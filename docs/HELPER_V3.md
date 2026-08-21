@@ -138,15 +138,17 @@ launcher. It has no production caller and `HelperEngine` still returns `Unavaila
 network work. The launcher reopens the exact running Linux image through `/proc/self/exe`, creates a
 private credential-enabled Unix seqpacket socketpair and generates a 256-bit OS-CSPRNG challenge. It
 maps only the child endpoint to stdin, clears the environment, selects `/` as the working directory
-and maps stdout and stderr to `/dev/null`. A bounded `/proc/self/fd` plus `fdinfo` preflight rejects
-every unexpected inheritable parent descriptor. As the final user-installed pre-exec hook, one
-async-signal-safe `close_range(3, UINT_MAX, CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC)` syscall
-privatises the child descriptor table and marks every non-standard descriptor close-on-exec; any
-kernel error makes spawn fail. An unprivileged subprocess test proves both child closure and that
-`UNSHARE` leaves the parent sentinel's descriptor flags unchanged. While the spawn lock is held and
-after descriptor preflight plus retirement-permit acquisition, the parent reads `Seccomp` and
-`Seccomp_filters` from `/proc/thread-self/status` immediately before `Command::spawn`; the child
-therefore inherits that exact per-thread filter baseline.
+and maps stdout and stderr to `/dev/null`. The launcher deliberately does not scan the process-wide
+parent descriptor table or change flags on ambient parent descriptors: another thread can change
+that table between any preflight and spawn. Instead, as the final user-installed pre-exec hook, one
+async-signal-safe
+`close_range(3, UINT_MAX, CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC)` syscall privatises the child
+descriptor table and marks every non-standard descriptor close-on-exec; any kernel error makes
+spawn fail. An isolated subprocess test proves that a deliberately inheritable parent descriptor
+does not reach the authenticated worker and that `UNSHARE` leaves the parent sentinel's descriptor
+flags unchanged. While the spawn lock is held and after retirement-permit acquisition, the parent
+reads `Seccomp` and `Seccomp_filters` from `/proc/thread-self/status` immediately before
+`Command::spawn`; the child therefore inherits that exact per-thread filter baseline.
 
 After exec, the child closes raw descriptor 3 if present, atomically duplicates stdin with
 `fcntl_dupfd_cloexec` using minimum 3, requires the returned descriptor to be exactly 3 and closes
