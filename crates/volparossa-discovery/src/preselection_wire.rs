@@ -1,4 +1,7 @@
-//! Callerless, bounded request-response wire types for the future A1c owner.
+//! Bounded request-response wire types for the dormant A1c transaction boundary.
+//!
+//! A sibling module owns the single client-hop dispatch and connection-binding seam. The
+//! upstream hop remains callerless, and neither hop has a production handler or responder.
 //!
 //! Both codecs preserve exact canonical A0 bytes. They perform only state-free canonical,
 //! version, type, payload-local, and envelope-binding validation. Cryptographic verification,
@@ -934,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn public_surface_is_exact_and_production_is_callerless() {
+    fn public_surface_is_exact_and_codecs_have_no_transaction_caller() {
         let source = include_str!("preselection_wire.rs");
         let production = source
             .split("#[cfg(test)]")
@@ -1112,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_composition_is_private_event_only_and_has_no_service_caller() {
+    fn discovery_composition_keeps_codecs_private_and_delegates_one_affine_client_seam() {
         let source = include_str!("lib.rs");
         let production = source
             .split("\n#[cfg(test)]\nmod tests {")
@@ -1124,6 +1127,8 @@ mod tests {
             .collect();
         assert_eq!(compact.matches("modpreselection_wire;").count(), 1);
         assert!(!compact.contains("pubmodpreselection_wire;"));
+        assert_eq!(compact.matches("modpreselection_transaction;").count(), 1);
+        assert!(!compact.contains("pubmodpreselection_transaction;"));
         assert_eq!(
             compact
                 .matches("preselection_observation:request_response::Behaviour<")
@@ -1188,6 +1193,53 @@ mod tests {
             assert!(
                 !service.contains(forbidden),
                 "discovery service caller surface: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_transaction_module_contains_only_the_affine_client_seam() {
+        let transaction_source = include_str!("preselection_transaction.rs");
+        let transaction_production = transaction_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("transaction production");
+        let transaction_compact: String = transaction_production
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert_eq!(
+            transaction_compact
+                .matches("pubfndispatch_preselection_observation(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            transaction_compact
+                .matches("pubfnbind_preselection_observation_response(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            transaction_compact
+                .matches("pubfncancel_preselection_observation_dispatch(")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "UpstreamPreselectionObservationRequest",
+            "UpstreamPreselectionObservationResponse",
+            "preselection_observation_upstream",
+            "send_response(",
+            "respond_preselection",
+            "handle_preselection",
+            "FreshEvidence",
+            "CandidateEvidence",
+            "BoundPreselectionTranscriptBatch",
+        ] {
+            assert!(
+                !transaction_production.contains(forbidden),
+                "transaction crossed A1c2 codec/owner boundary: {forbidden}"
             );
         }
     }

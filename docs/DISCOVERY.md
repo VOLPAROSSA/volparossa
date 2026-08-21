@@ -20,9 +20,11 @@ The current discovery crate composes:
   relay hop and `/volparossa/exit-forward-upstream/3` for the control-relay-to-exit hop;
 - canonical protobuf request-response on `/volparossa/datapath-relay/3` for direct operations with
   one prospective or selected datapath relay;
-- callerless canonical-byte request-response on `/volparossa/preselection-observation/3` for the
+- canonical-byte request-response on `/volparossa/preselection-observation/3` for the
   client-to-control/direct-relay hop and `/volparossa/preselection-observation-upstream/3` for the
-  control-relay-to-exit hop; these expose events but have no service sender or responder;
+  control-relay-to-exit hop; the client-facing behaviour has a dormant one-at-a-time affine
+  dispatch/bind/cancel seam, while upstream remains callerless and neither hop has an application
+  handler or responder;
 - refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2 and the
   retired direct reservation v2 identifiers; and
 - a process-local MemoryTransport used by hermetic swarm integration tests, not as a network or
@@ -153,11 +155,13 @@ origin truth.
 
 A0 still has no production or network producer, signer, application handler, rate limiter, or
 conversion into `FreshPeerEvidence`, `FreshEvidenceBatch`, or `CandidateEvidence`. Discovery now
-composes a callerless request-response wire shell around the unchanged exact A0 bytes, but exposes
-no `DiscoveryService` send/respond method and performs no A0 verification or consumption. Dormant
-A1a is a static consumer of the verifier/consume functions but has no production root,
-orchestrator, or transport caller. The opaque transcripts and wire wrappers are not local
-reachability, RTT, origin, freshness, or capacity evidence.
+composes request-response behaviours around the unchanged exact A0 bytes. Its only sending seam
+can dispatch one client-hop request, bind a typed matching response event to an internally
+timestamped current unique connection proof, or cancel that exact dispatch; upstream sending and
+all response-sending paths remain absent. No runtime or agent caller uses this seam, and discovery
+performs no A0 verification or replay consumption. Dormant A1a is a static consumer of the verifier/consume
+functions but has no production root, orchestrator, or transport caller. The opaque transcripts,
+transport proof, and wire wrappers are not yet local freshness, capacity, or route authority.
 
 The agent now contains a dormant A1a ownership prerequisite. Snapshot construction privately mints
 an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed
@@ -191,7 +195,12 @@ sanitized subject/request bindings, process-local dispatch ID/request hash, opaq
 tokens and attempt ceilings. It deliberately records no authenticated connection, local send or
 arrival event, socket origin, RTT, reachability, usable address, or Fresh-evidence validity. It
 has no production root, sampler, request-response handler, transport caller, or conversion into
-phase-A evidence, and creates no `RouteSessionAuthority` or `ReservationSession`.
+phase-A evidence, and creates no `RouteSessionAuthority` or `ReservationSession`. The completed
+affine A1a owner retains the original, non-cloned `RouteCandidateSnapshot` beside—not inside—the
+endpoint-free transcript batch. This preserves the exact candidate-union allocation for a later
+owner without exposing a getter or reconstructing candidate state. That sibling is the existing
+actor-private selection snapshot and can contain advertised control endpoints; those never enter
+the transcript batch or the opaque transport proof.
 
 A later A1c transport-provenance owner must exact-set join that batch to the authenticated Peer ID,
 libp2p `ConnectionId`, local request ID and request hash, and local monotonic send/arrival events.
@@ -204,7 +213,7 @@ the local-arrival freshness ceiling and aggregate it with the unchanged absolute
 every applicable signed receipt/attestation window, actor advertisement/capability expiries, and
 policy expiry before minting a verified observation.
 
-The first dormant A1c precursor is now composed as a private passive libp2p behaviour. It observes
+The first dormant A1c precursor is composed as a private passive libp2p behaviour. It observes
 the authenticated `ConnectionEstablished`, `AddressChange` and `ConnectionClosed` event lineage,
 bounds the registry by the existing 384-global/four-per-peer connection ceilings, and permanently
 poisons and clears the registry on overflow or inconsistent event lineage. Every connection,
@@ -217,8 +226,9 @@ three or six prefix bytes, never a full IP or multiaddress. An address change in
 generation even inside the same prefix. The private
 affine witness can be minted only for exactly one total connection to that peer in the requested
 native family, and binding consumes it while rechecking peer, connection, generation and prefix.
-There is deliberately no `DiscoveryService` accessor, request dispatch, A1a join or Fresh-evidence
-mint in this precursor; the rest of A1c remains required.
+There is deliberately no generic `DiscoveryService` registry, address, prefix, witness, or bound-
+observation accessor. The only consumer is the purpose-specific client transaction seam described
+below; there is still no A1a join or Fresh-evidence mint, so the rest of A1c remains required.
 
 A second dormant A1c wire precursor consists of two strictly separate libp2p request-response
 behaviours and event variants. The client-facing protocol is outbound for Client and inbound for
@@ -234,9 +244,22 @@ The codecs revalidate canonical encoding, v3 and hop-specific type/role shape, p
 invariants, and typed payload-to-envelope fields on both read and write. They neither verify a
 signature nor mutate replay state, correlate a response with a request, derive a connection
 witness/request ID, sign or forward a response, or claim origin/reachability. The two event
-variants retain separate libp2p request-ID domains. There is no producer, signer, application
-handler, dispatcher, pending registry, agent/A1a join, connection-provenance binding, or evidence
-mint; a future A1c owner must supply all of those missing authenticated transaction semantics.
+variants retain separate libp2p request-ID domains. A dormant client-only seam derives its target
+and address family from the canonical request, requires one unique current direct connection,
+mints a generation-bound witness immediately before libp2p dispatch, and admits at most one active
+request. Its affine token can be bound only through a typed client-hop response event. Cancellation
+consumes that exact token after the caller has matched a client-hop failure, local timeout or
+shutdown. Dropping it, a non-response event, unavailable pre-correlation wall time, or a
+cross-service, wrong-ID or wrong-peer event leaves the slot occupied fail closed. After exact
+correlation the slot is consumed even when the subsequent time or connection-provenance check
+fails. Binding stamps local monotonic and wall time internally and rechecks the exact service
+instance,
+request ID, authenticated peer, event-local `ConnectionId`, deadline, uniqueness, generation and
+native prefix. The resulting proof is completely opaque: it exposes no prefix, address, ID, hash,
+time, getter, clone or decomposition surface. There is still no runtime/agent caller, upstream
+dispatcher, producer, signer, application handler, responder/forwarder, A0 verifier/replay consumer,
+A1a exact-set join, or evidence mint. A future transaction owner must supply those remaining
+authenticated transaction semantics.
 
 A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
 Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than

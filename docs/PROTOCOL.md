@@ -215,8 +215,8 @@ socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, re
 production owner, request-response handler, transport caller, or network producer; A1a therefore
 does not alter production discovery behavior.
 
-Discovery now composes a callerless A1c wire shell without changing A0 or adding a protobuf
-wrapper. `/volparossa/preselection-observation/3` carries an exact canonical Relay or forwarded
+Discovery now composes a dormant A1c wire shell without changing A0 or adding a protobuf wrapper.
+`/volparossa/preselection-observation/3` carries an exact canonical Relay or forwarded
 Exit request (at most 4096 bytes) from Client to Relay and returns either the exact Relay signed
 receipt (at most 4096 bytes) or exact control-signed forwarded Exit attestation (at most 8192
 bytes). `/volparossa/preselection-observation-upstream/3` carries only the same forwarded Exit
@@ -228,12 +228,20 @@ no retry.
 
 The opaque hop wrappers admit bytes only after state-free canonical, version, hop type/role,
 payload-local, and typed envelope-binding validation; codec writes repeat those checks. This is
-not cryptographic verification, replay acceptance, request/response correlation, authenticated
-connection provenance, or signature/origin authority. There is no production sender, responder,
-signer, handler, forwarder, pending registry, A1a consumer, connection-witness join, or Fresh
-evidence conversion. A future A1c transaction owner must bind the unchanged bytes and the correct
-event-local request ID to authenticated connection and monotonic timing evidence before any
-observation can become usable.
+not cryptographic verification, replay acceptance, signature/origin authority, or usable evidence.
+Discovery has one dormant client-hop transport seam: it derives the peer and family from the exact
+request, admits one active dispatch, takes a connection-generation witness immediately before send,
+and binds only a typed matching response event under the fixed/request/attempt deadline minimum.
+The bind stamps arrival time internally and rechecks the exact service instance, request ID, peer,
+event-local `ConnectionId`, current unique connection generation and native prefix. The affine
+result exposes none of those fields. Explicit cancellation consumes the originating token. Dropping
+it, a non-response event, unavailable pre-correlation wall time, or a cross-service, wrong-ID or
+wrong-peer event keeps the only slot occupied fail closed. Exact correlation consumes the slot
+before later time or provenance checks.
+There is no runtime/agent caller, upstream sender, responder,
+signer, handler, forwarder, A0 verification/replay consumer, A1a exact-set join, or Fresh-evidence
+conversion. A later owner must consume the unchanged response bytes and opaque proof together
+before any observation can become usable.
 
 Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7

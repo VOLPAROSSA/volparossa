@@ -7,6 +7,7 @@ mod advertisements;
 mod connection_provenance;
 mod forwarding;
 mod peerlink;
+mod preselection_transaction;
 mod preselection_wire;
 mod reservations;
 
@@ -50,6 +51,10 @@ use forwarding::{
     exit_forward_upstream_behaviour,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
+use preselection_transaction::PreselectionTransactionState;
+pub use preselection_transaction::{
+    BoundClientPreselectionTransport, ClientPreselectionDispatch, PreselectionDispatchError,
+};
 use preselection_wire::{
     ClientPreselectionObservationCodec, UpstreamPreselectionObservationCodec,
     client_preselection_observation_behaviour, upstream_preselection_observation_behaviour,
@@ -224,7 +229,7 @@ pub struct DiscoveryBehaviour {
     connection_limits: connection_limits::Behaviour,
     /// Private, passive lineage for exact authenticated connection observations.
     connection_provenance: ConnectionProvenanceBehaviour,
-    /// Callerless client-to-control/direct-relay A1c wire precursor.
+    /// Client-hop A1c behaviour for the dormant affine owner seam.
     preselection_observation: request_response::Behaviour<ClientPreselectionObservationCodec>,
     /// Callerless control-relay-to-exit A1c wire precursor.
     preselection_observation_upstream:
@@ -364,7 +369,7 @@ pub enum BehaviourEvent {
     RelayServer(relay::Event),
     /// Advertisement protocol event.
     Advertisements(request_response::Event<AdvertisementRequest, AdvertisementResponse>),
-    /// Callerless client-to-control/direct-relay preselection wire event.
+    /// Client-to-control/direct-relay preselection event for the dormant affine owner seam.
     PreselectionObservation(
         request_response::Event<
             ClientPreselectionObservationRequest,
@@ -681,6 +686,7 @@ pub struct DiscoveryService {
     advertisement_budgets: AdvertisementBudgets,
     address_admissions: AddressAdmissions,
     protocol_roles: DiscoveryProtocolRoles,
+    preselection_transaction: PreselectionTransactionState,
 }
 
 impl DiscoveryService {
@@ -742,6 +748,7 @@ impl DiscoveryService {
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
             address_admissions: AddressAdmissions::default(),
+            preselection_transaction: PreselectionTransactionState::new(),
         })
     }
 
