@@ -1,0 +1,7 @@
+# Type Path                    Mode User        Group              Age Argument
+d      /var/lib/volparossa     0700 volparossa volparossa         -
+d      /etc/volparossa         0750 root        volparossa         -
+d      /run/volparossa         0750 root        volparossa         -
+d      /run/volparossa/control 0750 volparossa  volparossa-users   -
+d      /run/volparossa/native  0700 volparossa  volparossa         -
+z      /etc/volparossa/config.yaml 0640 root    volparossa         -

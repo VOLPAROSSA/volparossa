@@ -1,0 +1,14 @@
+Package: volparossa
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: @ARCHITECTURE@
+Maintainer: VOLPAROSSA contributors
+Installed-Size: @INSTALLED_SIZE@
+Depends: ca-certificates, libc6 (>= 2.36), libstdc++6, libgcc-s1, systemd, iproute2, nftables
+Recommends: wireguard-tools
+Description: decentralised policy-enforcing VPN overlay (development build)
+ VOLPAROSSA targets client-to-relay-to-exit paths using kernel WireGuard,
+ Linux MPTCP, MASQUE, and genuine Multipath QUIC. Relay and exit roles are
+ disabled by default. This package is not release-ready until the repository's
+ acceptance status is complete.

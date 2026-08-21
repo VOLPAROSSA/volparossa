@@ -1,0 +1,188 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 35a2742..669a883 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -111,6 +111,7 @@ dnssec-ring = [
+     "dep:ring",
+     "__dnssec",
+ ]
++volparossa-backport-regressions = ["dnssec-ring"]
+ h3-aws-lc-rs = [
+     "quic-aws-lc-rs",
+     "__h3",
+diff --git a/Cargo.toml.orig b/Cargo.toml.orig
+index 9e01634..8fb2e22 100644
+--- a/Cargo.toml.orig
++++ b/Cargo.toml.orig
+@@ -61,6 +61,7 @@ rustls-platform-verifier = ["dep:rustls-platform-verifier", "std"]
+ 
+ dnssec-aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs/aws-lc-sys", "aws-lc-rs/ring-io", "__dnssec"]
+ dnssec-ring = ["dep:ring", "__dnssec"]
++volparossa-backport-regressions = ["dnssec-ring"]
+ __dnssec = ["dep:bitflags", "dep:rustls-pki-types", "dep:time", "std"]
+ testing = ["std"]
+ 
+diff --git a/src/dnssec/dnssec_dns_handle/mod.rs b/src/dnssec/dnssec_dns_handle/mod.rs
+index a12f527..6473b61 100644
+--- a/src/dnssec/dnssec_dns_handle/mod.rs
++++ b/src/dnssec/dnssec_dns_handle/mod.rs
+@@ -38,6 +38,34 @@ use nsec3_validation::verify_nsec3;
+ 
+ use super::rdata::NSEC;
+ 
++#[cfg(feature = "volparossa-backport-regressions")]
++pub(super) fn volparossa_backport_nsec3_cross_zone_regression() -> bool {
++    use crate::{
++        dnssec::{Nsec3HashAlgorithm, rdata::NSEC3},
++        op::ResponseCode,
++    };
++
++    let query = Query::query(Name::from_ascii("www.example.").unwrap(), RecordType::A);
++    let soa_name = Name::from_ascii("unrelated.").unwrap();
++    let nsec3_owner = Name::from_ascii("abc.unrelated.").unwrap();
++    let nsec3 = NSEC3::new(
++        Nsec3HashAlgorithm::SHA1,
++        false,
++        0,
++        Vec::new(),
++        vec![0; 20],
++        [RecordType::A],
++    );
++
++    verify_nsec3(
++        &query,
++        &soa_name,
++        ResponseCode::NXDomain,
++        &[],
++        &[(&nsec3_owner, &nsec3)],
++    ) == Proof::Bogus
++}
++
+ /// Performs DNSSEC validation of all DNS responses from the wrapped DnsHandle
+ ///
+ /// This wraps a DnsHandle, changing the implementation `send()` to validate all
+diff --git a/src/dnssec/dnssec_dns_handle/nsec3_validation.rs b/src/dnssec/dnssec_dns_handle/nsec3_validation.rs
+index 01f6234..1818250 100644
+--- a/src/dnssec/dnssec_dns_handle/nsec3_validation.rs
++++ b/src/dnssec/dnssec_dns_handle/nsec3_validation.rs
+@@ -94,6 +94,18 @@ pub(super) fn verify_nsec3(
+ ) -> Proof {
+     debug_assert!(!nsec3s.is_empty());
+ 
++    // Closest-encloser enumeration only terminates when the query name is in
++    // the SOA's zone. Cross-zone responses can occur while chasing CNAMEs and
++    // must fail closed before candidate allocation begins.
++    if !soa_name.zone_of(query.name()) {
++        return proof_log_yield(
++            Proof::Bogus,
++            query.name(),
++            "nsec3",
++            "query name is not in the SOA zone",
++        );
++    }
++
+     // For every NSEC3 record that in text form looks like:
+     // <base32-hash>.soa.name NSEC3 <data>
+     // we extract (<base32-hash>, <data>) pair from deeply nested structures
+@@ -832,3 +844,37 @@ fn wildcard_based_encloser_proof<'a>(
+         closest_encloser_wildcard: wildcard_encloser,
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn cross_zone_closest_encloser_proof_fails_closed() {
++        let query = Query::query(
++            Name::from_ascii("www.example.").unwrap(),
++            RecordType::A,
++        );
++        let soa_name = Name::from_ascii("unrelated.").unwrap();
++        let nsec3_owner = Name::from_ascii("abc.unrelated.").unwrap();
++        let nsec3 = NSEC3::new(
++            Nsec3HashAlgorithm::SHA1,
++            false,
++            0,
++            Vec::new(),
++            vec![0; 20],
++            [RecordType::A],
++        );
++
++        assert_eq!(
++            verify_nsec3(
++                &query,
++                &soa_name,
++                ResponseCode::NXDomain,
++                &[],
++                &[(&nsec3_owner, &nsec3)],
++            ),
++            Proof::Bogus,
++        );
++    }
++}
+diff --git a/src/dnssec/mod.rs b/src/dnssec/mod.rs
+index 2af5107..ba073e2 100644
+--- a/src/dnssec/mod.rs
++++ b/src/dnssec/mod.rs
+@@ -27,6 +27,11 @@ mod dnssec_dns_handle;
+ pub use dnssec_dns_handle::DnssecDnsHandle;
+ #[doc(hidden)]
+ pub use dnssec_dns_handle::verify_nsec;
++#[cfg(feature = "volparossa-backport-regressions")]
++#[doc(hidden)]
++pub fn volparossa_backport_nsec3_cross_zone_regression() -> bool {
++    dnssec_dns_handle::volparossa_backport_nsec3_cross_zone_regression()
++}
+ /// Cryptographic backend implementations of DNSSEC traits.
+ pub mod crypto;
+ mod ec_public_key;
+diff --git a/src/serialize/binary/encoder.rs b/src/serialize/binary/encoder.rs
+index c299524..4ba60db 100644
+--- a/src/serialize/binary/encoder.rs
++++ b/src/serialize/binary/encoder.rs
+@@ -94,6 +94,12 @@ mod private {
+     }
+ }
+ 
++/// Maximum number of label pointers retained for later name compression.
++///
++/// Bounding the linear-search candidate set prevents pathologically large DNS
++/// messages from turning message encoding into quadratic work.
++const COMPRESSION_CANDIDATE_LIMIT: usize = 64;
++
+ /// Encode DNS messages and resource record types.
+ pub struct BinEncoder<'a> {
+     offset: usize,
+@@ -248,7 +254,7 @@ impl<'a> BinEncoder<'a> {
+         assert!(start <= (u16::MAX as usize));
+         assert!(end <= (u16::MAX as usize));
+         assert!(start <= end);
+-        if self.offset < 0x3FFF_usize {
++        if self.offset < 0x3FFF_usize && self.name_pointers.len() < COMPRESSION_CANDIDATE_LIMIT {
+             self.name_pointers
+                 .push((start, self.slice_of(start, end).to_vec())); // the next char will be at the len() location
+         }
+@@ -538,6 +544,21 @@ mod tests {
+         msg.to_bytes().unwrap();
+     }
+ 
++    #[test]
++    fn name_compression_candidates_are_bounded() {
++        let mut buf = vec![];
++        let mut encoder = BinEncoder::new(&mut buf);
++
++        for index in 0..=COMPRESSION_CANDIDATE_LIMIT {
++            let start = encoder.offset();
++            encoder.emit(index as u8).unwrap();
++            let end = encoder.offset();
++            encoder.store_label_pointer(start, end);
++        }
++
++        assert_eq!(encoder.name_pointers.len(), COMPRESSION_CANDIDATE_LIMIT);
++    }
++
+     #[test]
+     fn test_size_of() {
+         assert_eq!(u16::size_of(), 2);

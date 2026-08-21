@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+# Preserve /var/lib/volparossa and its encrypted identity even on purge. The operator must remove
+# identity data explicitly after following the scoped cleanup instructions.
+exit 0

@@ -1,0 +1,423 @@
+# VOLPAROSSA v1 implementation status
+
+This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
+
+Last updated: 2026-08-21
+
+## Repository and engineering baseline
+
+- [x] Workspace is a Git repository.
+- [x] Durable repository rules are recorded in `AGENTS.md`.
+- [x] The Rust workspace and required crate layout compile on stable Rust after the
+  hard-incompatible privacy-v3 discovery and route-setup migration.
+- [x] GPL-3.0-only licensing, including the standalone fuzz package and new
+  local mqvpn patch files, and compatible third-party notices are complete.
+- [ ] Workspace formatting, strict Clippy, and tests pass after the privacy-v3 migration; the
+  required all-in-one dependency-deny gate remains blocked as documented below, so the combined
+  gate stays unchecked.
+- [ ] The Debian-compatible Cargo-deny 0.18.3 cannot parse current CVSS 4.0 advisory metadata
+  for an all-in-one `cargo deny check`; the separate pinned Cargo-audit 0.22.1 gate reports zero
+  unremediated vulnerabilities.
+- [x] `justfile` exposes every required build, test, fuzz, benchmark, doctor, demo, package,
+  and cleanup entrypoint; privileged integration and package execution still report `BLOCKED`
+  until their real drivers exist.
+- [ ] No essential production datapath contains a mock, stub, `TODO`, or `unimplemented!()`.
+- [ ] Clean Debian 13 amd64 build is reproduced.
+
+## Configuration and roles
+
+- [x] The shipped `config/examples/default.yaml` is parsed and validated in a regression test and
+  is exactly equal to the fully validated `Config::default()` snapshot.
+- [x] Client defaults enabled; relay and exit default disabled.
+- [x] Unsafe combinations, invalid bounds, and unknown safety-sensitive fields fail closed.
+- [ ] `routing.direct_exit_debug` defaults off and production rejects it; explicit development
+  configuration accepts it, but no debug datapath or prominent runtime warning is implemented.
+- [ ] A private atomic role store initializes startup roles. Privacy-v3 protocol directions are
+  immutable after process start; runtime changes return restart-required without mutation or
+  persistence. No controlled apply/restart workflow or live service-readiness proof exists.
+- [ ] Route-context TTL, flow pinning, maximum contexts, and LRU cleanup exist as tested cache
+  primitives, but no production session caller inserts, binds, expires, or retires route contexts.
+
+## Processes and privilege separation
+
+- [ ] `volparossa` CLI implements every command in the master specification.
+- [ ] Unprivileged `volparossa-agent` owns control-plane, selection, sessions, and local metrics.
+- [ ] Minimal `volparossa-helper` owns only allowlisted privileged network operations; v3
+  has a bounded typed external state machine plus a disconnected child bootstrap that applies and
+  independently verifies NEWNET, exact capability/NNP reduction, exact descriptors, a fixed
+  post-install descendant-denying seccomp filter, credential-bound proof-to-Accepted-to-Ready and
+  leader pin retention. The parent attests filter mode plus exactly one filter beyond its pre-spawn
+  thread baseline; exact BPF content is structurally bound by the current executable's fixed UAPI
+  rather than claimed from `/proc`. `clone`, `clone3`, `fork` and `vfork` monotonically return
+  `EPERM` after installation, including post-Ready and across exec. It has no production caller and
+  production deliberately returns
+  `Unavailable`. This is not full worker isolation or context cleanup: the child remains effective
+  UID 0, can signal the parent and can access the root-writable runtime token/socket paths; this
+  slice also does not independently attest descendant absence before filter installation. Wiring
+  remains blocked on (1) a dedicated identity/broker that excludes runtime/socket impersonation and
+  (2) disposable live-root proof of the complete bootstrap, including prefilter process-tree state.
+- [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
+  plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
+  tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
+  live root integration remains outstanding.
+- [ ] Dormant helper tags 35/28 register one exact runtime-global Prepare intent and reconcile only
+  an expired same-runtime lineage. HelperClient uses one authenticated stream and one absolute
+  five-second budget for each Bind-plus-operation sequence; post-Prepare-write failures transfer
+  exact authority to the owned route-ticket supervisor. The crate-private Prepare method has no other
+  production call site; polling it standalone in future code would not be cancellation-safe. Runtime
+  mismatch and missing evidence quarantine, target-only cleanup never removes
+  Activated/Committed state, and exact retries re-evaluate a capped 1024-entry runtime-lifetime
+  `Absent` ledger. There is no tombstone ACK; tag 28 retries exact Pending/Owned cleanup, while tag 29
+  is an independent process-wide operation outside per-route reconciliation. Production Prepare
+  remains `Unavailable`, and no production manager calls this path. A dormant boot-scoped,
+  secret-free canonical/CAS ownership store and a read-only startup interlock have temp-directory
+  tests, but no production writer, recovery backend, restart reaper, cross-runtime tag-28 proof, or
+  live root proof exists.
+- [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
+- [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
+  and doctor contract deliberately omit the disconnected launcher's required `CAP_SETPCAP`.
+  Expanding that authority requires explicit approval plus disposable live-root proof.
+- [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine tests pass, but live namespace/kernel cleanup proof does not.
+- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation and close-on-reject socketpair/fake-backend tests pass, but production returns `Unavailable` before network work and worker-side socket creation, kernel validation, datapath adoption and live namespace proof remain.
+- [ ] Native MPQUIC API v4 consumes exactly one request-bound UDP descriptor for `AddPath` and zero descriptors otherwise; release, negative ancillary/tuple/ownership tests and the clean full-graph ASan+UBSan gate pass, but SCM_RIGHTS, its request hash and a same-session namespace cookie do not authenticate helper origin, so production path adoption and the launcher remain blocked.
+- [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
+
+## Identity and signed protocol
+
+- [x] `volparossa init` creates an Ed25519 identity and derived libp2p Peer ID.
+- [x] Private identity is encrypted at rest and created with mode `0600`.
+- [ ] Session identities and WireGuard keys are ephemeral per route/path context.
+- [ ] Canonical signed envelopes include version, sender, timestamp, expiry, nonce, message type, payload hash, and signature.
+- [ ] Invalid signatures, unsupported versions, expired messages, replayed nonces, excessive lengths, and malformed encodings are rejected.
+- [ ] Key rotation rules and compromise recovery are documented and implemented.
+
+## Decentralised discovery
+
+- [ ] rust-libp2p QUIC transport is integrated with Identify and Ping.
+- [ ] VOLPAROSSA-specific Kademlia protocol and capability provider records are integrated.
+- [ ] mDNS, AutoNAT, DCUtR/hole punching, and Circuit Relay v2 control-plane support are integrated.
+- [ ] Versioned `/advertisement/3` fetches relay advertisements directly, while exit advertisements
+  use only `/exit-forward/3` plus `/exit-forward-upstream/3`; the discovery crate proves the
+  three-hop shape. The live single-owner agent actor now serializes policy application and
+  cross-ledger revocation before reply, and linearizes freshness, current policy/authority, replay,
+  and peerstore mutation in one synchronous advertisement commit before successful completion is
+  cached or replied. A crate-private command can now produce a sorted, unique, at-most-200
+  in-process snapshot only after production signature revalidation and exact persisted
+  fingerprint/actor capability/policy joins. Expired, conflicted, self, pending-direct, unpaired,
+  direct-only exit, and multiply-control-paired exit records fail closed. The snapshot has no
+  production caller, serialization, or dispatch authority. Control-v3 tags 17 and 18 now define a
+  protocol precursor with no production/network caller for an actor-signed direct observation
+  transcript or an exit-signed receipt nested in a control-signed public-prefix claim. The
+  dedicated verifiers are transactional and return opaque affine transcripts. A separate dormant
+  A1a owner now validates
+  an endpoint-free reduced snapshot and local conservative ceiling, internally mints a 16-byte
+  batch ID plus two to nine unique 32-byte request/challenged-relay-or-exit challenges (the control
+  shares the exit challenge), and retains one forwarded response plus one to eight direct-relay
+  responses as three to ten opaque signed-envelope proofs. It allows only one
+  JIT pending request, uses fixed 5-second request/30-second attempt/30-second cooldown windows,
+  120-second challenge and batch tombstones (36+4), and a 40-entry replay cache without redraw,
+  retry, or live eviction. On pre-entropy rejection `PreselectionBeginFailure` retains the original
+  gate without cooldown; after admission only a valid non-decreasing terminal clock returns a
+  cooling gate, while invalid/backward/overflowing time loses it fail closed. Its opaque
+  `BoundPreselectionTranscriptBatch` records no authenticated
+  connection/socket, send/arrival event, direct prefix, RTT, reachability, Fresh validity, capacity
+  authority, reservation, route-session, or dispatch authority. Discovery now composes two
+  callerless, role-gated v3 request-response wire behaviours over unchanged exact A0 canonical
+  bytes: Client outbound/Relay inbound for direct Relay receipts or forwarded Exit attestations,
+  and Relay outbound/Exit inbound for forwarded Exit requests and Exit receipts. Requests and
+  receipts are bounded to 4096 bytes, forwarded attestations to 8192 bytes; both behaviours use an
+  exact five-second timeout, 64 streams, distinct event/request-ID domains, no legacy aliases and
+  no retry. Their opaque wrappers and codecs enforce only state-free canonical/version/hop
+  type/role/payload/envelope shape on read and write. There is still no production root or
+  lifecycle owner, producer, signer, application handler, sampler, service transport caller,
+  responder/forwarder, pending registry, request correlation, cryptographic verification/replay,
+  A1a or connection-provenance join, or conversion into fresh local evidence.
+  A future A1c boundary must exact-set bind real request/connection provenance before phase-A
+  evidence. A first dormant private A1c precursor now passively tracks authenticated libp2p
+  establish/address-change/close lineage under the existing 384-global/four-per-peer ceilings.
+  It counts unusable siblings for uniqueness, accepts prefixes only from exact direct public-IP
+  TCP or QUIC-v1 remote shapes, retains only the opaque normalized token plus the same native three
+  or six prefix bytes (no full IP/multiaddress), generation-invalidates every address change, and
+  permanently poisons and clears on ambiguous lineage or overflow. Its affine
+  witness/binding rechecks the exact Peer ID, `ConnectionId`, non-zero generation and native /24 or
+  /48, but has no public service accessor, request send, A1a join or Fresh-evidence mint. The
+  fake-only 1-200-record evidence boundary and prospective planner remain separate;
+  no checkbox is closed. Production still publishes no usable relay/exit capability, route
+  finalization still fails closed with `ProbeEvidenceUnavailable`, and no production evidence
+  producer, production transaction caller/orchestration or disposable live-network proof exists.
+- [ ] Bootstrap from peerstore, mDNS, multiple independent built-ins, peerlinks, and signed bootstrap files works.
+- [ ] No bootstrap node or DHT record becomes a unique authority or central node catalogue.
+- [ ] `volparossa://peer/...` peerlinks round-trip and validate.
+
+## Advertisements, peerstore, and reputation
+
+- [ ] Signed advertisement schema contains the required bounded fields, but production currently
+  signs only client advertisements and withdraws provider state whenever relay or exit is enabled;
+  no usable service capability is published.
+- [x] Advertisement TTL, monotonic sequence, signature, consistency, v3 protocol, active-policy,
+  current-authority, and replay checks fail closed at one synchronous commit boundary.
+- [ ] SQLite has bounded schema/APIs for advertisements, endpoints, reachability, path measurements,
+  delivery history, uptime, failures, policy hash, and last success; the agent discovery actor
+  produces advertisement/endpoint writes, but no production measurement, failure, or
+  session-success producers exist.
+- [x] Peerstore does not persist browsing domains or destination history.
+- [ ] A tested conservative capacity primitive takes the minimum of advertised free, fresh local
+  p25 when present, and a conservative preselection capacity ceiling. Snapshot projection
+  deliberately omits stored endpoint/RTT/capacity history; the fake batch accepts scope-bound
+  p25/count, one normalized public /24 or /48, exact advertisement payload hashes and that ceiling
+  only from test observations and preserves sparsely measured peers as bounded exploration. The
+  prefix, hashes and ceiling grant no provenance, reservation or dispatch authority. Explicit
+  validity is bounded by freshness, policy, advertisement and actor capability expiry. The bridge has no
+  runtime caller or observation producer, so the intended actor path remains at zero usable route
+  candidates instead of substituting control-plane or stored evidence.
+- [ ] A bounded 70/20/10 exploration primitive and a peer-only prospective relay selector are
+  tested. The latter canonically handles at most 200 candidates, returns at most eight, and applies
+  strict control/exit/slate diversity without synthetic complete-path metrics. Its dormant
+  prefix-native path and the source-compatible legacy full-origin adapters use one shared
+  filter/scoring/band/RNG/diversity core. No production route-selection caller lets new peers
+  participate yet.
+- [ ] The reputation model is local and has no universal score, but production observation
+  producers and the route-selection consumer are not connected.
+
+## Policy and whitelist enforcement
+
+- [x] Canonical manifest supports version, validity, domains/patterns, protocols/ports, explicit IPs, maintainer keys, and signatures.
+- [x] Threshold verification defaults to three-of-five production maintainer signatures.
+- [x] Development keys are clearly marked and rejected in production mode.
+- [ ] Live policy refresh is serialized through the discovery actor and revokes mismatched
+  capability and forwarding authority before reply; selection rejects mismatched exits, but
+  decentralised distribution and usable relay/exit policy-hash publication are not wired.
+- [x] Domain pattern matching is label-safe and raw IP fails closed unless exact-listed.
+- [ ] Exit-side resolution pins approved addresses to a flow/session and defends against rebinding.
+- [ ] TCP allowlist enforces hostname, port, and TLS ClientHello SNI; missing SNI, mismatch, and ECH fail closed.
+- [ ] QUIC Initial parsing enforces approved hostname/SNI on UDP/443; missing verification and ECH fail closed.
+- [ ] General UDP pins an approved domain/protocol/port tuple with short idle timeout.
+- [ ] DNS travels through the exit; arbitrary external resolvers and physical-interface leaks are blocked.
+- [ ] Rejection logs use reason codes without durable full hostnames.
+
+## Candidate, exit, and relay selection
+
+- [ ] Candidate pool targets approximately 200 usable peers and applies every hard filter. The
+  actor now has an exact 200-entry snapshot bound, but its production usable-candidate count
+  deliberately remains zero.
+- [ ] Weighted candidate selection uses the specified 30/20/15/15/10/10 inputs and 70/20/10 exploration tiers.
+- [ ] Exit selection occurs before relay selection and uses the specified weighted factors. A
+  dormant fake-only planner now consumes an exact snapshot-bound observation batch and selects one
+  exactly forwarded exit before constructing a prospective relay slate. Its conservative
+  preselection capacity ceiling and normalized prefix are only test scalars and establish no offer,
+  hold, reservation, admission, provenance or dispatch authority. Exact advertisement payload hashes
+  bind the projected advertisement, direct/forwarded capabilities, Fresh/authenticated/verified
+  records and later capability re-resolution. A1a and Fresh remain disconnected; no production
+  producer or caller supplies this evidence.
+- [ ] Relay selection measures and scores the complete client-relay-exit path. The second dormant
+  scalar preflight stage can require complete evidence bound to the selected exit and exact relay
+  snapshot, but it remains a test-only boundary and is not called or trusted by the new phase-A
+  plan. The plan contains no complete-path scalars. The separate private/dormant route transaction
+  now moves one session, hold and the original non-Clone-bound probe objects through an internal
+  measured continuation with the same IDs and absolute deadline. Its canonical post-probe selector
+  ignores pre-probe active/warm hints: any eligible measured path may satisfy the minimum, while
+  additional active paths still require unique-throughput gain or failover value. A dormant
+  phase-C1 boundary can consume the phase-A plan once, preserve actor-specific evidence windows,
+  assign stable prospective path IDs, carry one bounded Tokio deadline and mint one route-authority
+  pair plus one `ReservationSession` only after all validation. Dormant C2a/C2b prerequisites make
+  the phase-B request a flat ordered list of
+  explicit prospective path IDs and remove pre-probe active/warm roles; final policy counts remain
+  independent, so a UDP `1/1/1` policy may probe several prospects. The bridge consumes each full
+  `Candidate` into a private actor-bound proof before request construction. That proof retains exact
+  batch/actor/key/sequence/payload-hash/policy/expiry/static-scope/forwarded-exit binding, an
+  observed prefix and
+  an opaque value-only selection projection, but no full advertisement, advertised endpoint or raw
+  observed-origin IP. Request, path and proof values are non-cloneable, non-debuggable and
+  non-serializable. Post-probe scoring revalidates their exact time/scope binding and uses the same
+  canonical selector core as the source-compatible legacy API; successful selection consumes all
+  proofs and forwards only proof-free selected actor bindings, while error retains the original
+  transaction for rollback. The private unmeasured wrapper moves one caller-supplied deadline into
+  the measured continuation, and the transaction no longer exposes its old resolve-and-generate
+  constructor or a product session-remint call. The dormant C2c adapter now consumes the C1
+  continuation under one manager task/watch, recomputes its exact actor/evidence ceilings, builds
+  the sanitized request in stable path-ID order, and performs one bounded borrowed re-resolution
+  through the same owned combined resolver/transport value; the adapter accepts no second handle
+  between these phases. It post-checks wall time, cancellation,
+  deadline, proofs and resolved capabilities—including exact advertisement payload hashes—before
+  moving the original session, IDs, limits and
+  unchanged deadline into `UnmeasuredRouteSetup`. Pending cancel, call timeout or handle drop ends
+  before reservation dispatch with no helper/journal cleanup. Real measurement production,
+  production probe verification/handling, production orchestration and a production caller remain
+  absent, so the checkbox remains open.
+- [ ] Path capacity is the minimum of both legs, relay free capacity, and exit reservation.
+- [ ] Operator, IPv4 /24, IPv6 /48, ASN, and visible-access diversity constraints are enforced.
+- [ ] Defaults select four active, at least two, at most eight, plus two warm backup paths with RTT-spread/hysteresis rules.
+- [ ] A new path is activated only for meaningful unique throughput (about 10%) or failover value.
+- [ ] The dormant prospective selector enforces node/Peer ID, operator, ASN and one normalized
+  public IPv4 /24 or IPv6 /48 against control, exit and the slate. The fake evidence, plan and actor
+  proof retain no full host IP; the legacy candidate-origin field is `None`. This limits one selected
+  slot per observed cluster but does not eliminate pre-sampling Sybil identity multiplicity. The
+  broader production anti-Sybil layers, age/rate policy, authenticated ConnectionId/send-arrival
+  evidence and live observation producers remain incomplete. There are still zero usable production
+  candidates, and this item remains open.
+
+## Reservations and path lifecycle
+
+- [ ] Hard-incompatible reservation/control v3 uses a fresh session key/ID and signed, bounded
+  capacity-hold -> probe-permit/evidence -> exact relay-set finalize -> relay-grant -> exact
+  confirmation-receipt phases; v3 wire/package types remove permanent client Peer-ID fields and
+  reject v1/v2/future envelopes without fallback. The hold separately binds a final path-count
+  upper bound and a prospective permit limit with `1 <= maximum_paths <= probe_permit_limit <= 8`;
+  protocol, coordinator, exit, relay, fixture, and agent route tests cover missing-field rejection
+  and a non-contiguous 2/5/8 final subset. The migrated route coordinator remains private/dormant
+  and has no production caller. Its private phase-B split returns the original transaction on a
+  measurement error, rejects cancellation/deadline expiry before retirement/Prepare, and builds one
+  finalize frame only after Prepare while retaining the same session/IDs/deadline. The route-level
+  probe associated type is no longer Clone-bound, but public reservation `Verified*` values are not
+  claimed to be affine and `VerifiedRelayProbe` remains cloneable for API compatibility. C2a/C2b
+  admit only explicit ordered prospective IDs `1..N` (1-8 and at least the policy minimum), retain
+  affine actor-bound proofs until successful post-probe selection and carry one bounded
+  caller-supplied deadline from the private unmeasured wrapper through phase B; work already expired
+  when wrapper execution begins fails before its first protocol, transport, retirement or helper
+  event. Exact probe-ID membership is checked before capacity filtering, and later trusted time is
+  checked against every proof before selection completes or helper Prepare. The private C2c seam
+  now consumes the C1 pre-probe continuation into the existing transaction with the same freshly
+  minted session/ID pair, stable path IDs, limits and absolute deadline after bounded actor
+  re-resolution. Dropping C1 before the handoff still needs no rollback; cancelling, timing out or
+  dropping a pending resolver also occurs before reservation dispatch and makes no helper or
+  journal cleanup claim. No production caller invokes this seam. A separate dormant owner-first
+  prerequisite can retain one already-running route handle or one established route. Its occupied
+  slot returns a second handle intact but is not admission control and does not prevent that second
+  task from already having dispatched. Consuming settlement keeps success established, reopens the
+  slot only after `NotRequired`/`Destroyed` failure cleanup, and leaves `Quarantined` terminal.
+  Consuming drain cancels and waits for pending work, immediately retires a racing late success, or
+  tears down an established route; dropping the owner/future delegates to the existing handle and
+  retirement RAII. It does not own/start/shut down the manager, and a future production lifecycle
+  must drain it before manager shutdown. It has no production caller, so admission-before-spawn,
+  production lifecycle integration and end-to-end route ownership remain incomplete.
+- [ ] Every exit-facing v3 scope binds the chosen control-relay node/Peer ID, exit node/Peer ID and
+  boot incarnation, policy, capacity, session key/ID, hold/finalize IDs and expiries; final bundle and
+  confirmation hashes bind exact canonical frames and ordered authorizations. The discovery crate
+  exposes no client-to-exit RPC; the migrated route coordinator resolves actor-minted capabilities
+  and dispatches every exit phase only through the selected control relay. The coordinator remains
+  private/test-only and has no live network or packet-capture proof.
+- [ ] Exit/relay services reserve and roll back capacity through bounded idempotent state machines.
+  Prospective permits cause no additional ledger debit; successful subset finalization clears
+  unused permits and their response cache while retaining only the exact finalize retry response,
+  and every finalize error leaves the held permits fail-atomically intact. Production finalize
+  deliberately returns `ProbeEvidenceUnavailable` until helper-proven endpoints/readiness and an
+  exit-participating disposable probe producer exist; only an explicit test-only evidence verifier
+  reaches the subsequent helper phases in tests.
+- [ ] The v3 lease API exposes only opaque handles and public endpoint material and has no private-key
+  input/output. Production obtains no WireGuard lease because `HelperEngine::new` returns
+  `Unavailable` before endpoint publication or helper-owned kernel key/port/underlay proof.
+- [ ] Typed/pure/fake helper boundaries prove exact public handles, cardinality, TTL, idempotency,
+  state transitions, and handshake/RX/TX proof policy. Agent route tests exercise
+  prepare/activate/commit/destroy and destroy-first retirement through fake backends, but the
+  coordinator has no production caller and no live worker/kernel tunnel exists.
+- [ ] Service ledgers reduce internal available capacity immediately, but production publishes no
+  relay/exit advertisement, so advertised free-capacity updates are not wired.
+- [ ] Ledger/service tests prove that explicit expiry purging restores capacity, and the agent
+  discovery runtime contains a periodic purge path; no live capacity-restoration or advertised
+  free-capacity propagation proof exists.
+- [ ] Path state machine implements cold, reachable, warm, active, backup, degraded, and dead.
+- [ ] Passive metrics, bounded probes, hysteresis, replacement, and per-direction observations are implemented.
+
+## WireGuard, NAT traversal, and routing
+
+- [ ] Each path creates two separate ephemeral kernel WireGuard links: client-relay and relay-exit.
+- [ ] Each path has unique route ID, path ID, keys, ULA prefix, endpoint addresses, routes, authorisation TTL, and limits.
+- [ ] Product code configures WireGuard and networking through netlink/UAPI, not parsed CLI output.
+- [ ] Relay nftables permits only the authorised prefixes/protocol/interfaces/time and denies host access and Internet egress.
+- [ ] Dataplane traversal attempts IPv6, public IPv4, coordinated UDP endpoint punching, bounded keepalive, then rejects unsuitable paths.
+- [ ] libp2p circuit relay is never an implicit WireGuard dataplane fallback.
+- [ ] TPROXY namespace intercepts TCP, UDP, and DNS, recovers original destinations, excludes tunnels/control traffic, and prevents loops; typed socket and fail-closed TCP/UDP original-destination UAPI foundations have pure/socketpair tests, but no namespace/nftables transaction or live interception exists.
+- [ ] Kill switch prevents physical-interface leaks while preserving explicit control/tunnel reachability.
+
+## TCP over real MPTCP
+
+- [ ] Transparent TCP interception feeds a streaming local proxy.
+- [ ] Versioned `OPEN_TCP` framing is signed, bounded, and validated at the exit.
+- [ ] Client-to-exit proxy framing is protected by TLS 1.3 while preserving the application's own byte stream/TLS.
+- [ ] Proxy sockets explicitly use `IPPROTO_MPTCP`; ordinary TCP fallback is impossible by default.
+- [ ] `MptcpPathManagerBackend` and Debian 13 kernel path-manager backend create only selected path subflows.
+- [ ] Exit validates policy, resolves/pins the destination, validates visible TLS SNI, connects, and streams without message-sized buffering.
+- [ ] At least two MPTCP subflows carry real data over different relay paths.
+- [ ] Bidirectional scheduling works, aggregation exceeds a single constrained path where topology permits, and relay failure preserves the application flow.
+
+## General UDP through one relay
+
+- [ ] Transparent UDP interception/classification and original destination recovery work; exact family-matching original-destination ancillary parsing fails closed in pure/socketpair tests, but the live transparent UDP listener and routed datapath are not connected.
+- [ ] Signed flow authorisation binds a single approved destination tuple.
+- [ ] QUIC DATAGRAM over MASQUE CONNECT-IP/CONNECT-UDP traverses exactly one WireGuard relay path.
+- [ ] Datagram semantics, destination immutability, idle timeout, and explicit DNS policy are enforced.
+- [ ] Path failure may create a new association but never leaks or silently connects directly to the exit.
+
+## Genuine Multipath QUIC / MASQUE
+
+- [x] Current `mp0rta/mqvpn`/xquic upstream is inspected, license/draft compatibility recorded, tests run, and an exact commit pinned.
+- [x] Native integration layer is isolated behind a versioned, bounded Unix-socket API (or justified safe FFI).
+- [ ] MASQUE CONNECT-IP and QUIC DATAGRAM carry original browser QUIC/IP packets.
+- [ ] At least two simultaneously active outer QUIC paths bind to distinct selected WireGuard interfaces/addresses and carry real data.
+- [ ] Paths can be added/removed dynamically; failover preserves the inner QUIC flow where protocol permits.
+- [ ] Per-path RTT, loss, congestion window, delivery rate, queued bytes, and bytes-in-flight are reported.
+- [ ] Swappable scheduler predicts delivery time from RTT, queue/rate, congestion, and loss and honours congestion control.
+- [ ] No duplication, FEC, or false multipath reporting exists.
+- [ ] UDP/443 classification recognises valid QUIC Initial packets and policy-verifiable SNI.
+- [ ] Required-multipath mode defaults to at least two paths and fails closed without an unsafe downgrade.
+- [x] Native upstream, sanitizer, and Valgrind/ASan tests pass: the pinned
+  graph passed 33/33 upstream and 5/5 wrapper tests under ASan+UBSan, bounded
+  SIGINT/SIGTERM lifecycle smokes, and the recorded release Valgrind gate.
+
+## Logging, metrics, and operations
+
+- [ ] Structured logs contain ephemeral session/path/error/version/aggregate fields and redact prohibited metadata/secrets.
+- [ ] A local-only, label-free metrics endpoint and bounded metric registry exist, but production
+  does not yet produce the required throughput, RTT, loss, session, MPTCP, or MPQUIC observations.
+- [x] No external telemetry is present.
+- [ ] `doctor` checks every specified kernel, tool, capability, network, route, policy, library, and clock prerequisite.
+- [ ] Cleanup command is safe, scoped, previewed, and idempotent.
+- [ ] Demo exercises the real local topology or clearly reports unmet prerequisites.
+
+## Testing and fuzzing
+
+- [ ] Unit/property tests cover canonical encoding, signatures, replay, TTL, advertisements, whitelist, route contexts, scores, diversity, capacity, reservations, framing, versions, cleanup, and configuration.
+- [ ] Fuzz targets cover advertisements, policy, control messages, TCP open, UDP authorisation, QUIC classification, TLS ClientHello, and QUIC Initial parsing.
+- [ ] One command builds the full disposable namespace topology in the master specification using veth, nftables, and `tc netem`.
+- [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
+- [ ] Machine-readable acceptance report is emitted.
+
+### Required acceptance tests
+
+- [ ] A01 discovery survives loss of either bootstrap peer.
+- [ ] A02 TCP download proves at least two data-carrying MPTCP subflows.
+- [ ] A03 constrained MPTCP paths aggregate bandwidth beyond one path.
+- [ ] A04 removing a relay does not terminate an active MPTCP download.
+- [ ] A05 UDP echo uses exactly one relay and no direct client-exit datapath.
+- [ ] A06 HTTP/3 through MASQUE proves at least two data-carrying MPQUIC paths.
+- [ ] A07 removing one MPQUIC relay avoids unnecessary inner-QUIC interruption.
+- [ ] A08 allowed test domain succeeds.
+- [ ] A09 domain, raw-IP, SNI, and forbidden-port policy denials succeed.
+- [ ] A10 unverifiable ECH fails closed.
+- [ ] A11 relay capture reveals no Internet destination in the routed outer layer.
+- [ ] A12 exit capture sees relay peers rather than the client's public address.
+- [ ] A13 client capture proves there is no direct client-exit dataplane route.
+- [ ] A14 forced crash plus cleanup removes all temporary network state.
+- [ ] A15 original host routes, DNS, and firewall remain byte-for-byte unchanged.
+
+## Performance and packaging
+
+- [ ] Benchmarks cover one/four relays, TCP/MPTCP, QUIC/MPQUIC, RTT spread, loss, jitter, capacity, CPU, memory, context switches, WireGuard overhead, setup, discovery, and failover.
+- [ ] Reports distinguish net user data from physical tunnel data.
+- [ ] The Debian 13 bootstrap script previews packages, asks permission, and performs no direct
+  route/DNS/firewall/VPN mutation; package-maintainer service side effects are not independently
+  constrained or audited.
+- [x] System-check script is read-only.
+- [ ] Reproducible `.deb`, hardened systemd units, tmpfiles, users/groups, optional logrotate, uninstall, and cleanup instructions are provided.
+
+## Documentation
+
+- [ ] README accurately covers purpose/non-goals, architecture, install, demo, roles, warnings, limitations, and threat-model link.
+- [ ] Architecture document contains discovery, reservation, WireGuard, MPTCP, UDP, MPQUIC, cleanup, and policy diagrams.
+- [ ] Protocol document specifies every wire message, limits, canonical form, signatures, and versioning.
+- [ ] Threat model covers every required adversary/attack and clearly states global-observer limitations.
+- [ ] Discovery, routing, MPTCP, MPQUIC, whitelist, operations, testing, and privacy documents match implemented behaviour.
+
+## Definition of done
+
+- [ ] Every master-specification completion criterion is evidenced above; all checks and linters pass; packaging and the complete real-network acceptance suite pass on clean Debian 13.

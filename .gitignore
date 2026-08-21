@@ -1,0 +1,38 @@
+**/.DS_Store
+/target/
+/fuzz/target/
+/.cache/
+/.tools/
+/.volparossa-dev/
+/.agents/
+/.codex-*-candidate.*/
+/.codex-tmp-*/
+*.profraw
+*.profdata
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+*.tar.xz
+fuzz/artifacts/
+fuzz/corpus/
+tests/reports/*.json
+tests/reports/*.pcap
+native/**/build/
+
+# Runtime secrets and state must never enter Git.
+*.key
+*.pem
+*.pk8
+# Exact publicly distributed upstream Hickory key fixtures required by include_*; never
+# operational keys.
+!/third_party/rust/vendor/hickory-proto-0.25.2/tests/test-data/rfc4034-2.3.key
+!/third_party/rust/vendor/hickory-proto-0.25.2/tests/test-data/rfc4034-5.4.key
+!/third_party/rust/vendor/hickory-proto-0.25.2/tests/test-data/root.key
+!/third_party/rust/vendor/hickory-proto-0.25.2/tests/test-data/rsa-2048-pkcs1.pem
+!/third_party/rust/vendor/hickory-proto-0.25.2/tests/test-data/rsa-2048-private-key-1.pk8
+!/third_party/rust/vendor/hickory-proto-0.25.2/tests/test-data/rsa-2048-private-key-2.pk8
+*.sqlite
+*.sqlite3
+config/local.yaml
+config/development/generated-keys/

@@ -1,0 +1,1379 @@
+//! Private parent-to-worker protocol for helper v3.
+//!
+//! This wire format is deliberately independent from the authenticated agent protocol. It has
+//! its own magic, version and typed operation set. Private `WireGuard` keys are never representable:
+//! the namespace worker generates and retains them.
+
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
+
+use prost::Message;
+use thiserror::Error;
+use zeroize::Zeroizing;
+
+pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 1;
+pub(crate) const INTERNAL_WORKER_MAGIC: &[u8; 8] = b"VPWKR3\0\0";
+pub(crate) const MAX_INTERNAL_WORKER_FRAME: usize = 128 * 1024;
+const MAX_PATHS: u32 = 8;
+const MAX_LEASES: usize = 16;
+const MAX_PREFIXES: usize = 8;
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct InternalWorkerRequest {
+    #[prost(uint32, tag = "1")]
+    pub(crate) protocol_version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub(crate) magic: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub(crate) request_id: Vec<u8>,
+    #[prost(
+        oneof = "internal_worker_request::Operation",
+        tags = "10, 11, 12, 13, 15, 16, 17, 19"
+    )]
+    pub(crate) operation: Option<internal_worker_request::Operation>,
+}
+
+pub(crate) mod internal_worker_request {
+    use prost::Oneof;
+
+    use super::{
+        AcquireTransportSocket, ActivateLeases, AddMptcpEndpoint, DestroyContext,
+        InitialiseContext, PrepareLeases, ProbeCommitLeases, RemoveMptcpEndpoint,
+    };
+
+    #[derive(Clone, PartialEq, Oneof)]
+    pub(crate) enum Operation {
+        #[prost(message, tag = "10")]
+        Initialise(InitialiseContext),
+        #[prost(message, tag = "11")]
+        PrepareLeases(PrepareLeases),
+        #[prost(message, tag = "12")]
+        ActivateLeases(ActivateLeases),
+        #[prost(message, tag = "13")]
+        ProbeCommitLeases(ProbeCommitLeases),
+        #[prost(message, tag = "15")]
+        AddMptcpEndpoint(AddMptcpEndpoint),
+        #[prost(message, tag = "16")]
+        RemoveMptcpEndpoint(RemoveMptcpEndpoint),
+        #[prost(message, tag = "17")]
+        AcquireTransportSocket(AcquireTransportSocket),
+        #[prost(message, tag = "19")]
+        DestroyContext(DestroyContext),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum InternalContextRole {
+    Unspecified = 0,
+    Client = 1,
+    Relay = 2,
+    Exit = 3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum InternalEndpointRole {
+    Unspecified = 0,
+    Client = 1,
+    RelayClient = 2,
+    RelayExit = 3,
+    Exit = 4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum InternalMptcpMode {
+    Unspecified = 0,
+    Signal = 1,
+    Subflow = 2,
+    SignalAndSubflow = 3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum InternalTransportSocketKind {
+    Unspecified = 0,
+    MptcpConnected = 1,
+    MptcpListener = 2,
+    QuicUdpUnconnected = 3,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct InternalIpPrefix {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) address: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub(crate) prefix_length: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct InternalUdpEndpoint {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) address: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub(crate) port: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct InternalSocketAddress {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) address: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub(crate) port: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct InitialiseContext {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(enumeration = "InternalContextRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(uint32, tag = "3")]
+    pub(crate) mptcp_accepted_addrs: u32,
+    #[prost(uint32, tag = "4")]
+    pub(crate) mptcp_subflows: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct LeasePlan {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(message, optional, tag = "3")]
+    pub(crate) local_overlay_address: Option<InternalIpPrefix>,
+    #[prost(uint64, tag = "4")]
+    pub(crate) setup_expires_at_unix: u64,
+    #[prost(uint64, tag = "5")]
+    pub(crate) hard_expires_at_unix: u64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct PrepareLeases {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    pub(crate) leases: Vec<LeasePlan>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct LeaseActivation {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub(crate) peer_public_key: Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    pub(crate) peer_endpoint: Option<InternalUdpEndpoint>,
+    #[prost(message, repeated, tag = "5")]
+    pub(crate) allowed_prefixes: Vec<InternalIpPrefix>,
+    #[prost(uint32, tag = "6")]
+    pub(crate) persistent_keepalive_seconds: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ActivateLeases {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    pub(crate) leases: Vec<LeaseActivation>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct LeaseProbe {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub(crate) expected_peer_public_key: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub(crate) not_before_unix: u64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ProbeCommitLeases {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    pub(crate) leases: Vec<LeaseProbe>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct AddMptcpEndpoint {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalMptcpMode", tag = "3")]
+    pub(crate) mode: i32,
+    #[prost(bool, tag = "4")]
+    pub(crate) backup: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct RemoveMptcpEndpoint {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub(crate) path_id: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct AcquireTransportSocket {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "3")]
+    pub(crate) role: i32,
+    #[prost(enumeration = "InternalTransportSocketKind", tag = "4")]
+    pub(crate) descriptor_kind: i32,
+    #[prost(message, optional, tag = "5")]
+    pub(crate) expected_local: Option<InternalSocketAddress>,
+    #[prost(message, optional, tag = "6")]
+    pub(crate) expected_remote: Option<InternalSocketAddress>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct DestroyContext {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum InternalWorkerResult {
+    Unspecified = 0,
+    Ok = 1,
+    Invalid = 2,
+    Conflict = 3,
+    NotFound = 4,
+    Kernel = 5,
+    CleanupIncomplete = 6,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct InternalWorkerResponse {
+    #[prost(uint32, tag = "1")]
+    pub(crate) protocol_version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub(crate) magic: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub(crate) request_id: Vec<u8>,
+    #[prost(enumeration = "InternalWorkerResult", tag = "4")]
+    pub(crate) result: i32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub(crate) request_digest: Vec<u8>,
+    #[prost(
+        oneof = "internal_worker_response::Outcome",
+        tags = "10, 11, 12, 13, 15, 16, 17, 19"
+    )]
+    pub(crate) outcome: Option<internal_worker_response::Outcome>,
+}
+
+pub(crate) mod internal_worker_response {
+    use prost::Oneof;
+
+    use super::{
+        ActivatedLeases, ContextDestroyed, ContextInitialised, MptcpEndpointAdded,
+        MptcpEndpointRemoved, PreparedLeases, ProbedLeases, TransportSocketReady,
+    };
+
+    #[derive(Clone, PartialEq, Oneof)]
+    pub(crate) enum Outcome {
+        #[prost(message, tag = "10")]
+        Initialised(ContextInitialised),
+        #[prost(message, tag = "11")]
+        Prepared(PreparedLeases),
+        #[prost(message, tag = "12")]
+        Activated(ActivatedLeases),
+        #[prost(message, tag = "13")]
+        ProbedCommitted(ProbedLeases),
+        #[prost(message, tag = "15")]
+        MptcpEndpointAdded(MptcpEndpointAdded),
+        #[prost(message, tag = "16")]
+        MptcpEndpointRemoved(MptcpEndpointRemoved),
+        #[prost(message, tag = "17")]
+        TransportSocketReady(TransportSocketReady),
+        #[prost(message, tag = "19")]
+        Destroyed(ContextDestroyed),
+    }
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ContextInitialised {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+}
+
+/// A key and kernel-assigned port proven by the worker's correlated GET after binding.
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct PreparedLease {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub(crate) public_key: Vec<u8>,
+    #[prost(uint32, tag = "4")]
+    pub(crate) listen_port: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct PreparedLeases {
+    #[prost(message, repeated, tag = "1")]
+    pub(crate) leases: Vec<PreparedLease>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ActivatedLease {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub(crate) public_key: Vec<u8>,
+    #[prost(uint32, tag = "4")]
+    pub(crate) listen_port: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ActivatedLeases {
+    #[prost(message, repeated, tag = "1")]
+    pub(crate) leases: Vec<ActivatedLease>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ProbedLease {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(uint64, tag = "3")]
+    pub(crate) latest_handshake_unix: u64,
+    #[prost(uint64, tag = "4")]
+    pub(crate) received_bytes: u64,
+    #[prost(uint64, tag = "5")]
+    pub(crate) transmitted_bytes: u64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ProbedLeases {
+    #[prost(message, repeated, tag = "1")]
+    pub(crate) leases: Vec<ProbedLease>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct MptcpEndpointAdded {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct MptcpEndpointRemoved {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct TransportSocketReady {
+    #[prost(uint32, tag = "1")]
+    pub(crate) path_id: u32,
+    #[prost(enumeration = "InternalEndpointRole", tag = "2")]
+    pub(crate) role: i32,
+    #[prost(enumeration = "InternalTransportSocketKind", tag = "3")]
+    pub(crate) descriptor_kind: i32,
+    #[prost(message, optional, tag = "4")]
+    pub(crate) local: Option<InternalSocketAddress>,
+    #[prost(message, optional, tag = "5")]
+    pub(crate) remote: Option<InternalSocketAddress>,
+}
+
+fn response_matches_operation(
+    operation: &internal_worker_request::Operation,
+    outcome: &internal_worker_response::Outcome,
+) -> bool {
+    use internal_worker_request::Operation;
+    use internal_worker_response::Outcome;
+
+    match (operation, outcome) {
+        (Operation::Initialise(request), Outcome::Initialised(response)) => {
+            request.route_context_id == response.route_context_id
+        }
+        (Operation::PrepareLeases(_), Outcome::Prepared(_))
+        | (Operation::ActivateLeases(_), Outcome::Activated(_))
+        | (Operation::ProbeCommitLeases(_), Outcome::ProbedCommitted(_))
+        | (Operation::AddMptcpEndpoint(_), Outcome::MptcpEndpointAdded(_))
+        | (Operation::RemoveMptcpEndpoint(_), Outcome::MptcpEndpointRemoved(_))
+        | (Operation::DestroyContext(_), Outcome::Destroyed(_)) => true,
+        (Operation::AcquireTransportSocket(request), Outcome::TransportSocketReady(response)) => {
+            request.path_id == response.path_id
+                && request.role == response.role
+                && request.descriptor_kind == response.descriptor_kind
+                && request.expected_local == response.local
+                && request.expected_remote == response.remote
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ContextDestroyed {}
+
+#[derive(Debug, Error)]
+pub(crate) enum InternalProtocolError {
+    #[error("malformed internal worker protobuf")]
+    Decode(#[from] prost::DecodeError),
+    #[error("internal worker frame exceeds the fixed bound")]
+    TooLarge,
+    #[error("invalid internal worker message")]
+    Invalid,
+}
+
+pub(crate) fn encode_request(
+    value: &InternalWorkerRequest,
+) -> Result<Zeroizing<Vec<u8>>, InternalProtocolError> {
+    validate_request(value)?;
+    encode(value)
+}
+
+pub(crate) fn decode_request(bytes: &[u8]) -> Result<InternalWorkerRequest, InternalProtocolError> {
+    decode(bytes, validate_request)
+}
+
+pub(crate) fn encode_response(
+    value: &InternalWorkerResponse,
+) -> Result<Zeroizing<Vec<u8>>, InternalProtocolError> {
+    validate_response(value)?;
+    encode(value)
+}
+
+pub(crate) fn decode_response(
+    bytes: &[u8],
+) -> Result<InternalWorkerResponse, InternalProtocolError> {
+    decode(bytes, validate_response)
+}
+
+/// Validate correlation, digest and the operation-specific success outcome.
+pub(crate) fn validate_response_for_request(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<(), InternalProtocolError> {
+    let encoded_request = encode_request(request)?;
+    validate_response(response)?;
+    let expected_digest = blake3::hash(encoded_request.as_slice());
+    if response.request_id.as_slice() != request.request_id.as_slice()
+        || response.request_digest.as_slice() != expected_digest.as_bytes()
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+
+    if response.result == InternalWorkerResult::Ok as i32 {
+        let operation = request
+            .operation
+            .as_ref()
+            .ok_or(InternalProtocolError::Invalid)?;
+        let outcome = response
+            .outcome
+            .as_ref()
+            .ok_or(InternalProtocolError::Invalid)?;
+        if !response_matches_operation(operation, outcome) {
+            return Err(InternalProtocolError::Invalid);
+        }
+    }
+    Ok(())
+}
+
+/// Derives the exact completion binding for one internal transport response.
+pub(crate) fn transport_descriptor_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    validate_response_for_request(request, response)?;
+    let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
+        request.operation.as_ref()
+    else {
+        return Err(InternalProtocolError::Invalid);
+    };
+    let kind = InternalTransportSocketKind::try_from(operation.descriptor_kind)
+        .map_err(|_| InternalProtocolError::Invalid)?;
+    let canonical = response.encode_to_vec();
+    let length = u32::try_from(canonical.len()).map_err(|_| InternalProtocolError::TooLarge)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"VOLPAROSSA internal worker transport completion v1\0");
+    hasher.update(&request.protocol_version.to_be_bytes());
+    hasher.update(&request.magic);
+    hasher.update(&request.request_id);
+    hasher.update(&response.request_digest);
+    hasher.update(&(kind as i32).to_be_bytes());
+    hasher.update(&length.to_be_bytes());
+    hasher.update(&canonical);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn encode<M: Message>(value: &M) -> Result<Zeroizing<Vec<u8>>, InternalProtocolError> {
+    let payload = Zeroizing::new(value.encode_to_vec());
+    if payload.is_empty() || payload.len() > MAX_INTERNAL_WORKER_FRAME {
+        return Err(InternalProtocolError::TooLarge);
+    }
+    Ok(payload)
+}
+
+fn decode<M: Message + Default>(
+    bytes: &[u8],
+    validate: fn(&M) -> Result<(), InternalProtocolError>,
+) -> Result<M, InternalProtocolError> {
+    if bytes.is_empty() || bytes.len() > MAX_INTERNAL_WORKER_FRAME {
+        return Err(InternalProtocolError::TooLarge);
+    }
+    let value = M::decode(bytes)?;
+    validate(&value)?;
+    let canonical = Zeroizing::new(value.encode_to_vec());
+    if canonical.as_slice() != bytes {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(value)
+}
+
+fn validate_envelope(
+    version: u32,
+    magic: &[u8],
+    request_id: &[u8],
+) -> Result<(), InternalProtocolError> {
+    if version != INTERNAL_WORKER_PROTOCOL_VERSION
+        || magic != INTERNAL_WORKER_MAGIC
+        || request_id.len() != 16
+        || request_id.iter().all(|byte| *byte == 0)
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // One exhaustive match keeps the operation allowlist auditable.
+fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtocolError> {
+    use internal_worker_request::Operation;
+    validate_envelope(value.protocol_version, &value.magic, &value.request_id)?;
+    match value
+        .operation
+        .as_ref()
+        .ok_or(InternalProtocolError::Invalid)?
+    {
+        Operation::Initialise(operation) => {
+            route_id(&operation.route_context_id)?;
+            let role = InternalContextRole::try_from(operation.role)
+                .map_err(|_| InternalProtocolError::Invalid)?;
+            if role == InternalContextRole::Unspecified {
+                return Err(InternalProtocolError::Invalid);
+            }
+            bounded_limit(operation.mptcp_accepted_addrs)?;
+            bounded_limit(operation.mptcp_subflows)
+        }
+        Operation::PrepareLeases(operation) => {
+            route_id(&operation.route_context_id)?;
+            validate_lease_batch(&operation.leases, |lease| {
+                path_role(lease.path_id, lease.role)?;
+                validate_host_prefix(
+                    lease
+                        .local_overlay_address
+                        .as_ref()
+                        .ok_or(InternalProtocolError::Invalid)?,
+                )?;
+                if lease.setup_expires_at_unix == 0
+                    || lease.hard_expires_at_unix < lease.setup_expires_at_unix
+                {
+                    return Err(InternalProtocolError::Invalid);
+                }
+                Ok((lease.path_id, lease.role))
+            })
+        }
+        Operation::ActivateLeases(operation) => {
+            route_id(&operation.route_context_id)?;
+            validate_lease_batch(&operation.leases, |lease| {
+                path_role(lease.path_id, lease.role)?;
+                public_key(&lease.peer_public_key)?;
+                endpoint(
+                    lease
+                        .peer_endpoint
+                        .as_ref()
+                        .ok_or(InternalProtocolError::Invalid)?,
+                )?;
+                if lease.allowed_prefixes.is_empty()
+                    || lease.allowed_prefixes.len() > MAX_PREFIXES
+                    || lease.persistent_keepalive_seconds > 120
+                {
+                    return Err(InternalProtocolError::Invalid);
+                }
+                for prefix in &lease.allowed_prefixes {
+                    validate_prefix(prefix)?;
+                }
+                Ok((lease.path_id, lease.role))
+            })
+        }
+        Operation::ProbeCommitLeases(operation) => {
+            route_id(&operation.route_context_id)?;
+            validate_lease_batch(&operation.leases, |lease| {
+                path_role(lease.path_id, lease.role)?;
+                public_key(&lease.expected_peer_public_key)?;
+                if lease.not_before_unix == 0 {
+                    return Err(InternalProtocolError::Invalid);
+                }
+                Ok((lease.path_id, lease.role))
+            })
+        }
+        Operation::AddMptcpEndpoint(operation) => {
+            route_id(&operation.route_context_id)?;
+            path(operation.path_id)?;
+            let mode = InternalMptcpMode::try_from(operation.mode)
+                .map_err(|_| InternalProtocolError::Invalid)?;
+            if mode == InternalMptcpMode::Unspecified {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(())
+        }
+        Operation::RemoveMptcpEndpoint(operation) => {
+            route_id(&operation.route_context_id)?;
+            path(operation.path_id)
+        }
+        Operation::AcquireTransportSocket(operation) => {
+            route_id(&operation.route_context_id)?;
+            path_role(operation.path_id, operation.role)?;
+            validate_transport_tuple(
+                operation.descriptor_kind,
+                operation.expected_local.as_ref(),
+                operation.expected_remote.as_ref(),
+            )
+        }
+        Operation::DestroyContext(operation) => route_id(&operation.route_context_id),
+    }
+}
+
+fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProtocolError> {
+    use internal_worker_response::Outcome;
+    validate_envelope(value.protocol_version, &value.magic, &value.request_id)?;
+    let result =
+        InternalWorkerResult::try_from(value.result).map_err(|_| InternalProtocolError::Invalid)?;
+    if result == InternalWorkerResult::Unspecified {
+        return Err(InternalProtocolError::Invalid);
+    }
+    if value.request_digest.len() != 32 {
+        return Err(InternalProtocolError::Invalid);
+    }
+    match (result, value.outcome.as_ref()) {
+        (InternalWorkerResult::Ok, Some(outcome)) => match outcome {
+            Outcome::Initialised(outcome) => route_id(&outcome.route_context_id),
+            Outcome::Prepared(outcome) => validate_lease_batch(&outcome.leases, |lease| {
+                path_role(lease.path_id, lease.role)?;
+                public_key(&lease.public_key)?;
+                if !(1..=u32::from(u16::MAX)).contains(&lease.listen_port) {
+                    return Err(InternalProtocolError::Invalid);
+                }
+                Ok((lease.path_id, lease.role))
+            }),
+            Outcome::Activated(outcome) => validate_lease_batch(&outcome.leases, |lease| {
+                path_role(lease.path_id, lease.role)?;
+                public_key(&lease.public_key)?;
+                if !(1..=u32::from(u16::MAX)).contains(&lease.listen_port) {
+                    return Err(InternalProtocolError::Invalid);
+                }
+                Ok((lease.path_id, lease.role))
+            }),
+            Outcome::ProbedCommitted(outcome) => validate_lease_batch(&outcome.leases, |lease| {
+                path_role(lease.path_id, lease.role)?;
+                if lease.latest_handshake_unix == 0 {
+                    return Err(InternalProtocolError::Invalid);
+                }
+                Ok((lease.path_id, lease.role))
+            }),
+            Outcome::Destroyed(_) => Ok(()),
+            Outcome::MptcpEndpointAdded(outcome) => path(outcome.path_id),
+            Outcome::MptcpEndpointRemoved(outcome) => path(outcome.path_id),
+            Outcome::TransportSocketReady(outcome) => {
+                path_role(outcome.path_id, outcome.role)?;
+                validate_transport_tuple(
+                    outcome.descriptor_kind,
+                    outcome.local.as_ref(),
+                    outcome.remote.as_ref(),
+                )
+            }
+        },
+        (InternalWorkerResult::Ok, None)
+        | (InternalWorkerResult::Unspecified, _)
+        | (_, Some(_)) => Err(InternalProtocolError::Invalid),
+        (_, None) => Ok(()),
+    }
+}
+
+fn validate_lease_batch<T>(
+    values: &[T],
+    mut validate: impl FnMut(&T) -> Result<(u32, i32), InternalProtocolError>,
+) -> Result<(), InternalProtocolError> {
+    if values.is_empty() || values.len() > MAX_LEASES {
+        return Err(InternalProtocolError::Invalid);
+    }
+    let mut identities = BTreeSet::new();
+    for value in values {
+        if !identities.insert(validate(value)?) {
+            return Err(InternalProtocolError::Invalid);
+        }
+    }
+    Ok(())
+}
+
+fn route_id(value: &[u8]) -> Result<(), InternalProtocolError> {
+    if value.len() != 16 || value.iter().all(|byte| *byte == 0) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn bounded_limit(value: u32) -> Result<(), InternalProtocolError> {
+    if value > MAX_PATHS {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn path(value: u32) -> Result<(), InternalProtocolError> {
+    if !(1..=MAX_PATHS).contains(&value) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn path_role(path_id: u32, role: i32) -> Result<(), InternalProtocolError> {
+    path(path_id)?;
+    let role = InternalEndpointRole::try_from(role).map_err(|_| InternalProtocolError::Invalid)?;
+    if role == InternalEndpointRole::Unspecified {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn public_key(value: &[u8]) -> Result<(), InternalProtocolError> {
+    if value.len() != 32 || value.iter().all(|byte| *byte == 0) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn endpoint(value: &InternalUdpEndpoint) -> Result<(), InternalProtocolError> {
+    if !matches!(value.address.len(), 4 | 16)
+        || !(1..=u32::from(u16::MAX)).contains(&value.port)
+        || value.address.iter().all(|byte| *byte == 0)
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_transport_tuple(
+    descriptor_kind: i32,
+    local: Option<&InternalSocketAddress>,
+    remote: Option<&InternalSocketAddress>,
+) -> Result<(), InternalProtocolError> {
+    let kind = InternalTransportSocketKind::try_from(descriptor_kind)
+        .map_err(|_| InternalProtocolError::Invalid)?;
+    if kind == InternalTransportSocketKind::Unspecified {
+        return Err(InternalProtocolError::Invalid);
+    }
+    let local = transport_address(local.ok_or(InternalProtocolError::Invalid)?)?;
+    match kind {
+        InternalTransportSocketKind::MptcpConnected => {
+            let remote = transport_address(remote.ok_or(InternalProtocolError::Invalid)?)?;
+            if std::mem::discriminant(&local) != std::mem::discriminant(&remote) || local == remote
+            {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(())
+        }
+        InternalTransportSocketKind::MptcpListener
+        | InternalTransportSocketKind::QuicUdpUnconnected => {
+            if remote.is_some() {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(())
+        }
+        InternalTransportSocketKind::Unspecified => Err(InternalProtocolError::Invalid),
+    }
+}
+
+fn transport_address(value: &InternalSocketAddress) -> Result<IpAddr, InternalProtocolError> {
+    if !(1..=u32::from(u16::MAX)).contains(&value.port) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    let address = match value.address.as_slice() {
+        bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(
+            <[u8; 4]>::try_from(bytes).map_err(|_| InternalProtocolError::Invalid)?,
+        )),
+        bytes if bytes.len() == 16 => IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(bytes).map_err(|_| InternalProtocolError::Invalid)?,
+        )),
+        _ => return Err(InternalProtocolError::Invalid),
+    };
+    if address.is_unspecified() || address.is_multicast() || address.is_loopback() {
+        return Err(InternalProtocolError::Invalid);
+    }
+    if matches!(address, IpAddr::V4(value) if value == Ipv4Addr::BROADCAST)
+        || matches!(address, IpAddr::V6(value) if value.is_unicast_link_local())
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(address)
+}
+
+fn validate_host_prefix(value: &InternalIpPrefix) -> Result<(), InternalProtocolError> {
+    validate_prefix(value)?;
+    if !matches!(
+        (value.address.len(), value.prefix_length),
+        (4, 32) | (16, 128)
+    ) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_prefix(value: &InternalIpPrefix) -> Result<(), InternalProtocolError> {
+    let valid = match value.address.len() {
+        4 => value.prefix_length <= 32,
+        16 => value.prefix_length <= 128,
+        _ => false,
+    };
+    if !valid || value.address.iter().all(|byte| *byte == 0) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(operation: internal_worker_request::Operation) -> InternalWorkerRequest {
+        InternalWorkerRequest {
+            protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+            magic: INTERNAL_WORKER_MAGIC.to_vec(),
+            request_id: vec![7; 16],
+            operation: Some(operation),
+        }
+    }
+
+    fn prefix() -> InternalIpPrefix {
+        InternalIpPrefix {
+            address: vec![0xfd, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7],
+            prefix_length: 128,
+        }
+    }
+
+    fn plan_with_role(path_id: u32, role: InternalEndpointRole) -> LeasePlan {
+        LeasePlan {
+            path_id,
+            role: role as i32,
+            local_overlay_address: Some(prefix()),
+            setup_expires_at_unix: 100,
+            hard_expires_at_unix: 200,
+        }
+    }
+
+    fn plan(path_id: u32) -> LeasePlan {
+        plan_with_role(path_id, InternalEndpointRole::Client)
+    }
+
+    fn relay_leases() -> Vec<LeasePlan> {
+        (1..=MAX_PATHS)
+            .flat_map(|path_id| {
+                [
+                    InternalEndpointRole::RelayClient,
+                    InternalEndpointRole::RelayExit,
+                ]
+                .map(|role| plan_with_role(path_id, role))
+            })
+            .collect()
+    }
+
+    fn socket_address(address: [u8; 4], port: u32) -> InternalSocketAddress {
+        InternalSocketAddress {
+            address: address.to_vec(),
+            port,
+        }
+    }
+
+    fn acquire() -> InternalWorkerRequest {
+        request(internal_worker_request::Operation::AcquireTransportSocket(
+            AcquireTransportSocket {
+                route_context_id: vec![1; 16],
+                path_id: 1,
+                role: InternalEndpointRole::Client as i32,
+                descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+                expected_local: Some(socket_address([10, 77, 0, 2], 42_000)),
+                expected_remote: Some(socket_address([10, 77, 0, 3], 443)),
+            },
+        ))
+    }
+
+    #[test]
+    fn protocol_identity_and_operation_tags_are_fixed() {
+        assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 1);
+        assert_eq!(INTERNAL_WORKER_MAGIC, b"VPWKR3\0\0");
+
+        let operations = [
+            internal_worker_request::Operation::Initialise(InitialiseContext {
+                route_context_id: vec![1; 16],
+                role: InternalContextRole::Client as i32,
+                mptcp_accepted_addrs: 4,
+                mptcp_subflows: 4,
+            }),
+            internal_worker_request::Operation::PrepareLeases(PrepareLeases {
+                route_context_id: vec![1; 16],
+                leases: vec![plan(1)],
+            }),
+            internal_worker_request::Operation::ActivateLeases(ActivateLeases {
+                route_context_id: vec![1; 16],
+                leases: vec![LeaseActivation {
+                    path_id: 1,
+                    role: InternalEndpointRole::Client as i32,
+                    peer_public_key: vec![9; 32],
+                    peer_endpoint: Some(InternalUdpEndpoint {
+                        address: vec![8, 8, 8, 8],
+                        port: 51_820,
+                    }),
+                    allowed_prefixes: vec![prefix()],
+                    persistent_keepalive_seconds: 15,
+                }],
+            }),
+            internal_worker_request::Operation::ProbeCommitLeases(ProbeCommitLeases {
+                route_context_id: vec![1; 16],
+                leases: vec![LeaseProbe {
+                    path_id: 1,
+                    role: InternalEndpointRole::Client as i32,
+                    expected_peer_public_key: vec![9; 32],
+                    not_before_unix: 100,
+                }],
+            }),
+            internal_worker_request::Operation::AddMptcpEndpoint(AddMptcpEndpoint {
+                route_context_id: vec![1; 16],
+                path_id: 1,
+                mode: InternalMptcpMode::Subflow as i32,
+                backup: false,
+            }),
+            internal_worker_request::Operation::RemoveMptcpEndpoint(RemoveMptcpEndpoint {
+                route_context_id: vec![1; 16],
+                path_id: 1,
+            }),
+            acquire().operation.expect("Acquire operation"),
+            internal_worker_request::Operation::DestroyContext(DestroyContext {
+                route_context_id: vec![1; 16],
+            }),
+        ];
+        for operation in operations {
+            let value = request(operation);
+            let encoded = encode_request(&value).expect("encode");
+            assert_eq!(decode_request(&encoded).expect("decode"), value);
+        }
+        let encoded = acquire().encode_to_vec();
+        assert!(
+            encoded.windows(2).any(|bytes| bytes == [0x8a, 0x01]),
+            "AcquireTransportSocket stays on internal protobuf tag 17"
+        );
+        let mut retired_interception = encoded;
+        retired_interception.extend_from_slice(&[0x72, 0]);
+        assert!(decode_request(&retired_interception).is_err());
+    }
+
+    #[test]
+    fn envelope_and_canonical_encoding_fail_closed() {
+        let value = request(internal_worker_request::Operation::PrepareLeases(
+            PrepareLeases {
+                route_context_id: vec![1; 16],
+                leases: vec![plan(1)],
+            },
+        ));
+        let encoded = encode_request(&value).expect("encode");
+
+        let mut wrong = value.clone();
+        wrong.protocol_version = 2;
+        assert!(encode_request(&wrong).is_err());
+        wrong = value.clone();
+        wrong.magic[0] ^= 1;
+        assert!(encode_request(&wrong).is_err());
+        wrong = value.clone();
+        wrong.request_id.fill(0);
+        assert!(encode_request(&wrong).is_err());
+
+        let mut noncanonical = encoded.to_vec();
+        noncanonical.extend_from_slice(&[0xa0, 0x06, 0x01]);
+        assert!(decode_request(&noncanonical).is_err());
+        assert!(decode_request(&vec![0; MAX_INTERNAL_WORKER_FRAME + 1]).is_err());
+    }
+
+    #[test]
+    fn lease_batches_reject_empty_over_limit_invalid_path_and_duplicate_identity() {
+        let make = |leases| {
+            request(internal_worker_request::Operation::PrepareLeases(
+                PrepareLeases {
+                    route_context_id: vec![1; 16],
+                    leases,
+                },
+            ))
+        };
+
+        assert!(encode_request(&make(Vec::new())).is_err());
+
+        let relay_leases = relay_leases();
+        assert_eq!(relay_leases.len(), MAX_LEASES);
+
+        let mut over_limit = relay_leases.clone();
+        over_limit.push(plan(1));
+        assert_eq!(over_limit.len(), MAX_LEASES + 1);
+        assert!(encode_request(&make(over_limit)).is_err());
+
+        let mut invalid_path = relay_leases.clone();
+        invalid_path[0].path_id = MAX_PATHS + 1;
+        assert!(encode_request(&make(invalid_path)).is_err());
+
+        let mut duplicate = relay_leases;
+        duplicate[1] = duplicate[0].clone();
+        assert!(encode_request(&make(duplicate)).is_err());
+    }
+
+    fn correlated_response(
+        request: &InternalWorkerRequest,
+        result: InternalWorkerResult,
+        outcome: Option<internal_worker_response::Outcome>,
+    ) -> InternalWorkerResponse {
+        let encoded = encode_request(request).expect("valid request");
+        InternalWorkerResponse {
+            protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+            magic: INTERNAL_WORKER_MAGIC.to_vec(),
+            request_id: request.request_id.clone(),
+            result: result as i32,
+            request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn all_lease_batches_accept_sixteen_relay_leases_across_eight_paths() {
+        let plans = relay_leases();
+        assert_eq!(plans.len(), MAX_LEASES);
+
+        let requests = [
+            request(internal_worker_request::Operation::PrepareLeases(
+                PrepareLeases {
+                    route_context_id: vec![1; 16],
+                    leases: plans.clone(),
+                },
+            )),
+            request(internal_worker_request::Operation::ActivateLeases(
+                ActivateLeases {
+                    route_context_id: vec![1; 16],
+                    leases: plans
+                        .iter()
+                        .map(|lease| LeaseActivation {
+                            path_id: lease.path_id,
+                            role: lease.role,
+                            peer_public_key: vec![9; 32],
+                            peer_endpoint: Some(InternalUdpEndpoint {
+                                address: vec![8, 8, 8, 8],
+                                port: 51_820,
+                            }),
+                            allowed_prefixes: vec![prefix()],
+                            persistent_keepalive_seconds: 15,
+                        })
+                        .collect(),
+                },
+            )),
+            request(internal_worker_request::Operation::ProbeCommitLeases(
+                ProbeCommitLeases {
+                    route_context_id: vec![1; 16],
+                    leases: plans
+                        .iter()
+                        .map(|lease| LeaseProbe {
+                            path_id: lease.path_id,
+                            role: lease.role,
+                            expected_peer_public_key: vec![9; 32],
+                            not_before_unix: 100,
+                        })
+                        .collect(),
+                },
+            )),
+        ];
+        for value in requests {
+            let encoded = encode_request(&value).expect("sixteen-lease request");
+            assert_eq!(decode_request(&encoded).expect("decode"), value);
+        }
+
+        let outcomes = [
+            internal_worker_response::Outcome::Prepared(PreparedLeases {
+                leases: plans
+                    .iter()
+                    .map(|lease| PreparedLease {
+                        path_id: lease.path_id,
+                        role: lease.role,
+                        public_key: vec![9; 32],
+                        listen_port: 51_820,
+                    })
+                    .collect(),
+            }),
+            internal_worker_response::Outcome::Activated(ActivatedLeases {
+                leases: plans
+                    .iter()
+                    .map(|lease| ActivatedLease {
+                        path_id: lease.path_id,
+                        role: lease.role,
+                        public_key: vec![9; 32],
+                        listen_port: 51_820,
+                    })
+                    .collect(),
+            }),
+            internal_worker_response::Outcome::ProbedCommitted(ProbedLeases {
+                leases: plans
+                    .iter()
+                    .map(|lease| ProbedLease {
+                        path_id: lease.path_id,
+                        role: lease.role,
+                        latest_handshake_unix: 100,
+                        received_bytes: 1,
+                        transmitted_bytes: 1,
+                    })
+                    .collect(),
+            }),
+        ];
+        for outcome in outcomes {
+            let value = InternalWorkerResponse {
+                protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                request_id: vec![7; 16],
+                result: InternalWorkerResult::Ok as i32,
+                request_digest: vec![8; 32],
+                outcome: Some(outcome),
+            };
+            let encoded = encode_response(&value).expect("sixteen-lease response");
+            assert_eq!(decode_response(&encoded).expect("decode"), value);
+        }
+    }
+
+    #[test]
+    fn non_lease_path_limits_remain_eight() {
+        let initialise = |mptcp_accepted_addrs, mptcp_subflows| {
+            request(internal_worker_request::Operation::Initialise(
+                InitialiseContext {
+                    route_context_id: vec![1; 16],
+                    role: InternalContextRole::Relay as i32,
+                    mptcp_accepted_addrs,
+                    mptcp_subflows,
+                },
+            ))
+        };
+        assert!(encode_request(&initialise(MAX_PATHS, MAX_PATHS)).is_ok());
+        assert!(encode_request(&initialise(MAX_PATHS + 1, MAX_PATHS)).is_err());
+        assert!(encode_request(&initialise(MAX_PATHS, MAX_PATHS + 1)).is_err());
+
+        let add_endpoint = |path_id| {
+            request(internal_worker_request::Operation::AddMptcpEndpoint(
+                AddMptcpEndpoint {
+                    route_context_id: vec![1; 16],
+                    path_id,
+                    mode: InternalMptcpMode::Subflow as i32,
+                    backup: false,
+                },
+            ))
+        };
+        assert!(encode_request(&add_endpoint(MAX_PATHS)).is_ok());
+        assert!(encode_request(&add_endpoint(MAX_PATHS + 1)).is_err());
+    }
+
+    #[test]
+    fn omitted_enum_defaults_are_rejected() {
+        let initialise = request(internal_worker_request::Operation::Initialise(
+            InitialiseContext {
+                route_context_id: vec![1; 16],
+                role: InternalContextRole::Unspecified as i32,
+                mptcp_accepted_addrs: 4,
+                mptcp_subflows: 4,
+            },
+        ));
+        assert!(encode_request(&initialise).is_err());
+        assert!(decode_request(&initialise.encode_to_vec()).is_err());
+
+        let mut lease = plan(1);
+        lease.role = InternalEndpointRole::Unspecified as i32;
+        let prepare = request(internal_worker_request::Operation::PrepareLeases(
+            PrepareLeases {
+                route_context_id: vec![1; 16],
+                leases: vec![lease],
+            },
+        ));
+        assert!(encode_request(&prepare).is_err());
+        assert!(decode_request(&prepare.encode_to_vec()).is_err());
+
+        let add = request(internal_worker_request::Operation::AddMptcpEndpoint(
+            AddMptcpEndpoint {
+                route_context_id: vec![1; 16],
+                path_id: 1,
+                mode: InternalMptcpMode::Unspecified as i32,
+                backup: false,
+            },
+        ));
+        assert!(encode_request(&add).is_err());
+        assert!(decode_request(&add.encode_to_vec()).is_err());
+    }
+
+    #[test]
+    fn prepared_response_requires_kernel_proven_nonzero_port() {
+        let prepare = request(internal_worker_request::Operation::PrepareLeases(
+            PrepareLeases {
+                route_context_id: vec![1; 16],
+                leases: vec![plan(1)],
+            },
+        ));
+        let prepared = |listen_port| {
+            correlated_response(
+                &prepare,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::Prepared(
+                    PreparedLeases {
+                        leases: vec![PreparedLease {
+                            path_id: 1,
+                            role: InternalEndpointRole::Client as i32,
+                            public_key: vec![9; 32],
+                            listen_port,
+                        }],
+                    },
+                )),
+            )
+        };
+
+        let response = prepared(51_820);
+        assert!(encode_response(&response).is_ok());
+        assert!(validate_response_for_request(&prepare, &response).is_ok());
+        assert!(encode_response(&prepared(0)).is_err());
+    }
+
+    #[test]
+    fn result_and_operation_specific_outcome_are_bound_fail_closed() {
+        let initialise = request(internal_worker_request::Operation::Initialise(
+            InitialiseContext {
+                route_context_id: vec![1; 16],
+                role: InternalContextRole::Client as i32,
+                mptcp_accepted_addrs: 4,
+                mptcp_subflows: 4,
+            },
+        ));
+        let success = correlated_response(
+            &initialise,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Initialised(
+                ContextInitialised {
+                    route_context_id: vec![1; 16],
+                },
+            )),
+        );
+        assert!(validate_response_for_request(&initialise, &success).is_ok());
+
+        let mut unspecified = success.clone();
+        unspecified.result = InternalWorkerResult::Unspecified as i32;
+        unspecified.outcome = None;
+        assert!(encode_response(&unspecified).is_err());
+
+        let mut missing_success = success.clone();
+        missing_success.outcome = None;
+        assert!(encode_response(&missing_success).is_err());
+
+        let mut contradictory_failure = success.clone();
+        contradictory_failure.result = InternalWorkerResult::Invalid as i32;
+        assert!(encode_response(&contradictory_failure).is_err());
+
+        let mut failure = success.clone();
+        failure.result = InternalWorkerResult::Kernel as i32;
+        failure.outcome = None;
+        assert!(encode_response(&failure).is_ok());
+        assert!(validate_response_for_request(&initialise, &failure).is_ok());
+
+        let mut mismatched = success.clone();
+        mismatched.outcome = Some(internal_worker_response::Outcome::Destroyed(
+            ContextDestroyed {},
+        ));
+        assert!(encode_response(&mismatched).is_ok());
+        assert!(validate_response_for_request(&initialise, &mismatched).is_err());
+
+        let mut wrong_id = success.clone();
+        wrong_id.request_id[0] ^= 1;
+        assert!(validate_response_for_request(&initialise, &wrong_id).is_err());
+        let mut wrong_digest = success;
+        wrong_digest.request_digest[0] ^= 1;
+        assert!(validate_response_for_request(&initialise, &wrong_digest).is_err());
+    }
+
+    #[test]
+    fn transport_success_echo_and_completion_binding_are_exact() {
+        let acquire = acquire();
+        let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
+            acquire.operation.as_ref()
+        else {
+            panic!("Acquire operation");
+        };
+        let success = correlated_response(
+            &acquire,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::TransportSocketReady(
+                TransportSocketReady {
+                    path_id: operation.path_id,
+                    role: operation.role,
+                    descriptor_kind: operation.descriptor_kind,
+                    local: operation.expected_local.clone(),
+                    remote: operation.expected_remote.clone(),
+                },
+            )),
+        );
+        assert!(validate_response_for_request(&acquire, &success).is_ok());
+        let binding = transport_descriptor_binding(&acquire, &success).expect("binding");
+
+        let mut wrong_path = success.clone();
+        let Some(internal_worker_response::Outcome::TransportSocketReady(ready)) =
+            wrong_path.outcome.as_mut()
+        else {
+            panic!("transport outcome");
+        };
+        ready.path_id = 2;
+        assert!(validate_response_for_request(&acquire, &wrong_path).is_err());
+        assert!(transport_descriptor_binding(&acquire, &wrong_path).is_err());
+
+        let mut changed_response = success;
+        changed_response.request_id[0] ^= 1;
+        assert!(transport_descriptor_binding(&acquire, &changed_response).is_err());
+        assert_ne!(binding, [0; 32]);
+    }
+
+    #[test]
+    fn response_requires_typed_outcome_and_request_digest() {
+        let value = InternalWorkerResponse {
+            protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+            magic: INTERNAL_WORKER_MAGIC.to_vec(),
+            request_id: vec![7; 16],
+            result: InternalWorkerResult::Ok as i32,
+            request_digest: vec![8; 32],
+            outcome: Some(internal_worker_response::Outcome::Activated(
+                ActivatedLeases {
+                    leases: vec![ActivatedLease {
+                        path_id: 1,
+                        role: InternalEndpointRole::Exit as i32,
+                        public_key: vec![9; 32],
+                        listen_port: 51_820,
+                    }],
+                },
+            )),
+        };
+        let encoded = encode_response(&value).expect("encode response");
+        assert_eq!(decode_response(&encoded).expect("decode response"), value);
+
+        let mut wrong = value;
+        wrong.request_digest.clear();
+        assert!(encode_response(&wrong).is_err());
+    }
+}

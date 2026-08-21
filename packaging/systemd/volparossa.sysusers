@@ -1,0 +1,5 @@
+# Type Name              ID GECOS                         Home                   Shell
+g      volparossa        -
+g      volparossa-users  -
+u      volparossa        -  "VOLPAROSSA system service" /var/lib/volparossa    /usr/sbin/nologin
+m      volparossa        volparossa-users

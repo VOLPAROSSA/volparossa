@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "audited_at": "2026-08-06",
+  "native_component": "volparossa-mpquic",
+  "source_policy": {
+    "prebuilt_binaries_allowed": false,
+    "build_may_download": false,
+    "fetch_is_explicit": true,
+    "patches_must_apply_cleanly": true
+  },
+  "protocols": {
+    "masque_connect_ip": "RFC 9484",
+    "http_datagrams": "RFC 9297",
+    "quic_datagrams": "RFC 9221",
+    "http3": "RFC 9114",
+    "multipath_quic": "draft-ietf-quic-multipath-21"
+  },
+  "components": [
+    {
+      "name": "mqvpn",
+      "origin": "https://github.com/mp0rta/mqvpn.git",
+      "commit": "607c0df921e2c23bae8bea21cb3c6f2acb2db275",
+      "tree": "d6c5ff654c5b7be4754bcb8ad2720b112a2b1e56",
+      "tag_at_commit": "v0.15.1",
+      "version": "0.15.1",
+      "license": "Apache-2.0",
+      "license_files": ["LICENSE", "NOTICE"],
+      "checkout": "third_party/src/mqvpn",
+      "license_sha256": {
+        "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "NOTICE": "c86c552bb97af19967707243cd32203d7c43bebc6856abe69ea08e8f20258da5"
+      }
+    },
+    {
+      "name": "xquic",
+      "origin": "https://github.com/mp0rta/xquic.git",
+      "commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
+      "tree": "1999a0a944a1c93b46f7b41b9ff4dccb9302966b",
+      "tag_at_commit": "mqvpn-v0.15.1",
+      "license": "Apache-2.0",
+      "license_files": ["LICENSE"],
+      "checkout": "third_party/src/mqvpn/third_party/xquic",
+      "license_sha256": {
+        "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      },
+      "parent": "mqvpn",
+      "parent_path": "third_party/xquic",
+      "protocol_baseline": "draft-ietf-quic-multipath-21",
+      "security_hardening_ancestors": [
+        "16992ac0c9077bbd33f31f30b3af7b89ace1118b",
+        "e4d89de3a7837ffdc8b0d2c281549151107aebed",
+        "d20b6b8b6d9552261463e21e48e49e3fbb762b12"
+      ]
+    },
+    {
+      "name": "lwip",
+      "origin": "https://github.com/mp0rta/heiher-lwip.git",
+      "commit": "821af1994c4dbaf1e2cba9a7c2207303b3e5327b",
+      "tree": "995119cb3b9074644ed8af3d8c2553fe4f3781aa",
+      "license": "BSD-3-Clause",
+      "license_files": ["LICENSE"],
+      "checkout": "third_party/src/mqvpn/third_party/lwip",
+      "license_sha256": {
+        "LICENSE": "ef4aac92e05e87cd1cdc140870ed52206ba03d4a7fe46c1e11d7ffa6c87d252b"
+      },
+      "parent": "mqvpn",
+      "parent_path": "third_party/lwip"
+    },
+    {
+      "name": "wintun-userspace-header",
+      "origin": "https://www.wintun.net/",
+      "version": "bundled by mqvpn 0.15.1",
+      "license": "MIT (selected from GPL-2.0 OR MIT)",
+      "license_files": ["LICENSE"],
+      "checkout": "third_party/src/mqvpn/third_party/wintun",
+      "file_sha256": {
+        "wintun.h": "fd87705912c04a94b9736b88f9a2eb8a6dcb2e40f9dd1515bad941bb71af852a",
+        "LICENSE": "55743868302006ccaa536bcb96903e185999c6a9cb51ff5bf4b41b96bb30fd07",
+        "README.md": "124fd31fc8c48a528bdc43e9fb8b1d0bc2439f37833eea141c1670a1b85e9e67"
+      },
+      "copyright": "Copyright (C) 2018-2021 WireGuard LLC. All Rights Reserved.",
+      "parent": "mqvpn",
+      "parent_path": "third_party/wintun",
+      "platform_scope": "Windows-only userspace header; not compiled or linked in the Debian 13 target",
+      "runtime_driver_bundled": false
+    },
+    {
+      "name": "boringssl",
+      "origin": "https://github.com/google/boringssl.git",
+      "commit": "fd490c05de684d4cf135388023acf9aabb4e54f1",
+      "tree": "0420b7c79fdb88ccf2d7cb21bb934da6a0bc4092",
+      "tag_at_commit": "0.20260730.0",
+      "license": "Apache-2.0",
+      "license_scope": {
+        "linked_libcrypto_libssl": "Apache-2.0",
+        "unlinked_go_tls_test_support": "BSD-3-Clause"
+      },
+      "license_change_ancestor": "33d1049b1f730d2725bb09b2256fd5fe4c46b17e",
+      "license_files": ["LICENSE"],
+      "checkout": "third_party/src/mqvpn/third_party/xquic/third_party/boringssl",
+      "license_sha256": {
+        "LICENSE": "827c8d8fc207c2392794eef9e00fe246f9f61fdcc132556c275be3dd8c3cd97f"
+      },
+      "parent": "xquic",
+      "parent_path": "third_party/boringssl"
+    }
+  ],
+  "local_patches": [
+    {
+      "target": "xquic",
+      "applies_to_commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
+      "file": "patches/volparossa-xquic.patch",
+      "sha256": "acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b",
+      "purpose": [
+        "invoke the certificate callback on every handshake when requested",
+        "bind each created QUIC path to an explicit local and remote tuple",
+        "expose ACKed transport bytes under a non-payload label",
+        "avoid a null source pointer in the zero-length first-ALPN-list copy",
+        "return overflow-checked, XQC_ALIGNMENT-aligned large pool allocations",
+        "avoid a null source pointer when no client session ticket is configured",
+        "avoid a null data pointer copy for a zero-length stream frame carrying FIN"
+      ]
+    },
+    {
+      "target": "mqvpn",
+      "applies_to_commit": "607c0df921e2c23bae8bea21cb3c6f2acb2db275",
+      "file": "patches/volparossa-mqvpn.patch",
+      "sha256": "dfeffe71a9db187a700a078f0f9f427a57f7eb69bfae2ba1b974a556bd22719d",
+      "purpose": [
+        "enforce a caller-supplied leaf SPKI SHA-256 pin",
+        "carry explicit per-path local and remote socket tuples into xquic",
+        "surface real path congestion, loss, RTT, rate, and ACKed transport counters",
+        "attach a stable server session ID to client-originated inner-packet delivery",
+        "accept bounded in-memory server TLS identity and synchronously initialize xquic through sealed anonymous Linux memfds",
+        "wipe copied authentication, TLS-name, user-slot, client, server, and temporary SPKI material"
+      ]
+    }
+  ],
+  "audit_findings": {
+    "genuine_multipath": true,
+    "connect_ip": true,
+    "quic_datagram": true,
+    "dynamic_path_add_remove": true,
+    "fec_and_duplication_can_be_disabled": true,
+    "public_spki_pin_api": true,
+    "spki_callback_enforced_on_every_handshake": true,
+    "public_per_path_remote_address_api": true,
+    "public_client_delivery_rate_api": true,
+    "public_unique_delivered_payload_api": false,
+    "volparossa_edt_scheduler_exact_match": false,
+    "public_server_session_correlated_tun_output": true,
+    "credential_material_zeroized_on_replace_retire_destroy": true,
+    "public_server_bounded_tls_identity_pem_api": true,
+    "linux_server_tls_identity_sealed_memfd_handoff": true,
+    "native_api_v3_bounded_reverse_inner_datagram_poll": true,
+    "native_api_v3_nonzero_local_masque_association_context": true,
+    "native_api_v3_single_path_general_udp_mode": true,
+    "native_api_v3_per_route_auth_tls_expiry": true,
+    "native_api_v3_rejects_v1_v2_and_unknown": true,
+    "native_api_v3_exit_lifecycle": false,
+    "native_api_v3_helper_fd_orchestration": false,
+    "wintun_userspace_header_windows_only": true,
+    "wintun_linked_in_debian_target": false
+  }
+}

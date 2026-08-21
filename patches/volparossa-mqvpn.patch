@@ -1,0 +1,1423 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 99fcc0f..b7e50c5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -209,10 +209,19 @@ else()
+ endif()
+ message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
+ 
++if(NOT BORINGSSL_INCLUDE_DIR)
++    set(BORINGSSL_INCLUDE_DIR
++        "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include")
++endif()
++if(NOT EXISTS "${BORINGSSL_INCLUDE_DIR}/openssl/x509.h")
++    message(FATAL_ERROR "BoringSSL headers not found: ${BORINGSSL_INCLUDE_DIR}")
++endif()
++
+ # ---------- libmqvpn source files (shared between static and shared targets) ----------
+ set(MQVPN_LIB_SOURCES
+     src/mqvpn_config.c
+     src/mqvpn_client.c
++    src/spki_pin.c
+     src/mqvpn_server.c
+     src/mqvpn_conn_settings.c
+     src/mqvpn_util.c
+@@ -387,7 +396,7 @@ else()
+ endif()
+ target_include_directories(mqvpn_lib
+     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+-    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
++    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR} ${BORINGSSL_INCLUDE_DIR}
+ )
+ if(ANDROID_CROSS_COMPILE)
+     # Android NDK: pthread is in libc, no separate -lpthread
+@@ -556,7 +565,7 @@ set_target_properties(mqvpn_shared PROPERTIES
+ )
+ target_include_directories(mqvpn_shared
+     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+-    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
++    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR} ${BORINGSSL_INCLUDE_DIR}
+ )
+ # Shared lib links shared xquic, same as Linux (static .a is unusable there
+ # for -fPIC reasons; kept symmetric here even though clang on Darwin emits
+@@ -675,7 +684,7 @@ set_target_properties(mqvpn_shared PROPERTIES
+ )
+ target_include_directories(mqvpn_shared
+     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+-    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
++    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR} ${BORINGSSL_INCLUDE_DIR}
+ )
+ # Shared lib needs shared xquic (static .a lacks -fPIC)
+ target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
+@@ -764,7 +773,15 @@ if(BUILD_TESTING)
+     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
+     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
+     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
+-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate)
++    add_executable(test_spki_pin tests/test_spki_pin.c src/spki_pin.c)
++    target_include_directories(test_spki_pin PRIVATE ${BORINGSSL_INCLUDE_DIR})
++    target_compile_definitions(test_spki_pin PRIVATE
++        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt")
++    target_link_libraries(test_spki_pin ${CRYPTO_LIB} pthread dl stdc++)
++    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check
++        test_flow_sched test_status test_path_state_machine test_control_response_bound
++        test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config
++        test_classifier test_icmp test_reorder_gate test_spki_pin)
+ 
+     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
+     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
+diff --git a/include/libmqvpn.h b/include/libmqvpn.h
+index 8b5151f..9424e36 100644
+--- a/include/libmqvpn.h
++++ b/include/libmqvpn.h
+@@ -50,6 +50,8 @@ extern "C" {
+ #define MQVPN_MAX_USERS            64
+ #define MQVPN_MAX_PATHS            8
+ #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
++#define MQVPN_TLS_CERTIFICATE_PEM_MAX (64U * 1024U)
++#define MQVPN_TLS_PRIVATE_KEY_PEM_MAX (16U * 1024U)
+ 
+ /* ─── Opaque handles ─── */
+ 
+@@ -300,6 +302,18 @@ typedef struct {
+     uint64_t raw_markers_active;
+ } mqvpn_stats_t;
+ 
++typedef enum {
++    MQVPN_PATH_METRIC_SRTT = 1ULL << 0,
++    MQVPN_PATH_METRIC_LOSS = 1ULL << 1,
++    MQVPN_PATH_METRIC_CWND = 1ULL << 2,
++    MQVPN_PATH_METRIC_INFLIGHT = 1ULL << 3,
++    MQVPN_PATH_METRIC_ESTIMATED_RATE = 1ULL << 4,
++    /* ACKed QUIC packet bytes, including retransmitted transport bytes.
++     * This is deliberately not labelled as unique delivered payload. */
++    MQVPN_PATH_METRIC_ACKED_TRANSPORT = 1ULL << 5,
++    MQVPN_PATH_METRIC_XQUIC_STATE = 1ULL << 6,
++} mqvpn_path_metric_flag_t;
++
+ typedef struct {
+     uint32_t struct_size;
+     mqvpn_path_handle_t handle;
+@@ -308,6 +322,14 @@ typedef struct {
+     int srtt_ms;
+     uint64_t bytes_tx;
+     uint64_t bytes_rx;
++    uint64_t metrics_valid;
++    uint64_t srtt_us;
++    uint64_t packets_lost;
++    uint64_t congestion_window_bytes;
++    uint64_t bytes_in_flight;
++    uint64_t estimated_rate_bytes_per_sec;
++    uint64_t acked_transport_bytes;
++    uint8_t xquic_path_state;
+ } mqvpn_path_info_t;
+ 
+ typedef struct {
+@@ -351,12 +373,21 @@ typedef struct {
+     uint32_t local_addr_len;
+     int64_t platform_net_id; /* Android: Network handle */
+     uint32_t flags;
++    uint8_t remote_addr[128]; /* optional per-path peer sockaddr */
++    uint32_t remote_addr_len;
+ } mqvpn_path_desc_t;
+ 
+ /* ─── Callback function types ─── */
+ 
+ typedef void (*mqvpn_tun_output_fn)(const uint8_t *pkt, size_t len, void *user_ctx);
+ 
++/* Server-only session-correlated delivery for client-originated inner packets.
++ * session_id is the same stable value reported by on_client_connected and
++ * on_client_disconnected. This callback never receives server-generated ICMP. */
++typedef void (*mqvpn_session_tun_output_fn)(const uint8_t *pkt, size_t len,
++                                            uint32_t session_id,
++                                            void *user_ctx);
++
+ typedef void (*mqvpn_tunnel_config_ready_fn)(const mqvpn_tunnel_info_t *info,
+                                              void *user_ctx);
+ 
+@@ -458,6 +489,9 @@ typedef struct {
+     void (*egress_fd_register)(int fd, int want_read, int want_write, void *fd_ctx,
+                                void *user_ctx);
+     void (*egress_fd_unregister)(int fd, void *user_ctx);
++
++    /* Optional under ABI 2; appended for struct_size compatibility. */
++    mqvpn_session_tun_output_fn session_tun_output;
+ } mqvpn_server_callbacks_t;
+ 
+ #define MQVPN_SERVER_CALLBACKS_INIT                      \
+@@ -477,6 +511,13 @@ MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
+ MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port);
+ MQVPN_API int mqvpn_config_set_tls_server_name(mqvpn_config_t *cfg, const char *name);
+ MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key);
++/* Pins the leaf SubjectPublicKeyInfo SHA-256 digest. When configured, every
++ * handshake invokes the application verifier even for a CA-valid chain and
++ * fails unless this exact pin matches. A matching pin may authenticate an
++ * otherwise-valid self-signed/unknown-issuer chain; other certificate
++ * failures remain fatal. */
++MQVPN_API int mqvpn_config_set_expected_spki_sha256(mqvpn_config_t *cfg,
++                                                    const uint8_t pin[32]);
+ MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,
+                                     const char *key);
+ MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username);
+@@ -613,6 +654,17 @@ MQVPN_API int mqvpn_config_set_subnet(mqvpn_config_t *cfg, const char *cidr);
+ MQVPN_API int mqvpn_config_set_subnet6(mqvpn_config_t *cfg, const char *cidr6);
+ MQVPN_API int mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert,
+                                         const char *key);
++/* Server-only, bounded in-memory identity. Both PEM inputs are copied and
++ * must be non-empty, contain no NUL byte, and fit the public maxima above.
++ * The caller retains ownership and should wipe private_key_pem after this
++ * call. On Linux, server construction snapshots both copies into sealed,
++ * anonymous memfds for synchronous xquic initialization; no caller-supplied
++ * pathname is used. Other platforms fail server construction closed for this
++ * identity source. Replacing or freeing the config wipes every stored byte. */
++MQVPN_API int mqvpn_config_set_tls_identity_pem(
++    mqvpn_config_t *cfg, const uint8_t *certificate_pem,
++    size_t certificate_pem_len, const uint8_t *private_key_pem,
++    size_t private_key_pem_len);
+ MQVPN_API int mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max);
+ 
+ /* ─── Client API ─── */
+diff --git a/src/mqvpn_client.c b/src/mqvpn_client.c
+index c79c535..44199d4 100644
+--- a/src/mqvpn_client.c
++++ b/src/mqvpn_client.c
+@@ -58,6 +58,7 @@
+ #include "reorder_gate.h"
+ #include "reorder_rx.h"
+ #include "reorder_tx.h"
++#include "spki_pin.h"
+ 
+ /* ─── Constants ─── */
+ 
+@@ -191,6 +192,7 @@ struct mqvpn_client_s {
+ 
+     /* State machine */
+     mqvpn_client_state_t state;
++    int spki_verified;
+ 
+     /* xquic engine (Level 1) */
+     xqc_engine_t *engine;
+@@ -1117,12 +1119,21 @@ static int
+ cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t certs_len,
+                void *conn_user_data)
+ {
+-    (void)certs;
+-    (void)cert_len;
+-    (void)certs_len;
+     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
+-    if (conn && conn->client->config.insecure) return 0;
+-    LOG_E(conn->client, "TLS certificate verification failed");
++    if (conn == NULL || conn->client == NULL) return -1;
++    mqvpn_client_t *c = conn->client;
++    if (c->config.has_expected_spki_sha256) {
++        if (certs == NULL || cert_len == NULL || certs_len == 0 || certs[0] == NULL ||
++            mqvpn_spki_pin_matches_leaf_der(
++                certs[0], cert_len[0], c->config.expected_spki_sha256) != 1) {
++            LOG_E(c, "TLS leaf SPKI pin mismatch");
++            return -1;
++        }
++        c->spki_verified = 1;
++        return 0;
++    }
++    if (c->config.insecure) return 0;
++    LOG_E(c, "TLS certificate verification failed");
+     return -1;
+ }
+ 
+@@ -1166,6 +1177,13 @@ static void
+ cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
+ {
+     cli_conn_t *conn = (cli_conn_t *)user_data;
++    mqvpn_client_t *c = conn->client;
++    if (c->config.has_expected_spki_sha256 && !c->spki_verified) {
++        LOG_E(c, "TLS handshake completed without mandatory SPKI callback evidence");
++        cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
++        xqc_conn_close(c->engine, &conn->cid);
++        return;
++    }
+     conn->dgram_mss = xqc_h3_ext_datagram_get_mss(h3_conn);
+     LOG_I(conn->client, "handshake finished (dgram_mss=%zu)", conn->dgram_mss);
+     client_set_state(conn->client, MQVPN_STATE_AUTHENTICATING);
+@@ -2268,12 +2286,20 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
+  * The caller passes the classification + path_id into path_on_event()'s
+  * ctx (ACTIVATE_REQUESTED / RETRY_TIMER / MANUAL_REACTIVATE). */
+ static activate_result_t
+-activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
++activate_via_xquic_classify(mqvpn_client_t *c, const path_entry_t *path,
++                            uint64_t *out_path_id)
+ {
+     int path_status = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC) ? 1 : 0;
+     *out_path_id = 0;
+-    xqc_int_t ret =
+-        xqc_conn_create_path(c->engine, &c->conn->cid, out_path_id, path_status);
++    xqc_int_t ret;
++    if (path != NULL && path->local_addr_len > 0 && path->remote_addr_len > 0) {
++        ret = xqc_conn_create_path_with_addr(
++            c->engine, &c->conn->cid, out_path_id, path_status,
++            (const struct sockaddr *)&path->local_addr, path->local_addr_len,
++            (const struct sockaddr *)&path->remote_addr, path->remote_addr_len);
++    } else {
++        ret = xqc_conn_create_path(c->engine, &c->conn->cid, out_path_id, path_status);
++    }
+     if (ret == 0) return ACTIVATE_OK;
+     if (ret == -XQC_EMP_CREATE_PATH) return ACTIVATE_PERMANENT_FAIL;
+     return ACTIVATE_TRANSIENT_FAIL;
+@@ -2292,7 +2318,7 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
+     if (p->xquic_path_live) return;
+ 
+     uint64_t new_id = 0;
+-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
++    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
+     LOG_I(c, "path[%d] activate: result=%s id=%llu", idx,
+           r == ACTIVATE_OK               ? "OK"
+           : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
+@@ -2587,6 +2613,7 @@ static int
+ cli_start_connection(mqvpn_client_t *c)
+ {
+     c->conn_id++;
++    c->spki_verified = 0;
+     cli_conn_t *conn = calloc(1, sizeof(*conn));
+     if (!conn) return -1;
+     conn->client = c;
+@@ -2645,8 +2672,15 @@ cli_start_connection(mqvpn_client_t *c)
+ 
+     xqc_conn_ssl_config_t ssl_cfg;
+     memset(&ssl_cfg, 0, sizeof(ssl_cfg));
+-    ssl_cfg.cert_verify_flag = c->config.insecure ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
+-                                                  : XQC_TLS_CERT_FLAG_NEED_VERIFY;
++    if (c->config.has_expected_spki_sha256) {
++        ssl_cfg.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY |
++                                   XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED |
++                                   XQC_TLS_CERT_FLAG_ALWAYS_CALLBACK;
++    } else {
++        ssl_cfg.cert_verify_flag = c->config.insecure
++                                       ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
++                                       : XQC_TLS_CERT_FLAG_NEED_VERIFY;
++    }
+ 
+     const char *sni =
+         c->config.tls_server_name[0] ? c->config.tls_server_name : c->config.server_host;
+@@ -2856,6 +2890,7 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
+ 
+     if (init_xquic_engine(c) < 0) {
+         client_destroy_engine(c);
++        mqvpn_secure_zero(c, sizeof(*c));
+         free(c);
+         return NULL;
+     }
+@@ -2870,6 +2905,7 @@ mqvpn_client_destroy(mqvpn_client_t *client)
+ 
+     client_destroy_engine(client);
+     cli_conn_destroy(client);
++    mqvpn_secure_zero(client, sizeof(*client));
+     free(client);
+ }
+ 
+@@ -2988,6 +3024,18 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
+     if (!c || fd < 0) return -1;
+     ASSERT_TICK_THREAD(c);
+ 
++    uint32_t remote_addr_len = 0;
++    if (desc != NULL) {
++        if (desc->local_addr_len > sizeof(((path_entry_t *)0)->local_addr)) return -1;
++        const size_t remote_size_field_end =
++            offsetof(mqvpn_path_desc_t, remote_addr_len) +
++            sizeof(desc->remote_addr_len);
++        if (desc->struct_size >= remote_size_field_end) {
++            remote_addr_len = desc->remote_addr_len;
++            if (remote_addr_len > sizeof(((path_entry_t *)0)->remote_addr)) return -1;
++        }
++    }
++
+     /* Reuse a CLOSED slot if available, otherwise append.
+      *
+      * Tighten the predicate with `!xquic_path_live`: a slot in CLOSED_DROPPED
+@@ -3034,6 +3082,10 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
+         if (desc->local_addr_len > 0 && desc->local_addr_len <= sizeof(p->local_addr))
+             memcpy(&p->local_addr, desc->local_addr, desc->local_addr_len);
+         p->local_addr_len = desc->local_addr_len;
++        if (remote_addr_len > 0) {
++            memcpy(&p->remote_addr, desc->remote_addr, remote_addr_len);
++            p->remote_addr_len = remote_addr_len;
++        }
+         p->platform_net_id = desc->platform_net_id;
+         p->flags = desc->flags;
+     }
+@@ -3190,7 +3242,7 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+           path_lifecycle_name(p->state));
+ 
+     uint64_t new_id = 0;
+-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
++    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
+     path_event_ctx_t ctx = {
+         .result = r,
+         .new_xqc_path_id = new_id,
+@@ -3607,7 +3659,7 @@ tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now
+     if (p->recreate_after_us == 0 || now < p->recreate_after_us) return;
+ 
+     uint64_t new_id = 0;
+-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
++    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
+     LOG_I(c, "path[%d] retry: result=%s retries=%d/%d", idx,
+           r == ACTIVATE_OK               ? "OK"
+           : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
+@@ -3865,7 +3917,7 @@ int
+ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_paths,
+                        int *n_paths)
+ {
+-    if (!c || !out || !n_paths) return MQVPN_ERR_INVALID_ARG;
++    if (!c || !out || !n_paths || max_paths < 0) return MQVPN_ERR_INVALID_ARG;
+ 
+     /* Query xquic per-path metrics for SRTT */
+     xqc_conn_stats_t xstats;
+@@ -3875,6 +3927,7 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
+     int count = c->n_paths < max_paths ? c->n_paths : max_paths;
+     for (int i = 0; i < count; i++) {
+         const path_entry_t *p = &c->paths[i];
++        memset(&out[i], 0, sizeof(out[i]));
+         out[i].struct_size = sizeof(out[i]);
+         out[i].handle = p->handle;
+         out[i].status = p->status;
+@@ -3886,7 +3939,23 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
+         out[i].srtt_ms = 0;
+         if (p->xquic_path_live) {
+             const xqc_path_metrics_t *pm = xqc_find_path_metrics(&xstats, p->xqc_path_id);
+-            if (pm) out[i].srtt_ms = (int)(pm->path_srtt / 1000);
++            if (pm) {
++                out[i].srtt_ms = (int)(pm->path_srtt / 1000);
++                out[i].metrics_valid = MQVPN_PATH_METRIC_SRTT |
++                                       MQVPN_PATH_METRIC_LOSS |
++                                       MQVPN_PATH_METRIC_CWND |
++                                       MQVPN_PATH_METRIC_INFLIGHT |
++                                       MQVPN_PATH_METRIC_ESTIMATED_RATE |
++                                       MQVPN_PATH_METRIC_ACKED_TRANSPORT |
++                                       MQVPN_PATH_METRIC_XQUIC_STATE;
++                out[i].srtt_us = pm->path_srtt;
++                out[i].packets_lost = pm->path_lost_count;
++                out[i].congestion_window_bytes = pm->path_cwnd;
++                out[i].bytes_in_flight = pm->path_bytes_in_flight;
++                out[i].estimated_rate_bytes_per_sec = pm->path_est_bw;
++                out[i].acked_transport_bytes = pm->path_acked_transport_bytes;
++                out[i].xquic_path_state = pm->path_state;
++            }
+         }
+     }
+     *n_paths = count;
+diff --git a/src/mqvpn_config.c b/src/mqvpn_config.c
+index f14f760..4cf3fc2 100644
+--- a/src/mqvpn_config.c
++++ b/src/mqvpn_config.c
+@@ -164,6 +164,7 @@ void
+ mqvpn_config_free(mqvpn_config_t *cfg)
+ {
+     if (!cfg) return;
++    mqvpn_secure_zero(cfg, sizeof(*cfg));
+     free(cfg);
+ }
+ 
+@@ -183,6 +184,7 @@ int
+ mqvpn_config_set_tls_server_name(mqvpn_config_t *cfg, const char *name)
+ {
+     if (!cfg) return MQVPN_ERR_INVALID_ARG;
++    mqvpn_secure_zero(cfg->tls_server_name, sizeof(cfg->tls_server_name));
+     if (name)
+         snprintf(cfg->tls_server_name, sizeof(cfg->tls_server_name), "%s", name);
+     else
+@@ -195,10 +197,21 @@ mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key)
+ {
+     if (!cfg || !key) return MQVPN_ERR_INVALID_ARG;
+ 
++    mqvpn_secure_zero(cfg->auth_key, sizeof(cfg->auth_key));
+     snprintf(cfg->auth_key, sizeof(cfg->auth_key), "%s", key);
+     return MQVPN_OK;
+ }
+ 
++int
++mqvpn_config_set_expected_spki_sha256(mqvpn_config_t *cfg,
++                                      const uint8_t pin[32])
++{
++    if (cfg == NULL || pin == NULL) return MQVPN_ERR_INVALID_ARG;
++    memcpy(cfg->expected_spki_sha256, pin, sizeof(cfg->expected_spki_sha256));
++    cfg->has_expected_spki_sha256 = 1;
++    return MQVPN_OK;
++}
++
+ int
+ mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key)
+ {
+@@ -214,6 +227,7 @@ mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key
+ 
+     for (int i = 0; i < cfg->n_users; i++) {
+         if (strcmp(cfg->user_names[i], username) == 0) {
++            mqvpn_secure_zero(cfg->user_keys[i], sizeof(cfg->user_keys[i]));
+             snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);
+             return MQVPN_OK;
+         }
+@@ -247,6 +261,10 @@ mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
+                        sizeof(cfg->user_keys[j - 1]));
+             }
+             cfg->n_users--;
++            mqvpn_secure_zero(cfg->user_names[cfg->n_users],
++                              sizeof(cfg->user_names[cfg->n_users]));
++            mqvpn_secure_zero(cfg->user_keys[cfg->n_users],
++                              sizeof(cfg->user_keys[cfg->n_users]));
+             return MQVPN_OK;
+         }
+     }
+@@ -305,11 +323,13 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
+ 
+     v = json_find_key(json_text, "tls_cert");
+     if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
++        mqvpn_clear_tls_identity_pem(cfg);
+         mqvpn_copy_str(cfg->tls_cert, sizeof(cfg->tls_cert), tmp);
+     }
+ 
+     v = json_find_key(json_text, "tls_key");
+     if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
++        mqvpn_clear_tls_identity_pem(cfg);
+         mqvpn_copy_str(cfg->tls_key, sizeof(cfg->tls_key), tmp);
+     }
+ 
+@@ -569,11 +589,44 @@ int
+ mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert, const char *key)
+ {
+     if (!cfg || !cert || !key) return MQVPN_ERR_INVALID_ARG;
++    mqvpn_clear_tls_identity_pem(cfg);
++    mqvpn_secure_zero(cfg->tls_cert, sizeof(cfg->tls_cert));
++    mqvpn_secure_zero(cfg->tls_key, sizeof(cfg->tls_key));
+     snprintf(cfg->tls_cert, sizeof(cfg->tls_cert), "%s", cert);
+     snprintf(cfg->tls_key, sizeof(cfg->tls_key), "%s", key);
+     return MQVPN_OK;
+ }
+ 
++int
++mqvpn_config_set_tls_identity_pem(mqvpn_config_t *cfg,
++                                  const uint8_t *certificate_pem,
++                                  size_t certificate_pem_len,
++                                  const uint8_t *private_key_pem,
++                                  size_t private_key_pem_len)
++{
++    if (cfg == NULL || certificate_pem == NULL || private_key_pem == NULL ||
++        certificate_pem_len == 0 ||
++        certificate_pem_len > MQVPN_TLS_CERTIFICATE_PEM_MAX ||
++        private_key_pem_len == 0 ||
++        private_key_pem_len > MQVPN_TLS_PRIVATE_KEY_PEM_MAX) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
++    if (memchr(certificate_pem, '\0', certificate_pem_len) != NULL ||
++        memchr(private_key_pem, '\0', private_key_pem_len) != NULL) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
++
++    mqvpn_clear_tls_identity_pem(cfg);
++    mqvpn_secure_zero(cfg->tls_cert, sizeof(cfg->tls_cert));
++    mqvpn_secure_zero(cfg->tls_key, sizeof(cfg->tls_key));
++    memcpy(cfg->tls_certificate_pem, certificate_pem, certificate_pem_len);
++    memcpy(cfg->tls_private_key_pem, private_key_pem, private_key_pem_len);
++    cfg->tls_certificate_pem_len = certificate_pem_len;
++    cfg->tls_private_key_pem_len = private_key_pem_len;
++    cfg->has_tls_identity_pem = 1;
++    return MQVPN_OK;
++}
++
+ int
+ mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max)
+ {
+diff --git a/src/mqvpn_internal.h b/src/mqvpn_internal.h
+index 93e7317..f0dba4b 100644
+--- a/src/mqvpn_internal.h
++++ b/src/mqvpn_internal.h
+@@ -14,6 +14,17 @@
+ #include "reorder.h"           /* mqvpn_reorder_config_t embedded in the builder config */
+ #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t embedded in the builder config */
+ #include <stdbool.h>
++#include <stddef.h>
++
++static inline void
++mqvpn_secure_zero(void *memory, size_t len)
++{
++    volatile unsigned char *bytes = (volatile unsigned char *)memory;
++    while (len > 0) {
++        *bytes++ = 0;
++        --len;
++    }
++}
+ 
+ /* ─── Constants ─── */
+ /* MQVPN_MAX_PATHS and MQVPN_MAX_USERS are defined in libmqvpn.h */
+@@ -52,6 +63,8 @@ struct mqvpn_config_s {
+     char auth_key[256];
+     char user_names[MQVPN_MAX_USERS][64];
+     char user_keys[MQVPN_MAX_USERS][256];
++    uint8_t expected_spki_sha256[32];
++    int has_expected_spki_sha256;
+     int n_users;
+     int insecure;
+ 
+@@ -84,6 +97,11 @@ struct mqvpn_config_s {
+     char subnet6[64];
+     char tls_cert[256];
+     char tls_key[256];
++    uint8_t tls_certificate_pem[MQVPN_TLS_CERTIFICATE_PEM_MAX];
++    size_t tls_certificate_pem_len;
++    uint8_t tls_private_key_pem[MQVPN_TLS_PRIVATE_KEY_PEM_MAX];
++    size_t tls_private_key_pem_len;
++    int has_tls_identity_pem;
+     int max_clients;
+ 
+     /* draft-21 §4.6: initial Maximum Path Identifier we advertise in TP.
+@@ -106,6 +124,19 @@ struct mqvpn_config_s {
+     uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
+ };
+ 
++static inline void
++mqvpn_clear_tls_identity_pem(mqvpn_config_t *cfg)
++{
++    if (cfg == NULL) return;
++    mqvpn_secure_zero(cfg->tls_certificate_pem,
++                      sizeof(cfg->tls_certificate_pem));
++    mqvpn_secure_zero(cfg->tls_private_key_pem,
++                      sizeof(cfg->tls_private_key_pem));
++    cfg->tls_certificate_pem_len = 0;
++    cfg->tls_private_key_pem_len = 0;
++    cfg->has_tls_identity_pem = 0;
++}
++
+ /* ─── State transition validation (M0-5) ─── */
+ 
+ int mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to);
+diff --git a/src/mqvpn_server.c b/src/mqvpn_server.c
+index c80bf4f..559d197 100644
+--- a/src/mqvpn_server.c
++++ b/src/mqvpn_server.c
+@@ -4,9 +4,15 @@
+ /*
+  * mqvpn_server.c — Server lifecycle, xquic engine, MASQUE CONNECT-IP (server)
+  *
+- * Part of libmqvpn. No platform I/O — all I/O via callbacks.
++ * Part of libmqvpn. Dataplane I/O remains callback-driven. On Linux, server
++ * startup may create sealed anonymous memfds for bounded in-memory TLS identity
++ * material before the xquic engine synchronously imports it.
+  */
+ 
++#if defined(__linux__) && !defined(_GNU_SOURCE)
++#  define _GNU_SOURCE
++#endif
++
+ #include "libmqvpn.h"
+ #include "mqvpn_internal.h"
+ #include "mqvpn_scheduler.h"
+@@ -35,6 +41,11 @@
+ #  include <sys/time.h>
+ #  include <sys/resource.h>
+ #  include <arpa/inet.h>
++#  ifdef __linux__
++#    include <fcntl.h>
++#    include <sys/mman.h>
++#    include <sys/stat.h>
++#  endif
+ #  include <pthread.h>
+ #endif
+ #ifndef _WIN32
+@@ -66,6 +77,96 @@
+ #define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
+ #define MAX_CAPSULE_BUF  65536
+ 
++static void
++svr_close_tls_identity_fds(int *certificate_fd, int *private_key_fd)
++{
++#ifdef __linux__
++    if (*certificate_fd >= 0) close(*certificate_fd);
++    if (*private_key_fd >= 0) close(*private_key_fd);
++#else
++    (void)certificate_fd;
++    (void)private_key_fd;
++#endif
++    *certificate_fd = -1;
++    *private_key_fd = -1;
++}
++
++#ifdef __linux__
++static int
++svr_write_all(int fd, const uint8_t *data, size_t len)
++{
++    size_t written = 0;
++    while (written < len) {
++        ssize_t result = write(fd, data + written, len - written);
++        if (result < 0 && errno == EINTR) continue;
++        if (result <= 0) return -1;
++        written += (size_t)result;
++    }
++    return 0;
++}
++
++static int
++svr_sealed_identity_memfd(const char *name, const uint8_t *data, size_t len)
++{
++    int fd = memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING);
++    if (fd < 0) return -1;
++    if (fchmod(fd, 0600) != 0 || svr_write_all(fd, data, len) != 0 ||
++        fcntl(fd, F_ADD_SEALS,
++              F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE) != 0 ||
++        lseek(fd, 0, SEEK_SET) < 0) {
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++#endif
++
++static int
++svr_prepare_tls_identity(mqvpn_config_t *config, int *certificate_fd,
++                         int *private_key_fd)
++{
++    if (!config->has_tls_identity_pem) return 0;
++    if (config->tls_certificate_pem_len == 0 ||
++        config->tls_certificate_pem_len > MQVPN_TLS_CERTIFICATE_PEM_MAX ||
++        config->tls_private_key_pem_len == 0 ||
++        config->tls_private_key_pem_len > MQVPN_TLS_PRIVATE_KEY_PEM_MAX) {
++        return -1;
++    }
++
++#ifdef __linux__
++    *certificate_fd = svr_sealed_identity_memfd(
++        "mqvpn-tls-certificate", config->tls_certificate_pem,
++        config->tls_certificate_pem_len);
++    if (*certificate_fd < 0) return -1;
++    *private_key_fd = svr_sealed_identity_memfd(
++        "mqvpn-tls-private-key", config->tls_private_key_pem,
++        config->tls_private_key_pem_len);
++    if (*private_key_fd < 0) {
++        svr_close_tls_identity_fds(certificate_fd, private_key_fd);
++        return -1;
++    }
++
++    int certificate_path_len =
++        snprintf(config->tls_cert, sizeof(config->tls_cert),
++                 "/proc/self/fd/%d", *certificate_fd);
++    int private_key_path_len =
++        snprintf(config->tls_key, sizeof(config->tls_key),
++                 "/proc/self/fd/%d", *private_key_fd);
++    if (certificate_path_len <= 0 ||
++        (size_t)certificate_path_len >= sizeof(config->tls_cert) ||
++        private_key_path_len <= 0 ||
++        (size_t)private_key_path_len >= sizeof(config->tls_key)) {
++        svr_close_tls_identity_fds(certificate_fd, private_key_fd);
++        return -1;
++    }
++    return 0;
++#else
++    (void)certificate_fd;
++    (void)private_key_fd;
++    return -1;
++#endif
++}
++
+ /* ─── Forward declarations ─── */
+ 
+ typedef struct svr_conn_s svr_conn_t;
+@@ -92,6 +193,7 @@ struct svr_conn_s {
+ 
+     /* Auth identity (set on CONNECT-IP auth success) */
+     char username[64];
++    uint32_t session_id;
+     uint64_t connected_at_us;
+ 
+     /* Flow-aware reorder shim (§5). Created on accept when cfg.reorder.mode
+@@ -647,6 +749,7 @@ svr_conn_free(svr_conn_t *conn)
+         mqvpn_reorder_rx_free(conn->reorder_rx);
+         conn->reorder_rx = NULL;
+     }
++    mqvpn_secure_zero(conn, sizeof(*conn));
+     free(conn);
+ }
+ 
+@@ -911,6 +1014,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
+     /* Register in session table */
+     uint32_t ip_off = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
+     if (ip_off > 0 && ip_off <= MQVPN_ADDR_POOL_MAX) {
++        conn->session_id = ip_off;
+         s->sessions[ip_off] = conn;
+         s->n_sessions++;
+     }
+@@ -1587,7 +1691,13 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
+ 
+     s->bytes_rx += len;
+     s->dgram_recv++;
+-    s->cbs.tun_output(fwd_pkt, len, s->user_ctx);
++    if (s->cbs.session_tun_output != NULL) {
++        if (conn->session_id == 0) return;
++        s->cbs.session_tun_output(fwd_pkt, len, conn->session_id,
++                                  s->user_ctx);
++    } else {
++        s->cbs.tun_output(fwd_pkt, len, s->user_ctx);
++    }
+ }
+ 
+ /* Reorder RX deliver() trampoline: routes in-order packets from the reorder
+@@ -1698,8 +1808,12 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+ 
+     mqvpn_server_t *s = calloc(1, sizeof(*s));
+     if (!s) return NULL;
++    int tls_certificate_fd = -1;
++    int tls_private_key_fd = -1;
+ 
+     memcpy(&s->config, cfg, sizeof(*cfg));
++    if (svr_prepare_tls_identity(&s->config, &tls_certificate_fd,
++                                 &tls_private_key_fd) != 0) goto cleanup;
+     /* Clamp to the caller's struct_size: a platform built against an older
+      * (shorter) callbacks struct must not be over-read — appended fields
+      * stay NULL (s is calloc'd), which is the "callback unset" state. */
+@@ -1775,8 +1889,10 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+     /* ── xquic engine setup ── */
+     xqc_engine_ssl_config_t engine_ssl;
+     memset(&engine_ssl, 0, sizeof(engine_ssl));
+-    engine_ssl.private_key_file = cfg->tls_key[0] ? (char *)cfg->tls_key : NULL;
+-    engine_ssl.cert_file = cfg->tls_cert[0] ? (char *)cfg->tls_cert : NULL;
++    engine_ssl.private_key_file =
++        s->config.tls_key[0] ? (char *)s->config.tls_key : NULL;
++    engine_ssl.cert_file =
++        s->config.tls_cert[0] ? (char *)s->config.tls_cert : NULL;
+     engine_ssl.ciphers = XQC_TLS_CIPHERS;
+     engine_ssl.groups = XQC_TLS_GROUPS;
+ 
+@@ -1820,6 +1936,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+ 
+     s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
+                                   &tcbs, s);
++    svr_close_tls_identity_fds(&tls_certificate_fd, &tls_private_key_fd);
++    mqvpn_clear_tls_identity_pem(&s->config);
+     if (!s->engine) goto cleanup;
+ 
+         /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
+@@ -1907,10 +2025,12 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+     return s;
+ 
+ cleanup:
++    svr_close_tls_identity_fds(&tls_certificate_fd, &tls_private_key_fd);
+     if (s->engine) {
+         xqc_engine_destroy(s->engine);
+         s->engine = NULL;
+     }
++    mqvpn_secure_zero(s, sizeof(*s));
+     free(s);
+     return NULL;
+ }
+@@ -1950,7 +2070,8 @@ mqvpn_server_destroy(mqvpn_server_t *s)
+         }
+     }
+ 
+-    /* Step 4: free server handle */
++    /* Step 4: wipe credentials and free server handle. */
++    mqvpn_secure_zero(s, sizeof(*s));
+     free(s);
+ }
+ 
+@@ -2522,6 +2643,8 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
+ 
+     for (int i = 0; i < s->config.n_users; i++) {
+         if (strcmp(s->config.user_names[i], username) == 0) {
++            mqvpn_secure_zero(s->config.user_keys[i],
++                              sizeof(s->config.user_keys[i]));
+             snprintf(s->config.user_keys[i], sizeof(s->config.user_keys[i]), "%s", key);
+             return MQVPN_OK;
+         }
+@@ -2552,6 +2675,10 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
+                        sizeof(s->config.user_keys[j - 1]));
+             }
+             s->config.n_users--;
++            mqvpn_secure_zero(s->config.user_names[s->config.n_users],
++                              sizeof(s->config.user_names[s->config.n_users]));
++            mqvpn_secure_zero(s->config.user_keys[s->config.n_users],
++                              sizeof(s->config.user_keys[s->config.n_users]));
+             found = 1;
+             break;
+         }
+diff --git a/src/path_entry_internal.h b/src/path_entry_internal.h
+index 4185f79..7cec6e5 100644
+--- a/src/path_entry_internal.h
++++ b/src/path_entry_internal.h
+@@ -57,6 +57,8 @@ typedef struct path_entry_s {
+     int platform_attached;  /* PR0 rename of `active` */
+     struct sockaddr_storage local_addr;
+     uint32_t local_addr_len;
++    struct sockaddr_storage remote_addr;
++    uint32_t remote_addr_len;
+     int64_t platform_net_id;
+     uint32_t flags;
+     uint64_t xqc_path_id;
+diff --git a/src/spki_pin.c b/src/spki_pin.c
+new file mode 100644
+index 0000000..bb7ec91
+--- /dev/null
++++ b/src/spki_pin.c
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++#include "spki_pin.h"
++
++#include <limits.h>
++#include <stdlib.h>
++
++#include <openssl/mem.h>
++#include <openssl/sha.h>
++#include <openssl/x509.h>
++
++int
++mqvpn_spki_sha256_from_leaf_der(const uint8_t *der, size_t der_len,
++                                uint8_t out[MQVPN_SPKI_SHA256_LEN])
++{
++    if (der == NULL || out == NULL || der_len == 0
++        || der_len > MQVPN_MAX_LEAF_CERT_DER_LEN || der_len > (size_t)LONG_MAX)
++    {
++        return -1;
++    }
++
++    const uint8_t *cursor = der;
++    X509 *certificate = d2i_X509(NULL, &cursor, (long)der_len);
++    if (certificate == NULL || cursor != der + der_len) {
++        X509_free(certificate);
++        return -1;
++    }
++
++    X509_PUBKEY *public_key = X509_get_X509_PUBKEY(certificate);
++    if (public_key == NULL) {
++        X509_free(certificate);
++        return -1;
++    }
++
++    const int encoded_len = i2d_X509_PUBKEY(public_key, NULL);
++    if (encoded_len <= 0) {
++        X509_free(certificate);
++        return -1;
++    }
++
++    uint8_t *encoded = malloc((size_t)encoded_len);
++    if (encoded == NULL) {
++        X509_free(certificate);
++        return -1;
++    }
++    uint8_t *encoded_cursor = encoded;
++    const int written = i2d_X509_PUBKEY(public_key, &encoded_cursor);
++    if (written != encoded_len || encoded_cursor != encoded + encoded_len) {
++        OPENSSL_cleanse(encoded, (size_t)encoded_len);
++        free(encoded);
++        X509_free(certificate);
++        return -1;
++    }
++
++    const int result = SHA256(encoded, (size_t)encoded_len, out) != NULL ? 0 : -1;
++    OPENSSL_cleanse(encoded, (size_t)encoded_len);
++    free(encoded);
++    X509_free(certificate);
++    return result;
++}
++
++int
++mqvpn_spki_pin_matches_leaf_der(const uint8_t *der, size_t der_len,
++                                const uint8_t expected[MQVPN_SPKI_SHA256_LEN])
++{
++    uint8_t actual[MQVPN_SPKI_SHA256_LEN] = {0};
++    if (expected == NULL) return 0;
++    if (mqvpn_spki_sha256_from_leaf_der(der, der_len, actual) != 0) {
++        OPENSSL_cleanse(actual, sizeof(actual));
++        return 0;
++    }
++    const int matches = CRYPTO_memcmp(actual, expected, sizeof(actual)) == 0;
++    OPENSSL_cleanse(actual, sizeof(actual));
++    return matches ? 1 : 0;
++}
+diff --git a/src/spki_pin.h b/src/spki_pin.h
+new file mode 100644
+index 0000000..45b186b
+--- /dev/null
++++ b/src/spki_pin.h
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++#ifndef MQVPN_SPKI_PIN_H
++#define MQVPN_SPKI_PIN_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define MQVPN_SPKI_SHA256_LEN 32U
++#define MQVPN_MAX_LEAF_CERT_DER_LEN (1024U * 1024U)
++
++int mqvpn_spki_sha256_from_leaf_der(const uint8_t *der, size_t der_len,
++                                    uint8_t out[MQVPN_SPKI_SHA256_LEN]);
++
++int mqvpn_spki_pin_matches_leaf_der(const uint8_t *der, size_t der_len,
++                                    const uint8_t expected[MQVPN_SPKI_SHA256_LEN]);
++
++#endif
+diff --git a/tests/test_api.c b/tests/test_api.c
+index 6d103b6..38052d1 100644
+--- a/tests/test_api.c
++++ b/tests/test_api.c
+@@ -103,10 +103,25 @@ TEST(config_set_auth_key)
+ {
+     mqvpn_config_t *cfg = mqvpn_config_new();
+     ASSERT_EQ(mqvpn_config_set_auth_key(cfg, "testkey123"), MQVPN_OK);
++    ASSERT_EQ(mqvpn_config_set_auth_key(cfg, "x"), MQVPN_OK);
++    ASSERT_STR_EQ(cfg->auth_key, "x");
++    for (size_t i = 2; i < sizeof(cfg->auth_key); i++) {
++        ASSERT_EQ(cfg->auth_key[i], 0);
++    }
+     ASSERT_EQ(mqvpn_config_set_auth_key(NULL, "key"), MQVPN_ERR_INVALID_ARG);
+     mqvpn_config_free(cfg);
+ }
+ 
++TEST(secure_zero_complete_buffer)
++{
++    uint8_t secret[17];
++    memset(secret, 0xA5, sizeof(secret));
++    mqvpn_secure_zero(secret, sizeof(secret));
++    for (size_t i = 0; i < sizeof(secret); i++) {
++        ASSERT_EQ(secret[i], 0);
++    }
++}
++
+ TEST(config_add_remove_user)
+ {
+     mqvpn_config_t *cfg = mqvpn_config_new();
+@@ -121,9 +136,20 @@ TEST(config_add_remove_user)
+     ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "alice-key-2"), MQVPN_OK);
+     ASSERT_EQ(cfg->n_users, 2);
+     ASSERT_STR_EQ(cfg->user_keys[0], "alice-key-2");
++    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "a"), MQVPN_OK);
++    ASSERT_STR_EQ(cfg->user_keys[0], "a");
++    for (size_t i = 2; i < sizeof(cfg->user_keys[0]); i++) {
++        ASSERT_EQ(cfg->user_keys[0][i], 0);
++    }
+     ASSERT_EQ(mqvpn_config_remove_user(cfg, "bob"), MQVPN_OK);
+     ASSERT_EQ(cfg->n_users, 1);
+     ASSERT_STR_EQ(cfg->user_names[0], "alice");
++    for (size_t i = 0; i < sizeof(cfg->user_names[1]); i++) {
++        ASSERT_EQ(cfg->user_names[1][i], 0);
++    }
++    for (size_t i = 0; i < sizeof(cfg->user_keys[1]); i++) {
++        ASSERT_EQ(cfg->user_keys[1][i], 0);
++    }
+     ASSERT_EQ(mqvpn_config_remove_user(cfg, "missing"), MQVPN_ERR_INVALID_ARG);
+     ASSERT_EQ(mqvpn_config_add_user(NULL, "alice", "k"), MQVPN_ERR_INVALID_ARG);
+     ASSERT_EQ(mqvpn_config_add_user(cfg, "", "k"), MQVPN_ERR_INVALID_ARG);
+@@ -507,6 +533,113 @@ TEST(config_set_tls_cert)
+     mqvpn_config_free(cfg);
+ }
+ 
++TEST(config_set_tls_identity_pem)
++{
++    static const uint8_t certificate[] =
++        "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n";
++    static const uint8_t private_key[] =
++        "-----BEGIN PRIVATE KEY-----\nAQ==\n-----END PRIVATE KEY-----\n";
++    static const uint8_t replacement_certificate[] = "certificate";
++    static const uint8_t replacement_key[] = "key";
++    static const uint8_t embedded_nul[] = {'a', 0, 'b'};
++    mqvpn_config_t *cfg = mqvpn_config_new();
++    ASSERT_NOT_NULL(cfg);
++
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, certificate, sizeof(certificate) - 1U, private_key,
++                  sizeof(private_key) - 1U),
++              MQVPN_OK);
++    ASSERT_EQ(cfg->has_tls_identity_pem, 1);
++    ASSERT_EQ(cfg->tls_certificate_pem_len, sizeof(certificate) - 1U);
++    ASSERT_EQ(cfg->tls_private_key_pem_len, sizeof(private_key) - 1U);
++    ASSERT_EQ(memcmp(cfg->tls_certificate_pem, certificate,
++                     sizeof(certificate) - 1U),
++              0);
++    ASSERT_EQ(memcmp(cfg->tls_private_key_pem, private_key,
++                     sizeof(private_key) - 1U),
++              0);
++    ASSERT_EQ(cfg->tls_cert[0], 0);
++    ASSERT_EQ(cfg->tls_key[0], 0);
++
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, replacement_certificate,
++                  sizeof(replacement_certificate) - 1U, replacement_key,
++                  sizeof(replacement_key) - 1U),
++              MQVPN_OK);
++    for (size_t i = sizeof(replacement_key) - 1U;
++         i < sizeof(cfg->tls_private_key_pem); i++) {
++        ASSERT_EQ(cfg->tls_private_key_pem[i], 0);
++    }
++
++    size_t retained_len = cfg->tls_private_key_pem_len;
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, embedded_nul, sizeof(embedded_nul), replacement_key,
++                  sizeof(replacement_key) - 1U),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(cfg->tls_private_key_pem_len, retained_len);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, replacement_certificate,
++                  MQVPN_TLS_CERTIFICATE_PEM_MAX + 1U, replacement_key,
++                  sizeof(replacement_key) - 1U),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  NULL, replacement_certificate,
++                  sizeof(replacement_certificate) - 1U, replacement_key,
++                  sizeof(replacement_key) - 1U),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, NULL, 1U, replacement_key,
++                  sizeof(replacement_key) - 1U),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, replacement_certificate, 0U, replacement_key,
++                  sizeof(replacement_key) - 1U),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, replacement_certificate,
++                  sizeof(replacement_certificate) - 1U, replacement_key, 0U),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, replacement_certificate,
++                  sizeof(replacement_certificate) - 1U, replacement_key,
++                  MQVPN_TLS_PRIVATE_KEY_PEM_MAX + 1U),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, replacement_certificate,
++                  sizeof(replacement_certificate) - 1U, embedded_nul,
++                  sizeof(embedded_nul)),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(memcmp(cfg->tls_private_key_pem, replacement_key,
++                     sizeof(replacement_key) - 1U),
++              0);
++
++    ASSERT_EQ(mqvpn_config_set_tls_cert(cfg, "/path/cert.pem",
++                                        "/path/key.pem"),
++              MQVPN_OK);
++    ASSERT_EQ(cfg->has_tls_identity_pem, 0);
++    ASSERT_EQ(cfg->tls_certificate_pem_len, 0);
++    ASSERT_EQ(cfg->tls_private_key_pem_len, 0);
++    for (size_t i = 0; i < sizeof(cfg->tls_private_key_pem); i++) {
++        ASSERT_EQ(cfg->tls_private_key_pem[i], 0);
++    }
++
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, replacement_certificate,
++                  sizeof(replacement_certificate) - 1U, replacement_key,
++                  sizeof(replacement_key) - 1U),
++              MQVPN_OK);
++    ASSERT_EQ(mqvpn_config_load_json(
++                  cfg,
++                  "{\"tls_cert\":\"/json/cert.pem\","
++                  "\"tls_key\":\"/json/key.pem\"}"),
++              MQVPN_OK);
++    ASSERT_EQ(cfg->has_tls_identity_pem, 0);
++    ASSERT_STR_EQ(cfg->tls_cert, "/json/cert.pem");
++    ASSERT_STR_EQ(cfg->tls_key, "/json/key.pem");
++
++    mqvpn_config_free(cfg);
++}
++
+ TEST(config_set_max_clients)
+ {
+     mqvpn_config_t *cfg = mqvpn_config_new();
+@@ -2752,6 +2885,7 @@ main(void)
+     run_config_free_null();
+     run_config_set_server();
+     run_config_set_auth_key();
++    run_secure_zero_complete_buffer();
+     run_config_add_remove_user();
+     run_config_add_user_max_capacity();
+     run_config_load_json();
+@@ -2774,6 +2908,7 @@ main(void)
+     run_config_set_listen();
+     run_config_set_subnet();
+     run_config_set_tls_cert();
++    run_config_set_tls_identity_pem();
+     run_config_set_max_clients();
+     run_config_set_multipath();
+     run_config_set_hybrid();
+diff --git a/tests/test_server.c b/tests/test_server.c
+index 51918a1..c025f6f 100644
+--- a/tests/test_server.c
++++ b/tests/test_server.c
+@@ -91,6 +91,10 @@ static int g_tun_output_called = 0;
+ static int g_tunnel_config_ready_called = 0;
+ static mqvpn_tunnel_info_t g_last_tunnel_info;
+ static int g_log_called = 0;
++static int g_session_tun_output_called = 0;
++static uint32_t g_session_tun_output_id = 0;
++static uint8_t g_session_tun_output_packet[64];
++static size_t g_session_tun_output_len = 0;
+ 
+ static void
+ mock_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
+@@ -101,6 +105,19 @@ mock_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
+     g_tun_output_called++;
+ }
+ 
++static void
++mock_session_tun_output(const uint8_t *pkt, size_t len, uint32_t session_id,
++                        void *user_ctx)
++{
++    (void)user_ctx;
++    g_session_tun_output_called++;
++    g_session_tun_output_id = session_id;
++    g_session_tun_output_len = len;
++    if (len <= sizeof(g_session_tun_output_packet)) {
++        memcpy(g_session_tun_output_packet, pkt, len);
++    }
++}
++
+ static void
+ mock_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
+ {
+@@ -125,18 +142,80 @@ reset_mocks(void)
+     g_tunnel_config_ready_called = 0;
+     memset(&g_last_tunnel_info, 0, sizeof(g_last_tunnel_info));
+     g_log_called = 0;
++    g_session_tun_output_called = 0;
++    g_session_tun_output_id = 0;
++    g_session_tun_output_len = 0;
++    memset(g_session_tun_output_packet, 0,
++           sizeof(g_session_tun_output_packet));
+ }
+ 
+ /* Helper: create a valid server config */
+ 
++static uint8_t *
++read_fixture(const char *path, size_t maximum, size_t *out_len)
++{
++    FILE *stream = fopen(path, "rb");
++    if (stream == NULL || fseek(stream, 0, SEEK_END) != 0) {
++        if (stream != NULL) fclose(stream);
++        return NULL;
++    }
++    long file_len = ftell(stream);
++    if (file_len <= 0 || (size_t)file_len > maximum ||
++        fseek(stream, 0, SEEK_SET) != 0) {
++        fclose(stream);
++        return NULL;
++    }
++
++    uint8_t *contents = malloc((size_t)file_len);
++    if (contents == NULL ||
++        fread(contents, 1U, (size_t)file_len, stream) != (size_t)file_len ||
++        fgetc(stream) != EOF || ferror(stream)) {
++        if (contents != NULL) {
++            mqvpn_secure_zero(contents, (size_t)file_len);
++            free(contents);
++        }
++        fclose(stream);
++        return NULL;
++    }
++    fclose(stream);
++    *out_len = (size_t)file_len;
++    return contents;
++}
++
+ static mqvpn_config_t *
+ make_server_config(void)
+ {
+     mqvpn_config_t *cfg = mqvpn_config_new();
+-    if (!cfg) return NULL;
++    size_t certificate_len = 0;
++    size_t private_key_len = 0;
++    uint8_t *certificate =
++        read_fixture(TEST_CERT_FILE, MQVPN_TLS_CERTIFICATE_PEM_MAX,
++                     &certificate_len);
++    uint8_t *private_key =
++        read_fixture(TEST_KEY_FILE, MQVPN_TLS_PRIVATE_KEY_PEM_MAX,
++                     &private_key_len);
++    if (cfg == NULL || certificate == NULL || private_key == NULL) {
++        mqvpn_config_free(cfg);
++        free(certificate);
++        if (private_key != NULL) {
++            mqvpn_secure_zero(private_key, private_key_len);
++            free(private_key);
++        }
++        return NULL;
++    }
++
+     mqvpn_config_set_listen(cfg, "0.0.0.0", 443);
+     mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
+-    mqvpn_config_set_tls_cert(cfg, TEST_CERT_FILE, TEST_KEY_FILE);
++    int identity_result = mqvpn_config_set_tls_identity_pem(
++        cfg, certificate, certificate_len, private_key, private_key_len);
++    mqvpn_secure_zero(certificate, certificate_len);
++    mqvpn_secure_zero(private_key, private_key_len);
++    free(certificate);
++    free(private_key);
++    if (identity_result != MQVPN_OK) {
++        mqvpn_config_free(cfg);
++        return NULL;
++    }
+     mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+     return cfg;
+ }
+@@ -210,6 +289,28 @@ TEST(server_new_destroy)
+     mqvpn_server_destroy(s);
+ }
+ 
++TEST(server_new_rejects_malformed_tls_identity)
++{
++    static const uint8_t malformed_certificate[] = "not a certificate";
++    static const uint8_t malformed_private_key[] = "not a private key";
++    mqvpn_config_t *cfg = mqvpn_config_new();
++    ASSERT_NOT_NULL(cfg);
++    ASSERT_EQ(mqvpn_config_set_listen(cfg, "0.0.0.0", 443), MQVPN_OK);
++    ASSERT_EQ(mqvpn_config_set_subnet(cfg, "10.0.0.0/24"), MQVPN_OK);
++    ASSERT_EQ(mqvpn_config_set_tls_identity_pem(
++                  cfg, malformed_certificate,
++                  sizeof(malformed_certificate) - 1U, malformed_private_key,
++                  sizeof(malformed_private_key) - 1U),
++              MQVPN_OK);
++
++    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
++    cbs.tun_output = mock_tun_output;
++    cbs.tunnel_config_ready = mock_tunnel_config_ready;
++    mqvpn_server_t *server = mqvpn_server_new(cfg, &cbs, NULL);
++    ASSERT_NULL(server);
++    mqvpn_config_free(cfg);
++}
++
+ TEST(server_destroy_null)
+ {
+     /* Must not crash */
+@@ -732,6 +833,7 @@ TEST(server_session_quic_loopback)
+     svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+     svr_cbs.on_client_connected = mock_on_client_connected;
+     svr_cbs.on_client_disconnected = mock_on_client_disconnected;
++    svr_cbs.session_tun_output = mock_session_tun_output;
+ 
+     mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+     ASSERT_NOT_NULL(svr);
+@@ -810,7 +912,38 @@ TEST(server_session_quic_loopback)
+     mqvpn_client_set_tun_active(cli, 1, -1);
+     ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_ESTABLISHED);
+ 
+-    /* Phase 2: set_tun_active sends packet output through tun_output */
++    /* Phase 2: client-originated inner packets retain their exact session ID. */
++    uint8_t uplink_pkt[40];
++    memset(uplink_pkt, 0, sizeof(uplink_pkt));
++    uplink_pkt[0] = 0x45;
++    uplink_pkt[3] = (uint8_t)sizeof(uplink_pkt);
++    uplink_pkt[8] = 64;
++    uplink_pkt[9] = 17;
++    memcpy(uplink_pkt + 12, g_cli_tunnel_info.assigned_ip, 4);
++    uplink_pkt[16] = 1;
++    uplink_pkt[17] = 1;
++    uplink_pkt[18] = 1;
++    uplink_pkt[19] = 1;
++    const int legacy_tun_baseline = g_tun_output_called;
++    ASSERT_EQ(mqvpn_client_on_tun_packet(cli, uplink_pkt, sizeof(uplink_pkt)),
++              MQVPN_OK);
++    for (int i = 0; i < 5000; i++) {
++        drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
++        if (g_session_tun_output_called > 0) break;
++        struct pollfd pfds[2] = {
++            {.fd = svr_fd, .events = POLLIN},
++            {.fd = cli_fd, .events = POLLIN},
++        };
++        int w = poll(pfds, 2, 5);
++        i += (w == 0) ? 5 : 1;
++    }
++    ASSERT_EQ(g_session_tun_output_called, 1);
++    ASSERT_EQ(g_session_tun_output_id, g_last_session_id);
++    ASSERT_EQ(g_session_tun_output_len, sizeof(uplink_pkt));
++    ASSERT_EQ(g_session_tun_output_packet[8], 63);
++    ASSERT_EQ(g_tun_output_called, legacy_tun_baseline);
++
++    /* Phase 2b: server-to-client delivery still uses the MASQUE session. */
+     /* Build IPv4 packet destined for client's assigned IP */
+     uint8_t tun_pkt[40];
+     memset(tun_pkt, 0, sizeof(tun_pkt));
+@@ -927,6 +1060,7 @@ main(void)
+     run_server_new_missing_tun_output();
+     run_server_new_missing_tunnel_config_ready();
+     run_server_new_destroy();
++    run_server_new_rejects_malformed_tls_identity();
+     run_server_destroy_null();
+     run_server_egress_fd_budget();
+ 
+diff --git a/tests/test_spki_pin.c b/tests/test_spki_pin.c
+new file mode 100644
+index 0000000..77b9a8d
+--- /dev/null
++++ b/tests/test_spki_pin.c
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++#ifdef NDEBUG
++#  undef NDEBUG
++#endif
++
++#include "spki_pin.h"
++
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <openssl/pem.h>
++#include <openssl/x509.h>
++
++static uint8_t *
++load_test_certificate(size_t *out_len)
++{
++    FILE *stream = fopen(TEST_CERT_FILE, "rb");
++    assert(stream != NULL);
++    X509 *certificate = PEM_read_X509(stream, NULL, NULL, NULL);
++    assert(fclose(stream) == 0);
++    assert(certificate != NULL);
++
++    const int der_len = i2d_X509(certificate, NULL);
++    assert(der_len > 0);
++    uint8_t *der = malloc((size_t)der_len);
++    assert(der != NULL);
++    uint8_t *cursor = der;
++    assert(i2d_X509(certificate, &cursor) == der_len);
++    assert(cursor == der + der_len);
++    X509_free(certificate);
++    *out_len = (size_t)der_len;
++    return der;
++}
++
++static void
++test_known_fixture_pin(void)
++{
++    static const uint8_t expected[MQVPN_SPKI_SHA256_LEN] = {
++        0xa0, 0xfc, 0x6a, 0x29, 0x4f, 0x07, 0x24, 0x82,
++        0x11, 0xdf, 0xb2, 0x68, 0xb4, 0x3a, 0x00, 0x7d,
++        0x9f, 0x8b, 0x2d, 0xa2, 0x4d, 0xf6, 0xee, 0x83,
++        0x69, 0xe9, 0x21, 0xc4, 0xdd, 0x58, 0x89, 0xc8,
++    };
++    size_t der_len = 0;
++    uint8_t *der = load_test_certificate(&der_len);
++    uint8_t actual[MQVPN_SPKI_SHA256_LEN];
++    assert(mqvpn_spki_sha256_from_leaf_der(der, der_len, actual) == 0);
++    assert(memcmp(actual, expected, sizeof(actual)) == 0);
++    assert(mqvpn_spki_pin_matches_leaf_der(der, der_len, expected) == 1);
++
++    actual[0] ^= 1;
++    assert(mqvpn_spki_pin_matches_leaf_der(der, der_len, actual) == 0);
++    free(der);
++}
++
++static void
++test_malformed_and_oversize_fail_closed(void)
++{
++    const uint8_t malformed[] = {0x30, 0x03, 0x01, 0x01, 0xff};
++    uint8_t output[MQVPN_SPKI_SHA256_LEN];
++    memset(output, 0xa5, sizeof(output));
++    assert(mqvpn_spki_sha256_from_leaf_der(malformed, sizeof(malformed), output) == -1);
++    assert(mqvpn_spki_pin_matches_leaf_der(malformed, sizeof(malformed), output) == 0);
++    assert(mqvpn_spki_sha256_from_leaf_der(NULL, 1, output) == -1);
++    assert(mqvpn_spki_sha256_from_leaf_der(malformed,
++                                           MQVPN_MAX_LEAF_CERT_DER_LEN + 1U,
++                                           output) == -1);
++}
++
++int
++main(void)
++{
++    test_known_fixture_pin();
++    test_malformed_and_oversize_fail_closed();
++    puts("SPKI pin tests passed");
++    return 0;
++}

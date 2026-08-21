@@ -1,0 +1,49 @@
+[package]
+name = "volparossa-agent"
+description = "Unprivileged VOLPAROSSA control-plane and orchestration service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+libc.workspace = true
+libp2p.workspace = true
+nix.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+volparossa-config = { path = "../volparossa-config", version = "=0.1.0" }
+volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
+volparossa-discovery = { path = "../volparossa-discovery", version = "=0.1.0" }
+volparossa-exit = { path = "../volparossa-exit", version = "=0.1.0" }
+volparossa-identity = { path = "../volparossa-identity", version = "=0.1.0" }
+volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
+volparossa-local-control = { path = "../volparossa-local-control", version = "=0.1.0" }
+volparossa-metrics = { path = "../volparossa-metrics", version = "=0.1.0" }
+volparossa-peerstore = { path = "../volparossa-peerstore", version = "=0.1.0" }
+volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
+volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }
+volparossa-relay = { path = "../volparossa-relay", version = "=0.1.0" }
+volparossa-reservation = { path = "../volparossa-reservation", version = "=0.1.0" }
+volparossa-routing = { path = "../volparossa-routing", version = "=0.1.0" }
+volparossa-selection = { path = "../volparossa-selection", version = "=0.1.0" }
+volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
+
+[dev-dependencies]
+tempfile.workspace = true
+volparossa-test-support = { path = "../volparossa-test-support", version = "=0.1.0" }
+
+[lints]
+workspace = true

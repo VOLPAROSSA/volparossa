@@ -1,0 +1,76 @@
+diff --git a/src/parsing/combinator/rfc/rfc2822.rs b/src/parsing/combinator/rfc/rfc2822.rs
+--- a/src/parsing/combinator/rfc/rfc2822.rs
++++ b/src/parsing/combinator/rfc/rfc2822.rs
+@@ -5,6 +5,8 @@
+ use crate::parsing::combinator::rfc::rfc2234::wsp;
+ use crate::parsing::combinator::{ascii_char, one_or_more, zero_or_more};
+ use crate::parsing::ParsedItem;
+ 
++const DEPTH_LIMIT: u8 = 32;
++
+ /// Consume the `fws` rule.
+ // The full rule is equivalent to /\r\n[ \t]+|[ \t]+(?:\r\n[ \t]+)*/
+ pub(crate) fn fws(mut input: &[u8]) -> Option<ParsedItem<'_, ()>> {
+@@ -23,20 +25,29 @@ pub(crate) fn fws(mut input: &[u8]) -> Option<ParsedItem<'_, ()>> {
+ /// Consume the `cfws` rule.
+ // The full rule is equivalent to any combination of `fws` and `comment` so long as it is not empty.
+ pub(crate) fn cfws(input: &[u8]) -> Option<ParsedItem<'_, ()>> {
+-    one_or_more(|input| fws(input).or_else(|| comment(input)))(input)
++    one_or_more(|input| fws(input).or_else(|| comment(input, 1)))(input)
+ }
+ 
+ /// Consume the `comment` rule.
+-fn comment(mut input: &[u8]) -> Option<ParsedItem<'_, ()>> {
++fn comment(mut input: &[u8], depth: u8) -> Option<ParsedItem<'_, ()>> {
++    // Avoid stack exhaustion by rejecting pathologically nested comments. RFC
++    // 2822 comments are obsolete syntax and legitimate inputs do not need
++    // unbounded nesting.
++    if depth == DEPTH_LIMIT {
++        return None;
++    }
++
+     input = ascii_char::<b'('>(input)?.into_inner();
+     input = zero_or_more(fws)(input).into_inner();
+-    while let Some(rest) = ccontent(input) {
++    while let Some(rest) = ccontent(input, depth + 1) {
+         input = rest.into_inner();
+         input = zero_or_more(fws)(input).into_inner();
+     }
+@@ -45,10 +56,10 @@ fn comment(mut input: &[u8]) -> Option<ParsedItem<'_, ()>> {
+ }
+ 
+ /// Consume the `ccontent` rule.
+-fn ccontent(input: &[u8]) -> Option<ParsedItem<'_, ()>> {
++fn ccontent(input: &[u8], depth: u8) -> Option<ParsedItem<'_, ()>> {
+     ctext(input)
+         .or_else(|| quoted_pair(input))
+-        .or_else(|| comment(input))
++        .or_else(|| comment(input, depth))
+ }
+ 
+ /// Consume the `ctext` rule.
+@@ -106,3 +117,25 @@ fn text<'a>(input: &'a [u8]) -> ParsedItem<'a, ()> {
+ 
+     new_text(input).unwrap_or_else(|| obs_text(input))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn nested_comment(depth: usize) -> Vec<u8> {
++        let mut input = vec![b'('; depth];
++        input.push(b'x');
++        input.extend(core::iter::repeat_n(b')', depth));
++        input
++    }
++
++    #[test]
++    fn rfc2822_comment_recursion_is_bounded() {
++        let accepted = nested_comment(usize::from(DEPTH_LIMIT - 1));
++        assert!(cfws(&accepted).unwrap().into_inner().is_empty());
++
++        let rejected = nested_comment(usize::from(DEPTH_LIMIT));
++        assert!(cfws(&rejected).is_none());
++    }
++}

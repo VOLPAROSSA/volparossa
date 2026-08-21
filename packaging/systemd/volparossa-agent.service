@@ -1,0 +1,52 @@
+[Unit]
+Description=VOLPAROSSA unprivileged control-plane agent
+Documentation=file:/usr/share/doc/volparossa/OPERATIONS.md
+After=network-online.target volparossa-helper.service volparossa-mpquic.service
+Wants=network-online.target volparossa-helper.service volparossa-mpquic.service
+ConditionPathExists=/etc/volparossa/config.yaml
+
+[Service]
+Type=simple
+User=volparossa
+Group=volparossa
+SupplementaryGroups=volparossa-users
+UMask=0077
+LoadCredentialEncrypted=identity-passphrase:/etc/credstore.encrypted/identity-passphrase
+Environment=VOLPAROSSA_CONFIG=/etc/volparossa/config.yaml
+Environment=VOLPAROSSA_STATE_DIRECTORY=/var/lib/volparossa
+Environment=VOLPAROSSA_CONTROL_SOCKET=/run/volparossa/control/agent.sock
+Environment=VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock
+Environment=VOLPAROSSA_MPQUIC_SOCKET=/run/volparossa/native/mpquic.sock
+ExecStart=/usr/bin/volparossa-agent
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/volparossa /run/volparossa/control /run/volparossa/native
+ReadOnlyPaths=/etc/volparossa
+
+[Install]
+WantedBy=multi-user.target

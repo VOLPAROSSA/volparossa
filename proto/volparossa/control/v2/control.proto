@@ -1,0 +1,289 @@
+syntax = "proto3";
+
+package volparossa.control.v2;
+
+// HISTORICAL/RETIRED SCHEMA ONLY. Its tags are frozen for wire archaeology.
+// Production builds and protocol negotiation MUST NOT register or offer this
+// package. The hard-incompatible v3 implementation rejects v1, v2, and future
+// envelope versions without fallback.
+
+// This schema deliberately contains no maps. Set-like repeated fields MUST be
+// strictly sorted and unique. Receivers MUST reject any input whose decoded
+// value does not re-encode byte-for-byte to the received prost encoding.
+
+enum ControlMessageType {
+  CONTROL_MESSAGE_TYPE_UNSPECIFIED = 0;
+  CONTROL_MESSAGE_TYPE_NODE_ADVERTISEMENT = 1;
+  CONTROL_MESSAGE_TYPE_EXIT_RESERVATION = 2;
+  CONTROL_MESSAGE_TYPE_RELAY_AUTHORIZATION = 3;
+  CONTROL_MESSAGE_TYPE_RELAY_RESERVATION = 4;
+  CONTROL_MESSAGE_TYPE_OPEN_TCP = 5;
+  CONTROL_MESSAGE_TYPE_UDP_FLOW_AUTHORIZATION = 6;
+  CONTROL_MESSAGE_TYPE_EXIT_RESERVATION_REQUEST = 7;
+  CONTROL_MESSAGE_TYPE_RELAY_RESERVATION_REQUEST = 8;
+  CONTROL_MESSAGE_TYPE_EXIT_RESERVATION_CONFIRMATION = 9;
+}
+
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_TCP_MPTCP = 1;
+  TRANSPORT_UDP_SINGLE_PATH = 2;
+  TRANSPORT_MULTIPATH_QUIC = 3;
+}
+
+message SignedEnvelope {
+  uint32 protocol_version = 1;
+  bytes sender_id = 2;
+  bytes sender_public_key = 3;
+  uint64 timestamp_ms = 4;
+  uint64 expires_at_ms = 5;
+  bytes nonce = 6;
+  ControlMessageType message_type = 7;
+  bytes payload = 8;
+  bytes payload_hash = 9;
+  bytes signature = 10;
+}
+
+// Ed25519 signs the ASCII domain "volparossa/control-envelope/v2" followed by
+// one NUL byte and the canonical encoding of this message. The payload itself
+// is bound through payload_hash, which is SHA-256 over its canonical bytes.
+message EnvelopeSignatureInput {
+  uint32 protocol_version = 1;
+  bytes sender_id = 2;
+  bytes sender_public_key = 3;
+  uint64 timestamp_ms = 4;
+  uint64 expires_at_ms = 5;
+  bytes nonce = 6;
+  ControlMessageType message_type = 7;
+  bytes payload_hash = 8;
+}
+
+message AdvertisementRoles {
+  bool client = 1;
+  bool relay = 2;
+  bool exit = 3;
+}
+
+message AdvertisementCapabilities {
+  bool tcp_mptcp = 1;
+  bool udp_single_path = 2;
+  bool multipath_quic = 3;
+  bool ipv4 = 4;
+  bool ipv6 = 5;
+  bool udp_hole_punching = 6;
+}
+
+message WireguardAdvertisement {
+  bytes public_key = 1;
+  uint32 listen_port = 2;
+}
+
+// Route-specific endpoint allocated by the local helper/orchestrator. This is
+// never inferred from the coarse node advertisement.
+message WireguardEndpoint {
+  bytes public_key = 1;
+  bytes underlay_ip = 2;
+  uint32 listen_port = 3;
+}
+
+message AdvertisementCapacity {
+  uint64 operator_relay_limit_up_mbps = 1;
+  uint64 operator_relay_limit_down_mbps = 2;
+  uint64 operator_exit_limit_up_mbps = 3;
+  uint64 operator_exit_limit_down_mbps = 4;
+  uint64 currently_reserved_up_mbps = 5;
+  uint64 currently_reserved_down_mbps = 6;
+  uint64 estimated_free_up_mbps = 7;
+  uint64 estimated_free_down_mbps = 8;
+  uint32 active_relay_sessions = 9;
+  uint32 active_exit_sessions = 10;
+  uint32 free_relay_slots = 11;
+  uint32 free_exit_slots = 12;
+  uint32 sample_window_seconds = 13;
+}
+
+message AdvertisementNetwork {
+  string region = 1;
+  string country_code = 2;
+  uint32 asn = 3;
+  string ipv4_prefix_hint = 4;
+  string ipv6_prefix_hint = 5;
+}
+
+message AdvertisementQuality {
+  uint64 local_uptime_seconds = 1;
+  uint32 historical_uptime_ppm = 2;
+  uint32 historical_delivery_ratio_p25_ppm = 3;
+}
+
+message AdvertisementPolicy {
+  uint64 whitelist_version = 1;
+  bytes whitelist_hash = 2;
+}
+
+message NodeAdvertisement {
+  bytes node_id = 1;
+  bytes peer_id = 2;
+  uint64 sequence_number = 3;
+  AdvertisementRoles roles = 4;
+  AdvertisementCapabilities capabilities = 5;
+  repeated string control_addresses = 6;
+  WireguardAdvertisement wireguard = 7;
+  AdvertisementCapacity capacity = 8;
+  AdvertisementNetwork network = 9;
+  AdvertisementQuality quality = 10;
+  AdvertisementPolicy policy = 11;
+  uint64 measured_at_ms = 12;
+  uint64 expires_at_ms = 13;
+}
+
+message RequestedRelayPath {
+  reserved 5;
+  reserved "overlay_prefixes";
+
+  uint32 path_id = 1;
+  bytes relay_node_id = 2;
+  bytes relay_peer_id = 3;
+  bytes client_wireguard_public_key = 4;
+}
+
+message ExitReservationRequest {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes exit_node_id = 3;
+  bytes client_ephemeral_id = 4;
+  bytes client_peer_id = 5;
+  repeated Transport allowed_transports = 6;
+  uint64 reserved_up_mbps = 7;
+  uint64 reserved_down_mbps = 8;
+  uint32 maximum_paths = 9;
+  repeated RequestedRelayPath relay_paths = 10;
+  bytes policy_hash = 11;
+  uint64 created_at_ms = 12;
+  uint64 expires_at_ms = 13;
+  bytes nonce = 14;
+}
+
+message RelayReservationRequest {
+  bytes client_ephemeral_id = 1;
+  bytes client_peer_id = 2;
+  // Canonical SignedEnvelope carrying the exit's RelayAuthorization.
+  bytes exit_authorization = 3;
+  uint64 created_at_ms = 4;
+  uint64 expires_at_ms = 5;
+  bytes nonce = 6;
+  // Private topology rule: this client tuple is sent only to the selected
+  // relay. It MUST NOT be copied into a relay grant or exit confirmation.
+  WireguardEndpoint client_wireguard_endpoint = 7;
+}
+
+message ExitReservation {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes exit_node_id = 3;
+  bytes client_ephemeral_id = 4;
+  bytes client_peer_id = 5;
+  repeated Transport allowed_transports = 6;
+  uint64 reserved_up_mbps = 7;
+  uint64 reserved_down_mbps = 8;
+  uint32 maximum_paths = 9;
+  bytes policy_hash = 10;
+  uint64 created_at_ms = 11;
+  uint64 expires_at_ms = 12;
+  bytes nonce = 13;
+}
+
+message RelayAuthorization {
+  reserved 13;
+  reserved "overlay_prefixes";
+
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  uint32 path_id = 3;
+  bytes relay_node_id = 4;
+  bytes exit_node_id = 5;
+  bytes client_ephemeral_id = 6;
+  bytes client_peer_id = 7;
+  repeated Transport allowed_transports = 8;
+  uint64 maximum_up_mbps = 9;
+  uint64 maximum_down_mbps = 10;
+  bytes client_wireguard_public_key = 11;
+  WireguardEndpoint exit_wireguard_endpoint = 12;
+  bytes policy_hash = 14;
+  uint64 created_at_ms = 15;
+  uint64 expires_at_ms = 16;
+  bytes nonce = 17;
+  bytes relay_peer_id = 18;
+}
+
+message RelayReservation {
+  reserved 15;
+  reserved "overlay_prefixes";
+
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  uint32 path_id = 3;
+  bytes relay_node_id = 4;
+  bytes exit_node_id = 5;
+  bytes client_ephemeral_id = 6;
+  bytes client_peer_id = 7;
+  repeated Transport allowed_transports = 8;
+  uint64 maximum_up_mbps = 9;
+  uint64 maximum_down_mbps = 10;
+  bytes client_wireguard_public_key = 11;
+  WireguardEndpoint relay_client_wireguard_endpoint = 12;
+  WireguardEndpoint relay_exit_wireguard_endpoint = 13;
+  WireguardEndpoint exit_wireguard_endpoint = 14;
+  bytes policy_hash = 16;
+  uint64 created_at_ms = 17;
+  uint64 expires_at_ms = 18;
+  bytes nonce = 19;
+  // Canonical SignedEnvelope carrying an exit-signed RelayAuthorization.
+  bytes exit_authorization = 20;
+  bytes relay_peer_id = 21;
+}
+
+message ExitReservationConfirmation {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  uint32 path_id = 3;
+  bytes relay_node_id = 4;
+  bytes exit_node_id = 5;
+  bytes client_ephemeral_id = 6;
+  bytes client_peer_id = 7;
+  bytes policy_hash = 8;
+  // Canonical SignedEnvelope carrying the relay's RelayReservation.
+  bytes relay_reservation = 9;
+  uint64 created_at_ms = 10;
+  uint64 expires_at_ms = 11;
+  bytes nonce = 12;
+}
+
+message OpenTcp {
+  bytes route_context_id = 1;
+  bytes flow_id = 2;
+  bytes client_ephemeral_id = 3;
+  // Lowercase canonical ASCII (A-label) hostname, never an IP literal.
+  string hostname = 4;
+  uint32 port = 5;
+  bytes policy_hash = 6;
+  uint64 timestamp_ms = 7;
+  uint64 expires_at_ms = 8;
+  bytes nonce = 9;
+}
+
+message UdpFlowAuthorization {
+  bytes route_context_id = 1;
+  bytes flow_id = 2;
+  bytes client_ephemeral_id = 3;
+  // Exactly one of hostname and destination_ip MUST be populated.
+  string hostname = 4;
+  // Four or sixteen network-order bytes; policy must contain this exact IP.
+  bytes destination_ip = 5;
+  uint32 port = 6;
+  bytes policy_hash = 7;
+  uint32 idle_timeout_ms = 8;
+  uint64 timestamp_ms = 9;
+  uint64 expires_at_ms = 10;
+  bytes nonce = 11;
+}

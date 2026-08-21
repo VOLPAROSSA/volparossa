@@ -1,0 +1,18 @@
+[package]
+name = "volparossa-linux-uapi"
+description = "Minimal audited Linux UAPI calls unavailable through safe Rust wrappers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+libc.workspace = true
+nix = { workspace = true, features = ["uio"] }
+socket2.workspace = true
+
+# Deliberately does not inherit the workspace-wide unsafe-code prohibition:
+# this crate is the single audited FFI boundary for Linux getsockopt.

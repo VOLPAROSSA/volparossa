@@ -1,0 +1,100 @@
+[package]
+name = "volparossa-fuzz"
+version = "0.0.0"
+publish = false
+license = "GPL-3.0-only"
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+ed25519-dalek = "2.1.1"
+libfuzzer-sys = "0.4"
+prost = "0.14.1"
+volparossa-discovery = { path = "../crates/volparossa-discovery", version = "0.1.0" }
+volparossa-inspection = { path = "../crates/volparossa-inspection", version = "0.1.0" }
+volparossa-policy = { path = "../crates/volparossa-policy", version = "0.1.0" }
+volparossa-protocol = { path = "../crates/volparossa-protocol", version = "0.1.0" }
+volparossa-quic = { path = "../crates/volparossa-quic", version = "0.1.0" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "node_advertisement"
+path = "fuzz_targets/node_advertisement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_manifest"
+path = "fuzz_targets/policy_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_plane"
+path = "fuzz_targets/control_plane.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "advertisement_v3"
+path = "fuzz_targets/advertisement_v3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "forwarding_v3"
+path = "fuzz_targets/forwarding_v3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "datapath_relay_v3"
+path = "fuzz_targets/datapath_relay_v3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_open"
+path = "fuzz_targets/tcp_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udp_authorization"
+path = "fuzz_targets/udp_authorization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_classification"
+path = "fuzz_targets/quic_classification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_client_hello"
+path = "fuzz_targets/tls_client_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_initial"
+path = "fuzz_targets/quic_initial.rs"
+test = false
+doc = false
+bench = false
+

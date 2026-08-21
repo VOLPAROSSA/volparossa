@@ -1,0 +1,21 @@
+[package]
+name = "volparossa-policy"
+description = "Threshold-signed, fail-closed egress policy manifests for VOLPAROSSA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ed25519-dalek.workspace = true
+prost.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

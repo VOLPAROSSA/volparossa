@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+case "${1:-}" in
+    remove|deconfigure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop volparossa-agent.service volparossa-mpquic.service \
+                volparossa-helper.service >/dev/null 2>&1 || true
+            systemctl disable volparossa-agent.service volparossa-mpquic.service \
+                volparossa-helper.service >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+# Network cleanup is owned by the helper's scoped shutdown path. Never flush host state here.
+exit 0

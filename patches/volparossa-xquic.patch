@@ -1,0 +1,296 @@
+diff --git a/include/xquic/xquic.h b/include/xquic/xquic.h
+index 04e1b6664f14d34f645d97a91ff8bb2e552fa497..3925b44682dccd9e746ea8bdecd8c3a09e33647b 100644
+--- a/include/xquic/xquic.h
++++ b/include/xquic/xquic.h
+@@ -1308,6 +1308,12 @@ typedef struct xqc_engine_ssl_config_s {
+ typedef enum {
+     XQC_TLS_CERT_FLAG_NEED_VERIFY = 1 << 0,
+     XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED = 1 << 1,
++    /** Invoke cert_verify_cb even when built-in chain validation succeeds.
++     * This is opt-in so existing applications retain their current trust
++     * behavior. Applications that enable it must fail closed in the
++     * callback when their additional verification (for example SPKI
++     * pinning) does not succeed. */
++    XQC_TLS_CERT_FLAG_ALWAYS_CALLBACK = 1 << 2,
+ } xqc_cert_verify_flag_e;
+ 
+ typedef enum {
+@@ -1675,6 +1681,7 @@ typedef struct xqc_path_metrics_s {
+     uint64_t path_est_bw;          /* estimated bandwidth (bytes/sec) */
+     uint64_t path_pacing_rate;     /* pacing rate (bytes/sec) */
+     uint32_t path_lost_count;      /* packets lost on this path */
++    uint64_t path_acked_transport_bytes; /* ACKed QUIC bytes; not unique payload */
+     uint8_t path_state;            /* XQC_PATH_STATE_* */
+ } xqc_path_metrics_t;
+ 
+@@ -2350,6 +2357,32 @@ XQC_EXPORT_PUBLIC_API
+ xqc_int_t xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *cid,
+                                uint64_t *new_path_id, int path_status);
+ 
++/**
++ * create a new client path with an explicit local/peer address tuple
++ * @param cid scid for connection
++ * @param new_path_id receives the new path identifier on success
++ * @param path_status initial application status (1 = STANDBY)
++ * @param local_addr local address used by packet callbacks for this path
++ * @param local_addrlen size of local_addr
++ * @param peer_addr peer address used by packet callbacks for this path
++ * @param peer_addrlen size of peer_addr
++ * @return XQC_OK (0) when success, <0 for error
++ *
++ * Both address pointers are mandatory. This API exists for transports whose
++ * independently routed paths terminate on distinct peer overlay addresses;
++ * xqc_conn_create_path() retains the connection-wide inherited-address
++ * behavior for existing callers.
++ */
++XQC_EXPORT_PUBLIC_API
++xqc_int_t xqc_conn_create_path_with_addr(xqc_engine_t *engine,
++                                         const xqc_cid_t *cid,
++                                         uint64_t *new_path_id,
++                                         int path_status,
++                                         const struct sockaddr *local_addr,
++                                         socklen_t local_addrlen,
++                                         const struct sockaddr *peer_addr,
++                                         socklen_t peer_addrlen);
++
+ 
+ /**
+  * Close a path
+diff --git a/src/tls/xqc_tls.c b/src/tls/xqc_tls.c
+index 333582f1c5cad785d800ba6a51f60cb71fc4b8d4..77c4ba9641c954f77a39676047eeb12354045aa5 100644
+--- a/src/tls/xqc_tls.c
++++ b/src/tls/xqc_tls.c
+@@ -1038,10 +1038,6 @@ xqc_ssl_cert_verify_cb(int ok, X509_STORE_CTX *store_ctx)
+     unsigned char *certs_array[XQC_MAX_VERIFY_DEPTH] = {0};
+     size_t certs_len[XQC_MAX_VERIFY_DEPTH] = {0};
+ 
+-    if (ok == XQC_SSL_SUCCESS) {
+-        return XQC_SSL_SUCCESS;
+-    }
+-
+     SSL *ssl =
+         X509_STORE_CTX_get_ex_data(store_ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+     if (ssl == NULL) {
+@@ -1053,17 +1049,24 @@ xqc_ssl_cert_verify_cb(int ok, X509_STORE_CTX *store_ctx)
+         return XQC_SSL_FAIL;
+     }
+ 
+-    int err_code = X509_STORE_CTX_get_error(store_ctx);
+-    if (err_code != X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY &&
+-        err_code != X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY &&
+-        !((tls->cert_verify_flag & XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED) != 0 &&
+-          XQC_TLS_SELF_SIGNED_CERT(err_code))) {
+-        xqc_log(tls->log, XQC_LOG_ERROR, "|certificate verify failed with err_code:%d|",
+-                err_code);
+-        if (tls->cbs->error_cb) {
+-            tls->cbs->error_cb(err_code, tls->user_data);
++    if (ok == XQC_SSL_SUCCESS &&
++        (tls->cert_verify_flag & XQC_TLS_CERT_FLAG_ALWAYS_CALLBACK) == 0) {
++        return XQC_SSL_SUCCESS;
++    }
++
++    int err_code = ok == XQC_SSL_SUCCESS ? X509_V_OK
++                                         : X509_STORE_CTX_get_error(store_ctx);
++    if (ok != XQC_SSL_SUCCESS) {
++        if (err_code != X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY &&
++            !((tls->cert_verify_flag & XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED) != 0 &&
++              XQC_TLS_SELF_SIGNED_CERT(err_code))) {
++            xqc_log(tls->log, XQC_LOG_ERROR,
++                    "|certificate verify failed with err_code:%d|", err_code);
++            if (tls->cbs->error_cb) {
++                tls->cbs->error_cb(err_code, tls->user_data);
++            }
++            return XQC_SSL_FAIL;
+         }
+-        return XQC_SSL_FAIL;
+     }
+ 
+     /* get certs array */
+diff --git a/src/transport/xqc_multipath.c b/src/transport/xqc_multipath.c
+index 3cfd12583c3c158de9d1f35bfdea3ce5d7d6ac98..26941d2f790c6e55c9338f5676ea521b01e4586f 100644
+--- a/src/transport/xqc_multipath.c
++++ b/src/transport/xqc_multipath.c
+@@ -673,14 +673,26 @@ xqc_conn_is_current_mp_version_supported(xqc_multipath_version_t mp_version)
+     return ret;
+ }
+ 
+-xqc_int_t
+-xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t *new_path_id, int path_status)
++static xqc_int_t
++xqc_conn_create_path_internal(xqc_engine_t *engine, const xqc_cid_t *scid,
++    uint64_t *new_path_id, int path_status,
++    const struct sockaddr *local_addr, socklen_t local_addrlen,
++    const struct sockaddr *peer_addr, socklen_t peer_addrlen)
+ {
+     xqc_connection_t *conn = NULL;
+     xqc_path_ctx_t *path = NULL;
+     xqc_app_path_status_t ps_inner = XQC_APP_PATH_STATUS_AVAILABLE;
+     uint64_t path_id = 0;
+ 
++    if (engine == NULL || scid == NULL || new_path_id == NULL
++        || ((local_addr == NULL) != (local_addrlen == 0))
++        || ((peer_addr == NULL) != (peer_addrlen == 0))
++        || local_addrlen > sizeof(path->local_addr)
++        || peer_addrlen > sizeof(path->peer_addr))
++    {
++        return -XQC_EPARAM;
++    }
++
+     conn = xqc_engine_conns_hash_find(engine, scid, 's');
+     if (!conn) {
+         xqc_log(engine->log, XQC_LOG_ERROR, "|can not find connection|");
+@@ -737,6 +749,18 @@ xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t *new_
+         return -XQC_EMP_CREATE_PATH;
+     }
+ 
++    /* xqc_path_init has already queued PATH_CHALLENGE but no engine wake has
++     * occurred yet. Packet emission consults the path tuple, so replace the
++     * inherited connection tuple before making the connection runnable. */
++    if (local_addr != NULL) {
++        xqc_memcpy(path->local_addr, local_addr, local_addrlen);
++        path->local_addrlen = local_addrlen;
++    }
++    if (peer_addr != NULL) {
++        xqc_memcpy(path->peer_addr, peer_addr, peer_addrlen);
++        path->peer_addrlen = peer_addrlen;
++    }
++
+     xqc_engine_remove_wakeup_queue(engine, conn);
+     xqc_engine_add_active_queue(engine, conn);
+ 
+@@ -747,6 +771,30 @@ xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t *new_
+     return XQC_OK;
+ }
+ 
++xqc_int_t
++xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid,
++    uint64_t *new_path_id, int path_status)
++{
++    return xqc_conn_create_path_internal(engine, scid, new_path_id, path_status,
++                                         NULL, 0, NULL, 0);
++}
++
++xqc_int_t
++xqc_conn_create_path_with_addr(xqc_engine_t *engine, const xqc_cid_t *scid,
++    uint64_t *new_path_id, int path_status,
++    const struct sockaddr *local_addr, socklen_t local_addrlen,
++    const struct sockaddr *peer_addr, socklen_t peer_addrlen)
++{
++    if (local_addr == NULL || local_addrlen == 0
++        || peer_addr == NULL || peer_addrlen == 0)
++    {
++        return -XQC_EPARAM;
++    }
++    return xqc_conn_create_path_internal(engine, scid, new_path_id, path_status,
++                                         local_addr, local_addrlen,
++                                         peer_addr, peer_addrlen);
++}
++
+ xqc_int_t
+ xqc_conn_close_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t closed_path_id)
+ {
+@@ -957,6 +1005,7 @@ xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats)
+             m->path_est_bw          = xqc_send_ctl_get_est_bw(path->path_send_ctl);
+             m->path_pacing_rate     = xqc_send_ctl_get_pacing_rate(path->path_send_ctl);
+             m->path_lost_count      = path->path_send_ctl->ctl_lost_count;
++            m->path_acked_transport_bytes = path->path_send_ctl->ctl_delivered;
+             m->path_state           = path->path_state;
+             if (path->path_send_ctl->ctl_cong_callback
+                 && path->path_send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd)
+diff --git a/src/tls/xqc_tls_ctx.c b/src/tls/xqc_tls_ctx.c
+index fd6723fec24e15cfc955ae40ab08bd72bd00fcc8..01ff1d24c780c4892ff5730d3fcffa664aecde32 100644
+--- a/src/tls/xqc_tls_ctx.c
++++ b/src/tls/xqc_tls_ctx.c
+@@ -455,7 +455,9 @@ xqc_tls_ctx_register_alpn(xqc_tls_ctx_t *ctx, const char *alpn, size_t alpn_len)
+         ctx->alpn_list_sz = new_alpn_list_sz;
+ 
+         /* copy alpn_list */
+-        xqc_memcpy(alpn_list_new, ctx->alpn_list, ctx->alpn_list_len);
++        if (ctx->alpn_list_len != 0) {
++            xqc_memcpy(alpn_list_new, ctx->alpn_list, ctx->alpn_list_len);
++        }
+         alpn_list_new[ctx->alpn_list_len] = '\0';
+ 
+         /* replace */
+diff --git a/src/common/xqc_memory_pool.h b/src/common/xqc_memory_pool.h
+index ef4e2eaf70627cddebf2a959303d46a5dd872a09..acc4b32f3abebf5379ff11240cea9d37dbd6a0ea 100644
+--- a/src/common/xqc_memory_pool.h
++++ b/src/common/xqc_memory_pool.h
+@@ -35,6 +35,9 @@ typedef struct xqc_memory_block_s {
+     struct xqc_memory_block_s *next;
+ } xqc_memory_block_t;
+ 
++#define XQC_ALIGNMENT (16)
++#define xqc_align_ptr(p, a) ((char *) (((uintptr_t)(p) + ((uintptr_t)a - 1)) & ~((uintptr_t)a - 1)))
++
+ typedef struct xqc_memory_large_s {
+     struct xqc_memory_large_s *next;
+     unsigned    size;
+@@ -192,16 +195,22 @@ xqc_destroy_pool(xqc_memory_pool_t *pool)
+ static inline void *
+ xqc_palloc_large(xqc_memory_pool_t *pool, size_t size)
+ {
++    if (size > SIZE_MAX - sizeof(xqc_memory_large_t) - (XQC_ALIGNMENT - 1)) {
++        return NULL;
++    }
++    size_t allocation_size =
++        size + sizeof(xqc_memory_large_t) + (XQC_ALIGNMENT - 1);
++
+ #ifdef XQC_PROTECT_POOL_MEM
+     xqc_memory_large_t *p;
+     if (pool->protect_block) {
+-        p = xqc_mempool_malloc_protected(size + sizeof(xqc_memory_large_t), pool->page_size);
++        p = xqc_mempool_malloc_protected(allocation_size, pool->page_size);
+         
+     } else {
+-        p = xqc_malloc(size + sizeof(xqc_memory_large_t));
++        p = xqc_malloc(allocation_size);
+     }
+ #else
+-    xqc_memory_large_t *p = xqc_malloc(size + sizeof(xqc_memory_large_t));
++    xqc_memory_large_t *p = xqc_malloc(allocation_size);
+ #endif
+ 
+     if (p == NULL) {
+@@ -212,12 +221,9 @@ xqc_palloc_large(xqc_memory_pool_t *pool, size_t size)
+     p->next = pool->large;
+     pool->large = p;
+ 
+-    return p->data;
++    return xqc_align_ptr(p->data, XQC_ALIGNMENT);
+ }
+ 
+-#define XQC_ALIGNMENT (16)
+-#define xqc_align_ptr(p, a) ((char *) (((uintptr_t)(p) + ((uintptr_t)a - 1)) & ~((uintptr_t)a - 1)))
+-
+ static inline void *
+ xqc_palloc_block(xqc_memory_pool_t *pool, size_t size)
+ {
+diff --git a/src/transport/xqc_client.c b/src/transport/xqc_client.c
+--- a/src/transport/xqc_client.c
++++ b/src/transport/xqc_client.c
+@@ -182,6 +182,8 @@ xqc_client_create_tls(xqc_connection_t *conn, const xqc_conn_ssl_config_t *conn_s
+         ret = -XQC_EMALLOC;
+         goto end;
+     }
+-    xqc_memcpy(cfg.session_ticket, conn_ssl_config->session_ticket_data,
+-               conn_ssl_config->session_ticket_len);
++    if (conn_ssl_config->session_ticket_len != 0) {
++        xqc_memcpy(cfg.session_ticket, conn_ssl_config->session_ticket_data,
++                   conn_ssl_config->session_ticket_len);
++    }
+     cfg.session_ticket_len = conn_ssl_config->session_ticket_len;
+diff --git a/src/transport/xqc_stream.c b/src/transport/xqc_stream.c
+--- a/src/transport/xqc_stream.c
++++ b/src/transport/xqc_stream.c
+@@ -1586,6 +1586,8 @@ xqc_stream_recv(xqc_stream_t *stream, unsigned char *recv_buf, size_t recv_buf_si
+ 
+         if (read + frame_left <= recv_buf_size) {
+-            memcpy(recv_buf + read, stream_frame->data + stream_frame->next_read_offset,
+-                   frame_left);
++            if (frame_left != 0) {
++                memcpy(recv_buf + read,
++                       stream_frame->data + stream_frame->next_read_offset, frame_left);
++            }
+             stream->stream_data_in.next_read_offset += frame_left;
+             stream_frame->next_read_offset = stream_frame->data_length;

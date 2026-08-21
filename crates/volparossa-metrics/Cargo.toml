@@ -1,0 +1,17 @@
+[package]
+name = "volparossa-metrics"
+description = "Bounded local-only aggregate metrics for VOLPAROSSA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

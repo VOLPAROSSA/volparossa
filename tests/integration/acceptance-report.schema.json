@@ -1,0 +1,539 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "SPDX-License-Identifier: GPL-3.0-only",
+  "title": "VOLPAROSSA acceptance report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_kind",
+    "suite",
+    "source_revision",
+    "generated_at",
+    "started_at",
+    "finished_at",
+    "execution",
+    "environment",
+    "host_state",
+    "cases",
+    "cleanup",
+    "overall"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "report_kind": {
+      "const": "acceptance"
+    },
+    "suite": {
+      "enum": [
+        "all",
+        "mptcp",
+        "mpquic"
+      ]
+    },
+    "source_revision": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "generated_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "started_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_mode",
+        "attempted",
+        "completed",
+        "topology_created",
+        "blockers"
+      ],
+      "properties": {
+        "requested_mode": {
+          "enum": [
+            "PREVIEW",
+            "EXECUTE"
+          ]
+        },
+        "attempted": {
+          "type": "boolean"
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "topology_created": {
+          "type": "boolean"
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reason"
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "debian_version",
+        "architecture",
+        "kernel",
+        "rustc",
+        "native_revisions"
+      ],
+      "properties": {
+        "debian_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "architecture": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "kernel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "rustc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "native_revisions": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_.+-]{1,64}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          }
+        }
+      }
+    },
+    "host_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captured",
+        "before_digest",
+        "after_digest",
+        "unchanged"
+      ],
+      "properties": {
+        "captured": {
+          "type": "boolean"
+        },
+        "before_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "after_digest": {
+          "$ref": "#/$defs/nullable_digest"
+        },
+        "unchanged": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempted",
+        "complete",
+        "remaining_owned_objects"
+      ],
+      "properties": {
+        "attempted": {
+          "type": "boolean"
+        },
+        "complete": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "remaining_owned_objects": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "overall": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED",
+        "ERROR"
+      ]
+    }
+  },
+  "$defs": {
+    "nullable_digest": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "sha256",
+        "path",
+        "check"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "kind": {
+          "enum": [
+            "counter",
+            "capture",
+            "command",
+            "digest",
+            "measurement",
+            "state"
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+        },
+        "check": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "selected",
+        "result",
+        "reason",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "pattern": "^A(0[1-9]|1[0-5])$",
+          "type": "string"
+        },
+        "selected": {
+          "type": "boolean"
+        },
+        "result": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "SKIPPED",
+            "ERROR"
+          ]
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/reason"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "enum": [
+                  "FAIL",
+                  "SKIPPED",
+                  "ERROR"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/reason"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selected": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "const": "SKIPPED"
+              },
+              "reason": {
+                "$ref": "#/$defs/reason"
+              },
+              "evidence": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "overall": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "attempted": {
+                "const": true
+              },
+              "completed": {
+                "const": true
+              }
+            }
+          },
+          "host_state": {
+            "properties": {
+              "captured": {
+                "const": true
+              },
+              "unchanged": {
+                "const": true
+              }
+            }
+          },
+          "cleanup": {
+            "properties": {
+              "attempted": {
+                "const": true
+              },
+              "complete": {
+                "const": true
+              },
+              "remaining_owned_objects": {
+                "const": 0
+              }
+            }
+          },
+          "cases": {
+            "items": {
+              "properties": {
+                "result": {
+                  "const": "PASS"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "overall": {
+            "const": "BLOCKED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "blockers": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "attempted": {
+                "const": false
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "completed": {
+                "const": false
+              },
+              "topology_created": {
+                "const": false
+              }
+            }
+          },
+          "host_state": {
+            "properties": {
+              "captured": {
+                "const": false
+              },
+              "before_digest": {
+                "type": "null"
+              },
+              "after_digest": {
+                "type": "null"
+              },
+              "unchanged": {
+                "type": "null"
+              }
+            }
+          },
+          "cases": {
+            "items": {
+              "properties": {
+                "result": {
+                  "const": "SKIPPED"
+                }
+              }
+            }
+          },
+          "cleanup": {
+            "properties": {
+              "attempted": {
+                "const": false
+              },
+              "complete": {
+                "type": "null"
+              },
+              "remaining_owned_objects": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

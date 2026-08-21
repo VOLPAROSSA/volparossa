@@ -1,0 +1,39 @@
+[package]
+name = "volparossa"
+description = "User-facing command-line interface for VOLPAROSSA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+libc.workspace = true
+rand_core.workspace = true
+rpassword = "7.4.0"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+socket2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+volparossa-config = { path = "../volparossa-config", version = "=0.1.0" }
+volparossa-identity = { path = "../volparossa-identity", version = "=0.1.0" }
+volparossa-local-control = { path = "../volparossa-local-control", version = "=0.1.0" }
+volparossa-mptcp = { path = "../volparossa-mptcp", version = "=0.1.0" }
+volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
+volparossa-quic = { path = "../volparossa-quic", version = "=0.1.0" }
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

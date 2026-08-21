@@ -1,0 +1,51 @@
+[Unit]
+Description=VOLPAROSSA minimal privileged network helper
+Documentation=file:/usr/share/doc/volparossa/OPERATIONS.md
+Before=volparossa-agent.service
+After=local-fs.target
+ConditionPathExists=/etc/volparossa/config.yaml
+
+[Service]
+Type=simple
+User=root
+Group=volparossa
+UMask=0077
+Environment=VOLPAROSSA_CONFIG=/etc/volparossa/config.yaml
+Environment=VOLPAROSSA_RUNTIME_DIRECTORY=/run/volparossa
+Environment=VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock
+ExecStart=/usr/libexec/volparossa/volparossa-helper
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=30s
+TimeoutStopSec=45s
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=no
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=net
+PrivateMounts=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @network-io @mount
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/run/volparossa -/run/netns
+ReadOnlyPaths=/etc/volparossa
+
+[Install]
+WantedBy=multi-user.target

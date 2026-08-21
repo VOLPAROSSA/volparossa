@@ -1,0 +1,33 @@
+[package]
+name = "volparossa-discovery"
+description = "Decentralised libp2p discovery and peerlinks for VOLPAROSSA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+libp2p.workspace = true
+percent-encoding.workspace = true
+prost.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
+volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }
+
+[dev-dependencies]
+volparossa-exit = { path = "../volparossa-exit", version = "=0.1.0" }
+volparossa-relay = { path = "../volparossa-relay", version = "=0.1.0" }
+volparossa-reservation = { path = "../volparossa-reservation", version = "=0.1.0" }
+volparossa-test-support = { path = "../volparossa-test-support", version = "=0.1.0" }
+volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "volparossa-inspection"
+description = "Fail-closed TLS ClientHello and QUIC v1 Initial inspection for VOLPAROSSA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ring = "=0.17.14"
+thiserror.workspace = true
+volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
+
+[dev-dependencies]
+hex.workspace = true
+
+[lints]
+workspace = true

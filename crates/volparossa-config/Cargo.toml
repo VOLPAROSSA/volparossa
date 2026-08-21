@@ -1,0 +1,22 @@
+[package]
+name = "volparossa-config"
+description = "Strict YAML configuration and safety validation for VOLPAROSSA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
+

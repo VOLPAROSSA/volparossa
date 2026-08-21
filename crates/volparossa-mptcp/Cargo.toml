@@ -1,0 +1,25 @@
+[package]
+name = "volparossa-mptcp"
+description = "Linux MPTCP sockets and kernel path-manager control for VOLPAROSSA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bitflags.workspace = true
+libc.workspace = true
+netlink-sys.workspace = true
+serde.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
+
+[lints]
+workspace = true
+

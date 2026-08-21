@@ -1,0 +1,13 @@
+[package]
+name = "volparossa-rustsec-backport-regressions"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-only"
+rust-version = "1.85"
+
+[workspace]
+
+[dependencies]
+hickory-proto = { path = "../vendor/hickory-proto-0.25.2", default-features = false, features = ["volparossa-backport-regressions"] }
+time = { path = "../vendor/time-0.3.41", default-features = false, features = ["parsing", "std"] }

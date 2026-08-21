@@ -1,0 +1,69 @@
+runtime_mode: production
+
+network:
+  name: VOLPAROSSA
+  protocol_version: 3
+  operator_id: null
+  listen_addresses: []
+  bootstrap_peers: []
+  candidate_pool_size: 200
+  advertisement_ttl_seconds: 300
+
+roles:
+  client: true
+  relay: false
+  exit: false
+
+selection:
+  active_multipath_paths: 4
+  minimum_multipath_paths: 2
+  maximum_multipath_paths: 8
+  warm_backup_paths: 2
+  maximum_rtt_spread_ms: 20
+  exploration_ratio: 0.10
+
+capacity:
+  relay_upload_limit_mbps: 0
+  relay_download_limit_mbps: 0
+  exit_upload_limit_mbps: 0
+  exit_download_limit_mbps: 0
+  maximum_relay_sessions: 0
+  maximum_exit_sessions: 0
+
+routing:
+  context_ttl_seconds: 600
+  maximum_active_contexts: 64
+  kill_switch: true
+  direct_exit_debug: false
+
+tcp:
+  enabled: true
+  transport: mptcp
+  mptcp_path_manager: kernel
+  allow_plain_tcp_fallback: false
+
+udp:
+  enabled: true
+  transport: single_path_quic
+  idle_timeout_seconds: 60
+
+quic:
+  enabled: true
+  transport: masque_connect_ip_mpquic
+  require_multipath: true
+  minimum_paths: 2
+  allow_degraded_single_path: false
+  redundancy: false
+
+policy:
+  fail_closed: true
+  manifest_path: ""
+  minimum_signatures: 3
+  reject_ech: true
+  reject_unverifiable_sni: true
+
+privacy:
+  persist_domain_logs: false
+  persist_destination_ips: false
+  metrics_enabled: true
+  metrics_port: 9767

@@ -1,0 +1,25 @@
+[package]
+name = "volparossa-test-support"
+description = "Ephemeral test-only fixtures for VOLPAROSSA integration tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+libp2p-identity.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
+volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }
+volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
+
+[lints]
+workspace = true

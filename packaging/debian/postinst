@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers /usr/lib/sysusers.d/volparossa.conf
+fi
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/volparossa.conf
+fi
+if [ -e /etc/volparossa/config.yaml ]; then
+    chown root:volparossa /etc/volparossa/config.yaml
+    chmod 0640 /etc/volparossa/config.yaml
+fi
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+# Services and volunteer roles are deliberately not enabled or started here.
+exit 0
