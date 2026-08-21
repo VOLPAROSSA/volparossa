@@ -1,0 +1,68 @@
+name: Feature request
+description: Propose one bounded, testable addition toward the first working alpha.
+title: "feature: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep proposals narrow and evidence-driven. VOLPAROSSA does not trade away its privacy,
+        fail-closed, privilege-separation, or genuine-multipath requirements for speed.
+
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Invariant and failure mode
+      description: Which invariant does this protect, and how must ambiguous or unavailable state fail?
+    validations:
+      required: true
+
+  - type: textarea
+    id: change
+    attributes:
+      label: Bounded change
+      description: Describe the smallest vertical slice and its explicit non-goals.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: Which unit, property, integration, or real-datapath evidence would prove completion?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Primary impact
+      options:
+        - Control plane
+        - Privacy or security policy
+        - Privileged helper or host networking
+        - TCP or MPTCP dataplane
+        - UDP, QUIC, or Multipath QUIC dataplane
+        - Packaging, testing, or developer tooling
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: resources
+    attributes:
+      label: Resource and abuse bounds
+      description: State limits for messages, allocations, peers, sessions, queues, retries, and timeouts.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: This proposal preserves the normal `client -> exactly one relay -> exit` path.
+          required: true
+        - label: This proposal does not relabel ordinary TCP or single-path QUIC as multipath.
+          required: true
+        - label: This proposal identifies required docs and tests and does not depend on a production mock or stub.
+          required: true

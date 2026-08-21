@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a reproducible defect or fail-closed violation in the pre-alpha code.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        VOLPAROSSA is pre-alpha and is not yet a usable VPN. For vulnerabilities, follow the
+        private-reporting guidance in `SECURITY.md`; never post keys, identities, packet captures,
+        payloads, full hostnames, or private destination addresses in a public issue.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the defect and the invariant or failure mode it affects.
+    validations:
+      required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: Commit SHA or branch where you reproduced the problem.
+      placeholder: ad17653bb7bea4e066c46c5d46e3d4424c0cc98f
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Debian, kernel, architecture, Rust, and relevant component versions.
+      placeholder: Debian 13 amd64; kernel …; rustc …
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use disposable namespaces and test identities. Include exact non-privileged commands when safe.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected fail-closed behaviour
+      description: What should have happened, including cleanup or rejection behaviour?
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Include only logs or reports that contain no secrets, private traffic, or browsing metadata.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I used no volunteer node or third-party destination without explicit permission.
+          required: true
+        - label: This report contains no keys, identities, payloads, full hostnames, or private destination data.
+          required: true
+        - label: Any network reproduction ran only in a disposable namespace and left the host network unchanged, or involved no networking.
+          required: true

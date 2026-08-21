@@ -11,13 +11,9 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    fs,
     future::Future,
-    io::{self, Read},
-    os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::fs::OpenOptionsExt,
-    },
+    io,
+    os::fd::{AsRawFd, OwnedFd},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
@@ -79,9 +75,6 @@ const DEFAULT_MAX_CACHE_ENTRIES: usize = 1_024;
 const DEFAULT_MAX_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_PROCESS_OWNERS: usize = DEFAULT_MAX_WORKERS;
 const MAX_SUPERVISORS: usize = DEFAULT_MAX_WORKERS;
-const MAX_INHERITED_FD_AUDIT: usize = 4_096;
-const MAX_FDINFO_BYTES: usize = 4_096;
-
 static WORKER_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 type ContextId = [u8; 16];
@@ -265,76 +258,6 @@ fn validate_connected_socket(socket: &Socket) -> Result<(), WorkerV3Error> {
 fn configure_channel(socket: &Socket, timeout: Duration) -> Result<(), WorkerV3Error> {
     socket.set_read_timeout(Some(timeout))?;
     socket.set_write_timeout(Some(timeout))?;
-    Ok(())
-}
-
-fn parse_fdinfo_flags(info: &str) -> Result<u32, WorkerV3Error> {
-    let mut flags = info
-        .lines()
-        .filter_map(|line| line.strip_prefix("flags:\t"));
-    let value = flags.next().ok_or(WorkerV3Error::Authentication)?;
-    if flags.next().is_some()
-        || value.is_empty()
-        || !value.bytes().all(|byte| matches!(byte, b'0'..=b'7'))
-    {
-        return Err(WorkerV3Error::Authentication);
-    }
-    u32::from_str_radix(value, 8).map_err(|_| WorkerV3Error::Authentication)
-}
-
-fn validate_parent_fd_inheritance() -> Result<(), WorkerV3Error> {
-    let mut descriptors = {
-        let mut descriptors = Vec::new();
-        for entry in fs::read_dir("/proc/self/fd")? {
-            if descriptors.len() >= MAX_INHERITED_FD_AUDIT {
-                return Err(WorkerV3Error::Capacity);
-            }
-            let entry = entry?;
-            let descriptor = entry
-                .file_name()
-                .to_str()
-                .ok_or(WorkerV3Error::Authentication)?
-                .parse::<u32>()
-                .map_err(|_| WorkerV3Error::Authentication)?;
-            if descriptor
-                > u32::try_from(libc::STDERR_FILENO).map_err(|_| WorkerV3Error::Invalid)?
-            {
-                descriptors.push(descriptor);
-            }
-        }
-        descriptors
-    };
-    descriptors.sort_unstable();
-    if descriptors.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(WorkerV3Error::Authentication);
-    }
-
-    for descriptor in descriptors {
-        let file = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(format!("/proc/self/fdinfo/{descriptor}"))
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(WorkerV3Error::Io(error)),
-        };
-        let mut info = Vec::with_capacity(MAX_FDINFO_BYTES.saturating_add(1));
-        file.take(
-            u64::try_from(MAX_FDINFO_BYTES.saturating_add(1))
-                .map_err(|_| WorkerV3Error::Invalid)?,
-        )
-        .read_to_end(&mut info)?;
-        if info.is_empty() || info.len() > MAX_FDINFO_BYTES {
-            return Err(WorkerV3Error::Authentication);
-        }
-        let info = std::str::from_utf8(&info).map_err(|_| WorkerV3Error::Authentication)?;
-        let flags = parse_fdinfo_flags(info)?;
-        let close_on_exec = u32::try_from(libc::O_CLOEXEC).map_err(|_| WorkerV3Error::Invalid)?;
-        if flags & close_on_exec == 0 {
-            return Err(WorkerV3Error::Authentication);
-        }
-    }
     Ok(())
 }
 
@@ -605,7 +528,6 @@ fn spawn_with_command_locked(
     if let Some((name, value)) = retained_environment {
         command.env(name, value);
     }
-    validate_parent_fd_inheritance()?;
     let retirement_permit = acquire_retirement_permit()?;
     // This is deliberately the final user pre-exec hook installed on the command.
     install_close_range_on_exec(&mut command);
@@ -3430,6 +3352,28 @@ mod tests {
             .map(|authenticated| authenticated.process)
     }
 
+    fn timed_spawn_fixture_after_lock(
+        mode: &str,
+        context_id: ContextId,
+        generation: u64,
+    ) -> (Result<WorkerProcess, WorkerV3Error>, Duration) {
+        let _spawn_guard = WORKER_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let started = Instant::now();
+        let result = spawn_with_command_locked(
+            child_command(mode),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+            context_id,
+            generation,
+            Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
+            SandboxObservationMode::Fixture(fake_production_sandbox_snapshot()),
+        )
+        .map(|authenticated| authenticated.process);
+        (result, started.elapsed())
+    }
+
     fn spawn_authenticated_fixture(
         mode: &str,
         context_id: ContextId,
@@ -3577,24 +3521,45 @@ mod tests {
                 .is_ok_and(|path| path == std::path::Path::new("/dev/null"))
     }
 
-    fn non_cloexec_spawn_rejected_fixture() -> bool {
+    fn inheritable_parent_descriptor_is_confined_by_exec_fence_fixture() -> bool {
         let _spawn_guard = WORKER_SPAWN_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let sentinel = fs::File::open("/dev/null").expect("sentinel descriptor");
+        let sentinel_source = fs::File::open("/dev/null").expect("sentinel source");
+        // The child deliberately normalises raw fd 3, so the sentinel must sit above it to prove
+        // that the general close-range fence, rather than fd-3 setup, prevents inheritance.
+        let sentinel =
+            fcntl_dupfd_cloexec(&sentinel_source, 4).expect("sentinel above worker channel");
+        assert!(
+            sentinel.as_raw_fd() >= 4,
+            "sentinel must exercise the general non-standard descriptor fence"
+        );
         fcntl(&sentinel, FcntlArg::F_SETFD(FdFlag::empty())).expect("make sentinel inheritable");
         let result = spawn_with_command_locked(
-            child_command("hold"),
+            child_command("connect"),
             geteuid().as_raw(),
             getegid().as_raw(),
             [15; 16],
             1,
-            Some((CHILD_FIXTURE_ENVIRONMENT, "hold")),
+            Some((CHILD_FIXTURE_ENVIRONMENT, "connect")),
             SandboxObservationMode::Fixture(fake_production_sandbox_snapshot()),
+        );
+        let parent_flags = FdFlag::from_bits_truncate(
+            fcntl(&sentinel, FcntlArg::F_GETFD).expect("sentinel flags"),
         );
         fcntl(&sentinel, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
             .expect("restore sentinel close-on-exec");
-        matches!(result, Err(WorkerV3Error::Authentication))
+        let Ok(AuthenticatedWorker {
+            process,
+            bootstrap_challenge,
+        }) = result
+        else {
+            return false;
+        };
+        let child_authenticated =
+            bootstrap_challenge.into_bytes() != [0; 32] && process.has_complete_kernel_pins();
+        let child_reaped = process.terminate_bounded(TERMINATION_TIMEOUT);
+        parent_flags == FdFlag::empty() && child_authenticated && child_reaped
     }
 
     #[test]
@@ -3625,7 +3590,7 @@ mod tests {
                 )
                 .is_ok()
             }
-            Some("fd-audit") => !non_cloexec_spawn_rejected_fixture(),
+            Some("fd-fence") => !inheritable_parent_descriptor_is_confined_by_exec_fence_fixture(),
             Some("hold") => {
                 thread::sleep(Duration::from_secs(30));
                 false
@@ -3802,32 +3767,14 @@ mod tests {
     }
 
     #[test]
-    fn fdinfo_flags_are_exact_and_canonical() {
-        assert_eq!(
-            parse_fdinfo_flags("pos:\t0\nflags:\t02000002\n").expect("canonical flags"),
-            0o2_000_002
-        );
-        for invalid in [
-            "",
-            "pos:\t0\n",
-            "flags:\t\n",
-            "flags:\t08\n",
-            "flags: 02000002\n",
-            "flags:\t02000002\nflags:\t02000002\n",
-        ] {
-            assert!(parse_fdinfo_flags(invalid).is_err());
-        }
-    }
-
-    #[test]
-    fn non_cloexec_parent_descriptor_blocks_spawn_before_exec() {
-        let mut command = child_command("fd-audit");
+    fn inheritable_parent_descriptor_is_confined_to_the_parent() {
+        let mut command = child_command("fd-fence");
         let status = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .expect("isolated fd-audit fixture");
+            .expect("isolated inherited-descriptor fixture");
         assert!(status.success());
     }
 
@@ -3883,9 +3830,6 @@ mod tests {
             .map(|offset| locked_start + offset)
             .expect("locked spawn boundary");
         let body = &source[locked_start..locked_end];
-        let preflight = body
-            .find("validate_parent_fd_inheritance()?")
-            .expect("descriptor preflight");
         let permit = body
             .find("acquire_retirement_permit()?")
             .expect("retirement permit");
@@ -3895,7 +3839,9 @@ mod tests {
         let secured_spawn = body
             .find("spawn_after_seccomp_baseline(&mut command, observation_mode)?")
             .expect("baseline-bound spawn helper");
-        assert!(preflight < permit && permit < close_range && close_range < secured_spawn);
+        assert!(permit < close_range && close_range < secured_spawn);
+        assert!(!body.contains("/proc/self/fd"));
+        assert!(!body.contains("fdinfo"));
 
         let helper_start = source
             .find("fn spawn_after_seccomp_baseline(")
@@ -3954,19 +3900,16 @@ mod tests {
 
     #[test]
     fn wrong_challenge_fails_closed_and_child_is_boundedly_reaped() {
-        let started = Instant::now();
-        assert!(matches!(
-            spawn_fixture("wrong-challenge", [2; 16], 1),
-            Err(WorkerV3Error::Authentication)
-        ));
-        assert!(started.elapsed() < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
+        let (result, elapsed) = timed_spawn_fixture_after_lock("wrong-challenge", [2; 16], 1);
+        assert!(matches!(result, Err(WorkerV3Error::Authentication)));
+        assert!(elapsed < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
     }
 
     #[test]
     fn unexpected_post_exec_child_descriptor_fails_before_handshake() {
-        let started = Instant::now();
-        assert!(spawn_fixture("extra-fd-connect", [30; 16], 1).is_err());
-        assert!(started.elapsed() < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
+        let (result, elapsed) = timed_spawn_fixture_after_lock("extra-fd-connect", [30; 16], 1);
+        assert!(result.is_err());
+        assert!(elapsed < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
     }
 
     #[test]

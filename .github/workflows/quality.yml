@@ -1,0 +1,102 @@
+name: Quality
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTSEC_ADVISORY_DB_REVISION: bf5c0d245a92671908518d7e765914d437954ed6
+
+jobs:
+  quality:
+    name: Unprivileged quality gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 \
+            --profile minimal \
+            --component clippy \
+            --component rustfmt
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Verify required runner tools
+        run: |
+          for tool in cmake git jq pkg-config shellcheck; do
+            command -v "$tool"
+          done
+
+      - name: Check formatting and shell sources
+        run: |
+          cargo fmt --all -- --check
+          ./scripts/check-shell.sh
+
+      - name: Install pinned dependency-audit tools
+        run: |
+          tool_root="${RUNNER_TEMP}/cargo-tools"
+          cargo install --locked --root "$tool_root" --version 0.18.3 cargo-deny
+          cargo install --locked --root "$tool_root" --version 0.22.1 cargo-audit
+          printf '%s\n' "$tool_root/bin" >>"$GITHUB_PATH"
+
+      - name: Fetch locked Rust dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked \
+            --manifest-path third_party/rust/backport-regressions/Cargo.toml
+
+      - name: Prepare pinned RustSec advisory database
+        env:
+          RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
+        run: |
+          git init "$RUSTSEC_ADVISORY_DB"
+          git -C "$RUSTSEC_ADVISORY_DB" remote add origin \
+            https://github.com/RustSec/advisory-db.git
+          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin \
+            "$RUSTSEC_ADVISORY_DB_REVISION"
+          git -C "$RUSTSEC_ADVISORY_DB" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUSTSEC_ADVISORY_DB" rev-parse HEAD)" = \
+            "$RUSTSEC_ADVISORY_DB_REVISION"
+
+      - name: Check locked dependencies and licenses
+        env:
+          RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
+        run: |
+          ./scripts/check-rust-dependencies.sh
+          ./packaging/test-collect-cargo-licenses.sh
+
+      - name: Run strict Clippy
+        run: >-
+          cargo clippy --locked --offline --workspace --all-targets
+          --all-features -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --locked --offline --workspace --all-features
+
+      - name: Check non-mutating integration harness
+        run: ./tests/integration/test-harness.sh
