@@ -282,6 +282,23 @@ fn parse_fdinfo_flags(info: &str) -> Result<u32, WorkerV3Error> {
     u32::from_str_radix(value, 8).map_err(|_| WorkerV3Error::Authentication)
 }
 
+fn read_parent_fdinfo<R: Read>(reader: R) -> Result<Option<Vec<u8>>, WorkerV3Error> {
+    let mut info = Vec::with_capacity(MAX_FDINFO_BYTES.saturating_add(1));
+    match reader
+        .take(
+            u64::try_from(MAX_FDINFO_BYTES.saturating_add(1))
+                .map_err(|_| WorkerV3Error::Invalid)?,
+        )
+        .read_to_end(&mut info)
+    {
+        Ok(_) => Ok(Some(info)),
+        // `/proc/self/fdinfo/<n>` is a live view. The descriptor can disappear after the
+        // pseudofile was opened but before it is read; then procfs reports `ENOENT` here too.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(WorkerV3Error::Io(error)),
+    }
+}
+
 fn validate_parent_fd_inheritance() -> Result<(), WorkerV3Error> {
     let mut descriptors = {
         let mut descriptors = Vec::new();
@@ -319,12 +336,9 @@ fn validate_parent_fd_inheritance() -> Result<(), WorkerV3Error> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(WorkerV3Error::Io(error)),
         };
-        let mut info = Vec::with_capacity(MAX_FDINFO_BYTES.saturating_add(1));
-        file.take(
-            u64::try_from(MAX_FDINFO_BYTES.saturating_add(1))
-                .map_err(|_| WorkerV3Error::Invalid)?,
-        )
-        .read_to_end(&mut info)?;
+        let Some(info) = read_parent_fdinfo(file)? else {
+            continue;
+        };
         if info.is_empty() || info.len() > MAX_FDINFO_BYTES {
             return Err(WorkerV3Error::Authentication);
         }
@@ -3430,6 +3444,28 @@ mod tests {
             .map(|authenticated| authenticated.process)
     }
 
+    fn timed_spawn_fixture_after_lock(
+        mode: &str,
+        context_id: ContextId,
+        generation: u64,
+    ) -> (Result<WorkerProcess, WorkerV3Error>, Duration) {
+        let _spawn_guard = WORKER_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let started = Instant::now();
+        let result = spawn_with_command_locked(
+            child_command(mode),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+            context_id,
+            generation,
+            Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
+            SandboxObservationMode::Fixture(fake_production_sandbox_snapshot()),
+        )
+        .map(|authenticated| authenticated.process);
+        (result, started.elapsed())
+    }
+
     fn spawn_authenticated_fixture(
         mode: &str,
         context_id: ContextId,
@@ -3820,6 +3856,31 @@ mod tests {
     }
 
     #[test]
+    fn fdinfo_read_accepts_only_a_descriptor_that_disappeared() {
+        struct FailingReader(io::ErrorKind);
+
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::from(self.0))
+            }
+        }
+
+        assert!(
+            read_parent_fdinfo(FailingReader(io::ErrorKind::NotFound))
+                .expect("a vanished live procfs descriptor")
+                .is_none()
+        );
+        assert!(matches!(
+            read_parent_fdinfo(FailingReader(io::ErrorKind::PermissionDenied)),
+            Err(WorkerV3Error::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(
+            read_parent_fdinfo(io::Cursor::new(b"flags:\t02000002\n")).expect("read stable fdinfo"),
+            Some(b"flags:\t02000002\n".to_vec())
+        );
+    }
+
+    #[test]
     fn non_cloexec_parent_descriptor_blocks_spawn_before_exec() {
         let mut command = child_command("fd-audit");
         let status = command
@@ -3954,19 +4015,16 @@ mod tests {
 
     #[test]
     fn wrong_challenge_fails_closed_and_child_is_boundedly_reaped() {
-        let started = Instant::now();
-        assert!(matches!(
-            spawn_fixture("wrong-challenge", [2; 16], 1),
-            Err(WorkerV3Error::Authentication)
-        ));
-        assert!(started.elapsed() < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
+        let (result, elapsed) = timed_spawn_fixture_after_lock("wrong-challenge", [2; 16], 1);
+        assert!(matches!(result, Err(WorkerV3Error::Authentication)));
+        assert!(elapsed < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
     }
 
     #[test]
     fn unexpected_post_exec_child_descriptor_fails_before_handshake() {
-        let started = Instant::now();
-        assert!(spawn_fixture("extra-fd-connect", [30; 16], 1).is_err());
-        assert!(started.elapsed() < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
+        let (result, elapsed) = timed_spawn_fixture_after_lock("extra-fd-connect", [30; 16], 1);
+        assert!(result.is_err());
+        assert!(elapsed < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
     }
 
     #[test]
