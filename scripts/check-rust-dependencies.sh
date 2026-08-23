@@ -68,6 +68,7 @@ verify_vendor() {
     patch_sha256=$4
     crate_directory=$5
     vendor_tree_sha256=$6
+    embedded_lock_policy=${7:-keep}
 
     check_sha256 "$archive_sha256" "$archive"
     check_sha256 "$patch_sha256" "$patch"
@@ -75,6 +76,14 @@ verify_vendor() {
     tar -xzf "$archive" -C "$audit_tmp"
     extracted="$audit_tmp/$crate_directory"
     [ -d "$extracted" ] || fail "archive did not contain $crate_directory"
+
+    case "$embedded_lock_policy" in
+        keep) ;;
+        omit)
+            rm -f -- "$extracted/Cargo.lock"
+            ;;
+        *) fail "invalid embedded lock policy for $crate_directory" ;;
+    esac
 
     git -C "$extracted" apply --recount --check "$repository_root/$patch"
     git -C "$extracted" apply --recount "$repository_root/$patch"
@@ -92,7 +101,7 @@ verify_vendor() {
     [ "$actual_tree_sha256" = "$vendor_tree_sha256" ] ||
         fail "tree SHA-256 mismatch for $crate_directory"
 
-    pass "$crate_directory is exactly its crates.io archive plus the reviewed security patch"
+    pass "$crate_directory is exactly its reviewed crates.io reconstruction"
 }
 
 find_advisory_database() {
@@ -146,7 +155,23 @@ check_single_path_package() {
          $matches[0].source == null and
          $matches[0].manifest_path == $manifest_path' \
         "$metadata" >/dev/null ||
-        fail "the locked fuzz graph does not use only the reviewed $package $version path package"
+        fail "the locked graph does not use only the reviewed $package $version path package"
+}
+
+check_single_registry_package() {
+    metadata=$1
+    package=$2
+    version=$3
+
+    jq -e \
+        --arg package "$package" \
+        --arg version "$version" \
+        '[.packages[] | select(.name == $package)] as $matches |
+         ($matches | length) == 1 and
+         $matches[0].version == $version and
+         $matches[0].source == "registry+https://github.com/rust-lang/crates.io-index"' \
+        "$metadata" >/dev/null ||
+        fail "the locked graph does not use exactly registry $package $version"
 }
 
 audit_tmp=$(mktemp -d "${TMPDIR:-/tmp}/volparossa-rustsec.XXXXXX")
@@ -167,6 +192,15 @@ verify_vendor \
     time-0.3.41 \
     722fc9e265043f6d683a365596063ad3b192a7d4dce542f9aa56bee65ccfdd7b
 
+verify_vendor \
+    third_party/rust/sources/libp2p-yamux-0.47.0.crate \
+    f15df094914eb4af272acf9adaa9e287baa269943f32ea348ba29cfb9bfc60d8 \
+    third_party/rust/patches/libp2p-yamux-0.47.0-single-backend.patch \
+    1a845f6cfaa57c993b54f654dc8e9294a450de8c46be323618481a7cc750740d \
+    libp2p-yamux-0.47.0 \
+    a7a9977042b6d9f602e98d67dc8409c485b5e588f79f8567b9b5b6ec9587e4fb \
+    omit
+
 check_sha256 \
     6b9522191b8cb7126b2d214edd7f782d2ccd83c467e9c03b8af9e0bf903b49b4 \
     third_party/rust/vendor/hickory-proto-0.25.2/LICENSE-APACHE
@@ -179,21 +213,30 @@ check_sha256 \
 check_sha256 \
     2537228d9a1b44a5dc595241349cae7090b326c8de165aaf89bfddef4a00d0fc \
     third_party/rust/vendor/time-0.3.41/LICENSE-MIT
+check_sha256 \
+    e10098b8c52fd18ad0f116aac2c0dba1e99ca125d6848640c00688e160a3ee7d \
+    third_party/rust/vendor/libp2p-yamux-0.47.0/LICENSE
+check_sha256 \
+    cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30 \
+    third_party/rust/licenses/yamux-0.13.10/LICENSE-APACHE
+check_sha256 \
+    ec353d4fecf7963b4c054384557e5dbc3c7a717997eb4a3815b315721a6aa75a \
+    third_party/rust/licenses/yamux-0.13.10/LICENSE-MIT
 pass 'upstream Apache-2.0 and MIT license files are unchanged'
 
 check_sha256 \
-    814133e6e6c9461ecd0cd76808eb11a5ab2a165bbef36133641f22d8a8388fe2 \
+    bee77a5a6fa12bdd6fcc4fcee18f831e4f11e7c392583c4cffb13b884d50fd37 \
     third_party/rust/backport-regressions/Cargo.toml
 check_sha256 \
     aabd2af12e26033cb8de9b63841b54574718406e4479b47e41bc0d92fc6f14e0 \
     third_party/rust/backport-regressions/.cargo/config.toml
 check_sha256 \
-    f652cbe94e3d48b39a036abc4ac7d2917a6ff4f80bcdb8c3c6e66f732af8e903 \
+    796ae0f160c8d95aa6e395dc56f266273e47928b097c318bdc0dfa499b8dadfd \
     third_party/rust/backport-regressions/src/lib.rs
 check_sha256 \
-    c56a2c8a797466a7c38171bd7e806d8b8bfc0d9dd2cfdc1d3f5a0984262024eb \
+    08e7bcd46d2e3f7411e8f4e855c70027f627be6061f63ab459c43f41a687c5cc \
     third_party/rust/backport-regressions/Cargo.lock
-pass 'isolated RustSec regression harness and rustc-1.85 lock are unchanged'
+pass 'isolated dependency-security regression harness and rustc-1.85 lock are unchanged'
 
 if [ "$mode" = vendor_only ]; then
     exit 0
@@ -204,18 +247,33 @@ CARGO_TARGET_DIR="$audit_tmp/backport-target" \
         --manifest-path third_party/rust/backport-regressions/Cargo.toml \
         --locked \
         --offline
-pass 'all three locally backported RustSec regressions passed, including dnssec-ring NSEC3'
+pass 'all five dependency-security regressions passed, including Yamux fail-closed and wrapper-policy handling'
 
 command -v jq >/dev/null 2>&1 ||
     fail 'jq is required to verify exact locked package provenance'
 
-cargo metadata --locked --offline --format-version 1 >/dev/null
+root_metadata="$audit_tmp/root-metadata.json"
+cargo metadata --locked --offline --format-version 1 >"$root_metadata"
 fuzz_metadata="$audit_tmp/fuzz-metadata.json"
 cargo metadata \
     --manifest-path fuzz/Cargo.toml \
     --locked \
     --offline \
     --format-version 1 >"$fuzz_metadata"
+
+check_single_path_package \
+    "$root_metadata" \
+    libp2p-yamux \
+    0.47.0 \
+    "$repository_root/third_party/rust/vendor/libp2p-yamux-0.47.0/Cargo.toml"
+check_single_registry_package "$root_metadata" yamux 0.13.10
+check_single_path_package \
+    "$fuzz_metadata" \
+    libp2p-yamux \
+    0.47.0 \
+    "$repository_root/third_party/rust/vendor/libp2p-yamux-0.47.0/Cargo.toml"
+check_single_registry_package "$fuzz_metadata" yamux 0.13.10
+pass 'root and fuzz graphs contain one reviewed Yamux wrapper and only fixed yamux 0.13.10'
 
 hickory_features="$audit_tmp/hickory-features.txt"
 time_features="$audit_tmp/time-features.txt"
@@ -243,7 +301,7 @@ grep -F "third_party/rust/vendor/time-0.3.41" "$time_features" >/dev/null ||
 if grep -Eq 'dnssec-ring|dnssec-aws-lc-rs|volparossa-backport-regressions' "$hickory_features"; then
     fail 'the production feature graph unexpectedly enables Hickory DNSSEC'
 fi
-pass 'locked Cargo graph uses both reviewed patches and keeps Hickory DNSSEC disabled'
+pass 'locked Cargo graph uses the reviewed Hickory and time patches and keeps Hickory DNSSEC disabled'
 
 check_single_path_package \
     "$fuzz_metadata" \
@@ -264,7 +322,7 @@ if grep -Eq \
     "$fuzz_hickory_features"; then
     fail 'the fuzz feature graph unexpectedly enables Hickory DNSSEC'
 fi
-pass 'locked fuzz graph uses both reviewed patches exclusively and keeps Hickory DNSSEC disabled'
+pass 'locked fuzz graph uses the reviewed Hickory and time patches exclusively and keeps Hickory DNSSEC disabled'
 
 cargo deny --version >/dev/null 2>&1 ||
     fail 'cargo-deny is required for license, ban, and source checks'

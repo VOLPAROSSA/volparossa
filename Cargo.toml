@@ -3,11 +3,13 @@ resolver = "2"
 members = ["crates/*"]
 exclude = [
   "third_party/rust/vendor/hickory-proto-0.25.2",
+  "third_party/rust/vendor/libp2p-yamux-0.47.0",
   "third_party/rust/vendor/time-0.3.41",
 ]
 
 [patch.crates-io]
 hickory-proto = { path = "third_party/rust/vendor/hickory-proto-0.25.2" }
+libp2p-yamux = { path = "third_party/rust/vendor/libp2p-yamux-0.47.0" }
 time = { path = "third_party/rust/vendor/time-0.3.41" }
 
 [workspace.package]
