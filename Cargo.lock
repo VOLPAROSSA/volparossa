@@ -4383,6 +4383,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "volparossa-netns-runner"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "rand_core 0.6.4",
+ "rustix",
+ "socket2 0.6.5",
+ "tempfile",
+ "thiserror 2.0.19",
+ "volparossa-linux-uapi",
+ "volparossa-test-support",
+]
+
+[[package]]
 name = "volparossa-peerstore"
 version = "0.1.0"
 dependencies = [

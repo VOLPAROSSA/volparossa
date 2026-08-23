@@ -1,0 +1,25 @@
+[package]
+name = "volparossa-netns-runner"
+description = "Fixed disposable network-namespace acceptance runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+nix.workspace = true
+rand_core.workspace = true
+rustix.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
+volparossa-test-support = { path = "../volparossa-test-support", version = "=0.1.0" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -7,7 +7,7 @@ usage() {
     printf '%s\n' \
         'usage:' \
         '  tests/netns/topology.sh --preview' \
-        '  tests/netns/topology.sh --run      # blocked until the reviewed supervisor exists' \
+        '  tests/netns/topology.sh --run      # blocked until isolated bootstrap exists' \
         '  tests/netns/topology.sh --cleanup  # always refuses unowned standalone cleanup'
 }
 
@@ -51,7 +51,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the reviewed fixed lifecycle supervisor is not present.' \
+            'BLOCKED: the fixed process supervisor exists, but isolated namespace bootstrap is not present.' \
             'No namespace, link, route, rule, firewall object, VPN, or sysctl was changed.' >&2
         exit 77
         ;;
