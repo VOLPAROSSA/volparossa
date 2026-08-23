@@ -374,7 +374,7 @@ mod tests {
     };
     use volparossa_protocol::{
         PROTOCOL_VERSION, PreselectionActorBinding, PreselectionObservationReceipt,
-        PreselectionObservationScope, TimePolicy, Transport, encode_canonical,
+        PreselectionObservationScope, TimePolicy, Transport, encode_canonical, generate_nonce,
         node_id_from_public_key, sign_control_message_with,
     };
 
@@ -433,7 +433,7 @@ mod tests {
     ) -> ClientRequestFixture {
         let typed = PreselectionObservationRequest {
             protocol_version: PROTOCOL_VERSION,
-            challenge: vec![7; 32],
+            challenge: generate_nonce().to_vec(),
             actor: Some(actor),
             scope: Some(PreselectionObservationScope {
                 role: role as i32,
@@ -464,6 +464,7 @@ mod tests {
         key: &identity::Keypair,
         observed_at_ms: u64,
     ) -> ClientPreselectionObservationResponse {
+        let nonce = generate_nonce();
         let receipt = PreselectionObservationReceipt {
             request_hash: preselection_observation_request_hash(&fixture.encoded)
                 .expect("request hash")
@@ -473,14 +474,14 @@ mod tests {
             scope: fixture.typed.scope.clone(),
             observed_at_ms,
             valid_until_ms: observed_at_ms + 2_000,
-            nonce: vec![8; 32],
+            nonce: nonce.to_vec(),
         };
         let encoded = sign_control_message_with(
             &receipt,
             raw_public_key(key),
             observed_at_ms,
             observed_at_ms + 2_000,
-            [8; 32],
+            nonce,
             TimePolicy::default(),
             |message| key.sign(message).ok()?.try_into().ok(),
         )
