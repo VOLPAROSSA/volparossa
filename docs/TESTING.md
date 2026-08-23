@@ -149,6 +149,11 @@ just test-mpquic
 just benchmark
 ```
 
+An execute request must additionally include the explicit `--yes` acknowledgement after the
+printed plan. Omitting or duplicating that acknowledgement is an argument error and cannot reach a
+mutating path. The acknowledgement is not proof of safety: the fixed supervisor, environment gate,
+ownership checks, teardown, and host-state comparison must all still succeed.
+
 The acceptance and benchmark drivers required to exercise real datapaths are not present yet. The
 production probe producer, helper backend, agent route orchestration, and client ingress are also
 blocked. Consequently these commands intentionally emit `overall: "BLOCKED"`, mark unexecuted work
@@ -159,9 +164,53 @@ The Rust report-model tests compile the normative Draft 2020-12 schema and valid
 and MPQUIC model reports against it. `tests/integration/test-harness.sh` is unprivileged and
 exercises argument parsing, strict semantic and artifact validation, `--only mptcp|mpquic`
 selection, false-PASS refusals, fail-closed execution requests, and non-mutation previews with
-command shims. The root-capable topology currently refuses both arbitrary commands and standalone
-cleanup. Privileged execution stays blocked until a fixed reviewed driver can own setup, evidence
-finalization, and teardown in one trapped process.
+command shims. The root-capable topology entry point contains no dormant network mutator, refuses
+arbitrary commands and standalone cleanup, and only prints the fixed future lifecycle plan.
+
+The lifecycle protocol is separate from the acceptance result. It uses five bounded, canonical
+frames in one strict order. `BOOTSTRAP_READY` is an attestation that the fixed inner worker must
+construct only after directly measuring that it is PID 1 in different network, mount, and PID
+namespaces, with private mounts, pristine networking, handlers, and the parent-death chain
+established before mutation. The outer independently compares the three namespace identities with
+its original host identities. Only then may it send the affine `GO` authorization.
+`TOPOLOGY_READY` attests to the run ID, fixed topology-specification digest, exact two run-bound
+namespace identities, and the completed probe, all directly observed by that worker. The outer then
+sends `STOP`; `FINISHED` must bind the SHA-256 of the exact `TOPOLOGY_READY` bytes and report
+attempted cleanup. The outer independently reaps the complete sandbox and constructs the acceptance
+report. EOF before `GO` explicitly means that no mutation was authorized; EOF afterward requires
+cleanup. Missing, malformed, reordered, duplicated, contradictory, or differently bound records
+fail closed. These transient attestations are not A14 evidence and cannot themselves make any
+A01-A15 case pass.
+
+After a real lifecycle-only run, normal teardown still leaves A14 `SKIPPED` with
+`FORCED_CRASH_NOT_EXECUTED`. A15 alone may be `PASS` when two privacy-safe outer fingerprint
+manifests are present, content-addressed, and exactly equal after the complete sandbox process tree
+has been reaped. All selected datapath cases remain `SKIPPED` with `LIFECYCLE_ONLY`, so the report
+and process result remain `BLOCKED`/77. The current blocked entry point has not produced that
+evidence yet.
+
+Privileged execution stays blocked until a fixed reviewed supervisor owns setup, inherited IPC,
+evidence finalization, process-tree containment, and teardown as one operation. The supervisor may
+not accept a caller-selected command, executable, backend, cleanup prefix, or network-object name.
+
+Run-scoped names derive from one 128-bit lowercase hexadecimal run ID. The private ownership
+manifest is a mode-0600, owner-bound, bounded and canonically sorted record of exact namespace names
+and unique nonzero device/inode pairs. Cleanup eligibility is obtained only from that manifest and
+is rechecked against the current mount object; a missing object is safely absent, while a symlink,
+replacement inode, malformed journal, unknown name, or changed journal is foreign/invalid and must
+never be deleted. `tests/netns/test-lifecycle-contract.sh` exercises this decision logic without
+creating a namespace or invoking a networking command.
+
+An ownership decision is an observation, not a reusable deletion capability. The future worker must
+remain the sole actor in its private `/run`, repeat the identity check immediately at the deletion
+boundary, and fail closed if either the manifest or mount object changes. The current contract code
+performs no deletion.
+
+The V1 lifecycle specification digest also pins the two namespace and underlay-interface name
+formulas, two isolated `/30` networks, two exact host routes, absence of default routes and host
+links, namespace-local forwarding, an nftables forward policy of drop, and only the exact IPv4 ICMP
+request/reply tuples needed by the one-shot probe. Changing that topology requires an explicit
+contract/digest change rather than an implicit worker variation.
 
 ## Native and performance gates
 

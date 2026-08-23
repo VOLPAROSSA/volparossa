@@ -59,7 +59,9 @@ for script_path in \
     tests/integration/validate-report.sh \
     tests/netns/run-topology.sh \
     tests/netns/run-benchmarks.sh \
+    tests/netns/test-lifecycle-contract.sh \
     tests/netns/topology.sh \
+    tests/netns/lib/lifecycle-contract.sh \
     packaging/build-deb.sh \
     packaging/collect-cargo-licenses.sh \
     packaging/debian/postinst \
@@ -77,7 +79,10 @@ jq -e . "$REPOSITORY_DIRECTORY/tests/integration/acceptance-report.schema.json" 
 /bin/mkdir "$TEMPORARY_DIRECTORY/bin"
 MUTATION_MARKER=$TEMPORARY_DIRECTORY/mutation-attempt
 export VOLPAROSSA_MUTATION_MARKER="$MUTATION_MARKER"
-for command_name in cargo dpkg-deb install ip nft rm sudo sysctl tc touch wg; do
+for command_name in \
+    cargo chmod chown cp dpkg-deb install ip ln mkdir mktemp modprobe mount mv nft nsenter rm \
+    rmdir setpriv sudo sysctl systemctl systemd-run tc touch truncate umount unshare wg
+do
     shim=$TEMPORARY_DIRECTORY/bin/$command_name
     # Variables expand in the generated shim, not in this harness.
     # shellcheck disable=SC2016
@@ -111,7 +116,8 @@ mpquic_report=$LAST_OUTPUT
 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$mpquic_report"
 assert_selected_ids "$mpquic_report" 'A06,A07,A14,A15'
 
-expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --only all
+expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --only all
+expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --only all --yes
 jq -e '.overall == "BLOCKED" and .execution.requested_mode == "EXECUTE"' "$LAST_OUTPUT" >/dev/null
 
 expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/run-benchmarks.sh" --preview
@@ -124,10 +130,12 @@ jq -e '
 ' "$LAST_OUTPUT" >/dev/null
 
 expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/topology.sh" --cleanup
-expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/topology.sh" --run -- arbitrary-command
+expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/topology.sh" --run -- arbitrary-command
 expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --only
 expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --only unsupported
 expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --preview --execute
+expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --yes --yes
+expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --preview --yes
 expect_status 64 "$REPOSITORY_DIRECTORY/tests/integration/run.sh" --suite
 expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-benchmarks.sh" --preview --execute
 
@@ -203,6 +211,48 @@ jq --arg digest "$proof_digest" '
     | .overall = "PASS"
 ' "$all_report" >"$valid_all_report"
 expect_status 0 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$valid_all_report"
+
+lifecycle_only_report=$TEMPORARY_DIRECTORY/valid-lifecycle-only.json
+jq '
+    .execution = {
+        requested_mode: "EXECUTE",
+        attempted: true,
+        completed: true,
+        topology_created: true,
+        blockers: [
+          {"code":"LIFECYCLE_ONLY","message":"Only the isolated lifecycle ran."},
+          {"code":"FORCED_CRASH_NOT_EXECUTED","message":"Forced crash cleanup did not run."}
+        ]
+      }
+    | .cases |= map(
+        if .id == "A14" then
+            .result = "SKIPPED"
+            | .reason = {
+                "code":"FORCED_CRASH_NOT_EXECUTED",
+                "message":"Forced crash cleanup did not run."
+              }
+            | .evidence = []
+        elif .id == "A15" then .
+        else
+            .result = "SKIPPED"
+            | .reason = {
+                "code":"LIFECYCLE_ONLY",
+                "message":"Only the isolated lifecycle ran."
+              }
+            | .evidence = []
+        end
+      )
+    | .overall = "BLOCKED"
+' "$valid_all_report" >"$lifecycle_only_report"
+expect_status 0 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" \
+    "$lifecycle_only_report"
+jq -e '
+    .overall == "BLOCKED"
+    and .cases[13].result == "SKIPPED"
+    and .cases[13].reason.code == "FORCED_CRASH_NOT_EXECUTED"
+    and .cases[14].result == "PASS"
+    and all(.cases[0:13][]; .result == "SKIPPED" and .reason.code == "LIFECYCLE_ONLY")
+' "$lifecycle_only_report" >/dev/null
 
 valid_mptcp_report=$TEMPORARY_DIRECTORY/valid-mptcp-partial.json
 jq '
@@ -349,6 +399,7 @@ grep -F './tests/integration/run.sh --preview --suite all' "$REPOSITORY_DIRECTOR
 grep -F './tests/netns/run-topology.sh --preview --only all' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
 grep -F './tests/netns/run-topology.sh --preview --only mptcp' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
 grep -F './tests/netns/run-topology.sh --preview --only mpquic' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
+grep -F './tests/netns/test-lifecycle-contract.sh' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
 grep -F './tests/netns/run-benchmarks.sh --preview' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
 grep -F './packaging/build-deb.sh --preview' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
 grep -F './packaging/build-deb.sh --build' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
@@ -360,6 +411,31 @@ grep -F 'ConditionFileIsExecutable=/usr/libexec/volparossa/volparossa-mpquic-lau
     "$REPOSITORY_DIRECTORY/packaging/systemd/volparossa-mpquic.service" >/dev/null
 grep -F 'ExecStart=/usr/libexec/volparossa/volparossa-mpquic-launch' \
     "$REPOSITORY_DIRECTORY/packaging/systemd/volparossa-mpquic.service" >/dev/null
+
+for retired_mutator in \
+    'ip netns add' \
+    'ip netns del' \
+    'ip link add' \
+    'nft add table' \
+    'policy accept'
+do
+    if grep -F "$retired_mutator" "$REPOSITORY_DIRECTORY/tests/netns/topology.sh" >/dev/null; then
+        printf 'dormant topology mutator survived removal: %s\n' "$retired_mutator" >&2
+        exit 1
+    fi
+done
+if grep -E 'VOLPAROSSA_[A-Z_]*(COMMAND|BACKEND|DRIVER|CHILD)' \
+    "$REPOSITORY_DIRECTORY/tests/netns/"*.sh \
+    "$REPOSITORY_DIRECTORY/tests/netns/lib/"*.sh >/dev/null; then
+    printf '%s\n' 'a public topology script accepts a runtime implementation override' >&2
+    exit 1
+fi
+if grep -E '(^|[;&|[:space:]])eval([;&|[:space:]]|$)' \
+    "$REPOSITORY_DIRECTORY/tests/netns/"*.sh \
+    "$REPOSITORY_DIRECTORY/tests/netns/lib/"*.sh >/dev/null; then
+    printf '%s\n' 'a public topology script contains eval' >&2
+    exit 1
+fi
 
 if [ -e "$MUTATION_MARKER" ]; then
     printf '%s\n' 'a preview/refusal path invoked a host-mutating command:' >&2

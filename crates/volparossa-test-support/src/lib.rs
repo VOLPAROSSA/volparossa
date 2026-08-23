@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 mod acceptance;
+mod netns_lifecycle;
 
 pub use acceptance::{
     ACCEPTANCE_CASE_COUNT, ACCEPTANCE_REPORT_SCHEMA_VERSION, ALL_ACCEPTANCE_IDS, AcceptanceCase,
@@ -17,6 +18,15 @@ pub use acceptance::{
     AcceptanceSuite, CompleteAcceptanceProvenance, MAX_ACCEPTANCE_BLOCKERS,
     MAX_ACCEPTANCE_EVIDENCE_PER_CASE, MAX_NATIVE_REVISIONS, MAX_REMAINING_OWNED_OBJECTS,
     PartialAcceptanceProvenance, ReportTimestamp, RequestedMode, Sha256Digest, SourceRevision,
+};
+pub use netns_lifecycle::{
+    BootstrapReady, CompletionError, Finished, Go, InnerLifecycleFrame, InnerLifecyclePhase,
+    InnerLifecycleState, LIFECYCLE_TOPOLOGY_SPEC, LIFECYCLE_TOPOLOGY_SPEC_SHA256,
+    LifecycleEofDisposition, LifecycleSha256, MAX_LIFECYCLE_ERROR_CODE_BYTES,
+    MAX_LIFECYCLE_FRAME_BYTES, MAX_LIFECYCLE_NAME_BYTES, MAX_LIFECYCLE_NAMESPACES,
+    MutationAuthorization, NamespaceIdentity, NetnsLifecycleError, OuterLifecycleFrame,
+    OuterLifecyclePhase, OuterLifecycleState, OwnedNamespace, RunId, Stop, StopReason,
+    TopologyReady,
 };
 
 use ed25519_dalek::SigningKey;

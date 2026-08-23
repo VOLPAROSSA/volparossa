@@ -30,7 +30,9 @@ set -- \
     tests/integration/validate-report.sh \
     tests/netns/run-benchmarks.sh \
     tests/netns/run-topology.sh \
+    tests/netns/test-lifecycle-contract.sh \
     tests/netns/topology.sh \
+    tests/netns/lib/lifecycle-contract.sh \
     native/volparossa-mpquic/scripts/build-upstream.sh \
     native/volparossa-mpquic/scripts/fetch-upstream.sh \
     native/volparossa-mpquic/scripts/test-sanitized-upstream.sh \
