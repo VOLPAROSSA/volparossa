@@ -10,9 +10,13 @@
 mod acceptance;
 
 pub use acceptance::{
-    ACCEPTANCE_CASE_COUNT, ACCEPTANCE_REPORT_SCHEMA_VERSION, ALL_ACCEPTANCE_IDS,
-    AcceptanceEnvironment, AcceptanceId, AcceptanceReport, AcceptanceReportError, AcceptanceResult,
-    AcceptanceStatus,
+    ACCEPTANCE_CASE_COUNT, ACCEPTANCE_REPORT_SCHEMA_VERSION, ALL_ACCEPTANCE_IDS, AcceptanceCase,
+    AcceptanceCaseResult, AcceptanceCleanup, AcceptanceEnvironment, AcceptanceEvidence,
+    AcceptanceEvidenceKind, AcceptanceExecution, AcceptanceHostState, AcceptanceId,
+    AcceptanceOverallResult, AcceptanceReason, AcceptanceReport, AcceptanceReportError,
+    AcceptanceSuite, CompleteAcceptanceProvenance, MAX_ACCEPTANCE_BLOCKERS,
+    MAX_ACCEPTANCE_EVIDENCE_PER_CASE, MAX_NATIVE_REVISIONS, MAX_REMAINING_OWNED_OBJECTS,
+    PartialAcceptanceProvenance, ReportTimestamp, RequestedMode, Sha256Digest, SourceRevision,
 };
 
 use ed25519_dalek::SigningKey;
