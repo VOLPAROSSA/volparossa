@@ -186,6 +186,9 @@ fn assert_invalid_response(raw: &RawExitForwardResponse) {
 fuzz_target!(|data: &[u8]| {
     exercise_request(data);
     exercise_response(data);
+    // Tag 7 is repeated bytes: another occurrence changes message semantics
+    // instead of creating an alternate encoding of the same response.
+    exercise_response(&[0x3a, 0x00]);
 
     let fetch = fetch_request();
     let fetch_bytes = fetch.encode_to_vec();

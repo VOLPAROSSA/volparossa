@@ -3,7 +3,7 @@ use volparossa_protocol::{decode_canonical, encode_canonical};
 
 pub fn exercise_message<T, F>(data: &[u8], maximum: usize, validate: F)
 where
-    T: Message + Default,
+    T: Message + Default + PartialEq,
     F: FnOnce(&T),
 {
     let decoded = decode_canonical::<T>(data, maximum);
@@ -19,12 +19,12 @@ where
 
     let canonical = encode_canonical(&message, maximum).expect("decoded message remains bounded");
     assert_eq!(canonical, data);
-    exercise_noncanonical_forms::<T>(&canonical, maximum);
+    exercise_noncanonical_forms::<T>(&message, &canonical, maximum);
 }
 
-fn exercise_noncanonical_forms<T>(canonical: &[u8], maximum: usize)
+fn exercise_noncanonical_forms<T>(message: &T, canonical: &[u8], maximum: usize)
 where
-    T: Message + Default,
+    T: Message + Default + PartialEq,
 {
     if canonical.len().saturating_add(3) <= maximum {
         let mut unknown_field = canonical.to_vec();
@@ -38,7 +38,12 @@ where
     if canonical.len().saturating_add(first_end) <= maximum {
         let mut duplicate = canonical.to_vec();
         duplicate.extend_from_slice(&canonical[..first_end]);
-        assert!(decode_canonical::<T>(&duplicate, maximum).is_err());
+        if let Ok(duplicated_message) = decode_canonical::<T>(&duplicate, maximum) {
+            assert!(
+                &duplicated_message != message,
+                "an accepted repeated field occurrence must change message semantics",
+            );
+        }
     }
 
     if let Some((second_tag, second_end)) = field_at(canonical, first_end) {

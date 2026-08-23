@@ -8,20 +8,22 @@ acceptance report.
 ## Unprivileged quality gate
 
 ```sh
-cargo fmt --all --check
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+cargo clippy --manifest-path fuzz/Cargo.toml --locked --offline --all-targets -- -D warnings
 ./scripts/check-rust-dependencies.sh
 ./packaging/test-collect-cargo-licenses.sh
 ```
 The dependency script verifies exact crates.io archives, reviewed local
 security patches, unchanged license files, complete vendor-tree hashes, and
-the locked feature graph before running cargo-deny's license/ban/source checks
-and a no-fetch `cargo-audit >= 0.22.1` scan. It records the local RustSec
-database commit. Debian's cargo-deny 0.18.3 rejects CVSS 4.0 vectors; a
-successful licenses/bans/sources subset alone does not replace the advisory
-gate. See `third_party/rust/README.md` for the narrowly scoped local
-backports and scanner exemptions.
+the locked root and standalone fuzz feature graphs before running cargo-deny's
+license/ban/source checks and no-fetch `cargo-audit >= 0.22.1` scans of both
+lockfiles. It records the local RustSec database commit. Debian's cargo-deny
+0.18.3 rejects CVSS 4.0 vectors; a successful licenses/bans/sources subset
+alone does not replace the advisory gate. See `third_party/rust/README.md` for
+the narrowly scoped local backports and scanner exemptions.
 
 The package-license regression proves both reviewed path overrides enter the
 distributable notices while workspace and arbitrary path packages do not.

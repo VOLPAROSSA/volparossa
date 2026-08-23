@@ -67,8 +67,19 @@ jobs:
       - name: Fetch locked Rust dependencies
         run: |
           cargo fetch --locked
+          cargo fetch --locked --manifest-path fuzz/Cargo.toml
           cargo fetch --locked \
             --manifest-path third_party/rust/backport-regressions/Cargo.toml
+
+      - name: Lint standalone fuzz package
+        run: |
+          cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+          cargo clippy \
+            --manifest-path fuzz/Cargo.toml \
+            --locked \
+            --offline \
+            --all-targets \
+            -- -D warnings
 
       - name: Prepare pinned RustSec advisory database
         env:

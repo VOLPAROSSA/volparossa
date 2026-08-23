@@ -130,6 +130,25 @@ check_audit_version() {
     }'
 }
 
+check_single_path_package() {
+    metadata=$1
+    package=$2
+    version=$3
+    manifest_path=$4
+
+    jq -e \
+        --arg package "$package" \
+        --arg version "$version" \
+        --arg manifest_path "$manifest_path" \
+        '[.packages[] | select(.name == $package)] as $matches |
+         ($matches | length) == 1 and
+         $matches[0].version == $version and
+         $matches[0].source == null and
+         $matches[0].manifest_path == $manifest_path' \
+        "$metadata" >/dev/null ||
+        fail "the locked fuzz graph does not use only the reviewed $package $version path package"
+}
+
 audit_tmp=$(mktemp -d "${TMPDIR:-/tmp}/volparossa-rustsec.XXXXXX")
 
 verify_vendor \
@@ -187,11 +206,35 @@ CARGO_TARGET_DIR="$audit_tmp/backport-target" \
         --offline
 pass 'all three locally backported RustSec regressions passed, including dnssec-ring NSEC3'
 
+command -v jq >/dev/null 2>&1 ||
+    fail 'jq is required to verify exact locked package provenance'
+
 cargo metadata --locked --offline --format-version 1 >/dev/null
+fuzz_metadata="$audit_tmp/fuzz-metadata.json"
+cargo metadata \
+    --manifest-path fuzz/Cargo.toml \
+    --locked \
+    --offline \
+    --format-version 1 >"$fuzz_metadata"
+
 hickory_features="$audit_tmp/hickory-features.txt"
 time_features="$audit_tmp/time-features.txt"
+fuzz_hickory_features="$audit_tmp/fuzz-hickory-features.txt"
+fuzz_time_features="$audit_tmp/fuzz-time-features.txt"
 cargo tree --locked --offline -e features -i hickory-proto >"$hickory_features"
 cargo tree --locked --offline -e features -i time >"$time_features"
+cargo tree \
+    --manifest-path fuzz/Cargo.toml \
+    --locked \
+    --offline \
+    -e features \
+    -i hickory-proto >"$fuzz_hickory_features"
+cargo tree \
+    --manifest-path fuzz/Cargo.toml \
+    --locked \
+    --offline \
+    -e features \
+    -i time >"$fuzz_time_features"
 
 grep -F "third_party/rust/vendor/hickory-proto-0.25.2" "$hickory_features" >/dev/null ||
     fail 'the locked graph does not use the reviewed hickory-proto vendor tree'
@@ -202,10 +245,36 @@ if grep -Eq 'dnssec-ring|dnssec-aws-lc-rs|volparossa-backport-regressions' "$hic
 fi
 pass 'locked Cargo graph uses both reviewed patches and keeps Hickory DNSSEC disabled'
 
+check_single_path_package \
+    "$fuzz_metadata" \
+    hickory-proto \
+    0.25.2 \
+    "$repository_root/third_party/rust/vendor/hickory-proto-0.25.2/Cargo.toml"
+check_single_path_package \
+    "$fuzz_metadata" \
+    time \
+    0.3.41 \
+    "$repository_root/third_party/rust/vendor/time-0.3.41/Cargo.toml"
+grep -F "third_party/rust/vendor/hickory-proto-0.25.2" "$fuzz_hickory_features" >/dev/null ||
+    fail 'the locked fuzz graph does not use the reviewed hickory-proto vendor tree'
+grep -F "third_party/rust/vendor/time-0.3.41" "$fuzz_time_features" >/dev/null ||
+    fail 'the locked fuzz graph does not use the reviewed time vendor tree'
+if grep -Eq \
+    'dnssec-ring|dnssec-aws-lc-rs|volparossa-backport-regressions' \
+    "$fuzz_hickory_features"; then
+    fail 'the fuzz feature graph unexpectedly enables Hickory DNSSEC'
+fi
+pass 'locked fuzz graph uses both reviewed patches exclusively and keeps Hickory DNSSEC disabled'
+
 cargo deny --version >/dev/null 2>&1 ||
     fail 'cargo-deny is required for license, ban, and source checks'
-cargo deny check --disable-fetch licenses bans sources
-pass 'cargo-deny license, ban, and source checks passed without fetching'
+cargo deny --locked --offline check licenses bans sources
+cargo deny \
+    --manifest-path fuzz/Cargo.toml \
+    --locked \
+    --offline \
+    check licenses bans sources
+pass 'cargo-deny checked root and fuzz licenses, bans, and sources without fetching'
 
 audit_command=${CARGO_AUDIT:-cargo-audit}
 case "$audit_command" in
@@ -229,4 +298,11 @@ printf 'INFO  offline RustSec database commit: %s\n' "$advisory_commit"
     --ignore RUSTSEC-2026-0009 \
     --ignore RUSTSEC-2026-0118 \
     --ignore RUSTSEC-2026-0119
-pass 'cargo-audit found no unremediated vulnerability; three version matches are locally patched'
+"$audit_command" audit \
+    --db "$advisory_database" \
+    --no-fetch \
+    --file fuzz/Cargo.lock \
+    --ignore RUSTSEC-2026-0009 \
+    --ignore RUSTSEC-2026-0118 \
+    --ignore RUSTSEC-2026-0119
+pass 'cargo-audit found no unremediated root or fuzz vulnerability; three version matches are locally patched'
