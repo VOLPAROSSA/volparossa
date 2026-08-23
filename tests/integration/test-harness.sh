@@ -135,18 +135,208 @@ expect_status 0 "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" --preview
 grep -F 'PREVIEW ONLY: no build or package output was written.' "$LAST_OUTPUT" >/dev/null
 expect_status 77 "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" --build
 
-invalid_report=$TEMPORARY_DIRECTORY/invalid-pass.json
+/bin/mkdir "$TEMPORARY_DIRECTORY/evidence"
+printf '%s\n' 'synthetic acceptance evidence' >"$TEMPORARY_DIRECTORY/evidence/proof.txt"
+proof_digest=$(sha256sum "$TEMPORARY_DIRECTORY/evidence/proof.txt" | awk '{print $1}')
+valid_all_report=$TEMPORARY_DIRECTORY/valid-all-pass.json
+jq --arg digest "$proof_digest" '
+    def evidence($id; $kind; $check):
+        {
+            id: $id,
+            kind: $kind,
+            sha256: $digest,
+            path: "evidence/proof.txt",
+            check: $check
+        };
+    .source_revision = ("1" * 40)
+    | .generated_at = "2026-08-23T12:00:02Z"
+    | .started_at = "2026-08-23T12:00:00Z"
+    | .finished_at = "2026-08-23T12:00:01Z"
+    | .execution = {
+        requested_mode: "EXECUTE",
+        attempted: true,
+        completed: true,
+        topology_created: true,
+        blockers: []
+      }
+    | .environment = {
+        debian_version: "13",
+        architecture: "amd64",
+        kernel: "6.12.0-test-amd64",
+        rustc: "rustc 1.85.0",
+        native_revisions: {}
+      }
+    | .host_state = {
+        captured: true,
+        before_digest: $digest,
+        after_digest: $digest,
+        unchanged: true
+      }
+    | .cleanup = {
+        attempted: true,
+        complete: true,
+        remaining_owned_objects: 0
+      }
+    | .cases |= map(
+        . as $case
+        | .selected = true
+        | .result = "PASS"
+        | .reason = null
+        | if .id == "A14" then
+              .evidence = [
+                  evidence("a14.agent"; "state"; "FORCED_AGENT_CRASH_CLEANUP"),
+                  evidence("a14.helper"; "state"; "FORCED_HELPER_CRASH_CLEANUP"),
+                  evidence("a14.native"; "state"; "FORCED_NATIVE_CRASH_CLEANUP"),
+                  evidence("a14.absent"; "state"; "OWNED_OBJECTS_ABSENT")
+              ]
+          elif .id == "A15" then
+              .evidence = [
+                  evidence("a15.host_before"; "digest"; "HOST_STATE_BEFORE"),
+                  evidence("a15.host_after"; "digest"; "HOST_STATE_AFTER")
+              ]
+          else
+              .evidence = [
+                  evidence((($case.id | ascii_downcase) + ".proof"); "state"; "CASE_ASSERTION")
+              ]
+          end
+      )
+    | .overall = "PASS"
+' "$all_report" >"$valid_all_report"
+expect_status 0 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$valid_all_report"
+
+valid_mptcp_report=$TEMPORARY_DIRECTORY/valid-mptcp-partial.json
 jq '
-    .overall = "PASS"
-    | .execution.attempted = true
-    | .execution.completed = true
-    | .host_state.captured = true
-    | .host_state.unchanged = true
-    | .cleanup.attempted = true
-    | .cleanup.complete = true
-    | .cleanup.remaining_owned_objects = 0
-' "$all_report" >"$invalid_report"
+    .suite = "mptcp"
+    | .execution.blockers = [
+        {"code":"PARTIAL_SUITE","message":"Only the MPTCP acceptance subset was selected."}
+      ]
+    | .cases |= map(
+        if (.id | IN("A02", "A03", "A04", "A14", "A15")) then .
+        else
+            .selected = false
+            | .result = "SKIPPED"
+            | .reason = {"code":"NOT_SELECTED","message":"The case is outside the selected suite."}
+            | .evidence = []
+        end
+      )
+    | .overall = "BLOCKED"
+' "$valid_all_report" >"$valid_mptcp_report"
+expect_status 0 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$valid_mptcp_report"
+assert_selected_ids "$valid_mptcp_report" 'A02,A03,A04,A14,A15'
+
+valid_partial_failure_report=$TEMPORARY_DIRECTORY/valid-mptcp-failure.json
+jq '
+    .cases[1].result = "FAIL"
+    | .cases[1].reason = {"code":"ASSERTION_FAILED","message":"The selected assertion failed."}
+    | .overall = "FAIL"
+' "$valid_mptcp_report" >"$valid_partial_failure_report"
+expect_status 0 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" \
+    "$valid_partial_failure_report"
+
+valid_mpquic_report=$TEMPORARY_DIRECTORY/valid-mpquic-partial.json
+jq '
+    .suite = "mpquic"
+    | .execution.blockers = [
+        {"code":"PARTIAL_SUITE","message":"Only the MPQUIC acceptance subset was selected."}
+      ]
+    | .cases |= map(
+        if (.id | IN("A06", "A07", "A14", "A15")) then .
+        else
+            .selected = false
+            | .result = "SKIPPED"
+            | .reason = {"code":"NOT_SELECTED","message":"The case is outside the selected suite."}
+            | .evidence = []
+        end
+      )
+    | .overall = "BLOCKED"
+' "$valid_all_report" >"$valid_mpquic_report"
+expect_status 0 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$valid_mpquic_report"
+assert_selected_ids "$valid_mpquic_report" 'A06,A07,A14,A15'
+
+valid_indeterminate_report=$TEMPORARY_DIRECTORY/valid-indeterminate-error.json
+jq '
+    .execution = {
+        requested_mode: "EXECUTE",
+        attempted: true,
+        completed: false,
+        topology_created: false,
+        blockers: [
+          {"code":"HOST_CAPTURE_UNAVAILABLE","message":"Host state could not be captured."}
+        ]
+      }
+    | .host_state = {
+        captured: false,
+        before_digest: null,
+        after_digest: null,
+        unchanged: null
+      }
+    | .cleanup = {
+        attempted: false,
+        complete: null,
+        remaining_owned_objects: null
+      }
+    | .cases |= map(
+        .result = "SKIPPED"
+        | .reason = {"code":"HOST_CAPTURE_UNAVAILABLE","message":"The case could not run safely."}
+        | .evidence = []
+      )
+    | .overall = "ERROR"
+' "$valid_all_report" >"$valid_indeterminate_report"
+expect_status 0 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" \
+    "$valid_indeterminate_report"
+
+invalid_report=$TEMPORARY_DIRECTORY/invalid-report.json
+jq '.unexpected = true' "$valid_all_report" >"$invalid_report"
 expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.host_state.after_digest = ("2" * 64)' "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.host_state.after_digest = ("2" * 64) | .host_state.unchanged = false | .overall = "FAIL"' \
+    "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq 'del(.cases[14].evidence[1])' "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq 'del(.cases[13].evidence[2])' "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.cleanup.complete = false | .cleanup.remaining_owned_objects = 1 | .overall = "FAIL"' \
+    "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.cases[1].evidence[0].id = .cases[0].evidence[0].id' \
+    "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.finished_at = "2026-08-23T11:59:59Z"' "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.generated_at = "2023-02-29T12:00:02Z"' "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.execution.blockers = [
+        {"code":"DUPLICATE","message":"First blocker."},
+        {"code":"DUPLICATE","message":"Second blocker."}
+    ] | .overall = "BLOCKED"' "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq '.cases[0].evidence[0].sha256 = ("0" * 64)' "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+jq --arg digest "$proof_digest" '
+    .cases[0] = {
+        id: "A01",
+        selected: true,
+        result: "PASS",
+        reason: null,
+        evidence: [{
+            id: "a01.invalid_pass",
+            kind: "state",
+            sha256: $digest,
+            path: "evidence/proof.txt",
+            check: "CASE_ASSERTION"
+        }]
+      }
+' "$valid_indeterminate_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+/bin/ln -s proof.txt "$TEMPORARY_DIRECTORY/evidence/symlink.txt"
+jq '.cases[0].evidence[0].path = "evidence/symlink.txt"' \
+    "$valid_all_report" >"$invalid_report"
+expect_status 1 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" "$invalid_report"
+/bin/ln -s "$valid_all_report" "$TEMPORARY_DIRECTORY/report-symlink.json"
+expect_status 66 "$REPOSITORY_DIRECTORY/tests/integration/validate-report.sh" \
+    "$TEMPORARY_DIRECTORY/report-symlink.json"
 sed -n 's|^[[:space:]]*\(\./[^[:space:]]*\).*|\1|p' "$REPOSITORY_DIRECTORY/justfile" | \
     while IFS= read -r recipe_target; do
         if [ ! -e "$REPOSITORY_DIRECTORY/${recipe_target#./}" ]; then

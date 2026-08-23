@@ -45,21 +45,27 @@
         "string",
         "null"
       ],
-      "format": "date-time"
+      "format": "date-time",
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
     },
     "started_at": {
       "type": [
         "string",
         "null"
       ],
-      "format": "date-time"
+      "format": "date-time",
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
     },
     "finished_at": {
       "type": [
         "string",
         "null"
       ],
-      "format": "date-time"
+      "format": "date-time",
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
     },
     "execution": {
       "type": "object",
@@ -89,6 +95,7 @@
         },
         "blockers": {
           "type": "array",
+          "maxItems": 32,
           "items": {
             "$ref": "#/$defs/reason"
           }
@@ -136,6 +143,7 @@
         },
         "native_revisions": {
           "type": "object",
+          "maxProperties": 32,
           "propertyNames": {
             "pattern": "^[A-Za-z0-9_.+-]{1,64}$"
           },
@@ -177,9 +185,24 @@
       "type": "array",
       "minItems": 15,
       "maxItems": 15,
-      "items": {
-        "$ref": "#/$defs/case"
-      }
+      "prefixItems": [
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A01"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A02"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A03"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A04"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A05"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A06"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A07"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A08"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A09"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A10"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A11"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A12"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A13"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A14"}}}]},
+        {"allOf":[{"$ref":"#/$defs/case"},{"properties":{"id":{"const":"A15"}}}]}
+      ],
+      "items": false
     },
     "cleanup": {
       "type": "object",
@@ -277,7 +300,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 512,
-          "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+          "pattern": "^(?!.*(^|/)(\\.|\\.\\.)(/|$))[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$"
         },
         "check": {
           "type": "string",
@@ -324,6 +347,7 @@
         },
         "evidence": {
           "type": "array",
+          "maxItems": 32,
           "items": {
             "$ref": "#/$defs/evidence"
           }
@@ -343,6 +367,22 @@
               "reason": {
                 "type": "null"
               },
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "FAIL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
               "evidence": {
                 "minItems": 1
               }
@@ -405,6 +445,21 @@
       },
       "then": {
         "properties": {
+          "suite": {
+            "const": "all"
+          },
+          "source_revision": {
+            "type": "string"
+          },
+          "generated_at": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": "string"
+          },
           "execution": {
             "properties": {
               "attempted": {
@@ -412,6 +467,30 @@
               },
               "completed": {
                 "const": true
+              },
+              "topology_created": {
+                "const": true
+              },
+              "blockers": {
+                "maxItems": 0
+              }
+            }
+          },
+          "environment": {
+            "properties": {
+              "debian_version": {
+                "const": "13"
+              },
+              "architecture": {
+                "const": "amd64"
+              },
+              "kernel": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rustc": {
+                "type": "string",
+                "minLength": 1
               }
             }
           },
@@ -419,6 +498,12 @@
             "properties": {
               "captured": {
                 "const": true
+              },
+              "before_digest": {
+                "type": "string"
+              },
+              "after_digest": {
+                "type": "string"
               },
               "unchanged": {
                 "const": true
@@ -441,6 +526,9 @@
           "cases": {
             "items": {
               "properties": {
+                "selected": {
+                  "const": true
+                },
                 "result": {
                   "const": "PASS"
                 }
@@ -529,6 +617,142 @@
               },
               "remaining_owned_objects": {
                 "type": "null"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "attempted": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source_revision": {
+            "type": "string"
+          },
+          "generated_at": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": "string"
+          },
+          "environment": {
+            "properties": {
+              "debian_version": {
+                "const": "13"
+              },
+              "architecture": {
+                "const": "amd64"
+              },
+              "kernel": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rustc": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "requested_mode": {
+                "const": "PREVIEW"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "attempted": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "completed": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "attempted": {
+                "const": true
+              },
+              "topology_created": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution": {
+            "properties": {
+              "topology_created": {
+                "const": false
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "cases": {
+            "items": {
+              "if": {
+                "properties": {
+                  "selected": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "result": {
+                    "enum": [
+                      "SKIPPED",
+                      "ERROR"
+                    ]
+                  }
+                }
               }
             }
           }

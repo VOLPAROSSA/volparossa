@@ -127,9 +127,17 @@ validator `tests/integration/validate-report.sh`.
 
 Every report lists A01 through A15 exactly once. A case can be `PASS` only with one or more
 content-addressed evidence objects. An overall `PASS` additionally requires an attempted and
-completed execution, captured and unchanged host state, complete cleanup, zero remaining owned
-objects, and all fifteen cases passing. Evidence paths are relative, may not traverse upward, and
-must identify their producer check and SHA-256 digest.
+completed full-suite execution on Debian 13 amd64, complete source/time provenance, a created
+topology, captured and unchanged host state, complete cleanup, zero remaining owned objects, and
+all fifteen cases passing. MPTCP selects A02-A04/A14/A15 and MPQUIC selects A06-A07/A14/A15; a
+successful subset remains overall `BLOCKED` with `PARTIAL_SUITE` because it is not full acceptance.
+
+Evidence paths use bounded ASCII components below the report directory. The validator rejects
+report or evidence symlinks, rehashes every readable regular evidence file, and compares its actual
+SHA-256 with the report. A14 cannot pass without separate agent, helper, native, and owned-object
+cleanup checks. A15 cannot pass unless fixed before/after evidence entries bind to present, equal
+host-state digests. A case cannot pass or fail before a topology exists, and missing post-attempt
+host or cleanup state is an `ERROR`, not a successful or merely blocked result.
 
 The current default commands are safe previews:
 
@@ -147,11 +155,13 @@ blocked. Consequently these commands intentionally emit `overall: "BLOCKED"`, ma
 `SKIPPED` with a reason, and exit 77. Exit 64 denotes invalid arguments and 69 denotes a missing
 local report prerequisite. Exit 77 is not a passing or successful acceptance result.
 
-`tests/integration/test-harness.sh` is unprivileged and exercises argument parsing, schema
-semantics, `--only mptcp|mpquic` selection, fail-closed execution requests, and non-mutation
-previews with command shims. The root-capable topology currently refuses both arbitrary commands
-and standalone cleanup. Privileged execution stays blocked until a fixed reviewed driver can own
-setup, evidence finalization, and teardown in one trapped process.
+The Rust report-model tests compile the normative Draft 2020-12 schema and validate full, MPTCP,
+and MPQUIC model reports against it. `tests/integration/test-harness.sh` is unprivileged and
+exercises argument parsing, strict semantic and artifact validation, `--only mptcp|mpquic`
+selection, false-PASS refusals, fail-closed execution requests, and non-mutation previews with
+command shims. The root-capable topology currently refuses both arbitrary commands and standalone
+cleanup. Privileged execution stays blocked until a fixed reviewed driver can own setup, evidence
+finalization, and teardown in one trapped process.
 
 ## Native and performance gates
 
