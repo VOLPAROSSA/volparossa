@@ -4144,8 +4144,8 @@ name = "volparossa-protocol"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "prost",
- "rand_core 0.6.4",
  "sha2",
  "thiserror 2.0.19",
  "volparossa-core",

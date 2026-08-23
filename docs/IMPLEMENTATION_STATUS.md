@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 ## Repository and engineering baseline
 
@@ -121,26 +121,38 @@ Last updated: 2026-08-21
   cooling gate, while invalid/backward/overflowing time loses it fail closed. Its opaque
   `BoundPreselectionTranscriptBatch` records no authenticated
   connection/socket, send/arrival event, direct prefix, RTT, reachability, Fresh validity, capacity
-  authority, reservation, route-session, or dispatch authority. Discovery now composes two
-  callerless, role-gated v3 request-response wire behaviours over unchanged exact A0 canonical
-  bytes: Client outbound/Relay inbound for direct Relay receipts or forwarded Exit attestations,
+  authority, reservation, route-session, or dispatch authority. The completed affine A1a owner
+  retains the original non-cloned candidate snapshot as a sibling, never inside that endpoint-free
+  transcript batch, so a later exact-set owner need not reconstruct the candidate union. Any
+  advertised control endpoints in that existing actor-private snapshot never enter the transcript
+  batch or opaque transport proof. Discovery now composes two role-gated v3 request-response wire
+  behaviours over unchanged exact A0 canonical bytes: Client outbound/Relay inbound for direct
+  Relay receipts or forwarded Exit attestations,
   and Relay outbound/Exit inbound for forwarded Exit requests and Exit receipts. Requests and
   receipts are bounded to 4096 bytes, forwarded attestations to 8192 bytes; both behaviours use an
   exact five-second timeout, 64 streams, distinct event/request-ID domains, no legacy aliases and
   no retry. Their opaque wrappers and codecs enforce only state-free canonical/version/hop
-  type/role/payload/envelope shape on read and write. There is still no production root or
-  lifecycle owner, producer, signer, application handler, sampler, service transport caller,
-  responder/forwarder, pending registry, request correlation, cryptographic verification/replay,
-  A1a or connection-provenance join, or conversion into fresh local evidence.
-  A future A1c boundary must exact-set bind real request/connection provenance before phase-A
-  evidence. A first dormant private A1c precursor now passively tracks authenticated libp2p
+  type/role/payload/envelope shape on read and write. A dormant service seam derives the target and
+  family from an exact client-hop request, admits one active dispatch, captures a connection witness
+  immediately before send, and can cancel it or bind a typed response event after internally
+  stamping arrival. Binding rechecks the exact service, request ID, peer, event-local connection,
+  half-open deadline, uniqueness, generation and native prefix; the affine bound result exposes no
+  field or decomposition. Explicit cancellation consumes the exact originating token. Drop, a
+  non-response event, unavailable pre-correlation wall time, or a service/ID/peer mismatch leaves
+  the only slot occupied fail closed. Exact correlation consumes it before later time or provenance
+  checks. There is still no production root or lifecycle owner, producer, signer,
+  application handler, sampler, runtime/agent caller, upstream sender, responder/forwarder,
+  cryptographic verification/replay, A1a exact-set join, or conversion into fresh local evidence.
+  A future A1c boundary must consume and exact-set join these real request/connection proofs before
+  phase-A evidence. A first dormant private A1c precursor now passively tracks authenticated libp2p
   establish/address-change/close lineage under the existing 384-global/four-per-peer ceilings.
   It counts unusable siblings for uniqueness, accepts prefixes only from exact direct public-IP
   TCP or QUIC-v1 remote shapes, retains only the opaque normalized token plus the same native three
   or six prefix bytes (no full IP/multiaddress), generation-invalidates every address change, and
   permanently poisons and clears on ambiguous lineage or overflow. Its affine
   witness/binding rechecks the exact Peer ID, `ConnectionId`, non-zero generation and native /24 or
-  /48, but has no public service accessor, request send, A1a join or Fresh-evidence mint. The
+  /48. It has no generic registry/address/prefix accessor; only the purpose-specific client seam
+  may consume its affine witness. There is still no A1a join or Fresh-evidence mint. The
   fake-only 1-200-record evidence boundary and prospective planner remain separate;
   no checkbox is closed. Production still publishes no usable relay/exit capability, route
   finalization still fails closed with `ProbeEvidenceUnavailable`, and no production evidence

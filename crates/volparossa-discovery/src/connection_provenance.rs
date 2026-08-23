@@ -95,7 +95,6 @@ struct ConnectionRecord {
 
 /// Affine proof that exactly one connection to one peer had the requested native family.
 #[must_use = "a connection witness must be consumed by its registry"]
-#[allow(dead_code, reason = "dormant A1c0 boundary has no service accessor")]
 pub(super) struct ConnectionWitness {
     peer_id: PeerId,
     connection_id: ConnectionId,
@@ -105,7 +104,10 @@ pub(super) struct ConnectionWitness {
 
 /// Affine observation rebound to the still-current registry generation.
 #[must_use = "a bound connection observation must stay in its owning A1c transaction"]
-#[allow(dead_code, reason = "dormant A1c0 boundary has no service accessor")]
+#[allow(
+    dead_code,
+    reason = "fields remain sealed inside the opaque bound A1c3 transport proof"
+)]
 pub(super) struct BoundConnectionObservation {
     peer_id: PeerId,
     connection_id: ConnectionId,
@@ -251,7 +253,6 @@ impl ConnectionRegistry {
         }
     }
 
-    #[allow(dead_code, reason = "dormant A1c0 boundary has no service accessor")]
     fn unique_witness(&self, peer_id: PeerId, family: IpFamily) -> Option<ConnectionWitness> {
         if self.poisoned {
             return None;
@@ -276,7 +277,6 @@ impl ConnectionRegistry {
         })
     }
 
-    #[allow(dead_code, reason = "dormant A1c0 boundary has no service accessor")]
     #[allow(
         clippy::needless_pass_by_value,
         reason = "the affine witness must be consumed exactly once at the binding boundary"
@@ -349,7 +349,6 @@ impl ConnectionProvenanceBehaviour {
         }
     }
 
-    #[allow(dead_code, reason = "dormant A1c0 boundary has no service accessor")]
     pub(super) fn unique_witness(
         &self,
         peer_id: PeerId,
@@ -358,7 +357,6 @@ impl ConnectionProvenanceBehaviour {
         self.registry.unique_witness(peer_id, family)
     }
 
-    #[allow(dead_code, reason = "dormant A1c0 boundary has no service accessor")]
     pub(super) fn bind(
         &self,
         witness: ConnectionWitness,
@@ -1015,6 +1013,7 @@ mod tests {
         ] {
             assert!(!production.contains(getter), "forbidden getter {getter}");
         }
+        assert!(!production.contains("into_observed_prefix"));
     }
 
     #[test]
@@ -1065,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn private_composition_has_no_public_service_escape() {
+    fn private_composition_has_no_generic_registry_or_address_escape() {
         let crate_source = include_str!("lib.rs");
         let private_module = concat!("mod connection_", "provenance;");
         let behaviour_field = concat!("connection_provenance: ConnectionProvenance", "Behaviour");

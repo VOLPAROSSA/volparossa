@@ -543,8 +543,7 @@ struct BoundTranscriptRecord {
 )]
 pub(super) struct PendingPreselectionAttempt {
     gate: PreselectionAttemptGate,
-    subjects: PreselectionSubjectSet,
-    policy: super::RouteCandidatePolicySnapshot,
+    snapshot: RouteCandidateSnapshot,
     transport: Transport,
     address_family: ObservationAddressFamily,
     batch_id: [u8; BATCH_ID_LENGTH],
@@ -580,8 +579,7 @@ pub(super) enum PreselectionResponseOutcome {
 )]
 pub(super) struct ReadyPreselectionAttempt {
     gate: PreselectionAttemptGate,
-    subjects: PreselectionSubjectSet,
-    policy: super::RouteCandidatePolicySnapshot,
+    snapshot: RouteCandidateSnapshot,
     transport: Transport,
     address_family: ObservationAddressFamily,
     batch_id: [u8; BATCH_ID_LENGTH],
@@ -604,8 +602,6 @@ pub(super) struct ReadyPreselectionAttempt {
     )
 )]
 pub(super) struct BoundPreselectionTranscriptBatch {
-    subjects: PreselectionSubjectSet,
-    policy: super::RouteCandidatePolicySnapshot,
     transport: Transport,
     address_family: ObservationAddressFamily,
     batch_id: [u8; BATCH_ID_LENGTH],
@@ -626,6 +622,7 @@ pub(super) struct BoundPreselectionTranscriptBatch {
     )
 )]
 pub(super) struct CompletedPreselectionAttempt {
+    snapshot: RouteCandidateSnapshot,
     batch: BoundPreselectionTranscriptBatch,
     gate: CoolingPreselectionAttemptGate,
 }
@@ -638,8 +635,7 @@ pub(super) struct CompletedPreselectionAttempt {
     )
 )]
 struct ValidatedAttemptInput {
-    subjects: PreselectionSubjectSet,
-    policy: super::RouteCandidatePolicySnapshot,
+    snapshot: RouteCandidateSnapshot,
     transport: Transport,
     address_family: ObservationAddressFamily,
     preselection_capacity_ceiling: Bandwidth,
@@ -680,8 +676,7 @@ struct AttemptStart {
 )]
 #[derive(Clone, Copy)]
 struct RequestPreparation<'a> {
-    subjects: &'a PreselectionSubjectSet,
-    policy: super::RouteCandidatePolicySnapshot,
+    snapshot: &'a RouteCandidateSnapshot,
     transport: Transport,
     address_family: ObservationAddressFamily,
     batch_id: [u8; BATCH_ID_LENGTH],
@@ -902,8 +897,7 @@ impl PreselectionAttemptGate {
         let first_challenge = first_plan.challenge;
         let pending = match prepare_request(
             &RequestPreparation {
-                subjects: &validated.subjects,
-                policy: validated.policy,
+                snapshot: &validated.snapshot,
                 transport: validated.transport,
                 address_family: validated.address_family,
                 batch_id: entropy.batch_id,
@@ -928,8 +922,7 @@ impl PreselectionAttemptGate {
         }
         Ok(PendingPreselectionAttempt {
             gate: self,
-            subjects: validated.subjects,
-            policy: validated.policy,
+            snapshot: validated.snapshot,
             transport: validated.transport,
             address_family: validated.address_family,
             batch_id: entropy.batch_id,
@@ -1060,8 +1053,7 @@ impl PendingPreselectionAttempt {
             };
             let next_pending = match prepare_request(
                 &RequestPreparation {
-                    subjects: &self.subjects,
-                    policy: self.policy,
+                    snapshot: &self.snapshot,
                     transport: self.transport,
                     address_family: self.address_family,
                     batch_id: self.batch_id,
@@ -1103,8 +1095,7 @@ impl PendingPreselectionAttempt {
         Ok(PreselectionResponseOutcome::Ready(
             ReadyPreselectionAttempt {
                 gate: self.gate,
-                subjects: self.subjects,
-                policy: self.policy,
+                snapshot: self.snapshot,
                 transport: self.transport,
                 address_family: self.address_family,
                 batch_id: self.batch_id,
@@ -1275,8 +1266,7 @@ impl ReadyPreselectionAttempt {
         }
         let ReadyPreselectionAttempt {
             gate,
-            subjects,
-            policy,
+            snapshot,
             transport,
             address_family,
             batch_id,
@@ -1303,9 +1293,8 @@ impl ReadyPreselectionAttempt {
             });
         };
         Ok(CompletedPreselectionAttempt {
+            snapshot,
             batch: BoundPreselectionTranscriptBatch {
-                subjects,
-                policy,
                 transport,
                 address_family,
                 batch_id,
@@ -1435,16 +1424,8 @@ fn validate_attempt_input(
         transport,
         address_family,
     )?;
-    let RouteCandidateSnapshot {
-        captured_at_ms: _,
-        policy,
-        direct_relays: _,
-        forwarded_exits: _,
-        preselection_subjects,
-    } = snapshot;
     Ok(ValidatedAttemptInput {
-        subjects: preselection_subjects,
-        policy,
+        snapshot,
         transport,
         address_family,
         preselection_capacity_ceiling,
@@ -1782,8 +1763,7 @@ fn prepare_request(
     ordinal: u8,
 ) -> Result<PendingRequest, PreselectionAttemptError> {
     let RequestPreparation {
-        subjects,
-        policy,
+        snapshot,
         transport,
         address_family,
         batch_id,
@@ -1792,6 +1772,8 @@ fn prepare_request(
         attempt_deadline_ms,
         attempt_deadline_mono,
     } = *preparation;
+    let subjects = &snapshot.preselection_subjects;
+    let policy = snapshot.policy;
     let subject = subjects
         .entries
         .get(plan.subject)
@@ -1961,6 +1943,49 @@ mod tests {
 
     fn bandwidth(value: u32) -> Bandwidth {
         Bandwidth::new(value, value).expect("valid test bandwidth")
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct SnapshotCandidateUnionIdentity {
+        captured_at_ms: u64,
+        policy: super::super::RouteCandidatePolicySnapshot,
+        direct_relays: (*const DirectRelayCandidateSnapshot, usize, usize),
+        forwarded_exits: (*const ForwardedExitCandidateSnapshot, usize, usize),
+        subject_entries: (*const PreselectionSubjectBinding, usize, usize),
+        forwarded_pairs: (*const (usize, usize), usize, usize),
+    }
+
+    fn snapshot_candidate_union_identity(
+        snapshot: &RouteCandidateSnapshot,
+    ) -> SnapshotCandidateUnionIdentity {
+        assert!(!snapshot.direct_relays.is_empty());
+        assert!(!snapshot.forwarded_exits.is_empty());
+        assert!(!snapshot.preselection_subjects.entries.is_empty());
+        assert!(!snapshot.preselection_subjects.forwarded_pairs.is_empty());
+        SnapshotCandidateUnionIdentity {
+            captured_at_ms: snapshot.captured_at_ms,
+            policy: snapshot.policy,
+            direct_relays: (
+                snapshot.direct_relays.as_ptr(),
+                snapshot.direct_relays.len(),
+                snapshot.direct_relays.capacity(),
+            ),
+            forwarded_exits: (
+                snapshot.forwarded_exits.as_ptr(),
+                snapshot.forwarded_exits.len(),
+                snapshot.forwarded_exits.capacity(),
+            ),
+            subject_entries: (
+                snapshot.preselection_subjects.entries.as_ptr(),
+                snapshot.preselection_subjects.entries.len(),
+                snapshot.preselection_subjects.entries.capacity(),
+            ),
+            forwarded_pairs: (
+                snapshot.preselection_subjects.forwarded_pairs.as_ptr(),
+                snapshot.preselection_subjects.forwarded_pairs.len(),
+                snapshot.preselection_subjects.forwarded_pairs.capacity(),
+            ),
+        }
     }
 
     fn attempt_start_at(
@@ -2456,11 +2481,15 @@ mod tests {
         else {
             panic!("maximum bounded subject set must begin");
         };
-        assert_eq!(pending.subjects.entries.len(), MAXIMUM_ENVELOPES);
-        let (control, exit) = pending.subjects.forwarded_pairs[0];
+        assert_eq!(
+            pending.snapshot.preselection_subjects.entries.len(),
+            MAXIMUM_ENVELOPES
+        );
+        let (control, exit) = pending.snapshot.preselection_subjects.forwarded_pairs[0];
         assert!(
             pending
-                .subjects
+                .snapshot
+                .preselection_subjects
                 .entries
                 .iter()
                 .enumerate()
@@ -2504,15 +2533,14 @@ mod tests {
             assert_eq!(
                 decoded_request.actor.as_ref(),
                 Some(&actor_binding(
-                    &pending.subjects.entries[pending.pending.subject]
+                    &pending.snapshot.preselection_subjects.entries[pending.pending.subject]
                 ))
             );
             assert_eq!(
                 decoded_request.forwarded_control,
-                pending
-                    .pending
-                    .forwarded_control
-                    .map(|index| actor_binding(&pending.subjects.entries[index]))
+                pending.pending.forwarded_control.map(|index| {
+                    actor_binding(&pending.snapshot.preselection_subjects.entries[index])
+                })
             );
             expected.push(ExpectedBoundRecord {
                 batch_id: dispatch.batch_id,
@@ -2614,19 +2642,19 @@ mod tests {
         terminal_ms: u64,
         terminal_mono: Instant,
     ) {
-        assert_eq!(completed.batch.subjects.entries.len(), 4);
+        assert_eq!(completed.snapshot.preselection_subjects.entries.len(), 4);
         assert_eq!(
-            completed.batch.subjects.entries.len(),
+            completed.snapshot.preselection_subjects.entries.len(),
             completed.batch.transcripts.len() + 1,
             "the forwarding control is retained as a subject but not a second request"
         );
         assert_eq!(
-            completed.batch.policy.version(),
-            completed.batch.subjects.entries[0].policy_version
+            completed.snapshot.policy.version(),
+            completed.snapshot.preselection_subjects.entries[0].policy_version
         );
         assert_eq!(
-            completed.batch.policy.hash(),
-            completed.batch.subjects.entries[0].policy_hash
+            completed.snapshot.policy.hash(),
+            completed.snapshot.preselection_subjects.entries[0].policy_hash
         );
         assert_eq!(completed.batch.transport, Transport::UdpSinglePath);
         assert_eq!(
@@ -2649,6 +2677,50 @@ mod tests {
         assert_eq!(completed.batch.preselection_capacity_ceiling, bandwidth(80));
         assert_eq!(completed.gate.ready_at_ms, terminal_ms + COOLDOWN_MS);
         assert_eq!(completed.gate.ready_at, terminal_mono + COOLDOWN);
+    }
+
+    #[tokio::test]
+    async fn original_snapshot_candidate_union_is_affinely_retained_through_finish() {
+        let fixture = preselection_snapshot_fixture(2, false).await;
+        let original = snapshot_candidate_union_identity(&fixture.snapshot);
+        let signers = fixture.signers;
+        let started_at_ms = fixture.now_ms;
+        let started_at_mono = Instant::now();
+        let Ok(pending) = PreselectionAttemptGate::new()
+            .expect("gate")
+            .begin_at_with_entropy_for_test(
+                fixture.snapshot,
+                attempt_start_at(
+                    Transport::UdpSinglePath,
+                    ObservationAddressFamily::Ipv4,
+                    bandwidth(10),
+                    bandwidth(100),
+                    bandwidth(80),
+                    started_at_ms,
+                    started_at_mono,
+                ),
+                |request_count| Ok(minted_entropy(request_count, 81)),
+            )
+        else {
+            panic!("valid transcript attempt");
+        };
+        assert_eq!(
+            snapshot_candidate_union_identity(&pending.snapshot),
+            original
+        );
+        let (ready, _) =
+            advance_authentic_responses(pending, &signers, started_at_ms, started_at_mono);
+        assert_eq!(snapshot_candidate_union_identity(&ready.snapshot), original);
+        let Ok(completed) = ready.finish_at(
+            started_at_ms + 1_600,
+            started_at_mono + Duration::from_millis(1_600),
+        ) else {
+            panic!("ready attempt finishes with its original snapshot");
+        };
+        assert_eq!(
+            snapshot_candidate_union_identity(&completed.snapshot),
+            original
+        );
     }
 
     #[tokio::test]
@@ -2676,9 +2748,14 @@ mod tests {
         else {
             panic!("valid transcript attempt");
         };
-        assert_exact_persisted_payload_hashes(&pending.subjects, &persisted_payload_hashes);
-        let (expected_control, expected_exit) = pending.subjects.forwarded_pairs[0];
-        let expected_direct_subjects = (0..pending.subjects.entries.len() - 1)
+        assert_exact_persisted_payload_hashes(
+            &pending.snapshot.preselection_subjects,
+            &persisted_payload_hashes,
+        );
+        let (expected_control, expected_exit) =
+            pending.snapshot.preselection_subjects.forwarded_pairs[0];
+        let expected_direct_subjects = (0..pending.snapshot.preselection_subjects.entries.len()
+            - 1)
             .filter(|subject| *subject != expected_control)
             .collect::<HashSet<_>>();
         let (ready, expected) =
@@ -3154,8 +3231,8 @@ mod tests {
                 |request_count| Ok(minted_entropy(request_count, 231)),
             )
             .unwrap_or_else(|_| panic!("still-live local authority must begin"));
-        let (_, exit_index) = pending.subjects.forwarded_pairs[0];
-        let exit = &pending.subjects.entries[exit_index];
+        let (_, exit_index) = pending.snapshot.preselection_subjects.forwarded_pairs[0];
+        let exit = &pending.snapshot.preselection_subjects.entries[exit_index];
         assert!(
             exit.local_discovery_authority_expires_at_ms < exit.capability_expires_at_ms,
             "old discovery request deadline is deliberately stricter than the canonical actor cap"
@@ -3515,7 +3592,10 @@ mod tests {
                 )
                 .unwrap_or_else(|_| panic!("signed scope {transport:?}/{family:?} must begin"));
             assert_eq!(calls.get(), 1);
-            assert_exact_persisted_payload_hashes(&pending.subjects, &persisted);
+            assert_exact_persisted_payload_hashes(
+                &pending.snapshot.preselection_subjects,
+                &persisted,
+            );
             let decoded = request(&pending);
             let scope = decoded.scope.expect("request scope");
             assert_eq!(scope.transport, transport as i32);
@@ -3712,8 +3792,7 @@ mod tests {
             "pub(super) struct PendingPreselectionAttempt {",
             &[
                 "gate: PreselectionAttemptGate,",
-                "subjects: PreselectionSubjectSet,",
-                "policy: super::RouteCandidatePolicySnapshot,",
+                "snapshot: RouteCandidateSnapshot,",
                 "transport: Transport,",
                 "address_family: ObservationAddressFamily,",
                 "batch_id: [u8; BATCH_ID_LENGTH],",
@@ -3726,6 +3805,38 @@ mod tests {
                 "pending: PendingRequest,",
                 "remaining: VecDeque<RequestPlan>,",
                 "bound: Vec<BoundTranscriptRecord>,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "struct ValidatedAttemptInput {",
+            &[
+                "snapshot: RouteCandidateSnapshot,",
+                "transport: Transport,",
+                "address_family: ObservationAddressFamily,",
+                "preselection_capacity_ceiling: Bandwidth,",
+                "attempt_started_at_ms: u64,",
+                "attempt_deadline_ms: u64,",
+                "attempt_started_at_mono: Instant,",
+                "attempt_deadline_mono: Instant,",
+                "minimum_capacity: Bandwidth,",
+                "other_relay_subjects: Vec<usize>,",
+                "control_subject: usize,",
+                "exit_subject: usize,",
+            ],
+        );
+        assert_source_fields(
+            product,
+            "struct RequestPreparation<'a> {",
+            &[
+                "snapshot: &'a RouteCandidateSnapshot,",
+                "transport: Transport,",
+                "address_family: ObservationAddressFamily,",
+                "batch_id: [u8; BATCH_ID_LENGTH],",
+                "created_at_ms: u64,",
+                "prepared_at_mono: Instant,",
+                "attempt_deadline_ms: u64,",
+                "attempt_deadline_mono: Instant,",
             ],
         );
         assert!(!product.contains("Vec<PendingRequest>"));
@@ -3745,8 +3856,7 @@ mod tests {
             "pub(super) struct ReadyPreselectionAttempt {",
             &[
                 "gate: PreselectionAttemptGate,",
-                "subjects: PreselectionSubjectSet,",
-                "policy: super::RouteCandidatePolicySnapshot,",
+                "snapshot: RouteCandidateSnapshot,",
                 "transport: Transport,",
                 "address_family: ObservationAddressFamily,",
                 "batch_id: [u8; BATCH_ID_LENGTH],",
@@ -3765,8 +3875,6 @@ mod tests {
             product,
             "pub(super) struct BoundPreselectionTranscriptBatch {",
             &[
-                "subjects: PreselectionSubjectSet,",
-                "policy: super::RouteCandidatePolicySnapshot,",
                 "transport: Transport,",
                 "address_family: ObservationAddressFamily,",
                 "batch_id: [u8; BATCH_ID_LENGTH],",
@@ -3783,6 +3891,7 @@ mod tests {
             product,
             "pub(super) struct CompletedPreselectionAttempt {",
             &[
+                "snapshot: RouteCandidateSnapshot,",
                 "batch: BoundPreselectionTranscriptBatch,",
                 "gate: CoolingPreselectionAttemptGate,",
             ],
@@ -3864,6 +3973,17 @@ mod tests {
         ] {
             assert!(!product.contains(forbidden), "affine escape: {forbidden}");
         }
+        assert!(!product.contains("let RouteCandidateSnapshot {"));
+        assert_eq!(
+            product.matches("snapshot: RouteCandidateSnapshot,").count(),
+            8
+        );
+        assert_eq!(
+            product
+                .matches("snapshot: &'a RouteCandidateSnapshot,")
+                .count(),
+            1
+        );
         assert_eq!(product.matches("pub(super) struct ").count(), 11);
         assert_eq!(product.matches("pub(super) enum ").count(), 2);
         assert_eq!(product.matches("pub(super) fn ").count(), 9);
