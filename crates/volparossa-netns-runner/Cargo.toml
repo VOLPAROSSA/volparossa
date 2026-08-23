@@ -10,7 +10,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-nix.workspace = true
+nix = { workspace = true, features = ["sched"] }
 rand_core.workspace = true
 rustix.workspace = true
 socket2.workspace = true

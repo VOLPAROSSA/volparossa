@@ -195,22 +195,42 @@ has been reaped. All selected datapath cases remain `SKIPPED` with `LIFECYCLE_ON
 and process result remain `BLOCKED`/77. The current blocked entry point has not produced that
 evidence yet.
 
-The test-only `volparossa-netns-runner` now owns an initial, deliberately non-mutating process
-boundary. It re-executes only `/proc/self/exe` with one private fixed selector, clears the child
-environment, uses separate unnamed descriptor-free `SOCK_SEQPACKET` provisioning and lifecycle
-channels, fences unrelated inherited descriptors, and provisions exactly one `LAUNCH_CONTEXT`
-within a fixed child-side timeout. The
-child binds kernel peer PID/UID/GID to its live parent, requires the parent's executable inode to
-match its own, and accepts only the exact outer `--run` invocation; an external socketpair parent
-is rejected. It retains exact-child ownership through a bounded synchronous reap attempt; on
-timeout or wait error it transfers the `Child` and sole spawn permit to its exact-child reaper
-instead of detaching the process. Its current `--run` path verifies EOF-before-`GO` and unchanged
-supervisor namespace identities, then honestly returns `BLOCKED`/77. Command/environment shims
-prove that it invokes no namespace or networking utility. It is orchestration evidence only and
-cannot emit acceptance evidence.
+The test-only `volparossa-netns-runner` now owns an initial, deliberately pre-`GO` isolation
+boundary which creates no network-topology objects. It re-executes only `/proc/self/exe` with one private fixed selector, clears the child
+environment, uses three separate unnamed descriptor-free `SOCK_SEQPACKET` provisioning,
+bootstrap-control, and lifecycle channels, fences unrelated inherited descriptors, and provisions
+exactly one `LAUNCH_CONTEXT` within a fixed child-side timeout. The child binds kernel peer
+PID/UID/GID on all three channels to its live parent, requires the parent's executable inode to
+match its own, accepts only the exact outer `--run` invocation, and installs a verified
+parent-death `SIGKILL` before isolation; an external socketpair parent is rejected.
 
-Privileged execution stays blocked until that fixed reviewed supervisor additionally owns isolated
-bootstrap, setup, evidence finalization, process-tree containment, and teardown as one operation.
+The single-task child performs one direct `unshare` of anonymous user, mount, and network
+namespaces. It does not enter a new PID namespace. The outer immediately retains a pidfd and an
+anchored `/proc/<pid>` directory, then pins the exact user, mount, network, PID, and
+PID-for-children namespace descriptors before writing `deny` to `setgroups` and one exact
+`0 <outer-id> 1` extent to each ID map. The strict run-bound control exchange is
+`NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`, `MAPPINGS_VERIFIED`; both sides independently read back
+the mappings and namespace identities before closing without `GO`. A fixed set of kernel-policy
+denials return separate honest `BLOCKED` outcomes for failure before namespace creation and after
+isolation but before complete mapping, without a fallback. The portable real-process test accepts
+either blocked failure or the verified-mapping result, so a green generic CI job proves fail-closed
+behaviour but not that its kernel permitted namespace creation. Positive live-isolation evidence
+requires a capability-enabled Debian 13 job that specifically requires the verified-mapping
+outcome.
+
+The runner retains exact-child and namespace-FD ownership through a bounded synchronous reap
+attempt; on timeout or wait error it transfers the `Child`, pins, and sole spawn permit to its
+exact-child reaper instead of detaching the process. Its current `--run` path verifies
+EOF-before-`GO`, repeated exact reaping, and unchanged outer namespace, mount-table, and route-table
+observations, then honestly returns `BLOCKED`/77. Command/environment shims prove that it invokes
+no namespace or networking utility. It still has no PID namespace/PID 1, private `/proc` or `/run`,
+general root-filesystem or supplementary-group isolation, signal-driven five-frame lifecycle,
+topology mutation, or acceptance evidence.
+
+Privileged execution stays blocked until that fixed reviewed supervisor additionally owns
+PID-namespace/PID-1 bootstrap, private mount propagation and private `/run` and `/proc`, signal
+supervision, setup, evidence finalization, complete process-tree containment, and teardown as one
+operation.
 It may not accept a caller-selected command, executable, backend, timeout, cleanup prefix, or
 network-object name.
 

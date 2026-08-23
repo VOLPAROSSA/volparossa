@@ -1,4 +1,4 @@
-//! Real-process regressions for the fixed, non-mutating supervisor boundary.
+//! Real-process regressions for the fixed pre-`GO` isolation supervisor boundary.
 
 use std::{
     fs,
@@ -11,11 +11,12 @@ use std::{
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tempfile::tempdir;
-use volparossa_linux_uapi::send_seqpacket_without_fd;
+use volparossa_linux_uapi::{receive_seqpacket_without_fd, send_seqpacket_without_fd};
 use volparossa_netns_runner::INTERNAL_CHILD_ARGUMENT;
 use volparossa_test_support::{LaunchContext, NamespaceIdentity, RunId};
 
 const RUNNER: &str = env!("CARGO_BIN_EXE_volparossa-netns-runner");
+const MAXIMUM_HOST_RECORD_BYTES: u64 = 1024 * 1024;
 
 fn namespace_identity(name: &str) -> (u64, u64) {
     let metadata = fs::metadata(format!("/proc/self/ns/{name}")).expect("namespace metadata");
@@ -25,6 +26,23 @@ fn namespace_identity(name: &str) -> (u64, u64) {
 fn protocol_namespace_identity(name: &str) -> NamespaceIdentity {
     let (device, inode) = namespace_identity(name);
     NamespaceIdentity::new(device, inode).expect("nonzero namespace identity")
+}
+
+fn bounded_host_record(path: &str) -> Vec<u8> {
+    use std::io::Read as _;
+
+    let file = fs::File::open(path).expect("open host-state record");
+    let mut bytes = Vec::new();
+    file.take(MAXIMUM_HOST_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .expect("read host-state record");
+    assert!(
+        !bytes.is_empty()
+            && u64::try_from(bytes.len()).expect("record length fits u64")
+                <= MAXIMUM_HOST_RECORD_BYTES,
+        "host-state record {path} is empty or oversized"
+    );
+    bytes
 }
 
 fn write_command_shims(directory: &Path, marker: &Path) {
@@ -47,10 +65,15 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
     let marker = directory.path().join("invoked");
     write_command_shims(directory.path(), &marker);
     let before = [
+        namespace_identity("user"),
         namespace_identity("net"),
         namespace_identity("mnt"),
         namespace_identity("pid"),
+        namespace_identity("pid_for_children"),
     ];
+    let mountinfo_before = bounded_host_record("/proc/self/mountinfo");
+    let ipv4_routes_before = bounded_host_record("/proc/net/route");
+    let ipv6_routes_before = bounded_host_record("/proc/net/ipv6_route");
 
     let output = Command::new(RUNNER)
         .arg("--run")
@@ -61,17 +84,78 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
 
     assert_eq!(output.status.code(), Some(77));
     assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).expect("UTF-8 stderr"),
-        "BLOCKED: fixed child provisioning completed without GO; isolated namespace bootstrap is not implemented.\n"
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    assert!(
+        stderr
+            == "BLOCKED: anonymous namespaces and exact ID mappings were verified without GO; PID namespace/PID-1 and private mounts are not implemented.\n"
+            || stderr
+                == "BLOCKED: kernel policy did not permit the fixed anonymous namespace and ID-mapping bootstrap; no GO was emitted.\n"
+            || stderr
+                == "BLOCKED: anonymous namespaces were verified, but kernel policy did not permit the fixed ID mappings; no GO was emitted.\n",
+        "unexpected blocked outcome: {stderr:?}"
     );
     assert!(!marker.exists(), "no command shim may be executed");
     assert_eq!(
         before,
         [
+            namespace_identity("user"),
             namespace_identity("net"),
             namespace_identity("mnt"),
             namespace_identity("pid"),
+            namespace_identity("pid_for_children"),
+        ]
+    );
+    assert_eq!(
+        mountinfo_before,
+        bounded_host_record("/proc/self/mountinfo")
+    );
+    assert_eq!(ipv4_routes_before, bounded_host_record("/proc/net/route"));
+    assert_eq!(
+        ipv6_routes_before,
+        bounded_host_record("/proc/net/ipv6_route")
+    );
+}
+
+#[test]
+fn repeated_fixed_runs_release_every_child_and_namespace() {
+    let before = [
+        namespace_identity("user"),
+        namespace_identity("net"),
+        namespace_identity("mnt"),
+        namespace_identity("pid"),
+        namespace_identity("pid_for_children"),
+    ];
+    let mut expected_stderr = None;
+    for iteration in 0..8 {
+        let output = Command::new(RUNNER)
+            .arg("--run")
+            .env_clear()
+            .output()
+            .expect("repeat fixed supervisor");
+        assert_eq!(
+            output.status.code(),
+            Some(77),
+            "iteration {iteration} returned {:?}",
+            output.status
+        );
+        assert!(output.stdout.is_empty());
+        if let Some(expected) = &expected_stderr {
+            assert_eq!(
+                &output.stderr, expected,
+                "iteration {iteration} changed blocked route"
+            );
+        } else {
+            expected_stderr = Some(output.stderr);
+        }
+    }
+    assert_eq!(
+        before,
+        [
+            namespace_identity("user"),
+            namespace_identity("net"),
+            namespace_identity("mnt"),
+            namespace_identity("pid"),
+            namespace_identity("pid_for_children"),
         ]
     );
 }
@@ -85,7 +169,7 @@ fn preview_and_argument_surface_are_exact() {
     assert!(preview.status.success());
     assert_eq!(
         String::from_utf8(preview.stdout).expect("UTF-8 preview"),
-        "VOLPAROSSA fixed supervisor preview: inherited IPC and exact child reaping; namespace bootstrap and every network mutation remain blocked.\n"
+        "VOLPAROSSA fixed supervisor preview: anonymous user/mount/network namespace mapping is implemented; PID namespace/PID-1, private mounts, GO, and every network-topology mutation remain blocked.\n"
     );
     assert!(preview.stderr.is_empty());
 
@@ -118,6 +202,9 @@ fn externally_forged_hidden_child_parent_is_rejected() {
     let (_lifecycle_parent, inherited_lifecycle) =
         Socket::pair(Domain::UNIX, Type::SEQPACKET.cloexec(), None::<Protocol>)
             .expect("forged lifecycle channel");
+    let (control_parent, inherited_control) =
+        Socket::pair(Domain::UNIX, Type::SEQPACKET.cloexec(), None::<Protocol>)
+            .expect("forged control channel");
     send_seqpacket_without_fd(
         &provisioning_parent,
         context.encode().expect("context encode").as_bytes(),
@@ -127,6 +214,7 @@ fn externally_forged_hidden_child_parent_is_rejected() {
         .shutdown(Shutdown::Write)
         .expect("finish forged provisioning");
     let inherited_provisioning: OwnedFd = inherited_provisioning.into();
+    let inherited_control: OwnedFd = inherited_control.into();
     let inherited_lifecycle: OwnedFd = inherited_lifecycle.into();
 
     let status = Command::new(RUNNER)
@@ -134,9 +222,15 @@ fn externally_forged_hidden_child_parent_is_rejected() {
         .env_clear()
         .current_dir("/")
         .stdin(Stdio::from(inherited_provisioning))
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(inherited_control))
         .stderr(Stdio::from(inherited_lifecycle))
         .status()
         .expect("forged child invocation");
     assert_eq!(status.code(), Some(70));
+    assert_eq!(
+        receive_seqpacket_without_fd(&control_parent, 4096)
+            .expect_err("authentication failure must emit no bootstrap record")
+            .kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
 }
