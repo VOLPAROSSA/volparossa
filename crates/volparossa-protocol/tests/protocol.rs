@@ -15,10 +15,10 @@ use volparossa_protocol::{
     SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, WireguardEndpoint,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
     decode_canonical, encode_canonical, exit_confirmation_envelope_hash,
-    finalized_reservation_bundle_hash, frame_control_message, node_id_from_public_key,
-    preselection_observation_receipt_hash, preselection_observation_request_hash,
-    sign_control_message, sign_control_message_with, unframe_control_message,
-    verify_control_message, verify_direct_preselection_transcript,
+    finalized_reservation_bundle_hash, frame_control_message, generate_nonce,
+    node_id_from_public_key, preselection_observation_receipt_hash,
+    preselection_observation_request_hash, sign_control_message, sign_control_message_with,
+    unframe_control_message, verify_control_message, verify_direct_preselection_transcript,
     verify_forwarded_preselection_transcript, verify_relay_reservation,
 };
 
@@ -31,6 +31,16 @@ fn protocol_version_matches_core_contract() {
         PROTOCOL_VERSION,
         u32::from(volparossa_core::PROTOCOL_VERSION)
     );
+}
+
+#[test]
+fn generated_control_nonces_are_nonzero_and_fresh() {
+    let first = generate_nonce();
+    let second = generate_nonce();
+
+    assert!(first.iter().any(|byte| *byte != 0));
+    assert!(second.iter().any(|byte| *byte != 0));
+    assert_ne!(first, second);
 }
 
 #[test]

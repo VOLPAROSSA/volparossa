@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use prost::Message;
-use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -265,9 +264,13 @@ impl<T> VerifiedControlMessage<T> {
 }
 
 /// Generate a cryptographically secure 256-bit control-message nonce.
+///
+/// # Panics
+///
+/// Panics if the operating system cannot provide cryptographically secure randomness.
 pub fn generate_nonce() -> [u8; NONCE_LENGTH] {
     let mut nonce = [0_u8; NONCE_LENGTH];
-    OsRng.fill_bytes(&mut nonce);
+    getrandom::fill(&mut nonce).expect("operating-system randomness unavailable");
     nonce
 }
 
