@@ -40,8 +40,8 @@ const BOOTSTRAP_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
 pub enum LifecycleOutcome {
     /// The fixed child accepted provisioning, but kernel policy denied namespace creation.
     BlockedBeforeIsolation,
-    /// Anonymous namespaces exist, but kernel policy denied an exact ID mapping write.
-    BlockedAfterIsolationBeforeMapping,
+    /// Anonymous namespaces exist, but kernel policy denied required outer proof or ID mapping.
+    BlockedAfterIsolation,
     /// Anonymous namespaces and exact ID mappings were verified before closing without `GO`.
     BlockedAfterNamespaceMapping,
 }
@@ -171,7 +171,7 @@ pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
             child,
             &mut outer,
             before,
-            LifecycleOutcome::BlockedAfterIsolationBeforeMapping,
+            LifecycleOutcome::BlockedAfterIsolation,
         );
     }
     finish_blocked_run(
@@ -189,11 +189,17 @@ fn complete_mapping_barrier(
 ) -> Result<bool, RunnerError> {
     let outer_user_id = geteuid().as_raw();
     let outer_group_id = getegid().as_raw();
-    child
+    if let Err(error) = child
         .kernel_pins_mut()
         .map_err(RunnerError::KernelProof)?
         .pin_isolated_namespaces(before, std::process::id())
-        .map_err(RunnerError::KernelProof)?;
+    {
+        if !is_outer_proof_unavailable(&error) {
+            return Err(RunnerError::KernelProof(error));
+        }
+        finish_bootstrap_control(child)?;
+        return Ok(false);
+    }
     if let Err(error) = child
         .kernel_pins_mut()
         .map_err(RunnerError::KernelProof)?
@@ -202,11 +208,7 @@ fn complete_mapping_barrier(
         if !error.is_policy_denial() {
             return Err(RunnerError::KernelProof(error.into_io()));
         }
-        child
-            .control_channel()
-            .map_err(RunnerError::Channel)?
-            .finish_sending()
-            .map_err(RunnerError::Channel)?;
+        finish_bootstrap_control(child)?;
         return Ok(false);
     }
     let mappings_installed = bootstrap.mappings_installed()?;
@@ -221,11 +223,22 @@ fn complete_mapping_barrier(
         .receive()
         .map_err(RunnerError::Channel)?;
     bootstrap.accept_mappings_verified(&mappings_verified)?;
-    child
+    if let Err(error) = child
         .kernel_pins_mut()
         .map_err(RunnerError::KernelProof)?
         .verify_single_extent_mappings(outer_user_id, outer_group_id)
-        .map_err(RunnerError::KernelProof)?;
+    {
+        if !is_outer_proof_unavailable(&error) {
+            return Err(RunnerError::KernelProof(error));
+        }
+        finish_bootstrap_control(child)?;
+        return Ok(false);
+    }
+    finish_bootstrap_control(child)?;
+    Ok(true)
+}
+
+fn finish_bootstrap_control(child: &FixedChild) -> Result<(), RunnerError> {
     child
         .control_channel()
         .map_err(RunnerError::Channel)?
@@ -240,7 +253,11 @@ fn complete_mapping_barrier(
         Err(error) => return Err(RunnerError::Channel(error)),
         Ok(_) => return Err(RunnerError::Control),
     }
-    Ok(true)
+    Ok(())
+}
+
+fn is_outer_proof_unavailable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
 }
 
 fn finish_blocked_run(
@@ -598,5 +615,20 @@ mod tests {
             ),
             Err(RunnerError::Channel(error)) if error.kind() == io::ErrorKind::InvalidData
         ));
+    }
+
+    #[test]
+    fn only_permission_denial_makes_outer_kernel_proof_unavailable() {
+        assert!(is_outer_proof_unavailable(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::Unsupported,
+            io::ErrorKind::OutOfMemory,
+        ] {
+            assert!(!is_outer_proof_unavailable(&io::Error::from(kind)));
+        }
     }
 }

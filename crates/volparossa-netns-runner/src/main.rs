@@ -33,9 +33,9 @@ fn main() -> ExitCode {
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
-            Ok(LifecycleOutcome::BlockedAfterIsolationBeforeMapping) => {
+            Ok(LifecycleOutcome::BlockedAfterIsolation) => {
                 eprintln!(
-                    "BLOCKED: anonymous namespaces were verified, but kernel policy did not permit the fixed ID mappings; no GO was emitted."
+                    "BLOCKED: anonymous namespaces were created, but kernel policy did not permit the required outer proof or exact ID mappings; no GO was emitted."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

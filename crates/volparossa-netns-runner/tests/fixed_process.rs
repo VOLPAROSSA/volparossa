@@ -82,7 +82,14 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
         .output()
         .expect("run fixed supervisor");
 
-    assert_eq!(output.status.code(), Some(77));
+    assert_eq!(
+        output.status.code(),
+        Some(77),
+        "runner returned {:?}; stdout={:?}; stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
     assert!(
@@ -91,7 +98,7 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
             || stderr
                 == "BLOCKED: kernel policy did not permit the fixed anonymous namespace and ID-mapping bootstrap; no GO was emitted.\n"
             || stderr
-                == "BLOCKED: anonymous namespaces were verified, but kernel policy did not permit the fixed ID mappings; no GO was emitted.\n",
+                == "BLOCKED: anonymous namespaces were created, but kernel policy did not permit the required outer proof or exact ID mappings; no GO was emitted.\n",
         "unexpected blocked outcome: {stderr:?}"
     );
     assert!(!marker.exists(), "no command shim may be executed");
@@ -135,8 +142,10 @@ fn repeated_fixed_runs_release_every_child_and_namespace() {
         assert_eq!(
             output.status.code(),
             Some(77),
-            "iteration {iteration} returned {:?}",
-            output.status
+            "iteration {iteration} returned {:?}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         assert!(output.stdout.is_empty());
         if let Some(expected) = &expected_stderr {

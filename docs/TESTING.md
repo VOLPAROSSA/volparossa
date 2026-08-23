@@ -212,8 +212,9 @@ PID-for-children namespace descriptors before writing `deny` to `setgroups` and 
 `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`, `MAPPINGS_VERIFIED`; both sides independently read back
 the mappings and namespace identities before closing without `GO`. A fixed set of kernel-policy
 denials return separate honest `BLOCKED` outcomes for failure before namespace creation and after
-isolation but before complete mapping, without a fallback. The portable real-process test accepts
-either blocked failure or the verified-mapping result, so a green generic CI job proves fail-closed
+isolation when required outer proof or complete mapping is unavailable, without a fallback. The
+portable real-process test accepts either blocked failure or the verified-mapping result, so a
+green generic CI job proves fail-closed
 behaviour but not that its kernel permitted namespace creation. Positive live-isolation evidence
 requires a capability-enabled Debian 13 job that specifically requires the verified-mapping
 outcome.
