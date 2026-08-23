@@ -22,14 +22,26 @@ fn main() -> ExitCode {
         Some(argument) if argument == OsStr::new(INTERNAL_CHILD_ARGUMENT) => run_internal_child(),
         Some(argument) if argument == OsStr::new(PREVIEW_ARGUMENT) => {
             println!(
-                "VOLPAROSSA fixed supervisor preview: inherited IPC and exact child reaping; namespace bootstrap and every network mutation remain blocked."
+                "VOLPAROSSA fixed supervisor preview: anonymous user/mount/network namespace mapping is implemented; PID namespace/PID-1, private mounts, GO, and every network-topology mutation remain blocked."
             );
             ExitCode::SUCCESS
         }
         Some(argument) if argument == OsStr::new(RUN_ARGUMENT) => match run_fixed_lifecycle() {
             Ok(LifecycleOutcome::BlockedBeforeIsolation) => {
                 eprintln!(
-                    "BLOCKED: fixed child provisioning completed without GO; isolated namespace bootstrap is not implemented."
+                    "BLOCKED: kernel policy did not permit the fixed anonymous namespace and ID-mapping bootstrap; no GO was emitted."
+                );
+                ExitCode::from(BLOCKED_EXIT_CODE)
+            }
+            Ok(LifecycleOutcome::BlockedAfterIsolation) => {
+                eprintln!(
+                    "BLOCKED: anonymous namespaces were created, but kernel policy did not permit the required outer proof or exact ID mappings; no GO was emitted."
+                );
+                ExitCode::from(BLOCKED_EXIT_CODE)
+            }
+            Ok(LifecycleOutcome::BlockedAfterNamespaceMapping) => {
+                eprintln!(
+                    "BLOCKED: anonymous namespaces and exact ID mappings were verified without GO; PID namespace/PID-1 and private mounts are not implemented."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

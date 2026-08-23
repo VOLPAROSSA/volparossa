@@ -15,7 +15,7 @@ use nix::unistd::{close, getppid};
 use rustix::io::fcntl_dupfd_cloexec;
 use volparossa_linux_uapi::install_close_range_on_exec;
 
-use crate::ipc::LifecycleChannel;
+use crate::{evidence::LauncherKernelPins, ipc::LifecycleChannel};
 
 /// Exact private selector used when the runner re-executes its own image.
 ///
@@ -45,16 +45,18 @@ const TEST_CHILD_ENVIRONMENT_VALUE: &str = "fixed";
 pub(crate) struct FixedChild {
     child: Option<Child>,
     provisioning_channel: Option<LifecycleChannel>,
+    control_channel: Option<LifecycleChannel>,
     lifecycle_channel: Option<LifecycleChannel>,
+    kernel_pins: Option<LauncherKernelPins>,
     permit: Option<SpawnPermit>,
 }
 
 impl FixedChild {
     /// Re-execute `/proc/self/exe` with the sole fixed internal selector.
     ///
-    /// The command receives the unnamed provisioning socket as stdin and the
-    /// separate unnamed lifecycle socket as stderr. Its environment is empty,
-    /// cwd is `/`, and stdout is `/dev/null`.
+    /// The command receives the unnamed provisioning socket as stdin, a strict
+    /// bootstrap-control socket as stdout, and the separate lifecycle socket
+    /// as stderr. Its environment is empty and cwd is `/`.
     /// The audited close-range hook is installed last so every unrelated
     /// descriptor at 3 or above becomes close-on-exec before this child starts.
     ///
@@ -63,7 +65,7 @@ impl FixedChild {
     /// Returns an error when a child is already owned, reaper initialization or
     /// channel creation fails, or the fixed self-exec cannot be spawned.
     pub(crate) fn spawn() -> io::Result<Self> {
-        spawn_with_fixed_arguments(&[INTERNAL_CHILD_ARGUMENT], None)
+        spawn_with_fixed_arguments(&[INTERNAL_CHILD_ARGUMENT], None, true)
     }
 
     /// Kernel PID of the exact still-owned child.
@@ -84,6 +86,17 @@ impl FixedChild {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "child channel is closed"))
     }
 
+    /// Borrow the private namespace-bootstrap control endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error after retirement has begun and the endpoint was closed.
+    pub(crate) fn control_channel(&self) -> io::Result<&LifecycleChannel> {
+        self.control_channel
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "child channel is closed"))
+    }
+
     /// Borrow the private five-frame lifecycle endpoint.
     ///
     /// # Errors
@@ -95,17 +108,15 @@ impl FixedChild {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "child channel is closed"))
     }
 
-    /// Close IPC, terminate the exact child if it remains alive, and reap it.
-    ///
-    /// This operation consumes the owner. If the kernel does not make the child
-    /// waitable within the fixed one-second bound, ownership is transferred to
-    /// the background exact-child reaper and a timeout is returned.
+    /// Borrow the live pidfd, anchored proc directory, and namespace pins.
     ///
     /// # Errors
     ///
-    /// Returns a process error, or `TimedOut` after safe ownership transfer.
-    pub(crate) fn terminate_and_reap(mut self) -> io::Result<ExitStatus> {
-        self.retire()
+    /// Returns an error after retirement has begun and ownership was transferred.
+    pub(crate) fn kernel_pins_mut(&mut self) -> io::Result<&mut LauncherKernelPins> {
+        self.kernel_pins
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "child pins are closed"))
     }
 
     /// Wait for a normally exiting child and reap it without first signalling it.
@@ -119,40 +130,42 @@ impl FixedChild {
     ///
     /// Returns a wait error, or `TimedOut` after bounded forced retirement.
     pub(crate) fn wait_and_reap(mut self) -> io::Result<ExitStatus> {
-        let (mut child, permit) = self.take_retirement()?;
+        let (mut child, pins, permit) = self.take_retirement()?;
         let Some(deadline) = Instant::now().checked_add(TERMINATION_TIMEOUT) else {
-            defer_retirement(child, permit);
+            defer_retirement(child, pins, permit);
             return Err(io::Error::other("fixed child wait deadline overflow"));
         };
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    drop(pins);
                     drop(permit);
                     return Ok(status);
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    defer_retirement(child, permit);
+                    defer_retirement(child, pins, permit);
                     return Err(error);
                 }
             }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return retire_after_natural_wait_timeout(child, permit);
+                return retire_after_natural_wait_timeout(child, pins, permit);
             };
             if remaining.is_zero() {
-                return retire_after_natural_wait_timeout(child, permit);
+                return retire_after_natural_wait_timeout(child, pins, permit);
             }
             thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
         }
     }
 
     fn retire(&mut self) -> io::Result<ExitStatus> {
-        let (child, permit) = self.take_retirement()?;
-        terminate_owned_child(child, permit)
+        let (child, pins, permit) = self.take_retirement()?;
+        terminate_owned_child(child, pins, permit)
     }
 
-    fn take_retirement(&mut self) -> io::Result<(Child, SpawnPermit)> {
+    fn take_retirement(&mut self) -> io::Result<(Child, LauncherKernelPins, SpawnPermit)> {
         drop(self.provisioning_channel.take());
+        drop(self.control_channel.take());
         drop(self.lifecycle_channel.take());
         let Some(child) = self.child.take() else {
             return Err(io::Error::new(
@@ -160,10 +173,13 @@ impl FixedChild {
                 "fixed child was already retired",
             ));
         };
+        let pins = self.kernel_pins.take().unwrap_or_else(|| {
+            std::process::abort();
+        });
         let permit = self.permit.take().unwrap_or_else(|| {
             std::process::abort();
         });
-        Ok((child, permit))
+        Ok((child, pins, permit))
     }
 
     #[cfg(test)]
@@ -176,6 +192,7 @@ impl FixedChild {
                 "--nocapture",
             ],
             Some((TEST_CHILD_ENVIRONMENT, TEST_CHILD_ENVIRONMENT_VALUE)),
+            false,
         )
     }
 
@@ -189,6 +206,7 @@ impl FixedChild {
                 "--nocapture",
             ],
             Some((TEST_CHILD_ENVIRONMENT, TEST_CHILD_ENVIRONMENT_VALUE)),
+            false,
         )
     }
 }
@@ -225,24 +243,30 @@ impl Drop for SpawnPermit {
 
 struct Retirement {
     child: Child,
+    _pins: LauncherKernelPins,
     _permit: SpawnPermit,
 }
 
-fn terminate_owned_child(mut child: Child, permit: SpawnPermit) -> io::Result<ExitStatus> {
+fn terminate_owned_child(
+    mut child: Child,
+    pins: LauncherKernelPins,
+    permit: SpawnPermit,
+) -> io::Result<ExitStatus> {
     match child.try_wait() {
         Ok(Some(status)) => {
+            drop(pins);
             drop(permit);
             return Ok(status);
         }
         Ok(None) => {}
         Err(error) => {
-            defer_retirement(child, permit);
+            defer_retirement(child, pins, permit);
             return Err(error);
         }
     }
     let kill_error = child.kill().err();
     let Some(deadline) = Instant::now().checked_add(TERMINATION_TIMEOUT) else {
-        defer_retirement(child, permit);
+        defer_retirement(child, pins, permit);
         return Err(io::Error::other(
             "fixed child termination deadline overflow",
         ));
@@ -250,29 +274,34 @@ fn terminate_owned_child(mut child: Child, permit: SpawnPermit) -> io::Result<Ex
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                drop(pins);
                 drop(permit);
                 return Ok(status);
             }
             Ok(None) => {}
             Err(error) => {
-                defer_retirement(child, permit);
+                defer_retirement(child, pins, permit);
                 return Err(error);
             }
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            defer_retirement(child, permit);
+            defer_retirement(child, pins, permit);
             return Err(kill_error.unwrap_or_else(termination_timeout));
         };
         if remaining.is_zero() {
-            defer_retirement(child, permit);
+            defer_retirement(child, pins, permit);
             return Err(kill_error.unwrap_or_else(termination_timeout));
         }
         thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
     }
 }
 
-fn retire_after_natural_wait_timeout(child: Child, permit: SpawnPermit) -> io::Result<ExitStatus> {
-    match terminate_owned_child(child, permit) {
+fn retire_after_natural_wait_timeout(
+    child: Child,
+    pins: LauncherKernelPins,
+    permit: SpawnPermit,
+) -> io::Result<ExitStatus> {
+    match terminate_owned_child(child, pins, permit) {
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "fixed child did not exit normally before forced retirement",
@@ -291,31 +320,54 @@ fn termination_timeout() -> io::Error {
 fn spawn_with_fixed_arguments(
     arguments: &[&str],
     retained_environment: Option<(&str, &str)>,
+    inherit_control_channel: bool,
 ) -> io::Result<FixedChild> {
     let _ = reaper()?;
     let permit = SpawnPermit::acquire()?;
     let (provisioning_parent, provisioning_child) = LifecycleChannel::pair()?;
+    let (control_parent, control_child) = LifecycleChannel::pair()?;
     let (lifecycle_parent, lifecycle_child) = LifecycleChannel::pair()?;
     let inherited_provisioning: OwnedFd = provisioning_child.into_owned_fd();
+    let inherited_control: OwnedFd = control_child.into_owned_fd();
     let inherited_lifecycle: OwnedFd = lifecycle_child.into_owned_fd();
     let mut command = Command::new("/proc/self/exe");
+    let child_stdout = if inherit_control_channel {
+        Stdio::from(inherited_control)
+    } else {
+        drop(inherited_control);
+        Stdio::null()
+    };
     command
         .args(arguments)
         .env_clear()
         .current_dir("/")
         .stdin(Stdio::from(inherited_provisioning))
-        .stdout(Stdio::null())
+        .stdout(child_stdout)
         .stderr(Stdio::from(inherited_lifecycle));
     if let Some((name, value)) = retained_environment {
         command.env(name, value);
     }
     // This must remain the final user-installed pre-exec hook.
     install_close_range_on_exec(&mut command);
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
+    let kernel_pins = match LauncherKernelPins::pin_child(&child) {
+        Ok(pins) => pins,
+        Err(pin_error) => {
+            let _ = child.kill();
+            if let Err(wait_error) = child.wait() {
+                drop(permit);
+                return Err(wait_error);
+            }
+            drop(permit);
+            return Err(pin_error);
+        }
+    };
     Ok(FixedChild {
         child: Some(child),
         provisioning_channel: Some(provisioning_parent),
+        control_channel: Some(control_parent),
         lifecycle_channel: Some(lifecycle_parent),
+        kernel_pins: Some(kernel_pins),
         permit: Some(permit),
     })
 }
@@ -349,12 +401,13 @@ fn reaper() -> io::Result<&'static Sender<Retirement>> {
     }
 }
 
-fn defer_retirement(child: Child, permit: SpawnPermit) {
+fn defer_retirement(child: Child, pins: LauncherKernelPins, permit: SpawnPermit) {
     if reaper()
         .and_then(|sender| {
             sender
                 .send(Retirement {
                     child,
+                    _pins: pins,
                     _permit: permit,
                 })
                 .map_err(|_| io::Error::other("fixed child reaper stopped"))
@@ -378,6 +431,16 @@ fn defer_retirement(child: Child, permit: SpawnPermit) {
 #[doc(hidden)]
 pub(crate) fn inherited_provisioning_channel_from_stdin() -> io::Result<LifecycleChannel> {
     inherited_channel_from_standard_descriptor(io::stdin(), 0)
+}
+
+/// Duplicate the inherited bootstrap-control socket from stdout to a private descriptor.
+///
+/// # Errors
+///
+/// Returns an error for a parent race, close failure, or substituted/nonconforming
+/// stdout channel.
+pub(crate) fn inherited_control_channel_from_stdout() -> io::Result<LifecycleChannel> {
+    inherited_channel_from_standard_descriptor(io::stdout(), 1)
 }
 
 /// Duplicate the inherited lifecycle socket from stderr to a private descriptor.
@@ -531,7 +594,7 @@ mod tests {
             FINISHED
         );
         let status = child.wait_and_reap().expect("reap fixture");
-        assert!(status.success());
+        assert!(status.success(), "fixture status was {status:?}");
     }
 
     #[test]

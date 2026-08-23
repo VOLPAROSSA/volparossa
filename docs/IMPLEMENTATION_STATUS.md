@@ -394,12 +394,18 @@ Last updated: 2026-08-23
   veth, nftables, and `tc netem`; the unprivileged lifecycle frame/state, fixed two-endpoint spec,
   run-name, ownership-manifest, confirmation, and refusal contracts pass. A separate test-only
   runner now provisions the random run ID and original namespace identities over a dedicated
-  inherited unnamed seqpacket channel while retaining a separate bidirectional lifecycle channel,
-  kernel- and executable-authenticates its fixed parent/child pair, rejects duplicate
-  or timed-out provisioning, re-executes only its fixed image with a descriptor fence, proves
-  EOF-before-`GO`, reaps the exact child, and returns `BLOCKED` without executing command shims. It
-  has no isolated bootstrap, signal-driven five-frame driver, topology mutation, or privileged
-  namespace execution.
+  inherited unnamed seqpacket channel while retaining separate bootstrap-control and lifecycle
+  channels. It kernel- and executable-authenticates its fixed parent/child pair, rejects duplicate
+  or timed-out provisioning, re-executes only its fixed image with a descriptor fence, and directly
+  creates anonymous user, mount, and network namespaces. The outer holds a pidfd, anchored proc
+  directory, and exact namespace FDs before installing and independently reading back one UID/GID
+  mapping extent behind a strict three-record barrier. Repeated tests prove EOF-before-`GO`, exact
+  reaping, and unchanged outer namespace/mount/route observations before the runner returns
+  `BLOCKED` without executing command shims. Required parent, child, and outer proofs fail closed
+  when kernel policy hides them. Generic CI also accepts that explicit kernel-policy unavailable
+  outcome, so it is not yet positive live-isolation evidence. The slice has no PID
+  namespace/PID 1, private mounts, signal-driven five-frame driver, topology mutation, acceptance
+  report, or A01-A15 result.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 

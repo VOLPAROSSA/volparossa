@@ -7,7 +7,7 @@ usage() {
     printf '%s\n' \
         'usage:' \
         '  tests/netns/topology.sh --preview' \
-        '  tests/netns/topology.sh --run      # blocked until isolated bootstrap exists' \
+        '  tests/netns/topology.sh --run      # blocked until PID-namespace/PID-1/private-mount bootstrap exists' \
         '  tests/netns/topology.sh --cleanup  # always refuses unowned standalone cleanup'
 }
 
@@ -51,8 +51,8 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the fixed process supervisor exists, but isolated namespace bootstrap is not present.' \
-            'No namespace, link, route, rule, firewall object, VPN, or sysctl was changed.' >&2
+            'BLOCKED: the Rust runner implements anonymous user/mount/network namespace mapping, but this shell entry point remains non-executing until PID-namespace/PID-1/private-mount bootstrap exists.' \
+            'This invocation created no namespace, link, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;
     *)
