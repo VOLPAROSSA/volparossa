@@ -167,9 +167,15 @@ selection, false-PASS refusals, fail-closed execution requests, and non-mutation
 command shims. The root-capable topology entry point contains no dormant network mutator, refuses
 arbitrary commands and standalone cleanup, and only prints the fixed future lifecycle plan.
 
-The lifecycle protocol is separate from the acceptance result. It uses five bounded, canonical
-frames in one strict order. `BOOTSTRAP_READY` is an attestation that the fixed inner worker must
-construct only after directly measuring that it is PID 1 in different network, mount, and PID
+The lifecycle protocol is separate from the acceptance result. Before its five bounded, canonical
+frames, the outer sends one bounded canonical `LAUNCH_CONTEXT` transport-provisioning record over
+a dedicated inherited unnamed channel. It contains only the random run ID, the three original-host
+namespace identities, and the fixed topology-specification digest. It is not a lifecycle frame,
+cannot authorize mutation, and malformed, missing, duplicated, or prematurely closed provisioning
+never reaches `GO`. A separate inherited bidirectional channel then carries the five lifecycle
+frames in one strict order. `BOOTSTRAP_READY` is an
+attestation that the fixed inner worker must construct only after directly measuring that it is PID
+1 in different network, mount, and PID
 namespaces, with private mounts, pristine networking, handlers, and the parent-death chain
 established before mutation. The outer independently compares the three namespace identities with
 its original host identities. Only then may it send the affine `GO` authorization.
@@ -189,9 +195,24 @@ has been reaped. All selected datapath cases remain `SKIPPED` with `LIFECYCLE_ON
 and process result remain `BLOCKED`/77. The current blocked entry point has not produced that
 evidence yet.
 
-Privileged execution stays blocked until a fixed reviewed supervisor owns setup, inherited IPC,
-evidence finalization, process-tree containment, and teardown as one operation. The supervisor may
-not accept a caller-selected command, executable, backend, cleanup prefix, or network-object name.
+The test-only `volparossa-netns-runner` now owns an initial, deliberately non-mutating process
+boundary. It re-executes only `/proc/self/exe` with one private fixed selector, clears the child
+environment, uses separate unnamed descriptor-free `SOCK_SEQPACKET` provisioning and lifecycle
+channels, fences unrelated inherited descriptors, and provisions exactly one `LAUNCH_CONTEXT`
+within a fixed child-side timeout. The
+child binds kernel peer PID/UID/GID to its live parent, requires the parent's executable inode to
+match its own, and accepts only the exact outer `--run` invocation; an external socketpair parent
+is rejected. It retains exact-child ownership through a bounded synchronous reap attempt; on
+timeout or wait error it transfers the `Child` and sole spawn permit to its exact-child reaper
+instead of detaching the process. Its current `--run` path verifies EOF-before-`GO` and unchanged
+supervisor namespace identities, then honestly returns `BLOCKED`/77. Command/environment shims
+prove that it invokes no namespace or networking utility. It is orchestration evidence only and
+cannot emit acceptance evidence.
+
+Privileged execution stays blocked until that fixed reviewed supervisor additionally owns isolated
+bootstrap, setup, evidence finalization, process-tree containment, and teardown as one operation.
+It may not accept a caller-selected command, executable, backend, timeout, cleanup prefix, or
+network-object name.
 
 Run-scoped names derive from one 128-bit lowercase hexadecimal run ID. The private ownership
 manifest is a mode-0600, owner-bound, bounded and canonically sorted record of exact namespace names

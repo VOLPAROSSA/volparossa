@@ -392,8 +392,14 @@ Last updated: 2026-08-23
 - [ ] Fuzz targets cover advertisements, policy, control messages, TCP open, UDP authorisation, QUIC classification, TLS ClientHello, and QUIC Initial parsing.
 - [ ] One command builds the full disposable namespace topology in the master specification using
   veth, nftables, and `tc netem`; the unprivileged lifecycle frame/state, fixed two-endpoint spec,
-  run-name, ownership-manifest, confirmation, and refusal contracts pass, but no privileged
-  namespace execution exists yet.
+  run-name, ownership-manifest, confirmation, and refusal contracts pass. A separate test-only
+  runner now provisions the random run ID and original namespace identities over a dedicated
+  inherited unnamed seqpacket channel while retaining a separate bidirectional lifecycle channel,
+  kernel- and executable-authenticates its fixed parent/child pair, rejects duplicate
+  or timed-out provisioning, re-executes only its fixed image with a descriptor fence, proves
+  EOF-before-`GO`, reaps the exact child, and returns `BLOCKED` without executing command shims. It
+  has no isolated bootstrap, signal-driven five-frame driver, topology mutation, or privileged
+  namespace execution.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 

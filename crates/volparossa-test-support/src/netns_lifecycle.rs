@@ -64,6 +64,7 @@ const GO_HEADER: &str = "VOLPAROSSA_NETNS_LIFECYCLE_V1 GO";
 const TOPOLOGY_READY_HEADER: &str = "VOLPAROSSA_NETNS_LIFECYCLE_V1 TOPOLOGY_READY";
 const STOP_HEADER: &str = "VOLPAROSSA_NETNS_LIFECYCLE_V1 STOP";
 const FINISHED_HEADER: &str = "VOLPAROSSA_NETNS_LIFECYCLE_V1 FINISHED";
+const LAUNCH_CONTEXT_HEADER: &str = "VOLPAROSSA_NETNS_TRANSPORT_V1 LAUNCH_CONTEXT";
 
 /// Validation or sequencing failure in the network-namespace lifecycle protocol.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -92,6 +93,9 @@ pub enum NetnsLifecycleError {
     /// A namespace device or inode was zero or not canonical decimal notation.
     #[error("invalid namespace identity")]
     NamespaceIdentity,
+    /// Original-host network, mount, and PID namespace identities were not distinct.
+    #[error("launch-context namespace identities must differ")]
+    LaunchContextNamespacesNotDistinct,
     /// A namespace name was empty, too long, or contained unsafe characters.
     #[error("invalid lifecycle namespace name")]
     NamespaceName,
@@ -195,6 +199,140 @@ impl LifecycleSha256 {
 pub struct NamespaceIdentity {
     device: u64,
     inode: u64,
+}
+
+/// Immutable transport provisioning sent to the fixed inner executable before lifecycle framing.
+///
+/// This record supplies the outer-selected run identifier, the three original-host namespace
+/// identities, and the fixed topology specification digest over the already inherited IPC
+/// channel. It is deliberately not an [`OuterLifecycleFrame`] and carries no mutation authority;
+/// only a subsequently validated [`Go`] can produce [`MutationAuthorization`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchContext {
+    run_id: RunId,
+    host_network_namespace: NamespaceIdentity,
+    host_mount_namespace: NamespaceIdentity,
+    host_pid_namespace: NamespaceIdentity,
+}
+
+impl LaunchContext {
+    /// Construct fixed, non-authorizing launch metadata measured by the outer supervisor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetnsLifecycleError::LaunchContextNamespacesNotDistinct`] if any two typed
+    /// original-host namespace identities are equal.
+    pub fn new(
+        run_id: RunId,
+        host_network_namespace: NamespaceIdentity,
+        host_mount_namespace: NamespaceIdentity,
+        host_pid_namespace: NamespaceIdentity,
+    ) -> Result<Self, NetnsLifecycleError> {
+        if host_network_namespace.device == host_mount_namespace.device
+            && host_network_namespace.inode == host_mount_namespace.inode
+            || host_network_namespace.device == host_pid_namespace.device
+                && host_network_namespace.inode == host_pid_namespace.inode
+            || host_mount_namespace.device == host_pid_namespace.device
+                && host_mount_namespace.inode == host_pid_namespace.inode
+        {
+            return Err(NetnsLifecycleError::LaunchContextNamespacesNotDistinct);
+        }
+        Ok(Self {
+            run_id,
+            host_network_namespace,
+            host_mount_namespace,
+            host_pid_namespace,
+        })
+    }
+
+    /// Run identifier provisioned for the lifecycle exchange.
+    #[must_use]
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Original host network-namespace identity captured before sandbox creation.
+    #[must_use]
+    pub const fn host_network_namespace(&self) -> NamespaceIdentity {
+        self.host_network_namespace
+    }
+
+    /// Original host mount-namespace identity captured before sandbox creation.
+    #[must_use]
+    pub const fn host_mount_namespace(&self) -> NamespaceIdentity {
+        self.host_mount_namespace
+    }
+
+    /// Original host PID-namespace identity captured before sandbox creation.
+    #[must_use]
+    pub const fn host_pid_namespace(&self) -> NamespaceIdentity {
+        self.host_pid_namespace
+    }
+
+    /// Fixed topology specification digest provisioned to the inner executable.
+    #[must_use]
+    pub const fn specification_sha256(&self) -> &'static str {
+        LIFECYCLE_TOPOLOGY_SPEC_SHA256
+    }
+
+    /// Encode the exact ordered, line-feed-terminated transport record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetnsLifecycleError::FrameTooLarge`] if a future format exceeds the fixed
+    /// lifecycle transport bound.
+    pub fn encode(&self) -> Result<String, NetnsLifecycleError> {
+        encode_lines(&[
+            LAUNCH_CONTEXT_HEADER.to_owned(),
+            format!("run_id={}", self.run_id.as_str()),
+            format!("host_net_ns_dev={}", self.host_network_namespace.device()),
+            format!("host_net_ns_inode={}", self.host_network_namespace.inode()),
+            format!("host_mount_ns_dev={}", self.host_mount_namespace.device()),
+            format!("host_mount_ns_inode={}", self.host_mount_namespace.inode()),
+            format!("host_pid_ns_dev={}", self.host_pid_namespace.device()),
+            format!("host_pid_ns_inode={}", self.host_pid_namespace.inode()),
+            format!("spec_sha256={LIFECYCLE_TOPOLOGY_SPEC_SHA256}"),
+        ])
+    }
+
+    /// Parse one exact canonical transport-provisioning record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error for malformed, reordered, duplicated, oversized,
+    /// non-canonical, or wrong-topology input.
+    pub fn parse(bytes: &[u8]) -> Result<Self, NetnsLifecycleError> {
+        let lines = decode_lines(bytes)?;
+        if lines.len() != 9 || lines[0] != LAUNCH_CONTEXT_HEADER {
+            return Err(NetnsLifecycleError::FrameShape);
+        }
+        let run_id = RunId::parse(field(&lines, 1, "run_id")?)?;
+        let host_network_namespace = NamespaceIdentity::new(
+            parse_nonzero_decimal(field(&lines, 2, "host_net_ns_dev")?)?,
+            parse_nonzero_decimal(field(&lines, 3, "host_net_ns_inode")?)?,
+        )?;
+        let host_mount_namespace = NamespaceIdentity::new(
+            parse_nonzero_decimal(field(&lines, 4, "host_mount_ns_dev")?)?,
+            parse_nonzero_decimal(field(&lines, 5, "host_mount_ns_inode")?)?,
+        )?;
+        let host_pid_namespace = NamespaceIdentity::new(
+            parse_nonzero_decimal(field(&lines, 6, "host_pid_ns_dev")?)?,
+            parse_nonzero_decimal(field(&lines, 7, "host_pid_ns_inode")?)?,
+        )?;
+        let specification = field(&lines, 8, "spec_sha256")?;
+        let _ = LifecycleSha256::parse(specification)?;
+        if specification != LIFECYCLE_TOPOLOGY_SPEC_SHA256 {
+            return Err(NetnsLifecycleError::TopologySpecificationMismatch);
+        }
+        let context = Self::new(
+            run_id,
+            host_network_namespace,
+            host_mount_namespace,
+            host_pid_namespace,
+        )?;
+        require_canonical(bytes, &context.encode()?)?;
+        Ok(context)
+    }
 }
 
 impl NamespaceIdentity {
@@ -1533,6 +1671,11 @@ mod tests {
         (identity(7, 1), identity(7, 2), identity(7, 3))
     }
 
+    fn launch_context(run_id: RunId) -> LaunchContext {
+        let (network, mount, pid) = host_namespaces();
+        LaunchContext::new(run_id, network, mount, pid).expect("distinct launch namespaces")
+    }
+
     fn outer_state(run_id: RunId) -> OuterLifecycleState {
         let (network, mount, pid) = host_namespaces();
         OuterLifecycleState::new(run_id, network, mount, pid)
@@ -1600,6 +1743,175 @@ mod tests {
             Err(NetnsLifecycleError::NamespaceName)
         );
         assert!(OwnedNamespace::new("A0._-z".to_owned(), identity(1, 1)).is_ok());
+    }
+
+    #[test]
+    fn launch_context_round_trip_has_exact_order_and_fixed_specification() {
+        let frame = launch_context(run_id('0'));
+        let encoded = frame.encode().expect("encode");
+        assert_eq!(
+            encoded,
+            concat!(
+                "VOLPAROSSA_NETNS_TRANSPORT_V1 LAUNCH_CONTEXT\n",
+                "run_id=00000000000000000000000000000000\n",
+                "host_net_ns_dev=7\n",
+                "host_net_ns_inode=1\n",
+                "host_mount_ns_dev=7\n",
+                "host_mount_ns_inode=2\n",
+                "host_pid_ns_dev=7\n",
+                "host_pid_ns_inode=3\n",
+                "spec_sha256=0eb82db0f377ab973c1fb26c4dedd153c1694b28b4817f82f56e84a2aaaf0783\n"
+            )
+        );
+        assert!(encoded.len() <= MAX_LIFECYCLE_FRAME_BYTES);
+        assert_eq!(frame.run_id(), &run_id('0'));
+        assert_eq!(frame.host_network_namespace(), identity(7, 1));
+        assert_eq!(frame.host_mount_namespace(), identity(7, 2));
+        assert_eq!(frame.host_pid_namespace(), identity(7, 3));
+        assert_eq!(frame.specification_sha256(), LIFECYCLE_TOPOLOGY_SPEC_SHA256);
+        assert_eq!(LaunchContext::parse(encoded.as_bytes()), Ok(frame));
+
+        let maximum = LaunchContext::new(
+            run_id('f'),
+            identity(u64::MAX, u64::MAX),
+            identity(u64::MAX, u64::MAX - 1),
+            identity(u64::MAX, u64::MAX - 2),
+        )
+        .expect("distinct maximum identities");
+        let maximum_bytes = maximum.encode().expect("maximum encode");
+        assert_eq!(LaunchContext::parse(maximum_bytes.as_bytes()), Ok(maximum));
+    }
+
+    #[test]
+    fn launch_context_rejects_shape_framing_and_direction_confusion() {
+        let valid = launch_context(run_id('1')).encode().expect("encode");
+        let missing_field = valid.replace("host_mount_ns_inode=2\n", "");
+        let duplicate = valid.replace(
+            "run_id=11111111111111111111111111111111\n",
+            concat!(
+                "run_id=11111111111111111111111111111111\n",
+                "run_id=11111111111111111111111111111111\n"
+            ),
+        );
+        let reordered = valid.replace(
+            "host_net_ns_dev=7\nhost_net_ns_inode=1\n",
+            "host_net_ns_inode=1\nhost_net_ns_dev=7\n",
+        );
+        let extra = format!("{valid}unexpected=true\n");
+        let wrong_header = valid.replace(
+            LAUNCH_CONTEXT_HEADER,
+            "VOLPAROSSA_NETNS_TRANSPORT_V2 LAUNCH_CONTEXT",
+        );
+        for invalid in [missing_field, duplicate, reordered, extra, wrong_header] {
+            assert_eq!(
+                LaunchContext::parse(invalid.as_bytes()),
+                Err(NetnsLifecycleError::FrameShape)
+            );
+        }
+        assert_eq!(
+            LaunchContext::parse(valid.replace("run_id=", "run_id==").as_bytes()),
+            Err(NetnsLifecycleError::FrameShape)
+        );
+        assert_eq!(
+            LaunchContext::parse(valid.trim_end_matches('\n').as_bytes()),
+            Err(NetnsLifecycleError::MissingFinalLineFeed)
+        );
+        assert_eq!(
+            LaunchContext::parse(valid.replace('\n', "\r\n").as_bytes()),
+            Err(NetnsLifecycleError::CarriageReturn)
+        );
+        assert_eq!(
+            LaunchContext::parse(&[0xff, b'\n']),
+            Err(NetnsLifecycleError::Utf8)
+        );
+        assert_eq!(
+            LaunchContext::parse(&vec![b'a'; MAX_LIFECYCLE_FRAME_BYTES + 1]),
+            Err(NetnsLifecycleError::FrameTooLarge)
+        );
+        assert_eq!(
+            InnerLifecycleFrame::parse(valid.as_bytes()),
+            Err(NetnsLifecycleError::FrameShape)
+        );
+        assert_eq!(
+            OuterLifecycleFrame::parse(valid.as_bytes()),
+            Err(NetnsLifecycleError::FrameShape)
+        );
+    }
+
+    #[test]
+    fn launch_context_rejects_every_noncanonical_identity_and_specification() {
+        let valid = launch_context(run_id('2')).encode().expect("encode");
+        for (key, value) in [
+            ("host_net_ns_dev", "7"),
+            ("host_net_ns_inode", "1"),
+            ("host_mount_ns_dev", "7"),
+            ("host_mount_ns_inode", "2"),
+            ("host_pid_ns_dev", "7"),
+            ("host_pid_ns_inode", "3"),
+        ] {
+            for invalid_value in ["", "0", "01", "-1", "1a", "18446744073709551616"] {
+                let invalid = valid.replace(
+                    &format!("{key}={value}\n"),
+                    &format!("{key}={invalid_value}\n"),
+                );
+                assert_eq!(
+                    LaunchContext::parse(invalid.as_bytes()),
+                    Err(NetnsLifecycleError::NamespaceIdentity),
+                    "{key} accepted {invalid_value}"
+                );
+            }
+        }
+        assert_eq!(
+            LaunchContext::parse(valid.replace(&"2".repeat(32), &"A".repeat(32)).as_bytes()),
+            Err(NetnsLifecycleError::RunId)
+        );
+        assert_eq!(
+            LaunchContext::parse(
+                valid
+                    .replace(LIFECYCLE_TOPOLOGY_SPEC_SHA256, &"A".repeat(64))
+                    .as_bytes()
+            ),
+            Err(NetnsLifecycleError::Sha256)
+        );
+        assert_eq!(
+            LaunchContext::parse(
+                valid
+                    .replace(LIFECYCLE_TOPOLOGY_SPEC_SHA256, &"0".repeat(64))
+                    .as_bytes()
+            ),
+            Err(NetnsLifecycleError::TopologySpecificationMismatch)
+        );
+        assert_eq!(
+            LaunchContext::new(run_id('2'), identity(7, 1), identity(7, 1), identity(7, 3)),
+            Err(NetnsLifecycleError::LaunchContextNamespacesNotDistinct)
+        );
+        assert_eq!(
+            LaunchContext::parse(
+                valid
+                    .replace("host_mount_ns_inode=2", "host_mount_ns_inode=1")
+                    .as_bytes()
+            ),
+            Err(NetnsLifecycleError::LaunchContextNamespacesNotDistinct)
+        );
+    }
+
+    #[test]
+    fn launch_context_never_advances_a_lifecycle_or_authorizes_mutation() {
+        let run = run_id('3');
+        let encoded = launch_context(run.clone()).encode().expect("encode");
+        let _provisioning = LaunchContext::parse(encoded.as_bytes()).expect("provisioning");
+
+        let mut outer = outer_state(run.clone());
+        let mut inner = inner_state(run.clone());
+        assert_eq!(outer.phase(), OuterLifecyclePhase::AwaitingBootstrap);
+        assert_eq!(inner.phase(), InnerLifecyclePhase::Bootstrapping);
+        assert_eq!(outer.go(), Err(NetnsLifecycleError::StateTransition));
+        assert!(matches!(
+            inner.accept_go(Go::new(run).encode().expect("go encode").as_bytes()),
+            Err(NetnsLifecycleError::StateTransition)
+        ));
+        assert_eq!(outer.phase(), OuterLifecyclePhase::AwaitingBootstrap);
+        assert_eq!(inner.phase(), InnerLifecyclePhase::Bootstrapping);
     }
 
     #[test]

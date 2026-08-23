@@ -21,7 +21,7 @@ pub use acceptance::{
 };
 pub use netns_lifecycle::{
     BootstrapReady, CompletionError, Finished, Go, InnerLifecycleFrame, InnerLifecyclePhase,
-    InnerLifecycleState, LIFECYCLE_TOPOLOGY_SPEC, LIFECYCLE_TOPOLOGY_SPEC_SHA256,
+    InnerLifecycleState, LIFECYCLE_TOPOLOGY_SPEC, LIFECYCLE_TOPOLOGY_SPEC_SHA256, LaunchContext,
     LifecycleEofDisposition, LifecycleSha256, MAX_LIFECYCLE_ERROR_CODE_BYTES,
     MAX_LIFECYCLE_FRAME_BYTES, MAX_LIFECYCLE_NAME_BYTES, MAX_LIFECYCLE_NAMESPACES,
     MutationAuthorization, NamespaceIdentity, NetnsLifecycleError, OuterLifecycleFrame,
