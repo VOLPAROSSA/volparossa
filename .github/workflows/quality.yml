@@ -110,4 +110,6 @@ jobs:
         run: cargo test --locked --offline --workspace --all-features
 
       - name: Check non-mutating integration harness
-        run: ./tests/integration/test-harness.sh
+        run: |
+          ./tests/netns/test-lifecycle-contract.sh
+          ./tests/integration/test-harness.sh

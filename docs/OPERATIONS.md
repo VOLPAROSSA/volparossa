@@ -217,6 +217,12 @@ ready.
 A future explicit cleanup must preview generated namespaces, interfaces, route tables, marks, and
 nftables objects without secrets and ask before a root action. Re-running it must be safe.
 
+The acceptance topology has no standalone cleanup mode: a later supervisor may delete only an
+exact object recorded by its current run and only after the current namespace mount still matches
+the recorded device and inode. A name or prefix match is never ownership proof. Its inner worker is
+fixed repository code reached through inherited IPC and cannot be replaced with an environment or
+command-line supplied program.
+
 Do not manually run broad `ip netns delete`, nftables flush, route flush, or interface wildcard
 commands. If verified cleanup is unavailable, stop and inspect with read-only commands rather than
 risk unrelated host state.

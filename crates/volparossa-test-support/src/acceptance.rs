@@ -20,6 +20,8 @@ pub const MAX_REMAINING_OWNED_OBJECTS: u64 = 1_000_000;
 
 const PARTIAL_SUITE_CODE: &str = "PARTIAL_SUITE";
 const NOT_SELECTED_CODE: &str = "NOT_SELECTED";
+const LIFECYCLE_ONLY_CODE: &str = "LIFECYCLE_ONLY";
+const FORCED_CRASH_NOT_EXECUTED_CODE: &str = "FORCED_CRASH_NOT_EXECUTED";
 const A14_REQUIRED_CHECKS: [&str; 4] = [
     "FORCED_AGENT_CRASH_CLEANUP",
     "FORCED_HELPER_CRASH_CLEANUP",
@@ -942,6 +944,77 @@ impl AcceptanceReport {
         })
     }
 
+    /// Construct the bounded report for one successfully finalized lifecycle-only run.
+    ///
+    /// This narrow result proves only that the fixed disposable topology reached readiness,
+    /// normal teardown removed its owned objects, and the outer host-state manifests remained
+    /// identical. It therefore passes A15, skips A14 because no forced crash was injected, skips
+    /// every selected datapath case, and always derives an overall `BLOCKED` result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid provenance, environment, digest evidence paths, or report
+    /// invariants.
+    pub fn successful_lifecycle_only(
+        suite: AcceptanceSuite,
+        provenance: CompleteAcceptanceProvenance,
+        environment: AcceptanceEnvironment,
+        host_state_digest: Sha256Digest,
+        before_manifest_path: String,
+        after_manifest_path: String,
+    ) -> Result<Self, AcceptanceReportError> {
+        let lifecycle_reason = AcceptanceReason::new(
+            LIFECYCLE_ONLY_CODE.to_owned(),
+            "Only the isolated namespace lifecycle was exercised; no product datapath case ran."
+                .to_owned(),
+        )?;
+        let crash_reason = AcceptanceReason::new(
+            FORCED_CRASH_NOT_EXECUTED_CODE.to_owned(),
+            "Normal teardown ran, but agent, helper, and native crash cleanup was not exercised."
+                .to_owned(),
+        )?;
+        let execution = AcceptanceExecution::attempted(
+            true,
+            true,
+            vec![lifecycle_reason.clone(), crash_reason.clone()],
+        )?;
+        let before_evidence = AcceptanceEvidence::new(
+            A15_BEFORE_EVIDENCE_ID.to_owned(),
+            AcceptanceEvidenceKind::Digest,
+            host_state_digest.clone(),
+            before_manifest_path,
+            "HOST_STATE_BEFORE".to_owned(),
+        )?;
+        let after_evidence = AcceptanceEvidence::new(
+            A15_AFTER_EVIDENCE_ID.to_owned(),
+            AcceptanceEvidenceKind::Digest,
+            host_state_digest.clone(),
+            after_manifest_path,
+            "HOST_STATE_AFTER".to_owned(),
+        )?;
+        let selected_cases = ALL_ACCEPTANCE_IDS
+            .into_iter()
+            .filter(|id| suite.selects(*id))
+            .map(|id| match id {
+                AcceptanceId::A14 => AcceptanceCase::skipped(id, crash_reason.clone(), Vec::new()),
+                AcceptanceId::A15 => AcceptanceCase::passed(
+                    id,
+                    vec![before_evidence.clone(), after_evidence.clone()],
+                ),
+                _ => AcceptanceCase::skipped(id, lifecycle_reason.clone(), Vec::new()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_attempt(
+            suite,
+            provenance,
+            environment,
+            execution,
+            selected_cases,
+            AcceptanceHostState::captured(host_state_digest.clone(), host_state_digest),
+            AcceptanceCleanup::complete(),
+        )
+    }
+
     /// Construct an attempted report and derive its overall outcome.
     ///
     /// The supplied vector contains only selected cases, exactly once and in
@@ -1522,6 +1595,48 @@ mod tests {
     }
 
     #[test]
+    fn successful_lifecycle_only_passes_a15_but_never_claims_datapath_or_crash_cleanup() {
+        for suite in [
+            AcceptanceSuite::All,
+            AcceptanceSuite::Mptcp,
+            AcceptanceSuite::Mpquic,
+        ] {
+            let report = AcceptanceReport::successful_lifecycle_only(
+                suite,
+                provenance(),
+                environment(),
+                digest('d'),
+                "evidence/a15_host_before.json".to_owned(),
+                "evidence/a15_host_after.json".to_owned(),
+            )
+            .unwrap();
+            assert_eq!(report.overall(), AcceptanceOverallResult::Blocked);
+            assert!(!report.is_success());
+            let value = serde_json::to_value(report).unwrap();
+            assert_eq!(value["execution"]["attempted"], true);
+            assert_eq!(value["execution"]["completed"], true);
+            assert_eq!(value["execution"]["topology_created"], true);
+            assert_eq!(value["cleanup"]["complete"], true);
+            assert_eq!(value["cleanup"]["remaining_owned_objects"], 0);
+            assert_eq!(value["host_state"]["unchanged"], true);
+            assert_eq!(value["cases"][13]["result"], "SKIPPED");
+            assert_eq!(
+                value["cases"][13]["reason"]["code"],
+                FORCED_CRASH_NOT_EXECUTED_CODE
+            );
+            assert_eq!(value["cases"][14]["result"], "PASS");
+            assert_eq!(value["cases"][14]["evidence"].as_array().unwrap().len(), 2);
+            assert!(value["cases"].as_array().unwrap().iter().all(|case| {
+                case["selected"] == false
+                    || case["id"] == "A15"
+                    || (case["result"] == "SKIPPED"
+                        && (case["reason"]["code"] == LIFECYCLE_ONLY_CODE
+                            || case["reason"]["code"] == FORCED_CRASH_NOT_EXECUTED_CODE))
+            }));
+        }
+    }
+
+    #[test]
     fn full_and_partial_model_reports_validate_against_normative_draft_2020_12_schema() {
         let schema: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/integration/acceptance-report.schema.json"
@@ -1558,9 +1673,19 @@ mod tests {
             AcceptanceCleanup::complete(),
         )
         .unwrap();
+        let lifecycle = AcceptanceReport::successful_lifecycle_only(
+            AcceptanceSuite::All,
+            provenance(),
+            environment(),
+            digest('d'),
+            "evidence/a15_host_before.json".to_owned(),
+            "evidence/a15_host_after.json".to_owned(),
+        )
+        .unwrap();
         assert!(validator.is_valid(&serde_json::to_value(full).unwrap()));
         assert!(validator.is_valid(&serde_json::to_value(partial).unwrap()));
         assert!(validator.is_valid(&serde_json::to_value(mpquic).unwrap()));
+        assert!(validator.is_valid(&serde_json::to_value(lifecycle).unwrap()));
 
         let mut structurally_invalid = serde_json::to_value(
             AcceptanceReport::blocked_before_attempt(

@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-22
+Last updated: 2026-08-23
 
 ## Repository and engineering baseline
 
@@ -390,7 +390,10 @@ Last updated: 2026-08-22
 
 - [ ] Unit/property tests cover canonical encoding, signatures, replay, TTL, advertisements, whitelist, route contexts, scores, diversity, capacity, reservations, framing, versions, cleanup, and configuration.
 - [ ] Fuzz targets cover advertisements, policy, control messages, TCP open, UDP authorisation, QUIC classification, TLS ClientHello, and QUIC Initial parsing.
-- [ ] One command builds the full disposable namespace topology in the master specification using veth, nftables, and `tc netem`.
+- [ ] One command builds the full disposable namespace topology in the master specification using
+  veth, nftables, and `tc netem`; the unprivileged lifecycle frame/state, fixed two-endpoint spec,
+  run-name, ownership-manifest, confirmation, and refusal contracts pass, but no privileged
+  namespace execution exists yet.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 

@@ -39,6 +39,7 @@ test-unit:
 
 test-integration:
     ./packaging/test-collect-cargo-licenses.sh
+    ./tests/netns/test-lifecycle-contract.sh
     ./tests/integration/test-harness.sh
     ./tests/integration/run.sh --preview --suite all
 

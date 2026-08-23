@@ -11,6 +11,7 @@ SUITE=all
 SEEN_MODE=no
 SEEN_SUITE=no
 APPROVE=no
+SEEN_APPROVE=no
 
 usage() {
     printf '%s\n' \
@@ -41,7 +42,9 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --yes)
+            [ "$SEEN_APPROVE" = no ] || { usage >&2; exit 64; }
             APPROVE=yes
+            SEEN_APPROVE=yes
             ;;
         -h|--help)
             usage
@@ -66,6 +69,13 @@ case "$SUITE" in
 esac
 if [ "$MODE" = preview ] && [ "$APPROVE" = yes ]; then
     printf '%s\n' '--yes is valid only with --execute' >&2
+    exit 64
+fi
+
+if [ "$MODE" = execute ] && [ "$APPROVE" = no ]; then
+    "$TOPOLOGY" --preview >&2
+    printf '%s\n' \
+        'execution requires the explicit --yes acknowledgement after reviewing this plan' >&2
     exit 64
 fi
 
