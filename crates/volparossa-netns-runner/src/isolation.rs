@@ -72,13 +72,22 @@ pub(crate) fn create_launcher_namespaces() -> io::Result<IsolationAttempt> {
             Err(errno_io(error))
         };
     }
-    let membership = NamespaceSnapshot::capture_launcher_membership().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("post-unshare namespace capture failed: {error}"),
-        )
-    })?;
-    if !membership.is_isolated_launcher_from(before) || !has_exact_single_task()? {
+    let membership = match NamespaceSnapshot::capture_launcher_membership() {
+        Ok(membership) => membership,
+        Err(error) if is_proof_unavailable(&error) => return Ok(IsolationAttempt::Unavailable),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("post-unshare namespace capture failed: {error}"),
+            ));
+        }
+    };
+    let single_task = match has_exact_single_task() {
+        Ok(single_task) => single_task,
+        Err(error) if is_proof_unavailable(&error) => return Ok(IsolationAttempt::Unavailable),
+        Err(error) => return Err(error),
+    };
+    if !membership.is_isolated_launcher_from(before) || !single_task {
         return Err(invalid_data(
             "kernel did not establish the fixed launcher namespaces",
         ));
@@ -108,6 +117,10 @@ const fn is_namespace_unavailable(error: Errno) -> bool {
     )
 }
 
+fn is_proof_unavailable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+}
+
 fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -133,6 +146,21 @@ mod tests {
         }
         for error in [Errno::EIO, Errno::EBADF, Errno::EFAULT, Errno::ENOMEM] {
             assert!(!is_namespace_unavailable(error));
+        }
+    }
+
+    #[test]
+    fn only_permission_denial_makes_post_unshare_proof_unavailable() {
+        assert!(is_proof_unavailable(
+            &io::ErrorKind::PermissionDenied.into()
+        ));
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::OutOfMemory,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(!is_proof_unavailable(&kind.into()));
         }
     }
 }

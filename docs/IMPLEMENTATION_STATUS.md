@@ -401,8 +401,9 @@ Last updated: 2026-08-23
   directory, and exact namespace FDs before installing and independently reading back one UID/GID
   mapping extent behind a strict three-record barrier. Repeated tests prove EOF-before-`GO`, exact
   reaping, and unchanged outer namespace/mount/route observations before the runner returns
-  `BLOCKED` without executing command shims. Generic CI also accepts the explicit kernel-policy
-  unavailable outcome, so it is not yet positive live-isolation evidence. The slice has no PID
+  `BLOCKED` without executing command shims. Required parent, child, and outer proofs fail closed
+  when kernel policy hides them. Generic CI also accepts that explicit kernel-policy unavailable
+  outcome, so it is not yet positive live-isolation evidence. The slice has no PID
   namespace/PID 1, private mounts, signal-driven five-frame driver, topology mutation, acceptance
   report, or A01-A15 result.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.

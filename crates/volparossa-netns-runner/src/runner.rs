@@ -38,7 +38,7 @@ const BOOTSTRAP_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
 /// Honest outcome of the current pre-`GO` isolation supervisor slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleOutcome {
-    /// The fixed child accepted provisioning, but kernel policy denied namespace creation.
+    /// The fixed child accepted provisioning, but kernel policy denied a safe bootstrap proof.
     BlockedBeforeIsolation,
     /// Anonymous namespaces exist, but kernel policy denied required outer proof or ID mapping.
     BlockedAfterIsolation,
@@ -96,6 +96,9 @@ pub enum RunnerError {
     /// The inherited channel or process metadata did not identify the exact fixed outer runner.
     #[error("internal child could not authenticate the fixed outer runner")]
     ParentAuthentication,
+    /// Kernel policy hid parent metadata required before any namespace operation may begin.
+    #[error("kernel policy denied the fixed outer-runner authentication proof")]
+    ParentAuthenticationUnavailable,
     /// More than one transport-provisioning record was supplied.
     #[error("internal child received duplicate launch provisioning")]
     DuplicateLaunchContext,
@@ -321,8 +324,18 @@ fn internal_child() -> Result<(), RunnerError> {
     let control_channel = inherited_control_channel_from_stdout().map_err(RunnerError::Channel)?;
     let lifecycle_channel =
         inherited_lifecycle_channel_from_stderr().map_err(RunnerError::Channel)?;
-    let parent =
-        authenticate_outer_parent(&provisioning_channel, &control_channel, &lifecycle_channel)?;
+    let parent = match authenticate_outer_parent(
+        &provisioning_channel,
+        &control_channel,
+        &lifecycle_channel,
+    ) {
+        Ok(parent) => parent,
+        Err(RunnerError::ParentAuthenticationUnavailable) => {
+            drop(lifecycle_channel);
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let current = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
     let context = receive_launch_context(&provisioning_channel, current, BOOTSTRAP_RECORD_TIMEOUT)?;
     control_channel
@@ -401,15 +414,25 @@ fn authenticate_outer_parent(
         return Err(RunnerError::ParentAuthentication);
     }
     let self_executable = fs::metadata("/proc/self/exe").map_err(RunnerError::Namespace)?;
-    let parent_executable = fs::metadata(format!("/proc/{parent}/exe"))
-        .map_err(|_| RunnerError::ParentAuthentication)?;
+    let parent_executable = fs::metadata(format!("/proc/{parent}/exe")).map_err(|error| {
+        if is_parent_proof_unavailable(&error) {
+            RunnerError::ParentAuthenticationUnavailable
+        } else {
+            RunnerError::ParentAuthentication
+        }
+    })?;
     if self_executable.dev() != parent_executable.dev()
         || self_executable.ino() != parent_executable.ino()
     {
         return Err(RunnerError::ParentAuthentication);
     }
-    let command_line = fs::read(format!("/proc/{parent}/cmdline"))
-        .map_err(|_| RunnerError::ParentAuthentication)?;
+    let command_line = fs::read(format!("/proc/{parent}/cmdline")).map_err(|error| {
+        if is_parent_proof_unavailable(&error) {
+            RunnerError::ParentAuthenticationUnavailable
+        } else {
+            RunnerError::ParentAuthentication
+        }
+    })?;
     let mut arguments = command_line.split(|byte| *byte == 0);
     let executable_argument = arguments.next();
     if executable_argument.is_none_or(<[u8]>::is_empty)
@@ -444,6 +467,10 @@ fn receive_launch_context(
         Err(error) => Err(RunnerError::Channel(error)),
         Ok(_) => Err(RunnerError::DuplicateLaunchContext),
     }
+}
+
+fn is_parent_proof_unavailable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
 }
 
 fn random_run_id() -> Result<RunId, RunnerError> {
@@ -498,6 +525,21 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+    }
+
+    #[test]
+    fn only_permission_denial_makes_parent_proof_unavailable() {
+        assert!(is_parent_proof_unavailable(
+            &io::ErrorKind::PermissionDenied.into()
+        ));
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::OutOfMemory,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(!is_parent_proof_unavailable(&kind.into()));
+        }
     }
 
     #[test]
