@@ -1,6 +1,7 @@
 **/.DS_Store
 /target/
 /fuzz/target/
+/third_party/rust/backport-regressions/target/
 /.cache/
 /.tools/
 /.volparossa-dev/

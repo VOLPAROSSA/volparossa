@@ -17,6 +17,7 @@ License: GPL-3
  The complete GPL-3.0-only text is also installed as /usr/share/doc/volparossa/LICENSE.
 
 Files: third_party/rust/sources/hickory-proto-0.25.2.crate
+       third_party/rust/patches/hickory-proto-0.25.2-rustsec.patch
        third_party/rust/vendor/hickory-proto-0.25.2/*
 Copyright: 2015-2023 Benjamin Fry <benjaminfry@me.com>
            2015 The Hickory DNS Developers
@@ -32,6 +33,7 @@ Comment: Locked crates.io hickory-proto 0.25.2 source with the reviewed local se
  documented in third_party/rust/README.md.
 
 Files: third_party/rust/sources/time-0.3.41.crate
+       third_party/rust/patches/time-0.3.41-rustsec.patch
        third_party/rust/vendor/time-0.3.41/*
 Copyright: Jacob Pratt et al.
            2026 VOLPAROSSA contributors
@@ -41,6 +43,27 @@ License: MIT or Apache-2.0
  /usr/share/doc/volparossa/cargo-licenses/.
 Comment: Locked crates.io time 0.3.41 source with the reviewed local security backport documented
  in third_party/rust/README.md.
+
+Files: third_party/rust/sources/libp2p-yamux-0.47.0.crate
+       third_party/rust/patches/libp2p-yamux-0.47.0-single-backend.patch
+       third_party/rust/vendor/libp2p-yamux-0.47.0/*
+Copyright: 2017-2020 Parity Technologies (UK) Ltd.
+           2026 VOLPAROSSA contributors
+License: MIT
+ The complete MIT license from the exact upstream VCS revision is retained in the vendored tree.
+ Candidate binary packages install a copy under /usr/share/doc/volparossa/cargo-licenses/.
+Comment: Locked crates.io libp2p-yamux 0.47.0 source with the reviewed single-backend security
+ hardening documented in third_party/rust/README.md.
+
+Files: third_party/rust/licenses/yamux-0.13.10/LICENSE-APACHE
+       third_party/rust/licenses/yamux-0.13.10/LICENSE-MIT
+Copyright: 2018 Parity Technologies (UK) Ltd.
+License: Apache-2.0 or MIT
+ These exact license files are retained from the official yamux-v0.13.10 release tag because the
+ crates.io package omits top-level license files. Candidate binary packages install both under
+ /usr/share/doc/volparossa/cargo-licenses/.
+Comment: Official release tag 70db05dc63e8368bd0559a5ec0dba6e5fc2bdd41; the packaged crate's
+ embedded VCS metadata records 38e9944f8fbb723a3a4df575cfb15109efcb2d24.
 
 Files: third_party/src/mqvpn/*
        third_party/licenses/mqvpn-*

@@ -63,6 +63,9 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
                 "$repository_root/third_party/rust/vendor/time-0.3.41/Cargo.toml")
                     source_label='vendored-crates.io+time-0.3.41-security-backport'
                     ;;
+                "$repository_root/third_party/rust/vendor/libp2p-yamux-0.47.0/Cargo.toml")
+                    source_label='vendored-crates.io+libp2p-yamux-0.47.0-single-backend'
+                    ;;
                 *)
                     printf 'Unapproved non-workspace Cargo path dependency: %s\n' "$manifest_path" >&2
                     exit 1
@@ -96,6 +99,30 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
             copied=1
         done
     done
+
+    if [ "$copied" -ne 1 ] &&
+        [ "$crate_name" = yamux ] &&
+        [ "$crate_version" = 0.13.10 ] &&
+        [ "$license_expression" = 'Apache-2.0 OR MIT' ] &&
+        [ "$source" = 'registry+https://github.com/rust-lang/crates.io-index' ]
+    then
+        vcs_info=$crate_directory/.cargo_vcs_info.json
+        jq -e \
+            '.git.sha1 == "38e9944f8fbb723a3a4df575cfb15109efcb2d24" and
+             .path_in_vcs == "yamux"' \
+            "$vcs_info" >/dev/null 2>&1 || {
+                printf '%s\n' 'yamux 0.13.10 has unexpected or missing VCS provenance.' >&2
+                exit 1
+            }
+        install -m 0644 \
+            "$repository_root/third_party/rust/licenses/yamux-0.13.10/LICENSE-APACHE" \
+            "$crate_destination/LICENSE-APACHE"
+        install -m 0644 \
+            "$repository_root/third_party/rust/licenses/yamux-0.13.10/LICENSE-MIT" \
+            "$crate_destination/LICENSE-MIT"
+        copied=1
+        source_label='crates.io+yamux-0.13.10;licenses=official-tag-70db05dc63e8368bd0559a5ec0dba6e5fc2bdd41'
+    fi
 
     if [ "$copied" -ne 1 ]; then
         printf 'Resolved crate has no distributable top-level license/notice file: %s %s (%s)\n' \
