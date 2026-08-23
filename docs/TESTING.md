@@ -17,16 +17,18 @@ cargo clippy --manifest-path fuzz/Cargo.toml --locked --offline --all-targets --
 ./packaging/test-collect-cargo-licenses.sh
 ```
 The dependency script verifies exact crates.io archives, reviewed local
-security patches, unchanged license files, complete vendor-tree hashes, and
+security changes, unchanged license files, complete vendor-tree hashes, and
 the locked root and standalone fuzz feature graphs before running cargo-deny's
 license/ban/source checks and no-fetch `cargo-audit >= 0.22.1` scans of both
 lockfiles. It records the local RustSec database commit. Debian's cargo-deny
 0.18.3 rejects CVSS 4.0 vectors; a successful licenses/bans/sources subset
 alone does not replace the advisory gate. See `third_party/rust/README.md` for
-the narrowly scoped local backports and scanner exemptions.
+the narrowly scoped local backports, single-backend Yamux hardening, and
+scanner exemptions.
 
-The package-license regression proves both reviewed path overrides enter the
-distributable notices while workspace and arbitrary path packages do not.
+The package-license regression proves all three reviewed path overrides and
+the exact `yamux 0.13.10` release-tag license fallback enter the distributable
+notices while workspace and arbitrary path packages do not.
 
 Focused unit/property tests cover canonical protobuf, all eighteen signed
 control payloads, signatures/key binding, replay/TTL/skew, advertisements, two-hop forwarding,

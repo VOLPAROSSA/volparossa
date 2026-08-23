@@ -246,20 +246,22 @@ authoritative for a packaged release. Candidate packaging records each
 package, version, license, and source and copies every crate's top-level
 license/NOTICE files; it fails on an unapproved source or missing notice.
 
-### Debian 13 compatible Rust security backports
+### Debian 13 compatible Rust security overrides
 
-Two crates.io packages are overridden with verified project-local source
-because their fixed upstream releases require Rust 1.88 while Debian 13
-supplies Rust 1.85:
+Three crates.io packages are overridden with verified project-local source.
+The Hickory and time fixed releases require Rust 1.88, while the future
+single-backend libp2p-yamux release also raises its MSRV above Debian 13's
+Rust 1.85:
 
 | Component | Exact source and upstream revision | License | Local security patch |
 |---|---|---|---|
 | hickory-proto 0.25.2 | crates.io SHA-256 `f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502`; git `527c9f470a418cf6b92da902ea0aaa5749963d59` | Apache-2.0 OR MIT; original license files preserved | `third_party/rust/patches/hickory-proto-0.25.2-rustsec.patch`, SHA-256 `bd1d5df1a13574d5c8b546e1a53dfde04d524353a646c8235786d7724215828a`; bounds compression candidates, rejects cross-zone NSEC3 proofs, and adds a non-default regression-only adapter |
 | time 0.3.41 | crates.io SHA-256 `8a7619e19bc266e0f9c5e6686659d394bc57973859340060a69221e57dbc0c40`; git `cc35dcfcde917bb833c114e2b4c00292a374c4ba` | Apache-2.0 OR MIT; original license files preserved | `third_party/rust/patches/time-0.3.41-rustsec.patch`, SHA-256 `bc4ad8b199c3284c59b1aa259d5ec907d43f7cb898083a8d5ab99a71cc7a5c8a`; bounds RFC 2822 comment recursion |
+| libp2p-yamux 0.47.0 | crates.io SHA-256 `f15df094914eb4af272acf9adaa9e287baa269943f32ea348ba29cfb9bfc60d8`; git `9736aacf814eb7b9df0372c5f9adcffba8a4b212` | MIT; exact upstream repository license retained | `third_party/rust/patches/libp2p-yamux-0.47.0-single-backend.patch`, SHA-256 `1a845f6cfaa57c993b54f654dc8e9294a450de8c46be323618481a7cc750740d`; removes the retired 0.12 backend, pins fixed yamux 0.13.10, and preserves read-after-close policy |
 
 The complete sources, patch review notes, resulting tree hashes, test
 contract, and removal condition are in `third_party/rust/README.md`.
-`scripts/check-rust-dependencies.sh` reconstructs both trees from the exact
+`scripts/check-rust-dependencies.sh` reconstructs all three trees from the exact
 archives, applies the locked patches, byte-compares the result, verifies
 unchanged licenses and the feature graph, runs cargo-deny
 license/ban/source checks, and performs a no-fetch cargo-audit scan against a
@@ -267,10 +269,13 @@ local RustSec checkout. It prints that checkout's exact commit.
 
 The GPL-3.0-only harness under `third_party/rust/backport-regressions` has a
 rustc-1.85-resolved lockfile (SHA-256
-`c56a2c8a797466a7c38171bd7e806d8b8bfc0d9dd2cfdc1d3f5a0984262024eb`)
-and executes all three fixes offline. Its Hickory feature calls the same
+`08e7bcd46d2e3f7411e8f4e855c70027f627be6061f63ab459c43f41a687c5cc`)
+and executes all five dependency-security regressions offline. Its Hickory feature calls the same
 private NSEC3 validator through a doc-hidden adapter; that feature is absent
-from and forbidden in the production dependency graph.
+from and forbidden in the production dependency graph. Its bounded Yamux raw
+frame test proves an oversized first-stream body fails closed without an
+unwind; its public-wrapper test preserves `set_max_num_streams` and
+`read_after_close(false)` semantics.
 
 RustSec scanners still identify the unchanged semantic versions as affected.
 `RUSTSEC-2026-0009`, `RUSTSEC-2026-0118`, and
@@ -285,9 +290,15 @@ Debian cargo-deny 0.18.3 remains authoritative for licenses, bans, and sources
 but cannot parse the current CVSS 4.0 advisory database.
 
 Candidate packaging excludes workspace members and admits path dependencies
-only at the two exact verified vendor paths above.
-`packaging/test-collect-cargo-licenses.sh` proves both vendored license pairs
-are collected and an arbitrary non-workspace path dependency is rejected.
+only at the three exact verified vendor paths above.
+`yamux 0.13.10` omits license files from its crate archive, so exact
+Apache-2.0 and MIT files from official release tag
+`70db05dc63e8368bd0559a5ec0dba6e5fc2bdd41` are retained under
+`third_party/rust/licenses/yamux-0.13.10/`. The collector fallback requires the
+exact registry package identity, license expression, and embedded VCS
+revision. `packaging/test-collect-cargo-licenses.sh` proves every vendored and
+fallback license is collected and an arbitrary non-workspace path dependency
+is rejected.
 
 ## Notable Rust source dependencies
 
