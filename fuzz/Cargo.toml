@@ -4,11 +4,20 @@ version = "0.0.0"
 publish = false
 license = "GPL-3.0-only"
 edition = "2024"
+rust-version = "1.85"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
+# Direct, featureless constraints make this standalone resolver select the
+# reviewed path patches below.
+hickory-proto = { version = "=0.25.2", default-features = false }
+time = { version = "=0.3.41", default-features = false }
+# multibase 0.9.3 pulls in base45 3.2.0, whose Rust API exceeds the
+# pinned Rust 1.85.
+multibase = { version = "=0.9.2", default-features = false }
+
 ed25519-dalek = "2.1.1"
 libfuzzer-sys = "0.4"
 prost = "0.14.1"
@@ -20,6 +29,11 @@ volparossa-quic = { path = "../crates/volparossa-quic", version = "0.1.0" }
 
 [workspace]
 members = ["."]
+resolver = "3"
+
+[patch.crates-io]
+hickory-proto = { path = "../third_party/rust/vendor/hickory-proto-0.25.2" }
+time = { path = "../third_party/rust/vendor/time-0.3.41" }
 
 [[bin]]
 name = "node_advertisement"
@@ -97,4 +111,3 @@ path = "fuzz_targets/quic_initial.rs"
 test = false
 doc = false
 bench = false
-

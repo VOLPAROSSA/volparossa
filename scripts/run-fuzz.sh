@@ -24,6 +24,10 @@ if ! cargo fuzz --help >/dev/null 2>&1; then
     printf '%s\n' 'cargo-fuzz is required; install the Debian-packaged or audited cargo-fuzz tool first' >&2
     exit 69
 fi
+cargo metadata \
+    --manifest-path fuzz/Cargo.toml \
+    --locked \
+    --format-version 1 >/dev/null
 
 SECONDS_PER_TARGET=${VOLPAROSSA_FUZZ_SECONDS_PER_TARGET:-30}
 MAX_INPUT_BYTES=${VOLPAROSSA_FUZZ_MAX_INPUT_BYTES:-524289}
@@ -43,7 +47,6 @@ case $SANITIZER in
     address|none) ;;
     *) printf '%s\n' 'VOLPAROSSA_FUZZ_SANITIZER must be auto, address, or none' >&2; exit 64 ;;
 esac
-
 
 TARGETS='node_advertisement
 policy_manifest
