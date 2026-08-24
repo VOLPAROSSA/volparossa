@@ -6,10 +6,12 @@
 //! UID/GID-mapping barrier, and then proves one exact self-reexecuted namespace
 //! PID 1. That PID makes the inherited mount tree recursively private, installs
 //! a bounded hardened tmpfs at `/run` and a PID-namespace-bound procfs at
-//! `/proc`, and retains both while the outer independently verifies them. The
-//! exact process tree is then reaped without authorizing topology mutation. The
-//! slice deliberately stops before signal supervision, `BOOTSTRAP_READY`, and
-//! `GO`; it cannot emit acceptance evidence or create network topology.
+//! `/proc`, and retains both while the outer independently verifies them. A
+//! retained pidfd then delivers TERM to PID 1, which consumes it through a fixed
+//! `signalfd` and returns one affine observation before exact PID-1 and launcher
+//! reaping. The slice deliberately stops before pristine-network proof,
+//! `BOOTSTRAP_READY`, and `GO`; it cannot emit acceptance evidence or create
+//! network topology.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
@@ -24,6 +26,7 @@ mod namespace;
 mod pid1;
 mod process;
 mod runner;
+mod signals;
 
 pub use process::{INTERNAL_CHILD_ARGUMENT, INTERNAL_PID_ONE_ARGUMENT};
 pub use runner::{

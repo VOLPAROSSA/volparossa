@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         }
         Some(argument) if argument == OsStr::new(PREVIEW_ARGUMENT) => {
             println!(
-                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, recursive private propagation, bounded private /run, and PID-bound private /proc are implemented; signal supervision, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked."
+                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, and fixed pidfd-to-signalfd supervision are implemented; pristine-network proof, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked."
             );
             ExitCode::SUCCESS
         }
@@ -55,9 +55,15 @@ fn main() -> ExitCode {
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
-            Ok(LifecycleOutcome::BlockedAfterPrivateMountProof) => {
+            Ok(LifecycleOutcome::BlockedAfterSignalSupervisionProof) => {
                 eprintln!(
-                    "BLOCKED: recursive private propagation, bounded private /run, and PID-bound private /proc were independently verified and reaped without BOOTSTRAP_READY or GO."
+                    "BLOCKED: private mounts and the fixed pidfd-to-PID1-signalfd TERM observation chain were independently verified and exactly reaped without BOOTSTRAP_READY or GO."
+                );
+                ExitCode::from(BLOCKED_EXIT_CODE)
+            }
+            Ok(LifecycleOutcome::BlockedByManagedSignal) => {
+                eprintln!(
+                    "BLOCKED: a managed outer termination signal triggered bounded fail-closed containment before BOOTSTRAP_READY or GO."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

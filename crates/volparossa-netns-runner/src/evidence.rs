@@ -12,7 +12,7 @@ use rustix::{
         AtFlags, Dir, FileType, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags, StatxFlags, fstat,
         fstatfs, open, openat, openat2, statx,
     },
-    process::{Pid, PidfdFlags, pidfd_open},
+    process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
 };
 use thiserror::Error;
 
@@ -23,11 +23,16 @@ use crate::{
     namespace::{
         LauncherNamespaceMembership, LauncherNamespacePins, NamespacePins, NamespaceSnapshot,
     },
+    signals::ManagedSignal,
 };
 
 const MAXIMUM_PROC_RECORD_BYTES: usize = 16 * 1024;
 const MAXIMUM_DIRECTORY_ENTRIES: usize = 4096;
 const TMPFS_SUPER_MAGIC: i128 = 0x0102_1994;
+const MANAGED_SIGNAL_MASK: u64 = 0x0000_0000_0001_4003;
+// Rust 1.85's Unix runtime installs its fixed stack-overflow handlers for
+// SIGBUS and SIGSEGV before `main`; PID 1 then adds HUP, INT, and TERM.
+const PID_ONE_CAUGHT_SIGNAL_MASK: u64 = 0x0000_0000_0000_4443;
 
 pub(crate) struct LauncherKernelPins {
     pidfd: OwnedFd,
@@ -54,6 +59,15 @@ struct ProcessStatus {
     parent: u32,
     threads: u32,
     namespace_pids: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessSignalStatus {
+    pending: u64,
+    shared_pending: u64,
+    blocked: u64,
+    ignored: u64,
+    caught: u64,
 }
 
 #[derive(Debug, Error)]
@@ -470,6 +484,29 @@ impl PidOneKernelPins {
         verify_private_run(&run_directory, outer_user_id, outer_group_id)?;
         verify_private_proc(&proc_directory, self.namespaces.snapshot().pid)?;
         self.verify_live_identity(outer_user_id, outer_group_id)
+    }
+
+    pub(crate) fn verify_signal_supervision(
+        &self,
+        outer_user_id: u32,
+        outer_group_id: u32,
+    ) -> io::Result<()> {
+        self.verify_live_identity(outer_user_id, outer_group_id)?;
+        let status = read_proc_file(&self.process_directory, "status")?;
+        verify_pid_one_status(
+            &status,
+            self.process_id,
+            self.launcher_process_id,
+            self.launcher_pid_depth,
+        )?;
+        verify_pid_one_signal_supervision(&status)?;
+        self.verify_live_identity(outer_user_id, outer_group_id)
+    }
+
+    pub(crate) fn send_managed_signal(&self, signal: ManagedSignal) -> io::Result<()> {
+        self.ensure_alive()?;
+        pidfd_send_signal(&self.pidfd, managed_rustix_signal(signal)).map_err(rustix_io)?;
+        self.ensure_alive()
     }
 
     fn verify_live_identity(&self, outer_user_id: u32, outer_group_id: u32) -> io::Result<()> {
@@ -948,6 +985,83 @@ fn parse_process_status(bytes: &[u8]) -> io::Result<ProcessStatus> {
     })
 }
 
+fn parse_process_signal_status(bytes: &[u8]) -> io::Result<ProcessSignalStatus> {
+    if !bytes.ends_with(b"\n") || bytes.contains(&b'\r') || bytes.contains(&0) {
+        return Err(invalid_data("process signal status framing is invalid"));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| invalid_data("process signal status is not UTF-8"))?;
+    let mut pending = None;
+    let mut shared_pending = None;
+    let mut blocked = None;
+    let mut ignored = None;
+    let mut caught = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("SigPnd:\t") {
+            set_signal_mask_once(&mut pending, parse_signal_mask(value)?)?;
+        } else if let Some(value) = line.strip_prefix("ShdPnd:\t") {
+            set_signal_mask_once(&mut shared_pending, parse_signal_mask(value)?)?;
+        } else if let Some(value) = line.strip_prefix("SigBlk:\t") {
+            set_signal_mask_once(&mut blocked, parse_signal_mask(value)?)?;
+        } else if let Some(value) = line.strip_prefix("SigIgn:\t") {
+            set_signal_mask_once(&mut ignored, parse_signal_mask(value)?)?;
+        } else if let Some(value) = line.strip_prefix("SigCgt:\t") {
+            set_signal_mask_once(&mut caught, parse_signal_mask(value)?)?;
+        }
+    }
+    Ok(ProcessSignalStatus {
+        pending: pending.ok_or_else(|| invalid_data("process status is missing SigPnd"))?,
+        shared_pending: shared_pending
+            .ok_or_else(|| invalid_data("process status is missing ShdPnd"))?,
+        blocked: blocked.ok_or_else(|| invalid_data("process status is missing SigBlk"))?,
+        ignored: ignored.ok_or_else(|| invalid_data("process status is missing SigIgn"))?,
+        caught: caught.ok_or_else(|| invalid_data("process status is missing SigCgt"))?,
+    })
+}
+
+fn parse_signal_mask(value: &str) -> io::Result<u64> {
+    if value.len() != 16
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid_data("process signal mask is not canonical"));
+    }
+    u64::from_str_radix(value, 16).map_err(|_| invalid_data("process signal mask is out of range"))
+}
+
+fn verify_pid_one_signal_supervision(bytes: &[u8]) -> io::Result<()> {
+    let status = parse_process_signal_status(bytes)?;
+    if status.blocked != MANAGED_SIGNAL_MASK {
+        return Err(invalid_data(
+            "PID-1 blocked signal mask is not the exact managed set",
+        ));
+    }
+    if status.caught != PID_ONE_CAUGHT_SIGNAL_MASK {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PID-1 caught signal mask is not the exact fixed Rust-runtime and managed-handler set: observed={:016x}",
+                status.caught
+            ),
+        ));
+    }
+    if (status.pending | status.shared_pending | status.ignored) & MANAGED_SIGNAL_MASK != 0 {
+        return Err(invalid_data(
+            "PID-1 has a managed signal pending or ignored",
+        ));
+    }
+    Ok(())
+}
+
+const fn managed_rustix_signal(signal: ManagedSignal) -> Signal {
+    match signal {
+        ManagedSignal::Hup => Signal::HUP,
+        ManagedSignal::Int => Signal::INT,
+        ManagedSignal::Term => Signal::TERM,
+    }
+}
+
 fn parse_namespace_pid_list(value: &str) -> io::Result<Vec<u32>> {
     if value.is_empty() {
         return Err(invalid_data("process namespace PID list is empty"));
@@ -1033,6 +1147,14 @@ fn set_once(slot: &mut Option<u32>, value: u32) -> io::Result<()> {
     }
 }
 
+fn set_signal_mask_once(slot: &mut Option<u64>, value: u64) -> io::Result<()> {
+    if slot.replace(value).is_none() {
+        Ok(())
+    } else {
+        Err(invalid_data("proc record duplicated a required field"))
+    }
+}
+
 fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -1048,6 +1170,19 @@ fn errno_io(error: nix::errno::Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process_signal_status_record(
+        pending: u64,
+        shared_pending: u64,
+        blocked: u64,
+        ignored: u64,
+        caught: u64,
+    ) -> Vec<u8> {
+        format!(
+            "Name:\tfixture\nSigPnd:\t{pending:016x}\nShdPnd:\t{shared_pending:016x}\nSigBlk:\t{blocked:016x}\nSigIgn:\t{ignored:016x}\nSigCgt:\t{caught:016x}\n"
+        )
+        .into_bytes()
+    }
 
     #[test]
     fn mapping_parser_accepts_kernel_padding_and_one_canonical_extent() {
@@ -1121,6 +1256,118 @@ mod tests {
                 "accepted {rejected:?}"
             );
         }
+    }
+
+    #[test]
+    fn signal_status_parser_accepts_one_canonical_record_per_mask() {
+        let record = process_signal_status_record(
+            0x4,
+            0x8,
+            MANAGED_SIGNAL_MASK,
+            0x8000_0000_0000_0000,
+            PID_ONE_CAUGHT_SIGNAL_MASK,
+        );
+        assert_eq!(
+            parse_process_signal_status(&record).expect("signal status"),
+            ProcessSignalStatus {
+                pending: 0x4,
+                shared_pending: 0x8,
+                blocked: MANAGED_SIGNAL_MASK,
+                ignored: 0x8000_0000_0000_0000,
+                caught: PID_ONE_CAUGHT_SIGNAL_MASK,
+            }
+        );
+        verify_pid_one_signal_supervision(&record).expect("exact supervision state");
+    }
+
+    #[test]
+    fn signal_status_parser_rejects_missing_duplicate_or_noncanonical_masks() {
+        for value in [
+            "",
+            "0",
+            "000000000001400",
+            "00000000000014003",
+            "000000000000400A",
+            "0x0000000000014003",
+            "0000000000000g00",
+        ] {
+            assert!(parse_signal_mask(value).is_err(), "accepted {value:?}");
+        }
+
+        for record in [
+            b"SigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000014003\nSigIgn:\t0000000000000000\n"
+                .as_slice(),
+            b"SigPnd:\t0000000000000000\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000014003\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000004003\n",
+            b"SigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000014003\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000004003",
+            b"SigPnd:\t0000000000000000\r\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000014003\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000004003\n",
+            b"SigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000014003\nSigIgn:\t0000000000000000\nSigCgt:\t0000000000004003\0\n",
+            b"SigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000014003\nSigIgn:\t0000000000000000\nSigCgt:\tffffffffffffffff\xff\n",
+        ] {
+            assert!(
+                parse_process_signal_status(record).is_err(),
+                "accepted {record:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pid_one_signal_supervision_requires_exact_masks_and_no_managed_pending_state() {
+        for blocked in [
+            MANAGED_SIGNAL_MASK & !0x1,
+            MANAGED_SIGNAL_MASK & !0x0001_0000,
+            MANAGED_SIGNAL_MASK | 0x4,
+        ] {
+            assert!(
+                verify_pid_one_signal_supervision(&process_signal_status_record(
+                    0,
+                    0,
+                    blocked,
+                    0,
+                    PID_ONE_CAUGHT_SIGNAL_MASK,
+                ))
+                .is_err()
+            );
+        }
+        for caught in [
+            PID_ONE_CAUGHT_SIGNAL_MASK & !0x1,
+            PID_ONE_CAUGHT_SIGNAL_MASK | 0x0001_0000,
+            PID_ONE_CAUGHT_SIGNAL_MASK | 0x4,
+        ] {
+            assert!(
+                verify_pid_one_signal_supervision(&process_signal_status_record(
+                    0,
+                    0,
+                    MANAGED_SIGNAL_MASK,
+                    0,
+                    caught,
+                ))
+                .is_err()
+            );
+        }
+        for (pending, shared_pending, ignored) in [
+            (0x1, 0, 0),
+            (0, 0x2, 0),
+            (0, 0, 0x4000),
+            (0, 0x0001_0000, 0),
+        ] {
+            assert!(
+                verify_pid_one_signal_supervision(&process_signal_status_record(
+                    pending,
+                    shared_pending,
+                    MANAGED_SIGNAL_MASK,
+                    ignored,
+                    PID_ONE_CAUGHT_SIGNAL_MASK,
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn managed_signal_mapping_is_fixed_and_exhaustive() {
+        assert_eq!(managed_rustix_signal(ManagedSignal::Hup), Signal::HUP);
+        assert_eq!(managed_rustix_signal(ManagedSignal::Int), Signal::INT);
+        assert_eq!(managed_rustix_signal(ManagedSignal::Term), Signal::TERM);
     }
 
     #[test]

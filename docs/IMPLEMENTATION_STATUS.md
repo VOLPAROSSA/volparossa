@@ -414,13 +414,25 @@ Last updated: 2026-08-24
   mount IDs to bounded mountinfo, requires no propagation relationships, and proves the exact
   PID/task set `{1}` with no child. The outer independently repeats the mount-ID, filesystem,
   capacity, ownership, PID-namespace, PID/PPID/task, and empty-child proof while PID 1 remains
-  pinned. If the outer PID-1 pin is unavailable after spawn, one run-bound pre-mount abort record
+  pinned. Before any child process or fallback-reaper thread exists, the outer requires exact
+  default inherited HUP/INT/TERM actions, a waitable default CHLD action, and an empty inherited
+  signal mask. It then blocks HUP/INT/TERM/CHLD and owns the nonblocking close-on-exec `signalfd`.
+  PID 1 inherits that
+  exact mask, installs fixed HUP/INT/TERM emergency handlers, and verifies them directly through
+  the audited Linux-UAPI layer. The outer independently requires exact live proc masks
+  (`SigBlk=0000000000014003`, `SigCgt=0000000000004443`, and no managed ignored or pending bit)
+  through its retained pidfd and proc anchor. The caught mask is `0x4003` managed handlers plus
+  the repository-pinned Rust 1.85.0 runtime's `0x0440` SIGBUS/SIGSEGV baseline on Debian 13 amd64,
+  not a Linux ABI constant. After mount verification, the outer sends exact TERM via
+  the PID-1 pidfd; PID 1 consumes the real `signalfd` record and returns an affine run/PID/signal
+  observation through the launcher. Only then may lifecycle EOF retire and exactly reap PID 1.
+  If the outer PID-1 pin is unavailable after spawn, one run-bound pre-mount abort record
   retires PID 1 without issuing a mount instruction. Only `EPERM` or `EACCES` from a fixed
   mount-UAPI operation may produce the exclusive
   `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
   options, resource failures, and failed evidence remain hard errors. The positive
-  `BlockedAfterPrivateMountProof` route closes without a lifecycle frame or `GO` and proves exact
-  PID-1 exit/reap. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
+  `BlockedAfterSignalSupervisionProof` route closes without a lifecycle frame or `GO` and proves
+  the complete mount/signal chain plus exact PID-1 exit/reap. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
   namespace/mount/route observations, and no command-shim execution. Normal reaping retains both
   pidfd and exact `Child` ownership; every forced `SIGKILL` after admission targets that pidfd.
   Pidfd acquisition is mandatory; its failure closes the private channels, attempts `SIGKILL`
@@ -430,9 +442,13 @@ Last updated: 2026-08-24
   post-exit cleanup or A14 evidence. Required parent, namespace, mapping, mount-policy, and outer
   PID-1 proofs fail closed when kernel policy hides them. Generic CI may therefore prove only
   fail-closed behaviour; complete live evidence requires the explicit
-  `BlockedAfterPrivateMountProof` outcome. The slice still has no general root-filesystem or
-  supplementary-group isolation, signal-driven five-frame driver, topology mutation, crash
-  cleanup evidence, acceptance report, or A01-A15 result.
+  `BlockedAfterSignalSupervisionProof` outcome. At supervised IPC boundaries, managed outer
+  HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
+  external-signal handling across every reap/report phase, general descendant reaping, forced
+  parent-death/crash-chain cleanup, or A14. The slice
+  still has no general root-filesystem or supplementary-group isolation, pristine-network proof,
+  `BOOTSTRAP_READY`, signal-driven five-frame driver, topology mutation, crash-cleanup evidence,
+  acceptance report, or A01-A15 result.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 

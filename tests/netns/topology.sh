@@ -52,7 +52,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, and fixed private mounts, but this shell entry point remains non-executing until the signal-driven lifecycle driver exists.' \
+            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, and the PID1 signal-supervision substrate, but this shell entry point remains non-executing until the lifecycle driver exists.' \
             'This invocation created no namespace, link, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;

@@ -3,10 +3,16 @@
 //! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], taking
 //! immediate RAII ownership of descriptors installed by the bounded receive helpers, the
 //! [`install_close_range_on_exec`] process hook, the read-only
-//! [`ensure_waitable_sigchld_disposition`] query, and [`install_worker_no_descendants_filter`].
+//! [`ensure_waitable_sigchld_disposition`] and
+//! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
+//! [`install_pid_one_lifecycle_signal_handlers`] and
+//! [`verify_pid_one_lifecycle_signal_handlers`] signal-action calls, and
+//! [`install_worker_no_descendants_filter`].
 //! The process hook performs exactly one async-signal-safe `close_range(2)` syscall between
 //! `fork` and `exec`. The seccomp wrapper installs one fixed amd64 classic-BPF program and accepts
 //! no caller-controlled filter, action, syscall number, flag, or pointer.
+//! The PID-1 signal wrapper installs and reads back only the fixed `SIGHUP`, `SIGINT`, and
+//! `SIGTERM` emergency dispositions; its handler can only call `_exit(2)`.
 //! The MPTCP buffer uses the exact Debian 13 `/usr/include/linux/mptcp.h`
 //! `struct mptcp_info` layout, is fully initialized before FFI, and its returned
 //! length is checked before any field is trusted.
@@ -44,6 +50,18 @@ const MAX_HANDOFF_BINDING_BYTES: usize = 256;
 const MAX_SEQPACKET_BYTES: usize = 1024 * 1024;
 const CLOSE_RANGE_UNSHARE_AND_CLOEXEC: libc::c_uint =
     libc::CLOSE_RANGE_UNSHARE | libc::CLOSE_RANGE_CLOEXEC;
+const PID_ONE_LIFECYCLE_SIGNALS: [libc::c_int; 3] = [libc::SIGHUP, libc::SIGINT, libc::SIGTERM];
+const PID_ONE_LIFECYCLE_MASK_BITS: u64 = signal_bit(libc::SIGHUP)
+    | signal_bit(libc::SIGINT)
+    | signal_bit(libc::SIGTERM)
+    | signal_bit(libc::SIGCHLD);
+
+// glibc's amd64 `sigaction(2)` trampoline adds this Linux-internal flag to the action returned by
+// an exact readback. It is not caller selectable through this API and does not alter delivery.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const LIBC_SIGACTION_READBACK_FLAGS: libc::c_int = libc::SA_RESTART | 0x0400_0000;
+#[cfg(not(all(target_arch = "x86_64", target_pointer_width = "64")))]
+const LIBC_SIGACTION_READBACK_FLAGS: libc::c_int = libc::SA_RESTART;
 
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
@@ -122,6 +140,181 @@ fn classify_sigchld_action(handler: libc::sighandler_t, flags: libc::c_int) -> i
         ));
     }
     Ok(())
+}
+
+/// Require exact default dispositions for the fixed lifecycle signals.
+///
+/// An ignored disposition survives `execve(2)` and causes Linux to discard that signal instead
+/// of making it pending for a later `signalfd(2)` read. This read-only admission check therefore
+/// requires `SIGHUP`, `SIGINT`, and `SIGTERM` to each have the exact kernel default handler, an
+/// empty action mask, and zero action flags. Custom handlers and otherwise inert extra action
+/// state are rejected so the synchronous supervisor starts from one canonical process state.
+///
+/// Callers must remain single-threaded (or otherwise exclude concurrent disposition changes),
+/// perform this check before changing their signal mask, and fail closed if it returns an error.
+///
+/// # Errors
+///
+/// Returns the first kernel query error, an `InvalidData` error for an invalid signal-set
+/// readback, or `PermissionDenied` when any fixed lifecycle action is not exactly default.
+pub fn ensure_default_lifecycle_signal_dispositions() -> io::Result<()> {
+    for signal in PID_ONE_LIFECYCLE_SIGNALS {
+        classify_default_lifecycle_action(read_signal_action(signal)?)?;
+    }
+    Ok(())
+}
+
+/// Installs the fixed emergency dispositions required by a PID-namespace init process.
+///
+/// Linux gives namespace PID 1 special default signal semantics, so `SIGHUP`, `SIGINT`, and
+/// `SIGTERM` need real handlers even while the normal lifecycle path consumes blocked signals
+/// synchronously. Each fixed action uses `SA_RESTART` and blocks exactly `SIGHUP`, `SIGINT`,
+/// `SIGTERM`, and `SIGCHLD` while its handler runs. The emergency handler performs only the
+/// async-signal-safe `_exit(128 + signal)` operation. Thus an accidentally unblocked managed
+/// signal cannot leave PID 1 alive outside the supervised lifecycle path.
+///
+/// This API accepts no signal number, handler, mask, or action flags. The caller must block the
+/// three lifecycle signals before installation, remain single-threaded (or otherwise exclude
+/// concurrent disposition changes), and fail closed if this function returns an error. A
+/// successful installation includes an exact kernel readback through
+/// [`verify_pid_one_lifecycle_signal_handlers`].
+///
+/// # Errors
+///
+/// Returns the first kernel error while constructing or installing the fixed actions, or the
+/// verification error if their immediate kernel readback is not exact.
+pub fn install_pid_one_lifecycle_signal_handlers() -> io::Result<()> {
+    let action = fixed_pid_one_lifecycle_action()?;
+    for signal in PID_ONE_LIFECYCLE_SIGNALS {
+        // SAFETY: `signal` comes only from the fixed array above and `action` is a fully
+        // initialized fixed action whose function pointer, mask, and flags are not caller
+        // controlled. A null old-action pointer requests no inherited pointer back from libc.
+        let result = unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    verify_pid_one_lifecycle_signal_handlers()
+}
+
+/// Verifies the exact fixed PID-1 lifecycle dispositions by kernel readback.
+///
+/// The handler identity, `SA_RESTART` flags, and complete valid-signal mask must match for each of
+/// `SIGHUP`, `SIGINT`, and `SIGTERM`. On Debian 13 amd64, the verifier also requires the fixed
+/// libc-provided `SA_RESTORER` trampoline flag. Any extra or missing action property fails closed.
+/// Callers must exclude concurrent signal-disposition changes for the duration of the query.
+///
+/// # Errors
+///
+/// Returns the first kernel query error, an `InvalidData` error for an invalid signal-set
+/// readback, or `PermissionDenied` when any fixed action property differs.
+pub fn verify_pid_one_lifecycle_signal_handlers() -> io::Result<()> {
+    for signal in PID_ONE_LIFECYCLE_SIGNALS {
+        let snapshot = read_signal_action(signal)?;
+        classify_pid_one_lifecycle_action(snapshot)?;
+    }
+    Ok(())
+}
+
+extern "C" fn pid_one_lifecycle_emergency_exit(signal: libc::c_int) {
+    // SAFETY: `_exit(2)` is async-signal-safe and never returns. The kernel invokes this private
+    // handler only for one of the three fixed managed signals, whose `128 + signal` status fits
+    // in the process exit-status byte.
+    unsafe { libc::_exit(128 + signal) }
+}
+
+fn fixed_pid_one_lifecycle_action() -> io::Result<libc::sigaction> {
+    // SAFETY: an all-zero Linux `sigaction` is a valid baseline: the integer handler slot is
+    // overwritten below, the signal set is initialized by `sigemptyset`, flags are overwritten,
+    // and the optional restorer remains `None` for libc to supply internally where required.
+    let mut action = unsafe { mem::zeroed::<libc::sigaction>() };
+    action.sa_sigaction = pid_one_lifecycle_emergency_exit as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    // SAFETY: `action.sa_mask` is writable storage of the exact libc signal-set type. Only the
+    // fixed mask is constructed; no caller-provided signal number reaches libc.
+    if unsafe { libc::sigemptyset(&raw mut action.sa_mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM, libc::SIGCHLD] {
+        // SAFETY: the mask remains initialized and `signal` is one of four fixed valid signals.
+        if unsafe { libc::sigaddset(&raw mut action.sa_mask, signal) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(action)
+}
+
+#[derive(Clone, Copy)]
+struct SignalActionSnapshot {
+    handler: libc::sighandler_t,
+    flags: libc::c_int,
+    mask_bits: u64,
+}
+
+fn read_signal_action(signal: libc::c_int) -> io::Result<SignalActionSnapshot> {
+    let mut action = mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: this private helper is called only with one of the three fixed lifecycle signals. A
+    // null input action makes the operation read-only, while `action` provides correctly aligned
+    // writable output storage and is inspected only after libc reports success.
+    let result = unsafe { libc::sigaction(signal, std::ptr::null(), action.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a successful `sigaction` query initialized every field read below.
+    let action = unsafe { action.assume_init() };
+    Ok(SignalActionSnapshot {
+        handler: action.sa_sigaction,
+        flags: action.sa_flags,
+        mask_bits: read_signal_set_bits(&action.sa_mask)?,
+    })
+}
+
+fn read_signal_set_bits(mask: &libc::sigset_t) -> io::Result<u64> {
+    let maximum = libc::SIGRTMAX();
+    if !(1..=64).contains(&maximum) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Linux valid-signal range does not fit fixed signal snapshot",
+        ));
+    }
+    let mut bits = 0_u64;
+    for signal in 1..=maximum {
+        // SAFETY: `mask` is an initialized libc signal set and every queried number is within the
+        // runtime valid-signal range reported by libc.
+        match unsafe { libc::sigismember(mask, signal) } {
+            0 => {}
+            1 => bits |= signal_bit(signal),
+            _ => return Err(io::Error::last_os_error()),
+        }
+    }
+    Ok(bits)
+}
+
+fn classify_pid_one_lifecycle_action(snapshot: SignalActionSnapshot) -> io::Result<()> {
+    if snapshot.handler != pid_one_lifecycle_emergency_exit as libc::sighandler_t
+        || snapshot.flags != LIBC_SIGACTION_READBACK_FLAGS
+        || snapshot.mask_bits != PID_ONE_LIFECYCLE_MASK_BITS
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "PID-1 lifecycle signal disposition is not the fixed emergency action",
+        ));
+    }
+    Ok(())
+}
+
+fn classify_default_lifecycle_action(snapshot: SignalActionSnapshot) -> io::Result<()> {
+    if snapshot.handler != libc::SIG_DFL || snapshot.flags != 0 || snapshot.mask_bits != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "inherited lifecycle signal disposition is not exactly default",
+        ));
+    }
+    Ok(())
+}
+
+const fn signal_bit(signal: libc::c_int) -> u64 {
+    1_u64 << ((signal as u32) - 1)
 }
 
 /// Installs the fixed amd64 worker filter that prevents creation of descendants.
@@ -1176,6 +1369,9 @@ mod tests {
     use super::*;
 
     const CLOSE_RANGE_CHILD_ENV: &str = "VOLPAROSSA_UAPI_CLOSE_RANGE_CHILD";
+    const DEFAULT_LIFECYCLE_ACTION_CHILD_ENV: &str =
+        "VOLPAROSSA_UAPI_DEFAULT_LIFECYCLE_ACTION_CHILD";
+    const PID_ONE_SIGNALS_CHILD_ENV: &str = "VOLPAROSSA_UAPI_PID_ONE_SIGNALS_CHILD";
     const SIGCHLD_ACTION_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SIGCHLD_ACTION_CHILD";
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     const SECCOMP_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SECCOMP_CHILD";
@@ -1243,6 +1439,252 @@ mod tests {
                 .status()
                 .expect("spawn isolated SIGCHLD query test");
             assert!(status.success(), "SIGCHLD mode {mode} was not rejected");
+        }
+    }
+
+    #[test]
+    fn default_lifecycle_action_classifier_is_exact() {
+        let exact = SignalActionSnapshot {
+            handler: libc::SIG_DFL,
+            flags: 0,
+            mask_bits: 0,
+        };
+        assert!(classify_default_lifecycle_action(exact).is_ok());
+
+        for handler in [libc::SIG_IGN, sigchld_test_handler as libc::sighandler_t] {
+            assert_eq!(
+                classify_default_lifecycle_action(SignalActionSnapshot { handler, ..exact })
+                    .expect_err("non-default lifecycle handler")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        for flags in [libc::SA_RESTART, libc::SA_NODEFER, libc::SA_RESETHAND] {
+            assert_eq!(
+                classify_default_lifecycle_action(SignalActionSnapshot { flags, ..exact })
+                    .expect_err("lifecycle action flags")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        for mask_bits in [signal_bit(libc::SIGUSR1), signal_bit(libc::SIGCHLD)] {
+            assert_eq!(
+                classify_default_lifecycle_action(SignalActionSnapshot { mask_bits, ..exact })
+                    .expect_err("lifecycle action mask")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn default_lifecycle_actions_are_verified_in_isolated_processes() {
+        if let Some(mode) = env::var_os(DEFAULT_LIFECYCLE_ACTION_CHILD_ENV) {
+            let mode = mode.to_str().expect("ASCII lifecycle-action mode");
+            if mode == "default" {
+                ensure_default_lifecycle_signal_dispositions()
+                    .expect("exec supplied exact default lifecycle actions");
+                return;
+            }
+
+            let (property, signal_name) = mode.split_once('-').expect("structured test mode");
+            let signal = match signal_name {
+                "hup" => libc::SIGHUP,
+                "int" => libc::SIGINT,
+                "term" => libc::SIGTERM,
+                _ => panic!("unexpected lifecycle signal test mode"),
+            };
+            // SAFETY: this branch runs in a disposable, single-test subprocess. Every field in
+            // the action is initialized before installing it for one fixed lifecycle signal.
+            let mut action = unsafe { mem::zeroed::<libc::sigaction>() };
+            action.sa_sigaction = match property {
+                "ignore" => libc::SIG_IGN,
+                "handler" => sigchld_test_handler as libc::sighandler_t,
+                "flags" | "mask" => libc::SIG_DFL,
+                _ => panic!("unexpected lifecycle action test mode"),
+            };
+            action.sa_flags = if property == "flags" {
+                libc::SA_RESTART
+            } else {
+                0
+            };
+            // SAFETY: the action mask is valid writable storage; only a fixed valid test signal
+            // is added, and the process exits immediately after the read-only admission query.
+            unsafe {
+                assert_eq!(libc::sigemptyset(&raw mut action.sa_mask), 0);
+                if property == "mask" {
+                    assert_eq!(libc::sigaddset(&raw mut action.sa_mask, libc::SIGUSR1), 0);
+                }
+                assert_eq!(
+                    libc::sigaction(signal, &raw const action, std::ptr::null_mut()),
+                    0
+                );
+            }
+            assert_eq!(
+                ensure_default_lifecycle_signal_dispositions()
+                    .expect_err("non-default lifecycle kernel action")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            return;
+        }
+
+        let current_executable = env::current_exe().expect("current test executable");
+        for mode in [
+            "default",
+            "ignore-hup",
+            "ignore-int",
+            "ignore-term",
+            "handler-hup",
+            "handler-int",
+            "handler-term",
+            "flags-hup",
+            "flags-int",
+            "flags-term",
+            "mask-hup",
+            "mask-int",
+            "mask-term",
+        ] {
+            let status = Command::new(&current_executable)
+                .arg("--exact")
+                .arg("tests::default_lifecycle_actions_are_verified_in_isolated_processes")
+                .arg("--test-threads=1")
+                .env(DEFAULT_LIFECYCLE_ACTION_CHILD_ENV, mode)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("spawn isolated lifecycle-action test");
+            assert!(status.success(), "lifecycle-action mode {mode}");
+        }
+    }
+
+    #[test]
+    fn pid_one_lifecycle_action_classifier_is_exact() {
+        let exact = SignalActionSnapshot {
+            handler: pid_one_lifecycle_emergency_exit as libc::sighandler_t,
+            flags: LIBC_SIGACTION_READBACK_FLAGS,
+            mask_bits: PID_ONE_LIFECYCLE_MASK_BITS,
+        };
+        assert!(classify_pid_one_lifecycle_action(exact).is_ok());
+
+        for handler in [
+            libc::SIG_DFL,
+            libc::SIG_IGN,
+            sigchld_test_handler as libc::sighandler_t,
+        ] {
+            assert_eq!(
+                classify_pid_one_lifecycle_action(SignalActionSnapshot { handler, ..exact })
+                    .expect_err("caller-selected handler must fail")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+
+        for flags in [
+            LIBC_SIGACTION_READBACK_FLAGS ^ libc::SA_RESTART,
+            LIBC_SIGACTION_READBACK_FLAGS | libc::SA_NODEFER,
+            LIBC_SIGACTION_READBACK_FLAGS | libc::SA_RESETHAND,
+            LIBC_SIGACTION_READBACK_FLAGS | libc::SA_NOCLDWAIT,
+        ] {
+            assert_eq!(
+                classify_pid_one_lifecycle_action(SignalActionSnapshot { flags, ..exact })
+                    .expect_err("extra or missing action flag must fail")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+
+        for mask_bits in [
+            PID_ONE_LIFECYCLE_MASK_BITS & !signal_bit(libc::SIGHUP),
+            PID_ONE_LIFECYCLE_MASK_BITS & !signal_bit(libc::SIGCHLD),
+            PID_ONE_LIFECYCLE_MASK_BITS | signal_bit(libc::SIGUSR1),
+        ] {
+            assert_eq!(
+                classify_pid_one_lifecycle_action(SignalActionSnapshot { mask_bits, ..exact })
+                    .expect_err("extra or missing action-mask signal must fail")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn pid_one_lifecycle_actions_install_and_read_back_in_isolated_processes() {
+        if let Some(mode) = env::var_os(PID_ONE_SIGNALS_CHILD_ENV) {
+            let mut managed = unsafe { mem::zeroed::<libc::sigset_t>() };
+            // SAFETY: this branch runs only in a disposable subprocess. `managed` is writable
+            // signal-set storage and only the three fixed valid lifecycle signals are added. The
+            // resulting set is blocked on this test thread before the processwide actions change.
+            unsafe {
+                assert_eq!(libc::sigemptyset(&raw mut managed), 0);
+                for signal in PID_ONE_LIFECYCLE_SIGNALS {
+                    assert_eq!(libc::sigaddset(&raw mut managed, signal), 0);
+                }
+                assert_eq!(
+                    libc::pthread_sigmask(
+                        libc::SIG_BLOCK,
+                        &raw const managed,
+                        std::ptr::null_mut()
+                    ),
+                    0
+                );
+            }
+
+            install_pid_one_lifecycle_signal_handlers().expect("install fixed PID-1 actions");
+            verify_pid_one_lifecycle_signal_handlers().expect("verify fixed PID-1 actions");
+            if mode == "readback" {
+                return;
+            }
+
+            let signal = match mode.to_str() {
+                Some("hup") => libc::SIGHUP,
+                Some("int") => libc::SIGINT,
+                Some("term") => libc::SIGTERM,
+                _ => panic!("unexpected PID-1 signal test mode"),
+            };
+            let mut selected = unsafe { mem::zeroed::<libc::sigset_t>() };
+            // SAFETY: this disposable child constructs a set containing exactly one fixed valid
+            // managed signal and unblocks it only after the emergency action was exactly verified.
+            unsafe {
+                assert_eq!(libc::sigemptyset(&raw mut selected), 0);
+                assert_eq!(libc::sigaddset(&raw mut selected, signal), 0);
+                assert_eq!(
+                    libc::pthread_sigmask(
+                        libc::SIG_UNBLOCK,
+                        &raw const selected,
+                        std::ptr::null_mut(),
+                    ),
+                    0
+                );
+                assert_eq!(libc::raise(signal), 0);
+            }
+            panic!("emergency lifecycle handler returned");
+        }
+
+        let current_executable = env::current_exe().expect("current test executable");
+        for (mode, expected_code) in [
+            ("readback", 0),
+            ("hup", 128 + libc::SIGHUP),
+            ("int", 128 + libc::SIGINT),
+            ("term", 128 + libc::SIGTERM),
+        ] {
+            let status = Command::new(&current_executable)
+                .arg("--exact")
+                .arg("tests::pid_one_lifecycle_actions_install_and_read_back_in_isolated_processes")
+                .arg("--test-threads=1")
+                .arg("--nocapture")
+                .env(PID_ONE_SIGNALS_CHILD_ENV, mode)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("spawn isolated PID-1 signal-action test");
+            assert_eq!(
+                status.code(),
+                Some(expected_code),
+                "PID-1 signal mode {mode}"
+            );
         }
     }
 
