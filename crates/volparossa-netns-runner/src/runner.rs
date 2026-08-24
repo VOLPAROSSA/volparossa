@@ -53,8 +53,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// Two live nsfs pins and their private-run backing were fully rolled back and retired.
-    BlockedAfterNamespacePinsRollback,
+    /// Two fixed veth pairs, live nsfs pins, and private-run backing were fully rolled back.
+    BlockedAfterVethPairsRollback,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -63,7 +63,7 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    AuthorizedNamespacePinsRolledBack,
+    AuthorizedVethPairsRolledBack,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -171,8 +171,9 @@ impl From<PidOneControlError> for RunnerError {
 /// sole canonical `GO`. PID 1 consumes its affine authorization, creates and
 /// proves the fixed private-run roots and empty namespace slots through retained
 /// descriptors, attaches two live nsfs network-namespace pins, proves their
-/// exact pristine network state under restoration barriers, then rolls the
-/// pins and roots back in reverse order and emits one internal
+/// exact pristine network state, atomically creates two fixed down-veth pairs,
+/// proves the exact parent/A/B deltas, deletes B then A, proves all three
+/// namespaces pristine again, then rolls the pins and roots back and emits one internal
 /// rollback-complete checkpoint. The outer independently re-proves empty private
 /// mounts before sending fixed TERM through the retained pidfd and requiring one
 /// affine PID-1 `signalfd` observation before exact reap. This slice does not
@@ -282,8 +283,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::AuthorizedNamespacePinsRolledBack => {
-            LifecycleOutcome::BlockedAfterNamespacePinsRollback
+        PidOneBarrierOutcome::AuthorizedVethPairsRolledBack => {
+            LifecycleOutcome::BlockedAfterVethPairsRollback
         }
     };
     Ok(outcome)
@@ -427,7 +428,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::AuthorizedNamespacePinsRolledBack)
+        Ok(PidOneBarrierOutcome::AuthorizedVethPairsRolledBack)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -607,7 +608,7 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterNamespacePinsRollback {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterVethPairsRollback {
         LifecycleEofDisposition::CleanupRequired
     } else {
         LifecycleEofDisposition::NoTopologyMutationAuthorized
@@ -962,7 +963,8 @@ fn finish_pid_one(
 /// bracketed by unchanged generation 1. It then emits exactly one canonical
 /// `BOOTSTRAP_READY`, consumes the canonical affine `GO`, creates and fully
 /// proves the fixed private-run roots and empty slots, attaches two live
-/// run-bound network-namespace pins, proves each full pristine network state,
+/// run-bound network-namespace pins, atomically creates and proves two fixed
+/// down-veth pairs, reverses B then A, proves every namespace pristine again,
 /// reverses both pins and then every
 /// private-run creation, and reports the internal rollback checkpoint. Only
 /// after the outer independently re-proves
@@ -1154,8 +1156,36 @@ fn complete_authorized_private_run_rollback(
     namespace_pins
         .verify_authorized_namespace_pins()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let (veth_pairs, endpoint_baselines) =
+        namespace_pins
+            .create_fixed_veth_pairs()
+            .map_err(|error| match error {
+                crate::mounts::NamespacePinsNetworkProofError::Mount(error) => {
+                    RunnerError::PrivateMount(io::Error::other(error))
+                }
+                crate::mounts::NamespacePinsNetworkProofError::Network(_) => {
+                    RunnerError::NetworkProof
+                }
+            })?;
+    veth_pairs
+        .verify_authorized_veth_pairs()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    veth_pairs
+        .prove_exact_veth_pairs(&rollback_network_proof, &endpoint_baselines)
+        .map_err(|error| match error {
+            crate::mounts::NamespacePinsNetworkProofError::Mount(error) => {
+                RunnerError::PrivateMount(io::Error::other(error))
+            }
+            crate::mounts::NamespacePinsNetworkProofError::Network(_) => RunnerError::NetworkProof,
+        })?;
+    veth_pairs
+        .verify_authorized_veth_pairs()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let namespace_pins = veth_pairs
+        .rollback_fixed_veth_pairs()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
     namespace_pins
-        .prove_pristine_network_namespace_pins()
+        .verify_pristine_network_namespace_rollbacks(endpoint_baselines)
         .map_err(|error| match error {
             crate::mounts::NamespacePinsNetworkProofError::Mount(error) => {
                 RunnerError::PrivateMount(io::Error::other(error))

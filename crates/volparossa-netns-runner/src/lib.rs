@@ -14,13 +14,17 @@
 //! affine authorization, creates and proves the fixed descriptor-relative
 //! private-run roots and two empty namespace slots, creates two distinct network
 //! namespaces, and publishes them as run-bound nsfs pins. It joins each visible
-//! pin for the full pristine network proof, restores its parent namespace,
-//! ordinarily unmounts B then A, proves the hidden slots reappeared, rolls every
+//! pin for the full pristine network proof and restores its parent namespace.
+//! It creates and exactly proves two fixed down-veth pairs, each through one
+//! atomic `RTM_NEWLINK` request. It deletes B then A, proves all three namespaces
+//! pristine again, ordinarily unmounts nsfs B then A, proves the hidden slots
+//! reappeared, rolls every
 //! filesystem object back, and reports one internal rollback checkpoint. The
 //! outer then independently re-proves empty private mounts before delivering
 //! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
-//! before exact PID-1 and launcher reaping. The slice creates no veth, address,
-//! route, firewall, ownership manifest, or topology readiness and cannot emit
+//! before exact PID-1 and launcher reaping. The slice creates no configured
+//! address, route, forwarding change, firewall object, packet, probe, ownership
+//! manifest, or topology readiness and cannot emit
 //! `TOPOLOGY_READY` or acceptance evidence.
 
 #![cfg(target_os = "linux")]
