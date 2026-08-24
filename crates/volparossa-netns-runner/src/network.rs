@@ -192,16 +192,15 @@ struct PreGoNetworkBaseline {
 /// The token is deliberately neither cloneable nor transferable to another
 /// thread. [`Self::verify`] performs a fresh double snapshot before the proof is
 /// used at a later protocol barrier.
-pub(crate) struct PreGoNetworkProof<'mounts> {
+pub(crate) struct PreGoNetworkProof {
     baseline: PreGoNetworkBaseline,
-    mounts: &'mounts PrivateMounts,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-impl PreGoNetworkProof<'_> {
-    /// Re-prove the baseline and require it to equal the original observation.
-    pub(crate) fn verify(&self) -> Result<(), NetworkError> {
-        let current = collect_pre_go_network_baseline(self.mounts)?;
+impl PreGoNetworkProof {
+    /// Consume the affine proof, re-prove the baseline, and require equality.
+    pub(crate) fn verify(self, mounts: &PrivateMounts) -> Result<(), NetworkError> {
+        let current = collect_pre_go_network_baseline(mounts)?;
         if current == self.baseline {
             Ok(())
         } else {
@@ -213,10 +212,9 @@ impl PreGoNetworkProof<'_> {
 /// Prove the enumerated read-only pre-`GO` network baseline without mutating it.
 pub(crate) fn prove_pre_go_network_baseline(
     mounts: &PrivateMounts,
-) -> Result<PreGoNetworkProof<'_>, NetworkError> {
+) -> Result<PreGoNetworkProof, NetworkError> {
     Ok(PreGoNetworkProof {
         baseline: collect_pre_go_network_baseline(mounts)?,
-        mounts,
         _thread_bound: PhantomData,
     })
 }

@@ -1066,7 +1066,9 @@ fn complete_pid_one_ready_retirement(
     signal_supervisor
         .verify_pid_one_quiescent()
         .map_err(RunnerError::SignalSupervision)?;
-    proof.verify().map_err(|_| RunnerError::NetworkProof)?;
+    proof
+        .verify(mounts)
+        .map_err(|_| RunnerError::NetworkProof)?;
     mounts
         .verify()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
