@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         }
         Some(argument) if argument == OsStr::new(PREVIEW_ARGUMENT) => {
             println!(
-                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, and fixed pidfd-to-signalfd supervision are implemented; pristine-network proof, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked."
+                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, and one pinned BOOTSTRAP_READY are implemented; GO, every network-topology mutation, and A14 cleanup evidence remain blocked."
             );
             ExitCode::SUCCESS
         }
@@ -55,15 +55,15 @@ fn main() -> ExitCode {
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
-            Ok(LifecycleOutcome::BlockedAfterSignalSupervisionProof) => {
+            Ok(LifecycleOutcome::BlockedAfterBootstrapReadyProof) => {
                 eprintln!(
-                    "BLOCKED: private mounts and the fixed pidfd-to-PID1-signalfd TERM observation chain were independently verified and exactly reaped without BOOTSTRAP_READY or GO."
+                    "BLOCKED: the exact new-netns RTNL baseline and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; no GO, network-topology mutation, or A14 evidence was produced."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
             Ok(LifecycleOutcome::BlockedByManagedSignal) => {
                 eprintln!(
-                    "BLOCKED: a managed outer termination signal triggered bounded fail-closed containment before BOOTSTRAP_READY or GO."
+                    "BLOCKED: a managed outer termination signal triggered bounded fail-closed containment before GO or any network-topology mutation."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

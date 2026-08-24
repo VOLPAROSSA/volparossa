@@ -16,7 +16,8 @@ use nix::{
 use rand_core::{OsRng, RngCore};
 use thiserror::Error;
 use volparossa_test_support::{
-    LaunchContext, LifecycleEofDisposition, NetnsLifecycleError, OuterLifecycleState, RunId,
+    BootstrapReady, InnerLifecyclePhase, InnerLifecycleState, LaunchContext,
+    LifecycleEofDisposition, NetnsLifecycleError, OuterLifecyclePhase, OuterLifecycleState, RunId,
 };
 
 use crate::{
@@ -52,8 +53,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// PID-1 mounts and the fixed pidfd-to-signalfd observation chain were proven.
-    BlockedAfterSignalSupervisionProof,
+    /// PID 1 emitted one pinned pre-GO readiness proof and was exactly retired.
+    BlockedAfterBootstrapReadyProof,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -62,7 +63,7 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    SignalSupervisionVerified,
+    BootstrapReadyVerified,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -80,6 +81,9 @@ pub enum RunnerError {
     /// Outer kernel observation or mapping installation violated a fixed invariant.
     #[error("isolated launcher kernel proof failed: {0}")]
     KernelProof(#[source] io::Error),
+    /// PID 1 could not prove the fixed pristine routing-readiness baseline.
+    #[error("PID-1 pristine routing-readiness proof failed")]
+    NetworkProof,
     /// The operating-system CSPRNG could not create the run identifier.
     #[error("failed to generate lifecycle run identifier")]
     Random,
@@ -104,8 +108,8 @@ pub enum RunnerError {
     /// The inherited private channel failed.
     #[error("fixed lifecycle channel failed: {0}")]
     Channel(#[source] io::Error),
-    /// A lifecycle record appeared before the complete bootstrap attestation existed.
-    #[error("inner child emitted a lifecycle record before BOOTSTRAP_READY existed")]
+    /// A lifecycle record or phase violated the fixed pre-GO exchange.
+    #[error("inner child violated the fixed pre-GO lifecycle exchange")]
     UnexpectedLifecycleRecord,
     /// The fixed child did not return the sole blocked-before-isolation exit status.
     #[error("inner child returned unexpected process status code={code:?} signal={signal:?}")]
@@ -160,10 +164,11 @@ impl From<PidOneControlError> for RunnerError {
 /// and proven before it recursively privatizes the mount tree and installs fixed
 /// private `/run` and `/proc` filesystems. PID 1 measures them locally; the outer
 /// independently binds their visible mount IDs, filesystem properties, and procfs
-/// PID view to its retained kernel pins. It then sends fixed TERM through the
-/// retained pidfd and requires one affine PID-1 `signalfd` observation before
-/// exact reap. No lifecycle frame or `GO` is emitted. The outer verifies that
-/// its own namespace identities remain unchanged.
+/// PID view to its retained kernel pins. PID 1 proves the pristine RTNL baseline
+/// and emits one canonical `BOOTSTRAP_READY` bound to those pins. Only then does
+/// the outer send fixed TERM through the retained pidfd and require one affine
+/// PID-1 `signalfd` observation before exact reap. No `GO` is emitted. The outer
+/// verifies that its own namespace identities remain unchanged.
 /// The caller must enter with exactly one task, an empty signal mask, exact
 /// default HUP/INT/TERM dispositions, and a default `SIGCHLD` disposition
 /// without `SA_NOCLDWAIT`.
@@ -172,7 +177,8 @@ impl From<PidOneControlError> for RunnerError {
 ///
 /// Returns an error for every launch, IPC, protocol, process-status, reaping,
 /// randomness, initial task-count, signal-disposition, namespace-identity,
-/// private-mount, signal-supervision, or kernel-readback discrepancy.
+/// private-mount, network-baseline, signal-supervision, or kernel-readback
+/// discrepancy.
 pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
     if !has_exact_single_task().map_err(RunnerError::Process)? {
         return Err(RunnerError::Process(io::Error::new(
@@ -218,6 +224,7 @@ pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
         before,
         &context,
         &mut bootstrap,
+        &mut outer,
     );
     match attempt {
         Ok(outcome) => finish_blocked_run(&signal_supervisor, child, &mut outer, before, outcome),
@@ -234,6 +241,7 @@ fn continue_fixed_lifecycle(
     before: NamespaceSnapshot,
     context: &LaunchContext,
     bootstrap: &mut OuterBootstrapControl,
+    outer: &mut OuterLifecycleState,
 ) -> Result<LifecycleOutcome, RunnerError> {
     send_outer(
         signal_supervisor,
@@ -251,6 +259,7 @@ fn continue_fixed_lifecycle(
     ) {
         Ok(record) => record,
         Err(RunnerError::Channel(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            finish_bootstrap_control(signal_supervisor, child)?;
             return Ok(LifecycleOutcome::BlockedBeforeIsolation);
         }
         Err(error) => return Err(error),
@@ -259,13 +268,13 @@ fn continue_fixed_lifecycle(
     if !complete_mapping_barrier(signal_supervisor, child, before, bootstrap)? {
         return Ok(LifecycleOutcome::BlockedAfterIsolation);
     }
-    let outcome = match complete_pid_one_barrier(signal_supervisor, child, bootstrap)? {
+    let outcome = match complete_pid_one_barrier(signal_supervisor, child, bootstrap, outer)? {
         PidOneBarrierOutcome::PidOneProofUnavailable => LifecycleOutcome::BlockedAtPidOneProof,
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::SignalSupervisionVerified => {
-            LifecycleOutcome::BlockedAfterSignalSupervisionProof
+        PidOneBarrierOutcome::BootstrapReadyVerified => {
+            LifecycleOutcome::BlockedAfterBootstrapReadyProof
         }
     };
     Ok(outcome)
@@ -336,6 +345,7 @@ fn complete_pid_one_barrier(
     signal_supervisor: &FixedSignalSupervisor,
     child: &mut FixedChild,
     bootstrap: &mut OuterBootstrapControl,
+    outer: &mut OuterLifecycleState,
 ) -> Result<PidOneBarrierOutcome, RunnerError> {
     let outer_user_id = geteuid().as_raw();
     let outer_group_id = getegid().as_raw();
@@ -375,30 +385,14 @@ fn complete_pid_one_barrier(
         child.control_channel().map_err(RunnerError::Channel)?,
     )?;
     let mounts_verified = if bootstrap.accept_private_mounts_ready(&mount_result).is_ok() {
-        pid_one
-            .verify_private_mounts(outer_user_id, outer_group_id)
-            .map_err(RunnerError::KernelProof)?;
-        pid_one
-            .verify_signal_supervision(outer_user_id, outer_group_id)
-            .map_err(RunnerError::KernelProof)?;
-        let verified = bootstrap.private_mounts_verified(pid)?;
-        send_outer(
+        complete_bootstrap_ready_exchange(
             signal_supervisor,
-            child.control_channel().map_err(RunnerError::Channel)?,
-            verified.as_bytes(),
+            child,
+            bootstrap,
+            outer,
+            &pid_one,
+            pid,
         )?;
-        before_outer_send(signal_supervisor)?;
-        pid_one
-            .send_managed_signal(ManagedSignal::Term)
-            .map_err(RunnerError::KernelProof)?;
-        let observed = receive_outer(
-            signal_supervisor,
-            child.control_channel().map_err(RunnerError::Channel)?,
-        )?;
-        bootstrap.accept_pid1_signal_observed(&observed, ManagedSignal::Term)?;
-        pid_one
-            .verify_signal_supervision(outer_user_id, outer_group_id)
-            .map_err(RunnerError::KernelProof)?;
         true
     } else {
         bootstrap.accept_private_mounts_unavailable(&mount_result)?;
@@ -424,11 +418,65 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::SignalSupervisionVerified)
+        Ok(PidOneBarrierOutcome::BootstrapReadyVerified)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
     }
+}
+
+fn complete_bootstrap_ready_exchange(
+    signal_supervisor: &FixedSignalSupervisor,
+    child: &FixedChild,
+    bootstrap: &mut OuterBootstrapControl,
+    outer: &mut OuterLifecycleState,
+    pid_one: &crate::evidence::PidOneKernelPins,
+    pid: u32,
+) -> Result<(), RunnerError> {
+    let outer_user_id = geteuid().as_raw();
+    let outer_group_id = getegid().as_raw();
+    pid_one
+        .verify_private_mounts(outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
+    pid_one
+        .verify_signal_supervision(outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
+    let verified = bootstrap.private_mounts_verified(pid)?;
+    send_outer(
+        signal_supervisor,
+        child.control_channel().map_err(RunnerError::Channel)?,
+        verified.as_bytes(),
+    )?;
+    let bootstrap_ready_bytes = receive_outer(
+        signal_supervisor,
+        child.lifecycle_channel().map_err(RunnerError::Channel)?,
+    )?;
+    let bootstrap_ready = BootstrapReady::parse(&bootstrap_ready_bytes)?;
+    pid_one
+        .verify_bootstrap_ready(&bootstrap_ready, outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
+    pid_one
+        .verify_private_mounts(outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
+    pid_one
+        .verify_signal_supervision(outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
+    let accepted = outer.accept_bootstrap_ready(&bootstrap_ready_bytes)?;
+    if accepted != bootstrap_ready || outer.phase() != OuterLifecyclePhase::BootstrapReady {
+        return Err(RunnerError::UnexpectedLifecycleRecord);
+    }
+    before_outer_send(signal_supervisor)?;
+    pid_one
+        .send_managed_signal(ManagedSignal::Term)
+        .map_err(RunnerError::KernelProof)?;
+    let observed = receive_outer(
+        signal_supervisor,
+        child.control_channel().map_err(RunnerError::Channel)?,
+    )?;
+    bootstrap.accept_pid1_signal_observed(&observed, ManagedSignal::Term)?;
+    pid_one
+        .verify_signal_supervision(outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)
 }
 
 fn finish_bootstrap_control(
@@ -581,7 +629,8 @@ fn errno_runner(error: nix::errno::Errno) -> RunnerError {
 /// network, and pending child PID namespaces, and blocks on an outer-owned ID
 /// mapping barrier. It then owns exactly one fixed self-reexecuted PID 1 until
 /// the outer proves its PID placement and fixed private mounts and retires it.
-/// It emits no lifecycle frame or `GO`.
+/// PID 1 emits the sole pre-GO readiness frame directly; the launcher never
+/// emits a lifecycle frame or topology authorization.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_child() -> ExitCode {
@@ -604,7 +653,7 @@ fn internal_child() -> Result<(), RunnerError> {
     ) {
         Ok(parent) => parent,
         Err(RunnerError::ParentAuthenticationUnavailable) => {
-            drop(lifecycle_channel);
+            retire_launcher_before_isolation(&control_channel, &lifecycle_channel)?;
             return Ok(());
         }
         Err(error) => return Err(error),
@@ -617,7 +666,7 @@ fn internal_child() -> Result<(), RunnerError> {
     let isolation = match create_launcher_namespaces().map_err(RunnerError::IsolationCreation)? {
         IsolationAttempt::Created(isolation) => isolation,
         IsolationAttempt::Unavailable => {
-            drop(lifecycle_channel);
+            retire_launcher_before_isolation(&control_channel, &lifecycle_channel)?;
             return Ok(());
         }
     };
@@ -661,6 +710,26 @@ fn internal_child() -> Result<(), RunnerError> {
     )
 }
 
+fn retire_launcher_before_isolation(
+    control_channel: &crate::ipc::LifecycleChannel,
+    lifecycle_channel: &crate::ipc::LifecycleChannel,
+) -> Result<(), RunnerError> {
+    control_channel
+        .clear_io_timeout()
+        .map_err(RunnerError::Channel)?;
+    lifecycle_channel
+        .finish_sending()
+        .map_err(RunnerError::Channel)?;
+    control_channel
+        .finish_sending()
+        .map_err(RunnerError::Channel)?;
+    match control_channel.receive() {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(error) => Err(RunnerError::Channel(error)),
+        Ok(_) => Err(RunnerError::UnexpectedLifecycleRecord),
+    }
+}
+
 fn complete_internal_pid_one(
     lifecycle_channel: crate::ipc::LifecycleChannel,
     control_channel: &crate::ipc::LifecycleChannel,
@@ -680,11 +749,8 @@ fn complete_internal_pid_one(
         .map_err(RunnerError::Channel)?;
     let isolated = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
     let provision = PidOneProvision::new(
-        context.run_id().clone(),
-        isolated.user,
-        isolated.network,
-        isolated.mount,
-        isolated.pid_for_children,
+        context,
+        isolated,
         isolation.outer_user_id(),
         isolation.outer_group_id(),
     )?;
@@ -771,6 +837,7 @@ fn bridge_pid_one_mount_and_signal_result(
             .map_err(RunnerError::Channel)?;
         let verified = control_channel.receive().map_err(RunnerError::Channel)?;
         bootstrap.accept_private_mounts_verified(&verified)?;
+        verify_launcher_parent_death_chain(control_channel)?;
         pid_one
             .bootstrap_channel()
             .map_err(RunnerError::Channel)?
@@ -847,9 +914,10 @@ fn finish_pid_one(
 /// credentials, namespace membership, empty environment, root cwd, and armed
 /// parent-death signal. Only after the outer pins it may it install and directly
 /// verify recursive private propagation, bounded `/run`, and PID-bound `/proc`.
-/// It then arms the fixed handler/mask/`signalfd` set, consumes exact pidfd-delivered
-/// TERM, and reports the affine observation only over the launcher-private control
-/// channel before proving lifecycle EOF without accepting a lifecycle frame.
+/// It then arms the fixed handler/mask/`signalfd` set, proves the pristine RTNL
+/// baseline, and emits exactly one canonical `BOOTSTRAP_READY`. It consumes
+/// pidfd-delivered TERM only afterward and reports the affine observation over
+/// the launcher-private control channel before proving pre-GO lifecycle EOF.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_pid_one() -> ExitCode {
@@ -874,6 +942,12 @@ fn internal_pid_one() -> Result<(), RunnerError> {
     let mut control = PidOneControl::new();
     let provision_record = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
     let provision = control.accept_provision(&provision_record)?.clone();
+    let mut lifecycle = InnerLifecycleState::new(
+        provision.run_id().clone(),
+        provision.host_network_namespace(),
+        provision.host_mount_namespace(),
+        provision.host_pid_namespace(),
+    );
     verify_pid_one_runtime(&provision)?;
     bootstrap_channel
         .send(control.parent_death_armed()?.as_bytes())
@@ -891,53 +965,129 @@ fn internal_pid_one() -> Result<(), RunnerError> {
         &provision,
         &mount_instruction,
     )?;
-    let expect_eof = if let Some((_, signal_supervisor)) = &private_mounts {
-        signal_supervisor
-            .wait_pid_one_termination(
-                &bootstrap_channel,
-                &lifecycle_channel,
-                ManagedSignal::Term,
-                AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
-                    .map_err(RunnerError::SignalSupervision)?,
-            )
-            .map_err(RunnerError::SignalSupervision)?;
-        bootstrap_channel
-            .send(
-                control
-                    .managed_signal_observed(ManagedSignal::Term)?
-                    .as_bytes(),
-            )
-            .map_err(RunnerError::Channel)?;
-        signal_supervisor
-            .wait_pid_one_retire_barrier(
-                &bootstrap_channel,
-                &lifecycle_channel,
-                AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
-                    .map_err(RunnerError::SignalSupervision)?,
-            )
-            .map_err(RunnerError::SignalSupervision)?
-    } else {
-        let expect_eof = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
-        match lifecycle_channel.receive() {
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
-            Err(error) => return Err(RunnerError::Channel(error)),
-            Ok(_) => return Err(RunnerError::UnexpectedLifecycleRecord),
-        }
-        expect_eof
-    };
-    control.accept_expect_lifecycle_eof(&expect_eof)?;
     if let Some((mounts, signal_supervisor)) = private_mounts {
-        mounts
-            .verify()
-            .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-        verify_pid_one_runtime(&provision)?;
-        signal_supervisor
-            .verify_pid_one_quiescent()
-            .map_err(RunnerError::SignalSupervision)?;
+        complete_pid_one_ready_retirement(
+            &bootstrap_channel,
+            &lifecycle_channel,
+            &mut control,
+            &mut lifecycle,
+            &provision,
+            &mounts,
+            &signal_supervisor,
+        )?;
+    } else {
+        complete_pid_one_unavailable_retirement(
+            &bootstrap_channel,
+            &lifecycle_channel,
+            &mut control,
+            &mut lifecycle,
+        )?;
     }
     bootstrap_channel
         .send(control.lifecycle_eof()?.as_bytes())
         .map_err(RunnerError::Channel)?;
+    Ok(())
+}
+
+fn complete_pid_one_ready_retirement(
+    bootstrap_channel: &crate::ipc::LifecycleChannel,
+    lifecycle_channel: &crate::ipc::LifecycleChannel,
+    control: &mut PidOneControl,
+    lifecycle: &mut InnerLifecycleState,
+    provision: &PidOneProvision,
+    mounts: &crate::mounts::PrivateMounts,
+    signal_supervisor: &FixedSignalSupervisor,
+) -> Result<(), RunnerError> {
+    mounts
+        .verify()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    verify_pid_one_runtime(provision)?;
+    signal_supervisor
+        .verify_pid_one_quiescent()
+        .map_err(RunnerError::SignalSupervision)?;
+    let proof = crate::network::prove_pristine_network_namespace()
+        .map_err(|_| RunnerError::NetworkProof)?;
+    mounts
+        .verify()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let snapshot = verify_pid_one_runtime(provision)?;
+    signal_supervisor
+        .verify_pid_one_quiescent()
+        .map_err(RunnerError::SignalSupervision)?;
+    let ready = BootstrapReady::new(
+        provision.run_id().clone(),
+        snapshot.network,
+        snapshot.mount,
+        snapshot.pid,
+    )?;
+    let encoded = lifecycle.bootstrap_ready(&ready)?;
+    if lifecycle.phase() != InnerLifecyclePhase::AwaitingGo {
+        return Err(RunnerError::UnexpectedLifecycleRecord);
+    }
+    lifecycle_channel
+        .send(encoded.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    signal_supervisor
+        .wait_pid_one_termination(
+            bootstrap_channel,
+            lifecycle_channel,
+            ManagedSignal::Term,
+            AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
+                .map_err(RunnerError::SignalSupervision)?,
+        )
+        .map_err(RunnerError::SignalSupervision)?;
+    bootstrap_channel
+        .send(
+            control
+                .managed_signal_observed(ManagedSignal::Term)?
+                .as_bytes(),
+        )
+        .map_err(RunnerError::Channel)?;
+    let expect_eof = signal_supervisor
+        .wait_pid_one_retire_barrier(
+            bootstrap_channel,
+            lifecycle_channel,
+            AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
+                .map_err(RunnerError::SignalSupervision)?,
+        )
+        .map_err(RunnerError::SignalSupervision)?;
+    if lifecycle.observe_outer_eof()? != LifecycleEofDisposition::NoTopologyMutationAuthorized {
+        return Err(RunnerError::UnexpectedLifecycleRecord);
+    }
+    control.accept_expect_lifecycle_eof(&expect_eof)?;
+    mounts
+        .verify()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    verify_pid_one_runtime(provision)?;
+    signal_supervisor
+        .verify_pid_one_quiescent()
+        .map_err(RunnerError::SignalSupervision)?;
+    proof.verify().map_err(|_| RunnerError::NetworkProof)?;
+    mounts
+        .verify()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    verify_pid_one_runtime(provision)?;
+    signal_supervisor
+        .verify_pid_one_quiescent()
+        .map_err(RunnerError::SignalSupervision)
+}
+
+fn complete_pid_one_unavailable_retirement(
+    bootstrap_channel: &crate::ipc::LifecycleChannel,
+    lifecycle_channel: &crate::ipc::LifecycleChannel,
+    control: &mut PidOneControl,
+    lifecycle: &mut InnerLifecycleState,
+) -> Result<(), RunnerError> {
+    let expect_eof = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
+    match lifecycle_channel.receive() {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+        Err(error) => return Err(RunnerError::Channel(error)),
+        Ok(_) => return Err(RunnerError::UnexpectedLifecycleRecord),
+    }
+    if lifecycle.observe_outer_eof()? != LifecycleEofDisposition::NoTopologyMutationAuthorized {
+        return Err(RunnerError::UnexpectedLifecycleRecord);
+    }
+    control.accept_expect_lifecycle_eof(&expect_eof)?;
     Ok(())
 }
 
@@ -973,7 +1123,7 @@ fn prepare_pid_one_private_mounts(
                 .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
             verify_pid_one_runtime(provision)?;
             signal_supervisor
-                .verify_pid_one()
+                .verify_pid_one_quiescent()
                 .map_err(RunnerError::SignalSupervision)?;
             Ok(Some((mounts, signal_supervisor)))
         }
@@ -988,7 +1138,7 @@ fn prepare_pid_one_private_mounts(
     }
 }
 
-fn verify_pid_one_runtime(provision: &PidOneProvision) -> Result<(), RunnerError> {
+fn verify_pid_one_runtime(provision: &PidOneProvision) -> Result<NamespaceSnapshot, RunnerError> {
     let snapshot = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
     let user_ids = getresuid().map_err(errno_runner)?;
     let group_ids = getresgid().map_err(errno_runner)?;
@@ -1020,7 +1170,7 @@ fn verify_pid_one_runtime(provision: &PidOneProvision) -> Result<(), RunnerError
             "PID-1 runtime did not match its fixed isolated provision",
         )));
     }
-    Ok(())
+    Ok(snapshot)
 }
 
 fn authenticate_outer_parent(
@@ -1088,6 +1238,25 @@ fn authenticate_outer_parent(
         return Err(RunnerError::ParentAuthentication);
     }
     Ok(parent)
+}
+
+fn verify_launcher_parent_death_chain(
+    control_channel: &crate::ipc::LifecycleChannel,
+) -> Result<(), RunnerError> {
+    let parent = getppid();
+    let credentials = control_channel
+        .peer_credentials()
+        .map_err(RunnerError::Channel)?;
+    if parent.as_raw() <= 1
+        || get_pdeathsig().map_err(errno_runner)? != Some(Signal::SIGKILL)
+        || credentials.pid() != parent.as_raw()
+        || credentials.uid() != geteuid().as_raw()
+        || credentials.gid() != getegid().as_raw()
+        || getppid() != parent
+    {
+        return Err(RunnerError::ParentAuthentication);
+    }
+    Ok(())
 }
 
 fn receive_launch_context(
@@ -1338,5 +1507,48 @@ mod tests {
         ] {
             assert!(!is_outer_proof_unavailable(&io::Error::from(kind)));
         }
+    }
+
+    #[test]
+    fn unavailable_launcher_waits_for_outer_control_eof_before_exit() {
+        let (outer_control, child_control) =
+            crate::ipc::LifecycleChannel::pair().expect("control pair");
+        let (outer_lifecycle, child_lifecycle) =
+            crate::ipc::LifecycleChannel::pair().expect("lifecycle pair");
+        child_control
+            .set_io_timeout(Duration::from_millis(1))
+            .expect("short inherited timeout");
+        let (done_sender, done_receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            retire_launcher_before_isolation(&child_control, &child_lifecycle)
+                .expect("unavailable retirement");
+            done_sender.send(()).expect("retirement completion");
+        });
+
+        assert!(matches!(
+            outer_control.receive(),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+        assert!(matches!(
+            outer_lifecycle.receive(),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+        assert!(matches!(
+            done_receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(matches!(
+            done_receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        outer_control
+            .finish_sending()
+            .expect("acknowledge unavailable launcher");
+        done_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bounded launcher retirement");
+        worker.join().expect("join unavailable launcher");
     }
 }

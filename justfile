@@ -49,11 +49,11 @@ test-package-licenses:
 test-netns:
     ./tests/netns/run-topology.sh --preview --only all
 
-test-netns-signal-supervision-proof:
+test-netns-bootstrap-ready-proof:
     cargo build --locked --target x86_64-unknown-linux-gnu \
-        --target-dir target/signal-supervision-proof -p volparossa-netns-runner
+        --target-dir target/bootstrap-ready-proof -p volparossa-netns-runner
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
-        ./tests/netns/require-signal-supervision-proof.sh
+        ./tests/netns/require-bootstrap-ready-proof.sh
 
 test-mptcp:
     ./tests/netns/run-topology.sh --preview --only mptcp

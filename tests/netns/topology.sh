@@ -7,7 +7,7 @@ usage() {
     printf '%s\n' \
         'usage:' \
         '  tests/netns/topology.sh --preview' \
-        '  tests/netns/topology.sh --run      # blocked until the signal-driven Rust lifecycle driver exists' \
+        '  tests/netns/topology.sh --run      # blocked until the post-GO Rust topology driver exists' \
         '  tests/netns/topology.sh --cleanup  # always refuses unowned standalone cleanup'
 }
 
@@ -18,6 +18,7 @@ print_plan() {
         '  enter fixed anonymous network, mount, and PID namespaces' \
         '  make the inherited mount tree recursively private' \
         '  mount bounded private /run and PID-bound private /proc inside that sandbox' \
+        '  prove the exact new-netns RTNL baseline and emit one pinned BOOTSTRAP_READY' \
         '  create two run-scoped named namespaces only inside the private /run' \
         '  create both ends of two run-scoped veth pairs only inside the sandbox' \
         '  add exact local routes; do not add a default route' \
@@ -52,7 +53,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, and the PID1 signal-supervision substrate, but this shell entry point remains non-executing until the lifecycle driver exists.' \
+            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, the exact new-netns RTNL baseline, one pinned BOOTSTRAP_READY, and TERM/EOF/reap without GO or A14 evidence, but this shell entry point remains non-executing until the post-GO topology driver exists.' \
             'This invocation created no namespace, link, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;

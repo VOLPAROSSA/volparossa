@@ -70,6 +70,11 @@ impl LifecycleChannel {
         self.socket.set_write_timeout(Some(timeout))
     }
 
+    pub(crate) fn clear_io_timeout(&self) -> io::Result<()> {
+        self.socket.set_read_timeout(None)?;
+        self.socket.set_write_timeout(None)
+    }
+
     pub(crate) fn finish_sending(&self) -> io::Result<()> {
         self.socket.shutdown(Shutdown::Write)
     }

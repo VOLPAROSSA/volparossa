@@ -6,12 +6,13 @@
 //! UID/GID-mapping barrier, and then proves one exact self-reexecuted namespace
 //! PID 1. That PID makes the inherited mount tree recursively private, installs
 //! a bounded hardened tmpfs at `/run` and a PID-namespace-bound procfs at
-//! `/proc`, and retains both while the outer independently verifies them. A
-//! retained pidfd then delivers TERM to PID 1, which consumes it through a fixed
-//! `signalfd` and returns one affine observation before exact PID-1 and launcher
-//! reaping. The slice deliberately stops before pristine-network proof,
-//! `BOOTSTRAP_READY`, and `GO`; it cannot emit acceptance evidence or create
-//! network topology.
+//! `/proc`, retains both while the outer independently verifies them, proves the
+//! exact pristine RTNL baseline, and emits one namespace-bound
+//! `BOOTSTRAP_READY`. After matching that frame to its retained PID-1 pins, the
+//! outer delivers TERM through a retained pidfd; PID 1 consumes it through a
+//! fixed `signalfd` and returns one affine observation before exact PID-1 and
+//! launcher reaping. The slice deliberately stops before `GO`; it cannot emit
+//! acceptance evidence or create network topology.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
@@ -23,6 +24,7 @@ mod ipc;
 mod isolation;
 mod mounts;
 mod namespace;
+mod network;
 mod pid1;
 mod process;
 mod runner;

@@ -1,9 +1,9 @@
 use std::str;
 
 use thiserror::Error;
-use volparossa_test_support::{MAX_LIFECYCLE_FRAME_BYTES, NamespaceIdentity, RunId};
+use volparossa_test_support::{LaunchContext, MAX_LIFECYCLE_FRAME_BYTES, NamespaceIdentity, RunId};
 
-use crate::signals::ManagedSignal;
+use crate::{namespace::NamespaceSnapshot, signals::ManagedSignal};
 
 const PROVISION_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PROVISION";
 const PARENT_DEATH_ARMED_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PARENT_DEATH_ARMED";
@@ -54,6 +54,9 @@ pub(crate) enum PidOneControlError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PidOneProvision {
     run_id: RunId,
+    host_network_namespace: NamespaceIdentity,
+    host_mount_namespace: NamespaceIdentity,
+    host_pid_namespace: NamespaceIdentity,
     user_namespace: NamespaceIdentity,
     network_namespace: NamespaceIdentity,
     mount_namespace: NamespaceIdentity,
@@ -64,15 +67,26 @@ pub(crate) struct PidOneProvision {
 
 impl PidOneProvision {
     pub(crate) fn new(
-        run_id: RunId,
-        user_namespace: NamespaceIdentity,
-        network_namespace: NamespaceIdentity,
-        mount_namespace: NamespaceIdentity,
-        pid_namespace: NamespaceIdentity,
+        context: &LaunchContext,
+        namespaces: NamespaceSnapshot,
         outer_user_id: u32,
         outer_group_id: u32,
     ) -> Result<Self, PidOneControlError> {
+        let run_id = context.run_id().clone();
+        let host_network_namespace = context.host_network_namespace();
+        let host_mount_namespace = context.host_mount_namespace();
+        let host_pid_namespace = context.host_pid_namespace();
+        let user_namespace = namespaces.user;
+        let network_namespace = namespaces.network;
+        let mount_namespace = namespaces.mount;
+        let pid_namespace = namespaces.pid_for_children;
+        if namespaces.pid != host_pid_namespace {
+            return Err(PidOneControlError::Namespace);
+        }
         let identities = [
+            host_network_namespace,
+            host_mount_namespace,
+            host_pid_namespace,
             user_namespace,
             network_namespace,
             mount_namespace,
@@ -85,6 +99,9 @@ impl PidOneProvision {
         }
         Ok(Self {
             run_id,
+            host_network_namespace,
+            host_mount_namespace,
+            host_pid_namespace,
             user_namespace,
             network_namespace,
             mount_namespace,
@@ -96,6 +113,18 @@ impl PidOneProvision {
 
     pub(crate) const fn run_id(&self) -> &RunId {
         &self.run_id
+    }
+
+    pub(crate) const fn host_network_namespace(&self) -> NamespaceIdentity {
+        self.host_network_namespace
+    }
+
+    pub(crate) const fn host_mount_namespace(&self) -> NamespaceIdentity {
+        self.host_mount_namespace
+    }
+
+    pub(crate) const fn host_pid_namespace(&self) -> NamespaceIdentity {
+        self.host_pid_namespace
     }
 
     pub(crate) const fn user_namespace(&self) -> NamespaceIdentity {
@@ -126,6 +155,12 @@ impl PidOneProvision {
         encode_lines(&[
             PROVISION_HEADER.to_owned(),
             format!("run_id={}", self.run_id.as_str()),
+            format!("host_net_ns_dev={}", self.host_network_namespace.device()),
+            format!("host_net_ns_inode={}", self.host_network_namespace.inode()),
+            format!("host_mount_ns_dev={}", self.host_mount_namespace.device()),
+            format!("host_mount_ns_inode={}", self.host_mount_namespace.inode()),
+            format!("host_pid_ns_dev={}", self.host_pid_namespace.device()),
+            format!("host_pid_ns_inode={}", self.host_pid_namespace.inode()),
             format!("user_ns_dev={}", self.user_namespace.device()),
             format!("user_ns_inode={}", self.user_namespace.inode()),
             format!("net_ns_dev={}", self.network_namespace.device()),
@@ -141,17 +176,28 @@ impl PidOneProvision {
 
     fn parse(bytes: &[u8]) -> Result<Self, PidOneControlError> {
         let lines = decode_lines(bytes)?;
-        if lines.len() != 12 || lines[0] != PROVISION_HEADER {
+        if lines.len() != 18 || lines[0] != PROVISION_HEADER {
             return Err(PidOneControlError::Shape);
         }
-        let provision = Self::new(
+        let context = LaunchContext::new(
             RunId::parse(field(&lines, 1, "run_id")?).map_err(|_| PidOneControlError::RunId)?,
-            namespace(&lines, 2, "user_ns_dev", "user_ns_inode")?,
-            namespace(&lines, 4, "net_ns_dev", "net_ns_inode")?,
-            namespace(&lines, 6, "mount_ns_dev", "mount_ns_inode")?,
-            namespace(&lines, 8, "pid_ns_dev", "pid_ns_inode")?,
-            parse_u32(field(&lines, 10, "outer_uid")?)?,
-            parse_u32(field(&lines, 11, "outer_gid")?)?,
+            namespace(&lines, 2, "host_net_ns_dev", "host_net_ns_inode")?,
+            namespace(&lines, 4, "host_mount_ns_dev", "host_mount_ns_inode")?,
+            namespace(&lines, 6, "host_pid_ns_dev", "host_pid_ns_inode")?,
+        )
+        .map_err(|_| PidOneControlError::Namespace)?;
+        let namespaces = NamespaceSnapshot {
+            user: namespace(&lines, 8, "user_ns_dev", "user_ns_inode")?,
+            network: namespace(&lines, 10, "net_ns_dev", "net_ns_inode")?,
+            mount: namespace(&lines, 12, "mount_ns_dev", "mount_ns_inode")?,
+            pid: context.host_pid_namespace(),
+            pid_for_children: namespace(&lines, 14, "pid_ns_dev", "pid_ns_inode")?,
+        };
+        let provision = Self::new(
+            &context,
+            namespaces,
+            parse_u32(field(&lines, 16, "outer_uid")?)?,
+            parse_u32(field(&lines, 17, "outer_gid")?)?,
         )?;
         require_canonical(bytes, &provision.encode()?)?;
         Ok(provision)
@@ -723,15 +769,26 @@ mod tests {
         RunId::parse(OTHER_RUN).expect("other run")
     }
 
+    fn provision_with_namespaces(
+        host: [NamespaceIdentity; 3],
+        inner: [NamespaceIdentity; 4],
+    ) -> Result<PidOneProvision, PidOneControlError> {
+        let context = LaunchContext::new(run_id(), host[0], host[1], host[2])
+            .map_err(|_| PidOneControlError::Namespace)?;
+        let namespaces = NamespaceSnapshot {
+            user: inner[0],
+            network: inner[1],
+            mount: inner[2],
+            pid: host[2],
+            pid_for_children: inner[3],
+        };
+        PidOneProvision::new(&context, namespaces, 1000, 1001)
+    }
+
     fn provision() -> PidOneProvision {
-        PidOneProvision::new(
-            run_id(),
-            identity(101),
-            identity(102),
-            identity(103),
-            identity(104),
-            1000,
-            1001,
+        provision_with_namespaces(
+            [identity(201), identity(202), identity(203)],
+            [identity(101), identity(102), identity(103), identity(104)],
         )
         .expect("provision")
     }
@@ -829,6 +886,47 @@ mod tests {
             launcher.complete(),
             Err(PidOneControlError::StateTransition)
         );
+    }
+
+    #[test]
+    fn provision_carries_exact_host_and_inner_namespace_lineage() {
+        let provision = provision();
+        assert_eq!(provision.run_id(), &run_id());
+        assert_eq!(provision.host_network_namespace(), identity(201));
+        assert_eq!(provision.host_mount_namespace(), identity(202));
+        assert_eq!(provision.host_pid_namespace(), identity(203));
+        assert_eq!(provision.user_namespace(), identity(101));
+        assert_eq!(provision.network_namespace(), identity(102));
+        assert_eq!(provision.mount_namespace(), identity(103));
+        assert_eq!(provision.pid_namespace(), identity(104));
+        assert_eq!(provision.outer_user_id(), 1000);
+        assert_eq!(provision.outer_group_id(), 1001);
+
+        let encoded = provision.encode().expect("canonical provision");
+        assert_eq!(
+            encoded,
+            concat!(
+                "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PROVISION\n",
+                "run_id=0123456789abcdef0123456789abcdef\n",
+                "host_net_ns_dev=7\n",
+                "host_net_ns_inode=201\n",
+                "host_mount_ns_dev=7\n",
+                "host_mount_ns_inode=202\n",
+                "host_pid_ns_dev=7\n",
+                "host_pid_ns_inode=203\n",
+                "user_ns_dev=7\n",
+                "user_ns_inode=101\n",
+                "net_ns_dev=7\n",
+                "net_ns_inode=102\n",
+                "mount_ns_dev=7\n",
+                "mount_ns_inode=103\n",
+                "pid_ns_dev=7\n",
+                "pid_ns_inode=104\n",
+                "outer_uid=1000\n",
+                "outer_gid=1001\n"
+            )
+        );
+        assert_eq!(PidOneProvision::parse(encoded.as_bytes()), Ok(provision));
     }
 
     #[test]
@@ -1001,23 +1099,66 @@ mod tests {
     }
 
     #[test]
-    fn provision_rejects_aliases_and_noncanonical_fields() {
+    fn provision_rejects_host_inner_aliases_and_noncanonical_fields() {
         let valid = provision().encode().expect("valid");
         assert_eq!(PidOneProvision::parse(valid.as_bytes()), Ok(provision()));
+
+        let canonical_host = [identity(201), identity(202), identity(203)];
+        let canonical_inner = [identity(101), identity(102), identity(103), identity(104)];
+        for first in 0..canonical_host.len() {
+            for second in first + 1..canonical_host.len() {
+                let mut aliased = canonical_host;
+                aliased[second] = aliased[first];
+                assert_eq!(
+                    provision_with_namespaces(aliased, canonical_inner),
+                    Err(PidOneControlError::Namespace)
+                );
+            }
+        }
+        for first in 0..canonical_inner.len() {
+            for second in first + 1..canonical_inner.len() {
+                let mut aliased = canonical_inner;
+                aliased[second] = aliased[first];
+                assert_eq!(
+                    provision_with_namespaces(canonical_host, aliased),
+                    Err(PidOneControlError::Namespace)
+                );
+            }
+        }
+        for host_identity in canonical_host {
+            for inner_index in 0..canonical_inner.len() {
+                let mut unisolated = canonical_inner;
+                unisolated[inner_index] = host_identity;
+                assert_eq!(
+                    provision_with_namespaces(canonical_host, unisolated),
+                    Err(PidOneControlError::Namespace)
+                );
+            }
+        }
+        let context = LaunchContext::new(
+            run_id(),
+            canonical_host[0],
+            canonical_host[1],
+            canonical_host[2],
+        )
+        .expect("host context");
+        let wrong_current_pid = NamespaceSnapshot {
+            user: canonical_inner[0],
+            network: canonical_inner[1],
+            mount: canonical_inner[2],
+            pid: identity(999),
+            pid_for_children: canonical_inner[3],
+        };
         assert_eq!(
-            PidOneProvision::new(
-                provision().run_id.clone(),
-                identity(101),
-                identity(101),
-                identity(103),
-                identity(104),
-                1000,
-                1001,
-            ),
+            PidOneProvision::new(&context, wrong_current_pid, 1000, 1001),
             Err(PidOneControlError::Namespace)
         );
+
         for malformed in [
             valid.replace("outer_uid=1000", "outer_uid=01000"),
+            valid.replace("host_net_ns_inode=201", "host_net_ns_inode=0201"),
+            valid.replace("host_mount_ns_inode=202", "host_mount_ns_inode=0"),
+            valid.replace("host_pid_ns_inode=203", "host_pid_ns_inode=102"),
             valid.replace("pid_ns_inode=104", "pid_ns_inode=0"),
             valid.replace("run_id=", "run="),
             valid.replace("\nouter_gid=1001\n", "\nouter_gid=1001\nextra=true\n"),
