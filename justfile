@@ -49,15 +49,16 @@ test-package-licenses:
 test-netns:
     ./tests/netns/run-topology.sh --preview --only all
 
-test-netns-live-nsfs-proof:
+test-netns-veth-rollback-proof:
     cargo build --locked --target x86_64-unknown-linux-gnu \
-        --target-dir target/live-nsfs-proof -p volparossa-netns-runner
+        --target-dir target/veth-rollback-proof -p volparossa-netns-runner
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
         ./tests/netns/require-bootstrap-ready-proof.sh
 
-# Backwards-compatible names for the now-stronger live-nsfs proof.
-test-netns-authorized-private-run-proof: test-netns-live-nsfs-proof
-test-netns-bootstrap-ready-proof: test-netns-live-nsfs-proof
+# Backwards-compatible names for the now-stronger veth rollback proof.
+test-netns-live-nsfs-proof: test-netns-veth-rollback-proof
+test-netns-authorized-private-run-proof: test-netns-veth-rollback-proof
+test-netns-bootstrap-ready-proof: test-netns-veth-rollback-proof
 
 test-mptcp:
     ./tests/netns/run-topology.sh --preview --only mptcp
