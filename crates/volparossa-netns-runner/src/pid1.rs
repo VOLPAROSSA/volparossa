@@ -7,6 +7,14 @@ const PROVISION_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PROVISION";
 const PARENT_DEATH_ARMED_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PARENT_DEATH_ARMED";
 const PARENT_ALIVE_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PARENT_ALIVE";
 const EXECUTED_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 EXECUTED";
+const ABORT_BEFORE_PRIVATE_MOUNTS_HEADER: &str =
+    "VOLPAROSSA_NETNS_PID1_CONTROL_V1 ABORT_BEFORE_PRIVATE_MOUNTS";
+const SETUP_PRIVATE_MOUNTS_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 SETUP_PRIVATE_MOUNTS";
+const PRIVATE_MOUNTS_READY_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PRIVATE_MOUNTS_READY";
+const PRIVATE_MOUNTS_VERIFIED_HEADER: &str =
+    "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PRIVATE_MOUNTS_VERIFIED";
+const PRIVATE_MOUNTS_UNAVAILABLE_HEADER: &str =
+    "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PRIVATE_MOUNTS_UNAVAILABLE";
 const EXPECT_LIFECYCLE_EOF_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 EXPECT_LIFECYCLE_EOF";
 const LIFECYCLE_EOF_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 LIFECYCLE_EOF";
 
@@ -144,6 +152,11 @@ enum SimpleKind {
     ParentDeathArmed,
     ParentAlive,
     Executed,
+    AbortBeforePrivateMounts,
+    SetupPrivateMounts,
+    PrivateMountsReady,
+    PrivateMountsVerified,
+    PrivateMountsUnavailable,
     ExpectLifecycleEof,
     LifecycleEof,
 }
@@ -154,6 +167,11 @@ impl SimpleKind {
             Self::ParentDeathArmed => PARENT_DEATH_ARMED_HEADER,
             Self::ParentAlive => PARENT_ALIVE_HEADER,
             Self::Executed => EXECUTED_HEADER,
+            Self::AbortBeforePrivateMounts => ABORT_BEFORE_PRIVATE_MOUNTS_HEADER,
+            Self::SetupPrivateMounts => SETUP_PRIVATE_MOUNTS_HEADER,
+            Self::PrivateMountsReady => PRIVATE_MOUNTS_READY_HEADER,
+            Self::PrivateMountsVerified => PRIVATE_MOUNTS_VERIFIED_HEADER,
+            Self::PrivateMountsUnavailable => PRIVATE_MOUNTS_UNAVAILABLE_HEADER,
             Self::ExpectLifecycleEof => EXPECT_LIFECYCLE_EOF_HEADER,
             Self::LifecycleEof => LIFECYCLE_EOF_HEADER,
         }
@@ -166,7 +184,10 @@ enum LauncherPhase {
     AwaitingParentDeathArmed,
     ParentDeathArmed,
     AwaitingExecuted,
-    Executed,
+    SetupPrivateMountsPending,
+    AwaitingPrivateMountsResult,
+    PrivateMountsReady,
+    PrivateMountsComplete,
     AwaitingLifecycleEof,
     LifecycleEof,
     Complete,
@@ -218,14 +239,63 @@ impl LauncherPidOneControl {
         self.accept(
             bytes,
             LauncherPhase::AwaitingExecuted,
-            LauncherPhase::Executed,
+            LauncherPhase::SetupPrivateMountsPending,
             SimpleKind::Executed,
+        )
+    }
+
+    pub(crate) fn setup_private_mounts(&mut self) -> Result<String, PidOneControlError> {
+        self.emit(
+            LauncherPhase::SetupPrivateMountsPending,
+            LauncherPhase::AwaitingPrivateMountsResult,
+            SimpleKind::SetupPrivateMounts,
+        )
+    }
+
+    /// Abort affinely before any private-mount operation when the outer cannot pin PID 1.
+    pub(crate) fn abort_before_private_mounts(&mut self) -> Result<String, PidOneControlError> {
+        self.emit(
+            LauncherPhase::SetupPrivateMountsPending,
+            LauncherPhase::PrivateMountsComplete,
+            SimpleKind::AbortBeforePrivateMounts,
+        )
+    }
+
+    pub(crate) fn accept_private_mounts_ready(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), PidOneControlError> {
+        self.accept(
+            bytes,
+            LauncherPhase::AwaitingPrivateMountsResult,
+            LauncherPhase::PrivateMountsReady,
+            SimpleKind::PrivateMountsReady,
+        )
+    }
+
+    pub(crate) fn accept_private_mounts_unavailable(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), PidOneControlError> {
+        self.accept(
+            bytes,
+            LauncherPhase::AwaitingPrivateMountsResult,
+            LauncherPhase::PrivateMountsComplete,
+            SimpleKind::PrivateMountsUnavailable,
+        )
+    }
+
+    pub(crate) fn private_mounts_verified(&mut self) -> Result<String, PidOneControlError> {
+        self.emit(
+            LauncherPhase::PrivateMountsReady,
+            LauncherPhase::PrivateMountsComplete,
+            SimpleKind::PrivateMountsVerified,
         )
     }
 
     pub(crate) fn expect_lifecycle_eof(&mut self) -> Result<String, PidOneControlError> {
         self.emit(
-            LauncherPhase::Executed,
+            LauncherPhase::PrivateMountsComplete,
             LauncherPhase::AwaitingLifecycleEof,
             SimpleKind::ExpectLifecycleEof,
         )
@@ -284,6 +354,9 @@ enum PidOnePhase {
     ParentDeathArmedPending,
     AwaitingParentAlive,
     ExecutedPending,
+    AwaitingSetupPrivateMounts,
+    PrivateMountsResultPending,
+    AwaitingPrivateMountsVerified,
     AwaitingLifecycleEof,
     LifecycleEofPending,
     Complete,
@@ -336,8 +409,61 @@ impl PidOneControl {
     pub(crate) fn executed(&mut self) -> Result<String, PidOneControlError> {
         self.emit(
             PidOnePhase::ExecutedPending,
-            PidOnePhase::AwaitingLifecycleEof,
+            PidOnePhase::AwaitingSetupPrivateMounts,
             SimpleKind::Executed,
+        )
+    }
+
+    pub(crate) fn accept_setup_private_mounts(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), PidOneControlError> {
+        self.accept(
+            bytes,
+            PidOnePhase::AwaitingSetupPrivateMounts,
+            PidOnePhase::PrivateMountsResultPending,
+            SimpleKind::SetupPrivateMounts,
+        )
+    }
+
+    /// Accept the launcher's sole pre-mount abort after outer PID-1 proof is unavailable.
+    pub(crate) fn accept_abort_before_private_mounts(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), PidOneControlError> {
+        self.accept(
+            bytes,
+            PidOnePhase::AwaitingSetupPrivateMounts,
+            PidOnePhase::AwaitingLifecycleEof,
+            SimpleKind::AbortBeforePrivateMounts,
+        )
+    }
+
+    pub(crate) fn private_mounts_ready(&mut self) -> Result<String, PidOneControlError> {
+        self.emit(
+            PidOnePhase::PrivateMountsResultPending,
+            PidOnePhase::AwaitingPrivateMountsVerified,
+            SimpleKind::PrivateMountsReady,
+        )
+    }
+
+    pub(crate) fn private_mounts_unavailable(&mut self) -> Result<String, PidOneControlError> {
+        self.emit(
+            PidOnePhase::PrivateMountsResultPending,
+            PidOnePhase::AwaitingLifecycleEof,
+            SimpleKind::PrivateMountsUnavailable,
+        )
+    }
+
+    pub(crate) fn accept_private_mounts_verified(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), PidOneControlError> {
+        self.accept(
+            bytes,
+            PidOnePhase::AwaitingPrivateMountsVerified,
+            PidOnePhase::AwaitingLifecycleEof,
+            SimpleKind::PrivateMountsVerified,
         )
     }
 
@@ -504,13 +630,24 @@ fn require_canonical(bytes: &[u8], canonical: &str) -> Result<(), PidOneControlE
 mod tests {
     use super::*;
 
+    const RUN: &str = "0123456789abcdef0123456789abcdef";
+    const OTHER_RUN: &str = "fedcba9876543210fedcba9876543210";
+
     fn identity(value: u64) -> NamespaceIdentity {
         NamespaceIdentity::new(7, value).expect("identity")
     }
 
+    fn run_id() -> RunId {
+        RunId::parse(RUN).expect("run")
+    }
+
+    fn other_run_id() -> RunId {
+        RunId::parse(OTHER_RUN).expect("other run")
+    }
+
     fn provision() -> PidOneProvision {
         PidOneProvision::new(
-            RunId::parse("0123456789abcdef0123456789abcdef").expect("run"),
+            run_id(),
             identity(101),
             identity(102),
             identity(103),
@@ -519,6 +656,25 @@ mod tests {
             1001,
         )
         .expect("provision")
+    }
+
+    fn advance_through_executed(launcher: &mut LauncherPidOneControl, pid_one: &mut PidOneControl) {
+        let provision_record = launcher.provision().expect("provision record");
+        pid_one
+            .accept_provision(provision_record.as_bytes())
+            .expect("accept provision");
+        let armed = pid_one.parent_death_armed().expect("armed record");
+        launcher
+            .accept_parent_death_armed(armed.as_bytes())
+            .expect("accept armed");
+        let alive = launcher.parent_alive().expect("alive record");
+        pid_one
+            .accept_parent_alive(alive.as_bytes())
+            .expect("accept alive");
+        let executed = pid_one.executed().expect("executed record");
+        launcher
+            .accept_executed(executed.as_bytes())
+            .expect("accept executed");
     }
 
     #[test]
@@ -544,6 +700,32 @@ mod tests {
         launcher
             .accept_executed(executed.as_bytes())
             .expect("accept executed");
+        let setup_mounts = launcher
+            .setup_private_mounts()
+            .expect("setup private mounts");
+        assert_eq!(
+            setup_mounts,
+            format!("{SETUP_PRIVATE_MOUNTS_HEADER}\nrun_id={RUN}\n")
+        );
+        pid_one
+            .accept_setup_private_mounts(setup_mounts.as_bytes())
+            .expect("accept private-mount setup");
+        let mounts_ready = pid_one.private_mounts_ready().expect("mounts ready");
+        assert_eq!(
+            mounts_ready,
+            format!("{PRIVATE_MOUNTS_READY_HEADER}\nrun_id={RUN}\n")
+        );
+        launcher
+            .accept_private_mounts_ready(mounts_ready.as_bytes())
+            .expect("accept private-mount readiness");
+        let mounts_verified = launcher.private_mounts_verified().expect("mounts verified");
+        assert_eq!(
+            mounts_verified,
+            format!("{PRIVATE_MOUNTS_VERIFIED_HEADER}\nrun_id={RUN}\n")
+        );
+        pid_one
+            .accept_private_mounts_verified(mounts_verified.as_bytes())
+            .expect("accept private-mount verification");
         let expect_eof = launcher.expect_lifecycle_eof().expect("expect EOF");
         pid_one
             .accept_expect_lifecycle_eof(expect_eof.as_bytes())
@@ -557,6 +739,150 @@ mod tests {
             launcher.complete(),
             Err(PidOneControlError::StateTransition)
         );
+    }
+
+    #[test]
+    fn policy_denied_private_mounts_take_the_exclusive_unavailable_branch() {
+        let mut launcher = LauncherPidOneControl::new(provision());
+        let mut pid_one = PidOneControl::new();
+        advance_through_executed(&mut launcher, &mut pid_one);
+
+        let setup = launcher
+            .setup_private_mounts()
+            .expect("setup private mounts");
+        pid_one
+            .accept_setup_private_mounts(setup.as_bytes())
+            .expect("accept setup");
+        let unavailable = pid_one
+            .private_mounts_unavailable()
+            .expect("private mounts unavailable");
+        assert_eq!(
+            unavailable,
+            format!("{PRIVATE_MOUNTS_UNAVAILABLE_HEADER}\nrun_id={RUN}\n")
+        );
+        assert_eq!(pid_one.phase, PidOnePhase::AwaitingLifecycleEof);
+        assert_eq!(
+            pid_one.private_mounts_ready(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.private_mounts_unavailable(),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        launcher
+            .accept_private_mounts_unavailable(unavailable.as_bytes())
+            .expect("accept unavailable result");
+        assert_eq!(launcher.phase, LauncherPhase::PrivateMountsComplete);
+        assert_eq!(
+            launcher.accept_private_mounts_ready(
+                encode_simple(SimpleKind::PrivateMountsReady, &run_id())
+                    .expect("ready record")
+                    .as_bytes()
+            ),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.accept_private_mounts_unavailable(unavailable.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.private_mounts_verified(),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        let expect_eof = launcher.expect_lifecycle_eof().expect("expect EOF");
+        pid_one
+            .accept_expect_lifecycle_eof(expect_eof.as_bytes())
+            .expect("accept expect EOF");
+        let eof = pid_one.lifecycle_eof().expect("EOF");
+        launcher
+            .accept_lifecycle_eof(eof.as_bytes())
+            .expect("accept EOF");
+        launcher.complete().expect("complete unavailable branch");
+        assert_eq!(pid_one.phase, PidOnePhase::Complete);
+        assert_eq!(launcher.phase, LauncherPhase::Complete);
+    }
+
+    #[test]
+    fn unavailable_outer_pid_pin_aborts_affinely_before_mount_setup() {
+        let mut launcher = LauncherPidOneControl::new(provision());
+        let mut pid_one = PidOneControl::new();
+        advance_through_executed(&mut launcher, &mut pid_one);
+
+        let abort = launcher
+            .abort_before_private_mounts()
+            .expect("pre-mount abort");
+        assert_eq!(
+            abort,
+            format!("{ABORT_BEFORE_PRIVATE_MOUNTS_HEADER}\nrun_id={RUN}\n")
+        );
+        assert_eq!(launcher.phase, LauncherPhase::PrivateMountsComplete);
+        assert_eq!(
+            launcher.setup_private_mounts(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.abort_before_private_mounts(),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        pid_one
+            .accept_abort_before_private_mounts(abort.as_bytes())
+            .expect("accept pre-mount abort");
+        assert_eq!(pid_one.phase, PidOnePhase::AwaitingLifecycleEof);
+        assert_eq!(
+            pid_one.accept_setup_private_mounts(
+                encode_simple(SimpleKind::SetupPrivateMounts, &run_id())
+                    .expect("setup record")
+                    .as_bytes()
+            ),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.accept_abort_before_private_mounts(abort.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        let expect_eof = launcher.expect_lifecycle_eof().expect("expect EOF");
+        pid_one
+            .accept_expect_lifecycle_eof(expect_eof.as_bytes())
+            .expect("accept expect EOF");
+        let eof = pid_one.lifecycle_eof().expect("EOF");
+        launcher
+            .accept_lifecycle_eof(eof.as_bytes())
+            .expect("accept EOF");
+        launcher.complete().expect("complete abort branch");
+        assert_eq!(pid_one.phase, PidOnePhase::Complete);
+        assert_eq!(launcher.phase, LauncherPhase::Complete);
+    }
+
+    #[test]
+    fn all_simple_records_are_canonical_bounded_and_run_bound() {
+        for kind in [
+            SimpleKind::ParentDeathArmed,
+            SimpleKind::ParentAlive,
+            SimpleKind::Executed,
+            SimpleKind::AbortBeforePrivateMounts,
+            SimpleKind::SetupPrivateMounts,
+            SimpleKind::PrivateMountsReady,
+            SimpleKind::PrivateMountsVerified,
+            SimpleKind::PrivateMountsUnavailable,
+            SimpleKind::ExpectLifecycleEof,
+            SimpleKind::LifecycleEof,
+        ] {
+            let record = encode_simple(kind, &run_id()).expect("simple record");
+            assert_eq!(record, format!("{}\nrun_id={RUN}\n", kind.header()));
+            assert!(record.is_ascii());
+            assert!(!record.contains('\r'));
+            assert!(!record.ends_with("\n\n"));
+            assert!(record.len() <= MAX_LIFECYCLE_FRAME_BYTES);
+            assert_eq!(accept_simple(record.as_bytes(), kind, &run_id()), Ok(()));
+            assert_eq!(
+                accept_simple(record.as_bytes(), kind, &other_run_id()),
+                Err(PidOneControlError::RunIdMismatch)
+            );
+        }
     }
 
     #[test]
@@ -621,5 +947,189 @@ mod tests {
         launcher
             .accept_parent_death_armed(armed.as_bytes())
             .expect("state did not advance on rejection");
+    }
+
+    #[test]
+    fn private_mount_receivers_fail_closed_without_advancing() {
+        let mut launcher = LauncherPidOneControl::new(provision());
+        let mut pid_one = PidOneControl::new();
+        advance_through_executed(&mut launcher, &mut pid_one);
+        let oversized = vec![0xff; MAX_LIFECYCLE_FRAME_BYTES + 1];
+
+        let wrong_setup = encode_simple(SimpleKind::SetupPrivateMounts, &other_run_id())
+            .expect("wrong-run setup");
+        assert_eq!(
+            pid_one.accept_setup_private_mounts(wrong_setup.as_bytes()),
+            Err(PidOneControlError::RunIdMismatch)
+        );
+        let wrong_direction = encode_simple(SimpleKind::PrivateMountsReady, &run_id())
+            .expect("wrong-direction readiness");
+        assert_eq!(
+            pid_one.accept_setup_private_mounts(wrong_direction.as_bytes()),
+            Err(PidOneControlError::Shape)
+        );
+        assert_eq!(
+            pid_one.accept_setup_private_mounts(&oversized),
+            Err(PidOneControlError::FrameTooLarge)
+        );
+        assert_eq!(pid_one.phase, PidOnePhase::AwaitingSetupPrivateMounts);
+
+        let setup = launcher.setup_private_mounts().expect("valid setup record");
+        pid_one
+            .accept_setup_private_mounts(setup.as_bytes())
+            .expect("accept valid setup");
+
+        let wrong_ready = encode_simple(SimpleKind::PrivateMountsReady, &other_run_id())
+            .expect("wrong-run ready");
+        assert_eq!(
+            launcher.accept_private_mounts_ready(wrong_ready.as_bytes()),
+            Err(PidOneControlError::RunIdMismatch)
+        );
+        let wrong_unavailable =
+            encode_simple(SimpleKind::PrivateMountsUnavailable, &other_run_id())
+                .expect("wrong-run unavailable");
+        assert_eq!(
+            launcher.accept_private_mounts_unavailable(wrong_unavailable.as_bytes()),
+            Err(PidOneControlError::RunIdMismatch)
+        );
+        assert_eq!(
+            launcher.accept_private_mounts_ready(setup.as_bytes()),
+            Err(PidOneControlError::Shape)
+        );
+        assert_eq!(
+            launcher.accept_private_mounts_unavailable(&oversized),
+            Err(PidOneControlError::FrameTooLarge)
+        );
+        assert_eq!(launcher.phase, LauncherPhase::AwaitingPrivateMountsResult);
+
+        let ready = pid_one.private_mounts_ready().expect("valid ready record");
+        launcher
+            .accept_private_mounts_ready(ready.as_bytes())
+            .expect("accept valid ready");
+        let wrong_verified = encode_simple(SimpleKind::PrivateMountsVerified, &other_run_id())
+            .expect("wrong-run verification");
+        assert_eq!(
+            pid_one.accept_private_mounts_verified(wrong_verified.as_bytes()),
+            Err(PidOneControlError::RunIdMismatch)
+        );
+        assert_eq!(
+            pid_one.accept_private_mounts_verified(ready.as_bytes()),
+            Err(PidOneControlError::Shape)
+        );
+        assert_eq!(
+            pid_one.accept_private_mounts_verified(&oversized),
+            Err(PidOneControlError::FrameTooLarge)
+        );
+        assert_eq!(pid_one.phase, PidOnePhase::AwaitingPrivateMountsVerified);
+
+        let verified = launcher
+            .private_mounts_verified()
+            .expect("valid verification");
+        pid_one
+            .accept_private_mounts_verified(verified.as_bytes())
+            .expect("accept valid verification after rejections");
+        assert_eq!(pid_one.phase, PidOnePhase::AwaitingLifecycleEof);
+    }
+
+    #[test]
+    fn private_mount_transitions_reject_order_replay_and_branch_switching() {
+        let mut launcher = LauncherPidOneControl::new(provision());
+        let mut pid_one = PidOneControl::new();
+
+        assert_eq!(
+            launcher.setup_private_mounts(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.abort_before_private_mounts(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.private_mounts_verified(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.private_mounts_ready(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.private_mounts_unavailable(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.accept_abort_before_private_mounts(
+                encode_simple(SimpleKind::AbortBeforePrivateMounts, &run_id())
+                    .expect("abort record")
+                    .as_bytes()
+            ),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        advance_through_executed(&mut launcher, &mut pid_one);
+        assert_eq!(
+            launcher.expect_lifecycle_eof(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.accept_expect_lifecycle_eof(
+                encode_simple(SimpleKind::ExpectLifecycleEof, &run_id())
+                    .expect("expect-EOF record")
+                    .as_bytes()
+            ),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        let setup = launcher.setup_private_mounts().expect("first setup");
+        assert_eq!(
+            launcher.setup_private_mounts(),
+            Err(PidOneControlError::StateTransition)
+        );
+        pid_one
+            .accept_setup_private_mounts(setup.as_bytes())
+            .expect("first setup acceptance");
+        assert_eq!(
+            pid_one.accept_setup_private_mounts(setup.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        let ready = pid_one.private_mounts_ready().expect("first readiness");
+        assert_eq!(
+            pid_one.private_mounts_ready(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.private_mounts_unavailable(),
+            Err(PidOneControlError::StateTransition)
+        );
+        launcher
+            .accept_private_mounts_ready(ready.as_bytes())
+            .expect("first readiness acceptance");
+        assert_eq!(
+            launcher.accept_private_mounts_ready(ready.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.accept_private_mounts_unavailable(
+                encode_simple(SimpleKind::PrivateMountsUnavailable, &run_id())
+                    .expect("unavailable record")
+                    .as_bytes()
+            ),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        let verified = launcher
+            .private_mounts_verified()
+            .expect("first verification");
+        assert_eq!(
+            launcher.private_mounts_verified(),
+            Err(PidOneControlError::StateTransition)
+        );
+        pid_one
+            .accept_private_mounts_verified(verified.as_bytes())
+            .expect("first verification acceptance");
+        assert_eq!(
+            pid_one.accept_private_mounts_verified(verified.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
     }
 }

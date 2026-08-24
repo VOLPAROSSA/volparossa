@@ -49,8 +49,17 @@ pub enum LifecycleOutcome {
     BlockedAfterIsolation,
     /// Exact mappings exist, but kernel policy hid the required outer PID-1 proof.
     BlockedAtPidOneProof,
-    /// A real self-reexecuted PID 1 was independently proven and reaped without `GO`.
-    BlockedAfterPidOneProof,
+    /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
+    BlockedAtPrivateMountSetup,
+    /// Private propagation, `/run`, and PID-bound `/proc` were independently proven.
+    BlockedAfterPrivateMountProof,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PidOneBarrierOutcome {
+    PidOneProofUnavailable,
+    PrivateMountsUnavailable,
+    PrivateMountsVerified,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -80,6 +89,9 @@ pub enum RunnerError {
     /// The private launcher-to-PID-1 control exchange was rejected.
     #[error("PID-1 control rejected supervisor state")]
     PidOneControl,
+    /// One fixed private-mount operation or its direct kernel proof failed.
+    #[error("private-mount setup or proof failed: {0}")]
+    PrivateMount(#[source] io::Error),
     /// The fixed child could not be launched or retired exactly.
     #[error("fixed child process operation failed: {0}")]
     Process(#[source] io::Error),
@@ -133,16 +145,19 @@ impl From<PidOneControlError> for RunnerError {
 /// mount, network, and pending child PID namespaces, then blocks until the outer
 /// installs and verifies one exact UID/GID mapping extent. The launcher makes
 /// exactly one second self-reexec, whose PID-1 placement is independently pinned
-/// and proven by the outer before it is reaped. No lifecycle frame or `GO` is
-/// emitted. The outer verifies that its own namespace identities remain unchanged.
+/// and proven before it recursively privatizes the mount tree and installs fixed
+/// private `/run` and `/proc` filesystems. PID 1 measures them locally; the outer
+/// independently binds their visible mount IDs, filesystem properties, and procfs
+/// PID view to its retained kernel pins before exact reap. No lifecycle frame or
+/// `GO` is emitted. The outer verifies that its own namespace identities remain unchanged.
 /// The caller must enter with exactly one task; child creation also requires the
 /// default `SIGCHLD` disposition without `SA_NOCLDWAIT`.
 ///
 /// # Errors
 ///
 /// Returns an error for every launch, IPC, protocol, process-status, reaping,
-/// randomness, initial task-count, signal-disposition, or namespace-identity
-/// discrepancy.
+/// randomness, initial task-count, signal-disposition, namespace-identity,
+/// private-mount, or kernel-readback discrepancy.
 pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
     if !has_exact_single_task().map_err(RunnerError::Process)? {
         return Err(RunnerError::Process(io::Error::new(
@@ -203,20 +218,16 @@ pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
             LifecycleOutcome::BlockedAfterIsolation,
         );
     }
-    if !complete_pid_one_barrier(&mut child, &mut bootstrap)? {
-        return finish_blocked_run(
-            child,
-            &mut outer,
-            before,
-            LifecycleOutcome::BlockedAtPidOneProof,
-        );
-    }
-    finish_blocked_run(
-        child,
-        &mut outer,
-        before,
-        LifecycleOutcome::BlockedAfterPidOneProof,
-    )
+    let outcome = match complete_pid_one_barrier(&mut child, &mut bootstrap)? {
+        PidOneBarrierOutcome::PidOneProofUnavailable => LifecycleOutcome::BlockedAtPidOneProof,
+        PidOneBarrierOutcome::PrivateMountsUnavailable => {
+            LifecycleOutcome::BlockedAtPrivateMountSetup
+        }
+        PidOneBarrierOutcome::PrivateMountsVerified => {
+            LifecycleOutcome::BlockedAfterPrivateMountProof
+        }
+    };
+    finish_blocked_run(child, &mut outer, before, outcome)
 }
 
 fn complete_mapping_barrier(
@@ -271,13 +282,19 @@ fn complete_mapping_barrier(
         finish_bootstrap_control(child)?;
         return Ok(false);
     }
+    let mappings_pinned = bootstrap.mappings_pinned()?;
+    child
+        .control_channel()
+        .map_err(RunnerError::Channel)?
+        .send(mappings_pinned.as_bytes())
+        .map_err(RunnerError::Channel)?;
     Ok(true)
 }
 
 fn complete_pid_one_barrier(
     child: &mut FixedChild,
     bootstrap: &mut OuterBootstrapControl,
-) -> Result<bool, RunnerError> {
+) -> Result<PidOneBarrierOutcome, RunnerError> {
     let outer_user_id = geteuid().as_raw();
     let outer_group_id = getegid().as_raw();
     let spawned = child
@@ -303,7 +320,7 @@ fn complete_pid_one_barrier(
                 .finish_sending()
                 .map_err(RunnerError::Channel)?;
             finish_bootstrap_control(child)?;
-            return Ok(false);
+            return Ok(PidOneBarrierOutcome::PidOneProofUnavailable);
         }
         Err(error) => return Err(RunnerError::KernelProof(error)),
     };
@@ -313,6 +330,31 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::Channel)?
         .send(pinned.as_bytes())
         .map_err(RunnerError::Channel)?;
+    let mount_result = child
+        .control_channel()
+        .map_err(RunnerError::Channel)?
+        .receive()
+        .map_err(RunnerError::Channel)?;
+    let mounts_verified = if bootstrap.accept_private_mounts_ready(&mount_result).is_ok() {
+        pid_one
+            .verify_private_mounts(outer_user_id, outer_group_id)
+            .map_err(RunnerError::KernelProof)?;
+        let verified = bootstrap.private_mounts_verified(pid)?;
+        child
+            .control_channel()
+            .map_err(RunnerError::Channel)?
+            .send(verified.as_bytes())
+            .map_err(RunnerError::Channel)?;
+        true
+    } else {
+        bootstrap.accept_private_mounts_unavailable(&mount_result)?;
+        child
+            .control_channel()
+            .map_err(RunnerError::Channel)?
+            .finish_sending()
+            .map_err(RunnerError::Channel)?;
+        false
+    };
     child
         .lifecycle_channel()
         .map_err(RunnerError::Channel)?
@@ -329,8 +371,13 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?
         .verify_pid_one_reaped(&pid_one, outer_user_id, outer_group_id)
         .map_err(RunnerError::KernelProof)?;
-    finish_bootstrap_control(child)?;
-    Ok(true)
+    if mounts_verified {
+        finish_bootstrap_control(child)?;
+        Ok(PidOneBarrierOutcome::PrivateMountsVerified)
+    } else {
+        expect_bootstrap_control_eof(child)?;
+        Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
+    }
 }
 
 fn finish_bootstrap_control(child: &FixedChild) -> Result<(), RunnerError> {
@@ -339,6 +386,10 @@ fn finish_bootstrap_control(child: &FixedChild) -> Result<(), RunnerError> {
         .map_err(RunnerError::Channel)?
         .finish_sending()
         .map_err(RunnerError::Channel)?;
+    expect_bootstrap_control_eof(child)
+}
+
+fn expect_bootstrap_control_eof(child: &FixedChild) -> Result<(), RunnerError> {
     match child
         .control_channel()
         .map_err(RunnerError::Channel)?
@@ -374,7 +425,7 @@ fn finish_blocked_run(
             return Err(RunnerError::UnexpectedLifecycleRecord);
         }
     }
-    if outer.observe_inner_eof()? != LifecycleEofDisposition::NoMutationAuthorized {
+    if outer.observe_inner_eof()? != LifecycleEofDisposition::NoTopologyMutationAuthorized {
         return Err(RunnerError::UnexpectedLifecycleRecord);
     }
     let status = child.wait_and_reap().map_err(RunnerError::Process)?;
@@ -400,7 +451,8 @@ fn errno_runner(error: nix::errno::Errno) -> RunnerError {
 /// The child validates one launch context, creates anonymous user, mount,
 /// network, and pending child PID namespaces, and blocks on an outer-owned ID
 /// mapping barrier. It then owns exactly one fixed self-reexecuted PID 1 until
-/// the outer proves and retires it. It emits no lifecycle frame or `GO`.
+/// the outer proves its PID placement and fixed private mounts and retires it.
+/// It emits no lifecycle frame or `GO`.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_child() -> ExitCode {
@@ -462,6 +514,15 @@ fn internal_child() -> Result<(), RunnerError> {
     control_channel
         .send(bootstrap.mappings_verified()?.as_bytes())
         .map_err(RunnerError::Channel)?;
+    let mappings_pinned = match control_channel.receive() {
+        Ok(record) => record,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            drop(lifecycle_channel);
+            return Ok(());
+        }
+        Err(error) => return Err(RunnerError::Channel(error)),
+    };
+    bootstrap.accept_mappings_pinned(&mappings_pinned)?;
     complete_internal_pid_one(
         lifecycle_channel,
         &control_channel,
@@ -528,12 +589,47 @@ fn complete_internal_pid_one(
     let pinned = match control_channel.receive() {
         Ok(record) => record,
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-            finish_pid_one(pid_one, &mut pid_one_control)?;
+            abort_pid_one_before_mounts(pid_one, &mut pid_one_control)?;
             return Ok(());
         }
         Err(error) => return Err(RunnerError::Channel(error)),
     };
     bootstrap.accept_pid1_pinned(&pinned)?;
+    pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .send(pid_one_control.setup_private_mounts()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    let mount_result = pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .receive()
+        .map_err(RunnerError::Channel)?;
+    if pid_one_control
+        .accept_private_mounts_ready(&mount_result)
+        .is_ok()
+    {
+        control_channel
+            .send(bootstrap.private_mounts_ready(pid)?.as_bytes())
+            .map_err(RunnerError::Channel)?;
+        let verified = control_channel.receive().map_err(RunnerError::Channel)?;
+        bootstrap.accept_private_mounts_verified(&verified)?;
+        pid_one
+            .bootstrap_channel()
+            .map_err(RunnerError::Channel)?
+            .send(pid_one_control.private_mounts_verified()?.as_bytes())
+            .map_err(RunnerError::Channel)?;
+    } else {
+        pid_one_control.accept_private_mounts_unavailable(&mount_result)?;
+        control_channel
+            .send(bootstrap.private_mounts_unavailable(pid)?.as_bytes())
+            .map_err(RunnerError::Channel)?;
+        match control_channel.receive() {
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+            Err(error) => return Err(RunnerError::Channel(error)),
+            Ok(_) => return Err(RunnerError::Control),
+        }
+    }
     let status = finish_pid_one(pid_one, &mut pid_one_control)?;
     control_channel
         .send(bootstrap.pid1_reaped(pid, status)?.as_bytes())
@@ -544,6 +640,18 @@ fn complete_internal_pid_one(
         Ok(_) => return Err(RunnerError::Control),
     }
     Ok(())
+}
+
+fn abort_pid_one_before_mounts(
+    pid_one: FixedPidOne,
+    control: &mut LauncherPidOneControl,
+) -> Result<(), RunnerError> {
+    pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .send(control.abort_before_private_mounts()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    finish_pid_one(pid_one, control).map(|_| ())
 }
 
 fn finish_pid_one(
@@ -576,8 +684,10 @@ fn finish_pid_one(
 ///
 /// The entry verifies its fixed inherited channels, PID-1 placement, mapped
 /// credentials, namespace membership, empty environment, root cwd, and armed
-/// parent-death signal. It reports only over the launcher-private control
-/// channel and proves lifecycle EOF without accepting any frame.
+/// parent-death signal. Only after the outer pins it may it install and directly
+/// verify recursive private propagation, bounded `/run`, and PID-bound `/proc`.
+/// It reports only over the launcher-private control channel and proves lifecycle
+/// EOF without accepting any lifecycle frame.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_pid_one() -> ExitCode {
@@ -612,12 +722,51 @@ fn internal_pid_one() -> Result<(), RunnerError> {
     bootstrap_channel
         .send(control.executed()?.as_bytes())
         .map_err(RunnerError::Channel)?;
+    let mount_instruction = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
+    let private_mounts = if control
+        .accept_setup_private_mounts(&mount_instruction)
+        .is_ok()
+    {
+        match crate::mounts::setup_and_verify_private_mounts() {
+            Ok(mounts) => {
+                verify_pid_one_runtime(&provision)?;
+                bootstrap_channel
+                    .send(control.private_mounts_ready()?.as_bytes())
+                    .map_err(RunnerError::Channel)?;
+                let verified = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
+                control.accept_private_mounts_verified(&verified)?;
+                mounts
+                    .verify()
+                    .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+                verify_pid_one_runtime(&provision)?;
+                Some(mounts)
+            }
+            Err(error) if error.is_policy_denial() => {
+                verify_pid_one_runtime(&provision)?;
+                bootstrap_channel
+                    .send(control.private_mounts_unavailable()?.as_bytes())
+                    .map_err(RunnerError::Channel)?;
+                None
+            }
+            Err(error) => return Err(RunnerError::PrivateMount(io::Error::other(error))),
+        }
+    } else {
+        control.accept_abort_before_private_mounts(&mount_instruction)?;
+        verify_pid_one_runtime(&provision)?;
+        None
+    };
     let expect_eof = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
     control.accept_expect_lifecycle_eof(&expect_eof)?;
     match lifecycle_channel.receive() {
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
         Err(error) => return Err(RunnerError::Channel(error)),
         Ok(_) => return Err(RunnerError::UnexpectedLifecycleRecord),
+    }
+    if let Some(mounts) = private_mounts {
+        mounts
+            .verify()
+            .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+        verify_pid_one_runtime(&provision)?;
     }
     bootstrap_channel
         .send(control.lifecycle_eof()?.as_bytes())

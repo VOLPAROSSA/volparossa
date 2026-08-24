@@ -3,10 +3,13 @@
 //! The current executable provisions one fixed re-executed launcher over
 //! unnamed inherited IPC, creates anonymous user/mount/network namespaces,
 //! selects a pending child-PID namespace behind an outer-owned single-extent
-//! UID/GID-mapping barrier, and then proves and reaps one exact self-reexecuted
-//! namespace PID 1. It proves that no lifecycle mutation was authorized and
-//! deliberately stops before private-mount and `BOOTSTRAP_READY`/`GO`
-//! bootstrap. It cannot emit acceptance evidence or create network topology.
+//! UID/GID-mapping barrier, and then proves one exact self-reexecuted namespace
+//! PID 1. That PID makes the inherited mount tree recursively private, installs
+//! a bounded hardened tmpfs at `/run` and a PID-namespace-bound procfs at
+//! `/proc`, and retains both while the outer independently verifies them. The
+//! exact process tree is then reaped without authorizing topology mutation. The
+//! slice deliberately stops before signal supervision, `BOOTSTRAP_READY`, and
+//! `GO`; it cannot emit acceptance evidence or create network topology.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
@@ -16,6 +19,7 @@ mod control;
 mod evidence;
 mod ipc;
 mod isolation;
+mod mounts;
 mod namespace;
 mod pid1;
 mod process;

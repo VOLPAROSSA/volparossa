@@ -46,7 +46,9 @@ fn bounded_host_record(path: &str) -> Vec<u8> {
 }
 
 fn write_command_shims(directory: &Path, marker: &Path) {
-    for name in ["ip", "mount", "nft", "nsenter", "sysctl", "unshare", "wg"] {
+    for name in [
+        "ip", "mount", "nft", "nsenter", "sysctl", "umount", "unshare", "wg",
+    ] {
         let shim = directory.join(name);
         fs::write(
             &shim,
@@ -94,7 +96,9 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
     assert!(
         stderr
-            == "BLOCKED: anonymous namespaces, exact ID mappings, and a self-reexecuted PID 1 were verified and reaped without BOOTSTRAP_READY or GO; private mounts are not implemented.\n"
+            == "BLOCKED: recursive private propagation, bounded private /run, and PID-bound private /proc were independently verified and reaped without BOOTSTRAP_READY or GO.\n"
+            || stderr
+                == "BLOCKED: anonymous namespaces, exact ID mappings, and a self-reexecuted PID 1 were verified, but kernel policy denied the fixed private-mount setup; no BOOTSTRAP_READY or GO was emitted.\n"
             || stderr
                 == "BLOCKED: anonymous namespaces and exact ID mappings were verified, but kernel policy hid the required outer PID-1 proof; no GO was emitted.\n"
             || stderr
@@ -199,7 +203,7 @@ fn preview_and_argument_surface_are_exact() {
     assert!(preview.status.success());
     assert_eq!(
         String::from_utf8(preview.stdout).expect("UTF-8 preview"),
-        "VOLPAROSSA fixed supervisor preview: anonymous user/mount/network and pending child-PID namespace bootstrap, exact UID/GID mapping, and exact self-reexec PID-1 proof are implemented; private mounts, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked.\n"
+        "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, recursive private propagation, bounded private /run, and PID-bound private /proc are implemented; signal supervision, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked.\n"
     );
     assert!(preview.stderr.is_empty());
 

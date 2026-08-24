@@ -171,8 +171,8 @@ The lifecycle protocol is separate from the acceptance result. Before its five b
 frames, the outer sends one bounded canonical `LAUNCH_CONTEXT` transport-provisioning record over
 a dedicated inherited unnamed channel. It contains only the random run ID, the three original-host
 namespace identities, and the fixed topology-specification digest. It is not a lifecycle frame,
-cannot authorize mutation, and malformed, missing, duplicated, or prematurely closed provisioning
-never reaches `GO`. A separate inherited bidirectional channel then carries the five lifecycle
+cannot authorize topology mutation, and malformed, missing, duplicated, or prematurely closed
+provisioning never reaches `GO`. A separate inherited bidirectional channel then carries the five lifecycle
 frames in one strict order. `BOOTSTRAP_READY` is an
 attestation that the fixed inner worker must construct only after directly measuring that it is PID
 1 in different network, mount, and PID
@@ -183,10 +183,11 @@ its original host identities. Only then may it send the affine `GO` authorizatio
 namespace identities, and the completed probe, all directly observed by that worker. The outer then
 sends `STOP`; `FINISHED` must bind the SHA-256 of the exact `TOPOLOGY_READY` bytes and report
 attempted cleanup. The outer independently reaps the complete sandbox and constructs the acceptance
-report. EOF before `GO` explicitly means that no mutation was authorized; EOF afterward requires
-cleanup. Missing, malformed, reordered, duplicated, contradictory, or differently bound records
-fail closed. These transient attestations are not A14 evidence and cannot themselves make any
-A01-A15 case pass.
+report. EOF before `GO` explicitly means that no topology mutation was authorized; fixed pre-`GO`
+bootstrap operations such as namespace creation, ID mapping, and private mounts may already have
+occurred and must still be contained and reaped. EOF afterward requires cleanup. Missing,
+malformed, reordered, duplicated, contradictory, or differently bound records fail closed. These
+transient attestations are not A14 evidence and cannot themselves make any A01-A15 case pass.
 
 After a real lifecycle-only run, normal teardown still leaves A14 `SKIPPED` with
 `FORCED_CRASH_NOT_EXECUTED`. A15 alone may be `PASS` when two privacy-safe outer fingerprint
@@ -214,24 +215,66 @@ pending child PID namespaces. Before any child exists, the outer retains a pidfd
 requires an empty child set, and proves that the existing `pid_for_children` magic link is in the
 kernel-defined uninstantiated state. Only then does it write `deny` to `setgroups` and one exact
 `0 <outer-id> 1` extent to each ID map; both sides independently read back those mappings and the
-stable partial namespace set.
+stable partial namespace set. The launcher then emits `MAPPINGS_VERIFIED`, but cannot spawn PID 1
+yet. The outer repeats its anchored mapping readback and returns the affine `MAPPINGS_PINNED`
+proceed record; EOF instead retires the launcher before a PID-namespace child can exist.
 
 After that barrier the launcher makes exactly one second fixed `/proc/self/exe` invocation, which
 becomes PID 1 in the pending namespace and remains blocked on a new private bootstrap channel. The
-launcher and PID 1 perform an affine, run-bound provision/parent-death/liveness/execution/EOF
-exchange. PID 1 independently requires PID 1/PPID 0, one task, mapped-root credentials, the exact
-inherited namespace set, an empty environment, cwd `/`, and an armed parent-death `SIGKILL`. The
-outer upgrades its launcher namespace pins only after the child exists and independently proves
-the exact executable/selector, PID/PPID/nesting, mappings, namespaces, empty descendant set, and
-sole launcher-child relation. It closes the lifecycle channel without a frame and verifies exact
-PID-1 exit and reap on the positive route.
+launcher and PID 1 perform an affine, run-bound provision, parent-death, liveness, execution,
+private-mount, and EOF exchange. PID 1 independently requires PID 1/PPID 0, one task, mapped-root
+credentials, the exact inherited namespace set, an empty environment, cwd `/`, and an armed
+parent-death `SIGKILL`. The outer upgrades its launcher namespace pins only after the child exists
+and independently proves the exact executable/selector, PID/PPID/nesting, mappings, namespaces,
+empty descendant set, and sole launcher-child relation. Only after the outer returns its run- and
+PID-bound `PID1_PINNED` acknowledgement does PID 1 recursively make the inherited mount tree
+private. It then uses the descriptor-based Linux mount API to attach a 16 MiB, 4096-inode,
+mode-0700 tmpfs at `/run` with `nosuid,nodev,noexec`, followed by a separately instantiated procfs
+at `/proc` with the same hardening flags. No caller-selected path, mount option, command, or
+fallback is accepted.
 
-The strict outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
-`MAPPINGS_VERIFIED`, `PID1_SPAWNED`, `PID1_PINNED`, `PID1_REAPED`. A fixed set of kernel-policy
-denials returns separate honest `BLOCKED` outcomes when required parent, namespace, mapping, or
-outer PID-1 proof is unavailable, without fallback. A generic green CI job may therefore prove
-only fail-closed behaviour; the positive PID-1 path requires the explicit
-`BlockedAfterPidOneProof` outcome on the Debian 13 acceptance host.
+Linux 6.12 supports tmpfs `noswap`, but deliberately rejects changing swapability from this
+unprivileged user-namespace boundary. This slice therefore proves that `/run` remains empty and
+places no key, credential, or token material there. Future filesystem-backed secret material stays
+forbidden until the runner can independently prove a non-swappable store without broadening the
+unprivileged supervisor boundary.
+
+PID 1 binds the visible mount IDs to a bounded mountinfo parse, requires every inherited mount to
+have no propagation relationship, proves `/run` is the new bounded empty tmpfs, and proves that
+private procfs exposes exactly PID/task set `{1}` with no child. It retains root, `/run`, and `/proc`
+descriptors and repeats that proof after the outer acknowledgement and immediately before exit.
+The outer independently reads the still-live PID through its pre-mount pidfd and anchored host
+`/proc/<pid>` directory, matches visible `statx` mount IDs to mountinfo, checks tmpfs type, capacity,
+inode bound, mode and mapped ownership, and matches `/proc/1/ns/pid` to the retained PID namespace.
+Only then is `PRIVATE_MOUNTS_VERIFIED` returned. The lifecycle channel closes without a frame and
+the outer verifies exact PID-1 exit and reap.
+
+The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
+`MAPPINGS_VERIFIED`, `MAPPINGS_PINNED`, `PID1_SPAWNED`, `PID1_PINNED`, `PRIVATE_MOUNTS_READY`,
+`PRIVATE_MOUNTS_VERIFIED`, `PID1_REAPED`. The exclusive mount-policy branch substitutes
+`PRIVATE_MOUNTS_UNAVAILABLE` for the two positive mount records. Only `EPERM` or `EACCES` from an
+exact fixed mount-UAPI operation may take that branch; malformed state, missing targets, unsupported
+APIs, invalid options, resource failures, and failed readback remain internal errors. Other fixed
+kernel-policy denials return separate honest `BLOCKED` outcomes when required parent, namespace,
+mapping, or outer PID-1 proof is unavailable, without fallback. If the outer PID-1 pin is
+unavailable after spawn, the launcher sends one run-bound `ABORT_BEFORE_PRIVATE_MOUNTS` record to
+PID 1, proves lifecycle EOF, and reaps it without issuing a mount instruction. A generic green CI
+job may therefore prove only fail-closed behaviour; the complete positive path requires the
+explicit `BlockedAfterPrivateMountProof` outcome on the Debian 13 acceptance host:
+
+```sh
+just test-netns-private-mount-proof
+```
+
+That opt-in gate requires an unprivileged Debian 13 amd64 host with unprivileged user namespaces
+enabled, zero capabilities, and `no_new_privs`. A dedicated ephemeral VM is required for
+authoritative acceptance, but the gate itself proves only that its immediate host is a VM; CI job
+provenance must establish that the VM was dedicated and ephemeral. A bare-metal development host
+may supply an additional local proof because the runner remains inside disposable namespaces and
+the gate compares its outer namespace, mount and route state exactly before and after. A container
+on an Ubuntu runner does not supply the required Debian-host kernel evidence, and a privileged
+container would test a different privilege boundary. The gate executes a private, owner-only copy
+of the fixed-target build artifact.
 
 The runner retains exact-child and namespace-FD ownership through a bounded synchronous reap
 attempt. Normal reaping retains the pidfd and exact `Child` ownership; every forced `SIGKILL` after
@@ -242,17 +285,17 @@ public `--run` entry requires exactly one initial task, and any non-default `SIG
 `SA_NOCLDWAIT` is rejected before any channel, permit, reaper thread, or child is created. If a
 later synchronous reap attempt cannot complete, ownership transfers to a process-local fallback
 reaper instead of being silently detached; that rare fallback is not claimed as post-exit cleanup
-or A14 evidence. The current `--run` path verifies
-EOF-before-`GO`, repeated exact outer-launcher reaping, and unchanged outer namespace, mount-table,
-and route-table observations, then honestly returns `BLOCKED`/77. An explicit
-`BlockedAfterPidOneProof` run additionally proves exact PID-1 exit and reap. Command/environment
-shims prove that it invokes no namespace or networking utility. It still has no private mount
-propagation, private `/proc` or `/run`, general root-filesystem or supplementary-group isolation,
-signal-driven five-frame lifecycle, topology mutation, or acceptance evidence.
+or A14 evidence. The current `--run` path verifies EOF-before-`GO`, repeated exact PID-1 and
+outer-launcher reaping, and unchanged outer namespace, mount-table, and route-table observations,
+then honestly returns `BLOCKED`/77. An explicit `BlockedAfterPrivateMountProof` run additionally
+proves the complete private-mount barrier described above. Command/environment shims prove that it
+invokes no namespace or networking utility. It still has no general root-filesystem or
+supplementary-group isolation, signal-driven five-frame lifecycle, topology mutation, crash
+cleanup evidence, acceptance report, or A01-A15 result.
 
-Privileged execution stays blocked until that fixed reviewed supervisor additionally owns
-private mount propagation and private `/run` and `/proc`, signal supervision, setup, evidence
-finalization, complete process-tree containment, and teardown as one operation.
+Privileged topology execution stays blocked until that fixed reviewed supervisor additionally owns
+signal supervision, lifecycle setup and evidence finalization, complete process-tree containment,
+network-object ownership, and teardown as one operation.
 It may not accept a caller-selected command, executable, backend, timeout, cleanup prefix, or
 network-object name.
 

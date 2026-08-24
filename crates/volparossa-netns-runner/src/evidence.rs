@@ -8,16 +8,26 @@ use std::{
 use nix::poll::{PollFd, PollFlags, poll};
 use rustix::{
     fd::AsFd,
-    fs::{Mode, OFlags, fstat, open, openat},
+    fs::{
+        AtFlags, Dir, FileType, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags, StatxFlags, fstat,
+        fstatfs, open, openat, openat2, statx,
+    },
     process::{Pid, PidfdFlags, pidfd_open},
 };
 use thiserror::Error;
 
-use crate::namespace::{
-    LauncherNamespaceMembership, LauncherNamespacePins, NamespacePins, NamespaceSnapshot,
+use crate::{
+    mounts::{
+        MAX_PRIVATE_MOUNTINFO_BYTES, PRIVATE_RUN_INODES, PRIVATE_RUN_MODE, PRIVATE_RUN_SIZE_BYTES,
+    },
+    namespace::{
+        LauncherNamespaceMembership, LauncherNamespacePins, NamespacePins, NamespaceSnapshot,
+    },
 };
 
 const MAXIMUM_PROC_RECORD_BYTES: usize = 16 * 1024;
+const MAXIMUM_DIRECTORY_ENTRIES: usize = 4096;
+const TMPFS_SUPER_MAGIC: i128 = 0x0102_1994;
 
 pub(crate) struct LauncherKernelPins {
     pidfd: OwnedFd,
@@ -32,7 +42,11 @@ pub(crate) struct LauncherKernelPins {
 pub(crate) struct PidOneKernelPins {
     pidfd: OwnedFd,
     process_directory: OwnedFd,
+    root_directory: OwnedFd,
     namespaces: NamespacePins,
+    process_id: u32,
+    launcher_process_id: u32,
+    launcher_pid_depth: usize,
 }
 
 struct ProcessStatus {
@@ -397,6 +411,17 @@ impl PidOneKernelPins {
             expected_selector,
         )?;
         verify_mapping_records_at(&process_directory, outer_user_id, outer_group_id)?;
+        let root_directory = openat(
+            &process_directory,
+            "root",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_io)?;
+        let root_metadata = fstat(&root_directory).map_err(rustix_io)?;
+        if !FileType::from_raw_mode(root_metadata.st_mode).is_dir() {
+            return Err(invalid_data("reported PID-1 root is not a directory"));
+        }
         let namespaces = NamespacePins::pin_process(&process_directory)?;
         if !namespaces.snapshot().is_pid_one_child_of(launcher_snapshot)
             || !namespaces.matches_process_membership(&process_directory)?
@@ -413,12 +438,79 @@ impl PidOneKernelPins {
         Ok(Self {
             pidfd,
             process_directory,
+            root_directory,
             namespaces,
+            process_id,
+            launcher_process_id,
+            launcher_pid_depth,
         })
     }
 
     pub(crate) fn ensure_alive(&self) -> io::Result<()> {
         ensure_pidfd_alive(&self.pidfd, "reported PID-1 process is no longer alive")
+    }
+
+    pub(crate) fn verify_private_mounts(
+        &self,
+        outer_user_id: u32,
+        outer_group_id: u32,
+    ) -> io::Result<()> {
+        self.verify_live_identity(outer_user_id, outer_group_id)?;
+        let mountinfo = read_proc_file_with_limit(
+            &self.process_directory,
+            "mountinfo",
+            MAX_PRIVATE_MOUNTINFO_BYTES,
+            false,
+        )?;
+        let run_directory = open_isolated_root_directory(&self.root_directory, "run")?;
+        let proc_directory = open_isolated_root_directory(&self.root_directory, "proc")?;
+        let run_mount_id = descriptor_mount_id(&run_directory)?;
+        let proc_mount_id = descriptor_mount_id(&proc_directory)?;
+        crate::mounts::verify_private_mountinfo(&mountinfo, run_mount_id, proc_mount_id)?;
+        verify_private_run(&run_directory, outer_user_id, outer_group_id)?;
+        verify_private_proc(&proc_directory, self.namespaces.snapshot().pid)?;
+        self.verify_live_identity(outer_user_id, outer_group_id)
+    }
+
+    fn verify_live_identity(&self, outer_user_id: u32, outer_group_id: u32) -> io::Result<()> {
+        self.ensure_alive()?;
+        verify_pid_one_status(
+            &read_proc_file(&self.process_directory, "status")?,
+            self.process_id,
+            self.launcher_process_id,
+            self.launcher_pid_depth,
+        )?;
+        verify_pid_one_children(&read_proc_file_allow_empty(
+            &self.process_directory,
+            &format!("task/{}/children", self.process_id),
+        )?)?;
+        verify_mapping_records_at(&self.process_directory, outer_user_id, outer_group_id)?;
+        if !self.namespaces.still_matches()?
+            || !self
+                .namespaces
+                .matches_process_membership(&self.process_directory)?
+        {
+            return Err(invalid_data(
+                "reported PID-1 namespace membership changed during mount proof",
+            ));
+        }
+        let current_root = openat(
+            &self.process_directory,
+            "root",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_io)?;
+        let expected_root = fstat(&self.root_directory).map_err(rustix_io)?;
+        let observed_root = fstat(current_root).map_err(rustix_io)?;
+        if expected_root.st_dev != observed_root.st_dev
+            || expected_root.st_ino != observed_root.st_ino
+        {
+            return Err(invalid_data(
+                "reported PID-1 root changed during mount proof",
+            ));
+        }
+        self.ensure_alive()
     }
 
     fn verify_reaped(&self) -> io::Result<()> {
@@ -435,6 +527,152 @@ impl PidOneKernelPins {
         }
         ensure_pidfd_exited(&self.pidfd)
     }
+}
+
+fn open_isolated_root_directory<Fd: AsFd>(root: Fd, name: &str) -> io::Result<OwnedFd> {
+    openat2(
+        root,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(rustix_io)
+}
+
+fn descriptor_mount_id<Fd: AsFd>(descriptor: Fd) -> io::Result<u64> {
+    let status =
+        statx(descriptor, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).map_err(rustix_io)?;
+    if StatxFlags::from_bits_retain(status.stx_mask).contains(StatxFlags::MNT_ID)
+        && status.stx_mnt_id != 0
+    {
+        Ok(status.stx_mnt_id)
+    } else {
+        Err(invalid_data("kernel did not report a nonzero mount ID"))
+    }
+}
+
+fn verify_private_run<Fd: AsFd>(
+    directory: Fd,
+    outer_user_id: u32,
+    outer_group_id: u32,
+) -> io::Result<()> {
+    let metadata = fstat(&directory).map_err(rustix_io)?;
+    if !FileType::from_raw_mode(metadata.st_mode).is_dir()
+        || metadata.st_mode & 0o7777 != PRIVATE_RUN_MODE
+        || metadata.st_uid != outer_user_id
+        || metadata.st_gid != outer_group_id
+    {
+        return Err(invalid_data(
+            "private /run root type, mode, or ownership is not exact",
+        ));
+    }
+    let filesystem = fstatfs(&directory).map_err(rustix_io)?;
+    let block_size = u128::try_from(filesystem.f_bsize)
+        .map_err(|_| invalid_data("private /run block size is invalid"))?;
+    let capacity = u128::from(filesystem.f_blocks)
+        .checked_mul(block_size)
+        .ok_or_else(|| invalid_data("private /run capacity overflow"))?;
+    if i128::from(filesystem.f_type) != TMPFS_SUPER_MAGIC
+        || capacity == 0
+        || capacity > u128::from(PRIVATE_RUN_SIZE_BYTES)
+        || filesystem.f_files == 0
+        || filesystem.f_files > PRIVATE_RUN_INODES
+    {
+        return Err(invalid_data("private /run is not the fixed bounded tmpfs"));
+    }
+    if !directory_names(directory)?.is_empty() {
+        return Err(invalid_data("private /run is not initially empty"));
+    }
+    Ok(())
+}
+
+fn verify_private_proc<Fd: AsFd>(
+    directory: Fd,
+    expected_pid_namespace: volparossa_test_support::NamespaceIdentity,
+) -> io::Result<()> {
+    let metadata = fstat(&directory).map_err(rustix_io)?;
+    let filesystem = fstatfs(&directory).map_err(rustix_io)?;
+    if !FileType::from_raw_mode(metadata.st_mode).is_dir() || filesystem.f_type != PROC_SUPER_MAGIC
+    {
+        return Err(invalid_data("private /proc is not procfs"));
+    }
+    let names = directory_names(&directory)?;
+    let mut process_ids = Vec::new();
+    for name in names {
+        if name.first().is_some_and(u8::is_ascii_digit) {
+            if name.len() > 1 && name.first() == Some(&b'0') || !name.iter().all(u8::is_ascii_digit)
+            {
+                return Err(invalid_data("private /proc PID entry is not canonical"));
+            }
+            process_ids.push(
+                std::str::from_utf8(&name)
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|pid| *pid != 0)
+                    .ok_or_else(|| invalid_data("private /proc PID entry is invalid"))?,
+            );
+        }
+    }
+    process_ids.sort_unstable();
+    if process_ids != [1] {
+        return Err(invalid_data(
+            "private /proc does not expose exactly namespace PID 1",
+        ));
+    }
+    let namespace = openat(
+        &directory,
+        "1/ns/pid",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    let namespace_metadata = fstat(namespace).map_err(rustix_io)?;
+    if namespace_metadata.st_dev != expected_pid_namespace.device()
+        || namespace_metadata.st_ino != expected_pid_namespace.inode()
+    {
+        return Err(invalid_data(
+            "private /proc is not bound to the retained PID namespace",
+        ));
+    }
+    let status = parse_process_status(&read_proc_file_at(&directory, "1/status", false)?)?;
+    if status.pid != 1 || status.parent != 0 || status.threads != 1 || status.namespace_pids != [1]
+    {
+        return Err(invalid_data("private /proc PID-1 status is not exact"));
+    }
+    verify_pid_one_children(&read_proc_file_at(directory, "1/task/1/children", true)?)
+}
+
+fn directory_names<Fd: AsFd>(directory: Fd) -> io::Result<Vec<Vec<u8>>> {
+    let mut entries = Dir::read_from(directory).map_err(rustix_io)?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(rustix_io)?;
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        if names.len() == MAXIMUM_DIRECTORY_ENTRIES {
+            return Err(invalid_data("directory proof exceeded its entry bound"));
+        }
+        names.push(name.to_vec());
+    }
+    Ok(names)
+}
+
+fn read_proc_file_at<Fd: AsFd>(
+    directory: Fd,
+    name: &str,
+    allow_empty: bool,
+) -> io::Result<Vec<u8>> {
+    let descriptor = openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    read_bounded_inner(File::from(descriptor), allow_empty)
 }
 
 fn ensure_pidfd_alive<Fd: AsFd>(pidfd: Fd, message: &'static str) -> io::Result<()> {
@@ -576,17 +814,19 @@ fn write_proc_file_once<Fd: AsFd>(
 }
 
 fn read_proc_file<Fd: AsFd>(process_directory: Fd, name: &str) -> io::Result<Vec<u8>> {
-    let descriptor = openat(
-        process_directory,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )
-    .map_err(rustix_io)?;
-    read_bounded(File::from(descriptor))
+    read_proc_file_with_limit(process_directory, name, MAXIMUM_PROC_RECORD_BYTES, false)
 }
 
 fn read_proc_file_allow_empty<Fd: AsFd>(process_directory: Fd, name: &str) -> io::Result<Vec<u8>> {
+    read_proc_file_with_limit(process_directory, name, MAXIMUM_PROC_RECORD_BYTES, true)
+}
+
+fn read_proc_file_with_limit<Fd: AsFd>(
+    process_directory: Fd,
+    name: &str,
+    maximum_bytes: usize,
+    allow_empty: bool,
+) -> io::Result<Vec<u8>> {
     let descriptor = openat(
         process_directory,
         name,
@@ -594,22 +834,30 @@ fn read_proc_file_allow_empty<Fd: AsFd>(process_directory: Fd, name: &str) -> io
         Mode::empty(),
     )
     .map_err(rustix_io)?;
-    read_bounded_inner(File::from(descriptor), true)
+    read_bounded_inner_with_limit(File::from(descriptor), allow_empty, maximum_bytes)
 }
 
 fn read_bounded(file: File) -> io::Result<Vec<u8>> {
     read_bounded_inner(file, false)
 }
 
-fn read_bounded_inner(mut file: File, allow_empty: bool) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(MAXIMUM_PROC_RECORD_BYTES.saturating_add(1));
+fn read_bounded_inner(file: File, allow_empty: bool) -> io::Result<Vec<u8>> {
+    read_bounded_inner_with_limit(file, allow_empty, MAXIMUM_PROC_RECORD_BYTES)
+}
+
+fn read_bounded_inner_with_limit(
+    mut file: File,
+    allow_empty: bool,
+    maximum_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(maximum_bytes.saturating_add(1));
     file.by_ref()
         .take(
-            u64::try_from(MAXIMUM_PROC_RECORD_BYTES.saturating_add(1))
+            u64::try_from(maximum_bytes.saturating_add(1))
                 .map_err(|_| invalid_data("proc record read bound does not fit the platform"))?,
         )
         .read_to_end(&mut bytes)?;
-    if (!allow_empty && bytes.is_empty()) || bytes.len() > MAXIMUM_PROC_RECORD_BYTES {
+    if (!allow_empty && bytes.is_empty()) || bytes.len() > maximum_bytes {
         return Err(invalid_data("proc record is empty or oversized"));
     }
     Ok(bytes)

@@ -7,7 +7,7 @@ usage() {
     printf '%s\n' \
         'usage:' \
         '  tests/netns/topology.sh --preview' \
-        '  tests/netns/topology.sh --run      # blocked until PID-namespace/PID-1/private-mount bootstrap exists' \
+        '  tests/netns/topology.sh --run      # blocked until the signal-driven Rust lifecycle driver exists' \
         '  tests/netns/topology.sh --cleanup  # always refuses unowned standalone cleanup'
 }
 
@@ -16,7 +16,8 @@ print_plan() {
         'VOLPAROSSA isolated lifecycle plan (no change has been made):' \
         '  capture a privacy-safe digest manifest of host network state' \
         '  enter fixed anonymous network, mount, and PID namespaces' \
-        '  mount a private tmpfs at /run inside that sandbox' \
+        '  make the inherited mount tree recursively private' \
+        '  mount bounded private /run and PID-bound private /proc inside that sandbox' \
         '  create two run-scoped named namespaces only inside the private /run' \
         '  create both ends of two run-scoped veth pairs only inside the sandbox' \
         '  add exact local routes; do not add a default route' \
@@ -51,7 +52,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner implements anonymous user/mount/network namespace mapping, but this shell entry point remains non-executing until PID-namespace/PID-1/private-mount bootstrap exists.' \
+            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, and fixed private mounts, but this shell entry point remains non-executing until the signal-driven lifecycle driver exists.' \
             'This invocation created no namespace, link, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;
