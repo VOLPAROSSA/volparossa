@@ -423,14 +423,20 @@ Last updated: 2026-08-24
   (`SigBlk=0000000000014003`, `SigCgt=0000000000004443`, and no managed ignored or pending bit)
   through its retained pidfd and proc anchor. The caught mask is `0x4003` managed handlers plus
   the repository-pinned Rust 1.85.0 runtime's `0x0440` SIGBUS/SIGSEGV baseline on Debian 13 amd64,
-  not a Linux ABI constant. After mount verification, PID 1 directly proves the exact
-  fixed kernel-new-network-namespace RTNL readiness baseline and constructs one canonical
-  `BOOTSTRAP_READY` bound to the run and its measured network, mount, and PID namespace identities.
-  The baseline pins the enumerated down-loopback configuration, including its mutable GSO/GRO
-  limits, and proves empty address, route, ordinary/proxy-neighbour, and nexthop object sets plus
-  the exact default IPv4/IPv6 rules. Its
-  documented scope does not yet include every independent netconf, address-label,
-  neighbour-parameter, or traffic-control table. The outer
+  not a Linux ABI constant. After mount verification, PID 1 directly proves the enumerated
+  read-only pre-`GO` network-readiness baseline and constructs one canonical `BOOTSTRAP_READY`
+  bound to the run and its measured network, mount, and PID namespace identities. The RTNL part
+  pins the down-loopback configuration, including its mutable GSO/GRO limits, and proves empty
+  address, route, ordinary/proxy-neighbour, and nexthop object sets plus the exact default
+  IPv4/IPv6 rules. Each complete observation also reads the fixed namespace-local
+  `/proc/sys/net/ipv4/ip_forward` record through the retained private-proc descriptor, accepts
+  only canonical `0\n` or `1\n`, and requires its procfs object identity and value to remain
+  unchanged. A fixed read-only `NETLINK_NETFILTER` exchange requires generation 1 immediately
+  before and after a dump containing zero nftables tables. This sampled evidence is not a
+  claim that IPv4 forwarding is disabled or that every netconf or firewall/netfilter facility is
+  empty. Other netconf, address-label, neighbour-parameter, traffic-control, conntrack, ipset,
+  NFQUEUE/NFLOG, legacy-xtables, and independent-hook state remains outside this proof. The fixed
+  GET requests may cause ordinary kernel module loading but create no firewall object. The outer
   accepts that actual lifecycle frame only after matching all three identities to its retained
   PID-1 namespace pins and repeating the live mount and signal proofs. Only then does the outer
   send exact TERM through the PID-1 pidfd; PID 1 consumes the real `signalfd` record and returns
@@ -441,10 +447,11 @@ Last updated: 2026-08-24
   mount-UAPI operation may produce the exclusive
   `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
   options, resource failures, and failed evidence remain hard errors. The positive
-  `BlockedAfterBootstrapReadyProof` route proves the exact RTNL baseline, one real pinned
-  `BOOTSTRAP_READY`, the complete TERM/EOF/signal chain, and exact PID-1 exit/reap without `GO` or
-  network-topology mutation. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
-  namespace/mount/route observations, and no command-shim execution. Normal reaping retains both
+  `BlockedAfterBootstrapReadyProof` route proves that complete read-only network baseline, one
+  real pinned `BOOTSTRAP_READY`, the complete TERM/EOF/signal chain, and exact PID-1 exit/reap
+  without `GO` or network-topology mutation. Repeated portable tests prove exact outer-launcher
+  reaping, unchanged outer namespace/mount/route/IPv4-forwarding observations, and no command-shim
+  execution; they do not claim an authoritative comparison of host nftables state. Normal reaping retains both
   pidfd and exact `Child` ownership; every forced `SIGKILL` after admission targets that pidfd.
   Pidfd acquisition is mandatory; its failure closes the private channels, attempts `SIGKILL`
   against the still-owned unreaped child, and synchronously waits/reaps it before returning the
@@ -465,9 +472,11 @@ Last updated: 2026-08-24
   descriptor identity, run-scoped names, and replacement checks. That dormant code has no runtime
   caller, manifest writer, deletion capability, or network operation, and regular-file fixtures
   are not evidence for live nsfs mounts, hostile concurrency, topology creation, probing, or
-  cleanup. The slice still has no general root-filesystem or supplementary-group isolation, `GO`,
+  cleanup. No writer or nftables mutation API exists. The slice still has no general
+  root-filesystem or supplementary-group isolation, `GO`,
   `TOPOLOGY_READY`, `STOP`, `FINISHED`, network-topology mutation, crash-cleanup evidence,
-  acceptance report, or A01-A15 result. `BOOTSTRAP_READY` is readiness evidence only; it is not
+  acceptance report, or A01-A15 result. In particular, no network-object cleanup, A14, A15, or
+  acceptance evidence is produced. `BOOTSTRAP_READY` is readiness evidence only; it is not
   topology authorization, cleanup evidence, or an acceptance-test result.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.

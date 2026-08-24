@@ -1,11 +1,13 @@
-//! Bounded proof of the fixed pristine routing-readiness baseline.
+//! Bounded proof of the enumerated read-only pre-`GO` network baseline.
 //!
 //! The collector opens only `NETLINK_ROUTE`, issues fixed dump requests, and
 //! requires two identical canonical snapshots under one absolute deadline. It
 //! pins the enumerated loopback configuration, including its mutable offload
 //! limits, and the empty address, route, ordinary/proxy-neighbour, and nexthop
-//! object sets plus the default rules. It never mutates networking or host
-//! state.
+//! object sets plus the default rules. The composite proof also pins one fixed
+//! namespace-local IPv4-forwarding proc record and a read-only generation-1
+//! empty nftables-table observation. It exposes no network-state writer or
+//! nftables mutation API; fixed GETs may trigger ordinary kernel module loading.
 
 use std::{
     io,
@@ -21,6 +23,11 @@ use nix::{
     poll::{PollFd, PollFlags, PollTimeout, poll},
 };
 use thiserror::Error;
+
+use crate::{
+    mounts::{Ipv4ForwardingRecordSnapshot, PrivateMountSetupError, PrivateMounts},
+    nftables::{NftablesBaseline, NftablesError, observe_empty_nftables},
+};
 
 const NETWORK_PROOF_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -153,23 +160,49 @@ pub(crate) enum NetworkError {
     /// The stable snapshot was not the fixed pristine namespace baseline.
     #[error("network namespace is not pristine")]
     NotPristine,
+    /// The fixed private-proc observation failed.
+    #[error("network proof could not read the fixed private proc record")]
+    PrivateProc(#[source] PrivateMountSetupError),
+    /// The fixed read-only nftables observation failed.
+    #[error("network proof could not establish the nftables baseline")]
+    Nftables(#[source] NftablesError),
 }
 
-/// An affine proof that the current thread observed the pristine network baseline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Ipv4ForwardingState {
+    Disabled,
+    Enabled,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct Ipv4ForwardingBaseline {
+    record: Ipv4ForwardingRecordSnapshot,
+    state: Ipv4ForwardingState,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PreGoNetworkBaseline {
+    rtnl: NetworkSnapshot,
+    ipv4_forwarding: Ipv4ForwardingBaseline,
+    nftables: NftablesBaseline,
+}
+
+/// An affine proof that the current thread observed the enumerated pre-`GO` network baseline.
 ///
 /// The token is deliberately neither cloneable nor transferable to another
 /// thread. [`Self::verify`] performs a fresh double snapshot before the proof is
 /// used at a later protocol barrier.
-pub(crate) struct PristineNetworkProof {
-    snapshot: NetworkSnapshot,
+pub(crate) struct PreGoNetworkProof<'mounts> {
+    baseline: PreGoNetworkBaseline,
+    mounts: &'mounts PrivateMounts,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-impl PristineNetworkProof {
+impl PreGoNetworkProof<'_> {
     /// Re-prove the baseline and require it to equal the original observation.
     pub(crate) fn verify(&self) -> Result<(), NetworkError> {
-        let current = collect_consistent_pristine_snapshot()?;
-        if current == self.snapshot {
+        let current = collect_pre_go_network_baseline(self.mounts)?;
+        if current == self.baseline {
             Ok(())
         } else {
             Err(NetworkError::Inconsistent)
@@ -177,10 +210,13 @@ impl PristineNetworkProof {
     }
 }
 
-/// Prove the exact pristine network-namespace baseline without mutating it.
-pub(crate) fn prove_pristine_network_namespace() -> Result<PristineNetworkProof, NetworkError> {
-    Ok(PristineNetworkProof {
-        snapshot: collect_consistent_pristine_snapshot()?,
+/// Prove the enumerated read-only pre-`GO` network baseline without mutating it.
+pub(crate) fn prove_pre_go_network_baseline(
+    mounts: &PrivateMounts,
+) -> Result<PreGoNetworkProof<'_>, NetworkError> {
+    Ok(PreGoNetworkProof {
+        baseline: collect_pre_go_network_baseline(mounts)?,
+        mounts,
         _thread_bound: PhantomData,
     })
 }
@@ -216,6 +252,10 @@ impl Deadline {
         } else {
             Err(timeout_error().into())
         }
+    }
+
+    const fn instant(self) -> Instant {
+        self.0
     }
 }
 
@@ -561,8 +601,15 @@ impl NetlinkCollector {
     }
 }
 
+#[cfg(test)]
 fn collect_consistent_pristine_snapshot() -> Result<NetworkSnapshot, NetworkError> {
     let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
+    collect_consistent_pristine_snapshot_before(deadline)
+}
+
+fn collect_consistent_pristine_snapshot_before(
+    deadline: Deadline,
+) -> Result<NetworkSnapshot, NetworkError> {
     let mut collector = NetlinkCollector::connect(deadline)?;
     let mut budget = CollectionBudget::production();
     let first = collector.collect_snapshot(deadline, &mut budget)?;
@@ -571,6 +618,48 @@ fn collect_consistent_pristine_snapshot() -> Result<NetworkSnapshot, NetworkErro
     verify_consistent_pristine(&first, &second)?;
     deadline.ensure_unexpired()?;
     Ok(first)
+}
+
+fn collect_pre_go_network_baseline(
+    mounts: &PrivateMounts,
+) -> Result<PreGoNetworkBaseline, NetworkError> {
+    let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
+    let forwarding_before = mounts
+        .read_ipv4_forwarding_record()
+        .map_err(NetworkError::PrivateProc)?;
+    let rtnl = collect_consistent_pristine_snapshot_before(deadline)?;
+    let nftables = observe_empty_nftables(deadline.instant()).map_err(NetworkError::Nftables)?;
+    let forwarding_after = mounts
+        .read_ipv4_forwarding_record()
+        .map_err(NetworkError::PrivateProc)?;
+    deadline.ensure_unexpired()?;
+    if forwarding_before != forwarding_after {
+        return Err(NetworkError::Inconsistent);
+    }
+    let state =
+        classify_ipv4_forwarding_records(forwarding_before.bytes(), forwarding_after.bytes())?;
+    Ok(PreGoNetworkBaseline {
+        rtnl,
+        ipv4_forwarding: Ipv4ForwardingBaseline {
+            record: forwarding_before,
+            state,
+        },
+        nftables,
+    })
+}
+
+fn classify_ipv4_forwarding_records(
+    before: &[u8],
+    after: &[u8],
+) -> Result<Ipv4ForwardingState, NetworkError> {
+    if before != after {
+        return Err(NetworkError::Inconsistent);
+    }
+    match before {
+        b"0\n" => Ok(Ipv4ForwardingState::Disabled),
+        b"1\n" => Ok(Ipv4ForwardingState::Enabled),
+        _ => Err(NetworkError::Malformed),
+    }
 }
 
 fn verify_consistent_pristine(
@@ -1202,6 +1291,40 @@ mod tests {
     }
 
     #[test]
+    fn ipv4_forwarding_baseline_is_canonical_and_stable() {
+        assert_eq!(
+            classify_ipv4_forwarding_records(b"0\n", b"0\n").expect("disabled baseline"),
+            Ipv4ForwardingState::Disabled
+        );
+        assert_eq!(
+            classify_ipv4_forwarding_records(b"1\n", b"1\n").expect("enabled baseline"),
+            Ipv4ForwardingState::Enabled
+        );
+        for malformed in [
+            b"".as_slice(),
+            b"0",
+            b"00\n",
+            b"2\n",
+            b"0\r\n",
+            b"0\0",
+            b"0\nextra",
+        ] {
+            assert!(matches!(
+                classify_ipv4_forwarding_records(malformed, malformed),
+                Err(NetworkError::Malformed)
+            ));
+        }
+        assert!(matches!(
+            classify_ipv4_forwarding_records(b"0\n", b"1\n"),
+            Err(NetworkError::Inconsistent)
+        ));
+        assert!(matches!(
+            classify_ipv4_forwarding_records(b"1\n", b"0\n"),
+            Err(NetworkError::Inconsistent)
+        ));
+    }
+
+    #[test]
     fn distinct_snapshots_are_rejected_before_baseline_classification() {
         let first = pristine_snapshot();
         let mut second = first.clone();
@@ -1568,8 +1691,8 @@ mod tests {
     #[test]
     fn collector_proves_real_pristine_namespace_in_isolated_subprocess() {
         if env::var_os(LIVE_COLLECTOR_CHILD_ENV).is_some() {
-            let proof = prove_pristine_network_namespace().expect("pristine network namespace");
-            proof.verify().expect("stable pristine network namespace");
+            collect_consistent_pristine_snapshot().expect("pristine network namespace");
+            collect_consistent_pristine_snapshot().expect("stable pristine network namespace");
             return;
         }
 
@@ -1631,7 +1754,7 @@ mod tests {
                 );
             }
             assert!(matches!(
-                prove_pristine_network_namespace(),
+                collect_consistent_pristine_snapshot(),
                 Err(NetworkError::NotPristine)
             ));
             return;
