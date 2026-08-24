@@ -380,17 +380,30 @@ replacement inode, malformed journal, unknown name, or changed journal is foreig
 never be deleted. `tests/netns/test-lifecycle-contract.sh` exercises this decision logic without
 creating a namespace or invoking a networking command.
 
-The runner also compiles a private Rust port of that read-only manifest codec and classifier only
-under `cfg(test)`. Its temporary-directory tests exercise exact bytes, current-euid/mode/link/type
-limits, bounded double reads, held descriptor identities, absent/foreign decisions, and in-call
-content or entry replacement. It has no production entrypoint, writer, delete permit, or mutating
-operation. Regular temporary files do not prove a live nsfs mount, race-free hostile concurrency,
-safe teardown, `GO`, topology/probe readiness, cleanup, A14, or A15.
+The runner also compiles a private Rust ownership model only under `cfg(test)`. In addition to the
+read-only codec and classifier, its temporary-directory regressions model atomic publication of
+two canonical synthetic ownership records. They require initially empty mode-0700 roots, exact
+entry sets, descriptor and nonzero `statx` mount identities, two mode-0000 empty slots, an
+exclusive mode-0600 `ownership.pending`, exact bounded double readback, file sync,
+`RENAME_NOREPLACE`, directory sync, and an immediate manifest pin. Failure injection at every
+modeled stage/publication boundary exercises reverse, identity-scoped unlink of only the regular
+files created by that invocation. The intended future fixed paths are `/run/netns` and the
+per-run workspace `/run/volparossa-netns-runner/<run_id>`.
+
+Those tests deliberately use synthetic device/inode records; they do not construct or retain live
+nsfs objects. Their compare-then-unlink rollback runs in one tempfile test actor and is not a
+race-free deletion primitive against same-UID concurrency. The model has no production entrypoint,
+writer, deletion capability, `MutationAuthorization`, private-`/run` transition, or runtime caller.
+Regular-file fixtures do not prove a live namespace, safe production teardown, `GO`,
+topology/probe readiness, cleanup, A14, or A15. The production mount owner is now explicitly typed
+as `PristineRun`, and the final pre-`GO` network revalidation consumes its affine proof, but no
+authorised successor state exists yet and current execution is unchanged.
 
 An ownership decision is an observation, not a reusable deletion capability. The future worker must
-remain the sole actor in its private `/run`, repeat the identity check immediately at the deletion
-boundary, and fail closed if either the manifest or mount object changes. The current contract code
-performs no deletion.
+remain the sole actor in its private `/run`, retain rollback authority across errors, repeat the
+identity check immediately at the deletion boundary, and fail closed if either the manifest or
+mount object changes. Only the `cfg(test)` tempfile model performs unlink; production performs no
+topology deletion.
 
 The V1 lifecycle specification digest also pins the two namespace and underlay-interface name
 formulas, two isolated `/30` networks, two exact host routes, absence of default routes and host
