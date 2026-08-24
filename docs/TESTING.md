@@ -371,6 +371,13 @@ replacement inode, malformed journal, unknown name, or changed journal is foreig
 never be deleted. `tests/netns/test-lifecycle-contract.sh` exercises this decision logic without
 creating a namespace or invoking a networking command.
 
+The runner also compiles a private Rust port of that read-only manifest codec and classifier only
+under `cfg(test)`. Its temporary-directory tests exercise exact bytes, current-euid/mode/link/type
+limits, bounded double reads, held descriptor identities, absent/foreign decisions, and in-call
+content or entry replacement. It has no production entrypoint, writer, delete permit, or mutating
+operation. Regular temporary files do not prove a live nsfs mount, race-free hostile concurrency,
+safe teardown, `GO`, topology/probe readiness, cleanup, A14, or A15.
+
 An ownership decision is an observation, not a reusable deletion capability. The future worker must
 remain the sole actor in its private `/run`, repeat the identity check immediately at the deletion
 boundary, and fail closed if either the manifest or mount object changes. The current contract code

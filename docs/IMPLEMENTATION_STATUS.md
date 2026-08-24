@@ -459,8 +459,13 @@ Last updated: 2026-08-24
   `BlockedAfterBootstrapReadyProof` outcome. At supervised IPC boundaries, managed outer
   HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
   external-signal handling across every reap/report phase, general descendant reaping, forced
-  parent-death/crash-chain cleanup, or A14. The slice
-  still has no general root-filesystem or supplementary-group isolation, `GO`,
+  parent-death/crash-chain cleanup, or A14. The slice includes a private `cfg(test)`-only Rust port
+  of the canonical namespace ownership-manifest reader and read-only classifier. Tempfile
+  regressions bind its fixed leaf to the current euid, mode, link count, bounded stable bytes,
+  descriptor identity, run-scoped names, and replacement checks. That dormant code has no runtime
+  caller, manifest writer, deletion capability, or network operation, and regular-file fixtures
+  are not evidence for live nsfs mounts, hostile concurrency, topology creation, probing, or
+  cleanup. The slice still has no general root-filesystem or supplementary-group isolation, `GO`,
   `TOPOLOGY_READY`, `STOP`, `FINISHED`, network-topology mutation, crash-cleanup evidence,
   acceptance report, or A01-A15 result. `BOOTSTRAP_READY` is readiness evidence only; it is not
   topology authorization, cleanup evidence, or an acceptance-test result.

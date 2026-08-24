@@ -29,6 +29,8 @@ mod pid1;
 mod process;
 mod runner;
 mod signals;
+#[cfg(test)]
+mod topology;
 
 pub use process::{INTERNAL_CHILD_ARGUMENT, INTERNAL_PID_ONE_ARGUMENT};
 pub use runner::{
