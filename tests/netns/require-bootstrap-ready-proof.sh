@@ -1,5 +1,5 @@
 #!/bin/sh
-# Require the complete pinned BOOTSTRAP_READY proof on an unprivileged Debian 13 host.
+# Require the authorized private-run rollback proof on an unprivileged Debian 13 host.
 set -eu
 
 export LC_ALL=C
@@ -12,7 +12,7 @@ usage() {
 }
 
 fail() {
-    printf '%s\n' "BOOTSTRAP_READY proof gate failed: $1" >&2
+    printf '%s\n' "authorized private-run proof gate failed: $1" >&2
     exit 1
 }
 
@@ -22,7 +22,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-runner_source=$repository_root/target/bootstrap-ready-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
+runner_source=$repository_root/target/authorized-private-run-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
 if [ ! -f "$runner_source" ] || [ ! -x "$runner_source" ] || [ -L "$runner_source" ]; then
     fail 'fixed workspace runner must be one executable regular file, not a symlink'
 fi
@@ -93,7 +93,7 @@ do
     fi
 done
 
-proof_tmp=$(mktemp -d /tmp/volparossa-bootstrap-ready-proof.XXXXXX)
+proof_tmp=$(mktemp -d /tmp/volparossa-authorized-private-run-proof.XXXXXX)
 cleanup() {
     rm -rf -- "$proof_tmp"
 }
@@ -139,10 +139,10 @@ if [ -s "$proof_tmp/stdout" ]; then
     fail 'runner wrote unexpected standard output'
 fi
 printf '%s\n' \
-    'BLOCKED: the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; GO was never emitted, no network-topology mutation occurred, and no network-object cleanup, A14, A15, or acceptance evidence was produced.' \
+    'BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized descriptor-relative private-run roots and two empty namespace slots; PID 1 proved and removed every created object in exact reverse order, emitted one rollback-complete checkpoint, and the outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap. No namespace pin, network-topology object, TOPOLOGY_READY, A14, A15, or acceptance evidence was produced.' \
     >"$proof_tmp/expected-stderr"
 if ! cmp -s "$proof_tmp/expected-stderr" "$proof_tmp/stderr"; then
-    fail 'runner did not report the complete pinned BOOTSTRAP_READY proof outcome'
+    fail 'runner did not report the authorized private-run rollback outcome'
 fi
 for record in namespaces mountinfo ipv4-routes ipv6-routes ipv4-forwarding; do
     if ! cmp -s "$proof_tmp/before/$record" "$proof_tmp/after/$record"; then
@@ -152,10 +152,10 @@ done
 
 case $proof_scope in
     vm)
-        printf '%s\n' 'Debian 13 VM pinned BOOTSTRAP_READY proof gate passed'
+        printf '%s\n' 'Debian 13 VM authorized private-run proof gate passed'
         ;;
     additional-bare-metal-local)
-        printf '%s\n' 'additional bare-metal local pinned BOOTSTRAP_READY proof gate passed'
+        printf '%s\n' 'additional bare-metal local authorized private-run proof gate passed'
         ;;
-    *) fail 'BOOTSTRAP_READY proof scope was not classified' ;;
+    *) fail 'authorized private-run proof scope was not classified' ;;
 esac

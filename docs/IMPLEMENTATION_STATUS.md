@@ -439,20 +439,33 @@ Last updated: 2026-08-24
   GET requests may cause ordinary kernel module loading but create no firewall object. The outer
   accepts that actual lifecycle frame only after matching all three identities to its retained
   PID-1 namespace pins and repeating the live mount and signal proofs. Only then does the outer
-  send exact TERM through the PID-1 pidfd; PID 1 consumes the real `signalfd` record and returns
-  an affine run/PID/signal observation through the launcher. The outer never issues `GO`; both
-  lifecycle states classify the following EOF as pre-`GO`, after which PID 1 is exactly reaped.
+  send one canonical `GO`. PID 1 consumes the resulting affine `MutationAuthorization` and
+  immediately revalidates the complete pristine network baseline before its first write. Using
+  only retained directory descriptors, the production `AuthorizedPrivateRun` transition creates
+  exactly `/run/netns` and `/run/volparossa-netns-runner/<run_id>` at mode 0700 plus the two
+  run-derived empty namespace slots at mode 0000. It proves the exact entry set and each retained
+  object identity, then rolls back in reverse order: slot B, slot A, the per-run directory, the
+  workspace root, and the netns root, with the required directory `fsync` barriers. PID 1 returns
+  to the `PristineRun` state, revalidates the pinned network baseline and private mounts, and emits
+  the internal, canonical `MUTATION_ROLLBACK_COMPLETE` record through the launcher. The outer
+  accepts and run/PID-binds that checkpoint, then independently proves that the private `/run` is
+  empty again before sending exact TERM through the PID-1 pidfd. PID 1 consumes the real `signalfd` record and
+  returns an affine run/PID/signal observation through the launcher. Lifecycle EOF is necessarily
+  post-`GO` and is classified as `CleanupRequired`, after which PID 1 is exactly reaped.
   If the outer PID-1 pin is unavailable after spawn, one run-bound pre-mount abort record
   retires PID 1 without issuing a mount instruction. Only `EPERM` or `EACCES` from a fixed
   mount-UAPI operation may produce the exclusive
   `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
   options, resource failures, and failed evidence remain hard errors. The positive
-  `BlockedAfterBootstrapReadyProof` route proves that complete read-only network baseline, one
-  real pinned `BOOTSTRAP_READY`, the complete TERM/EOF/signal chain, and exact PID-1 exit/reap
-  without `GO` or network-topology mutation. Repeated portable tests prove exact outer-launcher
-  reaping, unchanged outer namespace/mount/route/IPv4-forwarding observations, and no command-shim
-  execution; they do not claim an authoritative comparison of host nftables state. Normal reaping retains both
-  pidfd and exact `Child` ownership; every forced `SIGKILL` after admission targets that pidfd.
+  `BlockedAfterAuthorizedMutationRollback` route proves that complete read-only network baseline,
+  one real pinned `BOOTSTRAP_READY`, the canonical `GO`, affine authorization consumption, the
+  descriptor-relative root/slot transaction and complete reverse rollback, the internal rollback
+  checkpoint, the post-rollback empty-`/run` proof, the TERM/EOF/signal chain, and exact PID-1
+  exit/reap without creating a network-topology object. Repeated portable tests prove exact
+  outer-launcher reaping, unchanged outer namespace/mount/route/IPv4-forwarding observations, and
+  no command-shim execution; they do not claim an authoritative comparison of host nftables state.
+  Normal reaping retains both pidfd and exact `Child` ownership; every forced `SIGKILL` after
+  admission targets that pidfd.
   Pidfd acquisition is mandatory; its failure closes the private channels, attempts `SIGKILL`
   against the still-owned unreaped child, and synchronously waits/reaps it before returning the
   pidfd error. The public `--run` entry requires one task, and a non-default `SIGCHLD` handler or
@@ -462,27 +475,38 @@ Last updated: 2026-08-24
   fail-closed behaviour. Pre-isolation parent-proof or namespace-policy denial uses a bounded
   control/lifecycle half-close handshake that keeps the launcher alive until the outer
   acknowledges EOF, preventing an early-`SIGCHLD` race; only the outer containment deadline bounds
-  that wait. Complete live evidence requires the explicit
-  `BlockedAfterBootstrapReadyProof` outcome. At supervised IPC boundaries, managed outer
+  that wait. Complete live evidence for this slice requires the explicit
+  `BlockedAfterAuthorizedMutationRollback` outcome. At supervised IPC boundaries, managed outer
   HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
   external-signal handling across every reap/report phase, general descendant reaping, forced
-  parent-death/crash-chain cleanup, or A14. The production mount owner now carries an explicit
-  `PristineRun` typestate, and the final pre-`GO` network revalidation consumes its affine proof;
-  there is no authorised successor state or changed runtime path. A private `cfg(test)`-only Rust
-  model covers the canonical ownership reader/classifier plus atomic tempfile publication of two
-  synthetic records. It verifies initially empty private roots, exact entry sets, descriptor and
-  nonzero mount identities, exclusive pending creation, exact bounded readback, file/directory
-  sync, no-replace rename, immediate pinning, failpoints, and reverse identity-scoped unlink of its
-  own regular-file fixtures. It has no production writer, deletion capability, GO token, private
-  `/run` transition, runtime caller, or network operation. Synthetic regular-file identities and a
-  single test actor are not live nsfs ownership, hostile-concurrency safety, topology creation,
-  production teardown, probing, or cleanup evidence. No production writer or nftables mutation API
-  exists. The slice still has no general
-  root-filesystem or supplementary-group isolation, `GO`,
+  parent-death/crash-chain cleanup, or A14. The production ownership module and its affine
+  `PristineRun`/`AuthorizedPrivateRun` typestates are now active in the runtime path for only the
+  descriptor-relative private-root and empty-slot transaction described above. A provisional
+  containment guard is installed immediately after each exclusive creation. Within this fixed
+  runner's one-PID-1-task and trusted-launcher scope, an inotify witness rejects delete, move, or
+  recreate activity during the non-atomic `mkdirat`-to-open handoff. A retained descriptor plus
+  that exact handoff observation permits only a scoped cleanup attempt; the guard performs an
+  immediate second descriptor/path/parent/shape revalidation before any unlink. If the new
+  directory cannot be pinned unambiguously, it is not unlinked by name and the
+  run fails closed until its disposable mount namespace is torn down. Only fully pinned and
+  journalled entries can reach the rollback-complete checkpoint. This is not an identity-conditioned
+  kernel unlink primitive and does not defend against a hostile mapped-same-UID process that
+  already holds a writable descriptor into the private mount. A production helper must establish
+  root-owned exclusive mutation authority before reusing this transaction. A private
+  `cfg(test)`-only Rust model still covers the separate canonical ownership manifest
+  reader/classifier and atomic tempfile publication machine. It verifies exclusive
+  pending creation, exact bounded readback, file/directory sync, no-replace rename, immediate
+  pinning, failpoints, and reverse identity-scoped unlink of its own synthetic regular-file
+  fixtures. Manifest publication remains test-only: production does not create or publish an
+  ownership manifest. Neither path constructs live nsfs objects or proves hostile same-UID
+  concurrency, production namespace teardown, probing, or cleanup evidence. No production nsfs,
+  veth, address, route, nftables, or probe mutation API exists. The slice still has no general
+  root-filesystem or supplementary-group isolation,
   `TOPOLOGY_READY`, `STOP`, `FINISHED`, network-topology mutation, crash-cleanup evidence,
   acceptance report, or A01-A15 result. In particular, no network-object cleanup, A14, A15, or
-  acceptance evidence is produced. `BOOTSTRAP_READY` is readiness evidence only; it is not
-  topology authorization, cleanup evidence, or an acceptance-test result.
+  acceptance evidence is produced. `BOOTSTRAP_READY` remains readiness evidence; `GO` authorizes
+  only this bounded private-root transaction, and `MUTATION_ROLLBACK_COMPLETE` is an internal
+  containment checkpoint rather than cleanup or acceptance evidence.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 
