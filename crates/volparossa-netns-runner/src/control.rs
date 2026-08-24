@@ -6,6 +6,11 @@ use volparossa_test_support::{MAX_LIFECYCLE_FRAME_BYTES, RunId};
 const NAMESPACES_CREATED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 NAMESPACES_CREATED";
 const MAPPINGS_INSTALLED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MAPPINGS_INSTALLED";
 const MAPPINGS_VERIFIED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MAPPINGS_VERIFIED";
+const PID1_SPAWNED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_SPAWNED";
+const PID1_PINNED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_PINNED";
+const PID1_REAPED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_REAPED";
+const PID1_REAPED_STATUS: i32 = 77;
+const MAX_LINUX_PID: u32 = 2_147_483_647;
 
 /// Rejection of the fixed internal bootstrap-control exchange.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -28,12 +33,21 @@ pub(crate) enum BootstrapControlError {
     /// The run identifier was not canonical.
     #[error("bootstrap-control run identifier is invalid")]
     RunId,
+    /// A PID was not a canonical positive Linux process identifier.
+    #[error("bootstrap-control PID is invalid")]
+    Pid,
+    /// A PID-1 completion record did not carry the sole blocked status.
+    #[error("bootstrap-control PID-1 status is invalid")]
+    ExitStatus,
     /// A valid record travelled in the wrong direction or appeared at the wrong receive step.
     #[error("unexpected bootstrap-control record")]
     UnexpectedRecord,
     /// A record was bound to another lifecycle run.
     #[error("bootstrap-control run identifier mismatch")]
     RunIdMismatch,
+    /// A record named another process than the affinely retained PID-1 child.
+    #[error("bootstrap-control PID mismatch")]
+    PidMismatch,
     /// An affine state transition was attempted more than once or out of order.
     #[error("invalid bootstrap-control state transition")]
     StateTransition,
@@ -44,6 +58,9 @@ enum RecordKind {
     NamespacesCreated,
     MappingsInstalled,
     MappingsVerified,
+    Pid1Spawned,
+    Pid1Pinned,
+    Pid1Reaped,
 }
 
 impl RecordKind {
@@ -52,6 +69,9 @@ impl RecordKind {
             Self::NamespacesCreated => NAMESPACES_CREATED_HEADER,
             Self::MappingsInstalled => MAPPINGS_INSTALLED_HEADER,
             Self::MappingsVerified => MAPPINGS_VERIFIED_HEADER,
+            Self::Pid1Spawned => PID1_SPAWNED_HEADER,
+            Self::Pid1Pinned => PID1_PINNED_HEADER,
+            Self::Pid1Reaped => PID1_REAPED_HEADER,
         }
     }
 
@@ -60,8 +80,22 @@ impl RecordKind {
             NAMESPACES_CREATED_HEADER => Ok(Self::NamespacesCreated),
             MAPPINGS_INSTALLED_HEADER => Ok(Self::MappingsInstalled),
             MAPPINGS_VERIFIED_HEADER => Ok(Self::MappingsVerified),
+            PID1_SPAWNED_HEADER => Ok(Self::Pid1Spawned),
+            PID1_PINNED_HEADER => Ok(Self::Pid1Pinned),
+            PID1_REAPED_HEADER => Ok(Self::Pid1Reaped),
             _ => Err(BootstrapControlError::FrameShape),
         }
+    }
+
+    const fn has_pid(self) -> bool {
+        matches!(
+            self,
+            Self::Pid1Spawned | Self::Pid1Pinned | Self::Pid1Reaped
+        )
+    }
+
+    const fn has_status(self) -> bool {
+        matches!(self, Self::Pid1Reaped)
     }
 }
 
@@ -69,19 +103,76 @@ impl RecordKind {
 struct ControlRecord {
     kind: RecordKind,
     run_id: RunId,
+    pid: Option<u32>,
+    status: Option<i32>,
 }
 
 impl ControlRecord {
     fn new(kind: RecordKind, run_id: RunId) -> Self {
-        Self { kind, run_id }
+        Self {
+            kind,
+            run_id,
+            pid: None,
+            status: None,
+        }
+    }
+
+    fn for_pid(kind: RecordKind, run_id: RunId, pid: u32) -> Self {
+        Self {
+            kind,
+            run_id,
+            pid: Some(pid),
+            status: None,
+        }
+    }
+
+    fn pid1_reaped(run_id: RunId, pid: u32, status: i32) -> Self {
+        Self {
+            kind: RecordKind::Pid1Reaped,
+            run_id,
+            pid: Some(pid),
+            status: Some(status),
+        }
     }
 
     fn encode(&self) -> Result<String, BootstrapControlError> {
-        let encoded = format!("{}\nrun_id={}\n", self.kind.header(), self.run_id.as_str());
+        self.validate_fields()?;
+        let encoded = match (self.pid, self.status) {
+            (None, None) => format!("{}\nrun_id={}\n", self.kind.header(), self.run_id.as_str()),
+            (Some(pid), None) => format!(
+                "{}\nrun_id={}\npid={pid}\n",
+                self.kind.header(),
+                self.run_id.as_str()
+            ),
+            (Some(pid), Some(status)) => format!(
+                "{}\nrun_id={}\npid={pid}\nstatus={status}\n",
+                self.kind.header(),
+                self.run_id.as_str()
+            ),
+            (None, Some(_)) => return Err(BootstrapControlError::FrameShape),
+        };
         if encoded.len() > MAX_LIFECYCLE_FRAME_BYTES {
             return Err(BootstrapControlError::FrameTooLarge);
         }
         Ok(encoded)
+    }
+
+    fn validate_fields(&self) -> Result<(), BootstrapControlError> {
+        if self.kind.has_pid() != self.pid.is_some()
+            || self.kind.has_status() != self.status.is_some()
+        {
+            return Err(BootstrapControlError::FrameShape);
+        }
+        if self.pid.is_some_and(|pid| pid == 0 || pid > MAX_LINUX_PID) {
+            return Err(BootstrapControlError::Pid);
+        }
+        if self
+            .status
+            .is_some_and(|status| status != PID1_REAPED_STATUS)
+        {
+            return Err(BootstrapControlError::ExitStatus);
+        }
+        Ok(())
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, BootstrapControlError> {
@@ -104,15 +195,41 @@ impl ControlRecord {
         let mut lines = body.split('\n');
         let header = lines.next().ok_or(BootstrapControlError::FrameShape)?;
         let run_line = lines.next().ok_or(BootstrapControlError::FrameShape)?;
-        if lines.next().is_some() {
-            return Err(BootstrapControlError::FrameShape);
-        }
         let kind = RecordKind::parse(header)?;
         let run_value = run_line
             .strip_prefix("run_id=")
             .ok_or(BootstrapControlError::FrameShape)?;
         let run_id = RunId::parse(run_value).map_err(|_| BootstrapControlError::RunId)?;
-        let record = Self::new(kind, run_id);
+        let pid = if kind.has_pid() {
+            let pid_line = lines.next().ok_or(BootstrapControlError::FrameShape)?;
+            let pid_value = pid_line
+                .strip_prefix("pid=")
+                .ok_or(BootstrapControlError::FrameShape)?;
+            Some(parse_canonical_pid(pid_value)?)
+        } else {
+            None
+        };
+        let status = if kind.has_status() {
+            let status_line = lines.next().ok_or(BootstrapControlError::FrameShape)?;
+            let status_value = status_line
+                .strip_prefix("status=")
+                .ok_or(BootstrapControlError::FrameShape)?;
+            if status_value != "77" {
+                return Err(BootstrapControlError::ExitStatus);
+            }
+            Some(PID1_REAPED_STATUS)
+        } else {
+            None
+        };
+        if lines.next().is_some() {
+            return Err(BootstrapControlError::FrameShape);
+        }
+        let record = Self {
+            kind,
+            run_id,
+            pid,
+            status,
+        };
         if record.encode()?.as_bytes() != bytes {
             return Err(BootstrapControlError::FrameShape);
         }
@@ -120,7 +237,21 @@ impl ControlRecord {
     }
 }
 
-/// Observable outer-side phase of the fixed mapping handshake.
+fn parse_canonical_pid(value: &str) -> Result<u32, BootstrapControlError> {
+    if value.is_empty()
+        || value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(BootstrapControlError::Pid);
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0 && *pid <= MAX_LINUX_PID)
+        .ok_or(BootstrapControlError::Pid)
+}
+
+/// Observable outer-side phase of the fixed mapping and PID-1 proof handshake.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OuterBootstrapPhase {
     /// Waiting for the launcher to prove that the fixed namespaces exist.
@@ -129,15 +260,22 @@ pub(crate) enum OuterBootstrapPhase {
     NamespacesCreated,
     /// The mapping acknowledgement was emitted; launcher verification is outstanding.
     AwaitingMappingsVerified,
-    /// The exact three-record exchange completed.
+    /// Mapping verification completed; the PID-1 spawn record is outstanding.
+    AwaitingPid1Spawned,
+    /// The exact PID-1 child was retained; its pin acknowledgement may be emitted once.
+    Pid1Spawned,
+    /// The pin acknowledgement was emitted; exact PID-1 reaping is outstanding.
+    AwaitingPid1Reaped,
+    /// The exact six-record exchange completed.
     Complete,
 }
 
-/// Affine owner of the outer side of one run-bound mapping handshake.
+/// Affine owner of the outer side of one run-bound bootstrap handshake.
 #[derive(Debug)]
 pub(crate) struct OuterBootstrapControl {
     run_id: RunId,
     phase: OuterBootstrapPhase,
+    pid1_pid: Option<u32>,
 }
 
 impl OuterBootstrapControl {
@@ -146,6 +284,7 @@ impl OuterBootstrapControl {
         Self {
             run_id,
             phase: OuterBootstrapPhase::AwaitingNamespacesCreated,
+            pid1_pid: None,
         }
     }
 
@@ -188,12 +327,58 @@ impl OuterBootstrapControl {
             return Err(BootstrapControlError::StateTransition);
         }
         accept_record(bytes, RecordKind::MappingsVerified, &self.run_id)?;
+        self.phase = OuterBootstrapPhase::AwaitingPid1Spawned;
+        Ok(())
+    }
+
+    /// Accept the launcher's sole `PID1_SPAWNED` record and retain its positive PID.
+    pub(crate) fn accept_pid1_spawned(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<u32, BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::AwaitingPid1Spawned {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let pid = accept_pid_record(bytes, RecordKind::Pid1Spawned, &self.run_id, None)?;
+        self.pid1_pid = Some(pid);
+        self.phase = OuterBootstrapPhase::Pid1Spawned;
+        Ok(pid)
+    }
+
+    /// Emit the outer's sole `PID1_PINNED` acknowledgement for the retained PID.
+    pub(crate) fn pid1_pinned(&mut self, pid: u32) -> Result<String, BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::Pid1Spawned {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        if self.pid1_pid != Some(pid) {
+            return Err(BootstrapControlError::PidMismatch);
+        }
+        let encoded =
+            ControlRecord::for_pid(RecordKind::Pid1Pinned, self.run_id.clone(), pid).encode()?;
+        self.phase = OuterBootstrapPhase::AwaitingPid1Reaped;
+        Ok(encoded)
+    }
+
+    /// Accept the launcher's sole `PID1_REAPED` record for status 77.
+    pub(crate) fn accept_pid1_reaped(&mut self, bytes: &[u8]) -> Result<(), BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::AwaitingPid1Reaped {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let expected_pid = self
+            .pid1_pid
+            .ok_or(BootstrapControlError::StateTransition)?;
+        accept_pid_record(
+            bytes,
+            RecordKind::Pid1Reaped,
+            &self.run_id,
+            Some(expected_pid),
+        )?;
         self.phase = OuterBootstrapPhase::Complete;
         Ok(())
     }
 }
 
-/// Observable launcher-side phase of the fixed mapping handshake.
+/// Observable launcher-side phase of the fixed mapping and PID-1 proof handshake.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LauncherBootstrapPhase {
     /// The namespace record has not yet been emitted.
@@ -202,15 +387,22 @@ pub(crate) enum LauncherBootstrapPhase {
     AwaitingMappingsInstalled,
     /// The mapping acknowledgement was accepted and local verification succeeded.
     MappingsInstalled,
-    /// The exact three-record exchange completed.
+    /// Mapping verification was emitted; the PID-1 spawn record may be emitted once.
+    Pid1SpawnPending,
+    /// The exact PID-1 spawn was emitted; the outer pin acknowledgement is outstanding.
+    AwaitingPid1Pinned,
+    /// The exact PID-1 pin acknowledgement was accepted; its reap may be emitted once.
+    Pid1Pinned,
+    /// The exact six-record exchange completed.
     Complete,
 }
 
-/// Affine owner of the launcher side of one run-bound mapping handshake.
+/// Affine owner of the launcher side of one run-bound bootstrap handshake.
 #[derive(Debug)]
 pub(crate) struct LauncherBootstrapControl {
     run_id: RunId,
     phase: LauncherBootstrapPhase,
+    pid1_pid: Option<u32>,
 }
 
 impl LauncherBootstrapControl {
@@ -219,6 +411,7 @@ impl LauncherBootstrapControl {
         Self {
             run_id,
             phase: LauncherBootstrapPhase::NamespacesCreatedPending,
+            pid1_pid: None,
         }
     }
 
@@ -259,6 +452,53 @@ impl LauncherBootstrapControl {
         }
         let encoded =
             ControlRecord::new(RecordKind::MappingsVerified, self.run_id.clone()).encode()?;
+        self.phase = LauncherBootstrapPhase::Pid1SpawnPending;
+        Ok(encoded)
+    }
+
+    /// Emit the launcher's sole `PID1_SPAWNED` record for a positive Linux PID.
+    pub(crate) fn pid1_spawned(&mut self, pid: u32) -> Result<String, BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::Pid1SpawnPending {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let encoded =
+            ControlRecord::for_pid(RecordKind::Pid1Spawned, self.run_id.clone(), pid).encode()?;
+        self.pid1_pid = Some(pid);
+        self.phase = LauncherBootstrapPhase::AwaitingPid1Pinned;
+        Ok(encoded)
+    }
+
+    /// Accept the outer's sole `PID1_PINNED` acknowledgement for the retained PID.
+    pub(crate) fn accept_pid1_pinned(&mut self, bytes: &[u8]) -> Result<(), BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::AwaitingPid1Pinned {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let expected_pid = self
+            .pid1_pid
+            .ok_or(BootstrapControlError::StateTransition)?;
+        accept_pid_record(
+            bytes,
+            RecordKind::Pid1Pinned,
+            &self.run_id,
+            Some(expected_pid),
+        )?;
+        self.phase = LauncherBootstrapPhase::Pid1Pinned;
+        Ok(())
+    }
+
+    /// Emit the sole `PID1_REAPED` record for the retained PID and exact status 77.
+    pub(crate) fn pid1_reaped(
+        &mut self,
+        pid: u32,
+        status: i32,
+    ) -> Result<String, BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::Pid1Pinned {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        if self.pid1_pid != Some(pid) {
+            return Err(BootstrapControlError::PidMismatch);
+        }
+        let encoded = ControlRecord::pid1_reaped(self.run_id.clone(), pid, status).encode()?;
         self.phase = LauncherBootstrapPhase::Complete;
         Ok(encoded)
     }
@@ -279,12 +519,34 @@ fn accept_record(
     Ok(())
 }
 
+fn accept_pid_record(
+    bytes: &[u8],
+    expected_kind: RecordKind,
+    expected_run_id: &RunId,
+    expected_pid: Option<u32>,
+) -> Result<u32, BootstrapControlError> {
+    let record = ControlRecord::parse(bytes)?;
+    if record.kind != expected_kind {
+        return Err(BootstrapControlError::UnexpectedRecord);
+    }
+    if &record.run_id != expected_run_id {
+        return Err(BootstrapControlError::RunIdMismatch);
+    }
+    let pid = record.pid.ok_or(BootstrapControlError::FrameShape)?;
+    if expected_pid.is_some_and(|expected| pid != expected) {
+        return Err(BootstrapControlError::PidMismatch);
+    }
+    Ok(pid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const RUN: &str = "0123456789abcdef0123456789abcdef";
     const OTHER_RUN: &str = "fedcba9876543210fedcba9876543210";
+    const PID1_PID: u32 = 4242;
+    const OTHER_PID: u32 = 4343;
 
     fn run_id() -> RunId {
         RunId::parse(RUN).expect("canonical run ID")
@@ -298,6 +560,36 @@ mod tests {
         ControlRecord::new(kind, run_id)
             .encode()
             .expect("bounded record")
+    }
+
+    fn pid_encoded(kind: RecordKind, run_id: RunId, pid: u32) -> String {
+        ControlRecord::for_pid(kind, run_id, pid)
+            .encode()
+            .expect("bounded PID record")
+    }
+
+    fn reaped_encoded(run_id: RunId, pid: u32) -> String {
+        ControlRecord::pid1_reaped(run_id, pid, PID1_REAPED_STATUS)
+            .encode()
+            .expect("bounded reaped record")
+    }
+
+    fn complete_mapping_exchange(
+        outer: &mut OuterBootstrapControl,
+        launcher: &mut LauncherBootstrapControl,
+    ) {
+        let namespaces = launcher.namespaces_created().expect("namespaces record");
+        outer
+            .accept_namespaces_created(namespaces.as_bytes())
+            .expect("outer accepts namespaces");
+        let installed = outer.mappings_installed().expect("mapping record");
+        launcher
+            .accept_mappings_installed(installed.as_bytes())
+            .expect("launcher accepts mapping record");
+        let verified = launcher.mappings_verified().expect("verified record");
+        outer
+            .accept_mappings_verified(verified.as_bytes())
+            .expect("outer accepts verification");
     }
 
     #[test]
@@ -317,6 +609,32 @@ mod tests {
             assert!(!canonical.ends_with("\n\n"));
             assert!(canonical.len() <= MAX_LIFECYCLE_FRAME_BYTES);
         }
+
+        for kind in [RecordKind::Pid1Spawned, RecordKind::Pid1Pinned] {
+            let record = ControlRecord::for_pid(kind, run_id(), PID1_PID);
+            let canonical = record.encode().expect("canonical PID encoding");
+            assert_eq!(
+                canonical,
+                format!("{}\nrun_id={RUN}\npid={PID1_PID}\n", kind.header())
+            );
+            assert_eq!(ControlRecord::parse(canonical.as_bytes()), Ok(record));
+            assert!(canonical.is_ascii());
+            assert!(!canonical.contains('\r'));
+            assert!(!canonical.contains("fd="));
+            assert!(canonical.len() <= MAX_LIFECYCLE_FRAME_BYTES);
+        }
+
+        let reaped = ControlRecord::pid1_reaped(run_id(), PID1_PID, PID1_REAPED_STATUS);
+        let canonical = reaped.encode().expect("canonical reaped encoding");
+        assert_eq!(
+            canonical,
+            format!("{PID1_REAPED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nstatus=77\n")
+        );
+        assert_eq!(ControlRecord::parse(canonical.as_bytes()), Ok(reaped));
+        assert!(canonical.is_ascii());
+        assert!(!canonical.contains('\r'));
+        assert!(!canonical.contains("fd="));
+        assert!(canonical.len() <= MAX_LIFECYCLE_FRAME_BYTES);
     }
 
     #[test]
@@ -350,10 +668,36 @@ mod tests {
         assert_eq!(launcher.phase(), LauncherBootstrapPhase::MappingsInstalled);
 
         let verified = launcher.mappings_verified().expect("verified record");
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Complete);
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1SpawnPending);
         outer
             .accept_mappings_verified(verified.as_bytes())
             .expect("outer accepts verification");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
+
+        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawned record");
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
+        assert_eq!(
+            outer
+                .accept_pid1_spawned(spawned.as_bytes())
+                .expect("outer accepts spawned PID"),
+            PID1_PID
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::Pid1Spawned);
+
+        let pinned = outer.pid1_pinned(PID1_PID).expect("pinned record");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+        launcher
+            .accept_pid1_pinned(pinned.as_bytes())
+            .expect("launcher accepts pinned PID");
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1Pinned);
+
+        let reaped = launcher
+            .pid1_reaped(PID1_PID, PID1_REAPED_STATUS)
+            .expect("reaped record");
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Complete);
+        outer
+            .accept_pid1_reaped(reaped.as_bytes())
+            .expect("outer accepts exact reap");
         assert_eq!(outer.phase(), OuterBootstrapPhase::Complete);
     }
 
@@ -410,6 +754,51 @@ mod tests {
     }
 
     #[test]
+    fn pid_and_status_fields_accept_only_exact_canonical_values() {
+        for invalid_pid in [
+            "",
+            "0",
+            "00",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "1_0",
+            "2147483648",
+            "4294967295",
+            "pid1",
+        ] {
+            let malformed = format!("{PID1_SPAWNED_HEADER}\nrun_id={RUN}\npid={invalid_pid}\n");
+            assert_eq!(
+                ControlRecord::parse(malformed.as_bytes()),
+                Err(BootstrapControlError::Pid),
+                "PID spelling {invalid_pid:?} must fail closed"
+            );
+        }
+        for invalid_status in ["", "0", "76", "078", "+77", "077", "77 ", "255", "-1"] {
+            let malformed = format!(
+                "{PID1_REAPED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nstatus={invalid_status}\n"
+            );
+            assert_eq!(
+                ControlRecord::parse(malformed.as_bytes()),
+                Err(BootstrapControlError::ExitStatus),
+                "status spelling {invalid_status:?} must fail closed"
+            );
+        }
+        assert_eq!(parse_canonical_pid("1"), Ok(1));
+        assert_eq!(parse_canonical_pid("2147483647"), Ok(MAX_LINUX_PID));
+        assert_eq!(
+            ControlRecord::for_pid(RecordKind::Pid1Spawned, run_id(), 0).encode(),
+            Err(BootstrapControlError::Pid)
+        );
+        assert_eq!(
+            ControlRecord::pid1_reaped(run_id(), PID1_PID, 0).encode(),
+            Err(BootstrapControlError::ExitStatus)
+        );
+    }
+
+    #[test]
     fn reordered_duplicate_and_extra_fields_are_rejected() {
         for malformed in [
             format!("run_id={RUN}\n{NAMESPACES_CREATED_HEADER}\n"),
@@ -419,12 +808,27 @@ mod tests {
             format!(
                 "{NAMESPACES_CREATED_HEADER}\nrun_id={RUN}\n{MAPPINGS_INSTALLED_HEADER}\nrun_id={RUN}\n"
             ),
+            format!("{PID1_SPAWNED_HEADER}\npid={PID1_PID}\nrun_id={RUN}\n"),
+            format!("{PID1_SPAWNED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\npid={PID1_PID}\n"),
+            format!("{PID1_SPAWNED_HEADER}\nrun_id={RUN}\nstatus=77\npid={PID1_PID}\n"),
+            format!("{PID1_SPAWNED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nstatus=77\n"),
+            format!("{PID1_PINNED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nfd=9\n"),
+            format!("{PID1_REAPED_HEADER}\nrun_id={RUN}\nstatus=77\npid={PID1_PID}\n"),
+            format!("{PID1_REAPED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nstatus=77\nfd=9\n"),
         ] {
             assert_eq!(
                 ControlRecord::parse(malformed.as_bytes()),
                 Err(BootstrapControlError::FrameShape)
             );
         }
+        assert_eq!(
+            ControlRecord::new(RecordKind::Pid1Spawned, run_id()).encode(),
+            Err(BootstrapControlError::FrameShape)
+        );
+        assert_eq!(
+            ControlRecord::for_pid(RecordKind::MappingsVerified, run_id(), PID1_PID).encode(),
+            Err(BootstrapControlError::FrameShape)
+        );
     }
 
     #[test]
@@ -468,6 +872,41 @@ mod tests {
                 LauncherBootstrapPhase::AwaitingMappingsInstalled
             );
         }
+
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        complete_mapping_exchange(&mut outer, &mut launcher);
+        let spawned = pid_encoded(RecordKind::Pid1Spawned, run_id(), PID1_PID);
+        let pinned = pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID);
+        let reaped = reaped_encoded(run_id(), PID1_PID);
+
+        for wrong in [&pinned, &reaped, &verified] {
+            assert_eq!(
+                outer.accept_pid1_spawned(wrong.as_bytes()),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
+        }
+        outer
+            .accept_pid1_spawned(spawned.as_bytes())
+            .expect("matching PID-1 spawn");
+        let _ = outer.pid1_pinned(PID1_PID).expect("pin record");
+        for wrong in [&spawned, &pinned, &verified] {
+            assert_eq!(
+                outer.accept_pid1_reaped(wrong.as_bytes()),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+        }
+
+        let _ = launcher.pid1_spawned(PID1_PID).expect("spawn record");
+        for wrong in [&spawned, &reaped, &installed] {
+            assert_eq!(
+                launcher.accept_pid1_pinned(wrong.as_bytes()),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
+        }
     }
 
     #[test]
@@ -505,6 +944,85 @@ mod tests {
             launcher.phase(),
             LauncherBootstrapPhase::AwaitingMappingsInstalled
         );
+
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        complete_mapping_exchange(&mut outer, &mut launcher);
+        let wrong_spawned = pid_encoded(RecordKind::Pid1Spawned, other_run_id(), PID1_PID);
+        assert_eq!(
+            outer.accept_pid1_spawned(wrong_spawned.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
+
+        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawn record");
+        outer
+            .accept_pid1_spawned(spawned.as_bytes())
+            .expect("matching spawn record");
+        let wrong_pinned = pid_encoded(RecordKind::Pid1Pinned, other_run_id(), PID1_PID);
+        assert_eq!(
+            launcher.accept_pid1_pinned(wrong_pinned.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
+
+        let pinned = outer.pid1_pinned(PID1_PID).expect("pin record");
+        launcher
+            .accept_pid1_pinned(pinned.as_bytes())
+            .expect("matching pin record");
+        let wrong_reaped = reaped_encoded(other_run_id(), PID1_PID);
+        assert_eq!(
+            outer.accept_pid1_reaped(wrong_reaped.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+    }
+
+    #[test]
+    fn wrong_pid_is_rejected_at_every_bound_step_without_advancing() {
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        complete_mapping_exchange(&mut outer, &mut launcher);
+
+        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawn record");
+        outer
+            .accept_pid1_spawned(spawned.as_bytes())
+            .expect("matching spawn record");
+        assert_eq!(
+            outer.pid1_pinned(OTHER_PID),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::Pid1Spawned);
+        let pinned = outer.pid1_pinned(PID1_PID).expect("pin record");
+
+        let wrong_pinned = pid_encoded(RecordKind::Pid1Pinned, run_id(), OTHER_PID);
+        assert_eq!(
+            launcher.accept_pid1_pinned(wrong_pinned.as_bytes()),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
+        launcher
+            .accept_pid1_pinned(pinned.as_bytes())
+            .expect("matching pin record");
+
+        assert_eq!(
+            launcher.pid1_reaped(OTHER_PID, PID1_REAPED_STATUS),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1Pinned);
+        let wrong_status =
+            format!("{PID1_REAPED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nstatus=76\n");
+        assert_eq!(
+            outer.accept_pid1_reaped(wrong_status.as_bytes()),
+            Err(BootstrapControlError::ExitStatus)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+        let wrong_reaped = reaped_encoded(run_id(), OTHER_PID);
+        assert_eq!(
+            outer.accept_pid1_reaped(wrong_reaped.as_bytes()),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
     }
 
     #[test]
@@ -569,6 +1087,87 @@ mod tests {
     }
 
     #[test]
+    fn pid1_duplicate_invalid_and_out_of_order_transitions_are_affinely_rejected() {
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        complete_mapping_exchange(&mut outer, &mut launcher);
+
+        assert_eq!(
+            outer.pid1_pinned(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            outer.accept_pid1_reaped(reaped_encoded(run_id(), PID1_PID).as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.accept_pid1_pinned(
+                pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.pid1_reaped(PID1_PID, PID1_REAPED_STATUS),
+            Err(BootstrapControlError::StateTransition)
+        );
+
+        let malformed_pid = format!("{PID1_SPAWNED_HEADER}\nrun_id={RUN}\npid=0\n");
+        assert_eq!(
+            outer.accept_pid1_spawned(malformed_pid.as_bytes()),
+            Err(BootstrapControlError::Pid)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
+        assert_eq!(launcher.pid1_spawned(0), Err(BootstrapControlError::Pid));
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1SpawnPending);
+
+        let spawned = launcher.pid1_spawned(PID1_PID).expect("first spawn");
+        assert_eq!(
+            launcher.pid1_spawned(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        outer
+            .accept_pid1_spawned(spawned.as_bytes())
+            .expect("first spawn acceptance");
+        assert_eq!(
+            outer.accept_pid1_spawned(spawned.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+
+        let pinned = outer.pid1_pinned(PID1_PID).expect("first pin");
+        assert_eq!(
+            outer.pid1_pinned(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        launcher
+            .accept_pid1_pinned(pinned.as_bytes())
+            .expect("first pin acceptance");
+        assert_eq!(
+            launcher.accept_pid1_pinned(pinned.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.pid1_reaped(PID1_PID, 0),
+            Err(BootstrapControlError::ExitStatus)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1Pinned);
+
+        let reaped = launcher
+            .pid1_reaped(PID1_PID, PID1_REAPED_STATUS)
+            .expect("first reap");
+        assert_eq!(
+            launcher.pid1_reaped(PID1_PID, PID1_REAPED_STATUS),
+            Err(BootstrapControlError::StateTransition)
+        );
+        outer
+            .accept_pid1_reaped(reaped.as_bytes())
+            .expect("first reap acceptance");
+        assert_eq!(
+            outer.accept_pid1_reaped(reaped.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+    }
+
+    #[test]
     fn oversized_input_is_rejected_before_utf8_or_shape_and_state_does_not_advance() {
         let oversized = vec![0xff; MAX_LIFECYCLE_FRAME_BYTES + 1];
         assert_eq!(
@@ -596,5 +1195,35 @@ mod tests {
             launcher.phase(),
             LauncherBootstrapPhase::AwaitingMappingsInstalled
         );
+
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        complete_mapping_exchange(&mut outer, &mut launcher);
+        assert_eq!(
+            outer.accept_pid1_spawned(&oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
+
+        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawn record");
+        outer
+            .accept_pid1_spawned(spawned.as_bytes())
+            .expect("matching spawn record");
+        let _ = outer.pid1_pinned(PID1_PID).expect("pin record");
+        assert_eq!(
+            launcher.accept_pid1_pinned(&oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
+
+        let pinned = pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID);
+        launcher
+            .accept_pid1_pinned(pinned.as_bytes())
+            .expect("matching pin record");
+        assert_eq!(
+            outer.accept_pid1_reaped(&oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
     }
 }

@@ -12,7 +12,7 @@ use std::{
 use socket2::{Domain, Protocol, Socket, Type};
 use tempfile::tempdir;
 use volparossa_linux_uapi::{receive_seqpacket_without_fd, send_seqpacket_without_fd};
-use volparossa_netns_runner::INTERNAL_CHILD_ARGUMENT;
+use volparossa_netns_runner::{INTERNAL_CHILD_ARGUMENT, INTERNAL_PID_ONE_ARGUMENT};
 use volparossa_test_support::{LaunchContext, NamespaceIdentity, RunId};
 
 const RUNNER: &str = env!("CARGO_BIN_EXE_volparossa-netns-runner");
@@ -94,7 +94,9 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
     assert!(
         stderr
-            == "BLOCKED: anonymous namespaces and exact ID mappings were verified without GO; PID namespace/PID-1 and private mounts are not implemented.\n"
+            == "BLOCKED: anonymous namespaces, exact ID mappings, and a self-reexecuted PID 1 were verified and reaped without BOOTSTRAP_READY or GO; private mounts are not implemented.\n"
+            || stderr
+                == "BLOCKED: anonymous namespaces and exact ID mappings were verified, but kernel policy hid the required outer PID-1 proof; no GO was emitted.\n"
             || stderr
                 == "BLOCKED: kernel policy did not permit the fixed anonymous namespace and ID-mapping bootstrap; no GO was emitted.\n"
             || stderr
@@ -124,7 +126,7 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
 }
 
 #[test]
-fn repeated_fixed_runs_release_every_child_and_namespace() {
+fn repeated_fixed_runs_preserve_outer_namespace_snapshot() {
     let before = [
         namespace_identity("user"),
         namespace_identity("net"),
@@ -170,6 +172,25 @@ fn repeated_fixed_runs_release_every_child_and_namespace() {
 }
 
 #[test]
+fn ignored_sigchld_is_rejected_before_any_child_is_spawned() {
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg("trap '' CHLD\nexec \"$1\" --run")
+        .arg("volparossa-sigchld-wrapper")
+        .arg(RUNNER)
+        .env_clear()
+        .output()
+        .expect("run with inherited ignored SIGCHLD");
+
+    assert_eq!(output.status.code(), Some(70));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("UTF-8 stderr"),
+        "ERROR: fixed child process operation failed: inherited SIGCHLD disposition prevents exact child reaping\n"
+    );
+}
+
+#[test]
 fn preview_and_argument_surface_are_exact() {
     let preview = Command::new(RUNNER)
         .arg("--preview")
@@ -178,7 +199,7 @@ fn preview_and_argument_surface_are_exact() {
     assert!(preview.status.success());
     assert_eq!(
         String::from_utf8(preview.stdout).expect("UTF-8 preview"),
-        "VOLPAROSSA fixed supervisor preview: anonymous user/mount/network namespace mapping is implemented; PID namespace/PID-1, private mounts, GO, and every network-topology mutation remain blocked.\n"
+        "VOLPAROSSA fixed supervisor preview: anonymous user/mount/network and pending child-PID namespace bootstrap, exact UID/GID mapping, and exact self-reexec PID-1 proof are implemented; private mounts, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked.\n"
     );
     assert!(preview.stderr.is_empty());
 
@@ -242,4 +263,18 @@ fn externally_forged_hidden_child_parent_is_rejected() {
             .kind(),
         std::io::ErrorKind::UnexpectedEof
     );
+}
+
+#[test]
+fn pid_one_selector_without_required_namespace_and_channels_is_rejected() {
+    let output = Command::new(RUNNER)
+        .arg(INTERNAL_PID_ONE_ARGUMENT)
+        .env_clear()
+        .current_dir("/")
+        .output()
+        .expect("unprovisioned PID-one-selector invocation");
+
+    assert_eq!(output.status.code(), Some(70));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }

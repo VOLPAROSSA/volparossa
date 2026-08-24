@@ -196,44 +196,63 @@ and process result remain `BLOCKED`/77. The current blocked entry point has not 
 evidence yet.
 
 The test-only `volparossa-netns-runner` now owns an initial, deliberately pre-`GO` isolation
-boundary which creates no network-topology objects. It re-executes only `/proc/self/exe` with one private fixed selector, clears the child
-environment, uses three separate unnamed descriptor-free `SOCK_SEQPACKET` provisioning,
-bootstrap-control, and lifecycle channels, fences unrelated inherited descriptors, and provisions
-exactly one `LAUNCH_CONTEXT` within a fixed child-side timeout. The child binds kernel peer
-PID/UID/GID on all three channels to its live parent, requires the parent's executable inode to
-match its own, accepts only the exact outer `--run` invocation, and installs a verified
-parent-death `SIGKILL` before isolation; an external socketpair parent is rejected.
+boundary which creates no network-topology objects. It re-executes only `/proc/self/exe`, once as
+the fixed launcher and once as namespace PID 1, with a distinct private selector for each role. It
+clears both child environments, fences unrelated inherited descriptors, and uses three separate
+unnamed descriptor-free `SOCK_SEQPACKET` outer-to-launcher channels plus one launcher-to-PID-1
+bootstrap channel; the lifecycle endpoint is transferred affinely to PID 1. Exactly one
+`LAUNCH_CONTEXT` is provisioned within a fixed child-side timeout. The launcher binds kernel peer
+PID/UID/GID on all three outer channels to its live parent, requires the parent's executable inode
+to match its own, accepts only the exact outer `--run` invocation, and installs a verified
+parent-death `SIGKILL` before isolation. A launcher-selector invocation without that exact parent
+contract, and a PID-1-selector invocation without its required namespace and channel contract, are
+rejected.
 
-The single-task child performs one direct `unshare` of anonymous user, mount, and network
-namespaces. It does not enter a new PID namespace. The outer immediately retains a pidfd and an
-anchored `/proc/<pid>` directory, then pins the exact user, mount, network, PID, and
-PID-for-children namespace descriptors before writing `deny` to `setgroups` and one exact
-`0 <outer-id> 1` extent to each ID map. The strict run-bound control exchange is
-`NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`, `MAPPINGS_VERIFIED`; both sides independently read back
-the mappings and namespace identities before closing without `GO`. A fixed set of kernel-policy
-denials return separate honest `BLOCKED` outcomes when required parent or immediate post-`unshare`
-proof is hidden, and after positively observed isolation when required outer proof or complete
-mapping is unavailable, without a fallback. The first outcome deliberately makes no positive
-claim about whether a denied immediate post-`unshare` proof followed partial namespace creation.
-The portable real-process test accepts either blocked failure or the verified-mapping result, so a
-green generic CI job proves fail-closed
-behaviour but not that its kernel permitted namespace creation. Positive live-isolation evidence
-requires a capability-enabled Debian 13 job that specifically requires the verified-mapping
-outcome.
+The single-task launcher performs one direct `unshare` of anonymous user, mount, network, and
+pending child PID namespaces. Before any child exists, the outer retains a pidfd and anchored
+`/proc/<pid>` directory, pins the exact user, mount, network, and current PID namespace descriptors,
+requires an empty child set, and proves that the existing `pid_for_children` magic link is in the
+kernel-defined uninstantiated state. Only then does it write `deny` to `setgroups` and one exact
+`0 <outer-id> 1` extent to each ID map; both sides independently read back those mappings and the
+stable partial namespace set.
+
+After that barrier the launcher makes exactly one second fixed `/proc/self/exe` invocation, which
+becomes PID 1 in the pending namespace and remains blocked on a new private bootstrap channel. The
+launcher and PID 1 perform an affine, run-bound provision/parent-death/liveness/execution/EOF
+exchange. PID 1 independently requires PID 1/PPID 0, one task, mapped-root credentials, the exact
+inherited namespace set, an empty environment, cwd `/`, and an armed parent-death `SIGKILL`. The
+outer upgrades its launcher namespace pins only after the child exists and independently proves
+the exact executable/selector, PID/PPID/nesting, mappings, namespaces, empty descendant set, and
+sole launcher-child relation. It closes the lifecycle channel without a frame and verifies exact
+PID-1 exit and reap on the positive route.
+
+The strict outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
+`MAPPINGS_VERIFIED`, `PID1_SPAWNED`, `PID1_PINNED`, `PID1_REAPED`. A fixed set of kernel-policy
+denials returns separate honest `BLOCKED` outcomes when required parent, namespace, mapping, or
+outer PID-1 proof is unavailable, without fallback. A generic green CI job may therefore prove
+only fail-closed behaviour; the positive PID-1 path requires the explicit
+`BlockedAfterPidOneProof` outcome on the Debian 13 acceptance host.
 
 The runner retains exact-child and namespace-FD ownership through a bounded synchronous reap
-attempt; on timeout or wait error it transfers the `Child`, pins, and sole spawn permit to its
-exact-child reaper instead of detaching the process. Its current `--run` path verifies
-EOF-before-`GO`, repeated exact reaping, and unchanged outer namespace, mount-table, and route-table
-observations, then honestly returns `BLOCKED`/77. Command/environment shims prove that it invokes
-no namespace or networking utility. It still has no PID namespace/PID 1, private `/proc` or `/run`,
-general root-filesystem or supplementary-group isolation, signal-driven five-frame lifecycle,
-topology mutation, or acceptance evidence.
+attempt. Normal reaping retains the pidfd and exact `Child` ownership; every forced `SIGKILL` after
+admission targets that pidfd, including timeout and fallback-reaper paths. Pidfd acquisition is
+mandatory; if it fails, the private channels close, `SIGKILL` is attempted against the still-owned
+unreaped child, and that child is synchronously waited/reaped before the pidfd error returns. The
+public `--run` entry requires exactly one initial task, and any non-default `SIGCHLD` handler or
+`SA_NOCLDWAIT` is rejected before any channel, permit, reaper thread, or child is created. If a
+later synchronous reap attempt cannot complete, ownership transfers to a process-local fallback
+reaper instead of being silently detached; that rare fallback is not claimed as post-exit cleanup
+or A14 evidence. The current `--run` path verifies
+EOF-before-`GO`, repeated exact outer-launcher reaping, and unchanged outer namespace, mount-table,
+and route-table observations, then honestly returns `BLOCKED`/77. An explicit
+`BlockedAfterPidOneProof` run additionally proves exact PID-1 exit and reap. Command/environment
+shims prove that it invokes no namespace or networking utility. It still has no private mount
+propagation, private `/proc` or `/run`, general root-filesystem or supplementary-group isolation,
+signal-driven five-frame lifecycle, topology mutation, or acceptance evidence.
 
 Privileged execution stays blocked until that fixed reviewed supervisor additionally owns
-PID-namespace/PID-1 bootstrap, private mount propagation and private `/run` and `/proc`, signal
-supervision, setup, evidence finalization, complete process-tree containment, and teardown as one
-operation.
+private mount propagation and private `/run` and `/proc`, signal supervision, setup, evidence
+finalization, complete process-tree containment, and teardown as one operation.
 It may not accept a caller-selected command, executable, backend, timeout, cleanup prefix, or
 network-object name.
 
