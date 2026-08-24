@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     fs::File,
     io::{self, Read as _},
+    marker::PhantomData,
     mem::MaybeUninit,
     os::fd::OwnedFd,
 };
@@ -76,14 +77,20 @@ impl PrivateMountSetupError {
 ///
 /// The retained root and visible mount descriptors pin the measured objects.
 /// Reverification reopens both fixed paths below the pinned root and requires
-/// their visible mount IDs to remain unchanged.
-pub(crate) struct PrivateMounts {
+/// their visible mount IDs to remain unchanged. The state parameter marks the
+/// current proof as pristine and reserves a compile-time transition boundary;
+/// this slice deliberately defines no post-`GO` successor yet.
+pub(crate) struct PrivateMounts<RunState = PristineRun> {
     root: OwnedFd,
     run_pin: OwnedFd,
     proc_pin: OwnedFd,
     root_mount_id: u64,
     ids: PrivateMountIds,
+    run_state: PhantomData<RunState>,
 }
+
+/// Type-level proof that the private `/run` directory was observed empty.
+pub(crate) enum PristineRun {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProcRecordIdentity {
@@ -111,7 +118,7 @@ impl Ipv4ForwardingRecordSnapshot {
     }
 }
 
-impl PrivateMounts {
+impl PrivateMounts<PristineRun> {
     /// Repeat the complete local mount-table and procfs proof.
     pub(crate) fn verify(&self) -> Result<(), PrivateMountSetupError> {
         let root_stat = hard_rustix(
@@ -248,6 +255,7 @@ pub(crate) fn setup_and_verify_private_mounts() -> Result<PrivateMounts, Private
         proc_pin: visible_proc,
         root_mount_id: targets.root_mount_id,
         ids,
+        run_state: PhantomData,
     };
     mounts.verify()?;
     Ok(mounts)
@@ -1034,6 +1042,7 @@ mod tests {
                 run_mount_id,
                 proc_mount_id,
             },
+            run_state: PhantomData,
         };
 
         let first = mounts

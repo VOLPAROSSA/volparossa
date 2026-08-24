@@ -466,13 +466,18 @@ Last updated: 2026-08-24
   `BlockedAfterBootstrapReadyProof` outcome. At supervised IPC boundaries, managed outer
   HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
   external-signal handling across every reap/report phase, general descendant reaping, forced
-  parent-death/crash-chain cleanup, or A14. The slice includes a private `cfg(test)`-only Rust port
-  of the canonical namespace ownership-manifest reader and read-only classifier. Tempfile
-  regressions bind its fixed leaf to the current euid, mode, link count, bounded stable bytes,
-  descriptor identity, run-scoped names, and replacement checks. That dormant code has no runtime
-  caller, manifest writer, deletion capability, or network operation, and regular-file fixtures
-  are not evidence for live nsfs mounts, hostile concurrency, topology creation, probing, or
-  cleanup. No writer or nftables mutation API exists. The slice still has no general
+  parent-death/crash-chain cleanup, or A14. The production mount owner now carries an explicit
+  `PristineRun` typestate, and the final pre-`GO` network revalidation consumes its affine proof;
+  there is no authorised successor state or changed runtime path. A private `cfg(test)`-only Rust
+  model covers the canonical ownership reader/classifier plus atomic tempfile publication of two
+  synthetic records. It verifies initially empty private roots, exact entry sets, descriptor and
+  nonzero mount identities, exclusive pending creation, exact bounded readback, file/directory
+  sync, no-replace rename, immediate pinning, failpoints, and reverse identity-scoped unlink of its
+  own regular-file fixtures. It has no production writer, deletion capability, GO token, private
+  `/run` transition, runtime caller, or network operation. Synthetic regular-file identities and a
+  single test actor are not live nsfs ownership, hostile-concurrency safety, topology creation,
+  production teardown, probing, or cleanup evidence. No production writer or nftables mutation API
+  exists. The slice still has no general
   root-filesystem or supplementary-group isolation, `GO`,
   `TOPOLOGY_READY`, `STOP`, `FINISHED`, network-topology mutation, crash-cleanup evidence,
   acceptance report, or A01-A15 result. In particular, no network-object cleanup, A14, A15, or
