@@ -96,7 +96,7 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
     assert!(
         stderr
-            == "BLOCKED: private mounts and the fixed pidfd-to-PID1-signalfd TERM observation chain were independently verified and exactly reaped without BOOTSTRAP_READY or GO.\n"
+            == "BLOCKED: the exact new-netns RTNL baseline and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; no GO, network-topology mutation, or A14 evidence was produced.\n"
             || stderr
                 == "BLOCKED: anonymous namespaces, exact ID mappings, and a self-reexecuted PID 1 were verified, but kernel policy denied the fixed private-mount setup; no BOOTSTRAP_READY or GO was emitted.\n"
             || stderr
@@ -226,7 +226,7 @@ fn preview_and_argument_surface_are_exact() {
     assert!(preview.status.success());
     assert_eq!(
         String::from_utf8(preview.stdout).expect("UTF-8 preview"),
-        "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, and fixed pidfd-to-signalfd supervision are implemented; pristine-network proof, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked.\n"
+        "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, and one pinned BOOTSTRAP_READY are implemented; GO, every network-topology mutation, and A14 cleanup evidence remain blocked.\n"
     );
     assert!(preview.stderr.is_empty());
 

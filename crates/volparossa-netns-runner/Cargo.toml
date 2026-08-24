@@ -10,6 +10,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+netlink-sys.workspace = true
 nix = { workspace = true, features = ["sched"] }
 rand_core.workspace = true
 rustix.workspace = true

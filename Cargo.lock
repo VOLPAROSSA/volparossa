@@ -4386,6 +4386,7 @@ dependencies = [
 name = "volparossa-netns-runner"
 version = "0.1.0"
 dependencies = [
+ "netlink-sys",
  "nix",
  "rand_core 0.6.4",
  "rustix",

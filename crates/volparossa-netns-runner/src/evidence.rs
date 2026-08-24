@@ -15,6 +15,7 @@ use rustix::{
     process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
 };
 use thiserror::Error;
+use volparossa_test_support::BootstrapReady;
 
 use crate::{
     mounts::{
@@ -500,6 +501,25 @@ impl PidOneKernelPins {
             self.launcher_pid_depth,
         )?;
         verify_pid_one_signal_supervision(&status)?;
+        self.verify_live_identity(outer_user_id, outer_group_id)
+    }
+
+    pub(crate) fn verify_bootstrap_ready(
+        &self,
+        frame: &BootstrapReady,
+        outer_user_id: u32,
+        outer_group_id: u32,
+    ) -> io::Result<()> {
+        self.verify_live_identity(outer_user_id, outer_group_id)?;
+        let snapshot = self.namespaces.snapshot();
+        if frame.network_namespace() != snapshot.network
+            || frame.mount_namespace() != snapshot.mount
+            || frame.pid_namespace() != snapshot.pid
+        {
+            return Err(invalid_data(
+                "BOOTSTRAP_READY namespaces do not match the retained PID-1 pins",
+            ));
+        }
         self.verify_live_identity(outer_user_id, outer_group_id)
     }
 

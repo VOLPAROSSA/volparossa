@@ -423,16 +423,27 @@ Last updated: 2026-08-24
   (`SigBlk=0000000000014003`, `SigCgt=0000000000004443`, and no managed ignored or pending bit)
   through its retained pidfd and proc anchor. The caught mask is `0x4003` managed handlers plus
   the repository-pinned Rust 1.85.0 runtime's `0x0440` SIGBUS/SIGSEGV baseline on Debian 13 amd64,
-  not a Linux ABI constant. After mount verification, the outer sends exact TERM via
-  the PID-1 pidfd; PID 1 consumes the real `signalfd` record and returns an affine run/PID/signal
-  observation through the launcher. Only then may lifecycle EOF retire and exactly reap PID 1.
+  not a Linux ABI constant. After mount verification, PID 1 directly proves the exact
+  fixed kernel-new-network-namespace RTNL readiness baseline and constructs one canonical
+  `BOOTSTRAP_READY` bound to the run and its measured network, mount, and PID namespace identities.
+  The baseline pins the enumerated down-loopback configuration, including its mutable GSO/GRO
+  limits, and proves empty address, route, ordinary/proxy-neighbour, and nexthop object sets plus
+  the exact default IPv4/IPv6 rules. Its
+  documented scope does not yet include every independent netconf, address-label,
+  neighbour-parameter, or traffic-control table. The outer
+  accepts that actual lifecycle frame only after matching all three identities to its retained
+  PID-1 namespace pins and repeating the live mount and signal proofs. Only then does the outer
+  send exact TERM through the PID-1 pidfd; PID 1 consumes the real `signalfd` record and returns
+  an affine run/PID/signal observation through the launcher. The outer never issues `GO`; both
+  lifecycle states classify the following EOF as pre-`GO`, after which PID 1 is exactly reaped.
   If the outer PID-1 pin is unavailable after spawn, one run-bound pre-mount abort record
   retires PID 1 without issuing a mount instruction. Only `EPERM` or `EACCES` from a fixed
   mount-UAPI operation may produce the exclusive
   `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
   options, resource failures, and failed evidence remain hard errors. The positive
-  `BlockedAfterSignalSupervisionProof` route closes without a lifecycle frame or `GO` and proves
-  the complete mount/signal chain plus exact PID-1 exit/reap. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
+  `BlockedAfterBootstrapReadyProof` route proves the exact RTNL baseline, one real pinned
+  `BOOTSTRAP_READY`, the complete TERM/EOF/signal chain, and exact PID-1 exit/reap without `GO` or
+  network-topology mutation. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
   namespace/mount/route observations, and no command-shim execution. Normal reaping retains both
   pidfd and exact `Child` ownership; every forced `SIGKILL` after admission targets that pidfd.
   Pidfd acquisition is mandatory; its failure closes the private channels, attempts `SIGKILL`
@@ -441,14 +452,18 @@ Last updated: 2026-08-24
   `SA_NOCLDWAIT` is rejected before any spawn. The rare process-local fallback-reaper path is not
   post-exit cleanup or A14 evidence. Required parent, namespace, mapping, mount-policy, and outer
   PID-1 proofs fail closed when kernel policy hides them. Generic CI may therefore prove only
-  fail-closed behaviour; complete live evidence requires the explicit
-  `BlockedAfterSignalSupervisionProof` outcome. At supervised IPC boundaries, managed outer
+  fail-closed behaviour. Pre-isolation parent-proof or namespace-policy denial uses a bounded
+  control/lifecycle half-close handshake that keeps the launcher alive until the outer
+  acknowledges EOF, preventing an early-`SIGCHLD` race; only the outer containment deadline bounds
+  that wait. Complete live evidence requires the explicit
+  `BlockedAfterBootstrapReadyProof` outcome. At supervised IPC boundaries, managed outer
   HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
   external-signal handling across every reap/report phase, general descendant reaping, forced
   parent-death/crash-chain cleanup, or A14. The slice
-  still has no general root-filesystem or supplementary-group isolation, pristine-network proof,
-  `BOOTSTRAP_READY`, signal-driven five-frame driver, topology mutation, crash-cleanup evidence,
-  acceptance report, or A01-A15 result.
+  still has no general root-filesystem or supplementary-group isolation, `GO`,
+  `TOPOLOGY_READY`, `STOP`, `FINISHED`, network-topology mutation, crash-cleanup evidence,
+  acceptance report, or A01-A15 result. `BOOTSTRAP_READY` is readiness evidence only; it is not
+  topology authorization, cleanup evidence, or an acceptance-test result.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 

@@ -261,13 +261,36 @@ mask plus the `0x0440` process-start SIGBUS/SIGSEGV stack-overflow baseline of t
 Rust 1.85.0 runtime on Debian 13 amd64, not a Linux ABI constant; the audited UAPI separately reads
 back the exact managed handler addresses, flags and masks.
 
-After `PRIVATE_MOUNTS_VERIFIED`, the outer sends exactly TERM through the retained PID-1 pidfd.
-PID 1 must consume that actual `signalfd` record and return one canonical run-, PID- and
-signal-bound `MANAGED_SIGNAL_OBSERVED` through the launcher, which forwards the host-PID-bound
-`PID1_SIGNAL_OBSERVED`. Only after the outer accepts that observation and repeats the live signal
-proof does it close the lifecycle channel. PID 1 accepts the affine retire instruction and
-lifecycle EOF in either cross-channel order, repeats its mount/runtime/signal proofs, exits 77, and
-is exactly reaped by the launcher and outer. No lifecycle frame or `GO` is emitted.
+After `PRIVATE_MOUNTS_VERIFIED`, PID 1 directly proves the exact kernel-new-network-namespace RTNL
+baseline, repeats its mount/runtime/signal proofs, and emits one canonical `BOOTSTRAP_READY` over
+the affinely transferred lifecycle endpoint. The frame is bound to the run and PID 1's measured
+network, mount, and PID namespace identities. The outer parses that actual frame, requires all
+three identities to match its retained PID-1 namespace pins, repeats the live mount and signal
+proofs, and accepts the frame through the strict outer lifecycle state. Only then does it send
+exactly TERM through the retained PID-1 pidfd. PID 1 must consume that actual `signalfd` record and
+return one canonical run-, PID- and signal-bound `MANAGED_SIGNAL_OBSERVED` through the launcher,
+which forwards the host-PID-bound `PID1_SIGNAL_OBSERVED`. Only after the outer accepts that
+observation and repeats the live signal proof does it close the lifecycle channel without issuing
+`GO`. PID 1 accepts the affine retire instruction and lifecycle EOF in either cross-channel order;
+both lifecycle states require the EOF to mean `NoTopologyMutationAuthorized`. PID 1 then repeats
+its mount/runtime/signal proofs, exits 77, and is exactly reaped by the launcher and outer.
+
+That fixed readiness baseline contains exactly one down `lo` link at ifindex 1 with loopback-only
+flags, MTU 65536, transmit queue length 1000, `noop` qdisc, default link mode and group, zero
+address/broadcast/promiscuity/all-multicast/protocol-down state, IPv6 EUI-64 address-generation
+mode, GSO segment limit 65535, and GSO/GRO plus IPv4 GSO/GRO size limits 65536. It has no link
+relationship, alias, alternate name, link-info, or attached XDP program. It
+contains no addresses, routes, ordinary or proxy neighbours, or nexthop objects. Its
+routing-policy database is exactly IPv4 priorities 0/local, 32766/main, and 32767/default plus
+IPv6 priorities 0/local and 32766/main. PID 1 requires two identical bounded snapshots before
+readiness, then repeats the same double snapshot after pre-`GO` EOF and brackets both observations
+with its retained mount, runtime, and signal proofs.
+
+Here “pristine” is deliberately scoped to that enumerated pre-topology readiness contract; it is
+not a claim that this slice attests every independent Linux networking table or tunable. Netconf
+sysctls, address-label and neighbour-table parameters, and standalone traffic-control actions are
+outside this pre-`GO` proof and no production mutator for them exists in this slice. A later
+topology driver must either pin every setting it relies on or extend this proof before `GO`.
 
 The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
 `MAPPINGS_VERIFIED`, `MAPPINGS_PINNED`, `PID1_SPAWNED`, `PID1_PINNED`, `PRIVATE_MOUNTS_READY`,
@@ -276,18 +299,29 @@ The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_
 exact fixed mount-UAPI operation may take that branch; malformed state, missing targets, unsupported
 APIs, invalid options, resource failures, and failed readback remain internal errors. Other fixed
 kernel-policy denials return separate honest `BLOCKED` outcomes when required parent, namespace,
-mapping, or outer PID-1 proof is unavailable, without fallback. If the outer PID-1 pin is
+mapping, or outer PID-1 proof is unavailable, without fallback. A pre-isolation parent-proof or
+namespace-policy denial uses a bounded two-channel half-close handshake: the launcher advertises
+both EOFs but cannot exit until the outer acknowledges the control EOF, so early `SIGCHLD` never
+races the admitted blocked result. Only the outer-owned containment deadline bounds that wait; the
+launcher cannot time itself out before acknowledgement. If the outer PID-1 pin is
 unavailable after spawn, the launcher sends one run-bound `ABORT_BEFORE_PRIVATE_MOUNTS` record to
 PID 1, proves lifecycle EOF, and reaps it without issuing a mount instruction. A generic green CI
 job may therefore prove only fail-closed behaviour; the complete positive path requires the
-explicit `BlockedAfterSignalSupervisionProof` outcome on the Debian 13 acceptance host:
+explicit `BlockedAfterBootstrapReadyProof` outcome on the Debian 13 acceptance host:
+
+The portable unit suite runs the live RTNL collector and adversarial link/object mutations when
+unprivileged user/network namespaces are available. It treats only the exact util-linux `EPERM`
+forms for an unavailable `unshare` or UID/GID-map write as an environmental skip; every other
+spawn, child, mutation, parser, or proof failure remains fatal. Such a skip is not readiness
+evidence and cannot replace the dedicated gate.
 
 ```sh
-just test-netns-signal-supervision-proof
+just test-netns-bootstrap-ready-proof
 ```
 
 That opt-in gate requires an unprivileged Debian 13 amd64 host with unprivileged user namespaces
-enabled, zero capabilities, and `no_new_privs`. A dedicated ephemeral VM is required for
+enabled, zero inherited, permitted, effective, and ambient capability sets, and `no_new_privs`.
+A dedicated ephemeral VM is required for
 authoritative acceptance, but the gate itself proves only that its immediate host is a VM; CI job
 provenance must establish that the VM was dedicated and ephemeral. A bare-metal development host
 may supply an additional local proof because the runner remains inside disposable namespaces and
@@ -307,15 +341,18 @@ later synchronous reap attempt cannot complete, ownership transfers to a process
 reaper instead of being silently detached; that rare fallback is not claimed as post-exit cleanup
 or A14 evidence. The current `--run` path verifies EOF-before-`GO`, repeated exact PID-1 and
 outer-launcher reaping, and unchanged outer namespace, mount-table, and route-table observations,
-then honestly returns `BLOCKED`/77. An explicit `BlockedAfterSignalSupervisionProof` run
-additionally proves the complete private-mount barrier and fixed pidfd-to-PID1-signalfd TERM
-observation described above. At supervised IPC boundaries, managed outer HUP/INT/TERM events take
+then honestly returns `BLOCKED`/77. An explicit `BlockedAfterBootstrapReadyProof` run additionally
+proves the complete private-mount barrier, exact new-netns RTNL baseline, one real pinned
+`BOOTSTRAP_READY`, and fixed pidfd-to-PID1-signalfd TERM observation described above. It never
+issues `GO`, mutates network topology, or produces A14 evidence. At supervised IPC boundaries,
+managed outer HUP/INT/TERM events take
 priority over pending protocol records and trigger bounded exact-launcher containment. The live
 gate does not yet prove external-signal handling throughout every reap/report phase, a forced
 parent-death/crash chain, a general descendant reaper, or A14 cleanup. Command/environment shims
-prove that the runner invokes no namespace or networking utility. It still has no general root-filesystem or supplementary-group isolation,
-pristine-network proof, `BOOTSTRAP_READY`, signal-driven five-frame lifecycle, topology mutation,
-crash-cleanup evidence, acceptance report, or A01-A15 result.
+prove that the runner invokes no namespace or networking utility. It still has no general
+root-filesystem or supplementary-group isolation, `GO`, `TOPOLOGY_READY`, `STOP`, `FINISHED`,
+network-topology mutation, crash-cleanup evidence, acceptance report, or A01-A15 result. The sole
+`BOOTSTRAP_READY` frame is readiness evidence, not topology authorization or A14 cleanup evidence.
 The dedicated-host proof also does not claim hostile same-UID sender provenance from the
 `signalfd_siginfo` metadata; it proves that the retained pidfd send is followed by the exact
 quiescent TERM observation within this fixed supervisor.
