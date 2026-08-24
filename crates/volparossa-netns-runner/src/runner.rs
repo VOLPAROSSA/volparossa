@@ -1,6 +1,7 @@
 use std::{
-    fs, io,
+    env, fs, io,
     os::unix::{fs::MetadataExt, process::ExitStatusExt},
+    path::Path,
     process::ExitCode,
     time::Duration,
 };
@@ -10,7 +11,7 @@ use nix::{
         prctl::{get_pdeathsig, set_pdeathsig},
         signal::Signal,
     },
-    unistd::{getegid, geteuid, getppid},
+    unistd::{getegid, geteuid, getpid, getppid, getresgid, getresuid},
 };
 use rand_core::{OsRng, RngCore};
 use thiserror::Error;
@@ -20,11 +21,15 @@ use volparossa_test_support::{
 
 use crate::{
     control::{BootstrapControlError, LauncherBootstrapControl, OuterBootstrapControl},
-    isolation::{IsolationAttempt, create_launcher_namespaces},
+    isolation::{
+        IsolationAttempt, LauncherIsolation, create_launcher_namespaces, has_exact_single_task,
+    },
     namespace::NamespaceSnapshot,
+    pid1::{LauncherPidOneControl, PidOneControl, PidOneControlError, PidOneProvision},
     process::{
-        FixedChild, inherited_control_channel_from_stdout, inherited_lifecycle_channel_from_stderr,
-        inherited_provisioning_channel_from_stdin,
+        FixedChild, FixedPidOne, INTERNAL_PID_ONE_ARGUMENT, inherited_control_channel_from_stdout,
+        inherited_lifecycle_channel_from_stderr, inherited_pid_one_bootstrap_channel_from_stdin,
+        inherited_pid_one_lifecycle_channel_from_stdout, inherited_provisioning_channel_from_stdin,
     },
 };
 
@@ -42,8 +47,10 @@ pub enum LifecycleOutcome {
     BlockedBeforeIsolation,
     /// Anonymous namespaces exist, but kernel policy denied required outer proof or ID mapping.
     BlockedAfterIsolation,
-    /// Anonymous namespaces and exact ID mappings were verified before closing without `GO`.
-    BlockedAfterNamespaceMapping,
+    /// Exact mappings exist, but kernel policy hid the required outer PID-1 proof.
+    BlockedAtPidOneProof,
+    /// A real self-reexecuted PID 1 was independently proven and reaped without `GO`.
+    BlockedAfterPidOneProof,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -70,14 +77,17 @@ pub enum RunnerError {
     /// The strict internal namespace-mapping control exchange was rejected.
     #[error("bootstrap control rejected supervisor state")]
     Control,
+    /// The private launcher-to-PID-1 control exchange was rejected.
+    #[error("PID-1 control rejected supervisor state")]
+    PidOneControl,
     /// The fixed child could not be launched or retired exactly.
     #[error("fixed child process operation failed: {0}")]
     Process(#[source] io::Error),
     /// The inherited private channel failed.
     #[error("fixed lifecycle channel failed: {0}")]
     Channel(#[source] io::Error),
-    /// A lifecycle record appeared even though PID-1 bootstrap is not implemented yet.
-    #[error("inner child emitted a lifecycle record before PID-1 bootstrap existed")]
+    /// A lifecycle record appeared before the complete bootstrap attestation existed.
+    #[error("inner child emitted a lifecycle record before BOOTSTRAP_READY existed")]
     UnexpectedLifecycleRecord,
     /// The fixed child did not return the sole blocked-before-isolation exit status.
     #[error("inner child returned unexpected process status code={code:?} signal={signal:?}")]
@@ -110,20 +120,36 @@ impl From<BootstrapControlError> for RunnerError {
     }
 }
 
+impl From<PidOneControlError> for RunnerError {
+    fn from(_: PidOneControlError) -> Self {
+        Self::PidOneControl
+    }
+}
+
 /// Run the sole fixed pre-`GO` isolation supervisor slice.
 ///
 /// A random launch context is sent to an exact self-reexecuted child through an
 /// unnamed inherited seqpacket channel. The child creates only anonymous user,
-/// mount, and network namespaces, then blocks until the outer installs and
-/// verifies one exact UID/GID mapping extent. It emits no lifecycle frame and
-/// exits with status 77. The outer state records EOF before `GO`, reaps the
-/// exact child, and verifies that its own namespace identities remained unchanged.
+/// mount, network, and pending child PID namespaces, then blocks until the outer
+/// installs and verifies one exact UID/GID mapping extent. The launcher makes
+/// exactly one second self-reexec, whose PID-1 placement is independently pinned
+/// and proven by the outer before it is reaped. No lifecycle frame or `GO` is
+/// emitted. The outer verifies that its own namespace identities remain unchanged.
+/// The caller must enter with exactly one task; child creation also requires the
+/// default `SIGCHLD` disposition without `SA_NOCLDWAIT`.
 ///
 /// # Errors
 ///
 /// Returns an error for every launch, IPC, protocol, process-status, reaping,
-/// randomness, or namespace-identity discrepancy.
+/// randomness, initial task-count, signal-disposition, or namespace-identity
+/// discrepancy.
 pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
+    if !has_exact_single_task().map_err(RunnerError::Process)? {
+        return Err(RunnerError::Process(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fixed supervisor must start with exactly one task",
+        )));
+    }
     let before = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
     let run_id = random_run_id()?;
     let context = LaunchContext::new(run_id.clone(), before.network, before.mount, before.pid)?;
@@ -177,11 +203,19 @@ pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
             LifecycleOutcome::BlockedAfterIsolation,
         );
     }
+    if !complete_pid_one_barrier(&mut child, &mut bootstrap)? {
+        return finish_blocked_run(
+            child,
+            &mut outer,
+            before,
+            LifecycleOutcome::BlockedAtPidOneProof,
+        );
+    }
     finish_blocked_run(
         child,
         &mut outer,
         before,
-        LifecycleOutcome::BlockedAfterNamespaceMapping,
+        LifecycleOutcome::BlockedAfterPidOneProof,
     )
 }
 
@@ -195,7 +229,7 @@ fn complete_mapping_barrier(
     if let Err(error) = child
         .kernel_pins_mut()
         .map_err(RunnerError::KernelProof)?
-        .pin_isolated_namespaces(before, std::process::id())
+        .pin_launcher_before_pid_one(before, std::process::id())
     {
         if !is_outer_proof_unavailable(&error) {
             return Err(RunnerError::KernelProof(error));
@@ -237,6 +271,64 @@ fn complete_mapping_barrier(
         finish_bootstrap_control(child)?;
         return Ok(false);
     }
+    Ok(true)
+}
+
+fn complete_pid_one_barrier(
+    child: &mut FixedChild,
+    bootstrap: &mut OuterBootstrapControl,
+) -> Result<bool, RunnerError> {
+    let outer_user_id = geteuid().as_raw();
+    let outer_group_id = getegid().as_raw();
+    let spawned = child
+        .control_channel()
+        .map_err(RunnerError::Channel)?
+        .receive()
+        .map_err(RunnerError::Channel)?;
+    let pid = bootstrap.accept_pid1_spawned(&spawned)?;
+    let pid_one = match child
+        .kernel_pins_mut()
+        .map_err(RunnerError::KernelProof)?
+        .pin_pid_one(
+            pid,
+            INTERNAL_PID_ONE_ARGUMENT,
+            outer_user_id,
+            outer_group_id,
+        ) {
+        Ok(pid_one) => pid_one,
+        Err(error) if is_outer_proof_unavailable(&error) => {
+            child
+                .lifecycle_channel()
+                .map_err(RunnerError::Channel)?
+                .finish_sending()
+                .map_err(RunnerError::Channel)?;
+            finish_bootstrap_control(child)?;
+            return Ok(false);
+        }
+        Err(error) => return Err(RunnerError::KernelProof(error)),
+    };
+    let pinned = bootstrap.pid1_pinned(pid)?;
+    child
+        .control_channel()
+        .map_err(RunnerError::Channel)?
+        .send(pinned.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    child
+        .lifecycle_channel()
+        .map_err(RunnerError::Channel)?
+        .finish_sending()
+        .map_err(RunnerError::Channel)?;
+    let reaped = child
+        .control_channel()
+        .map_err(RunnerError::Channel)?
+        .receive()
+        .map_err(RunnerError::Channel)?;
+    bootstrap.accept_pid1_reaped(&reaped)?;
+    child
+        .kernel_pins_mut()
+        .map_err(RunnerError::KernelProof)?
+        .verify_pid_one_reaped(&pid_one, outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
     finish_bootstrap_control(child)?;
     Ok(true)
 }
@@ -305,10 +397,10 @@ fn errno_runner(error: nix::errno::Errno) -> RunnerError {
 
 /// Run the exact hidden child entry selected and authenticated by the fixed process owner.
 ///
-/// The child validates one launch context, creates only anonymous user, mount,
-/// and network namespaces, and blocks on an outer-owned ID
-/// mapping barrier. It emits no lifecycle frame, authorizes no mutation, and
-/// returns status 77 because PID-namespace/PID-1/private-mount bootstrap is still absent.
+/// The child validates one launch context, creates anonymous user, mount,
+/// network, and pending child PID namespaces, and blocks on an outer-owned ID
+/// mapping barrier. It then owns exactly one fixed self-reexecuted PID 1 until
+/// the outer proves and retires it. It emits no lifecycle frame or `GO`.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_child() -> ExitCode {
@@ -370,12 +462,201 @@ fn internal_child() -> Result<(), RunnerError> {
     control_channel
         .send(bootstrap.mappings_verified()?.as_bytes())
         .map_err(RunnerError::Channel)?;
+    complete_internal_pid_one(
+        lifecycle_channel,
+        &control_channel,
+        &mut bootstrap,
+        &context,
+        &isolation,
+    )
+}
+
+fn complete_internal_pid_one(
+    lifecycle_channel: crate::ipc::LifecycleChannel,
+    control_channel: &crate::ipc::LifecycleChannel,
+    bootstrap: &mut LauncherBootstrapControl,
+    context: &LaunchContext,
+    isolation: &LauncherIsolation,
+) -> Result<(), RunnerError> {
+    // Linux intentionally leaves `pid_for_children` unopenable after
+    // `unshare(CLONE_NEWPID)` until the first child exists. Create the exact
+    // blocked self-reexec only after both sides have pinned and verified the
+    // mapping-stage launcher; then capture the complete namespace set.
+    let pid_one = FixedPidOne::spawn(lifecycle_channel).map_err(RunnerError::Process)?;
+    pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .set_read_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .map_err(RunnerError::Channel)?;
+    let isolated = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
+    let provision = PidOneProvision::new(
+        context.run_id().clone(),
+        isolated.user,
+        isolated.network,
+        isolated.mount,
+        isolated.pid_for_children,
+        isolation.outer_user_id(),
+        isolation.outer_group_id(),
+    )?;
+    let mut pid_one_control = LauncherPidOneControl::new(provision);
+    pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .send(pid_one_control.provision()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    let parent_death_armed = pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .receive()
+        .map_err(RunnerError::Channel)?;
+    pid_one_control.accept_parent_death_armed(&parent_death_armed)?;
+    pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .send(pid_one_control.parent_alive()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    let executed = pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .receive()
+        .map_err(RunnerError::Channel)?;
+    pid_one_control.accept_executed(&executed)?;
+    let pid = pid_one.id().map_err(RunnerError::Process)?;
+    control_channel
+        .send(bootstrap.pid1_spawned(pid)?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    let pinned = match control_channel.receive() {
+        Ok(record) => record,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            finish_pid_one(pid_one, &mut pid_one_control)?;
+            return Ok(());
+        }
+        Err(error) => return Err(RunnerError::Channel(error)),
+    };
+    bootstrap.accept_pid1_pinned(&pinned)?;
+    let status = finish_pid_one(pid_one, &mut pid_one_control)?;
+    control_channel
+        .send(bootstrap.pid1_reaped(pid, status)?.as_bytes())
+        .map_err(RunnerError::Channel)?;
     match control_channel.receive() {
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
         Err(error) => return Err(RunnerError::Channel(error)),
         Ok(_) => return Err(RunnerError::Control),
     }
-    drop(lifecycle_channel);
+    Ok(())
+}
+
+fn finish_pid_one(
+    pid_one: FixedPidOne,
+    control: &mut LauncherPidOneControl,
+) -> Result<i32, RunnerError> {
+    pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .send(control.expect_lifecycle_eof()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    let lifecycle_eof = pid_one
+        .bootstrap_channel()
+        .map_err(RunnerError::Channel)?
+        .receive()
+        .map_err(RunnerError::Channel)?;
+    control.accept_lifecycle_eof(&lifecycle_eof)?;
+    let status = pid_one.wait_and_reap().map_err(RunnerError::Process)?;
+    if status.code() != Some(i32::from(BLOCKED_EXIT_CODE)) {
+        return Err(RunnerError::UnexpectedChildStatus {
+            code: status.code(),
+            signal: status.signal(),
+        });
+    }
+    control.complete()?;
+    Ok(i32::from(BLOCKED_EXIT_CODE))
+}
+
+/// Run the exact hidden second self-reexec which must be PID 1.
+///
+/// The entry verifies its fixed inherited channels, PID-1 placement, mapped
+/// credentials, namespace membership, empty environment, root cwd, and armed
+/// parent-death signal. It reports only over the launcher-private control
+/// channel and proves lifecycle EOF without accepting any frame.
+#[doc(hidden)]
+#[must_use]
+pub fn run_internal_pid_one() -> ExitCode {
+    match internal_pid_one() {
+        Ok(()) => ExitCode::from(BLOCKED_EXIT_CODE),
+        Err(_) => ExitCode::from(INTERNAL_ERROR_EXIT_CODE),
+    }
+}
+
+fn internal_pid_one() -> Result<(), RunnerError> {
+    let bootstrap_channel =
+        inherited_pid_one_bootstrap_channel_from_stdin().map_err(RunnerError::Channel)?;
+    let lifecycle_channel =
+        inherited_pid_one_lifecycle_channel_from_stdout().map_err(RunnerError::Channel)?;
+    set_pdeathsig(Signal::SIGKILL).map_err(errno_runner)?;
+    bootstrap_channel
+        .set_read_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .map_err(RunnerError::Channel)?;
+    lifecycle_channel
+        .set_read_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .map_err(RunnerError::Channel)?;
+    let mut control = PidOneControl::new();
+    let provision_record = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
+    let provision = control.accept_provision(&provision_record)?.clone();
+    verify_pid_one_runtime(&provision)?;
+    bootstrap_channel
+        .send(control.parent_death_armed()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    let parent_alive = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
+    control.accept_parent_alive(&parent_alive)?;
+    verify_pid_one_runtime(&provision)?;
+    bootstrap_channel
+        .send(control.executed()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    let expect_eof = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
+    control.accept_expect_lifecycle_eof(&expect_eof)?;
+    match lifecycle_channel.receive() {
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+        Err(error) => return Err(RunnerError::Channel(error)),
+        Ok(_) => return Err(RunnerError::UnexpectedLifecycleRecord),
+    }
+    bootstrap_channel
+        .send(control.lifecycle_eof()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    Ok(())
+}
+
+fn verify_pid_one_runtime(provision: &PidOneProvision) -> Result<(), RunnerError> {
+    let snapshot = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
+    let user_ids = getresuid().map_err(errno_runner)?;
+    let group_ids = getresgid().map_err(errno_runner)?;
+    crate::evidence::verify_current_single_extent_mappings(
+        provision.outer_user_id(),
+        provision.outer_group_id(),
+    )
+    .map_err(RunnerError::Isolation)?;
+    if getpid().as_raw() != 1
+        || getppid().as_raw() != 0
+        || get_pdeathsig().map_err(errno_runner)? != Some(Signal::SIGKILL)
+        || user_ids.real.as_raw() != 0
+        || user_ids.effective.as_raw() != 0
+        || user_ids.saved.as_raw() != 0
+        || group_ids.real.as_raw() != 0
+        || group_ids.effective.as_raw() != 0
+        || group_ids.saved.as_raw() != 0
+        || snapshot.user != provision.user_namespace()
+        || snapshot.network != provision.network_namespace()
+        || snapshot.mount != provision.mount_namespace()
+        || snapshot.pid != provision.pid_namespace()
+        || snapshot.pid_for_children != provision.pid_namespace()
+        || !has_exact_single_task().map_err(RunnerError::Isolation)?
+        || env::vars_os().next().is_some()
+        || env::current_dir().map_err(RunnerError::Isolation)? != Path::new("/")
+    {
+        return Err(RunnerError::Isolation(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PID-1 runtime did not match its fixed isolated provision",
+        )));
+    }
     Ok(())
 }
 
@@ -525,6 +806,28 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+    }
+
+    #[test]
+    fn public_supervisor_rejects_a_multitask_caller_before_spawn() {
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let guard = std::thread::spawn(move || {
+            ready_sender.send(()).expect("announce guard task");
+            release_receiver.recv().expect("release guard task");
+        });
+        ready_receiver.recv().expect("wait for guard task");
+
+        let result = run_fixed_lifecycle();
+        release_sender.send(()).expect("release guard task");
+        guard.join().expect("join guard task");
+
+        assert!(matches!(
+            result,
+            Err(RunnerError::Process(error))
+                if error.kind() == io::ErrorKind::InvalidInput
+                    && error.to_string() == "fixed supervisor must start with exactly one task"
+        ));
     }
 
     #[test]

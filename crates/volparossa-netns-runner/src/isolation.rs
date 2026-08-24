@@ -19,7 +19,6 @@ pub(crate) enum IsolationAttempt {
 pub(crate) struct LauncherIsolation {
     outer_user_id: u32,
     outer_group_id: u32,
-    host: NamespaceSnapshot,
     membership: LauncherNamespaceMembership,
 }
 
@@ -40,13 +39,22 @@ impl LauncherIsolation {
                 "launcher credentials or namespace identity changed after mapping",
             ));
         }
-        let snapshot = NamespaceSnapshot::capture()?;
-        if !snapshot.is_isolated_launcher_from(self.host) || !self.membership.matches(snapshot) {
+        let membership = NamespaceSnapshot::capture_launcher_membership()?;
+        let pending_pid_namespace = NamespaceSnapshot::pending_pid_namespace_identity()?;
+        if !self.membership.matches_membership(membership) || pending_pid_namespace.is_some() {
             return Err(invalid_data(
                 "launcher namespace identity changed after mapping",
             ));
         }
         Ok(())
+    }
+
+    pub(crate) const fn outer_user_id(&self) -> u32 {
+        self.outer_user_id
+    }
+
+    pub(crate) const fn outer_group_id(&self) -> u32 {
+        self.outer_group_id
     }
 }
 
@@ -64,7 +72,10 @@ pub(crate) fn create_launcher_namespaces() -> io::Result<IsolationAttempt> {
             "launcher must have one task and non-setid credentials",
         ));
     }
-    let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWNET;
+    let flags = CloneFlags::CLONE_NEWUSER
+        | CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWNET
+        | CloneFlags::CLONE_NEWPID;
     if let Err(error) = unshare(flags) {
         return if is_namespace_unavailable(error) {
             Ok(IsolationAttempt::Unavailable)
@@ -82,12 +93,20 @@ pub(crate) fn create_launcher_namespaces() -> io::Result<IsolationAttempt> {
             ));
         }
     };
+    let pending_pid_namespace = match NamespaceSnapshot::pending_pid_namespace_identity() {
+        Ok(identity) => identity,
+        Err(error) if is_proof_unavailable(&error) => return Ok(IsolationAttempt::Unavailable),
+        Err(error) => return Err(error),
+    };
     let single_task = match has_exact_single_task() {
         Ok(single_task) => single_task,
         Err(error) if is_proof_unavailable(&error) => return Ok(IsolationAttempt::Unavailable),
         Err(error) => return Err(error),
     };
-    if !membership.is_isolated_launcher_from(before) || !single_task {
+    if !membership.is_isolated_launcher_from(before)
+        || pending_pid_namespace.is_some()
+        || !single_task
+    {
         return Err(invalid_data(
             "kernel did not establish the fixed launcher namespaces",
         ));
@@ -95,19 +114,17 @@ pub(crate) fn create_launcher_namespaces() -> io::Result<IsolationAttempt> {
     Ok(IsolationAttempt::Created(LauncherIsolation {
         outer_user_id: user_ids.effective.as_raw(),
         outer_group_id: group_ids.effective.as_raw(),
-        host: before,
         membership,
     }))
 }
 
-fn has_exact_single_task() -> io::Result<bool> {
-    let expected = std::process::id().to_string();
+pub(crate) fn has_exact_single_task() -> io::Result<bool> {
     let mut entries = fs::read_dir("/proc/self/task")?;
     let Some(entry) = entries.next() else {
         return Ok(false);
     };
-    let entry = entry?;
-    Ok(entry.file_name() == expected.as_str() && entries.next().is_none())
+    let _ = entry?;
+    Ok(entries.next().is_none())
 }
 
 const fn is_namespace_unavailable(error: Errno) -> bool {

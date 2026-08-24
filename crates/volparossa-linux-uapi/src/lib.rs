@@ -2,7 +2,8 @@
 //!
 //! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], taking
 //! immediate RAII ownership of descriptors installed by the bounded receive helpers, the
-//! [`install_close_range_on_exec`] process hook, and [`install_worker_no_descendants_filter`].
+//! [`install_close_range_on_exec`] process hook, the read-only
+//! [`ensure_waitable_sigchld_disposition`] query, and [`install_worker_no_descendants_filter`].
 //! The process hook performs exactly one async-signal-safe `close_range(2)` syscall between
 //! `fork` and `exec`. The seccomp wrapper installs one fixed amd64 classic-BPF program and accepts
 //! no caller-controlled filter, action, syscall number, flag, or pointer.
@@ -85,6 +86,42 @@ pub fn install_close_range_on_exec(command: &mut Command) {
             }
         });
     }
+}
+
+/// Require the current process to retain ordinary waitable child exit status.
+///
+/// A fixed child owner cannot prove exact reaping when `SIGCHLD` is ignored, a
+/// handler can concurrently call `waitpid(2)`, or `SA_NOCLDWAIT` discards exit
+/// status. This read-only query therefore accepts only the default `SIGCHLD`
+/// disposition without `SA_NOCLDWAIT`. Callers must separately guarantee that
+/// no concurrent thread can change the disposition after this check.
+///
+/// # Errors
+///
+/// Returns the kernel error when the action cannot be queried, or
+/// `PermissionDenied` when the disposition cannot support exclusive reaping.
+pub fn ensure_waitable_sigchld_disposition() -> io::Result<()> {
+    let mut action = mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: a null `act` makes this a read-only query. `action` points to
+    // writable storage of the exact libc type and is read only after the
+    // kernel reports success and has initialized it.
+    let result = unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful `sigaction` initialized the complete output object.
+    let action = unsafe { action.assume_init() };
+    classify_sigchld_action(action.sa_sigaction, action.sa_flags)
+}
+
+fn classify_sigchld_action(handler: libc::sighandler_t, flags: libc::c_int) -> io::Result<()> {
+    if handler != libc::SIG_DFL || flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "inherited SIGCHLD disposition prevents exact child reaping",
+        ));
+    }
+    Ok(())
 }
 
 /// Installs the fixed amd64 worker filter that prevents creation of descendants.
@@ -1139,8 +1176,75 @@ mod tests {
     use super::*;
 
     const CLOSE_RANGE_CHILD_ENV: &str = "VOLPAROSSA_UAPI_CLOSE_RANGE_CHILD";
+    const SIGCHLD_ACTION_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SIGCHLD_ACTION_CHILD";
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     const SECCOMP_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SECCOMP_CHILD";
+
+    #[test]
+    fn child_reaping_requires_default_sigchld_without_nocldwait() {
+        assert!(classify_sigchld_action(libc::SIG_DFL, 0).is_ok());
+        for (handler, flags) in [
+            (libc::SIG_IGN, 0),
+            (libc::SIG_DFL, libc::SA_NOCLDWAIT),
+            (libc::SIG_IGN, libc::SA_NOCLDWAIT),
+        ] {
+            assert_eq!(
+                classify_sigchld_action(handler, flags)
+                    .expect_err("nonwaitable SIGCHLD action")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    extern "C" fn sigchld_test_handler(_: libc::c_int) {}
+
+    #[test]
+    fn sigchld_query_rejects_nonwaitable_kernel_actions() {
+        if let Some(mode) = env::var_os(SIGCHLD_ACTION_CHILD_ENV) {
+            let mut action = unsafe { mem::zeroed::<libc::sigaction>() };
+            action.sa_sigaction = match mode.to_str() {
+                Some("ignore") => libc::SIG_IGN,
+                Some("nocldwait") => libc::SIG_DFL,
+                Some("handler") => sigchld_test_handler as libc::sighandler_t,
+                _ => panic!("unexpected SIGCHLD test mode"),
+            };
+            action.sa_flags = if mode == "nocldwait" {
+                libc::SA_NOCLDWAIT
+            } else {
+                0
+            };
+            // SAFETY: this is an isolated one-test subprocess which creates
+            // no children. The initialized action has an empty mask and
+            // either a valid fixed handler or a libc sentinel.
+            unsafe {
+                assert_eq!(libc::sigemptyset(&raw mut action.sa_mask), 0);
+                assert_eq!(
+                    libc::sigaction(libc::SIGCHLD, &raw const action, std::ptr::null_mut()),
+                    0
+                );
+            }
+            assert_eq!(
+                ensure_waitable_sigchld_disposition()
+                    .expect_err("nonwaitable kernel action")
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            return;
+        }
+
+        let current_executable = env::current_exe().expect("current test executable");
+        for mode in ["ignore", "nocldwait", "handler"] {
+            let status = Command::new(&current_executable)
+                .arg("--exact")
+                .arg("tests::sigchld_query_rejects_nonwaitable_kernel_actions")
+                .arg("--test-threads=1")
+                .env(SIGCHLD_ACTION_CHILD_ENV, mode)
+                .status()
+                .expect("spawn isolated SIGCHLD query test");
+            assert!(status.success(), "SIGCHLD mode {mode} was not rejected");
+        }
+    }
 
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     #[test]

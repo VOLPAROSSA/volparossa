@@ -3,8 +3,9 @@
 use std::{env, ffi::OsStr, process::ExitCode};
 
 use volparossa_netns_runner::{
-    BLOCKED_EXIT_CODE, INTERNAL_CHILD_ARGUMENT, INTERNAL_ERROR_EXIT_CODE, LifecycleOutcome,
-    run_fixed_lifecycle, run_internal_child,
+    BLOCKED_EXIT_CODE, INTERNAL_CHILD_ARGUMENT, INTERNAL_ERROR_EXIT_CODE,
+    INTERNAL_PID_ONE_ARGUMENT, LifecycleOutcome, run_fixed_lifecycle, run_internal_child,
+    run_internal_pid_one,
 };
 
 const PREVIEW_ARGUMENT: &str = "--preview";
@@ -20,9 +21,12 @@ fn main() -> ExitCode {
     }
     match first.as_deref() {
         Some(argument) if argument == OsStr::new(INTERNAL_CHILD_ARGUMENT) => run_internal_child(),
+        Some(argument) if argument == OsStr::new(INTERNAL_PID_ONE_ARGUMENT) => {
+            run_internal_pid_one()
+        }
         Some(argument) if argument == OsStr::new(PREVIEW_ARGUMENT) => {
             println!(
-                "VOLPAROSSA fixed supervisor preview: anonymous user/mount/network namespace mapping is implemented; PID namespace/PID-1, private mounts, GO, and every network-topology mutation remain blocked."
+                "VOLPAROSSA fixed supervisor preview: anonymous user/mount/network and pending child-PID namespace bootstrap, exact UID/GID mapping, and exact self-reexec PID-1 proof are implemented; private mounts, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked."
             );
             ExitCode::SUCCESS
         }
@@ -39,9 +43,15 @@ fn main() -> ExitCode {
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
-            Ok(LifecycleOutcome::BlockedAfterNamespaceMapping) => {
+            Ok(LifecycleOutcome::BlockedAtPidOneProof) => {
                 eprintln!(
-                    "BLOCKED: anonymous namespaces and exact ID mappings were verified without GO; PID namespace/PID-1 and private mounts are not implemented."
+                    "BLOCKED: anonymous namespaces and exact ID mappings were verified, but kernel policy hid the required outer PID-1 proof; no GO was emitted."
+                );
+                ExitCode::from(BLOCKED_EXIT_CODE)
+            }
+            Ok(LifecycleOutcome::BlockedAfterPidOneProof) => {
+                eprintln!(
+                    "BLOCKED: anonymous namespaces, exact ID mappings, and a self-reexecuted PID 1 were verified and reaped without BOOTSTRAP_READY or GO; private mounts are not implemented."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

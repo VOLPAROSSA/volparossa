@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-23
+Last updated: 2026-08-24
 
 ## Repository and engineering baseline
 
@@ -397,15 +397,27 @@ Last updated: 2026-08-23
   inherited unnamed seqpacket channel while retaining separate bootstrap-control and lifecycle
   channels. It kernel- and executable-authenticates its fixed parent/child pair, rejects duplicate
   or timed-out provisioning, re-executes only its fixed image with a descriptor fence, and directly
-  creates anonymous user, mount, and network namespaces. The outer holds a pidfd, anchored proc
-  directory, and exact namespace FDs before installing and independently reading back one UID/GID
-  mapping extent behind a strict three-record barrier. Repeated tests prove EOF-before-`GO`, exact
-  reaping, and unchanged outer namespace/mount/route observations before the runner returns
-  `BLOCKED` without executing command shims. Required parent, child, and outer proofs fail closed
-  when kernel policy hides them. Generic CI also accepts that explicit kernel-policy unavailable
-  outcome, so it is not yet positive live-isolation evidence. The slice has no PID
-  namespace/PID 1, private mounts, signal-driven five-frame driver, topology mutation, acceptance
-  report, or A01-A15 result.
+  creates anonymous user, mount, network, and pending child PID namespaces. Before mapping, the
+  outer holds a pidfd, anchored proc directory, exact user/mount/network/current-PID namespace FDs,
+  an empty child-set proof, and the kernel-defined uninstantiated `pid_for_children` proof. It then
+  installs and independently reads back one UID/GID mapping extent. The launcher subsequently
+  creates exactly one fixed self-reexecuted PID 1 and upgrades the full namespace proof. PID 1
+  checks its PID/PPID, mappings, credentials, namespaces, environment, cwd, task count, and
+  parent-death signal; the outer independently proves its executable/selector, PID nesting,
+  mappings, namespaces, empty descendant set, and sole launcher-child relation. The positive
+  `BlockedAfterPidOneProof` route closes without a lifecycle frame or `GO` and proves exact PID-1
+  exit/reap. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
+  namespace/mount/route observations, and no command-shim execution. Normal reaping retains both
+  pidfd and exact `Child` ownership; every forced `SIGKILL` after admission targets that pidfd.
+  Pidfd acquisition is mandatory; its failure closes the private channels, attempts `SIGKILL`
+  against the still-owned unreaped child, and synchronously waits/reaps it before returning the
+  pidfd error. The public `--run` entry requires one task, and a non-default `SIGCHLD` handler or
+  `SA_NOCLDWAIT` is rejected before any spawn. The rare process-local fallback-reaper path is not
+  post-exit cleanup or A14 evidence. Required parent, namespace,
+  mapping, and outer PID-1 proofs fail closed when kernel policy hides them. Generic CI may
+  therefore prove only fail-closed behaviour; positive live PID-1 evidence requires the explicit
+  `BlockedAfterPidOneProof` outcome. The slice still has no private mounts, signal-driven five-frame
+  driver, topology mutation, acceptance report, or A01-A15 result.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 
