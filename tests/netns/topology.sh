@@ -20,9 +20,8 @@ print_plan() {
         '  mount bounded private /run and PID-bound private /proc inside that sandbox' \
         '  prove exact RTNL, stable canonical IPv4 forwarding, and zero-table nftables baselines' \
         '  emit one pinned BOOTSTRAP_READY and one canonical affine GO authorization' \
-        '  current slice: create, prove, and reverse-roll back fixed descriptor-relative private-run roots and slots' \
-        '  future full topology: retain those roots and slots after GO until final teardown' \
-        '  create two run-scoped named namespaces only inside the private /run' \
+        '  current slice: create roots and slots, publish and visit two pristine live nsfs pins, then ordinarily unmount B/A and reverse-roll back every private-run object' \
+        '  future full topology: retain those roots, slots, and run-scoped named namespaces after GO until final teardown' \
         '  create both ends of two run-scoped veth pairs only inside the sandbox' \
         '  add exact local routes; do not add a default route' \
         '  install a namespace-local nftables forward chain with policy drop' \
@@ -56,7 +55,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, exact RTNL, stable canonical IPv4 forwarding, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, canonical GO, descriptor-relative private-run roots and slots, exact reverse rollback, and TERM/EOF/reap. It creates no namespace pin or network-topology object and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence; this shell entry point remains non-executing until the post-GO network-topology driver exists.' \
+            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, exact RTNL, stable canonical IPv4 forwarding, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, canonical GO, descriptor-relative private-run roots and slots, two distinct live run-bound nsfs pins, their full pristine network state, ordinary reverse unmount, exact filesystem rollback, and TERM/EOF/reap. It creates no veth, address, route, nftables object, ownership manifest, or topology readiness and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence; this shell entry point remains non-executing until the post-GO network-topology driver exists.' \
             'This invocation created no namespace, link, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;

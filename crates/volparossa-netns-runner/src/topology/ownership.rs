@@ -1394,8 +1394,9 @@ impl StageBoundary {
 
 /// Affine post-`GO` owner of one run-bound private root and two empty namespace slots.
 ///
-/// The authorization token remains private to this state. This type publishes
-/// no ownership manifest and grants no namespace, veth, or lifecycle-attestation authority.
+/// The authorization token remains private to this state. Namespace authority
+/// is confined to consuming this owner into the exact two-pin transition; it
+/// grants no ownership-manifest, veth, configured-network, or lifecycle-attestation authority.
 /// Cleanup is scoped to the disposable runner's fixed single-task PID 1 and
 /// trusted launcher. It does not claim synchronization against a hostile
 /// mapped-same-UID process that already holds a writable private-`/run` descriptor;
