@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         }
         Some(argument) if argument == OsStr::new(PREVIEW_ARGUMENT) => {
             println!(
-                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, and one pinned BOOTSTRAP_READY are implemented; GO, every network-topology mutation, and A14 cleanup evidence remain blocked."
+                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY are implemented; GO, every network-topology mutation, network-object cleanup, A14, A15, and acceptance evidence remain blocked."
             );
             ExitCode::SUCCESS
         }
@@ -57,7 +57,7 @@ fn main() -> ExitCode {
             }
             Ok(LifecycleOutcome::BlockedAfterBootstrapReadyProof) => {
                 eprintln!(
-                    "BLOCKED: the exact new-netns RTNL baseline and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; no GO, network-topology mutation, or A14 evidence was produced."
+                    "BLOCKED: the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; GO was never emitted, no network-topology mutation occurred, and no network-object cleanup, A14, A15, or acceptance evidence was produced."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

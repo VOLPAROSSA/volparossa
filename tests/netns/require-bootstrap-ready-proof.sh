@@ -119,6 +119,7 @@ capture_host_state() {
     cp /proc/self/mountinfo "$destination/mountinfo"
     cp /proc/net/route "$destination/ipv4-routes"
     cp /proc/net/ipv6_route "$destination/ipv6-routes"
+    cp /proc/sys/net/ipv4/ip_forward "$destination/ipv4-forwarding"
 }
 
 mkdir "$proof_tmp/before" "$proof_tmp/after"
@@ -138,14 +139,14 @@ if [ -s "$proof_tmp/stdout" ]; then
     fail 'runner wrote unexpected standard output'
 fi
 printf '%s\n' \
-    'BLOCKED: the exact new-netns RTNL baseline and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; no GO, network-topology mutation, or A14 evidence was produced.' \
+    'BLOCKED: the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; GO was never emitted, no network-topology mutation occurred, and no network-object cleanup, A14, A15, or acceptance evidence was produced.' \
     >"$proof_tmp/expected-stderr"
 if ! cmp -s "$proof_tmp/expected-stderr" "$proof_tmp/stderr"; then
     fail 'runner did not report the complete pinned BOOTSTRAP_READY proof outcome'
 fi
-for record in namespaces mountinfo ipv4-routes ipv6-routes; do
+for record in namespaces mountinfo ipv4-routes ipv6-routes ipv4-forwarding; do
     if ! cmp -s "$proof_tmp/before/$record" "$proof_tmp/after/$record"; then
-        fail 'outer host namespace, mount, or route state changed'
+        fail 'outer host namespace, mount, route, or IPv4-forwarding state changed'
     fi
 done
 

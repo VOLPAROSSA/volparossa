@@ -18,7 +18,8 @@ print_plan() {
         '  enter fixed anonymous network, mount, and PID namespaces' \
         '  make the inherited mount tree recursively private' \
         '  mount bounded private /run and PID-bound private /proc inside that sandbox' \
-        '  prove the exact new-netns RTNL baseline and emit one pinned BOOTSTRAP_READY' \
+        '  prove exact RTNL, stable canonical IPv4 forwarding, and zero-table nftables baselines' \
+        '  emit one pinned BOOTSTRAP_READY without authorizing topology mutation' \
         '  create two run-scoped named namespaces only inside the private /run' \
         '  create both ends of two run-scoped veth pairs only inside the sandbox' \
         '  add exact local routes; do not add a default route' \
@@ -53,7 +54,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, the exact new-netns RTNL baseline, one pinned BOOTSTRAP_READY, and TERM/EOF/reap without GO or A14 evidence, but this shell entry point remains non-executing until the post-GO topology driver exists.' \
+            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, exact RTNL, stable canonical IPv4 forwarding, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, and TERM/EOF/reap without GO, network-topology mutation, network-object cleanup, A14, A15, or acceptance evidence, but this shell entry point remains non-executing until the post-GO topology driver exists.' \
             'This invocation created no namespace, link, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;

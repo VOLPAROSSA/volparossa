@@ -176,8 +176,9 @@ provisioning never reaches `GO`. A separate inherited bidirectional channel then
 frames in one strict order. `BOOTSTRAP_READY` is an
 attestation that the fixed inner worker must construct only after directly measuring that it is PID
 1 in different network, mount, and PID
-namespaces, with private mounts, pristine networking, handlers, and the parent-death chain
-established before mutation. The outer independently compares the three namespace identities with
+namespaces, with private mounts, the enumerated read-only pre-`GO` network baseline, handlers, and
+the parent-death chain established before network-topology mutation. The outer independently
+compares the three namespace identities with
 its original host identities. Only then may it send the affine `GO` authorization.
 `TOPOLOGY_READY` attests to the run ID, fixed topology-specification digest, exact two run-bound
 namespace identities, and the completed probe, all directly observed by that worker. The outer then
@@ -261,7 +262,7 @@ mask plus the `0x0440` process-start SIGBUS/SIGSEGV stack-overflow baseline of t
 Rust 1.85.0 runtime on Debian 13 amd64, not a Linux ABI constant; the audited UAPI separately reads
 back the exact managed handler addresses, flags and masks.
 
-After `PRIVATE_MOUNTS_VERIFIED`, PID 1 directly proves the exact kernel-new-network-namespace RTNL
+After `PRIVATE_MOUNTS_VERIFIED`, PID 1 directly proves the enumerated read-only pre-`GO` network
 baseline, repeats its mount/runtime/signal proofs, and emits one canonical `BOOTSTRAP_READY` over
 the affinely transferred lifecycle endpoint. The frame is bound to the run and PID 1's measured
 network, mount, and PID namespace identities. The outer parses that actual frame, requires all
@@ -282,14 +283,18 @@ mode, GSO segment limit 65535, and GSO/GRO plus IPv4 GSO/GRO size limits 65536. 
 relationship, alias, alternate name, link-info, or attached XDP program. It
 contains no addresses, routes, ordinary or proxy neighbours, or nexthop objects. Its
 routing-policy database is exactly IPv4 priorities 0/local, 32766/main, and 32767/default plus
-IPv6 priorities 0/local and 32766/main. PID 1 requires two identical bounded snapshots before
-readiness, then repeats the same double snapshot after pre-`GO` EOF and brackets both observations
-with its retained mount, runtime, and signal proofs.
+IPv6 priorities 0/local and 32766/main. Each complete observation reads the fixed namespace-local
+`/proc/sys/net/ipv4/ip_forward` record through the retained private-proc descriptor, accepts only
+canonical `0\n` or `1\n`, and binds both the procfs object identity and value across the RTNL
+snapshot. A fixed read-only `NETLINK_NETFILTER` sequence requires generation 1 immediately before
+and after a dump containing zero nftables tables. PID 1 repeats the complete observation
+after pre-`GO` EOF and requires every pinned component to match, while retained mount, runtime, and
+signal proofs bracket both barriers.
 
-Here “pristine” is deliberately scoped to that enumerated pre-topology readiness contract; it is
-not a claim that this slice attests every independent Linux networking table or tunable. Netconf
-sysctls, address-label and neighbour-table parameters, and standalone traffic-control actions are
-outside this pre-`GO` proof and no production mutator for them exists in this slice. A later
+This proof does not claim that forwarding is disabled or that every firewall/netfilter facility is
+empty. Other netconf, address-label, neighbour-table parameter, traffic-control, conntrack, ipset,
+NFQUEUE/NFLOG, legacy-xtables, and independent-hook state is outside it. A read-only GET may cause
+ordinary kernel module loading, but the runner has no writer or nftables mutation API. A later
 topology driver must either pin every setting it relies on or extend this proof before `GO`.
 
 The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
@@ -309,11 +314,11 @@ PID 1, proves lifecycle EOF, and reaps it without issuing a mount instruction. A
 job may therefore prove only fail-closed behaviour; the complete positive path requires the
 explicit `BlockedAfterBootstrapReadyProof` outcome on the Debian 13 acceptance host:
 
-The portable unit suite runs the live RTNL collector and adversarial link/object mutations when
-unprivileged user/network namespaces are available. It treats only the exact util-linux `EPERM`
-forms for an unavailable `unshare` or UID/GID-map write as an environmental skip; every other
-spawn, child, mutation, parser, or proof failure remains fatal. Such a skip is not readiness
-evidence and cannot replace the dedicated gate.
+The portable unit suite runs the live RTNL and read-only NFNETLINK collectors plus adversarial
+wire/parser and RTNL link/object cases when unprivileged user/network namespaces are available. It
+treats only the exact util-linux `EPERM` forms for an unavailable `unshare` or UID/GID-map write as
+an environmental skip; every other spawn, child, parser, or proof failure remains fatal. Such a
+skip is not readiness evidence and cannot replace the dedicated gate.
 
 ```sh
 just test-netns-bootstrap-ready-proof
@@ -325,7 +330,8 @@ A dedicated ephemeral VM is required for
 authoritative acceptance, but the gate itself proves only that its immediate host is a VM; CI job
 provenance must establish that the VM was dedicated and ephemeral. A bare-metal development host
 may supply an additional local proof because the runner remains inside disposable namespaces and
-the gate compares its outer namespace, mount and route state exactly before and after. A container
+the gate compares its outer namespace, mount, route, and IPv4-forwarding state exactly before and
+after. It cannot authoritatively compare host nftables state. A container
 on an Ubuntu runner does not supply the required Debian-host kernel evidence, and a privileged
 container would test a different privilege boundary. The gate executes a private, owner-only copy
 of the fixed-target build artifact.
@@ -340,11 +346,14 @@ public `--run` entry requires exactly one initial task, and any non-default `SIG
 later synchronous reap attempt cannot complete, ownership transfers to a process-local fallback
 reaper instead of being silently detached; that rare fallback is not claimed as post-exit cleanup
 or A14 evidence. The current `--run` path verifies EOF-before-`GO`, repeated exact PID-1 and
-outer-launcher reaping, and unchanged outer namespace, mount-table, and route-table observations,
+outer-launcher reaping, and unchanged outer namespace, mount-table, route-table, and
+IPv4-forwarding observations,
 then honestly returns `BLOCKED`/77. An explicit `BlockedAfterBootstrapReadyProof` run additionally
-proves the complete private-mount barrier, exact new-netns RTNL baseline, one real pinned
+proves the complete private-mount barrier, exact RTNL state, descriptor-pinned IPv4-forwarding
+baseline, zero nftables tables bracketed by unchanged generation 1, one real pinned
 `BOOTSTRAP_READY`, and fixed pidfd-to-PID1-signalfd TERM observation described above. It never
-issues `GO`, mutates network topology, or produces A14 evidence. At supervised IPC boundaries,
+issues `GO`, mutates network topology, or produces network-object cleanup, A14, A15, or acceptance
+evidence. At supervised IPC boundaries,
 managed outer HUP/INT/TERM events take
 priority over pending protocol records and trigger bounded exact-launcher containment. The live
 gate does not yet prove external-signal handling throughout every reap/report phase, a forced

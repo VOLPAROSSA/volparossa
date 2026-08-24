@@ -32,10 +32,12 @@ pub(crate) const PRIVATE_RUN_MODE: u32 = 0o700;
 
 const MAX_PRIVATE_MOUNTINFO_RECORDS: usize = 4096;
 const MAX_PROC_PROOF_BYTES: usize = 4096;
+const MAX_IPV4_FORWARDING_RECORD_BYTES: usize = 2;
 const DIRECTORY_BUFFER_BYTES: usize = 4096;
 const TMPFS_SUPER_MAGIC: FsWord = 0x0102_1994;
 const RUN_MOUNT_POINT: &[u8] = b"/run";
 const PROC_MOUNT_POINT: &[u8] = b"/proc";
+const IPV4_FORWARDING_RECORD_PATH: &str = "sys/net/ipv4/ip_forward";
 
 /// Visible mount identities proven for the private runtime filesystems.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +85,32 @@ pub(crate) struct PrivateMounts {
     ids: PrivateMountIds,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcRecordIdentity {
+    device_major: u32,
+    device_minor: u32,
+    inode: u64,
+    mount_id: u64,
+}
+
+/// Opaque observation of the fixed namespace-local IPv4-forwarding record.
+///
+/// Equality binds both the bounded exact bytes and the procfs object identity
+/// observed through the retained private-proc descriptor. No descriptor or
+/// write capability leaves the mount owner.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct Ipv4ForwardingRecordSnapshot {
+    bytes: Vec<u8>,
+    identity: ProcRecordIdentity,
+}
+
+impl Ipv4ForwardingRecordSnapshot {
+    /// Return the bounded raw kernel record for canonical parsing by the network proof.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl PrivateMounts {
     /// Repeat the complete local mount-table and procfs proof.
     pub(crate) fn verify(&self) -> Result<(), PrivateMountSetupError> {
@@ -109,6 +137,13 @@ impl PrivateMounts {
         }
 
         verify_visible_private_mounts(&self.root, self.root_mount_id, self.ids)
+    }
+
+    /// Read the fixed namespace-local IPv4-forwarding record through the retained procfs pin.
+    pub(crate) fn read_ipv4_forwarding_record(
+        &self,
+    ) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
+        read_ipv4_forwarding_record_at(&self.proc_pin, self.ids.proc_mount_id)
     }
 }
 
@@ -314,6 +349,19 @@ fn open_beneath<Fd: AsFd>(directory: Fd, name: &str, flags: OFlags) -> rustix::i
     )
 }
 
+fn open_ipv4_forwarding_record<Fd: AsFd>(proc: Fd) -> rustix::io::Result<OwnedFd> {
+    openat2(
+        proc,
+        IPV4_FORWARDING_RECORD_PATH,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS
+            | ResolveFlags::NO_XDEV,
+    )
+}
+
 fn statx_fd<Fd: AsFd>(fd: Fd, requested: StatxFlags) -> rustix::io::Result<Statx> {
     statx(
         fd,
@@ -341,6 +389,29 @@ fn require_directory_and_mount_id(observed: &Statx, expected_mount_id: u64) -> i
         ));
     }
     Ok(())
+}
+
+fn proc_record_identity(
+    observed: &Statx,
+    expected_mount_id: u64,
+) -> io::Result<ProcRecordIdentity> {
+    let mask = StatxFlags::from_bits_retain(observed.stx_mask);
+    if !mask.contains(StatxFlags::TYPE | StatxFlags::INO | StatxFlags::MNT_ID)
+        || !FileType::from_raw_mode(u32::from(observed.stx_mode)).is_file()
+        || observed.stx_ino == 0
+        || observed.stx_mnt_id == 0
+        || observed.stx_mnt_id != expected_mount_id
+    {
+        return Err(invalid_data(
+            "kernel did not return the expected regular proc-record identity",
+        ));
+    }
+    Ok(ProcRecordIdentity {
+        device_major: observed.stx_dev_major,
+        device_minor: observed.stx_dev_minor,
+        inode: observed.stx_ino,
+        mount_id: observed.stx_mnt_id,
+    })
 }
 
 fn verify_visible_private_mounts(
@@ -534,11 +605,58 @@ fn read_proc_record(
         "open private procfs proof record",
         open_beneath(proc, name, OFlags::RDONLY | OFlags::CLOEXEC),
     )?;
-    read_bounded(File::from(descriptor), maximum)
+    read_bounded(&mut File::from(descriptor), maximum)
         .map_err(|source| hard_error("read private procfs proof record", source))
 }
 
-fn read_bounded(mut file: File, maximum: usize) -> io::Result<Vec<u8>> {
+fn read_ipv4_forwarding_record_at(
+    proc: &OwnedFd,
+    expected_proc_mount_id: u64,
+) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
+    let descriptor = hard_rustix(
+        "open fixed private IPv4-forwarding record",
+        open_ipv4_forwarding_record(proc),
+    )?;
+    let mut file = File::from(descriptor);
+    let before = hard_rustix(
+        "measure fixed private IPv4-forwarding record before read",
+        statx_fd(
+            &file,
+            StatxFlags::TYPE | StatxFlags::INO | StatxFlags::MNT_ID,
+        ),
+    )?;
+    let identity = proc_record_identity(&before, expected_proc_mount_id).map_err(|source| {
+        hard_error(
+            "verify fixed private IPv4-forwarding record before read",
+            source,
+        )
+    })?;
+    let bytes = read_bounded(&mut file, MAX_IPV4_FORWARDING_RECORD_BYTES)
+        .map_err(|source| hard_error("read fixed private IPv4-forwarding record", source))?;
+    let after = hard_rustix(
+        "measure fixed private IPv4-forwarding record after read",
+        statx_fd(
+            &file,
+            StatxFlags::TYPE | StatxFlags::INO | StatxFlags::MNT_ID,
+        ),
+    )?;
+    let identity_after =
+        proc_record_identity(&after, expected_proc_mount_id).map_err(|source| {
+            hard_error(
+                "verify fixed private IPv4-forwarding record after read",
+                source,
+            )
+        })?;
+    if identity_after != identity {
+        return Err(hard_error(
+            "verify fixed private IPv4-forwarding record stability",
+            invalid_data("fixed private IPv4-forwarding record identity changed during read"),
+        ));
+    }
+    Ok(Ipv4ForwardingRecordSnapshot { bytes, identity })
+}
+
+fn read_bounded(file: &mut File, maximum: usize) -> io::Result<Vec<u8>> {
     let limit = maximum
         .checked_add(1)
         .ok_or_else(|| invalid_data("proof record read bound overflowed"))?;
@@ -857,6 +975,14 @@ fn errno_io(error: Errno) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        path::{Path, PathBuf},
+    };
+
+    use rustix::fs::mkfifoat;
+
     use super::*;
 
     const VALID_MOUNTINFO: &[u8] = b"10 10 8:1 / / rw,relatime - ext4 /dev/root rw\n\
@@ -864,6 +990,142 @@ mod tests {
 21 20 0:21 / /run rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=16384k,nr_inodes=4096,mode=700,inode64\n\
 30 10 0:30 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n\
 31 30 0:31 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n";
+
+    fn open_test_directory(path: &Path) -> OwnedFd {
+        File::open(path).expect("open test directory").into()
+    }
+
+    fn fixed_record_path(root: &Path) -> PathBuf {
+        root.join(IPV4_FORWARDING_RECORD_PATH)
+    }
+
+    fn create_fixed_record_parents(root: &Path) {
+        fs::create_dir_all(
+            fixed_record_path(root)
+                .parent()
+                .expect("fixed record parent"),
+        )
+        .expect("create fixed record parents");
+    }
+
+    fn hard_failure_source(error: PrivateMountSetupError) -> io::Error {
+        match error {
+            PrivateMountSetupError::HardFailure { source, .. } => source,
+            PrivateMountSetupError::PolicyDenied { .. } => {
+                panic!("fixed read errors may never be mount-policy denials")
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_reader_pins_real_proc_record_identity() {
+        let root = open_test_directory(Path::new("/"));
+        let run_pin = open_test_directory(Path::new("/run"));
+        let proc_pin = open_test_directory(Path::new("/proc"));
+        let root_mount_id = mount_id_for_fd(&root).expect("root mount ID");
+        let run_mount_id = mount_id_for_fd(&run_pin).expect("run mount ID");
+        let proc_mount_id = mount_id_for_fd(&proc_pin).expect("proc mount ID");
+        let mounts = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids: PrivateMountIds {
+                run_mount_id,
+                proc_mount_id,
+            },
+        };
+
+        let first = mounts
+            .read_ipv4_forwarding_record()
+            .expect("first fixed forwarding read");
+        let second = mounts
+            .read_ipv4_forwarding_record()
+            .expect("second fixed forwarding read");
+        assert!(matches!(first.bytes(), b"0\n" | b"1\n"));
+        assert_eq!(first, second, "value and proc-record identity stay exact");
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_reader_rejects_wrong_mount_identity() {
+        let proc = open_test_directory(Path::new("/proc"));
+        let mount_id = mount_id_for_fd(&proc).expect("proc mount ID");
+        let wrong_mount_id = mount_id.checked_add(1).expect("mount ID increment");
+        let source = hard_failure_source(
+            read_ipv4_forwarding_record_at(&proc, wrong_mount_id)
+                .expect_err("wrong mount ID must fail"),
+        );
+        assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_reader_is_nonblocking_and_rejects_non_regular_leaf() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        let root = open_test_directory(directory.path());
+        mkfifoat(
+            &root,
+            IPV4_FORWARDING_RECORD_PATH,
+            Mode::from_raw_mode(0o600),
+        )
+        .expect("FIFO fixture");
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let source = hard_failure_source(
+            read_ipv4_forwarding_record_at(&root, mount_id)
+                .expect_err("FIFO leaf must fail without blocking"),
+        );
+        assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_reader_rejects_symlink_and_mount_crossing() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        let leaf = fixed_record_path(directory.path());
+        fs::write(leaf.with_file_name("target"), b"0\n").expect("symlink target");
+        symlink("target", &leaf).expect("symlink fixture");
+        let fixture = open_test_directory(directory.path());
+        let fixture_mount_id = mount_id_for_fd(&fixture).expect("fixture mount ID");
+        let symlink_source = hard_failure_source(
+            read_ipv4_forwarding_record_at(&fixture, fixture_mount_id)
+                .expect_err("symlink leaf must fail"),
+        );
+        assert_eq!(
+            symlink_source.raw_os_error(),
+            Some(Errno::LOOP.raw_os_error())
+        );
+
+        let root = open_test_directory(Path::new("/"));
+        let sys = open_test_directory(Path::new("/sys"));
+        let root_mount_id = mount_id_for_fd(&root).expect("root mount ID");
+        assert_ne!(
+            root_mount_id,
+            mount_id_for_fd(&sys).expect("sysfs mount ID"),
+            "test requires /sys to be a distinct mount"
+        );
+        let crossing_source = hard_failure_source(
+            read_ipv4_forwarding_record_at(&root, root_mount_id)
+                .expect_err("cross-mount lookup must fail"),
+        );
+        assert_eq!(
+            crossing_source.raw_os_error(),
+            Some(Errno::XDEV.raw_os_error())
+        );
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_reader_rejects_oversized_record() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        fs::write(fixed_record_path(directory.path()), b"000").expect("oversized fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let source = hard_failure_source(
+            read_ipv4_forwarding_record_at(&root, mount_id)
+                .expect_err("oversized record must fail"),
+        );
+        assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn visible_private_mounts_accept_covered_inherited_records() {
@@ -958,7 +1220,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let empty = File::open(directory.path()).expect("open empty directory");
         verify_empty_directory(&empty).expect("empty directory");
-        std::fs::write(directory.path().join("owned-object"), b"x").expect("write entry");
+        fs::write(directory.path().join("owned-object"), b"x").expect("write entry");
         assert!(verify_empty_directory(&empty).is_err());
     }
 

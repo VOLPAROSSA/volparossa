@@ -81,8 +81,8 @@ pub enum RunnerError {
     /// Outer kernel observation or mapping installation violated a fixed invariant.
     #[error("isolated launcher kernel proof failed: {0}")]
     KernelProof(#[source] io::Error),
-    /// PID 1 could not prove the fixed pristine routing-readiness baseline.
-    #[error("PID-1 pristine routing-readiness proof failed")]
+    /// PID 1 could not prove the enumerated read-only pre-`GO` network baseline.
+    #[error("PID-1 enumerated pre-GO network-readiness proof failed")]
     NetworkProof,
     /// The operating-system CSPRNG could not create the run identifier.
     #[error("failed to generate lifecycle run identifier")]
@@ -164,8 +164,10 @@ impl From<PidOneControlError> for RunnerError {
 /// and proven before it recursively privatizes the mount tree and installs fixed
 /// private `/run` and `/proc` filesystems. PID 1 measures them locally; the outer
 /// independently binds their visible mount IDs, filesystem properties, and procfs
-/// PID view to its retained kernel pins. PID 1 proves the pristine RTNL baseline
-/// and emits one canonical `BOOTSTRAP_READY` bound to those pins. Only then does
+/// PID view to its retained kernel pins. PID 1 proves the pristine RTNL baseline,
+/// pins a stable canonical IPv4-forwarding record, proves zero nftables tables
+/// bracketed by unchanged generation 1, and emits one canonical
+/// `BOOTSTRAP_READY` bound to those pins. Only then does
 /// the outer send fixed TERM through the retained pidfd and require one affine
 /// PID-1 `signalfd` observation before exact reap. No `GO` is emitted. The outer
 /// verifies that its own namespace identities remain unchanged.
@@ -915,7 +917,9 @@ fn finish_pid_one(
 /// parent-death signal. Only after the outer pins it may it install and directly
 /// verify recursive private propagation, bounded `/run`, and PID-bound `/proc`.
 /// It then arms the fixed handler/mask/`signalfd` set, proves the pristine RTNL
-/// baseline, and emits exactly one canonical `BOOTSTRAP_READY`. It consumes
+/// baseline, a stable canonical IPv4-forwarding record, and zero nftables tables
+/// bracketed by unchanged generation 1. It then emits exactly one canonical
+/// `BOOTSTRAP_READY` and consumes
 /// pidfd-delivered TERM only afterward and reports the affine observation over
 /// the launcher-private control channel before proving pre-GO lifecycle EOF.
 #[doc(hidden)]
@@ -1005,7 +1009,7 @@ fn complete_pid_one_ready_retirement(
     signal_supervisor
         .verify_pid_one_quiescent()
         .map_err(RunnerError::SignalSupervision)?;
-    let proof = crate::network::prove_pristine_network_namespace()
+    let proof = crate::network::prove_pre_go_network_baseline(mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
     mounts
         .verify()
