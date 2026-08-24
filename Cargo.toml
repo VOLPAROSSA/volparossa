@@ -57,7 +57,7 @@ rand_chacha = "0.3.1"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "pem", "ring"] }
 rtnetlink = "0.17.0"
-rustix = { version = "=1.1.4", features = ["fs", "process", "thread"] }
+rustix = { version = "=1.1.4", features = ["fs", "mount", "process", "thread"] }
 rusqlite = { version = "0.32.1", features = ["bundled", "chrono", "limits", "modern_sqlite", "trace", "uuid"] }
 rustls = { version = "0.23.27", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-pki-types = "1.12.0"

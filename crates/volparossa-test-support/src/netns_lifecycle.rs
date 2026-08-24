@@ -205,7 +205,7 @@ pub struct NamespaceIdentity {
 ///
 /// This record supplies the outer-selected run identifier, the three original-host namespace
 /// identities, and the fixed topology specification digest over the already inherited IPC
-/// channel. It is deliberately not an [`OuterLifecycleFrame`] and carries no mutation authority;
+/// channel. It is deliberately not an [`OuterLifecycleFrame`] and carries no topology-mutation authority;
 /// only a subsequently validated [`Go`] can produce [`MutationAuthorization`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaunchContext {
@@ -475,7 +475,7 @@ impl CompletionError {
     }
 }
 
-/// Inner sandbox attestation emitted before the outer supervisor may authorize mutation.
+/// Inner sandbox attestation emitted before the outer supervisor may authorize topology mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapReady {
     run_id: RunId,
@@ -604,7 +604,7 @@ impl BootstrapReady {
     }
 }
 
-/// Outer mutation authorization sent only after a valid bootstrap attestation.
+/// Outer topology-mutation authorization sent only after a valid bootstrap attestation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Go {
     run_id: RunId,
@@ -958,7 +958,7 @@ impl Finished {
 /// Frame sent from the inner sandbox to the outer supervisor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InnerLifecycleFrame {
-    /// Isolation attestation sent before mutation authorization.
+    /// Isolation attestation sent before topology-mutation authorization.
     BootstrapReady(BootstrapReady),
     /// Ownership and probe attestation sent after authorized topology creation.
     TopologyReady(TopologyReady),
@@ -999,7 +999,7 @@ impl InnerLifecycleFrame {
 /// Frame sent from the outer supervisor to the inner sandbox.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OuterLifecycleFrame {
-    /// Mutation authorization after a valid bootstrap attestation.
+    /// Topology-mutation authorization after a valid bootstrap attestation.
     Go(Go),
     /// Request to stop and clean up.
     Stop(Stop),
@@ -1048,7 +1048,7 @@ pub enum OuterLifecyclePhase {
     StopSent,
     /// A valid terminal result was received.
     Finished,
-    /// The peer closed before `GO`, so mutation was never authorized.
+    /// The peer closed before `GO`, so topology mutation was never authorized.
     PeerClosedBeforeGo,
     /// The peer closed after `GO`, so cleanup remains required.
     PeerClosedAfterGo,
@@ -1069,7 +1069,7 @@ pub enum InnerLifecyclePhase {
     StopReceived,
     /// The terminal result was emitted.
     Finished,
-    /// The outer peer closed before `GO`; mutation was never authorized.
+    /// The outer peer closed before `GO`; topology mutation was never authorized.
     PeerClosedBeforeGo,
     /// The outer peer closed after `GO`; cleanup remains required.
     PeerClosedAfterGo,
@@ -1078,8 +1078,8 @@ pub enum InnerLifecyclePhase {
 /// Meaning of EOF for either side of the lifecycle exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleEofDisposition {
-    /// EOF happened before `GO`; no mutation authorization exists.
-    NoMutationAuthorized,
+    /// EOF happened before `GO`; no topology-mutation authorization exists.
+    NoTopologyMutationAuthorized,
     /// EOF happened after `GO`; owned objects must be cleaned up.
     CleanupRequired,
 }
@@ -1144,7 +1144,7 @@ impl OuterLifecycleState {
         &self.run_id
     }
 
-    /// Accept the exact inner bootstrap bytes without authorizing mutation yet.
+    /// Accept the exact inner bootstrap bytes without authorizing topology mutation yet.
     ///
     /// # Errors
     ///
@@ -1169,7 +1169,7 @@ impl OuterLifecycleState {
         Ok(frame)
     }
 
-    /// Issue the sole `GO` mutation authorization after bootstrap attestation.
+    /// Issue the sole `GO` topology-mutation authorization after bootstrap attestation.
     ///
     /// # Errors
     ///
@@ -1242,7 +1242,7 @@ impl OuterLifecycleState {
         Ok(frame)
     }
 
-    /// Record inner EOF and make pre-`GO` non-authorization explicit.
+    /// Record inner EOF and make pre-`GO` topology non-authorization explicit.
     ///
     /// # Errors
     ///
@@ -1252,7 +1252,7 @@ impl OuterLifecycleState {
         match self.phase {
             OuterLifecyclePhase::AwaitingBootstrap | OuterLifecyclePhase::BootstrapReady => {
                 self.phase = OuterLifecyclePhase::PeerClosedBeforeGo;
-                Ok(LifecycleEofDisposition::NoMutationAuthorized)
+                Ok(LifecycleEofDisposition::NoTopologyMutationAuthorized)
             }
             OuterLifecyclePhase::GoSent
             | OuterLifecyclePhase::TopologyReady
@@ -1334,7 +1334,7 @@ impl InnerLifecycleState {
         Ok(encoded)
     }
 
-    /// Consume one valid `GO` and return an affine mutation authorization.
+    /// Consume one valid `GO` and return an affine topology-mutation authorization.
     ///
     /// # Errors
     ///
@@ -1416,7 +1416,7 @@ impl InnerLifecycleState {
         Ok(encoded)
     }
 
-    /// Record outer EOF and make pre-`GO` non-authorization explicit.
+    /// Record outer EOF and make pre-`GO` topology non-authorization explicit.
     ///
     /// # Errors
     ///
@@ -1426,7 +1426,7 @@ impl InnerLifecycleState {
         match self.phase {
             InnerLifecyclePhase::Bootstrapping | InnerLifecyclePhase::AwaitingGo => {
                 self.phase = InnerLifecyclePhase::PeerClosedBeforeGo;
-                Ok(LifecycleEofDisposition::NoMutationAuthorized)
+                Ok(LifecycleEofDisposition::NoTopologyMutationAuthorized)
             }
             InnerLifecyclePhase::GoReceived
             | InnerLifecyclePhase::TopologyReady
@@ -1896,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_context_never_advances_a_lifecycle_or_authorizes_mutation() {
+    fn launch_context_never_advances_a_lifecycle_or_authorizes_topology_mutation() {
         let run = run_id('3');
         let encoded = launch_context(run.clone()).encode().expect("encode");
         let _provisioning = LaunchContext::parse(encoded.as_bytes()).expect("provisioning");
@@ -2415,7 +2415,7 @@ mod tests {
     }
 
     #[test]
-    fn eof_before_go_never_authorizes_mutation_and_eof_after_go_requires_cleanup() {
+    fn eof_before_go_never_authorizes_topology_and_eof_after_go_requires_cleanup() {
         let run = run_id('1');
         let mut outer = outer_state(run.clone());
         outer
@@ -2423,7 +2423,7 @@ mod tests {
             .expect("bootstrap");
         assert_eq!(
             outer.observe_inner_eof(),
-            Ok(LifecycleEofDisposition::NoMutationAuthorized)
+            Ok(LifecycleEofDisposition::NoTopologyMutationAuthorized)
         );
         assert_eq!(outer.phase(), OuterLifecyclePhase::PeerClosedBeforeGo);
         assert_eq!(outer.go(), Err(NetnsLifecycleError::StateTransition));
@@ -2434,7 +2434,7 @@ mod tests {
             .expect("bootstrap");
         assert_eq!(
             inner.observe_outer_eof(),
-            Ok(LifecycleEofDisposition::NoMutationAuthorized)
+            Ok(LifecycleEofDisposition::NoTopologyMutationAuthorized)
         );
         assert_eq!(inner.phase(), InnerLifecyclePhase::PeerClosedBeforeGo);
 

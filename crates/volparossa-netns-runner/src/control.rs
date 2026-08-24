@@ -6,8 +6,15 @@ use volparossa_test_support::{MAX_LIFECYCLE_FRAME_BYTES, RunId};
 const NAMESPACES_CREATED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 NAMESPACES_CREATED";
 const MAPPINGS_INSTALLED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MAPPINGS_INSTALLED";
 const MAPPINGS_VERIFIED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MAPPINGS_VERIFIED";
+const MAPPINGS_PINNED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MAPPINGS_PINNED";
 const PID1_SPAWNED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_SPAWNED";
 const PID1_PINNED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_PINNED";
+const PRIVATE_MOUNTS_READY_HEADER: &str =
+    "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PRIVATE_MOUNTS_READY";
+const PRIVATE_MOUNTS_VERIFIED_HEADER: &str =
+    "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PRIVATE_MOUNTS_VERIFIED";
+const PRIVATE_MOUNTS_UNAVAILABLE_HEADER: &str =
+    "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PRIVATE_MOUNTS_UNAVAILABLE";
 const PID1_REAPED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_REAPED";
 const PID1_REAPED_STATUS: i32 = 77;
 const MAX_LINUX_PID: u32 = 2_147_483_647;
@@ -58,8 +65,12 @@ enum RecordKind {
     NamespacesCreated,
     MappingsInstalled,
     MappingsVerified,
+    MappingsPinned,
     Pid1Spawned,
     Pid1Pinned,
+    PrivateMountsReady,
+    PrivateMountsVerified,
+    PrivateMountsUnavailable,
     Pid1Reaped,
 }
 
@@ -69,8 +80,12 @@ impl RecordKind {
             Self::NamespacesCreated => NAMESPACES_CREATED_HEADER,
             Self::MappingsInstalled => MAPPINGS_INSTALLED_HEADER,
             Self::MappingsVerified => MAPPINGS_VERIFIED_HEADER,
+            Self::MappingsPinned => MAPPINGS_PINNED_HEADER,
             Self::Pid1Spawned => PID1_SPAWNED_HEADER,
             Self::Pid1Pinned => PID1_PINNED_HEADER,
+            Self::PrivateMountsReady => PRIVATE_MOUNTS_READY_HEADER,
+            Self::PrivateMountsVerified => PRIVATE_MOUNTS_VERIFIED_HEADER,
+            Self::PrivateMountsUnavailable => PRIVATE_MOUNTS_UNAVAILABLE_HEADER,
             Self::Pid1Reaped => PID1_REAPED_HEADER,
         }
     }
@@ -80,8 +95,12 @@ impl RecordKind {
             NAMESPACES_CREATED_HEADER => Ok(Self::NamespacesCreated),
             MAPPINGS_INSTALLED_HEADER => Ok(Self::MappingsInstalled),
             MAPPINGS_VERIFIED_HEADER => Ok(Self::MappingsVerified),
+            MAPPINGS_PINNED_HEADER => Ok(Self::MappingsPinned),
             PID1_SPAWNED_HEADER => Ok(Self::Pid1Spawned),
             PID1_PINNED_HEADER => Ok(Self::Pid1Pinned),
+            PRIVATE_MOUNTS_READY_HEADER => Ok(Self::PrivateMountsReady),
+            PRIVATE_MOUNTS_VERIFIED_HEADER => Ok(Self::PrivateMountsVerified),
+            PRIVATE_MOUNTS_UNAVAILABLE_HEADER => Ok(Self::PrivateMountsUnavailable),
             PID1_REAPED_HEADER => Ok(Self::Pid1Reaped),
             _ => Err(BootstrapControlError::FrameShape),
         }
@@ -90,7 +109,12 @@ impl RecordKind {
     const fn has_pid(self) -> bool {
         matches!(
             self,
-            Self::Pid1Spawned | Self::Pid1Pinned | Self::Pid1Reaped
+            Self::Pid1Spawned
+                | Self::Pid1Pinned
+                | Self::PrivateMountsReady
+                | Self::PrivateMountsVerified
+                | Self::PrivateMountsUnavailable
+                | Self::Pid1Reaped
         )
     }
 
@@ -260,13 +284,19 @@ pub(crate) enum OuterBootstrapPhase {
     NamespacesCreated,
     /// The mapping acknowledgement was emitted; launcher verification is outstanding.
     AwaitingMappingsVerified,
-    /// Mapping verification completed; the PID-1 spawn record is outstanding.
+    /// Launcher mapping verification arrived; the outer pin may be emitted once.
+    MappingsVerified,
+    /// The outer mapping pin was emitted; the PID-1 spawn record is outstanding.
     AwaitingPid1Spawned,
     /// The exact PID-1 child was retained; its pin acknowledgement may be emitted once.
     Pid1Spawned,
-    /// The pin acknowledgement was emitted; exact PID-1 reaping is outstanding.
+    /// The pin acknowledgement was emitted; private-mount readiness is outstanding.
+    AwaitingPrivateMountsReady,
+    /// Private-mount readiness was accepted; its verification may be emitted once.
+    PrivateMountsReady,
+    /// Private-mount verification was emitted; exact PID-1 reaping is outstanding.
     AwaitingPid1Reaped,
-    /// The exact six-record exchange completed.
+    /// One exact private-mount result branch and the PID-1 reap completed.
     Complete,
 }
 
@@ -327,8 +357,19 @@ impl OuterBootstrapControl {
             return Err(BootstrapControlError::StateTransition);
         }
         accept_record(bytes, RecordKind::MappingsVerified, &self.run_id)?;
-        self.phase = OuterBootstrapPhase::AwaitingPid1Spawned;
+        self.phase = OuterBootstrapPhase::MappingsVerified;
         Ok(())
+    }
+
+    /// Emit the sole proceed acknowledgement after the outer independently re-pins the mappings.
+    pub(crate) fn mappings_pinned(&mut self) -> Result<String, BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::MappingsVerified {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let encoded =
+            ControlRecord::new(RecordKind::MappingsPinned, self.run_id.clone()).encode()?;
+        self.phase = OuterBootstrapPhase::AwaitingPid1Spawned;
+        Ok(encoded)
     }
 
     /// Accept the launcher's sole `PID1_SPAWNED` record and retain its positive PID.
@@ -355,6 +396,66 @@ impl OuterBootstrapControl {
         }
         let encoded =
             ControlRecord::for_pid(RecordKind::Pid1Pinned, self.run_id.clone(), pid).encode()?;
+        self.phase = OuterBootstrapPhase::AwaitingPrivateMountsReady;
+        Ok(encoded)
+    }
+
+    /// Accept the launcher's sole `PRIVATE_MOUNTS_READY` record for the retained PID.
+    pub(crate) fn accept_private_mounts_ready(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::AwaitingPrivateMountsReady {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let expected_pid = self
+            .pid1_pid
+            .ok_or(BootstrapControlError::StateTransition)?;
+        accept_pid_record(
+            bytes,
+            RecordKind::PrivateMountsReady,
+            &self.run_id,
+            Some(expected_pid),
+        )?;
+        self.phase = OuterBootstrapPhase::PrivateMountsReady;
+        Ok(())
+    }
+
+    /// Accept the launcher's sole policy-denied `PRIVATE_MOUNTS_UNAVAILABLE` record.
+    pub(crate) fn accept_private_mounts_unavailable(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::AwaitingPrivateMountsReady {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let expected_pid = self
+            .pid1_pid
+            .ok_or(BootstrapControlError::StateTransition)?;
+        accept_pid_record(
+            bytes,
+            RecordKind::PrivateMountsUnavailable,
+            &self.run_id,
+            Some(expected_pid),
+        )?;
+        self.phase = OuterBootstrapPhase::AwaitingPid1Reaped;
+        Ok(())
+    }
+
+    /// Emit the outer's sole `PRIVATE_MOUNTS_VERIFIED` acknowledgement for the retained PID.
+    pub(crate) fn private_mounts_verified(
+        &mut self,
+        pid: u32,
+    ) -> Result<String, BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::PrivateMountsReady {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        if self.pid1_pid != Some(pid) {
+            return Err(BootstrapControlError::PidMismatch);
+        }
+        let encoded =
+            ControlRecord::for_pid(RecordKind::PrivateMountsVerified, self.run_id.clone(), pid)
+                .encode()?;
         self.phase = OuterBootstrapPhase::AwaitingPid1Reaped;
         Ok(encoded)
     }
@@ -387,13 +488,19 @@ pub(crate) enum LauncherBootstrapPhase {
     AwaitingMappingsInstalled,
     /// The mapping acknowledgement was accepted and local verification succeeded.
     MappingsInstalled,
-    /// Mapping verification was emitted; the PID-1 spawn record may be emitted once.
+    /// Mapping verification was emitted; the outer mapping pin is outstanding.
+    AwaitingMappingsPinned,
+    /// The outer mapping pin was accepted; the PID-1 spawn record may be emitted once.
     Pid1SpawnPending,
     /// The exact PID-1 spawn was emitted; the outer pin acknowledgement is outstanding.
     AwaitingPid1Pinned,
-    /// The exact PID-1 pin acknowledgement was accepted; its reap may be emitted once.
-    Pid1Pinned,
-    /// The exact six-record exchange completed.
+    /// The exact PID-1 pin acknowledgement was accepted; mount readiness may be emitted once.
+    PrivateMountsReadyPending,
+    /// Mount readiness was emitted; the outer verification acknowledgement is outstanding.
+    AwaitingPrivateMountsVerified,
+    /// One exact mount-result branch completed; PID-1 reap may be emitted once.
+    Pid1ReapPending,
+    /// One exact private-mount result branch and the PID-1 reap completed.
     Complete,
 }
 
@@ -452,8 +559,21 @@ impl LauncherBootstrapControl {
         }
         let encoded =
             ControlRecord::new(RecordKind::MappingsVerified, self.run_id.clone()).encode()?;
-        self.phase = LauncherBootstrapPhase::Pid1SpawnPending;
+        self.phase = LauncherBootstrapPhase::AwaitingMappingsPinned;
         Ok(encoded)
+    }
+
+    /// Accept the outer's sole mapping-pin proceed acknowledgement before spawning PID 1.
+    pub(crate) fn accept_mappings_pinned(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::AwaitingMappingsPinned {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        accept_record(bytes, RecordKind::MappingsPinned, &self.run_id)?;
+        self.phase = LauncherBootstrapPhase::Pid1SpawnPending;
+        Ok(())
     }
 
     /// Emit the launcher's sole `PID1_SPAWNED` record for a positive Linux PID.
@@ -482,7 +602,67 @@ impl LauncherBootstrapControl {
             &self.run_id,
             Some(expected_pid),
         )?;
-        self.phase = LauncherBootstrapPhase::Pid1Pinned;
+        self.phase = LauncherBootstrapPhase::PrivateMountsReadyPending;
+        Ok(())
+    }
+
+    /// Emit the sole `PRIVATE_MOUNTS_READY` record for the retained PID.
+    pub(crate) fn private_mounts_ready(
+        &mut self,
+        pid: u32,
+    ) -> Result<String, BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::PrivateMountsReadyPending {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        if self.pid1_pid != Some(pid) {
+            return Err(BootstrapControlError::PidMismatch);
+        }
+        let encoded =
+            ControlRecord::for_pid(RecordKind::PrivateMountsReady, self.run_id.clone(), pid)
+                .encode()?;
+        self.phase = LauncherBootstrapPhase::AwaitingPrivateMountsVerified;
+        Ok(encoded)
+    }
+
+    /// Emit the sole policy-denied `PRIVATE_MOUNTS_UNAVAILABLE` record for the retained PID.
+    pub(crate) fn private_mounts_unavailable(
+        &mut self,
+        pid: u32,
+    ) -> Result<String, BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::PrivateMountsReadyPending {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        if self.pid1_pid != Some(pid) {
+            return Err(BootstrapControlError::PidMismatch);
+        }
+        let encoded = ControlRecord::for_pid(
+            RecordKind::PrivateMountsUnavailable,
+            self.run_id.clone(),
+            pid,
+        )
+        .encode()?;
+        self.phase = LauncherBootstrapPhase::Pid1ReapPending;
+        Ok(encoded)
+    }
+
+    /// Accept the outer's sole `PRIVATE_MOUNTS_VERIFIED` acknowledgement for the retained PID.
+    pub(crate) fn accept_private_mounts_verified(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::AwaitingPrivateMountsVerified {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let expected_pid = self
+            .pid1_pid
+            .ok_or(BootstrapControlError::StateTransition)?;
+        accept_pid_record(
+            bytes,
+            RecordKind::PrivateMountsVerified,
+            &self.run_id,
+            Some(expected_pid),
+        )?;
+        self.phase = LauncherBootstrapPhase::Pid1ReapPending;
         Ok(())
     }
 
@@ -492,7 +672,7 @@ impl LauncherBootstrapControl {
         pid: u32,
         status: i32,
     ) -> Result<String, BootstrapControlError> {
-        if self.phase != LauncherBootstrapPhase::Pid1Pinned {
+        if self.phase != LauncherBootstrapPhase::Pid1ReapPending {
             return Err(BootstrapControlError::StateTransition);
         }
         if self.pid1_pid != Some(pid) {
@@ -574,7 +754,7 @@ mod tests {
             .expect("bounded reaped record")
     }
 
-    fn complete_mapping_exchange(
+    fn advance_to_mapping_pin(
         outer: &mut OuterBootstrapControl,
         launcher: &mut LauncherBootstrapControl,
     ) {
@@ -592,12 +772,42 @@ mod tests {
             .expect("outer accepts verification");
     }
 
+    fn complete_mapping_exchange(
+        outer: &mut OuterBootstrapControl,
+        launcher: &mut LauncherBootstrapControl,
+    ) {
+        advance_to_mapping_pin(outer, launcher);
+        let pinned = outer.mappings_pinned().expect("mapping pin record");
+        launcher
+            .accept_mappings_pinned(pinned.as_bytes())
+            .expect("launcher accepts mapping pin");
+    }
+
+    fn complete_pid1_pin_exchange(
+        outer: &mut OuterBootstrapControl,
+        launcher: &mut LauncherBootstrapControl,
+    ) {
+        complete_mapping_exchange(outer, launcher);
+        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawn record");
+        assert_eq!(
+            outer
+                .accept_pid1_spawned(spawned.as_bytes())
+                .expect("outer accepts spawn record"),
+            PID1_PID
+        );
+        let pinned = outer.pid1_pinned(PID1_PID).expect("pin record");
+        launcher
+            .accept_pid1_pinned(pinned.as_bytes())
+            .expect("launcher accepts pin record");
+    }
+
     #[test]
     fn every_record_round_trips_in_exact_canonical_lf_format() {
         for kind in [
             RecordKind::NamespacesCreated,
             RecordKind::MappingsInstalled,
             RecordKind::MappingsVerified,
+            RecordKind::MappingsPinned,
         ] {
             let record = ControlRecord::new(kind, run_id());
             let canonical = record.encode().expect("canonical encoding");
@@ -610,7 +820,13 @@ mod tests {
             assert!(canonical.len() <= MAX_LIFECYCLE_FRAME_BYTES);
         }
 
-        for kind in [RecordKind::Pid1Spawned, RecordKind::Pid1Pinned] {
+        for kind in [
+            RecordKind::Pid1Spawned,
+            RecordKind::Pid1Pinned,
+            RecordKind::PrivateMountsReady,
+            RecordKind::PrivateMountsVerified,
+            RecordKind::PrivateMountsUnavailable,
+        ] {
             let record = ControlRecord::for_pid(kind, run_id(), PID1_PID);
             let canonical = record.encode().expect("canonical PID encoding");
             assert_eq!(
@@ -668,11 +884,21 @@ mod tests {
         assert_eq!(launcher.phase(), LauncherBootstrapPhase::MappingsInstalled);
 
         let verified = launcher.mappings_verified().expect("verified record");
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1SpawnPending);
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingMappingsPinned
+        );
         outer
             .accept_mappings_verified(verified.as_bytes())
             .expect("outer accepts verification");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::MappingsVerified);
+
+        let mappings_pinned = outer.mappings_pinned().expect("mapping pin record");
         assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
+        launcher
+            .accept_mappings_pinned(mappings_pinned.as_bytes())
+            .expect("launcher accepts mapping pin");
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1SpawnPending);
 
         let spawned = launcher.pid1_spawned(PID1_PID).expect("spawned record");
         assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
@@ -685,11 +911,38 @@ mod tests {
         assert_eq!(outer.phase(), OuterBootstrapPhase::Pid1Spawned);
 
         let pinned = outer.pid1_pinned(PID1_PID).expect("pinned record");
-        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingPrivateMountsReady
+        );
         launcher
             .accept_pid1_pinned(pinned.as_bytes())
             .expect("launcher accepts pinned PID");
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1Pinned);
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::PrivateMountsReadyPending
+        );
+
+        let mounts_ready = launcher
+            .private_mounts_ready(PID1_PID)
+            .expect("private mounts ready record");
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingPrivateMountsVerified
+        );
+        outer
+            .accept_private_mounts_ready(mounts_ready.as_bytes())
+            .expect("outer accepts private mounts readiness");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::PrivateMountsReady);
+
+        let mounts_verified = outer
+            .private_mounts_verified(PID1_PID)
+            .expect("private mounts verified record");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+        launcher
+            .accept_private_mounts_verified(mounts_verified.as_bytes())
+            .expect("launcher accepts private mounts verification");
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1ReapPending);
 
         let reaped = launcher
             .pid1_reaped(PID1_PID, PID1_REAPED_STATUS)
@@ -832,6 +1085,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn wrong_direction_is_rejected_without_advancing_either_state_machine() {
         let namespaces = encoded(RecordKind::NamespacesCreated, run_id());
         let installed = encoded(RecordKind::MappingsInstalled, run_id());
@@ -878,9 +1132,20 @@ mod tests {
         complete_mapping_exchange(&mut outer, &mut launcher);
         let spawned = pid_encoded(RecordKind::Pid1Spawned, run_id(), PID1_PID);
         let pinned = pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID);
+        let mounts_ready = pid_encoded(RecordKind::PrivateMountsReady, run_id(), PID1_PID);
+        let mounts_verified = pid_encoded(RecordKind::PrivateMountsVerified, run_id(), PID1_PID);
+        let mounts_unavailable =
+            pid_encoded(RecordKind::PrivateMountsUnavailable, run_id(), PID1_PID);
         let reaped = reaped_encoded(run_id(), PID1_PID);
 
-        for wrong in [&pinned, &reaped, &verified] {
+        for wrong in [
+            &pinned,
+            &mounts_ready,
+            &mounts_verified,
+            &mounts_unavailable,
+            &reaped,
+            &verified,
+        ] {
             assert_eq!(
                 outer.accept_pid1_spawned(wrong.as_bytes()),
                 Err(BootstrapControlError::UnexpectedRecord)
@@ -890,22 +1155,88 @@ mod tests {
         outer
             .accept_pid1_spawned(spawned.as_bytes())
             .expect("matching PID-1 spawn");
-        let _ = outer.pid1_pinned(PID1_PID).expect("pin record");
-        for wrong in [&spawned, &pinned, &verified] {
-            assert_eq!(
-                outer.accept_pid1_reaped(wrong.as_bytes()),
-                Err(BootstrapControlError::UnexpectedRecord)
-            );
-            assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
-        }
+        let pinned_record = outer.pid1_pinned(PID1_PID).expect("pin record");
 
         let _ = launcher.pid1_spawned(PID1_PID).expect("spawn record");
-        for wrong in [&spawned, &reaped, &installed] {
+        for wrong in [
+            &spawned,
+            &mounts_ready,
+            &mounts_verified,
+            &mounts_unavailable,
+            &reaped,
+            &installed,
+        ] {
             assert_eq!(
                 launcher.accept_pid1_pinned(wrong.as_bytes()),
                 Err(BootstrapControlError::UnexpectedRecord)
             );
             assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
+        }
+        launcher
+            .accept_pid1_pinned(pinned_record.as_bytes())
+            .expect("matching pin record");
+
+        for wrong in [
+            &spawned,
+            &pinned,
+            &mounts_verified,
+            &mounts_unavailable,
+            &reaped,
+            &verified,
+        ] {
+            assert_eq!(
+                outer.accept_private_mounts_ready(wrong.as_bytes()),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(
+                outer.phase(),
+                OuterBootstrapPhase::AwaitingPrivateMountsReady
+            );
+        }
+        let ready_record = launcher
+            .private_mounts_ready(PID1_PID)
+            .expect("mount-ready record");
+        outer
+            .accept_private_mounts_ready(ready_record.as_bytes())
+            .expect("matching mount-ready record");
+        let verified_record = outer
+            .private_mounts_verified(PID1_PID)
+            .expect("mount-verified record");
+
+        for wrong in [
+            &spawned,
+            &pinned,
+            &mounts_ready,
+            &mounts_unavailable,
+            &reaped,
+            &installed,
+        ] {
+            assert_eq!(
+                launcher.accept_private_mounts_verified(wrong.as_bytes()),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(
+                launcher.phase(),
+                LauncherBootstrapPhase::AwaitingPrivateMountsVerified
+            );
+        }
+        launcher
+            .accept_private_mounts_verified(verified_record.as_bytes())
+            .expect("matching mount-verified record");
+
+        for wrong in [
+            &spawned,
+            &pinned,
+            &mounts_ready,
+            &mounts_verified,
+            &mounts_unavailable,
+            &verified,
+        ] {
+            assert_eq!(
+                outer.accept_pid1_reaped(wrong.as_bytes()),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
         }
     }
 
@@ -970,12 +1301,74 @@ mod tests {
         launcher
             .accept_pid1_pinned(pinned.as_bytes())
             .expect("matching pin record");
+
+        let wrong_mounts_ready =
+            pid_encoded(RecordKind::PrivateMountsReady, other_run_id(), PID1_PID);
+        assert_eq!(
+            outer.accept_private_mounts_ready(wrong_mounts_ready.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingPrivateMountsReady
+        );
+        let mounts_ready = launcher
+            .private_mounts_ready(PID1_PID)
+            .expect("matching mounts-ready record");
+        outer
+            .accept_private_mounts_ready(mounts_ready.as_bytes())
+            .expect("accept matching mounts-ready record");
+
+        let mounts_verified = outer
+            .private_mounts_verified(PID1_PID)
+            .expect("matching mounts-verified record");
+        let wrong_mounts_verified =
+            pid_encoded(RecordKind::PrivateMountsVerified, other_run_id(), PID1_PID);
+        assert_eq!(
+            launcher.accept_private_mounts_verified(wrong_mounts_verified.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingPrivateMountsVerified
+        );
+        launcher
+            .accept_private_mounts_verified(mounts_verified.as_bytes())
+            .expect("accept matching mounts-verified record");
+
         let wrong_reaped = reaped_encoded(other_run_id(), PID1_PID);
         assert_eq!(
             outer.accept_pid1_reaped(wrong_reaped.as_bytes()),
             Err(BootstrapControlError::RunIdMismatch)
         );
         assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+    }
+
+    #[test]
+    fn mapping_pin_rejects_the_wrong_run_without_enabling_pid_one_spawn() {
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        advance_to_mapping_pin(&mut outer, &mut launcher);
+
+        let wrong = encoded(RecordKind::MappingsPinned, other_run_id());
+        assert_eq!(
+            launcher.accept_mappings_pinned(wrong.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingMappingsPinned
+        );
+        assert_eq!(
+            launcher.pid1_spawned(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+
+        let pinned = outer.mappings_pinned().expect("matching mapping pin");
+        launcher
+            .accept_mappings_pinned(pinned.as_bytes())
+            .expect("accept matching mapping pin");
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1SpawnPending);
     }
 
     #[test]
@@ -1006,10 +1399,55 @@ mod tests {
             .expect("matching pin record");
 
         assert_eq!(
+            launcher.private_mounts_ready(OTHER_PID),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::PrivateMountsReadyPending
+        );
+        let wrong_ready = pid_encoded(RecordKind::PrivateMountsReady, run_id(), OTHER_PID);
+        assert_eq!(
+            outer.accept_private_mounts_ready(wrong_ready.as_bytes()),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingPrivateMountsReady
+        );
+
+        let ready = launcher
+            .private_mounts_ready(PID1_PID)
+            .expect("matching mount-ready record");
+        outer
+            .accept_private_mounts_ready(ready.as_bytes())
+            .expect("matching mount-ready acceptance");
+        assert_eq!(
+            outer.private_mounts_verified(OTHER_PID),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::PrivateMountsReady);
+        let verified = outer
+            .private_mounts_verified(PID1_PID)
+            .expect("matching mount-verified record");
+        let wrong_verified = pid_encoded(RecordKind::PrivateMountsVerified, run_id(), OTHER_PID);
+        assert_eq!(
+            launcher.accept_private_mounts_verified(wrong_verified.as_bytes()),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingPrivateMountsVerified
+        );
+        launcher
+            .accept_private_mounts_verified(verified.as_bytes())
+            .expect("matching mount-verified acceptance");
+
+        assert_eq!(
             launcher.pid1_reaped(OTHER_PID, PID1_REAPED_STATUS),
             Err(BootstrapControlError::PidMismatch)
         );
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1Pinned);
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1ReapPending);
         let wrong_status =
             format!("{PID1_REAPED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nstatus=76\n");
         assert_eq!(
@@ -1084,9 +1522,39 @@ mod tests {
             outer.accept_mappings_verified(verified.as_bytes()),
             Err(BootstrapControlError::StateTransition)
         );
+        assert_eq!(
+            launcher.accept_mappings_pinned(&vec![0xff; MAX_LIFECYCLE_FRAME_BYTES + 1]),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            launcher.accept_mappings_pinned(installed.as_bytes()),
+            Err(BootstrapControlError::UnexpectedRecord)
+        );
+        assert_eq!(
+            launcher.pid1_spawned(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingMappingsPinned
+        );
+        let mapping_pin = outer.mappings_pinned().expect("first mapping pin");
+        assert_eq!(
+            outer.mappings_pinned(),
+            Err(BootstrapControlError::StateTransition)
+        );
+        launcher
+            .accept_mappings_pinned(mapping_pin.as_bytes())
+            .expect("first mapping pin acceptance");
+        assert_eq!(
+            launcher.accept_mappings_pinned(mapping_pin.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1SpawnPending);
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn pid1_duplicate_invalid_and_out_of_order_transitions_are_affinely_rejected() {
         let mut outer = OuterBootstrapControl::new(run_id());
         let mut launcher = LauncherBootstrapControl::new(run_id());
@@ -1101,6 +1569,22 @@ mod tests {
             Err(BootstrapControlError::StateTransition)
         );
         assert_eq!(
+            outer.accept_private_mounts_ready(
+                pid_encoded(RecordKind::PrivateMountsReady, run_id(), PID1_PID).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            outer.accept_private_mounts_unavailable(
+                pid_encoded(RecordKind::PrivateMountsUnavailable, run_id(), PID1_PID,).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            outer.private_mounts_verified(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
             launcher.accept_pid1_pinned(
                 pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID).as_bytes()
             ),
@@ -1108,6 +1592,20 @@ mod tests {
         );
         assert_eq!(
             launcher.pid1_reaped(PID1_PID, PID1_REAPED_STATUS),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.private_mounts_ready(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.private_mounts_unavailable(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.accept_private_mounts_verified(
+                pid_encoded(RecordKind::PrivateMountsVerified, run_id(), PID1_PID).as_bytes()
+            ),
             Err(BootstrapControlError::StateTransition)
         );
 
@@ -1145,11 +1643,55 @@ mod tests {
             launcher.accept_pid1_pinned(pinned.as_bytes()),
             Err(BootstrapControlError::StateTransition)
         );
+
+        let ready = launcher
+            .private_mounts_ready(PID1_PID)
+            .expect("first mount-ready emission");
+        assert_eq!(
+            launcher.private_mounts_ready(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.private_mounts_unavailable(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        outer
+            .accept_private_mounts_ready(ready.as_bytes())
+            .expect("first mount-ready acceptance");
+        assert_eq!(
+            outer.accept_private_mounts_ready(ready.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            outer.accept_private_mounts_unavailable(
+                pid_encoded(RecordKind::PrivateMountsUnavailable, run_id(), PID1_PID,).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+
+        let mounts_verified = outer
+            .private_mounts_verified(PID1_PID)
+            .expect("first mount-verified emission");
+        assert_eq!(
+            outer.private_mounts_verified(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        launcher
+            .accept_private_mounts_verified(mounts_verified.as_bytes())
+            .expect("first mount-verified acceptance");
+        assert_eq!(
+            launcher.accept_private_mounts_verified(mounts_verified.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.private_mounts_unavailable(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
         assert_eq!(
             launcher.pid1_reaped(PID1_PID, 0),
             Err(BootstrapControlError::ExitStatus)
         );
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1Pinned);
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1ReapPending);
 
         let reaped = launcher
             .pid1_reaped(PID1_PID, PID1_REAPED_STATUS)
@@ -1165,6 +1707,90 @@ mod tests {
             outer.accept_pid1_reaped(reaped.as_bytes()),
             Err(BootstrapControlError::StateTransition)
         );
+    }
+
+    #[test]
+    fn private_mounts_unavailable_is_an_exclusive_affine_terminal_result() {
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        complete_pid1_pin_exchange(&mut outer, &mut launcher);
+
+        assert_eq!(
+            launcher.private_mounts_unavailable(OTHER_PID),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::PrivateMountsReadyPending
+        );
+        let unavailable = launcher
+            .private_mounts_unavailable(PID1_PID)
+            .expect("policy-denied mount result");
+        assert_eq!(
+            unavailable,
+            format!("{PRIVATE_MOUNTS_UNAVAILABLE_HEADER}\nrun_id={RUN}\npid={PID1_PID}\n")
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1ReapPending);
+        assert_eq!(
+            launcher.private_mounts_unavailable(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.private_mounts_ready(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.accept_private_mounts_verified(
+                pid_encoded(RecordKind::PrivateMountsVerified, run_id(), PID1_PID).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+
+        let wrong_run = pid_encoded(
+            RecordKind::PrivateMountsUnavailable,
+            other_run_id(),
+            PID1_PID,
+        );
+        assert_eq!(
+            outer.accept_private_mounts_unavailable(wrong_run.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        let wrong_pid = pid_encoded(RecordKind::PrivateMountsUnavailable, run_id(), OTHER_PID);
+        assert_eq!(
+            outer.accept_private_mounts_unavailable(wrong_pid.as_bytes()),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingPrivateMountsReady
+        );
+        outer
+            .accept_private_mounts_unavailable(unavailable.as_bytes())
+            .expect("accept policy-denied mount result");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+        assert_eq!(
+            outer.accept_private_mounts_unavailable(unavailable.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            outer.accept_private_mounts_ready(
+                pid_encoded(RecordKind::PrivateMountsReady, run_id(), PID1_PID).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            outer.private_mounts_verified(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+
+        let reaped = launcher
+            .pid1_reaped(PID1_PID, PID1_REAPED_STATUS)
+            .expect("policy-denied PID-1 reap");
+        outer
+            .accept_pid1_reaped(reaped.as_bytes())
+            .expect("accept policy-denied PID-1 reap");
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Complete);
+        assert_eq!(outer.phase(), OuterBootstrapPhase::Complete);
     }
 
     #[test]
@@ -1220,6 +1846,39 @@ mod tests {
         launcher
             .accept_pid1_pinned(pinned.as_bytes())
             .expect("matching pin record");
+        assert_eq!(
+            outer.accept_private_mounts_ready(&oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            outer.accept_private_mounts_unavailable(&oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingPrivateMountsReady
+        );
+
+        let ready = launcher
+            .private_mounts_ready(PID1_PID)
+            .expect("mount-ready record");
+        outer
+            .accept_private_mounts_ready(ready.as_bytes())
+            .expect("matching mount-ready record");
+        let mounts_verified = outer
+            .private_mounts_verified(PID1_PID)
+            .expect("mount-verified record");
+        assert_eq!(
+            launcher.accept_private_mounts_verified(&oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingPrivateMountsVerified
+        );
+        launcher
+            .accept_private_mounts_verified(mounts_verified.as_bytes())
+            .expect("matching mount-verified record");
         assert_eq!(
             outer.accept_pid1_reaped(&oversized),
             Err(BootstrapControlError::FrameTooLarge)

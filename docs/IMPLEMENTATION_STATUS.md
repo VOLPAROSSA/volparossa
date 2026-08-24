@@ -400,24 +400,39 @@ Last updated: 2026-08-24
   creates anonymous user, mount, network, and pending child PID namespaces. Before mapping, the
   outer holds a pidfd, anchored proc directory, exact user/mount/network/current-PID namespace FDs,
   an empty child-set proof, and the kernel-defined uninstantiated `pid_for_children` proof. It then
-  installs and independently reads back one UID/GID mapping extent. The launcher subsequently
-  creates exactly one fixed self-reexecuted PID 1 and upgrades the full namespace proof. PID 1
+  installs and independently reads back one UID/GID mapping extent. The launcher emits its mapping
+  verification but cannot spawn until the outer repeats its anchored readback and returns one
+  affine `MAPPINGS_PINNED` proceed record. It subsequently creates exactly one fixed
+  self-reexecuted PID 1 and upgrades the full namespace proof. PID 1
   checks its PID/PPID, mappings, credentials, namespaces, environment, cwd, task count, and
   parent-death signal; the outer independently proves its executable/selector, PID nesting,
-  mappings, namespaces, empty descendant set, and sole launcher-child relation. The positive
-  `BlockedAfterPidOneProof` route closes without a lifecycle frame or `GO` and proves exact PID-1
-  exit/reap. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
+  mappings, namespaces, empty descendant set, and sole launcher-child relation. Only after the
+  outer returns its run- and PID-bound pin does PID 1 make the inherited mount tree recursively
+  private and use the descriptor-based Linux mount API to attach a fixed 16 MiB, 4096-inode,
+  mode-0700 tmpfs at `/run` plus a new procfs at `/proc`, both with `nosuid,nodev,noexec`.
+  PID 1 retains fixed root, `/run`, and `/proc` descriptors and repeatedly binds their visible
+  mount IDs to bounded mountinfo, requires no propagation relationships, and proves the exact
+  PID/task set `{1}` with no child. The outer independently repeats the mount-ID, filesystem,
+  capacity, ownership, PID-namespace, PID/PPID/task, and empty-child proof while PID 1 remains
+  pinned. If the outer PID-1 pin is unavailable after spawn, one run-bound pre-mount abort record
+  retires PID 1 without issuing a mount instruction. Only `EPERM` or `EACCES` from a fixed
+  mount-UAPI operation may produce the exclusive
+  `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
+  options, resource failures, and failed evidence remain hard errors. The positive
+  `BlockedAfterPrivateMountProof` route closes without a lifecycle frame or `GO` and proves exact
+  PID-1 exit/reap. Repeated portable tests prove exact outer-launcher reaping, unchanged outer
   namespace/mount/route observations, and no command-shim execution. Normal reaping retains both
   pidfd and exact `Child` ownership; every forced `SIGKILL` after admission targets that pidfd.
   Pidfd acquisition is mandatory; its failure closes the private channels, attempts `SIGKILL`
   against the still-owned unreaped child, and synchronously waits/reaps it before returning the
   pidfd error. The public `--run` entry requires one task, and a non-default `SIGCHLD` handler or
   `SA_NOCLDWAIT` is rejected before any spawn. The rare process-local fallback-reaper path is not
-  post-exit cleanup or A14 evidence. Required parent, namespace,
-  mapping, and outer PID-1 proofs fail closed when kernel policy hides them. Generic CI may
-  therefore prove only fail-closed behaviour; positive live PID-1 evidence requires the explicit
-  `BlockedAfterPidOneProof` outcome. The slice still has no private mounts, signal-driven five-frame
-  driver, topology mutation, acceptance report, or A01-A15 result.
+  post-exit cleanup or A14 evidence. Required parent, namespace, mapping, mount-policy, and outer
+  PID-1 proofs fail closed when kernel policy hides them. Generic CI may therefore prove only
+  fail-closed behaviour; complete live evidence requires the explicit
+  `BlockedAfterPrivateMountProof` outcome. The slice still has no general root-filesystem or
+  supplementary-group isolation, signal-driven five-frame driver, topology mutation, crash
+  cleanup evidence, acceptance report, or A01-A15 result.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 
