@@ -1,5 +1,5 @@
 #!/bin/sh
-# Require the complete private-mount proof on an unprivileged Debian 13 host.
+# Require the complete PID-1 signal-supervision proof on an unprivileged Debian 13 host.
 set -eu
 
 export LC_ALL=C
@@ -8,11 +8,11 @@ export PATH
 umask 077
 
 usage() {
-    printf '%s\n' 'usage: tests/netns/require-private-mount-proof.sh' >&2
+    printf '%s\n' 'usage: tests/netns/require-signal-supervision-proof.sh' >&2
 }
 
 fail() {
-    printf '%s\n' "private-mount proof gate failed: $1" >&2
+    printf '%s\n' "signal-supervision proof gate failed: $1" >&2
     exit 1
 }
 
@@ -22,7 +22,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-runner_source=$repository_root/target/private-mount-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
+runner_source=$repository_root/target/signal-supervision-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
 if [ ! -f "$runner_source" ] || [ ! -x "$runner_source" ] || [ -L "$runner_source" ]; then
     fail 'fixed workspace runner must be one executable regular file, not a symlink'
 fi
@@ -93,7 +93,7 @@ do
     fi
 done
 
-proof_tmp=$(mktemp -d /tmp/volparossa-private-mount-proof.XXXXXX)
+proof_tmp=$(mktemp -d /tmp/volparossa-signal-supervision-proof.XXXXXX)
 cleanup() {
     rm -rf -- "$proof_tmp"
 }
@@ -138,10 +138,10 @@ if [ -s "$proof_tmp/stdout" ]; then
     fail 'runner wrote unexpected standard output'
 fi
 printf '%s\n' \
-    'BLOCKED: recursive private propagation, bounded private /run, and PID-bound private /proc were independently verified and reaped without BOOTSTRAP_READY or GO.' \
+    'BLOCKED: private mounts and the fixed pidfd-to-PID1-signalfd TERM observation chain were independently verified and exactly reaped without BOOTSTRAP_READY or GO.' \
     >"$proof_tmp/expected-stderr"
 if ! cmp -s "$proof_tmp/expected-stderr" "$proof_tmp/stderr"; then
-    fail 'runner did not report the complete private-mount proof outcome'
+    fail 'runner did not report the complete signal-supervision proof outcome'
 fi
 for record in namespaces mountinfo ipv4-routes ipv6-routes; do
     if ! cmp -s "$proof_tmp/before/$record" "$proof_tmp/after/$record"; then
@@ -151,10 +151,10 @@ done
 
 case $proof_scope in
     vm)
-        printf '%s\n' 'Debian 13 VM private-mount proof gate passed'
+        printf '%s\n' 'Debian 13 VM signal-supervision proof gate passed'
         ;;
     additional-bare-metal-local)
-        printf '%s\n' 'additional bare-metal local private-mount proof gate passed'
+        printf '%s\n' 'additional bare-metal local signal-supervision proof gate passed'
         ;;
-    *) fail 'private-mount proof scope was not classified' ;;
+    *) fail 'signal-supervision proof scope was not classified' ;;
 esac

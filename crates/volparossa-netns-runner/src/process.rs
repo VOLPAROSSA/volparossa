@@ -175,6 +175,15 @@ impl FixedChild {
         }
     }
 
+    /// Terminate the exact owned launcher through its retained pidfd and reap it.
+    ///
+    /// This is the fail-closed containment path for an outer managed signal.
+    /// It consumes every IPC endpoint and kernel pin together with the process
+    /// owner, so no detached launcher can survive the interrupted run.
+    pub(crate) fn terminate_and_reap(mut self) -> io::Result<ExitStatus> {
+        self.retire()
+    }
+
     fn retire(&mut self) -> io::Result<ExitStatus> {
         let (child, termination_pidfd, pins, permit) = self.take_retirement()?;
         terminate_owned_child(child, termination_pidfd, pins, permit)

@@ -96,7 +96,7 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
     assert!(
         stderr
-            == "BLOCKED: recursive private propagation, bounded private /run, and PID-bound private /proc were independently verified and reaped without BOOTSTRAP_READY or GO.\n"
+            == "BLOCKED: private mounts and the fixed pidfd-to-PID1-signalfd TERM observation chain were independently verified and exactly reaped without BOOTSTRAP_READY or GO.\n"
             || stderr
                 == "BLOCKED: anonymous namespaces, exact ID mappings, and a self-reexecuted PID 1 were verified, but kernel policy denied the fixed private-mount setup; no BOOTSTRAP_READY or GO was emitted.\n"
             || stderr
@@ -195,6 +195,29 @@ fn ignored_sigchld_is_rejected_before_any_child_is_spawned() {
 }
 
 #[test]
+fn ignored_lifecycle_signals_are_rejected_before_any_child_is_spawned() {
+    for signal in ["HUP", "INT", "TERM"] {
+        let output = Command::new("/bin/bash")
+            .arg("-c")
+            .arg("trap '' \"$1\"\nexec \"$2\" --run")
+            .arg("volparossa-signal-wrapper")
+            .arg(signal)
+            .arg(RUNNER)
+            .env_clear()
+            .output()
+            .expect("run with inherited ignored lifecycle signal");
+
+        assert_eq!(output.status.code(), Some(70), "ignored {signal}");
+        assert!(output.stdout.is_empty(), "ignored {signal}");
+        assert_eq!(
+            String::from_utf8(output.stderr).expect("UTF-8 stderr"),
+            "ERROR: fixed child process operation failed: inherited lifecycle signal disposition is not exactly default\n",
+            "ignored {signal}"
+        );
+    }
+}
+
+#[test]
 fn preview_and_argument_surface_are_exact() {
     let preview = Command::new(RUNNER)
         .arg("--preview")
@@ -203,7 +226,7 @@ fn preview_and_argument_surface_are_exact() {
     assert!(preview.status.success());
     assert_eq!(
         String::from_utf8(preview.stdout).expect("UTF-8 preview"),
-        "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, recursive private propagation, bounded private /run, and PID-bound private /proc are implemented; signal supervision, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked.\n"
+        "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, and fixed pidfd-to-signalfd supervision are implemented; pristine-network proof, BOOTSTRAP_READY, GO, and every network-topology mutation remain blocked.\n"
     );
     assert!(preview.stderr.is_empty());
 

@@ -3,6 +3,8 @@ use std::str;
 use thiserror::Error;
 use volparossa_test_support::{MAX_LIFECYCLE_FRAME_BYTES, RunId};
 
+use crate::signals::ManagedSignal;
+
 const NAMESPACES_CREATED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 NAMESPACES_CREATED";
 const MAPPINGS_INSTALLED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MAPPINGS_INSTALLED";
 const MAPPINGS_VERIFIED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MAPPINGS_VERIFIED";
@@ -15,6 +17,8 @@ const PRIVATE_MOUNTS_VERIFIED_HEADER: &str =
     "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PRIVATE_MOUNTS_VERIFIED";
 const PRIVATE_MOUNTS_UNAVAILABLE_HEADER: &str =
     "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PRIVATE_MOUNTS_UNAVAILABLE";
+const PID1_SIGNAL_OBSERVED_HEADER: &str =
+    "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_SIGNAL_OBSERVED";
 const PID1_REAPED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_REAPED";
 const PID1_REAPED_STATUS: i32 = 77;
 const MAX_LINUX_PID: u32 = 2_147_483_647;
@@ -46,6 +50,9 @@ pub(crate) enum BootstrapControlError {
     /// A PID-1 completion record did not carry the sole blocked status.
     #[error("bootstrap-control PID-1 status is invalid")]
     ExitStatus,
+    /// A managed-signal field was not one of the fixed canonical names.
+    #[error("bootstrap-control managed signal is invalid")]
+    Signal,
     /// A valid record travelled in the wrong direction or appeared at the wrong receive step.
     #[error("unexpected bootstrap-control record")]
     UnexpectedRecord,
@@ -55,6 +62,9 @@ pub(crate) enum BootstrapControlError {
     /// A record named another process than the affinely retained PID-1 child.
     #[error("bootstrap-control PID mismatch")]
     PidMismatch,
+    /// A record named another signal than the affinely expected managed signal.
+    #[error("bootstrap-control managed signal mismatch")]
+    SignalMismatch,
     /// An affine state transition was attempted more than once or out of order.
     #[error("invalid bootstrap-control state transition")]
     StateTransition,
@@ -71,6 +81,7 @@ enum RecordKind {
     PrivateMountsReady,
     PrivateMountsVerified,
     PrivateMountsUnavailable,
+    Pid1SignalObserved,
     Pid1Reaped,
 }
 
@@ -86,6 +97,7 @@ impl RecordKind {
             Self::PrivateMountsReady => PRIVATE_MOUNTS_READY_HEADER,
             Self::PrivateMountsVerified => PRIVATE_MOUNTS_VERIFIED_HEADER,
             Self::PrivateMountsUnavailable => PRIVATE_MOUNTS_UNAVAILABLE_HEADER,
+            Self::Pid1SignalObserved => PID1_SIGNAL_OBSERVED_HEADER,
             Self::Pid1Reaped => PID1_REAPED_HEADER,
         }
     }
@@ -101,6 +113,7 @@ impl RecordKind {
             PRIVATE_MOUNTS_READY_HEADER => Ok(Self::PrivateMountsReady),
             PRIVATE_MOUNTS_VERIFIED_HEADER => Ok(Self::PrivateMountsVerified),
             PRIVATE_MOUNTS_UNAVAILABLE_HEADER => Ok(Self::PrivateMountsUnavailable),
+            PID1_SIGNAL_OBSERVED_HEADER => Ok(Self::Pid1SignalObserved),
             PID1_REAPED_HEADER => Ok(Self::Pid1Reaped),
             _ => Err(BootstrapControlError::FrameShape),
         }
@@ -114,12 +127,17 @@ impl RecordKind {
                 | Self::PrivateMountsReady
                 | Self::PrivateMountsVerified
                 | Self::PrivateMountsUnavailable
+                | Self::Pid1SignalObserved
                 | Self::Pid1Reaped
         )
     }
 
     const fn has_status(self) -> bool {
         matches!(self, Self::Pid1Reaped)
+    }
+
+    const fn has_signal(self) -> bool {
+        matches!(self, Self::Pid1SignalObserved)
     }
 }
 
@@ -129,6 +147,7 @@ struct ControlRecord {
     run_id: RunId,
     pid: Option<u32>,
     status: Option<i32>,
+    signal: Option<ManagedSignal>,
 }
 
 impl ControlRecord {
@@ -138,6 +157,7 @@ impl ControlRecord {
             run_id,
             pid: None,
             status: None,
+            signal: None,
         }
     }
 
@@ -147,6 +167,7 @@ impl ControlRecord {
             run_id,
             pid: Some(pid),
             status: None,
+            signal: None,
         }
     }
 
@@ -156,24 +177,43 @@ impl ControlRecord {
             run_id,
             pid: Some(pid),
             status: Some(status),
+            signal: None,
+        }
+    }
+
+    fn pid1_signal_observed(run_id: RunId, pid: u32, signal: ManagedSignal) -> Self {
+        Self {
+            kind: RecordKind::Pid1SignalObserved,
+            run_id,
+            pid: Some(pid),
+            status: None,
+            signal: Some(signal),
         }
     }
 
     fn encode(&self) -> Result<String, BootstrapControlError> {
         self.validate_fields()?;
-        let encoded = match (self.pid, self.status) {
-            (None, None) => format!("{}\nrun_id={}\n", self.kind.header(), self.run_id.as_str()),
-            (Some(pid), None) => format!(
+        let encoded = match (self.pid, self.status, self.signal) {
+            (None, None, None) => {
+                format!("{}\nrun_id={}\n", self.kind.header(), self.run_id.as_str())
+            }
+            (Some(pid), None, None) => format!(
                 "{}\nrun_id={}\npid={pid}\n",
                 self.kind.header(),
                 self.run_id.as_str()
             ),
-            (Some(pid), Some(status)) => format!(
+            (Some(pid), Some(status), None) => format!(
                 "{}\nrun_id={}\npid={pid}\nstatus={status}\n",
                 self.kind.header(),
                 self.run_id.as_str()
             ),
-            (None, Some(_)) => return Err(BootstrapControlError::FrameShape),
+            (Some(pid), None, Some(signal)) => format!(
+                "{}\nrun_id={}\npid={pid}\nsignal={}\n",
+                self.kind.header(),
+                self.run_id.as_str(),
+                signal.as_str()
+            ),
+            _ => return Err(BootstrapControlError::FrameShape),
         };
         if encoded.len() > MAX_LIFECYCLE_FRAME_BYTES {
             return Err(BootstrapControlError::FrameTooLarge);
@@ -184,6 +224,7 @@ impl ControlRecord {
     fn validate_fields(&self) -> Result<(), BootstrapControlError> {
         if self.kind.has_pid() != self.pid.is_some()
             || self.kind.has_status() != self.status.is_some()
+            || self.kind.has_signal() != self.signal.is_some()
         {
             return Err(BootstrapControlError::FrameShape);
         }
@@ -245,6 +286,15 @@ impl ControlRecord {
         } else {
             None
         };
+        let signal = if kind.has_signal() {
+            let signal_line = lines.next().ok_or(BootstrapControlError::FrameShape)?;
+            let signal_value = signal_line
+                .strip_prefix("signal=")
+                .ok_or(BootstrapControlError::FrameShape)?;
+            Some(ManagedSignal::parse(signal_value).map_err(|_| BootstrapControlError::Signal)?)
+        } else {
+            None
+        };
         if lines.next().is_some() {
             return Err(BootstrapControlError::FrameShape);
         }
@@ -253,6 +303,7 @@ impl ControlRecord {
             run_id,
             pid,
             status,
+            signal,
         };
         if record.encode()?.as_bytes() != bytes {
             return Err(BootstrapControlError::FrameShape);
@@ -294,7 +345,9 @@ pub(crate) enum OuterBootstrapPhase {
     AwaitingPrivateMountsReady,
     /// Private-mount readiness was accepted; its verification may be emitted once.
     PrivateMountsReady,
-    /// Private-mount verification was emitted; exact PID-1 reaping is outstanding.
+    /// Private-mount verification was emitted; exact managed-signal observation is outstanding.
+    AwaitingSignalObserved,
+    /// Exact managed-signal observation was accepted; PID-1 reaping is outstanding.
     AwaitingPid1Reaped,
     /// One exact private-mount result branch and the PID-1 reap completed.
     Complete,
@@ -456,8 +509,31 @@ impl OuterBootstrapControl {
         let encoded =
             ControlRecord::for_pid(RecordKind::PrivateMountsVerified, self.run_id.clone(), pid)
                 .encode()?;
-        self.phase = OuterBootstrapPhase::AwaitingPid1Reaped;
+        self.phase = OuterBootstrapPhase::AwaitingSignalObserved;
         Ok(encoded)
+    }
+
+    /// Accept the launcher's sole signal observation for the retained PID and expected signal.
+    pub(crate) fn accept_pid1_signal_observed(
+        &mut self,
+        bytes: &[u8],
+        expected_signal: ManagedSignal,
+    ) -> Result<(), BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::AwaitingSignalObserved {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let expected_pid = self
+            .pid1_pid
+            .ok_or(BootstrapControlError::StateTransition)?;
+        accept_pid_signal_record(
+            bytes,
+            RecordKind::Pid1SignalObserved,
+            &self.run_id,
+            expected_pid,
+            expected_signal,
+        )?;
+        self.phase = OuterBootstrapPhase::AwaitingPid1Reaped;
+        Ok(())
     }
 
     /// Accept the launcher's sole `PID1_REAPED` record for status 77.
@@ -498,6 +574,8 @@ pub(crate) enum LauncherBootstrapPhase {
     PrivateMountsReadyPending,
     /// Mount readiness was emitted; the outer verification acknowledgement is outstanding.
     AwaitingPrivateMountsVerified,
+    /// Positive mount verification completed; managed-signal observation is outstanding.
+    AwaitingSignalObserved,
     /// One exact mount-result branch completed; PID-1 reap may be emitted once.
     Pid1ReapPending,
     /// One exact private-mount result branch and the PID-1 reap completed.
@@ -662,8 +740,26 @@ impl LauncherBootstrapControl {
             &self.run_id,
             Some(expected_pid),
         )?;
-        self.phase = LauncherBootstrapPhase::Pid1ReapPending;
+        self.phase = LauncherBootstrapPhase::AwaitingSignalObserved;
         Ok(())
+    }
+
+    /// Emit the sole managed-signal observation for the retained PID.
+    pub(crate) fn pid1_signal_observed(
+        &mut self,
+        pid: u32,
+        signal: ManagedSignal,
+    ) -> Result<String, BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::AwaitingSignalObserved {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        if self.pid1_pid != Some(pid) {
+            return Err(BootstrapControlError::PidMismatch);
+        }
+        let encoded =
+            ControlRecord::pid1_signal_observed(self.run_id.clone(), pid, signal).encode()?;
+        self.phase = LauncherBootstrapPhase::Pid1ReapPending;
+        Ok(encoded)
     }
 
     /// Emit the sole `PID1_REAPED` record for the retained PID and exact status 77.
@@ -719,6 +815,29 @@ fn accept_pid_record(
     Ok(pid)
 }
 
+fn accept_pid_signal_record(
+    bytes: &[u8],
+    expected_kind: RecordKind,
+    expected_run_id: &RunId,
+    expected_pid: u32,
+    expected_signal: ManagedSignal,
+) -> Result<(), BootstrapControlError> {
+    let record = ControlRecord::parse(bytes)?;
+    if record.kind != expected_kind {
+        return Err(BootstrapControlError::UnexpectedRecord);
+    }
+    if &record.run_id != expected_run_id {
+        return Err(BootstrapControlError::RunIdMismatch);
+    }
+    if record.pid != Some(expected_pid) {
+        return Err(BootstrapControlError::PidMismatch);
+    }
+    if record.signal != Some(expected_signal) {
+        return Err(BootstrapControlError::SignalMismatch);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,6 +871,12 @@ mod tests {
         ControlRecord::pid1_reaped(run_id, pid, PID1_REAPED_STATUS)
             .encode()
             .expect("bounded reaped record")
+    }
+
+    fn signal_observed_encoded(run_id: RunId, pid: u32, signal: ManagedSignal) -> String {
+        ControlRecord::pid1_signal_observed(run_id, pid, signal)
+            .encode()
+            .expect("bounded signal-observation record")
     }
 
     fn advance_to_mapping_pin(
@@ -851,6 +976,23 @@ mod tests {
         assert!(!canonical.contains('\r'));
         assert!(!canonical.contains("fd="));
         assert!(canonical.len() <= MAX_LIFECYCLE_FRAME_BYTES);
+
+        for signal in [ManagedSignal::Hup, ManagedSignal::Int, ManagedSignal::Term] {
+            let observed = ControlRecord::pid1_signal_observed(run_id(), PID1_PID, signal);
+            let canonical = observed.encode().expect("canonical observation encoding");
+            assert_eq!(
+                canonical,
+                format!(
+                    "{PID1_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nsignal={}\n",
+                    signal.as_str()
+                )
+            );
+            assert_eq!(ControlRecord::parse(canonical.as_bytes()), Ok(observed));
+            assert!(canonical.is_ascii());
+            assert!(!canonical.contains('\r'));
+            assert!(!canonical.contains("fd="));
+            assert!(canonical.len() <= MAX_LIFECYCLE_FRAME_BYTES);
+        }
     }
 
     #[test]
@@ -938,11 +1080,23 @@ mod tests {
         let mounts_verified = outer
             .private_mounts_verified(PID1_PID)
             .expect("private mounts verified record");
-        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
         launcher
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("launcher accepts private mounts verification");
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingSignalObserved
+        );
+
+        let signal_observed = launcher
+            .pid1_signal_observed(PID1_PID, ManagedSignal::Term)
+            .expect("signal-observation record");
         assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1ReapPending);
+        outer
+            .accept_pid1_signal_observed(signal_observed.as_bytes(), ManagedSignal::Term)
+            .expect("outer accepts exact signal observation");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
 
         let reaped = launcher
             .pid1_reaped(PID1_PID, PID1_REAPED_STATUS)
@@ -1007,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn pid_and_status_fields_accept_only_exact_canonical_values() {
+    fn pid_status_and_signal_fields_accept_only_exact_canonical_values() {
         for invalid_pid in [
             "",
             "0",
@@ -1039,6 +1193,16 @@ mod tests {
                 "status spelling {invalid_status:?} must fail closed"
             );
         }
+        for invalid_signal in ["", "term", "SIGTERM", "KILL", "TERM ", " TERM", "TERM\0"] {
+            let malformed = format!(
+                "{PID1_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nsignal={invalid_signal}\n"
+            );
+            assert_eq!(
+                ControlRecord::parse(malformed.as_bytes()),
+                Err(BootstrapControlError::Signal),
+                "signal spelling {invalid_signal:?} must fail closed"
+            );
+        }
         assert_eq!(parse_canonical_pid("1"), Ok(1));
         assert_eq!(parse_canonical_pid("2147483647"), Ok(MAX_LINUX_PID));
         assert_eq!(
@@ -1068,6 +1232,10 @@ mod tests {
             format!("{PID1_PINNED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nfd=9\n"),
             format!("{PID1_REAPED_HEADER}\nrun_id={RUN}\nstatus=77\npid={PID1_PID}\n"),
             format!("{PID1_REAPED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nstatus=77\nfd=9\n"),
+            format!("{PID1_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\nsignal=TERM\npid={PID1_PID}\n"),
+            format!(
+                "{PID1_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\npid={PID1_PID}\nsignal=TERM\nsignal=TERM\n"
+            ),
         ] {
             assert_eq!(
                 ControlRecord::parse(malformed.as_bytes()),
@@ -1136,6 +1304,7 @@ mod tests {
         let mounts_verified = pid_encoded(RecordKind::PrivateMountsVerified, run_id(), PID1_PID);
         let mounts_unavailable =
             pid_encoded(RecordKind::PrivateMountsUnavailable, run_id(), PID1_PID);
+        let signal_observed = signal_observed_encoded(run_id(), PID1_PID, ManagedSignal::Term);
         let reaped = reaped_encoded(run_id(), PID1_PID);
 
         for wrong in [
@@ -1230,6 +1399,30 @@ mod tests {
             &mounts_ready,
             &mounts_verified,
             &mounts_unavailable,
+            &reaped,
+            &verified,
+        ] {
+            assert_eq!(
+                outer.accept_pid1_signal_observed(wrong.as_bytes(), ManagedSignal::Term),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
+        }
+        let emitted_observation = launcher
+            .pid1_signal_observed(PID1_PID, ManagedSignal::Term)
+            .expect("matching signal observation");
+        assert_eq!(emitted_observation, signal_observed);
+        outer
+            .accept_pid1_signal_observed(emitted_observation.as_bytes(), ManagedSignal::Term)
+            .expect("matching signal observation acceptance");
+
+        for wrong in [
+            &spawned,
+            &pinned,
+            &mounts_ready,
+            &mounts_verified,
+            &mounts_unavailable,
+            &signal_observed,
             &verified,
         ] {
             assert_eq!(
@@ -1241,6 +1434,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn wrong_run_is_rejected_at_every_receive_step_without_advancing() {
         let wrong_namespaces = encoded(RecordKind::NamespacesCreated, other_run_id());
         let wrong_installed = encoded(RecordKind::MappingsInstalled, other_run_id());
@@ -1336,6 +1530,20 @@ mod tests {
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("accept matching mounts-verified record");
 
+        let wrong_observation =
+            signal_observed_encoded(other_run_id(), PID1_PID, ManagedSignal::Term);
+        assert_eq!(
+            outer.accept_pid1_signal_observed(wrong_observation.as_bytes(), ManagedSignal::Term),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
+        let observation = launcher
+            .pid1_signal_observed(PID1_PID, ManagedSignal::Term)
+            .expect("matching signal observation");
+        outer
+            .accept_pid1_signal_observed(observation.as_bytes(), ManagedSignal::Term)
+            .expect("accept matching signal observation");
+
         let wrong_reaped = reaped_encoded(other_run_id(), PID1_PID);
         assert_eq!(
             outer.accept_pid1_reaped(wrong_reaped.as_bytes()),
@@ -1372,6 +1580,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn wrong_pid_is_rejected_at_every_bound_step_without_advancing() {
         let mut outer = OuterBootstrapControl::new(run_id());
         let mut launcher = LauncherBootstrapControl::new(run_id());
@@ -1442,6 +1651,27 @@ mod tests {
         launcher
             .accept_private_mounts_verified(verified.as_bytes())
             .expect("matching mount-verified acceptance");
+
+        assert_eq!(
+            launcher.pid1_signal_observed(OTHER_PID, ManagedSignal::Term),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingSignalObserved
+        );
+        let wrong_observation = signal_observed_encoded(run_id(), OTHER_PID, ManagedSignal::Term);
+        assert_eq!(
+            outer.accept_pid1_signal_observed(wrong_observation.as_bytes(), ManagedSignal::Term),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
+        let observation = launcher
+            .pid1_signal_observed(PID1_PID, ManagedSignal::Term)
+            .expect("matching observation");
+        outer
+            .accept_pid1_signal_observed(observation.as_bytes(), ManagedSignal::Term)
+            .expect("matching observation acceptance");
 
         assert_eq!(
             launcher.pid1_reaped(OTHER_PID, PID1_REAPED_STATUS),
@@ -1569,6 +1799,13 @@ mod tests {
             Err(BootstrapControlError::StateTransition)
         );
         assert_eq!(
+            outer.accept_pid1_signal_observed(
+                signal_observed_encoded(run_id(), PID1_PID, ManagedSignal::Term).as_bytes(),
+                ManagedSignal::Term
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
             outer.accept_private_mounts_ready(
                 pid_encoded(RecordKind::PrivateMountsReady, run_id(), PID1_PID).as_bytes()
             ),
@@ -1592,6 +1829,10 @@ mod tests {
         );
         assert_eq!(
             launcher.pid1_reaped(PID1_PID, PID1_REAPED_STATUS),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.pid1_signal_observed(PID1_PID, ManagedSignal::Term),
             Err(BootstrapControlError::StateTransition)
         );
         assert_eq!(
@@ -1687,6 +1928,38 @@ mod tests {
             launcher.private_mounts_unavailable(PID1_PID),
             Err(BootstrapControlError::StateTransition)
         );
+        assert_eq!(
+            launcher.pid1_reaped(PID1_PID, 0),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingSignalObserved
+        );
+        let wrong_signal = signal_observed_encoded(run_id(), PID1_PID, ManagedSignal::Hup);
+        assert_eq!(
+            outer.accept_pid1_signal_observed(wrong_signal.as_bytes(), ManagedSignal::Term),
+            Err(BootstrapControlError::SignalMismatch)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
+
+        let observed = launcher
+            .pid1_signal_observed(PID1_PID, ManagedSignal::Term)
+            .expect("first signal observation");
+        assert_eq!(
+            launcher.pid1_signal_observed(PID1_PID, ManagedSignal::Term),
+            Err(BootstrapControlError::StateTransition)
+        );
+        outer
+            .accept_pid1_signal_observed(observed.as_bytes(), ManagedSignal::Term)
+            .expect("first signal-observation acceptance");
+        assert_eq!(
+            outer.accept_pid1_signal_observed(observed.as_bytes(), ManagedSignal::Term),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1ReapPending);
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Reaped);
+
         assert_eq!(
             launcher.pid1_reaped(PID1_PID, 0),
             Err(BootstrapControlError::ExitStatus)
@@ -1879,6 +2152,17 @@ mod tests {
         launcher
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("matching mount-verified record");
+        assert_eq!(
+            outer.accept_pid1_signal_observed(&oversized, ManagedSignal::Term),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
+        let observed = launcher
+            .pid1_signal_observed(PID1_PID, ManagedSignal::Term)
+            .expect("matching signal-observation record");
+        outer
+            .accept_pid1_signal_observed(observed.as_bytes(), ManagedSignal::Term)
+            .expect("matching signal-observation acceptance");
         assert_eq!(
             outer.accept_pid1_reaped(&oversized),
             Err(BootstrapControlError::FrameTooLarge)

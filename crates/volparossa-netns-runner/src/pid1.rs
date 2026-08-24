@@ -3,6 +3,8 @@ use std::str;
 use thiserror::Error;
 use volparossa_test_support::{MAX_LIFECYCLE_FRAME_BYTES, NamespaceIdentity, RunId};
 
+use crate::signals::ManagedSignal;
+
 const PROVISION_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PROVISION";
 const PARENT_DEATH_ARMED_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PARENT_DEATH_ARMED";
 const PARENT_ALIVE_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PARENT_ALIVE";
@@ -15,8 +17,11 @@ const PRIVATE_MOUNTS_VERIFIED_HEADER: &str =
     "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PRIVATE_MOUNTS_VERIFIED";
 const PRIVATE_MOUNTS_UNAVAILABLE_HEADER: &str =
     "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PRIVATE_MOUNTS_UNAVAILABLE";
+const MANAGED_SIGNAL_OBSERVED_HEADER: &str =
+    "VOLPAROSSA_NETNS_PID1_CONTROL_V1 MANAGED_SIGNAL_OBSERVED";
 const EXPECT_LIFECYCLE_EOF_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 EXPECT_LIFECYCLE_EOF";
 const LIFECYCLE_EOF_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 LIFECYCLE_EOF";
+const NAMESPACE_PID_ONE: u32 = 1;
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum PidOneControlError {
@@ -34,8 +39,14 @@ pub(crate) enum PidOneControlError {
     Namespace,
     #[error("PID-1 control decimal is invalid")]
     Decimal,
+    #[error("PID-1 control managed signal is invalid")]
+    Signal,
     #[error("PID-1 control record used the wrong run identifier")]
     RunIdMismatch,
+    #[error("PID-1 control record used the wrong namespace PID")]
+    PidMismatch,
+    #[error("PID-1 control record used the wrong managed signal")]
+    SignalMismatch,
     #[error("PID-1 control record appeared in the wrong direction or order")]
     StateTransition,
 }
@@ -187,6 +198,7 @@ enum LauncherPhase {
     SetupPrivateMountsPending,
     AwaitingPrivateMountsResult,
     PrivateMountsReady,
+    AwaitingSignalObserved,
     PrivateMountsComplete,
     AwaitingLifecycleEof,
     LifecycleEof,
@@ -288,9 +300,23 @@ impl LauncherPidOneControl {
     pub(crate) fn private_mounts_verified(&mut self) -> Result<String, PidOneControlError> {
         self.emit(
             LauncherPhase::PrivateMountsReady,
-            LauncherPhase::PrivateMountsComplete,
+            LauncherPhase::AwaitingSignalObserved,
             SimpleKind::PrivateMountsVerified,
         )
+    }
+
+    /// Accept PID 1's sole run-, PID-, and signal-bound observation.
+    pub(crate) fn accept_managed_signal_observed(
+        &mut self,
+        bytes: &[u8],
+        expected_signal: ManagedSignal,
+    ) -> Result<(), PidOneControlError> {
+        if self.phase != LauncherPhase::AwaitingSignalObserved {
+            return Err(PidOneControlError::StateTransition);
+        }
+        accept_managed_signal_observed(bytes, self.provision.run_id(), expected_signal)?;
+        self.phase = LauncherPhase::PrivateMountsComplete;
+        Ok(())
     }
 
     pub(crate) fn expect_lifecycle_eof(&mut self) -> Result<String, PidOneControlError> {
@@ -357,6 +383,7 @@ enum PidOnePhase {
     AwaitingSetupPrivateMounts,
     PrivateMountsResultPending,
     AwaitingPrivateMountsVerified,
+    ManagedSignalObservedPending,
     AwaitingLifecycleEof,
     LifecycleEofPending,
     Complete,
@@ -462,9 +489,22 @@ impl PidOneControl {
         self.accept(
             bytes,
             PidOnePhase::AwaitingPrivateMountsVerified,
-            PidOnePhase::AwaitingLifecycleEof,
+            PidOnePhase::ManagedSignalObservedPending,
             SimpleKind::PrivateMountsVerified,
         )
+    }
+
+    /// Emit the sole canonical observation after consuming one managed signal.
+    pub(crate) fn managed_signal_observed(
+        &mut self,
+        signal: ManagedSignal,
+    ) -> Result<String, PidOneControlError> {
+        if self.phase != PidOnePhase::ManagedSignalObservedPending {
+            return Err(PidOneControlError::StateTransition);
+        }
+        let encoded = encode_managed_signal_observed(self.run_id()?, signal)?;
+        self.phase = PidOnePhase::AwaitingLifecycleEof;
+        Ok(encoded)
     }
 
     pub(crate) fn accept_expect_lifecycle_eof(
@@ -546,6 +586,44 @@ fn accept_simple(
         return Err(PidOneControlError::RunIdMismatch);
     }
     require_canonical(bytes, &encode_simple(expected, &run_id)?)
+}
+
+fn encode_managed_signal_observed(
+    run_id: &RunId,
+    signal: ManagedSignal,
+) -> Result<String, PidOneControlError> {
+    encode_lines(&[
+        MANAGED_SIGNAL_OBSERVED_HEADER.to_owned(),
+        format!("run_id={}", run_id.as_str()),
+        format!("pid={NAMESPACE_PID_ONE}"),
+        format!("signal={}", signal.as_str()),
+    ])
+}
+
+fn accept_managed_signal_observed(
+    bytes: &[u8],
+    expected_run_id: &RunId,
+    expected_signal: ManagedSignal,
+) -> Result<(), PidOneControlError> {
+    let lines = decode_lines(bytes)?;
+    if lines.len() != 4 || lines[0] != MANAGED_SIGNAL_OBSERVED_HEADER {
+        return Err(PidOneControlError::Shape);
+    }
+    let run_id =
+        RunId::parse(field(&lines, 1, "run_id")?).map_err(|_| PidOneControlError::RunId)?;
+    if &run_id != expected_run_id {
+        return Err(PidOneControlError::RunIdMismatch);
+    }
+    let pid = parse_u32(field(&lines, 2, "pid")?)?;
+    if pid != NAMESPACE_PID_ONE {
+        return Err(PidOneControlError::PidMismatch);
+    }
+    let signal = ManagedSignal::parse(field(&lines, 3, "signal")?)
+        .map_err(|_| PidOneControlError::Signal)?;
+    if signal != expected_signal {
+        return Err(PidOneControlError::SignalMismatch);
+    }
+    require_canonical(bytes, &encode_managed_signal_observed(&run_id, signal)?)
 }
 
 fn namespace(
@@ -726,6 +804,18 @@ mod tests {
         pid_one
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("accept private-mount verification");
+        assert_eq!(pid_one.phase, PidOnePhase::ManagedSignalObservedPending);
+        assert_eq!(launcher.phase, LauncherPhase::AwaitingSignalObserved);
+        let observed = pid_one
+            .managed_signal_observed(ManagedSignal::Term)
+            .expect("managed-signal observation");
+        assert_eq!(
+            observed,
+            format!("{MANAGED_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\npid=1\nsignal=TERM\n")
+        );
+        launcher
+            .accept_managed_signal_observed(observed.as_bytes(), ManagedSignal::Term)
+            .expect("accept managed-signal observation");
         let expect_eof = launcher.expect_lifecycle_eof().expect("expect EOF");
         pid_one
             .accept_expect_lifecycle_eof(expect_eof.as_bytes())
@@ -886,6 +976,31 @@ mod tests {
     }
 
     #[test]
+    fn all_managed_signal_observations_are_canonical_bounded_and_affine() {
+        for signal in [ManagedSignal::Hup, ManagedSignal::Int, ManagedSignal::Term] {
+            let record =
+                encode_managed_signal_observed(&run_id(), signal).expect("signal observation");
+            assert_eq!(
+                record,
+                format!(
+                    "{MANAGED_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\npid=1\nsignal={}\n",
+                    signal.as_str()
+                )
+            );
+            assert!(record.is_ascii());
+            assert!(record.len() <= MAX_LIFECYCLE_FRAME_BYTES);
+            assert_eq!(
+                accept_managed_signal_observed(record.as_bytes(), &run_id(), signal),
+                Ok(())
+            );
+            assert_eq!(
+                accept_managed_signal_observed(record.as_bytes(), &other_run_id(), signal),
+                Err(PidOneControlError::RunIdMismatch)
+            );
+        }
+    }
+
+    #[test]
     fn provision_rejects_aliases_and_noncanonical_fields() {
         let valid = provision().encode().expect("valid");
         assert_eq!(PidOneProvision::parse(valid.as_bytes()), Ok(provision()));
@@ -1028,10 +1143,87 @@ mod tests {
         pid_one
             .accept_private_mounts_verified(verified.as_bytes())
             .expect("accept valid verification after rejections");
+        assert_eq!(pid_one.phase, PidOnePhase::ManagedSignalObservedPending);
+        assert_eq!(launcher.phase, LauncherPhase::AwaitingSignalObserved);
+    }
+
+    #[test]
+    fn managed_signal_observation_rejects_wrong_binding_without_advancing() {
+        let mut launcher = LauncherPidOneControl::new(provision());
+        let mut pid_one = PidOneControl::new();
+        advance_through_executed(&mut launcher, &mut pid_one);
+        let setup = launcher.setup_private_mounts().expect("setup");
+        pid_one
+            .accept_setup_private_mounts(setup.as_bytes())
+            .expect("accept setup");
+        let ready = pid_one.private_mounts_ready().expect("ready");
+        launcher
+            .accept_private_mounts_ready(ready.as_bytes())
+            .expect("accept ready");
+        let verified = launcher.private_mounts_verified().expect("verified");
+        pid_one
+            .accept_private_mounts_verified(verified.as_bytes())
+            .expect("accept verified");
+
+        assert_eq!(
+            launcher.expect_lifecycle_eof(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.accept_expect_lifecycle_eof(
+                encode_simple(SimpleKind::ExpectLifecycleEof, &run_id())
+                    .expect("expect-EOF record")
+                    .as_bytes()
+            ),
+            Err(PidOneControlError::StateTransition)
+        );
+
+        let wrong_run = encode_managed_signal_observed(&other_run_id(), ManagedSignal::Term)
+            .expect("wrong-run observation");
+        assert_eq!(
+            launcher.accept_managed_signal_observed(wrong_run.as_bytes(), ManagedSignal::Term),
+            Err(PidOneControlError::RunIdMismatch)
+        );
+        let wrong_pid =
+            format!("{MANAGED_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\npid=2\nsignal=TERM\n");
+        assert_eq!(
+            launcher.accept_managed_signal_observed(wrong_pid.as_bytes(), ManagedSignal::Term),
+            Err(PidOneControlError::PidMismatch)
+        );
+        let wrong_signal =
+            encode_managed_signal_observed(&run_id(), ManagedSignal::Hup).expect("wrong signal");
+        assert_eq!(
+            launcher.accept_managed_signal_observed(wrong_signal.as_bytes(), ManagedSignal::Term),
+            Err(PidOneControlError::SignalMismatch)
+        );
+        let invalid_signal =
+            format!("{MANAGED_SIGNAL_OBSERVED_HEADER}\nrun_id={RUN}\npid=1\nsignal=KILL\n");
+        assert_eq!(
+            launcher.accept_managed_signal_observed(invalid_signal.as_bytes(), ManagedSignal::Term),
+            Err(PidOneControlError::Signal)
+        );
+        assert_eq!(launcher.phase, LauncherPhase::AwaitingSignalObserved);
+
+        let observed = pid_one
+            .managed_signal_observed(ManagedSignal::Term)
+            .expect("valid observation");
+        assert_eq!(
+            pid_one.managed_signal_observed(ManagedSignal::Term),
+            Err(PidOneControlError::StateTransition)
+        );
+        launcher
+            .accept_managed_signal_observed(observed.as_bytes(), ManagedSignal::Term)
+            .expect("accept valid observation after rejections");
+        assert_eq!(
+            launcher.accept_managed_signal_observed(observed.as_bytes(), ManagedSignal::Term),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(launcher.phase, LauncherPhase::PrivateMountsComplete);
         assert_eq!(pid_one.phase, PidOnePhase::AwaitingLifecycleEof);
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn private_mount_transitions_reject_order_replay_and_branch_switching() {
         let mut launcher = LauncherPidOneControl::new(provision());
         let mut pid_one = PidOneControl::new();
@@ -1129,6 +1321,24 @@ mod tests {
             .expect("first verification acceptance");
         assert_eq!(
             pid_one.accept_private_mounts_verified(verified.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.expect_lifecycle_eof(),
+            Err(PidOneControlError::StateTransition)
+        );
+        let observed = pid_one
+            .managed_signal_observed(ManagedSignal::Int)
+            .expect("first observation");
+        assert_eq!(
+            pid_one.managed_signal_observed(ManagedSignal::Int),
+            Err(PidOneControlError::StateTransition)
+        );
+        launcher
+            .accept_managed_signal_observed(observed.as_bytes(), ManagedSignal::Int)
+            .expect("first observation acceptance");
+        assert_eq!(
+            launcher.accept_managed_signal_observed(observed.as_bytes(), ManagedSignal::Int),
             Err(PidOneControlError::StateTransition)
         );
     }

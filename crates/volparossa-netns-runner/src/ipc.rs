@@ -1,7 +1,7 @@
 use std::{
     io,
     net::Shutdown,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
     time::Duration,
 };
 
@@ -65,8 +65,9 @@ impl LifecycleChannel {
         receive_seqpacket_without_fd(&self.socket, MAX_LIFECYCLE_FRAME_BYTES)
     }
 
-    pub(crate) fn set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
-        self.socket.set_read_timeout(Some(timeout))
+    pub(crate) fn set_io_timeout(&self, timeout: Duration) -> io::Result<()> {
+        self.socket.set_read_timeout(Some(timeout))?;
+        self.socket.set_write_timeout(Some(timeout))
     }
 
     pub(crate) fn finish_sending(&self) -> io::Result<()> {
@@ -89,6 +90,12 @@ impl LifecycleChannel {
     fn from_socket(socket: Socket) -> io::Result<Self> {
         validate_socket(&socket)?;
         Ok(Self { socket })
+    }
+}
+
+impl AsFd for LifecycleChannel {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.socket.as_fd()
     }
 }
 

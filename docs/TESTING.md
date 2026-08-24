@@ -246,12 +246,32 @@ descriptors and repeats that proof after the outer acknowledgement and immediate
 The outer independently reads the still-live PID through its pre-mount pidfd and anchored host
 `/proc/<pid>` directory, matches visible `statx` mount IDs to mountinfo, checks tmpfs type, capacity,
 inode bound, mode and mapped ownership, and matches `/proc/1/ns/pid` to the retained PID namespace.
-Only then is `PRIVATE_MOUNTS_VERIFIED` returned. The lifecycle channel closes without a frame and
-the outer verifies exact PID-1 exit and reap.
+Only then is `PRIVATE_MOUNTS_VERIFIED` returned.
+
+Before any child or fallback-reaper thread exists, the outer requires exact default inherited
+HUP/INT/TERM actions, a waitable default CHLD action, and an empty inherited signal mask. It then
+blocks exactly HUP, INT, TERM and CHLD and owns a nonblocking close-on-exec `signalfd`.
+PID 1 inherits that exact mask and, before reporting private-mount readiness, installs fixed real
+HUP/INT/TERM emergency handlers. Normal delivery remains synchronous through `signalfd`; an
+unexpectedly unblocked managed signal can only make the emergency handler call `_exit(128 +
+signal)`. The outer binds its independent readback to the retained pidfd and anchored proc
+directory: `SigBlk` is exactly `0000000000014003`, managed bits are absent from `SigIgn`, `SigPnd`
+and `ShdPnd`, and `SigCgt` is exactly `0000000000004443`. That caught set is the `0x4003` managed
+mask plus the `0x0440` process-start SIGBUS/SIGSEGV stack-overflow baseline of the repository-pinned
+Rust 1.85.0 runtime on Debian 13 amd64, not a Linux ABI constant; the audited UAPI separately reads
+back the exact managed handler addresses, flags and masks.
+
+After `PRIVATE_MOUNTS_VERIFIED`, the outer sends exactly TERM through the retained PID-1 pidfd.
+PID 1 must consume that actual `signalfd` record and return one canonical run-, PID- and
+signal-bound `MANAGED_SIGNAL_OBSERVED` through the launcher, which forwards the host-PID-bound
+`PID1_SIGNAL_OBSERVED`. Only after the outer accepts that observation and repeats the live signal
+proof does it close the lifecycle channel. PID 1 accepts the affine retire instruction and
+lifecycle EOF in either cross-channel order, repeats its mount/runtime/signal proofs, exits 77, and
+is exactly reaped by the launcher and outer. No lifecycle frame or `GO` is emitted.
 
 The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
 `MAPPINGS_VERIFIED`, `MAPPINGS_PINNED`, `PID1_SPAWNED`, `PID1_PINNED`, `PRIVATE_MOUNTS_READY`,
-`PRIVATE_MOUNTS_VERIFIED`, `PID1_REAPED`. The exclusive mount-policy branch substitutes
+`PRIVATE_MOUNTS_VERIFIED`, `PID1_SIGNAL_OBSERVED`, `PID1_REAPED`. The exclusive mount-policy branch substitutes
 `PRIVATE_MOUNTS_UNAVAILABLE` for the two positive mount records. Only `EPERM` or `EACCES` from an
 exact fixed mount-UAPI operation may take that branch; malformed state, missing targets, unsupported
 APIs, invalid options, resource failures, and failed readback remain internal errors. Other fixed
@@ -260,10 +280,10 @@ mapping, or outer PID-1 proof is unavailable, without fallback. If the outer PID
 unavailable after spawn, the launcher sends one run-bound `ABORT_BEFORE_PRIVATE_MOUNTS` record to
 PID 1, proves lifecycle EOF, and reaps it without issuing a mount instruction. A generic green CI
 job may therefore prove only fail-closed behaviour; the complete positive path requires the
-explicit `BlockedAfterPrivateMountProof` outcome on the Debian 13 acceptance host:
+explicit `BlockedAfterSignalSupervisionProof` outcome on the Debian 13 acceptance host:
 
 ```sh
-just test-netns-private-mount-proof
+just test-netns-signal-supervision-proof
 ```
 
 That opt-in gate requires an unprivileged Debian 13 amd64 host with unprivileged user namespaces
@@ -287,15 +307,22 @@ later synchronous reap attempt cannot complete, ownership transfers to a process
 reaper instead of being silently detached; that rare fallback is not claimed as post-exit cleanup
 or A14 evidence. The current `--run` path verifies EOF-before-`GO`, repeated exact PID-1 and
 outer-launcher reaping, and unchanged outer namespace, mount-table, and route-table observations,
-then honestly returns `BLOCKED`/77. An explicit `BlockedAfterPrivateMountProof` run additionally
-proves the complete private-mount barrier described above. Command/environment shims prove that it
-invokes no namespace or networking utility. It still has no general root-filesystem or
-supplementary-group isolation, signal-driven five-frame lifecycle, topology mutation, crash
-cleanup evidence, acceptance report, or A01-A15 result.
+then honestly returns `BLOCKED`/77. An explicit `BlockedAfterSignalSupervisionProof` run
+additionally proves the complete private-mount barrier and fixed pidfd-to-PID1-signalfd TERM
+observation described above. At supervised IPC boundaries, managed outer HUP/INT/TERM events take
+priority over pending protocol records and trigger bounded exact-launcher containment. The live
+gate does not yet prove external-signal handling throughout every reap/report phase, a forced
+parent-death/crash chain, a general descendant reaper, or A14 cleanup. Command/environment shims
+prove that the runner invokes no namespace or networking utility. It still has no general root-filesystem or supplementary-group isolation,
+pristine-network proof, `BOOTSTRAP_READY`, signal-driven five-frame lifecycle, topology mutation,
+crash-cleanup evidence, acceptance report, or A01-A15 result.
+The dedicated-host proof also does not claim hostile same-UID sender provenance from the
+`signalfd_siginfo` metadata; it proves that the retained pidfd send is followed by the exact
+quiescent TERM observation within this fixed supervisor.
 
 Privileged topology execution stays blocked until that fixed reviewed supervisor additionally owns
-signal supervision, lifecycle setup and evidence finalization, complete process-tree containment,
-network-object ownership, and teardown as one operation.
+lifecycle setup and evidence finalization, complete process-tree containment, network-object
+ownership, and teardown as one operation.
 It may not accept a caller-selected command, executable, backend, timeout, cleanup prefix, or
 network-object name.
 
