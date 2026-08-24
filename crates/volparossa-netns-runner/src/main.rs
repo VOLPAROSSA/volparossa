@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         }
         Some(argument) if argument == OsStr::new(PREVIEW_ARGUMENT) => {
             println!(
-                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, one canonical GO, and descriptor-relative private-run roots and empty namespace slots with exact reverse rollback are implemented; namespace pins, network-topology objects, TOPOLOGY_READY, A14, A15, and acceptance evidence remain blocked."
+                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, one canonical GO, descriptor-relative private-run roots and slots, two distinct live network namespaces published as run-bound nsfs pins, full pristine proof through the visible pins, ordinary reverse unmount B then A, and exact reverse filesystem rollback are implemented; veths, configured dataplane topology, TOPOLOGY_READY, A14, A15, and acceptance evidence remain blocked."
             );
             ExitCode::SUCCESS
         }
@@ -55,9 +55,9 @@ fn main() -> ExitCode {
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
-            Ok(LifecycleOutcome::BlockedAfterAuthorizedMutationRollback) => {
+            Ok(LifecycleOutcome::BlockedAfterNamespacePinsRollback) => {
                 eprintln!(
-                    "BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized descriptor-relative private-run roots and two empty namespace slots; PID 1 proved and removed every created object in exact reverse order, emitted one rollback-complete checkpoint, and the outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap. No namespace pin, network-topology object, TOPOLOGY_READY, A14, A15, or acceptance evidence was produced."
+                    "BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized descriptor-relative private-run roots and two empty namespace slots; PID 1 created two distinct live network namespaces, published each as an exact run-bound nsfs pin, proved both visible pins joinable and pristine, ordinarily unmounted B then A, restored the hidden empty slots, and removed every created filesystem object in reverse order. It emitted one rollback-complete checkpoint, and the outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap. No veth, address, route, nftables, ownership manifest, network-topology readiness, TOPOLOGY_READY, A14, A15, or acceptance evidence was produced."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

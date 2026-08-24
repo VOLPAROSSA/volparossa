@@ -255,6 +255,18 @@ pub(crate) fn prove_pre_go_network_baseline(
     })
 }
 
+/// Prove the full composite pristine baseline in the network namespace of the
+/// current task without producing mutation authority.
+///
+/// This read-only observation is generic over the private-run typestate so the
+/// fixed runner can apply the same RTNL, stable IPv4-forwarding, and empty
+/// nftables proof while it is temporarily visiting an authorized nsfs pin.
+pub(crate) fn prove_current_pristine_network_namespace<RunState>(
+    mounts: &PrivateMounts<RunState>,
+) -> Result<(), NetworkError> {
+    collect_pre_go_network_baseline(mounts).map(|_| ())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Deadline(Instant);
 
@@ -654,8 +666,8 @@ fn collect_consistent_pristine_snapshot_before(
     Ok(first)
 }
 
-fn collect_pre_go_network_baseline(
-    mounts: &PrivateMounts,
+fn collect_pre_go_network_baseline<RunState>(
+    mounts: &PrivateMounts<RunState>,
 ) -> Result<PreGoNetworkBaseline, NetworkError> {
     let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
     let forwarding_before = mounts
