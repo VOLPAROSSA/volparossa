@@ -444,9 +444,25 @@ Last updated: 2026-08-24
   only retained directory descriptors, the production `AuthorizedPrivateRun` transition creates
   exactly `/run/netns` and `/run/volparossa-netns-runner/<run_id>` at mode 0700 plus the two
   run-derived empty namespace slots at mode 0000. It proves the exact entry set and each retained
-  object identity, then rolls back in reverse order: slot B, slot A, the per-run directory, the
-  workspace root, and the netns root, with the required directory `fsync` barriers. PID 1 returns
-  to the `PristineRun` state, revalidates the pinned network baseline and private mounts, and emits
+  object identity. One fixed PID-1 task then consumes that state into `AuthorizedNamespacePins`,
+  creates two distinct network namespaces A and B, and restores its exact parent network namespace
+  after each excursion. It clones each namespace into a detached nsfs mount through the audited
+  `open_tree` UAPI and attaches that mount to its exact run-derived slot with `move_mount`. The
+  runtime proves both published pins are `CLONE_NEWNET`, have the expected owning user namespace,
+  are distinct from each other and the parent, expose the expected object and mount identities,
+  and are joinable through their visible read-only pins. The bounded mountinfo proof requires the
+  original baseline records unchanged plus exactly those two known mount-ID/path/nsfs/no-propagation
+  additions beneath the private `/run` mount; it does not independently validate every possible
+  nsfs root or option field. While visiting A and B through the visible pins, PID 1 runs the same
+  complete pristine-network proof used at the lifecycle barriers and restores the exact parent
+  after every visit. It closes its attached-clone and visible-pin descriptors, ordinarily unmounts
+  B and then A with `UMOUNT_NOFOLLOW`, proves the hidden empty slots and exact original mountinfo
+  baseline are restored, and removes every owned task, mount, and descriptor reference. Namespace
+  destruction after the last reference closes is governed by the kernel's reference-counting
+  semantics and is not claimed as a separately observed event. The transition then rolls back slot
+  B, slot A, the per-run directory, the workspace root, and the netns root, with the required
+  directory `fsync` barriers. PID 1 returns to the `PristineRun` state, revalidates the pinned
+  network baseline and private mounts, and emits
   the internal, canonical `MUTATION_ROLLBACK_COMPLETE` record through the launcher. The outer
   accepts and run/PID-binds that checkpoint, then independently proves that the private `/run` is
   empty again before sending exact TERM through the PID-1 pidfd. PID 1 consumes the real `signalfd` record and
@@ -457,11 +473,14 @@ Last updated: 2026-08-24
   mount-UAPI operation may produce the exclusive
   `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
   options, resource failures, and failed evidence remain hard errors. The positive
-  `BlockedAfterAuthorizedMutationRollback` route proves that complete read-only network baseline,
+  `BlockedAfterNamespacePinsRollback` route proves that complete read-only network baseline,
   one real pinned `BOOTSTRAP_READY`, the canonical `GO`, affine authorization consumption, the
-  descriptor-relative root/slot transaction and complete reverse rollback, the internal rollback
-  checkpoint, the post-rollback empty-`/run` proof, the TERM/EOF/signal chain, and exact PID-1
-  exit/reap without creating a network-topology object. Repeated portable tests prove exact
+  descriptor-relative root/slot transaction, two live pristine nsfs pins, their complete reverse
+  rollback, the internal rollback checkpoint, the post-rollback empty-`/run` proof, the
+  TERM/EOF/signal chain, and exact PID-1 exit/reap. The only transient topology is the two otherwise-
+  pristine network namespace objects, their kernel-default loopback/rules, and their nsfs mounts;
+  no veth, configured address, route, nftables object, dataplane, or topology-readiness evidence is
+  created. Repeated portable tests prove exact
   outer-launcher reaping, unchanged outer namespace/mount/route/IPv4-forwarding observations, and
   no command-shim execution; they do not claim an authoritative comparison of host nftables state.
   Normal reaping retains both pidfd and exact `Child` ownership; every forced `SIGKILL` after
@@ -476,12 +495,13 @@ Last updated: 2026-08-24
   control/lifecycle half-close handshake that keeps the launcher alive until the outer
   acknowledges EOF, preventing an early-`SIGCHLD` race; only the outer containment deadline bounds
   that wait. Complete live evidence for this slice requires the explicit
-  `BlockedAfterAuthorizedMutationRollback` outcome. At supervised IPC boundaries, managed outer
+  `BlockedAfterNamespacePinsRollback` outcome. At supervised IPC boundaries, managed outer
   HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
   external-signal handling across every reap/report phase, general descendant reaping, forced
-  parent-death/crash-chain cleanup, or A14. The production ownership module and its affine
-  `PristineRun`/`AuthorizedPrivateRun` typestates are now active in the runtime path for only the
-  descriptor-relative private-root and empty-slot transaction described above. A provisional
+  parent-death/crash-chain cleanup, or A14. The production ownership and namespace modules and their
+  affine `PristineRun`/`AuthorizedPrivateRun`/`AuthorizedNamespacePins` typestates are active in the
+  runtime path for the descriptor-relative private-root, empty-slot, and two-pin transaction
+  described above. A provisional
   containment guard is installed immediately after each exclusive creation. Within this fixed
   runner's one-PID-1-task and trusted-launcher scope, an inotify witness rejects delete, move, or
   recreate activity during the non-atomic `mkdirat`-to-open handoff. A retained descriptor plus
@@ -498,15 +518,20 @@ Last updated: 2026-08-24
   pending creation, exact bounded readback, file/directory sync, no-replace rename, immediate
   pinning, failpoints, and reverse identity-scoped unlink of its own synthetic regular-file
   fixtures. Manifest publication remains test-only: production does not create or publish an
-  ownership manifest. Neither path constructs live nsfs objects or proves hostile same-UID
-  concurrency, production namespace teardown, probing, or cleanup evidence. No production nsfs,
-  veth, address, route, nftables, or probe mutation API exists. The slice still has no general
+  ownership manifest. The runtime does construct and fully reverse two transient live nsfs pins,
+  but proves that ordinary unmount only within its fixed one-PID-1-task and trusted-launcher scope.
+  Cleanup uses the retained parent directory through a descriptor-rooted
+  `/proc/thread-self/fd/<fd>/<leaf>` path, with an identity verification before ordinary unmount;
+  the intervening path lookup means this is not a race-free unmount proof against an excluded
+  hostile mapped-same-UID actor. A production helper must provide root-owned exclusive mutation
+  authority before reusing it. No veth, address, route, nftables, ownership-manifest, or probe
+  mutation API exists. The slice still has no general
   root-filesystem or supplementary-group isolation,
-  `TOPOLOGY_READY`, `STOP`, `FINISHED`, network-topology mutation, crash-cleanup evidence,
+  `TOPOLOGY_READY`, `STOP`, `FINISHED`, configured dataplane-topology mutation, crash-cleanup evidence,
   acceptance report, or A01-A15 result. In particular, no network-object cleanup, A14, A15, or
   acceptance evidence is produced. `BOOTSTRAP_READY` remains readiness evidence; `GO` authorizes
-  only this bounded private-root transaction, and `MUTATION_ROLLBACK_COMPLETE` is an internal
-  containment checkpoint rather than cleanup or acceptance evidence.
+  only this bounded private-root and two-pin transaction, and `MUTATION_ROLLBACK_COMPLETE` is an
+  internal containment checkpoint rather than cleanup or acceptance evidence.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
 - [ ] Machine-readable acceptance report is emitted.
 

@@ -1,7 +1,8 @@
 //! Minimal safe wrappers around Linux UAPI calls not exposed by the standard library.
 //!
-//! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], taking
-//! immediate RAII ownership of descriptors installed by the bounded receive helpers, the
+//! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], the fixed
+//! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], taking immediate
+//! RAII ownership of descriptors installed by the bounded receive helpers, the
 //! [`install_close_range_on_exec`] process hook, the read-only
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
@@ -13,6 +14,10 @@
 //! no caller-controlled filter, action, syscall number, flag, or pointer.
 //! The PID-1 signal wrapper installs and reads back only the fixed `SIGHUP`, `SIGINT`, and
 //! `SIGTERM` emergency dispositions; its handler can only call `_exit(2)`.
+//! The nsfs wrappers use the exact Debian 13 `<linux/nsfs.h>` request values and expose no
+//! caller-controlled ioctl request or argument. A returned owning-user-namespace descriptor is
+//! placed in [`OwnedFd`] immediately, then required to be read-only, close-on-exec, and a user
+//! namespace before it is returned.
 //! The MPTCP buffer uses the exact Debian 13 `/usr/include/linux/mptcp.h`
 //! `struct mptcp_info` layout, is fully initialized before FFI, and its returned
 //! length is checked before any field is trusted.
@@ -43,6 +48,10 @@ use socket2::{Domain, Protocol, SockRef, Type};
 const SOL_MPTCP: libc::c_int = 284;
 /// `MPTCP_INFO` from `<linux/mptcp.h>`.
 const MPTCP_INFO: libc::c_int = 1;
+/// `NS_GET_USERNS` from the Debian 13 `<linux/nsfs.h>` UAPI.
+const NS_GET_USERNS: libc::c_ulong = 0xb701;
+/// `NS_GET_NSTYPE` from the Debian 13 `<linux/nsfs.h>` UAPI.
+const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
 const MPTCP_INFO_FLAG_FALLBACK: u32 = 1 << 0;
 const MPTCP_INFO_FLAG_REMOTE_KEY_RECEIVED: u32 = 1 << 1;
 const MAX_HANDOFF_FDS: usize = 2;
@@ -73,6 +82,73 @@ const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const WORKER_NO_DESCENDANTS_FILTER_LENGTH: usize = 12;
+
+/// Returns the Linux clone flag identifying an nsfs namespace descriptor.
+///
+/// The fixed `NS_GET_NSTYPE` ioctl accepts no argument and cannot be selected by the caller.
+/// Known results include `CLONE_NEWNET`, `CLONE_NEWUSER`, and the other namespace flags defined
+/// by the Linux clone UAPI. The borrowed descriptor remains owned by the caller.
+///
+/// # Errors
+///
+/// Returns the kernel error, including `ENOTTY` when the descriptor is not an nsfs namespace.
+pub fn namespace_type<Fd: AsFd>(namespace: &Fd) -> io::Result<libc::c_int> {
+    // SAFETY: the descriptor remains borrowed and live for the duration of the call. The ioctl
+    // request is the fixed, argument-free Debian 13 `NS_GET_NSTYPE` value; no request, pointer,
+    // length, or argument is caller controlled.
+    let result = unsafe { libc::ioctl(namespace.as_fd().as_raw_fd(), NS_GET_NSTYPE) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result)
+    }
+}
+
+/// Opens and validates the user namespace that owns an nsfs namespace descriptor.
+///
+/// The fixed `NS_GET_USERNS` ioctl accepts no argument. On success, ownership of its returned
+/// descriptor moves immediately into [`OwnedFd`], so every later validation failure closes it.
+/// The descriptor is returned only when kernel readback proves `FD_CLOEXEC`, read-only access,
+/// and namespace type `CLONE_NEWUSER`.
+///
+/// # Errors
+///
+/// Returns the kernel error when the owner cannot be opened or descriptor flags cannot be read,
+/// and `InvalidData` when the returned descriptor lacks any required invariant.
+pub fn owning_user_namespace<Fd: AsFd>(namespace: &Fd) -> io::Result<OwnedFd> {
+    // SAFETY: the input descriptor remains borrowed and live for the duration of the call. The
+    // ioctl request is the fixed, argument-free Debian 13 `NS_GET_USERNS` value; no request,
+    // pointer, length, or argument is caller controlled.
+    let result = unsafe { libc::ioctl(namespace.as_fd().as_raw_fd(), NS_GET_USERNS) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: successful `NS_GET_USERNS` returns a new descriptor owned by the caller. This is
+    // deliberately the first operation after the success check, before any fallible validation.
+    let owner = unsafe { OwnedFd::from_raw_fd(result) };
+    let descriptor_flags =
+        FdFlag::from_bits_truncate(fcntl(&owner, FcntlArg::F_GETFD).map_err(errno_io)?);
+    if !descriptor_flags.contains(FdFlag::FD_CLOEXEC) {
+        return Err(invalid_data(
+            "owning user namespace descriptor is not close-on-exec",
+        ));
+    }
+    let status_flags =
+        OFlag::from_bits_truncate(fcntl(&owner, FcntlArg::F_GETFL).map_err(errno_io)?);
+    if status_flags & OFlag::O_ACCMODE != OFlag::O_RDONLY {
+        return Err(invalid_data(
+            "owning user namespace descriptor is not read-only",
+        ));
+    }
+    if namespace_type(&owner)? != libc::CLONE_NEWUSER {
+        return Err(invalid_data(
+            "owning user namespace descriptor has the wrong namespace type",
+        ));
+    }
+
+    Ok(owner)
+}
 
 /// Installs an exec-time inherited-descriptor fence on a child command.
 ///
@@ -1375,6 +1451,42 @@ mod tests {
     const SIGCHLD_ACTION_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SIGCHLD_ACTION_CHILD";
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     const SECCOMP_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SECCOMP_CHILD";
+
+    #[test]
+    fn nsfs_namespace_type_is_exact_and_rejects_non_namespace_descriptors() {
+        let network_namespace = File::open("/proc/self/ns/net").expect("open current netns");
+        assert_eq!(
+            namespace_type(&network_namespace).expect("query current netns type"),
+            libc::CLONE_NEWNET
+        );
+
+        let (pipe_read, _pipe_write) = nix::unistd::pipe().expect("open non-namespace pipe");
+        assert_eq!(
+            namespace_type(&pipe_read)
+                .expect_err("pipe must not pass as nsfs")
+                .raw_os_error(),
+            Some(libc::ENOTTY)
+        );
+    }
+
+    #[test]
+    fn owning_user_namespace_is_owned_read_only_cloexec_and_typed() {
+        let network_namespace = File::open("/proc/self/ns/net").expect("open current netns");
+        let owner = owning_user_namespace(&network_namespace).expect("open owning userns");
+
+        let descriptor_flags = FdFlag::from_bits_truncate(
+            fcntl(&owner, FcntlArg::F_GETFD).expect("read owner descriptor flags"),
+        );
+        assert!(descriptor_flags.contains(FdFlag::FD_CLOEXEC));
+        let status_flags = OFlag::from_bits_truncate(
+            fcntl(&owner, FcntlArg::F_GETFL).expect("read owner status flags"),
+        );
+        assert_eq!(status_flags & OFlag::O_ACCMODE, OFlag::O_RDONLY);
+        assert_eq!(
+            namespace_type(&owner).expect("query owner namespace type"),
+            libc::CLONE_NEWUSER
+        );
+    }
 
     #[test]
     fn child_reaping_requires_default_sigchld_without_nocldwait() {

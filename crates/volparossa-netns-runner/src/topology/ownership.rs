@@ -366,6 +366,72 @@ impl PinnedDirectory {
         }
         self.verify()
     }
+
+    fn verify_exact_names(&self, expected: &[&str]) -> Result<(), AuthorizedPrivateRunError> {
+        self.verify()?;
+        if expected.len() > MAX_ROOT_ENTRIES
+            || expected
+                .iter()
+                .enumerate()
+                .any(|(index, name)| invalid_leaf(name) || expected[index + 1..].contains(name))
+        {
+            return Err(AuthorizedPrivateRunError::Unsafe(
+                "invalid expected private-directory name set",
+            ));
+        }
+        let before = object_snapshot(&self.descriptor)?;
+        let reopened = openat2(
+            &self.descriptor,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|error| AuthorizedPrivateRunError::io("reopen exact-name directory", error))?;
+        let mut storage = [MaybeUninit::<u8>::uninit(); DIRECTORY_BUFFER_BYTES];
+        let mut directory = RawDir::new(reopened, &mut storage);
+        let mut seen = vec![false; expected.len()];
+        let mut count = 0_usize;
+        while let Some(entry) = directory.next() {
+            let entry = entry.map_err(|error| {
+                AuthorizedPrivateRunError::io("enumerate exact-name set", error)
+            })?;
+            let name = entry.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            count = count
+                .checked_add(1)
+                .ok_or(AuthorizedPrivateRunError::Unsafe(
+                    "directory entry count overflowed",
+                ))?;
+            let Some(index) = expected
+                .iter()
+                .position(|candidate| candidate.as_bytes() == name)
+            else {
+                return Err(AuthorizedPrivateRunError::Unsafe(
+                    "private directory contains a foreign name",
+                ));
+            };
+            if seen[index] {
+                return Err(AuthorizedPrivateRunError::Unsafe(
+                    "private directory contains a duplicate name observation",
+                ));
+            }
+            seen[index] = true;
+        }
+        if count != expected.len() || seen.contains(&false) {
+            return Err(AuthorizedPrivateRunError::Unsafe(
+                "private directory exact-name set is incomplete",
+            ));
+        }
+        if object_snapshot(&self.descriptor)? != before {
+            return Err(AuthorizedPrivateRunError::Unsafe(
+                "private directory changed during exact-name proof",
+            ));
+        }
+        self.verify()
+    }
 }
 
 fn verify_expected_entry(
@@ -1180,15 +1246,26 @@ struct PinnedEmptySlot {
 }
 
 impl PinnedEmptySlot {
-    fn verify_at(&self, parent: &PinnedDirectory) -> Result<(), AuthorizedPrivateRunError> {
+    fn verify_hidden_at(&self, parent: &PinnedDirectory) -> Result<(), AuthorizedPrivateRunError> {
         let held = object_snapshot(&self.descriptor)?;
         if held.identity != self.identity
-            || held != entry_snapshot(&parent.descriptor, &self.name)?
             || !held.identity.file_type.is_file()
             || held.identity.permissions() != EMPTY_SLOT_MODE
             || held.links != 1
             || held.size != 0
             || !parent.filesystem.contains(held.identity)
+        {
+            return Err(AuthorizedPrivateRunError::Unsafe(
+                "retained hidden namespace slot changed",
+            ));
+        }
+        parent.verify()
+    }
+
+    fn verify_at(&self, parent: &PinnedDirectory) -> Result<(), AuthorizedPrivateRunError> {
+        self.verify_hidden_at(parent)?;
+        let held = object_snapshot(&self.descriptor)?;
+        if held.identity != self.identity || held != entry_snapshot(&parent.descriptor, &self.name)?
         {
             return Err(AuthorizedPrivateRunError::Unsafe(
                 "retained empty namespace slot changed",
@@ -1317,8 +1394,9 @@ impl StageBoundary {
 
 /// Affine post-`GO` owner of one run-bound private root and two empty namespace slots.
 ///
-/// The authorization token remains private to this state. This type publishes
-/// no ownership manifest and grants no namespace, veth, or lifecycle-attestation authority.
+/// The authorization token remains private to this state. Namespace authority
+/// is confined to consuming this owner into the exact two-pin transition; it
+/// grants no ownership-manifest, veth, configured-network, or lifecycle-attestation authority.
 /// Cleanup is scoped to the disposable runner's fixed single-task PID 1 and
 /// trusted launcher. It does not claim synchronization against a hostile
 /// mapped-same-UID process that already holds a writable private-`/run` descriptor;
@@ -1339,6 +1417,13 @@ struct StagedLayout {
     workspace_root: PinnedDirectory,
     run_directory: PinnedDirectory,
     slots: [PinnedEmptySlot; 2],
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct NamespacePinTarget<'a> {
+    pub(super) parent: &'a File,
+    pub(super) hidden_slot: &'a File,
+    pub(super) name: &'a str,
 }
 
 impl AuthorizedPrivateRun {
@@ -1410,13 +1495,40 @@ impl AuthorizedPrivateRun {
 
     /// Reprove the authorization binding, fixed exact sets, modes, and retained identities.
     pub(crate) fn verify(&self) -> Result<(), AuthorizedPrivateRunError> {
-        let authorization =
-            self.authorization
-                .as_ref()
-                .ok_or(AuthorizedPrivateRunError::Unsafe(
-                    "authorized private-run token was consumed",
-                ))?;
-        let run_id = authorization.run_id();
+        let run_id = self.verify_fixed_directories()?;
+        for slot in &self.slots {
+            slot.verify_at(&self.netns_root)?;
+        }
+        if self.slots[0].name != namespace_slot_name(run_id, 'a')
+            || self.slots[1].name != namespace_slot_name(run_id, 'b')
+            || self.slots[0].identity == self.slots[1].identity
+        {
+            return Err(AuthorizedPrivateRunError::Unsafe(
+                "namespace slots are not exactly run-bound A and B",
+            ));
+        }
+        self.netns_root.verify_exact_entries(&[
+            ExpectedEntry {
+                name: &self.slots[0].name,
+                descriptor: &self.slots[0].descriptor,
+                identity: self.slots[0].identity,
+            },
+            ExpectedEntry {
+                name: &self.slots[1].name,
+                descriptor: &self.slots[1].descriptor,
+                identity: self.slots[1].identity,
+            },
+        ])
+    }
+
+    fn verify_fixed_directories(&self) -> Result<&RunId, AuthorizedPrivateRunError> {
+        let run_id = self
+            .authorization
+            .as_ref()
+            .ok_or(AuthorizedPrivateRunError::Unsafe(
+                "authorized private-run token was consumed",
+            ))?
+            .run_id();
         if self.run_directory.identity == self.workspace_root.identity
             || self.workspace_root.identity == self.netns_root.identity
             || self.netns_root.identity == self.run_root.identity
@@ -1443,8 +1555,13 @@ impl AuthorizedPrivateRun {
             identity: self.run_directory.identity,
         }])?;
         self.run_directory.verify_exact_entries(&[])?;
+        Ok(run_id)
+    }
+
+    pub(super) fn verify_namespace_pin_backing(&self) -> Result<(), AuthorizedPrivateRunError> {
+        let run_id = self.verify_fixed_directories()?;
         for slot in &self.slots {
-            slot.verify_at(&self.netns_root)?;
+            slot.verify_hidden_at(&self.netns_root)?;
         }
         if self.slots[0].name != namespace_slot_name(run_id, 'a')
             || self.slots[1].name != namespace_slot_name(run_id, 'b')
@@ -1454,18 +1571,23 @@ impl AuthorizedPrivateRun {
                 "namespace slots are not exactly run-bound A and B",
             ));
         }
-        self.netns_root.verify_exact_entries(&[
-            ExpectedEntry {
+        self.netns_root
+            .verify_exact_names(&[&self.slots[0].name, &self.slots[1].name])
+    }
+
+    pub(super) fn namespace_pin_targets(&self) -> [NamespacePinTarget<'_>; 2] {
+        [
+            NamespacePinTarget {
+                parent: &self.netns_root.descriptor,
+                hidden_slot: &self.slots[0].descriptor,
                 name: &self.slots[0].name,
-                descriptor: &self.slots[0].descriptor,
-                identity: self.slots[0].identity,
             },
-            ExpectedEntry {
+            NamespacePinTarget {
+                parent: &self.netns_root.descriptor,
+                hidden_slot: &self.slots[1].descriptor,
                 name: &self.slots[1].name,
-                descriptor: &self.slots[1].descriptor,
-                identity: self.slots[1].identity,
             },
-        ])
+        ]
     }
 
     /// Consume the internal authorization and remove B, A, run, workspace, then netns.

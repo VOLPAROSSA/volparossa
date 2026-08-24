@@ -12,12 +12,16 @@
 //! one namespace-bound `BOOTSTRAP_READY`. After matching that frame to its
 //! retained PID-1 pins, the outer issues one canonical `GO`. PID 1 consumes the
 //! affine authorization, creates and proves the fixed descriptor-relative
-//! private-run roots and two empty namespace slots, rolls every object back in
-//! reverse order, and reports one internal rollback checkpoint. The outer then
-//! independently re-proves empty private mounts before delivering TERM through
-//! a retained pidfd. PID 1 consumes it through a fixed `signalfd` before exact
-//! PID-1 and launcher reaping. The slice creates no namespace pin or network
-//! topology and cannot emit `TOPOLOGY_READY` or acceptance evidence.
+//! private-run roots and two empty namespace slots, creates two distinct network
+//! namespaces, and publishes them as run-bound nsfs pins. It joins each visible
+//! pin for the full pristine network proof, restores its parent namespace,
+//! ordinarily unmounts B then A, proves the hidden slots reappeared, rolls every
+//! filesystem object back, and reports one internal rollback checkpoint. The
+//! outer then independently re-proves empty private mounts before delivering
+//! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
+//! before exact PID-1 and launcher reaping. The slice creates no veth, address,
+//! route, firewall, ownership manifest, or topology readiness and cannot emit
+//! `TOPOLOGY_READY` or acceptance evidence.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]

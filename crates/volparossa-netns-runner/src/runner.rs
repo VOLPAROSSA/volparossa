@@ -53,8 +53,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// One authorised private-run mutation was proven, fully rolled back, and exactly retired.
-    BlockedAfterAuthorizedMutationRollback,
+    /// Two live nsfs pins and their private-run backing were fully rolled back and retired.
+    BlockedAfterNamespacePinsRollback,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -63,7 +63,7 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    AuthorizedMutationRolledBack,
+    AuthorizedNamespacePinsRolledBack,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -170,7 +170,9 @@ impl From<PidOneControlError> for RunnerError {
 /// `BOOTSTRAP_READY` bound to those pins. Only then does the outer issue the
 /// sole canonical `GO`. PID 1 consumes its affine authorization, creates and
 /// proves the fixed private-run roots and empty namespace slots through retained
-/// descriptors, rolls them back in reverse order, and emits one internal
+/// descriptors, attaches two live nsfs network-namespace pins, proves their
+/// exact pristine network state under restoration barriers, then rolls the
+/// pins and roots back in reverse order and emits one internal
 /// rollback-complete checkpoint. The outer independently re-proves empty private
 /// mounts before sending fixed TERM through the retained pidfd and requiring one
 /// affine PID-1 `signalfd` observation before exact reap. This slice does not
@@ -280,8 +282,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::AuthorizedMutationRolledBack => {
-            LifecycleOutcome::BlockedAfterAuthorizedMutationRollback
+        PidOneBarrierOutcome::AuthorizedNamespacePinsRolledBack => {
+            LifecycleOutcome::BlockedAfterNamespacePinsRollback
         }
     };
     Ok(outcome)
@@ -425,7 +427,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::AuthorizedMutationRolledBack)
+        Ok(PidOneBarrierOutcome::AuthorizedNamespacePinsRolledBack)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -605,7 +607,7 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterAuthorizedMutationRollback {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterNamespacePinsRollback {
         LifecycleEofDisposition::CleanupRequired
     } else {
         LifecycleEofDisposition::NoTopologyMutationAuthorized
@@ -959,8 +961,11 @@ fn finish_pid_one(
 /// baseline, a stable canonical IPv4-forwarding record, and zero nftables tables
 /// bracketed by unchanged generation 1. It then emits exactly one canonical
 /// `BOOTSTRAP_READY`, consumes the canonical affine `GO`, creates and fully
-/// rolls back the fixed private-run roots and empty slots, and reports the
-/// internal rollback checkpoint. Only after the outer independently re-proves
+/// proves the fixed private-run roots and empty slots, attaches two live
+/// run-bound network-namespace pins, proves each full pristine network state,
+/// reverses both pins and then every
+/// private-run creation, and reports the internal rollback checkpoint. Only
+/// after the outer independently re-proves
 /// empty private mounts does PID 1 consume pidfd-delivered TERM and report the
 /// affine observation over the launcher-private control channel. The final EOF
 /// is post-`GO` and therefore remains cleanup-required.
@@ -1139,6 +1144,29 @@ fn complete_authorized_private_run_rollback(
         .map_err(|_| RunnerError::NetworkProof)?;
     let authorized_mounts = mounts
         .authorize_private_run(authorization)
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    authorized_mounts
+        .verify_authorized_private_run()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let namespace_pins = authorized_mounts
+        .pin_network_namespaces()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    namespace_pins
+        .verify_authorized_namespace_pins()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    namespace_pins
+        .prove_pristine_network_namespace_pins()
+        .map_err(|error| match error {
+            crate::mounts::NamespacePinsNetworkProofError::Mount(error) => {
+                RunnerError::PrivateMount(io::Error::other(error))
+            }
+            crate::mounts::NamespacePinsNetworkProofError::Network(_) => RunnerError::NetworkProof,
+        })?;
+    namespace_pins
+        .verify_authorized_namespace_pins()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let authorized_mounts = namespace_pins
+        .rollback_namespace_pins()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
     authorized_mounts
         .verify_authorized_private_run()

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{self, Read as _},
     mem::MaybeUninit,
@@ -22,7 +22,10 @@ use rustix::{
 use thiserror::Error;
 use volparossa_test_support::MutationAuthorization;
 
-use crate::topology::ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError};
+use crate::topology::{
+    AuthorizedNamespacePins, NamespacePinError, NamespaceVisitError,
+    ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError},
+};
 
 /// Exact byte ceiling for one kernel mount-table observation.
 pub(crate) const MAX_PRIVATE_MOUNTINFO_BYTES: usize = 1024 * 1024;
@@ -75,19 +78,32 @@ impl PrivateMountSetupError {
     }
 }
 
+/// Failure while applying the full read-only network proof to both live pins.
+#[derive(Debug, Error)]
+pub(crate) enum NamespacePinsNetworkProofError {
+    /// The mount typestate, namespace visit, or restoration proof failed.
+    #[error("authorized namespace-pin mount proof failed: {0}")]
+    Mount(#[source] PrivateMountSetupError),
+    /// The existing composite pristine-network collector rejected one endpoint.
+    #[error("authorized namespace pin is not pristine: {0}")]
+    Network(#[source] crate::network::NetworkError),
+}
+
 /// Affine owner of the exact private mounts installed by namespace PID 1.
 ///
 /// The retained root and visible mount descriptors pin the measured objects.
 /// Reverification reopens both fixed paths below the pinned root and requires
 /// their visible mount IDs to remain unchanged. The state parameter enforces
-/// the affine transition from an empty private `/run` into the bounded
-/// post-`GO` root-and-slot transaction and back to the pristine state.
+/// the affine transition from an empty private `/run` through the bounded
+/// post-`GO` root-and-slot and two-pin transaction and back to the pristine
+/// state.
 pub(crate) struct PrivateMounts<RunState = PristineRun> {
     root: OwnedFd,
     run_pin: OwnedFd,
     proc_pin: OwnedFd,
     root_mount_id: u64,
     ids: PrivateMountIds,
+    baseline_mountinfo: Vec<u8>,
     run_state: RunState,
 }
 
@@ -139,13 +155,6 @@ impl PrivateMounts<PristineRun> {
         authorized.verify_authorized_private_run()?;
         Ok(authorized)
     }
-
-    /// Read the fixed namespace-local IPv4-forwarding record through the retained procfs pin.
-    pub(crate) fn read_ipv4_forwarding_record(
-        &self,
-    ) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
-        read_ipv4_forwarding_record_at(&self.proc_pin, self.ids.proc_mount_id)
-    }
 }
 
 impl PrivateMounts<AuthorizedPrivateRun> {
@@ -155,6 +164,37 @@ impl PrivateMounts<AuthorizedPrivateRun> {
         self.run_state
             .verify()
             .map_err(|source| private_run_error("verify authorized private-run roots", source))
+    }
+
+    /// Consume the authorized empty slots and attach exactly two live network
+    /// namespaces while retaining the private-run ownership transaction.
+    pub(crate) fn pin_network_namespaces(
+        self,
+    ) -> Result<PrivateMounts<AuthorizedNamespacePins>, PrivateMountSetupError> {
+        self.verify_authorized_private_run()?;
+        let PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        } = self;
+        let run_state = run_state
+            .pin_network_namespaces()
+            .map_err(|source| namespace_pin_error("pin authorized network namespaces", source))?;
+        let pinned = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        };
+        pinned.verify_authorized_namespace_pins()?;
+        Ok(pinned)
     }
 
     /// Consume the authorized state, drop its internal token, reverse every
@@ -168,6 +208,7 @@ impl PrivateMounts<AuthorizedPrivateRun> {
             proc_pin,
             root_mount_id,
             ids,
+            baseline_mountinfo,
             run_state,
         } = self;
         run_state.rollback().map_err(|source| {
@@ -179,6 +220,7 @@ impl PrivateMounts<AuthorizedPrivateRun> {
             proc_pin,
             root_mount_id,
             ids,
+            baseline_mountinfo,
             run_state: PristineRun,
         };
         pristine.verify()?;
@@ -186,7 +228,104 @@ impl PrivateMounts<AuthorizedPrivateRun> {
     }
 }
 
+impl PrivateMounts<AuthorizedNamespacePins> {
+    /// Reprove the private mounts, the unchanged baseline mount records, and
+    /// exactly two live run-bound nsfs attachments.
+    pub(crate) fn verify_authorized_namespace_pins(&self) -> Result<(), PrivateMountSetupError> {
+        self.run_state.verify().map_err(|source| {
+            namespace_pin_error("verify authorized network namespace pins", source)
+        })?;
+        let mountinfo = self.observe_visible_private_mounts(false)?;
+        verify_authorized_namespace_mountinfo(
+            &self.baseline_mountinfo,
+            &mountinfo,
+            self.ids,
+            self.run_state.mount_ids(),
+            self.run_state.mount_point_bytes(),
+        )
+        .map_err(|source| hard_error("verify authorized nsfs mount table", source))?;
+        self.run_state.verify().map_err(|source| {
+            namespace_pin_error("reverify authorized network namespace pins", source)
+        })
+    }
+
+    /// Visit A then B and apply the full read-only pristine-network collector
+    /// inside each live namespace, with exact parent restoration between them.
+    pub(crate) fn prove_pristine_network_namespace_pins(
+        &self,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_namespace_pins()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        self.run_state
+            .visit_network_namespaces(|_endpoint| {
+                crate::network::prove_current_pristine_network_namespace(self)
+            })
+            .map_err(|error| match error {
+                NamespaceVisitError::Namespace(source) => NamespacePinsNetworkProofError::Mount(
+                    namespace_pin_error("visit authorized network namespace", source),
+                ),
+                NamespaceVisitError::Visitor(source) => {
+                    NamespacePinsNetworkProofError::Network(source)
+                }
+            })?;
+        self.verify_authorized_namespace_pins()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+
+    /// Detach both owned nsfs mounts in reverse order, prove that their mount
+    /// IDs and path records disappeared, and recover the unchanged authorized
+    /// private-run state.
+    pub(crate) fn rollback_namespace_pins(
+        self,
+    ) -> Result<PrivateMounts<AuthorizedPrivateRun>, PrivateMountSetupError> {
+        self.verify_authorized_namespace_pins()?;
+        let expected_mount_ids = self.run_state.mount_ids();
+        let mount_point_bytes = self.run_state.mount_point_bytes();
+        let expected_mount_points = [mount_point_bytes[0].to_vec(), mount_point_bytes[1].to_vec()];
+        let PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        } = self;
+        let run_state = run_state.rollback().map_err(|source| {
+            namespace_pin_error("roll back authorized network namespace pins", source)
+        })?;
+        let authorized = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        };
+        let mountinfo = authorized.observe_visible_private_mounts(false)?;
+        verify_namespace_mountinfo_rollback(
+            &authorized.baseline_mountinfo,
+            &mountinfo,
+            authorized.ids,
+            expected_mount_ids,
+            [&expected_mount_points[0], &expected_mount_points[1]],
+        )
+        .map_err(|source| hard_error("verify reversed nsfs mount table", source))?;
+        authorized.verify_authorized_private_run()?;
+        Ok(authorized)
+    }
+}
+
 impl<RunState> PrivateMounts<RunState> {
+    /// Read the current network namespace's fixed IPv4-forwarding record
+    /// through the retained private procfs pin in any affine run state.
+    pub(crate) fn read_ipv4_forwarding_record(
+        &self,
+    ) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
+        read_ipv4_forwarding_record_at(&self.proc_pin, self.ids.proc_mount_id)
+    }
+
     fn with_run_state<NextState>(self, run_state: NextState) -> PrivateMounts<NextState> {
         let Self {
             root,
@@ -194,6 +333,7 @@ impl<RunState> PrivateMounts<RunState> {
             proc_pin,
             root_mount_id,
             ids,
+            baseline_mountinfo,
             run_state: _,
         } = self;
         PrivateMounts {
@@ -202,6 +342,7 @@ impl<RunState> PrivateMounts<RunState> {
             proc_pin,
             root_mount_id,
             ids,
+            baseline_mountinfo,
             run_state,
         }
     }
@@ -229,6 +370,17 @@ impl<RunState> PrivateMounts<RunState> {
             ));
         }
 
+        let mountinfo = self.observe_visible_private_mounts(require_pristine_run)?;
+        verify_private_mountinfo(&mountinfo, self.ids.run_mount_id, self.ids.proc_mount_id)
+            .map_err(|source| hard_error("verify private mount table", source))?;
+        verify_unchanged_mountinfo(&self.baseline_mountinfo, &mountinfo)
+            .map_err(|source| hard_error("verify unchanged private mount table", source))
+    }
+
+    fn observe_visible_private_mounts(
+        &self,
+        require_pristine_run: bool,
+    ) -> Result<Vec<u8>, PrivateMountSetupError> {
         verify_visible_private_mounts(
             &self.root,
             self.root_mount_id,
@@ -333,14 +485,19 @@ pub(crate) fn setup_and_verify_private_mounts() -> Result<PrivateMounts, Private
         ));
     }
 
-    let mounts = PrivateMounts {
+    let mut mounts = PrivateMounts {
         root: targets.root,
         run_pin: visible_run,
         proc_pin: visible_proc,
         root_mount_id: targets.root_mount_id,
         ids,
+        baseline_mountinfo: Vec::new(),
         run_state: PristineRun,
     };
+    let baseline_mountinfo = mounts.observe_visible_private_mounts(true)?;
+    verify_private_mountinfo(&baseline_mountinfo, ids.run_mount_id, ids.proc_mount_id)
+        .map_err(|source| hard_error("capture private mount-table baseline", source))?;
+    mounts.baseline_mountinfo = baseline_mountinfo;
     mounts.verify()?;
     Ok(mounts)
 }
@@ -511,7 +668,7 @@ fn verify_visible_private_mounts(
     expected_root_mount_id: u64,
     expected_ids: PrivateMountIds,
     require_pristine_run: bool,
-) -> Result<(), PrivateMountSetupError> {
+) -> Result<Vec<u8>, PrivateMountSetupError> {
     let run = hard_rustix(
         "open visible private /run",
         open_beneath(root, "run", readable_directory_flags()),
@@ -537,13 +694,6 @@ fn verify_visible_private_mounts(
     verify_proc_filesystem(&proc_before)?;
     verify_exact_proc_state(&proc_before)?;
     let mountinfo = read_proc_record(&proc_before, "1/mountinfo", MAX_PRIVATE_MOUNTINFO_BYTES)?;
-    verify_private_mountinfo(
-        &mountinfo,
-        expected_ids.run_mount_id,
-        expected_ids.proc_mount_id,
-    )
-    .map_err(|source| hard_error("verify private mount table", source))?;
-
     let proc_after = hard_rustix(
         "reopen visible private /proc",
         open_beneath(root, "proc", readable_directory_flags()),
@@ -558,7 +708,8 @@ fn verify_visible_private_mounts(
             invalid_data("visible private /proc changed during verification"),
         ));
     }
-    verify_exact_proc_state(&proc_after)
+    verify_exact_proc_state(&proc_after)?;
+    Ok(mountinfo)
 }
 
 fn verify_run_filesystem(
@@ -836,8 +987,174 @@ pub(crate) fn verify_private_mountinfo(
     })
 }
 
+fn verify_unchanged_mountinfo(baseline: &[u8], observed: &[u8]) -> io::Result<()> {
+    let baseline_records = mountinfo_record_map(baseline)?;
+    let observed_records = mountinfo_record_map(observed)?;
+    if baseline_records.len() != observed_records.len()
+        || baseline_records
+            .iter()
+            .any(|(mount_id, record)| observed_records.get(mount_id) != Some(record))
+    {
+        return Err(invalid_data(
+            "private mount-table baseline changed unexpectedly",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_authorized_namespace_mountinfo(
+    baseline: &[u8],
+    observed: &[u8],
+    private_ids: PrivateMountIds,
+    namespace_mount_ids: [u64; 2],
+    namespace_mount_points: [&[u8]; 2],
+) -> io::Result<()> {
+    verify_private_mountinfo(
+        baseline,
+        private_ids.run_mount_id,
+        private_ids.proc_mount_id,
+    )?;
+    verify_private_mountinfo(
+        observed,
+        private_ids.run_mount_id,
+        private_ids.proc_mount_id,
+    )?;
+    validate_namespace_mount_expectations(namespace_mount_ids, namespace_mount_points)?;
+
+    let baseline_records = mountinfo_record_map(baseline)?;
+    let observed_records = mountinfo_record_map(observed)?;
+    let expected_record_count = baseline_records
+        .len()
+        .checked_add(2)
+        .ok_or_else(|| invalid_data("authorized mount-table record count overflowed"))?;
+    if observed_records.len() != expected_record_count {
+        return Err(invalid_data(
+            "authorized mount table does not contain exactly two additions",
+        ));
+    }
+    for (mount_id, baseline_record) in &baseline_records {
+        if observed_records.get(mount_id) != Some(baseline_record) {
+            return Err(invalid_data(
+                "authorized mount table changed a baseline mount record",
+            ));
+        }
+    }
+    for (mount_id, mount_point) in namespace_mount_ids.into_iter().zip(namespace_mount_points) {
+        if baseline_records.contains_key(&mount_id)
+            || mountinfo_contains_mount_point(&baseline_records, mount_point)?
+        {
+            return Err(invalid_data(
+                "authorized namespace mount collides with the baseline",
+            ));
+        }
+        let record_bytes = observed_records
+            .get(&mount_id)
+            .ok_or_else(|| invalid_data("authorized nsfs mount ID is missing"))?;
+        let record = MountInfoRecord::parse(record_bytes)?;
+        if record.parent_id != private_ids.run_mount_id
+            || record.mount_point != mount_point
+            || record.file_system_type != b"nsfs"
+            || record.has_optional_field()
+        {
+            return Err(invalid_data("authorized nsfs mount record is not exact"));
+        }
+    }
+    Ok(())
+}
+
+fn verify_namespace_mountinfo_rollback(
+    baseline: &[u8],
+    observed: &[u8],
+    private_ids: PrivateMountIds,
+    retired_mount_ids: [u64; 2],
+    retired_mount_points: [&[u8]; 2],
+) -> io::Result<()> {
+    verify_private_mountinfo(
+        observed,
+        private_ids.run_mount_id,
+        private_ids.proc_mount_id,
+    )?;
+    verify_unchanged_mountinfo(baseline, observed)?;
+    let observed_records = mountinfo_record_map(observed)?;
+    for (mount_id, mount_point) in retired_mount_ids.into_iter().zip(retired_mount_points) {
+        if observed_records.contains_key(&mount_id)
+            || mountinfo_contains_mount_point(&observed_records, mount_point)?
+        {
+            return Err(invalid_data(
+                "retired nsfs mount ID or path remains in the mount table",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_namespace_mount_expectations(
+    mount_ids: [u64; 2],
+    mount_points: [&[u8]; 2],
+) -> io::Result<()> {
+    if mount_ids[0] == 0
+        || mount_ids[1] == 0
+        || mount_ids[0] == mount_ids[1]
+        || mount_points[0] == mount_points[1]
+        || mount_points.iter().any(|mount_point| {
+            let leaf = &mount_point[b"/run/netns/".len().min(mount_point.len())..];
+            !mount_point.starts_with(b"/run/netns/")
+                || leaf.is_empty()
+                || leaf.contains(&b'/')
+                || leaf.iter().any(|byte| {
+                    !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && *byte != b'-'
+                })
+        })
+    {
+        return Err(invalid_data(
+            "authorized namespace mount expectations are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn mountinfo_record_map(bytes: &[u8]) -> io::Result<HashMap<u64, &[u8]>> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_PRIVATE_MOUNTINFO_BYTES
+        || !bytes.ends_with(b"\n")
+        || bytes.contains(&b'\r')
+        || bytes.contains(&0)
+    {
+        return Err(invalid_data("private mountinfo framing is invalid"));
+    }
+    let mut records = HashMap::new();
+    for (index, line) in bytes[..bytes.len() - 1]
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+    {
+        if line.is_empty() || index >= MAX_PRIVATE_MOUNTINFO_RECORDS {
+            return Err(invalid_data("private mountinfo record count is invalid"));
+        }
+        let record = MountInfoRecord::parse(line)?;
+        if records.insert(record.mount_id, line).is_some() {
+            return Err(invalid_data(
+                "private mountinfo contains a duplicate mount ID",
+            ));
+        }
+    }
+    Ok(records)
+}
+
+fn mountinfo_contains_mount_point(
+    records: &HashMap<u64, &[u8]>,
+    mount_point: &[u8],
+) -> io::Result<bool> {
+    for record in records.values() {
+        if MountInfoRecord::parse(record)?.mount_point == mount_point {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 struct MountInfoRecord<'a> {
     mount_id: u64,
+    parent_id: u64,
     root: &'a [u8],
     mount_point: &'a [u8],
     mount_options: &'a [u8],
@@ -870,6 +1187,7 @@ impl<'a> MountInfoRecord<'a> {
         }
         Ok(Self {
             mount_id,
+            parent_id,
             root: fields[3],
             mount_point: fields[4],
             mount_options: fields[5],
@@ -1071,6 +1389,13 @@ fn private_run_error(
     hard_error(operation, io::Error::other(source))
 }
 
+fn namespace_pin_error(
+    operation: &'static str,
+    source: NamespacePinError,
+) -> PrivateMountSetupError {
+    hard_error(operation, io::Error::other(source))
+}
+
 fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -1140,6 +1465,7 @@ mod tests {
                 run_mount_id,
                 proc_mount_id,
             },
+            baseline_mountinfo: Vec::new(),
             run_state: PristineRun,
         };
 
@@ -1239,6 +1565,101 @@ mod tests {
         let ids = verify_private_mountinfo(VALID_MOUNTINFO, 21, 31).expect("private mounts");
         assert_eq!(ids.run_mount_id, 21);
         assert_eq!(ids.proc_mount_id, 31);
+    }
+
+    #[test]
+    fn active_namespace_mountinfo_adds_exactly_two_nsfs_records() {
+        const A: &[u8] = b"/run/netns/vpl-0123456789abcdef0123456789abcdef-a";
+        const B: &[u8] = b"/run/netns/vpl-0123456789abcdef0123456789abcdef-b";
+        let mut active = VALID_MOUNTINFO.to_vec();
+        active.extend_from_slice(
+            b"40 21 0:4 net:[4026533001] /run/netns/vpl-0123456789abcdef0123456789abcdef-a rw,nosuid,nodev,noexec,relatime - nsfs nsfs rw\n\
+41 21 0:4 net:[4026533002] /run/netns/vpl-0123456789abcdef0123456789abcdef-b rw,nosuid,nodev,noexec,relatime - nsfs nsfs rw\n",
+        );
+        verify_authorized_namespace_mountinfo(
+            VALID_MOUNTINFO,
+            &active,
+            PrivateMountIds {
+                run_mount_id: 21,
+                proc_mount_id: 31,
+            },
+            [40, 41],
+            [A, B],
+        )
+        .expect("exact active namespace mount table");
+
+        let changed_baseline = String::from_utf8(active.clone())
+            .expect("fixture")
+            .replace("10 10 8:1 / / rw,relatime", "10 10 8:1 / / rw");
+        assert!(
+            verify_authorized_namespace_mountinfo(
+                VALID_MOUNTINFO,
+                changed_baseline.as_bytes(),
+                PrivateMountIds {
+                    run_mount_id: 21,
+                    proc_mount_id: 31,
+                },
+                [40, 41],
+                [A, B],
+            )
+            .is_err()
+        );
+        for changed in [
+            String::from_utf8(active.clone())
+                .expect("fixture")
+                .replace("- nsfs nsfs", "- tmpfs tmpfs"),
+            String::from_utf8(active.clone()).expect("fixture").replace(
+                "rw,nosuid,nodev,noexec,relatime - nsfs",
+                "rw shared:7 - nsfs",
+            ),
+            String::from_utf8(active.clone())
+                .expect("fixture")
+                .replace("40 21 0:4", "40 10 0:4"),
+            String::from_utf8(active)
+                .expect("fixture")
+                .replace("abcdef-a", "abcdef-c"),
+        ] {
+            assert!(
+                verify_authorized_namespace_mountinfo(
+                    VALID_MOUNTINFO,
+                    changed.as_bytes(),
+                    PrivateMountIds {
+                        run_mount_id: 21,
+                        proc_mount_id: 31,
+                    },
+                    [40, 41],
+                    [A, B],
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_mountinfo_rollback_requires_exact_baseline_and_absence() {
+        const A: &[u8] = b"/run/netns/vpl-0123456789abcdef0123456789abcdef-a";
+        const B: &[u8] = b"/run/netns/vpl-0123456789abcdef0123456789abcdef-b";
+        let ids = PrivateMountIds {
+            run_mount_id: 21,
+            proc_mount_id: 31,
+        };
+        verify_namespace_mountinfo_rollback(
+            VALID_MOUNTINFO,
+            VALID_MOUNTINFO,
+            ids,
+            [40, 41],
+            [A, B],
+        )
+        .expect("exact mount-table rollback");
+
+        let mut leaked = VALID_MOUNTINFO.to_vec();
+        leaked.extend_from_slice(
+            b"40 21 0:4 net:[4026533001] /run/netns/vpl-0123456789abcdef0123456789abcdef-a rw,nosuid,nodev,noexec,relatime - nsfs nsfs rw\n",
+        );
+        assert!(
+            verify_namespace_mountinfo_rollback(VALID_MOUNTINFO, &leaked, ids, [40, 41], [A, B],)
+                .is_err()
+        );
     }
 
     #[test]
