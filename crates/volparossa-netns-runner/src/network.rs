@@ -197,15 +197,51 @@ pub(crate) struct PreGoNetworkProof {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+/// Affine baseline retained across one authorized, fully rolled-back mutation.
+///
+/// Construction revalidates the pristine observation immediately before the
+/// mutation boundary. The token is neither cloneable nor transferable and is
+/// consumed by the post-rollback verification.
+pub(crate) struct MutationRollbackNetworkProof {
+    baseline: PreGoNetworkBaseline,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
 impl PreGoNetworkProof {
     /// Consume the affine proof, re-prove the baseline, and require equality.
     pub(crate) fn verify(self, mounts: &PrivateMounts) -> Result<(), NetworkError> {
-        let current = collect_pre_go_network_baseline(mounts)?;
-        if current == self.baseline {
-            Ok(())
-        } else {
-            Err(NetworkError::Inconsistent)
-        }
+        require_current_baseline(mounts, &self.baseline)
+    }
+
+    /// Revalidate immediately before one authorized mutation and retain the
+    /// exact baseline for a later rollback proof.
+    pub(crate) fn authorize_mutation(
+        self,
+        mounts: &PrivateMounts,
+    ) -> Result<MutationRollbackNetworkProof, NetworkError> {
+        require_current_baseline(mounts, &self.baseline)?;
+        Ok(MutationRollbackNetworkProof {
+            baseline: self.baseline,
+            _thread_bound: PhantomData,
+        })
+    }
+}
+
+impl MutationRollbackNetworkProof {
+    /// Consume the retained baseline and prove exact restoration after rollback.
+    pub(crate) fn verify_rollback(self, mounts: &PrivateMounts) -> Result<(), NetworkError> {
+        require_current_baseline(mounts, &self.baseline)
+    }
+}
+
+fn require_current_baseline(
+    mounts: &PrivateMounts,
+    expected: &PreGoNetworkBaseline,
+) -> Result<(), NetworkError> {
+    if collect_pre_go_network_baseline(mounts)? == *expected {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
     }
 }
 

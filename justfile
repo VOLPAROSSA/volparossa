@@ -49,11 +49,14 @@ test-package-licenses:
 test-netns:
     ./tests/netns/run-topology.sh --preview --only all
 
-test-netns-bootstrap-ready-proof:
+test-netns-authorized-private-run-proof:
     cargo build --locked --target x86_64-unknown-linux-gnu \
-        --target-dir target/bootstrap-ready-proof -p volparossa-netns-runner
+        --target-dir target/authorized-private-run-proof -p volparossa-netns-runner
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
         ./tests/netns/require-bootstrap-ready-proof.sh
+
+# Backwards-compatible name for the now-stronger authorized private-run proof.
+test-netns-bootstrap-ready-proof: test-netns-authorized-private-run-proof
 
 test-mptcp:
     ./tests/netns/run-topology.sh --preview --only mptcp

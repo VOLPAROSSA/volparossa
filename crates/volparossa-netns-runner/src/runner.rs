@@ -42,7 +42,7 @@ pub const INTERNAL_ERROR_EXIT_CODE: u8 = 70;
 
 const BOOTSTRAP_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Honest outcome of the current pre-`GO` isolation supervisor slice.
+/// Honest outcome of the current bounded isolation-supervisor slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleOutcome {
     /// The fixed child accepted provisioning, but kernel policy denied a safe bootstrap proof.
@@ -53,8 +53,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// PID 1 emitted one pinned pre-GO readiness proof and was exactly retired.
-    BlockedAfterBootstrapReadyProof,
+    /// One authorised private-run mutation was proven, fully rolled back, and exactly retired.
+    BlockedAfterAuthorizedMutationRollback,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -63,7 +63,7 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    BootstrapReadyVerified,
+    AuthorizedMutationRolledBack,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -108,10 +108,10 @@ pub enum RunnerError {
     /// The inherited private channel failed.
     #[error("fixed lifecycle channel failed: {0}")]
     Channel(#[source] io::Error),
-    /// A lifecycle record or phase violated the fixed pre-GO exchange.
-    #[error("inner child violated the fixed pre-GO lifecycle exchange")]
+    /// A lifecycle record or phase violated the fixed bounded exchange.
+    #[error("inner child violated the fixed bounded lifecycle exchange")]
     UnexpectedLifecycleRecord,
-    /// The fixed child did not return the sole blocked-before-isolation exit status.
+    /// The fixed child did not return the sole bounded-run blocked exit status.
     #[error("inner child returned unexpected process status code={code:?} signal={signal:?}")]
     UnexpectedChildStatus {
         /// Conventional child exit code, when it exited normally.
@@ -119,8 +119,8 @@ pub enum RunnerError {
         /// Terminating signal, when the kernel killed the child.
         signal: Option<i32>,
     },
-    /// The supervisor process moved namespaces during a non-mutating run.
-    #[error("supervisor namespace identities changed during a non-mutating run")]
+    /// The outer supervisor process moved namespaces during the bounded run.
+    #[error("outer supervisor namespace identities changed during the bounded run")]
     SupervisorNamespaceChanged,
     /// The child did not begin in the exact provisioned parent namespaces.
     #[error("child namespace identity did not match launch provisioning")]
@@ -154,7 +154,7 @@ impl From<PidOneControlError> for RunnerError {
     }
 }
 
-/// Run the sole fixed pre-`GO` isolation supervisor slice.
+/// Run the sole fixed bounded isolation-supervisor slice.
 ///
 /// A random launch context is sent to an exact self-reexecuted child through an
 /// unnamed inherited seqpacket channel. The child creates only anonymous user,
@@ -167,10 +167,15 @@ impl From<PidOneControlError> for RunnerError {
 /// PID view to its retained kernel pins. PID 1 proves the pristine RTNL baseline,
 /// pins a stable canonical IPv4-forwarding record, proves zero nftables tables
 /// bracketed by unchanged generation 1, and emits one canonical
-/// `BOOTSTRAP_READY` bound to those pins. Only then does
-/// the outer send fixed TERM through the retained pidfd and require one affine
-/// PID-1 `signalfd` observation before exact reap. No `GO` is emitted. The outer
-/// verifies that its own namespace identities remain unchanged.
+/// `BOOTSTRAP_READY` bound to those pins. Only then does the outer issue the
+/// sole canonical `GO`. PID 1 consumes its affine authorization, creates and
+/// proves the fixed private-run roots and empty namespace slots through retained
+/// descriptors, rolls them back in reverse order, and emits one internal
+/// rollback-complete checkpoint. The outer independently re-proves empty private
+/// mounts before sending fixed TERM through the retained pidfd and requiring one
+/// affine PID-1 `signalfd` observation before exact reap. This slice does not
+/// emit `TOPOLOGY_READY`; post-`GO` EOF therefore remains cleanup-required. The
+/// outer verifies that its own namespace identities remain unchanged.
 /// The caller must enter with exactly one task, an empty signal mask, exact
 /// default HUP/INT/TERM dispositions, and a default `SIGCHLD` disposition
 /// without `SA_NOCLDWAIT`.
@@ -275,8 +280,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::BootstrapReadyVerified => {
-            LifecycleOutcome::BlockedAfterBootstrapReadyProof
+        PidOneBarrierOutcome::AuthorizedMutationRolledBack => {
+            LifecycleOutcome::BlockedAfterAuthorizedMutationRollback
         }
     };
     Ok(outcome)
@@ -420,7 +425,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::BootstrapReadyVerified)
+        Ok(PidOneBarrierOutcome::AuthorizedMutationRolledBack)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -467,6 +472,26 @@ fn complete_bootstrap_ready_exchange(
     if accepted != bootstrap_ready || outer.phase() != OuterLifecyclePhase::BootstrapReady {
         return Err(RunnerError::UnexpectedLifecycleRecord);
     }
+    let go = outer.go()?.encode()?;
+    if outer.phase() != OuterLifecyclePhase::GoSent {
+        return Err(RunnerError::UnexpectedLifecycleRecord);
+    }
+    send_outer(
+        signal_supervisor,
+        child.lifecycle_channel().map_err(RunnerError::Channel)?,
+        go.as_bytes(),
+    )?;
+    let rollback_complete = receive_outer(
+        signal_supervisor,
+        child.control_channel().map_err(RunnerError::Channel)?,
+    )?;
+    bootstrap.accept_mutation_rollback_complete(&rollback_complete)?;
+    pid_one
+        .verify_private_mounts(outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
+    pid_one
+        .verify_signal_supervision(outer_user_id, outer_group_id)
+        .map_err(RunnerError::KernelProof)?;
     before_outer_send(signal_supervisor)?;
     pid_one
         .send_managed_signal(ManagedSignal::Term)
@@ -580,7 +605,12 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    if outer.observe_inner_eof()? != LifecycleEofDisposition::NoTopologyMutationAuthorized {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterAuthorizedMutationRollback {
+        LifecycleEofDisposition::CleanupRequired
+    } else {
+        LifecycleEofDisposition::NoTopologyMutationAuthorized
+    };
+    if outer.observe_inner_eof()? != expected_eof {
         return Err(RunnerError::UnexpectedLifecycleRecord);
     }
     let status = child.wait_and_reap().map_err(RunnerError::Process)?;
@@ -845,6 +875,15 @@ fn bridge_pid_one_mount_and_signal_result(
             .map_err(RunnerError::Channel)?
             .send(pid_one_control.private_mounts_verified()?.as_bytes())
             .map_err(RunnerError::Channel)?;
+        let rollback_complete = pid_one
+            .bootstrap_channel()
+            .map_err(RunnerError::Channel)?
+            .receive()
+            .map_err(RunnerError::Channel)?;
+        pid_one_control.accept_mutation_rollback_complete(&rollback_complete)?;
+        control_channel
+            .send(bootstrap.mutation_rollback_complete(pid)?.as_bytes())
+            .map_err(RunnerError::Channel)?;
         let signal_observed = pid_one
             .bootstrap_channel()
             .map_err(RunnerError::Channel)?
@@ -919,9 +958,12 @@ fn finish_pid_one(
 /// It then arms the fixed handler/mask/`signalfd` set, proves the pristine RTNL
 /// baseline, a stable canonical IPv4-forwarding record, and zero nftables tables
 /// bracketed by unchanged generation 1. It then emits exactly one canonical
-/// `BOOTSTRAP_READY` and consumes
-/// pidfd-delivered TERM only afterward and reports the affine observation over
-/// the launcher-private control channel before proving pre-GO lifecycle EOF.
+/// `BOOTSTRAP_READY`, consumes the canonical affine `GO`, creates and fully
+/// rolls back the fixed private-run roots and empty slots, and reports the
+/// internal rollback checkpoint. Only after the outer independently re-proves
+/// empty private mounts does PID 1 consume pidfd-delivered TERM and report the
+/// affine observation over the launcher-private control channel. The final EOF
+/// is post-`GO` and therefore remains cleanup-required.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_pid_one() -> ExitCode {
@@ -976,7 +1018,7 @@ fn internal_pid_one() -> Result<(), RunnerError> {
             &mut control,
             &mut lifecycle,
             &provision,
-            &mounts,
+            mounts,
             &signal_supervisor,
         )?;
     } else {
@@ -999,25 +1041,14 @@ fn complete_pid_one_ready_retirement(
     control: &mut PidOneControl,
     lifecycle: &mut InnerLifecycleState,
     provision: &PidOneProvision,
-    mounts: &crate::mounts::PrivateMounts,
+    mounts: crate::mounts::PrivateMounts,
     signal_supervisor: &FixedSignalSupervisor,
 ) -> Result<(), RunnerError> {
-    mounts
-        .verify()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    verify_pid_one_runtime(provision)?;
-    signal_supervisor
-        .verify_pid_one_quiescent()
-        .map_err(RunnerError::SignalSupervision)?;
-    let proof = crate::network::prove_pre_go_network_baseline(mounts)
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
+    let proof = crate::network::prove_pre_go_network_baseline(&mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
-    mounts
-        .verify()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
     let snapshot = verify_pid_one_runtime(provision)?;
-    signal_supervisor
-        .verify_pid_one_quiescent()
-        .map_err(RunnerError::SignalSupervision)?;
     let ready = BootstrapReady::new(
         provision.run_id().clone(),
         snapshot.network,
@@ -1031,6 +1062,27 @@ fn complete_pid_one_ready_retirement(
     lifecycle_channel
         .send(encoded.as_bytes())
         .map_err(RunnerError::Channel)?;
+    let go = signal_supervisor
+        .receive_pid_one_lifecycle_record(
+            bootstrap_channel,
+            lifecycle_channel,
+            AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
+                .map_err(RunnerError::SignalSupervision)?,
+        )
+        .map_err(RunnerError::SignalSupervision)?;
+    let authorization = lifecycle.accept_go(&go)?;
+    if lifecycle.phase() != InnerLifecyclePhase::GoReceived {
+        return Err(RunnerError::UnexpectedLifecycleRecord);
+    }
+    let (mounts, final_network_proof) = complete_authorized_private_run_rollback(
+        bootstrap_channel,
+        control,
+        provision,
+        mounts,
+        signal_supervisor,
+        proof,
+        authorization,
+    )?;
     signal_supervisor
         .wait_pid_one_termination(
             bootstrap_channel,
@@ -1055,20 +1107,63 @@ fn complete_pid_one_ready_retirement(
                 .map_err(RunnerError::SignalSupervision)?,
         )
         .map_err(RunnerError::SignalSupervision)?;
-    if lifecycle.observe_outer_eof()? != LifecycleEofDisposition::NoTopologyMutationAuthorized {
+    if lifecycle.observe_outer_eof()? != LifecycleEofDisposition::CleanupRequired {
         return Err(RunnerError::UnexpectedLifecycleRecord);
     }
     control.accept_expect_lifecycle_eof(&expect_eof)?;
-    mounts
-        .verify()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    verify_pid_one_runtime(provision)?;
-    signal_supervisor
-        .verify_pid_one_quiescent()
-        .map_err(RunnerError::SignalSupervision)?;
-    proof
-        .verify(mounts)
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
+    final_network_proof
+        .verify(&mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)
+}
+
+fn complete_authorized_private_run_rollback(
+    bootstrap_channel: &crate::ipc::LifecycleChannel,
+    control: &mut PidOneControl,
+    provision: &PidOneProvision,
+    mounts: crate::mounts::PrivateMounts,
+    signal_supervisor: &FixedSignalSupervisor,
+    proof: crate::network::PreGoNetworkProof,
+    authorization: volparossa_test_support::MutationAuthorization,
+) -> Result<
+    (
+        crate::mounts::PrivateMounts,
+        crate::network::PreGoNetworkProof,
+    ),
+    RunnerError,
+> {
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
+    let rollback_network_proof = proof
+        .authorize_mutation(&mounts)
+        .map_err(|_| RunnerError::NetworkProof)?;
+    let authorized_mounts = mounts
+        .authorize_private_run(authorization)
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    authorized_mounts
+        .verify_authorized_private_run()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let mounts = authorized_mounts
+        .rollback_private_run()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    rollback_network_proof
+        .verify_rollback(&mounts)
+        .map_err(|_| RunnerError::NetworkProof)?;
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
+    let final_network_proof = crate::network::prove_pre_go_network_baseline(&mounts)
+        .map_err(|_| RunnerError::NetworkProof)?;
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
+    bootstrap_channel
+        .send(control.mutation_rollback_complete()?.as_bytes())
+        .map_err(RunnerError::Channel)?;
+    Ok((mounts, final_network_proof))
+}
+
+fn verify_pid_one_pristine_state(
+    mounts: &crate::mounts::PrivateMounts,
+    provision: &PidOneProvision,
+    signal_supervisor: &FixedSignalSupervisor,
+) -> Result<(), RunnerError> {
     mounts
         .verify()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;

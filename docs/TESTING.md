@@ -179,7 +179,9 @@ attestation that the fixed inner worker must construct only after directly measu
 namespaces, with private mounts, the enumerated read-only pre-`GO` network baseline, handlers, and
 the parent-death chain established before network-topology mutation. The outer independently
 compares the three namespace identities with
-its original host identities. Only then may it send the affine `GO` authorization.
+its original host identities. Only then may it send the affine `GO` authorization. The current
+early slice reaches that barrier and permits only one bounded private-`/run` root-and-slot
+transaction; it does not claim that the remaining topology lifecycle is implemented.
 `TOPOLOGY_READY` attests to the run ID, fixed topology-specification digest, exact two run-bound
 namespace identities, and the completed probe, all directly observed by that worker. The outer then
 sends `STOP`; `FINISHED` must bind the SHA-256 of the exact `TOPOLOGY_READY` bytes and report
@@ -197,9 +199,9 @@ has been reaped. All selected datapath cases remain `SKIPPED` with `LIFECYCLE_ON
 and process result remain `BLOCKED`/77. The current blocked entry point has not produced that
 evidence yet.
 
-The test-only `volparossa-netns-runner` now owns an initial, deliberately pre-`GO` isolation
-boundary which creates no network-topology objects. It re-executes only `/proc/self/exe`, once as
-the fixed launcher and once as namespace PID 1, with a distinct private selector for each role. It
+The test-only `volparossa-netns-runner` now owns an initial, deliberately early post-`GO`
+containment slice which creates no network-topology objects. It re-executes only `/proc/self/exe`,
+once as the fixed launcher and once as namespace PID 1, with a distinct private selector for each role. It
 clears both child environments, fences unrelated inherited descriptors, and uses three separate
 unnamed descriptor-free `SOCK_SEQPACKET` outer-to-launcher channels plus one launcher-to-PID-1
 bootstrap channel; the lifecycle endpoint is transferred affinely to PID 1. Exactly one
@@ -268,13 +270,25 @@ the affinely transferred lifecycle endpoint. The frame is bound to the run and P
 network, mount, and PID namespace identities. The outer parses that actual frame, requires all
 three identities to match its retained PID-1 namespace pins, repeats the live mount and signal
 proofs, and accepts the frame through the strict outer lifecycle state. Only then does it send
-exactly TERM through the retained PID-1 pidfd. PID 1 must consume that actual `signalfd` record and
-return one canonical run-, PID- and signal-bound `MANAGED_SIGNAL_OBSERVED` through the launcher,
-which forwards the host-PID-bound `PID1_SIGNAL_OBSERVED`. Only after the outer accepts that
-observation and repeats the live signal proof does it close the lifecycle channel without issuing
-`GO`. PID 1 accepts the affine retire instruction and lifecycle EOF in either cross-channel order;
-both lifecycle states require the EOF to mean `NoTopologyMutationAuthorized`. PID 1 then repeats
-its mount/runtime/signal proofs, exits 77, and is exactly reaped by the launcher and outer.
+one canonical `GO`. PID 1 consumes the resulting affine `MutationAuthorization` and immediately
+revalidates the complete pristine network baseline before the first filesystem mutation. The
+production ownership transition operates only through retained directory descriptors: it creates
+exactly `/run/netns` and `/run/volparossa-netns-runner/<run_id>` at mode 0700 plus two run-derived,
+empty namespace slots at mode 0000. It proves their exact entry set and retained identities, then
+rolls them back in reverse order: slot B, slot A, the per-run directory, the workspace root, and
+the netns root. Required directory `fsync` barriers make every completed removal explicit.
+
+After restoring the affine `PristineRun` state, PID 1 repeats its network, mount, runtime, and
+signal proofs and sends one internal canonical `MUTATION_ROLLBACK_COMPLETE` record through the
+launcher. The outer accepts and run/PID-binds it, then independently proves that the private
+`/run` is empty again. Only then does the outer send exact TERM through the retained PID-1 pidfd. PID 1 must consume
+that actual `signalfd` record and return one canonical run-, PID- and signal-bound
+`MANAGED_SIGNAL_OBSERVED` through the launcher, which forwards the host-PID-bound
+`PID1_SIGNAL_OBSERVED`. Once the outer accepts that observation and repeats the live signal proof,
+it closes the lifecycle channel. Because `GO` was consumed, both lifecycle states require that EOF
+to mean `CleanupRequired`; it can no longer mean `NoTopologyMutationAuthorized`. PID 1 then repeats
+its proofs, exits 77, and is exactly reaped by the launcher and outer. Failure before the internal
+rollback checkpoint proves bounded process containment only, not completed mutation rollback.
 
 That fixed readiness baseline contains exactly one down `lo` link at ifindex 1 with loopback-only
 flags, MTU 65536, transmit queue length 1000, `noop` qdisc, default link mode and group, zero
@@ -288,8 +302,8 @@ IPv6 priorities 0/local and 32766/main. Each complete observation reads the fixe
 canonical `0\n` or `1\n`, and binds both the procfs object identity and value across the RTNL
 snapshot. A fixed read-only `NETLINK_NETFILTER` sequence requires generation 1 immediately before
 and after a dump containing zero nftables tables. PID 1 repeats the complete observation
-after pre-`GO` EOF and requires every pinned component to match, while retained mount, runtime, and
-signal proofs bracket both barriers.
+immediately before the authorized write and again after root/slot rollback; every pinned component
+must match, while retained mount, runtime, and signal proofs bracket both barriers.
 
 This proof does not claim that forwarding is disabled or that every firewall/netfilter facility is
 empty. Other netconf, address-label, neighbour-table parameter, traffic-control, conntrack, ipset,
@@ -299,10 +313,11 @@ topology driver must either pin every setting it relies on or extend this proof 
 
 The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
 `MAPPINGS_VERIFIED`, `MAPPINGS_PINNED`, `PID1_SPAWNED`, `PID1_PINNED`, `PRIVATE_MOUNTS_READY`,
-`PRIVATE_MOUNTS_VERIFIED`, `PID1_SIGNAL_OBSERVED`, `PID1_REAPED`. The exclusive mount-policy branch substitutes
-`PRIVATE_MOUNTS_UNAVAILABLE` for the two positive mount records. Only `EPERM` or `EACCES` from an
-exact fixed mount-UAPI operation may take that branch; malformed state, missing targets, unsupported
-APIs, invalid options, resource failures, and failed readback remain internal errors. Other fixed
+`PRIVATE_MOUNTS_VERIFIED`, `MUTATION_ROLLBACK_COMPLETE`, `PID1_SIGNAL_OBSERVED`, and
+`PID1_REAPED`. The exclusive mount-policy branch substitutes `PRIVATE_MOUNTS_UNAVAILABLE` for the
+two positive mount records. Only `EPERM` or `EACCES` from an exact fixed mount-UAPI operation may
+take that branch; malformed state, missing targets, unsupported APIs, invalid options, resource
+failures, and failed readback remain internal errors. Other fixed
 kernel-policy denials return separate honest `BLOCKED` outcomes when required parent, namespace,
 mapping, or outer PID-1 proof is unavailable, without fallback. A pre-isolation parent-proof or
 namespace-policy denial uses a bounded two-channel half-close handshake: the launcher advertises
@@ -312,7 +327,7 @@ launcher cannot time itself out before acknowledgement. If the outer PID-1 pin i
 unavailable after spawn, the launcher sends one run-bound `ABORT_BEFORE_PRIVATE_MOUNTS` record to
 PID 1, proves lifecycle EOF, and reaps it without issuing a mount instruction. A generic green CI
 job may therefore prove only fail-closed behaviour; the complete positive path requires the
-explicit `BlockedAfterBootstrapReadyProof` outcome on the Debian 13 acceptance host:
+explicit `BlockedAfterAuthorizedMutationRollback` outcome on the Debian 13 acceptance host:
 
 The portable unit suite runs the live RTNL and read-only NFNETLINK collectors plus adversarial
 wire/parser and RTNL link/object cases when unprivileged user/network namespaces are available. It
@@ -321,7 +336,7 @@ an environmental skip; every other spawn, child, parser, or proof failure remain
 skip is not readiness evidence and cannot replace the dedicated gate.
 
 ```sh
-just test-netns-bootstrap-ready-proof
+just test-netns-authorized-private-run-proof
 ```
 
 That opt-in gate requires an unprivileged Debian 13 amd64 host with unprivileged user namespaces
@@ -336,6 +351,9 @@ on an Ubuntu runner does not supply the required Debian-host kernel evidence, an
 container would test a different privilege boundary. The gate executes a private, owner-only copy
 of the fixed-target build artifact.
 
+The earlier `just test-netns-bootstrap-ready-proof` recipe may remain available as a compatibility
+entry point, but the command above names the deepest currently implemented proof.
+
 The runner retains exact-child and namespace-FD ownership through a bounded synchronous reap
 attempt. Normal reaping retains the pidfd and exact `Child` ownership; every forced `SIGKILL` after
 admission targets that pidfd, including timeout and fallback-reaper paths. Pidfd acquisition is
@@ -345,23 +363,26 @@ public `--run` entry requires exactly one initial task, and any non-default `SIG
 `SA_NOCLDWAIT` is rejected before any channel, permit, reaper thread, or child is created. If a
 later synchronous reap attempt cannot complete, ownership transfers to a process-local fallback
 reaper instead of being silently detached; that rare fallback is not claimed as post-exit cleanup
-or A14 evidence. The current `--run` path verifies EOF-before-`GO`, repeated exact PID-1 and
-outer-launcher reaping, and unchanged outer namespace, mount-table, route-table, and
-IPv4-forwarding observations,
-then honestly returns `BLOCKED`/77. An explicit `BlockedAfterBootstrapReadyProof` run additionally
-proves the complete private-mount barrier, exact RTNL state, descriptor-pinned IPv4-forwarding
-baseline, zero nftables tables bracketed by unchanged generation 1, one real pinned
-`BOOTSTRAP_READY`, and fixed pidfd-to-PID1-signalfd TERM observation described above. It never
-issues `GO`, mutates network topology, or produces network-object cleanup, A14, A15, or acceptance
-evidence. At supervised IPC boundaries,
+or A14 evidence. The current positive `--run` path requires post-`GO` EOF to classify as
+`CleanupRequired`, proves repeated exact PID-1 and outer-launcher reaping plus unchanged outer
+namespace, mount-table, route-table, and IPv4-forwarding observations, and honestly returns
+`BlockedAfterAuthorizedMutationRollback`/77. That outcome additionally proves the complete
+private-mount barrier, exact RTNL state, descriptor-pinned IPv4-forwarding baseline, zero nftables
+tables bracketed by unchanged generation 1, one real pinned `BOOTSTRAP_READY`, canonical `GO`,
+affine `MutationAuthorization`, the descriptor-relative root/slot create-and-reverse-rollback
+transaction, the internal `MUTATION_ROLLBACK_COMPLETE` checkpoint, independent empty-`/run`
+verification, and fixed pidfd-to-PID1-signalfd TERM observation described above. It creates no
+live nsfs, manifest, veth, address, route, nftables, or probe object and produces no
+network-object cleanup, A14, A15, or acceptance evidence. At supervised IPC boundaries,
 managed outer HUP/INT/TERM events take
 priority over pending protocol records and trigger bounded exact-launcher containment. The live
 gate does not yet prove external-signal handling throughout every reap/report phase, a forced
 parent-death/crash chain, a general descendant reaper, or A14 cleanup. Command/environment shims
 prove that the runner invokes no namespace or networking utility. It still has no general
-root-filesystem or supplementary-group isolation, `GO`, `TOPOLOGY_READY`, `STOP`, `FINISHED`,
-network-topology mutation, crash-cleanup evidence, acceptance report, or A01-A15 result. The sole
-`BOOTSTRAP_READY` frame is readiness evidence, not topology authorization or A14 cleanup evidence.
+root-filesystem or supplementary-group isolation, `TOPOLOGY_READY`, `STOP`, `FINISHED`,
+network-topology mutation, crash-cleanup evidence, acceptance report, or A01-A15 result.
+`BOOTSTRAP_READY` remains readiness evidence; this `GO` authorizes only the bounded private-root
+transaction, and the rollback checkpoint is not A14 cleanup or acceptance evidence.
 The dedicated-host proof also does not claim hostile same-UID sender provenance from the
 `signalfd_siginfo` metadata; it proves that the retained pidfd send is followed by the exact
 quiescent TERM observation within this fixed supervisor.
@@ -372,38 +393,44 @@ ownership, and teardown as one operation.
 It may not accept a caller-selected command, executable, backend, timeout, cleanup prefix, or
 network-object name.
 
-Run-scoped names derive from one 128-bit lowercase hexadecimal run ID. The private ownership
-manifest is a mode-0600, owner-bound, bounded and canonically sorted record of exact namespace names
-and unique nonzero device/inode pairs. Cleanup eligibility is obtained only from that manifest and
-is rechecked against the current mount object; a missing object is safely absent, while a symlink,
-replacement inode, malformed journal, unknown name, or changed journal is foreign/invalid and must
-never be deleted. `tests/netns/test-lifecycle-contract.sh` exercises this decision logic without
-creating a namespace or invoking a networking command.
+Run-scoped names derive from one 128-bit lowercase hexadecimal run ID. The production ownership
+module and `PristineRun`/`AuthorizedPrivateRun` typestates are active in the runner. After consuming
+`MutationAuthorization`, it uses only the retained private-`/run` descriptor to create the fixed
+mode-0700 roots `/run/netns` and `/run/volparossa-netns-runner/<run_id>` plus exactly two
+run-derived mode-0000 empty slots. It retains and rechecks their identities and exact entry sets.
+A provisional containment guard exists immediately after every exclusive creation. In the fixed
+one-PID-1-task, trusted-launcher model, an inotify witness rejects delete, move, and recreate
+activity across the inherently non-atomic `mkdirat`-to-open handoff. A retained descriptor plus
+that exact handoff observation permits only a scoped cleanup attempt; immediately before unlink,
+the guard revalidates the descriptor, path, parent, and object shape. If the new directory cannot
+be pinned unambiguously, the runner leaves the name untouched, fails closed, and
+relies on destruction of its disposable mount namespace rather than risking deletion of a
+replacement. Only a fully pinned and journalled layout can emit the rollback-complete checkpoint;
+that success path reverses slot B, slot A, the per-run directory, the workspace root, and the netns
+root, including directory `fsync`. Inotify and compare-before-unlink are not a race-free deletion
+primitive against a hostile mapped-same-UID process with a previously opened writable directory
+descriptor. That actor is explicitly outside this disposable runner's proof; a production helper
+must instead provide root-owned exclusive mutation authority. This transaction neither creates
+nor publishes an ownership manifest.
 
-The runner also compiles a private Rust ownership model only under `cfg(test)`. In addition to the
-read-only codec and classifier, its temporary-directory regressions model atomic publication of
-two canonical synthetic ownership records. They require initially empty mode-0700 roots, exact
-entry sets, descriptor and nonzero `statx` mount identities, two mode-0000 empty slots, an
-exclusive mode-0600 `ownership.pending`, exact bounded double readback, file sync,
-`RENAME_NOREPLACE`, directory sync, and an immediate manifest pin. Failure injection at every
-modeled stage/publication boundary exercises reverse, identity-scoped unlink of only the regular
-files created by that invocation. The intended future fixed paths are `/run/netns` and the
-per-run workspace `/run/volparossa-netns-runner/<run_id>`.
+The future private ownership-manifest contract remains a mode-0600, owner-bound, bounded and
+canonically sorted record of exact namespace names and unique nonzero device/inode pairs. Its
+reader/classifier and atomic publication machine remain `cfg(test)`-only. Temporary-directory
+regressions require initially empty mode-0700 roots, exact entry sets, descriptor and nonzero
+`statx` mount identities, two mode-0000 empty slots, an exclusive mode-0600 `ownership.pending`,
+exact bounded double readback, file sync, `RENAME_NOREPLACE`, directory sync, and an immediate
+manifest pin. Failure injection at every modeled stage/publication boundary exercises reverse,
+identity-scoped unlink of only the synthetic regular files created by that invocation.
+`tests/netns/test-lifecycle-contract.sh` exercises the manifest decision logic without creating a
+namespace or invoking a networking command.
 
-Those tests deliberately use synthetic device/inode records; they do not construct or retain live
-nsfs objects. Their compare-then-unlink rollback runs in one tempfile test actor and is not a
-race-free deletion primitive against same-UID concurrency. The model has no production entrypoint,
-writer, deletion capability, `MutationAuthorization`, private-`/run` transition, or runtime caller.
-Regular-file fixtures do not prove a live namespace, safe production teardown, `GO`,
-topology/probe readiness, cleanup, A14, or A15. The production mount owner is now explicitly typed
-as `PristineRun`, and the final pre-`GO` network revalidation consumes its affine proof, but no
-authorised successor state exists yet and current execution is unchanged.
-
-An ownership decision is an observation, not a reusable deletion capability. The future worker must
-remain the sole actor in its private `/run`, retain rollback authority across errors, repeat the
-identity check immediately at the deletion boundary, and fail closed if either the manifest or
-mount object changes. Only the `cfg(test)` tempfile model performs unlink; production performs no
-topology deletion.
+Those publication tests deliberately use synthetic device/inode records and one tempfile actor;
+they do not prove a live namespace, hostile same-UID concurrency safety, safe production namespace
+teardown, topology/probe readiness, cleanup, A14, or A15. The runtime root/slot transaction does
+perform descriptor-relative unlink of its own empty files and directories, but production has no
+manifest writer, live nsfs object, or live topology-object deletion capability. Future live nsfs
+cleanup must retain rollback authority, repeat identity checks at deletion boundaries, and fail
+closed on a changed manifest or mount object.
 
 The V1 lifecycle specification digest also pins the two namespace and underlay-interface name
 formulas, two isolated `/30` networks, two exact host routes, absence of default routes and host

@@ -17,6 +17,8 @@ const PRIVATE_MOUNTS_VERIFIED_HEADER: &str =
     "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PRIVATE_MOUNTS_VERIFIED";
 const PRIVATE_MOUNTS_UNAVAILABLE_HEADER: &str =
     "VOLPAROSSA_NETNS_PID1_CONTROL_V1 PRIVATE_MOUNTS_UNAVAILABLE";
+const MUTATION_ROLLBACK_COMPLETE_HEADER: &str =
+    "VOLPAROSSA_NETNS_PID1_CONTROL_V1 MUTATION_ROLLBACK_COMPLETE";
 const MANAGED_SIGNAL_OBSERVED_HEADER: &str =
     "VOLPAROSSA_NETNS_PID1_CONTROL_V1 MANAGED_SIGNAL_OBSERVED";
 const EXPECT_LIFECYCLE_EOF_HEADER: &str = "VOLPAROSSA_NETNS_PID1_CONTROL_V1 EXPECT_LIFECYCLE_EOF";
@@ -214,6 +216,7 @@ enum SimpleKind {
     PrivateMountsReady,
     PrivateMountsVerified,
     PrivateMountsUnavailable,
+    MutationRollbackComplete,
     ExpectLifecycleEof,
     LifecycleEof,
 }
@@ -229,6 +232,7 @@ impl SimpleKind {
             Self::PrivateMountsReady => PRIVATE_MOUNTS_READY_HEADER,
             Self::PrivateMountsVerified => PRIVATE_MOUNTS_VERIFIED_HEADER,
             Self::PrivateMountsUnavailable => PRIVATE_MOUNTS_UNAVAILABLE_HEADER,
+            Self::MutationRollbackComplete => MUTATION_ROLLBACK_COMPLETE_HEADER,
             Self::ExpectLifecycleEof => EXPECT_LIFECYCLE_EOF_HEADER,
             Self::LifecycleEof => LIFECYCLE_EOF_HEADER,
         }
@@ -244,6 +248,7 @@ enum LauncherPhase {
     SetupPrivateMountsPending,
     AwaitingPrivateMountsResult,
     PrivateMountsReady,
+    AwaitingMutationRollbackComplete,
     AwaitingSignalObserved,
     PrivateMountsComplete,
     AwaitingLifecycleEof,
@@ -346,8 +351,23 @@ impl LauncherPidOneControl {
     pub(crate) fn private_mounts_verified(&mut self) -> Result<String, PidOneControlError> {
         self.emit(
             LauncherPhase::PrivateMountsReady,
-            LauncherPhase::AwaitingSignalObserved,
+            LauncherPhase::AwaitingMutationRollbackComplete,
             SimpleKind::PrivateMountsVerified,
+        )
+    }
+
+    /// Accept PID 1's sole run-bound checkpoint after all authorised mutation rollback.
+    ///
+    /// The checkpoint carries no topology-readiness, lifecycle-completion, or acceptance claim.
+    pub(crate) fn accept_mutation_rollback_complete(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), PidOneControlError> {
+        self.accept(
+            bytes,
+            LauncherPhase::AwaitingMutationRollbackComplete,
+            LauncherPhase::AwaitingSignalObserved,
+            SimpleKind::MutationRollbackComplete,
         )
     }
 
@@ -429,6 +449,7 @@ enum PidOnePhase {
     AwaitingSetupPrivateMounts,
     PrivateMountsResultPending,
     AwaitingPrivateMountsVerified,
+    MutationRollbackCompletePending,
     ManagedSignalObservedPending,
     AwaitingLifecycleEof,
     LifecycleEofPending,
@@ -535,8 +556,19 @@ impl PidOneControl {
         self.accept(
             bytes,
             PidOnePhase::AwaitingPrivateMountsVerified,
-            PidOnePhase::ManagedSignalObservedPending,
+            PidOnePhase::MutationRollbackCompletePending,
             SimpleKind::PrivateMountsVerified,
+        )
+    }
+
+    /// Emit the sole run-bound checkpoint after authorised mutation rollback is complete.
+    ///
+    /// The checkpoint carries no topology-readiness, lifecycle-completion, or acceptance claim.
+    pub(crate) fn mutation_rollback_complete(&mut self) -> Result<String, PidOneControlError> {
+        self.emit(
+            PidOnePhase::MutationRollbackCompletePending,
+            PidOnePhase::ManagedSignalObservedPending,
+            SimpleKind::MutationRollbackComplete,
         )
     }
 
@@ -861,6 +893,21 @@ mod tests {
         pid_one
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("accept private-mount verification");
+        assert_eq!(pid_one.phase, PidOnePhase::MutationRollbackCompletePending);
+        assert_eq!(
+            launcher.phase,
+            LauncherPhase::AwaitingMutationRollbackComplete
+        );
+        let rollback_complete = pid_one
+            .mutation_rollback_complete()
+            .expect("mutation rollback checkpoint");
+        assert_eq!(
+            rollback_complete,
+            format!("{MUTATION_ROLLBACK_COMPLETE_HEADER}\nrun_id={RUN}\n")
+        );
+        launcher
+            .accept_mutation_rollback_complete(rollback_complete.as_bytes())
+            .expect("accept mutation rollback checkpoint");
         assert_eq!(pid_one.phase, PidOnePhase::ManagedSignalObservedPending);
         assert_eq!(launcher.phase, LauncherPhase::AwaitingSignalObserved);
         let observed = pid_one
@@ -957,6 +1004,10 @@ mod tests {
             pid_one.private_mounts_unavailable(),
             Err(PidOneControlError::StateTransition)
         );
+        assert_eq!(
+            pid_one.mutation_rollback_complete(),
+            Err(PidOneControlError::StateTransition)
+        );
 
         launcher
             .accept_private_mounts_unavailable(unavailable.as_bytes())
@@ -976,6 +1027,14 @@ mod tests {
         );
         assert_eq!(
             launcher.private_mounts_verified(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(
+                encode_simple(SimpleKind::MutationRollbackComplete, &run_id())
+                    .expect("rollback checkpoint")
+                    .as_bytes()
+            ),
             Err(PidOneControlError::StateTransition)
         );
 
@@ -1014,6 +1073,14 @@ mod tests {
             launcher.abort_before_private_mounts(),
             Err(PidOneControlError::StateTransition)
         );
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(
+                encode_simple(SimpleKind::MutationRollbackComplete, &run_id())
+                    .expect("rollback checkpoint")
+                    .as_bytes()
+            ),
+            Err(PidOneControlError::StateTransition)
+        );
 
         pid_one
             .accept_abort_before_private_mounts(abort.as_bytes())
@@ -1029,6 +1096,10 @@ mod tests {
         );
         assert_eq!(
             pid_one.accept_abort_before_private_mounts(abort.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.mutation_rollback_complete(),
             Err(PidOneControlError::StateTransition)
         );
 
@@ -1056,6 +1127,7 @@ mod tests {
             SimpleKind::PrivateMountsReady,
             SimpleKind::PrivateMountsVerified,
             SimpleKind::PrivateMountsUnavailable,
+            SimpleKind::MutationRollbackComplete,
             SimpleKind::ExpectLifecycleEof,
             SimpleKind::LifecycleEof,
         ] {
@@ -1284,8 +1356,80 @@ mod tests {
         pid_one
             .accept_private_mounts_verified(verified.as_bytes())
             .expect("accept valid verification after rejections");
-        assert_eq!(pid_one.phase, PidOnePhase::ManagedSignalObservedPending);
+        assert_eq!(pid_one.phase, PidOnePhase::MutationRollbackCompletePending);
+        assert_eq!(
+            launcher.phase,
+            LauncherPhase::AwaitingMutationRollbackComplete
+        );
+    }
+
+    #[test]
+    fn mutation_rollback_checkpoint_is_run_bound_directional_and_affine() {
+        let mut launcher = LauncherPidOneControl::new(provision());
+        let mut pid_one = PidOneControl::new();
+        advance_through_executed(&mut launcher, &mut pid_one);
+        let setup = launcher.setup_private_mounts().expect("setup");
+        pid_one
+            .accept_setup_private_mounts(setup.as_bytes())
+            .expect("accept setup");
+        let ready = pid_one.private_mounts_ready().expect("ready");
+        launcher
+            .accept_private_mounts_ready(ready.as_bytes())
+            .expect("accept ready");
+        let verified = launcher.private_mounts_verified().expect("verified");
+        pid_one
+            .accept_private_mounts_verified(verified.as_bytes())
+            .expect("accept verified");
+
+        assert_eq!(
+            pid_one.managed_signal_observed(ManagedSignal::Term),
+            Err(PidOneControlError::StateTransition)
+        );
+        let wrong_run = encode_simple(SimpleKind::MutationRollbackComplete, &other_run_id())
+            .expect("wrong-run checkpoint");
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(wrong_run.as_bytes()),
+            Err(PidOneControlError::RunIdMismatch)
+        );
+        let wrong_direction =
+            encode_simple(SimpleKind::PrivateMountsVerified, &run_id()).expect("wrong direction");
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(wrong_direction.as_bytes()),
+            Err(PidOneControlError::Shape)
+        );
+        let pid_bound =
+            format!("{MUTATION_ROLLBACK_COMPLETE_HEADER}\nrun_id={RUN}\npid={NAMESPACE_PID_ONE}\n");
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(pid_bound.as_bytes()),
+            Err(PidOneControlError::Shape)
+        );
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(&vec![0xff; MAX_LIFECYCLE_FRAME_BYTES + 1]),
+            Err(PidOneControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            launcher.phase,
+            LauncherPhase::AwaitingMutationRollbackComplete
+        );
+
+        let checkpoint = pid_one.mutation_rollback_complete().expect("checkpoint");
+        assert_eq!(
+            checkpoint,
+            format!("{MUTATION_ROLLBACK_COMPLETE_HEADER}\nrun_id={RUN}\n")
+        );
+        assert_eq!(
+            pid_one.mutation_rollback_complete(),
+            Err(PidOneControlError::StateTransition)
+        );
+        launcher
+            .accept_mutation_rollback_complete(checkpoint.as_bytes())
+            .expect("accept checkpoint after rejections");
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(checkpoint.as_bytes()),
+            Err(PidOneControlError::StateTransition)
+        );
         assert_eq!(launcher.phase, LauncherPhase::AwaitingSignalObserved);
+        assert_eq!(pid_one.phase, PidOnePhase::ManagedSignalObservedPending);
     }
 
     #[test]
@@ -1305,6 +1449,12 @@ mod tests {
         pid_one
             .accept_private_mounts_verified(verified.as_bytes())
             .expect("accept verified");
+        let rollback_complete = pid_one
+            .mutation_rollback_complete()
+            .expect("rollback complete");
+        launcher
+            .accept_mutation_rollback_complete(rollback_complete.as_bytes())
+            .expect("accept rollback complete");
 
         assert_eq!(
             launcher.expect_lifecycle_eof(),
@@ -1379,6 +1529,14 @@ mod tests {
         );
         assert_eq!(
             launcher.private_mounts_verified(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(
+                encode_simple(SimpleKind::MutationRollbackComplete, &run_id())
+                    .expect("rollback record")
+                    .as_bytes()
+            ),
             Err(PidOneControlError::StateTransition)
         );
         assert_eq!(
@@ -1466,6 +1624,24 @@ mod tests {
         );
         assert_eq!(
             launcher.expect_lifecycle_eof(),
+            Err(PidOneControlError::StateTransition)
+        );
+        assert_eq!(
+            pid_one.managed_signal_observed(ManagedSignal::Int),
+            Err(PidOneControlError::StateTransition)
+        );
+        let rollback_complete = pid_one
+            .mutation_rollback_complete()
+            .expect("first rollback checkpoint");
+        assert_eq!(
+            pid_one.mutation_rollback_complete(),
+            Err(PidOneControlError::StateTransition)
+        );
+        launcher
+            .accept_mutation_rollback_complete(rollback_complete.as_bytes())
+            .expect("first rollback-checkpoint acceptance");
+        assert_eq!(
+            launcher.accept_mutation_rollback_complete(rollback_complete.as_bytes()),
             Err(PidOneControlError::StateTransition)
         );
         let observed = pid_one

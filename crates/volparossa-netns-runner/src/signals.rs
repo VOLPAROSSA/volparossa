@@ -21,7 +21,7 @@ use volparossa_linux_uapi::{
 
 use crate::ipc::LifecycleChannel;
 
-/// Fixed termination signals accepted by the pre-`GO` supervisor.
+/// Fixed termination signals accepted by the bounded lifecycle supervisor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedSignal {
     Hup,
@@ -322,6 +322,63 @@ impl FixedSignalSupervisor {
         reject_outer_pending(&self.drain()?)
     }
 
+    /// Receive exactly one PID-1 lifecycle record while both parent channels stay quiet.
+    ///
+    /// This is the sole pre-mutation admission wait. A managed termination, `SIGCHLD`,
+    /// bootstrap-parent record/EOF, lifecycle EOF, or an already-pending second lifecycle
+    /// record fails closed. The returned record is therefore the only lifecycle input observed
+    /// under the supplied absolute deadline.
+    pub(crate) fn receive_pid_one_lifecycle_record(
+        &self,
+        bootstrap: &LifecycleChannel,
+        lifecycle: &LifecycleChannel,
+        deadline: AbsoluteDeadline,
+    ) -> io::Result<Vec<u8>> {
+        self.verify_pid_one()?;
+        let mut descriptors = [
+            PollFd::new(self.descriptor.as_fd(), PollFlags::POLLIN),
+            PollFd::new(bootstrap.as_fd(), PollFlags::POLLIN),
+            PollFd::new(lifecycle.as_fd(), PollFlags::POLLIN),
+        ];
+        let ready = poll(&mut descriptors, deadline.poll_timeout()?).map_err(errno_io)?;
+        deadline.ensure_unexpired()?;
+        if ready == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "PID-1 lifecycle receive timed out",
+            ));
+        }
+        validate_poll_events(&descriptors)?;
+        reject_pid_one_pending(&self.drain()?)?;
+
+        let bootstrap_events = descriptors[1].revents().unwrap_or_else(PollFlags::empty);
+        if bootstrap_events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
+            return Err(invalid_data(
+                "bootstrap-parent event arrived before PID-1 lifecycle authorization",
+            ));
+        }
+
+        let lifecycle_events = descriptors[2].revents().unwrap_or_else(PollFlags::empty);
+        if !lifecycle_events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
+            return Err(invalid_data(
+                "poll returned without a PID-1 lifecycle authorization event",
+            ));
+        }
+        let record = lifecycle.receive().map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                invalid_data("lifecycle EOF arrived before PID-1 authorization")
+            } else {
+                error
+            }
+        })?;
+
+        reject_pid_one_pending(&self.drain()?)?;
+        reject_immediate_pid_one_lifecycle_races(bootstrap, lifecycle)?;
+        self.verify_pid_one_quiescent()?;
+        deadline.ensure_unexpired()?;
+        Ok(record)
+    }
+
     /// Wait for exactly one managed PID-1 termination while also watching both parents.
     pub(crate) fn wait_pid_one_termination(
         &self,
@@ -434,7 +491,7 @@ impl FixedSignalSupervisor {
                     Err(error) => return Err(error),
                     Ok(_) => {
                         return Err(invalid_data(
-                            "lifecycle record arrived before topology authorization",
+                            "unexpected lifecycle record arrived during PID-1 retirement",
                         ));
                     }
                 }
@@ -541,6 +598,56 @@ fn observe_final_outer_pending(
         *child_observed = true;
     }
     Ok(())
+}
+
+fn reject_pid_one_pending(pending: &PendingSignals) -> io::Result<()> {
+    if pending.termination.is_some() {
+        return Err(invalid_data(
+            "managed termination arrived before PID-1 lifecycle authorization",
+        ));
+    }
+    if pending.child {
+        return Err(invalid_data(
+            "SIGCHLD arrived before PID-1 lifecycle authorization",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_immediate_pid_one_lifecycle_races(
+    bootstrap: &LifecycleChannel,
+    lifecycle: &LifecycleChannel,
+) -> io::Result<()> {
+    let mut descriptors = [
+        PollFd::new(bootstrap.as_fd(), PollFlags::POLLIN),
+        PollFd::new(lifecycle.as_fd(), PollFlags::POLLIN),
+    ];
+    let ready = poll(&mut descriptors, PollTimeout::ZERO).map_err(errno_io)?;
+    validate_poll_events(&descriptors)?;
+    if ready == 0 {
+        return Ok(());
+    }
+    if descriptors[0]
+        .revents()
+        .unwrap_or_else(PollFlags::empty)
+        .intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
+    {
+        return Err(invalid_data(
+            "bootstrap-parent event raced PID-1 lifecycle authorization",
+        ));
+    }
+    if descriptors[1]
+        .revents()
+        .unwrap_or_else(PollFlags::empty)
+        .intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
+    {
+        return Err(invalid_data(
+            "second lifecycle record or EOF raced PID-1 authorization",
+        ));
+    }
+    Err(invalid_data(
+        "poll returned without an immediate PID-1 lifecycle event",
+    ))
 }
 
 fn require_no_immediate_extra_retire_record(channel: &LifecycleChannel) -> io::Result<()> {
@@ -690,13 +797,14 @@ mod tests {
                 Some("reject-inherited") => test_reject_inherited_mask_child(),
                 Some("outer") => test_outer_supervisor_child(),
                 Some("pid-one") => test_pid_one_supervisor_child(),
+                Some("pid-one-lifecycle") => test_pid_one_lifecycle_record_child(),
                 _ => panic!("unexpected signal-supervisor child mode"),
             }
             return;
         }
 
         let executable = env::current_exe().expect("current test executable");
-        for mode in ["reject-inherited", "outer", "pid-one"] {
+        for mode in ["reject-inherited", "outer", "pid-one", "pid-one-lifecycle"] {
             let status = Command::new(&executable)
                 .arg("--exact")
                 .arg(
@@ -811,5 +919,167 @@ mod tests {
         supervisor
             .verify_pid_one_quiescent()
             .expect("quiescent PID-1 state");
+    }
+
+    fn test_pid_one_lifecycle_record_child() {
+        managed_mask()
+            .thread_set_mask()
+            .expect("install inherited PID-1 mask");
+        let supervisor = FixedSignalSupervisor::install_pid_one().expect("PID-1 supervisor");
+
+        assert_pid_one_lifecycle_success(&supervisor);
+        assert_pid_one_signal_races_fail(&supervisor);
+        assert_pid_one_bootstrap_events_fail(&supervisor);
+        assert_pid_one_lifecycle_eof_fails(&supervisor);
+        assert_pid_one_duplicate_lifecycle_fails(&supervisor);
+        assert_pid_one_post_record_eof_fails(&supervisor);
+        assert_pid_one_expired_deadline_fails(&supervisor);
+        supervisor
+            .verify_pid_one_quiescent()
+            .expect("final quiescent PID-1 state");
+    }
+
+    fn assert_pid_one_lifecycle_success(supervisor: &FixedSignalSupervisor) {
+        let (bootstrap, _bootstrap_parent) =
+            LifecycleChannel::pair().expect("success bootstrap channel");
+        let (lifecycle, lifecycle_parent) =
+            LifecycleChannel::pair().expect("success lifecycle channel");
+        lifecycle_parent.send(b"GO").expect("queue GO record");
+        assert_eq!(
+            receive_pid_one_record(supervisor, &bootstrap, &lifecycle)
+                .expect("exact lifecycle record"),
+            b"GO"
+        );
+    }
+
+    fn assert_pid_one_signal_races_fail(supervisor: &FixedSignalSupervisor) {
+        for signal in [
+            Signal::SIGHUP,
+            Signal::SIGINT,
+            Signal::SIGTERM,
+            Signal::SIGCHLD,
+        ] {
+            let (bootstrap, _bootstrap_parent) =
+                LifecycleChannel::pair().expect("signal bootstrap channel");
+            let (lifecycle, lifecycle_parent) =
+                LifecycleChannel::pair().expect("signal lifecycle channel");
+            lifecycle_parent.send(b"GO").expect("queue raced GO record");
+            raise(signal).expect("queue pre-GO signal");
+            assert_invalid_receive(
+                receive_pid_one_record(supervisor, &bootstrap, &lifecycle),
+                "pre-GO signal must fail",
+            );
+            supervisor
+                .verify_pid_one_quiescent()
+                .expect("signal failure drains fixed queue");
+        }
+    }
+
+    fn assert_pid_one_bootstrap_events_fail(supervisor: &FixedSignalSupervisor) {
+        let (bootstrap, bootstrap_parent) =
+            LifecycleChannel::pair().expect("bootstrap-record channel");
+        let (lifecycle, lifecycle_parent) =
+            LifecycleChannel::pair().expect("bootstrap-record lifecycle");
+        bootstrap_parent
+            .send(b"UNEXPECTED")
+            .expect("queue bootstrap record");
+        lifecycle_parent.send(b"GO").expect("queue raced GO");
+        assert_invalid_receive(
+            receive_pid_one_record(supervisor, &bootstrap, &lifecycle),
+            "bootstrap record must fail",
+        );
+
+        let (bootstrap, bootstrap_parent) =
+            LifecycleChannel::pair().expect("bootstrap-EOF channel");
+        let (lifecycle, lifecycle_parent) =
+            LifecycleChannel::pair().expect("bootstrap-EOF lifecycle");
+        bootstrap_parent
+            .finish_sending()
+            .expect("queue bootstrap EOF");
+        lifecycle_parent.send(b"GO").expect("queue GO beside EOF");
+        assert_invalid_receive(
+            receive_pid_one_record(supervisor, &bootstrap, &lifecycle),
+            "bootstrap EOF must fail",
+        );
+    }
+
+    fn assert_pid_one_lifecycle_eof_fails(supervisor: &FixedSignalSupervisor) {
+        let (bootstrap, _bootstrap_parent) =
+            LifecycleChannel::pair().expect("lifecycle-EOF bootstrap");
+        let (lifecycle, lifecycle_parent) =
+            LifecycleChannel::pair().expect("lifecycle-EOF channel");
+        lifecycle_parent
+            .finish_sending()
+            .expect("queue lifecycle EOF");
+        assert_invalid_receive(
+            receive_pid_one_record(supervisor, &bootstrap, &lifecycle),
+            "lifecycle EOF must fail",
+        );
+    }
+
+    fn assert_pid_one_duplicate_lifecycle_fails(supervisor: &FixedSignalSupervisor) {
+        let (bootstrap, _bootstrap_parent) = LifecycleChannel::pair().expect("duplicate bootstrap");
+        let (lifecycle, lifecycle_parent) = LifecycleChannel::pair().expect("duplicate lifecycle");
+        lifecycle_parent.send(b"GO").expect("queue first record");
+        lifecycle_parent
+            .send(b"DUPLICATE")
+            .expect("queue second record");
+        assert_invalid_receive(
+            receive_pid_one_record(supervisor, &bootstrap, &lifecycle),
+            "second lifecycle record must fail",
+        );
+    }
+
+    fn assert_pid_one_post_record_eof_fails(supervisor: &FixedSignalSupervisor) {
+        let (bootstrap, _bootstrap_parent) =
+            LifecycleChannel::pair().expect("post-record EOF bootstrap");
+        let (lifecycle, lifecycle_parent) =
+            LifecycleChannel::pair().expect("post-record EOF lifecycle");
+        lifecycle_parent
+            .send(b"GO")
+            .expect("queue record before EOF");
+        lifecycle_parent
+            .finish_sending()
+            .expect("queue EOF after record");
+        assert_invalid_receive(
+            receive_pid_one_record(supervisor, &bootstrap, &lifecycle),
+            "already-pending lifecycle EOF must fail",
+        );
+    }
+
+    fn assert_pid_one_expired_deadline_fails(supervisor: &FixedSignalSupervisor) {
+        let (bootstrap, _bootstrap_parent) = LifecycleChannel::pair().expect("expired bootstrap");
+        let (lifecycle, lifecycle_parent) = LifecycleChannel::pair().expect("expired lifecycle");
+        lifecycle_parent
+            .send(b"GO")
+            .expect("queue record before expiry");
+        assert_eq!(
+            supervisor
+                .receive_pid_one_lifecycle_record(
+                    &bootstrap,
+                    &lifecycle,
+                    AbsoluteDeadline(Instant::now()),
+                )
+                .expect_err("expired lifecycle admission must fail")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    fn receive_pid_one_record(
+        supervisor: &FixedSignalSupervisor,
+        bootstrap: &LifecycleChannel,
+        lifecycle: &LifecycleChannel,
+    ) -> io::Result<Vec<u8>> {
+        supervisor.receive_pid_one_lifecycle_record(
+            bootstrap,
+            lifecycle,
+            AbsoluteDeadline::after(Duration::from_secs(2)).expect("PID-1 lifecycle deadline"),
+        )
+    }
+
+    fn assert_invalid_receive(result: io::Result<Vec<u8>>, expectation: &str) {
+        let error = result.expect_err(expectation);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
     }
 }

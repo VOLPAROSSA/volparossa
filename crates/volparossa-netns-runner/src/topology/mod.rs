@@ -1,1 +1,1 @@
-mod ownership;
+pub(crate) mod ownership;
