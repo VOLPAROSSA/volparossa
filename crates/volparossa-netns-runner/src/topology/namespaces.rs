@@ -24,7 +24,13 @@ use rustix::{
 use thiserror::Error;
 use volparossa_linux_uapi::{namespace_type, owning_user_namespace};
 
-use super::ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError, NamespacePinTarget};
+use super::{
+    ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError, NamespacePinTarget},
+    veth::{
+        FixedVethEndpoint, FixedVethPair, VethCreateError, VethRollbackError, VethVerifyError,
+        create_fixed_veth_pair,
+    },
+};
 
 const CURRENT_NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
 const PRIVATE_NETNS_PREFIX: &str = "/run/netns/";
@@ -69,6 +75,26 @@ pub(crate) enum NamespaceVisitError<VisitorError> {
     Namespace(NamespacePinError),
     /// The supplied read-only proof failed after exact parent restoration.
     Visitor(VisitorError),
+}
+
+/// Failure to create, prove, or reverse the fixed two-veth transaction.
+#[derive(Debug, Error)]
+pub(crate) enum VethPairError {
+    /// The retained namespace-pin owner or its restoration proof failed.
+    #[error("fixed veth namespace binding failed: {0}")]
+    Namespace(#[from] NamespacePinError),
+    /// One atomic pair creation failed.
+    #[error("fixed veth pair creation failed: {0}")]
+    Create(#[source] VethCreateError),
+    /// Fresh readback no longer matched one retained pair.
+    #[error("fixed veth pair verification failed: {0}")]
+    Verify(#[source] VethVerifyError),
+    /// Reverse deletion encountered an anomaly after restoring absence.
+    #[error("fixed veth pair rollback failed: {0}")]
+    Rollback(#[source] VethRollbackError),
+    /// The exact pair set or affine owner was incomplete.
+    #[error("fixed veth pair proof failed: {0}")]
+    Unsafe(&'static str),
 }
 
 impl NamespacePinError {
@@ -806,10 +832,89 @@ impl Drop for MountJournal {
     }
 }
 
+struct VethPairJournal {
+    entries: Vec<FixedVethPair>,
+    armed: bool,
+}
+
+impl VethPairJournal {
+    fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(ENDPOINT_COUNT),
+            armed: true,
+        }
+    }
+
+    fn push(&mut self, pair: FixedVethPair) -> Result<(), VethPairError> {
+        let expected = match self.entries.len() {
+            0 => FixedVethEndpoint::A,
+            1 => FixedVethEndpoint::B,
+            _ => {
+                return Err(VethPairError::Unsafe(
+                    "fixed veth journal exceeded two pairs",
+                ));
+            }
+        };
+        if pair.endpoint() != expected {
+            return Err(VethPairError::Unsafe(
+                "fixed veth journal order is not A then B",
+            ));
+        }
+        self.entries.push(pair);
+        Ok(())
+    }
+
+    fn verify(&self) -> Result<(), VethPairError> {
+        if !self.armed || self.entries.len() != ENDPOINT_COUNT {
+            return Err(VethPairError::Unsafe(
+                "fixed veth journal is not exactly armed with two pairs",
+            ));
+        }
+        let first = &self.entries[0];
+        let second = &self.entries[1];
+        if first.endpoint() != FixedVethEndpoint::A
+            || second.endpoint() != FixedVethEndpoint::B
+            || first.parent_name() == second.parent_name()
+            || first.parent_ifindex() == second.parent_ifindex()
+            || first.peer_name() != "eth0"
+            || second.peer_name() != "eth0"
+        {
+            return Err(VethPairError::Unsafe(
+                "fixed veth pair identities are incomplete or ambiguous",
+            ));
+        }
+        first.verify().map_err(VethPairError::Verify)?;
+        second.verify().map_err(VethPairError::Verify)
+    }
+
+    fn rollback(&mut self) -> Result<(), VethPairError> {
+        let mut first_error = None;
+        while let Some(pair) = self.entries.pop() {
+            if let Err(error) = pair.rollback() {
+                first_error.get_or_insert(VethPairError::Rollback(error));
+            }
+        }
+        self.armed = false;
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for VethPairJournal {
+    fn drop(&mut self) {
+        if self.armed {
+            while let Some(pair) = self.entries.pop() {
+                drop(pair);
+            }
+            self.armed = false;
+        }
+    }
+}
+
 /// Affine owner of exactly two live run-bound nsfs network-namespace pins.
 ///
 /// The state retains both the lower empty-slot view and the visible nsfs view.
-/// It owns no veth, address, route, firewall, ownership-manifest, or topology-ready authority.
+/// It can be consumed only into the fixed two-down-veth transaction; it owns no
+/// configured address, route, firewall, ownership-manifest, or topology-ready authority.
 /// Path-based ordinary unmount remains scoped to the disposable runner's fixed
 /// one-task PID 1 and trusted launcher; this is not a race-free cleanup claim
 /// against a hostile mapped-same-UID process holding a writable private-run fd.
@@ -820,6 +925,18 @@ pub(crate) struct AuthorizedNamespacePins {
     private_run: Option<AuthorizedPrivateRun>,
     parent: NetworkNamespace,
     task: TaskIdentity,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Affine owner of exactly two fixed down veth pairs and their live namespace pins.
+///
+/// The veth journal is declared before the namespace owner so implicit unwind
+/// deletes B then A before either target namespace can be unmounted. The state
+/// owns no configured address, route, forwarding, firewall, probe, dataplane,
+/// ownership-manifest, or topology-ready authority.
+pub(crate) struct AuthorizedVethPairs {
+    veths: VethPairJournal,
+    namespace_pins: Option<AuthorizedNamespacePins>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -938,6 +1055,46 @@ impl AuthorizedNamespacePins {
         ]
     }
 
+    /// Consume the pristine two-pin owner and atomically create A then B.
+    pub(crate) fn create_fixed_veth_pairs(self) -> Result<AuthorizedVethPairs, VethPairError> {
+        self.verify()?;
+        let run_id = self
+            .private_run
+            .as_ref()
+            .ok_or(VethPairError::Unsafe(
+                "authorized private-run owner was consumed before veth creation",
+            ))?
+            .verified_run_id()
+            .map_err(NamespacePinError::from)?
+            .clone();
+        let mut veths = VethPairJournal::new();
+        for (index, endpoint) in [FixedVethEndpoint::A, FixedVethEndpoint::B]
+            .into_iter()
+            .enumerate()
+        {
+            let target = &self.mounts.entries[index].namespace.descriptor;
+            let pair = match create_fixed_veth_pair(&run_id, endpoint, target) {
+                Ok(pair) => pair,
+                Err(source) => {
+                    let cleanup = veths.rollback();
+                    let backing = self.verify().map_err(VethPairError::Namespace);
+                    return match (cleanup, backing) {
+                        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+                        (Ok(()), Ok(())) => Err(VethPairError::Create(source)),
+                    };
+                }
+            };
+            veths.push(pair)?;
+        }
+        let state = AuthorizedVethPairs {
+            veths,
+            namespace_pins: Some(self),
+            _thread_bound: PhantomData,
+        };
+        state.verify()?;
+        Ok(state)
+    }
+
     /// Visit A then B synchronously and restore the exact parent before every return.
     ///
     /// The visitor receives no namespace descriptor or mutation capability. A
@@ -998,15 +1155,95 @@ impl AuthorizedNamespacePins {
     pub(crate) fn rollback(mut self) -> Result<AuthorizedPrivateRun, NamespacePinError> {
         self.verify()?;
         let cleanup = self.mounts.rollback();
-        let private_run = self.private_run.take().ok_or(NamespacePinError::Unsafe(
-            "authorized private-run owner was already consumed",
-        ))?;
+        let private_run = take_backing_after_cleanup(cleanup, &mut self.private_run, || {
+            NamespacePinError::Unsafe("authorized private-run owner was already consumed")
+        })?;
         let backing = private_run.verify();
-        match (cleanup, backing) {
-            (Ok(()), Ok(())) => Ok(private_run),
-            (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => Err(error.into()),
+        match backing {
+            Ok(()) => Ok(private_run),
+            Err(error) => Err(error.into()),
         }
+    }
+}
+
+fn take_backing_after_cleanup<Backing, Error, Missing>(
+    cleanup: Result<(), Error>,
+    backing: &mut Option<Backing>,
+    missing: Missing,
+) -> Result<Backing, Error>
+where
+    Missing: FnOnce() -> Error,
+{
+    cleanup?;
+    backing.take().ok_or_else(missing)
+}
+
+impl AuthorizedVethPairs {
+    /// Reprove both pair identities and their unchanged live namespace backing.
+    pub(crate) fn verify(&self) -> Result<(), VethPairError> {
+        let namespace_pins = self.namespace_pins();
+        namespace_pins.verify().map_err(VethPairError::Namespace)?;
+        self.veths.verify()?;
+        let pairs = self.fixed_pairs();
+        for (pair, endpoint) in pairs.iter().zip(&namespace_pins.mounts.entries) {
+            pair.verify_target_namespace_descriptor(&endpoint.namespace.descriptor)
+                .map_err(VethPairError::Verify)?;
+            let target = pair.target_namespace_identity();
+            if target.device() != endpoint.namespace.identity.device
+                || target.inode() != endpoint.namespace.identity.inode
+            {
+                return Err(VethPairError::Unsafe(
+                    "fixed veth target escaped its retained endpoint namespace",
+                ));
+            }
+        }
+        namespace_pins.verify().map_err(VethPairError::Namespace)
+    }
+
+    /// Borrow the fixed pair owners in canonical A, B order.
+    pub(crate) fn fixed_pairs(&self) -> [&FixedVethPair; ENDPOINT_COUNT] {
+        [&self.veths.entries[0], &self.veths.entries[1]]
+    }
+
+    /// Return the exact visible nsfs mount IDs in canonical A, B order.
+    pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
+        self.namespace_pins().mount_ids()
+    }
+
+    /// Return the exact canonical nsfs mount-point bytes in A, B order.
+    pub(crate) fn mount_point_bytes(&self) -> [&[u8]; ENDPOINT_COUNT] {
+        self.namespace_pins().mount_point_bytes()
+    }
+
+    /// Visit A then B and restore the exact parent before every return.
+    pub(crate) fn visit_network_namespaces<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), NamespaceVisitError<VisitorError>>
+    where
+        Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+    {
+        self.namespace_pins().visit_network_namespaces(visitor)
+    }
+
+    /// Delete B then A, prove both absent, and recover the unchanged pin owner.
+    pub(crate) fn rollback(mut self) -> Result<AuthorizedNamespacePins, VethPairError> {
+        self.verify()?;
+        let cleanup = self.veths.rollback();
+        let namespace_pins = take_backing_after_cleanup(cleanup, &mut self.namespace_pins, || {
+            VethPairError::Unsafe("namespace-pin owner was consumed before veth rollback")
+        })?;
+        let backing = namespace_pins.verify().map_err(VethPairError::Namespace);
+        match backing {
+            Ok(()) => Ok(namespace_pins),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn namespace_pins(&self) -> &AuthorizedNamespacePins {
+        self.namespace_pins
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
     }
 }
 
@@ -1033,7 +1270,111 @@ fn require_distinct_pair(
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use super::*;
+
+    struct RetryMountJournal {
+        events: Rc<RefCell<Vec<&'static str>>>,
+        armed: bool,
+        attempts: usize,
+    }
+
+    impl RetryMountJournal {
+        fn rollback(&mut self) -> Result<(), ()> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                self.events.borrow_mut().push("first unmount failed");
+                Err(())
+            } else {
+                self.events.borrow_mut().push("drop retry unmounted");
+                self.armed = false;
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for RetryMountJournal {
+        fn drop(&mut self) {
+            assert!(
+                !self.armed || self.rollback().is_ok(),
+                "mock mount cleanup retry failed"
+            );
+        }
+    }
+
+    struct BackingOwner(Rc<RefCell<Vec<&'static str>>>);
+
+    impl Drop for BackingOwner {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("backing owner dropped");
+        }
+    }
+
+    struct RollbackHarness {
+        // This is the same safety-critical declaration order as
+        // `AuthorizedNamespacePins`: mount cleanup precedes backing cleanup.
+        mounts: RetryMountJournal,
+        backing: Option<BackingOwner>,
+    }
+
+    impl RollbackHarness {
+        fn rollback(mut self) -> Result<BackingOwner, ()> {
+            let cleanup = self.mounts.rollback();
+            take_backing_after_cleanup(cleanup, &mut self.backing, || ())
+        }
+    }
+
+    struct RetryVethJournal {
+        events: Rc<RefCell<Vec<&'static str>>>,
+        armed: bool,
+        attempts: usize,
+    }
+
+    impl RetryVethJournal {
+        fn rollback(&mut self) -> Result<(), ()> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                self.events.borrow_mut().push("first veth rollback failed");
+                Err(())
+            } else {
+                self.events.borrow_mut().push("drop retry deleted links");
+                self.armed = false;
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for RetryVethJournal {
+        fn drop(&mut self) {
+            assert!(
+                !self.armed || self.rollback().is_ok(),
+                "mock veth cleanup retry failed"
+            );
+        }
+    }
+
+    struct NamespacePinsOwner(Rc<RefCell<Vec<&'static str>>>);
+
+    impl Drop for NamespacePinsOwner {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("namespace owner dropped");
+        }
+    }
+
+    struct VethRollbackHarness {
+        // This mirrors `AuthorizedVethPairs`: links must disappear before the
+        // namespace owner and its target descriptors may be dropped.
+        veths: RetryVethJournal,
+        namespace_pins: Option<NamespacePinsOwner>,
+    }
+
+    impl VethRollbackHarness {
+        fn rollback(mut self) -> Result<NamespacePinsOwner, ()> {
+            let cleanup = self.veths.rollback();
+            take_backing_after_cleanup(cleanup, &mut self.namespace_pins, || ())
+        }
+    }
 
     #[test]
     fn current_network_namespace_has_exact_type_owner_and_nsfs_identity() {
@@ -1042,6 +1383,52 @@ mod tests {
         assert_ne!(current.identity.device, 0);
         assert_ne!(current.identity.inode, 0);
         assert_ne!(current.owner_identity.inode, 0);
+    }
+
+    #[test]
+    fn first_mount_rollback_failure_retries_before_backing_owner_drop() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let state = RollbackHarness {
+            mounts: RetryMountJournal {
+                events: Rc::clone(&events),
+                armed: true,
+                attempts: 0,
+            },
+            backing: Some(BackingOwner(Rc::clone(&events))),
+        };
+
+        assert!(state.rollback().is_err());
+        assert_eq!(
+            *events.borrow(),
+            [
+                "first unmount failed",
+                "drop retry unmounted",
+                "backing owner dropped",
+            ]
+        );
+    }
+
+    #[test]
+    fn first_veth_rollback_failure_retries_before_namespace_owner_drop() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let state = VethRollbackHarness {
+            veths: RetryVethJournal {
+                events: Rc::clone(&events),
+                armed: true,
+                attempts: 0,
+            },
+            namespace_pins: Some(NamespacePinsOwner(Rc::clone(&events))),
+        };
+
+        assert!(state.rollback().is_err());
+        assert_eq!(
+            *events.borrow(),
+            [
+                "first veth rollback failed",
+                "drop retry deleted links",
+                "namespace owner dropped",
+            ]
+        );
     }
 
     #[test]

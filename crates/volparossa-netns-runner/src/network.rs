@@ -12,6 +12,7 @@
 use std::{
     io,
     marker::PhantomData,
+    mem::size_of,
     os::fd::AsFd,
     rc::Rc,
     time::{Duration, Instant},
@@ -22,11 +23,14 @@ use nix::{
     libc,
     poll::{PollFd, PollFlags, PollTimeout, poll},
 };
+use rustix::fs::{FsWord, Mode, OFlags, fstat, fstatfs, open};
 use thiserror::Error;
+use volparossa_linux_uapi::namespace_type;
 
 use crate::{
     mounts::{Ipv4ForwardingRecordSnapshot, PrivateMountSetupError, PrivateMounts},
     nftables::{NftablesBaseline, NftablesError, observe_empty_nftables},
+    topology::veth::VethTargetNamespaceIdentity,
 };
 
 const NETWORK_PROOF_TIMEOUT: Duration = Duration::from_secs(2);
@@ -41,6 +45,7 @@ const MAX_ADDRESSES: usize = 64;
 const MAX_ROUTES: usize = 64;
 const MAX_NEIGHBOURS: usize = 64;
 const MAX_RULES: usize = 16;
+const MAX_QDISCS: usize = 8;
 
 const NLMSG_HEADER_LEN: usize = 16;
 const ATTRIBUTE_HEADER_LEN: usize = 4;
@@ -51,12 +56,17 @@ const NDMSG_LEN: usize = 12;
 const NDMSG_FLAGS_OFFSET: usize = 10;
 const NHMSG_LEN: usize = 8;
 const FIB_RULE_HEADER_LEN: usize = 12;
+const TCMSG_LEN: usize = 20;
 
 const NLM_F_REQUEST: u16 = 0x0001;
 const NLM_F_MULTI: u16 = 0x0002;
 const NLM_F_ROOT: u16 = 0x0100;
 const NLM_F_MATCH: u16 = 0x0200;
 const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
+#[cfg(test)]
+const NLM_F_EXCL: u16 = 0x0200;
+#[cfg(test)]
+const NLM_F_CREATE: u16 = 0x0400;
 
 const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
@@ -72,6 +82,8 @@ const RTM_NEWNEIGH: u16 = 28;
 const RTM_GETNEIGH: u16 = 30;
 const RTM_NEWRULE: u16 = 32;
 const RTM_GETRULE: u16 = 34;
+const RTM_NEWQDISC: u16 = 36;
+const RTM_GETQDISC: u16 = 38;
 const RTM_NEWNEXTHOP: u16 = 104;
 const RTM_GETNEXTHOP: u16 = 106;
 
@@ -89,36 +101,95 @@ const IFLA_IFNAME: u16 = 3;
 const IFLA_MTU: u16 = 4;
 const IFLA_LINK: u16 = 5;
 const IFLA_QDISC: u16 = 6;
+const IFLA_STATS: u16 = 7;
 const IFLA_MASTER: u16 = 10;
 const IFLA_TXQLEN: u16 = 13;
+const IFLA_MAP: u16 = 14;
 const IFLA_OPERSTATE: u16 = 16;
 const IFLA_LINKMODE: u16 = 17;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_IFALIAS: u16 = 20;
+const IFLA_STATS64: u16 = 23;
 const IFLA_AF_SPEC: u16 = 26;
 const IFLA_GROUP: u16 = 27;
 const IFLA_PROMISCUITY: u16 = 30;
+const IFLA_NUM_TX_QUEUES: u16 = 31;
+const IFLA_NUM_RX_QUEUES: u16 = 32;
+const IFLA_CARRIER: u16 = 33;
+const IFLA_CARRIER_CHANGES: u16 = 35;
+const IFLA_LINK_NETNSID: u16 = 37;
 const IFLA_PROTO_DOWN: u16 = 39;
 const IFLA_GSO_MAX_SEGS: u16 = 40;
 const IFLA_GSO_MAX_SIZE: u16 = 41;
 const IFLA_XDP: u16 = 43;
+const IFLA_EVENT: u16 = 44;
+const IFLA_CARRIER_UP_COUNT: u16 = 47;
+const IFLA_CARRIER_DOWN_COUNT: u16 = 48;
+const IFLA_MIN_MTU: u16 = 50;
+const IFLA_MAX_MTU: u16 = 51;
 const IFLA_PROP_LIST: u16 = 52;
 const IFLA_ALT_IFNAME: u16 = 53;
+const IFLA_PERM_ADDRESS: u16 = 54;
 const IFLA_GRO_MAX_SIZE: u16 = 58;
+const IFLA_TSO_MAX_SIZE: u16 = 59;
+const IFLA_TSO_MAX_SEGS: u16 = 60;
 const IFLA_ALLMULTI: u16 = 61;
+const IFLA_DEVLINK_PORT: u16 = 62;
 const IFLA_GSO_IPV4_MAX_SIZE: u16 = 63;
 const IFLA_GRO_IPV4_MAX_SIZE: u16 = 64;
+const IFLA_DPLL_PIN: u16 = 65;
+const MAX_DEBIAN13_LINK_ATTRIBUTE: usize = IFLA_DPLL_PIN as usize;
 const IFLA_XDP_ATTACHED: u16 = 2;
+const IFLA_INFO_KIND: u16 = 1;
+const IFLA_INET_CONF: u16 = 1;
+const IFLA_INET6_FLAGS: u16 = 1;
+const IFLA_INET6_CONF: u16 = 2;
+const IFLA_INET6_STATS: u16 = 3;
+const IFLA_INET6_MCAST: u16 = 4;
+const IFLA_INET6_CACHEINFO: u16 = 5;
+const IFLA_INET6_ICMP6STATS: u16 = 6;
+const IFLA_INET6_TOKEN: u16 = 7;
 const IFLA_INET6_ADDR_GEN_MODE: u16 = 8;
+const IFLA_INET6_RA_MTU: u16 = 9;
 
+#[cfg(test)]
+const TCA_KIND: u16 = 1;
+
+const IFF_BROADCAST: u32 = 0x0002;
 const IFF_LOOPBACK: u32 = 0x0008;
+const IFF_MULTICAST: u32 = 0x1000;
+const ARPHRD_ETHER: u16 = 1;
 const ARPHRD_LOOPBACK: u16 = 772;
 const IF_OPER_DOWN: u8 = 2;
 const IN6_ADDR_GEN_MODE_EUI64: u8 = 0;
+const VETH_MTU: u32 = 1_500;
+const VETH_TX_QUEUE_LENGTH: u32 = 1_000;
+const VETH_FLAGS: u32 = IFF_BROADCAST | IFF_MULTICAST;
+const VETH_QUEUE_COUNT: u32 = 1;
+const VETH_MIN_MTU: u32 = 68;
+const VETH_MAX_MTU: u32 = 65_535;
+const VETH_LINK_STATS_BYTES: usize = 24 * size_of::<u32>();
+const VETH_LINK_STATS64_BYTES: usize = 25 * size_of::<u64>();
+const VETH_LINK_IFMAP_BYTES: usize = 32;
+const VETH_STATS_SEEN: u8 = 1 << 0;
+const VETH_STATS64_SEEN: u8 = 1 << 1;
+const VETH_IFMAP_SEEN: u8 = 1 << 2;
+const VETH_ZEROED_STRUCTS_SEEN: u8 = VETH_STATS_SEEN | VETH_STATS64_SEEN | VETH_IFMAP_SEEN;
+const VETH_ENDPOINT_NAME: &[u8] = b"eth0";
+const ETHERNET_ADDRESS_BYTES: usize = 6;
+const MAX_INTERFACE_NAME_BYTES: usize = 15;
+const CURRENT_NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
+const NSFS_MAGIC: FsWord = 0x6e73_6673;
+#[cfg(test)]
+const TC_H_ROOT: u32 = u32::MAX;
+#[cfg(test)]
+const TC_H_CLSACT: u32 = 0xffff_fff1;
 const LOOPBACK_MTU: u32 = 65_536;
 const LOOPBACK_TX_QUEUE_LENGTH: u32 = 1_000;
 const LOOPBACK_GSO_MAX_SEGMENTS: u32 = 65_535;
 const LOOPBACK_OFFLOAD_MAX_SIZE: u32 = 65_536;
+const DEFAULT_TSO_MAX_SIZE: u32 = 524_280;
+const DEFAULT_TSO_MAX_SEGMENTS: u32 = 65_535;
 const LOOPBACK_OFFLOAD_LIMITS: [u32; 5] = [
     LOOPBACK_GSO_MAX_SEGMENTS,
     LOOPBACK_OFFLOAD_MAX_SIZE,
@@ -160,6 +231,9 @@ pub(crate) enum NetworkError {
     /// The stable snapshot was not the fixed pristine namespace baseline.
     #[error("network namespace is not pristine")]
     NotPristine,
+    /// A caller supplied an impossible or ambiguous fixed-veth expectation.
+    #[error("fixed-veth observation expectation was invalid")]
+    InvalidVethExpectation,
     /// The fixed private-proc observation failed.
     #[error("network proof could not read the fixed private proc record")]
     PrivateProc(#[source] PrivateMountSetupError),
@@ -207,6 +281,106 @@ pub(crate) struct MutationRollbackNetworkProof {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+/// Fixed identity supplied by the veth owner for one read-only pair observation.
+///
+/// The indices are namespace-local: the parent index identifies the underlay
+/// end, while the endpoint index identifies `eth0` in A or B. Equal numeric
+/// values across those two namespaces are valid. This value owns no link and
+/// grants no mutation authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExpectedVethPair {
+    parent_name: Vec<u8>,
+    parent_ifindex: u32,
+    endpoint_ifindex: u32,
+    target_namespace: NetworkNamespaceIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NetworkNamespaceIdentity {
+    device: u64,
+    inode: u64,
+}
+
+/// Exact pristine observation retained for one future endpoint excursion.
+///
+/// The observation is thread-bound because its meaning is tied to the network
+/// namespace visited by the current task. It owns no namespace or link.
+pub(crate) struct PristineNetworkNamespaceObservation {
+    baseline: PreGoNetworkBaseline,
+    namespace: NetworkNamespaceIdentity,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct VethLinkObservation {
+    identity: ExpectedVethPair,
+    mac: [u8; ETHERNET_ADDRESS_BYTES],
+    peer_netnsid: i32,
+}
+
+/// Read-only exact-delta observation of both parent-side veth links.
+pub(crate) struct ExactVethParentObservation {
+    active: PreGoNetworkBaseline,
+    links: [VethLinkObservation; 2],
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Read-only exact-delta observation of one endpoint-side `eth0` veth link.
+pub(crate) struct ExactVethEndpointObservation {
+    active: PreGoNetworkBaseline,
+    link: VethLinkObservation,
+    namespace: NetworkNamespaceIdentity,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl ExpectedVethPair {
+    /// Construct one exact observation expectation from owner-retained identity.
+    pub(crate) fn new(
+        parent_name: &str,
+        parent_ifindex: u32,
+        endpoint_ifindex: u32,
+        target_namespace: VethTargetNamespaceIdentity,
+    ) -> Result<Self, NetworkError> {
+        let target_namespace = NetworkNamespaceIdentity {
+            device: target_namespace.device(),
+            inode: target_namespace.inode(),
+        };
+        Self::new_with_namespace_identity(
+            parent_name,
+            parent_ifindex,
+            endpoint_ifindex,
+            target_namespace,
+        )
+    }
+
+    fn new_with_namespace_identity(
+        parent_name: &str,
+        parent_ifindex: u32,
+        endpoint_ifindex: u32,
+        target_namespace: NetworkNamespaceIdentity,
+    ) -> Result<Self, NetworkError> {
+        let parent_name = parent_name.as_bytes();
+        if parent_name.is_empty()
+            || parent_name.len() > MAX_INTERFACE_NAME_BYTES
+            || !parent_name.is_ascii()
+            || parent_name.contains(&0)
+            || matches!(parent_name, b"lo" | VETH_ENDPOINT_NAME)
+            || !(2..=i32::MAX as u32).contains(&parent_ifindex)
+            || !(2..=i32::MAX as u32).contains(&endpoint_ifindex)
+            || target_namespace.device == 0
+            || target_namespace.inode == 0
+        {
+            return Err(NetworkError::InvalidVethExpectation);
+        }
+        Ok(Self {
+            parent_name: parent_name.to_vec(),
+            parent_ifindex,
+            endpoint_ifindex,
+            target_namespace,
+        })
+    }
+}
+
 impl PreGoNetworkProof {
     /// Consume the affine proof, re-prove the baseline, and require equality.
     pub(crate) fn verify(self, mounts: &PrivateMounts) -> Result<(), NetworkError> {
@@ -228,14 +402,139 @@ impl PreGoNetworkProof {
 }
 
 impl MutationRollbackNetworkProof {
+    /// Observe the exact parent delta for two owner-retained, down veth pairs.
+    ///
+    /// Every non-link RTNL record, IPv4-forwarding record, and nftables
+    /// observation must still equal the retained pristine baseline. The only
+    /// admitted link delta is the two expected parent-side veth observations.
+    pub(crate) fn observe_exact_veth_parent<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        expected: [&ExpectedVethPair; 2],
+    ) -> Result<ExactVethParentObservation, NetworkError> {
+        validate_parent_expectations(expected)?;
+        let active = collect_stable_network_baseline(mounts)?;
+        let links = verify_exact_parent_veth_delta(&self.baseline, &active, expected)?;
+        Ok(ExactVethParentObservation {
+            active,
+            links,
+            _thread_bound: PhantomData,
+        })
+    }
+
     /// Consume the retained baseline and prove exact restoration after rollback.
     pub(crate) fn verify_rollback(self, mounts: &PrivateMounts) -> Result<(), NetworkError> {
         require_current_baseline(mounts, &self.baseline)
     }
 }
 
-fn require_current_baseline(
-    mounts: &PrivateMounts,
+impl PristineNetworkNamespaceObservation {
+    /// Observe one exact endpoint delta consisting only of down veth `eth0`.
+    pub(crate) fn observe_exact_veth_endpoint<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        expected: &ExpectedVethPair,
+    ) -> Result<ExactVethEndpointObservation, NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        if self.namespace != expected.target_namespace {
+            return Err(NetworkError::Inconsistent);
+        }
+        let active = collect_stable_network_baseline(mounts)?;
+        require_current_network_namespace(self.namespace)?;
+        let link = verify_exact_endpoint_veth_delta(&self.baseline, &active, expected)?;
+        Ok(ExactVethEndpointObservation {
+            active,
+            link,
+            namespace: self.namespace,
+            _thread_bound: PhantomData,
+        })
+    }
+
+    /// Consume the retained observation and prove exact pristine restoration.
+    pub(crate) fn verify_pristine_rollback<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_baseline(mounts, &self.baseline)?;
+        require_current_network_namespace(self.namespace)
+    }
+}
+
+impl ExactVethParentObservation {
+    /// Reobserve and require byte-exact equality with the retained active state.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_stable_baseline(mounts, &self.active)
+    }
+}
+
+impl ExactVethEndpointObservation {
+    /// Reobserve and require byte-exact equality with the retained active state.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_stable_baseline(mounts, &self.active)?;
+        require_current_network_namespace(self.namespace)
+    }
+}
+
+/// Cross-check owner-retained atomic-target facts against independent observations.
+///
+/// The caller supplies A then B in the same order used for the parent
+/// expectations. Numeric ifindex collisions across namespaces remain valid.
+/// This proves consistency with the owner's retained name/index result and two
+/// distinct observed endpoint nsfs objects; per-namespace link-netns IDs are
+/// observations and are not durable namespace identities.
+pub(crate) fn verify_exact_veth_pair_observations(
+    parent: &ExactVethParentObservation,
+    endpoints: [&ExactVethEndpointObservation; 2],
+) -> Result<(), NetworkError> {
+    verify_veth_observation_relations(
+        &parent.links,
+        [&endpoints[0].link, &endpoints[1].link],
+        [endpoints[0].namespace, endpoints[1].namespace],
+    )
+}
+
+fn verify_veth_observation_relations(
+    parent: &[VethLinkObservation; 2],
+    endpoints: [&VethLinkObservation; 2],
+    endpoint_namespaces: [NetworkNamespaceIdentity; 2],
+) -> Result<(), NetworkError> {
+    if endpoint_namespaces[0] == endpoint_namespaces[1]
+        || parent[0].peer_netnsid == parent[1].peer_netnsid
+    {
+        return Err(NetworkError::NotPristine);
+    }
+    for (parent_link, endpoint) in parent.iter().zip(endpoints) {
+        if parent_link.identity != endpoint.identity {
+            return Err(NetworkError::Inconsistent);
+        }
+    }
+    let macs = [
+        parent[0].mac,
+        endpoints[0].mac,
+        parent[1].mac,
+        endpoints[1].mac,
+    ];
+    if macs
+        .iter()
+        .enumerate()
+        .any(|(index, mac)| macs[index + 1..].contains(mac))
+    {
+        Err(NetworkError::NotPristine)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_current_baseline<RunState>(
+    mounts: &PrivateMounts<RunState>,
     expected: &PreGoNetworkBaseline,
 ) -> Result<(), NetworkError> {
     if collect_pre_go_network_baseline(mounts)? == *expected {
@@ -243,6 +542,53 @@ fn require_current_baseline(
     } else {
         Err(NetworkError::Inconsistent)
     }
+}
+
+fn require_current_stable_baseline<RunState>(
+    mounts: &PrivateMounts<RunState>,
+    expected: &PreGoNetworkBaseline,
+) -> Result<(), NetworkError> {
+    if collect_stable_network_baseline(mounts)? == *expected {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
+    }
+}
+
+fn current_network_namespace_identity() -> Result<NetworkNamespaceIdentity, NetworkError> {
+    let descriptor = open(
+        CURRENT_NETWORK_NAMESPACE,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(rustix_network_io)?;
+    if fstatfs(&descriptor).map_err(rustix_network_io)?.f_type != NSFS_MAGIC
+        || namespace_type(&descriptor)? != libc::CLONE_NEWNET
+    {
+        return Err(NetworkError::NotPristine);
+    }
+    let metadata = fstat(&descriptor).map_err(rustix_network_io)?;
+    if metadata.st_dev == 0 || metadata.st_ino == 0 {
+        return Err(NetworkError::NotPristine);
+    }
+    Ok(NetworkNamespaceIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn require_current_network_namespace(
+    expected: NetworkNamespaceIdentity,
+) -> Result<(), NetworkError> {
+    if current_network_namespace_identity()? == expected {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
+    }
+}
+
+fn rustix_network_io(source: rustix::io::Errno) -> NetworkError {
+    NetworkError::Io(io::Error::from_raw_os_error(source.raw_os_error()))
 }
 
 /// Prove the enumerated read-only pre-`GO` network baseline without mutating it.
@@ -255,16 +601,19 @@ pub(crate) fn prove_pre_go_network_baseline(
     })
 }
 
-/// Prove the full composite pristine baseline in the network namespace of the
-/// current task without producing mutation authority.
-///
-/// This read-only observation is generic over the private-run typestate so the
-/// fixed runner can apply the same RTNL, stable IPv4-forwarding, and empty
-/// nftables proof while it is temporarily visiting an authorized nsfs pin.
-pub(crate) fn prove_current_pristine_network_namespace<RunState>(
+/// Retain the exact composite pristine observation for a later veth delta and
+/// exact rollback proof in the same visited namespace.
+pub(crate) fn observe_current_pristine_network_namespace<RunState>(
     mounts: &PrivateMounts<RunState>,
-) -> Result<(), NetworkError> {
-    collect_pre_go_network_baseline(mounts).map(|_| ())
+) -> Result<PristineNetworkNamespaceObservation, NetworkError> {
+    let namespace = current_network_namespace_identity()?;
+    let baseline = collect_pre_go_network_baseline(mounts)?;
+    require_current_network_namespace(namespace)?;
+    Ok(PristineNetworkNamespaceObservation {
+        baseline,
+        namespace,
+        _thread_bound: PhantomData,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -308,6 +657,7 @@ impl Deadline {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DumpKind {
     Link,
+    Qdisc,
     Address,
     Route,
     Neighbour,
@@ -318,8 +668,9 @@ enum DumpKind {
 }
 
 impl DumpKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Link,
+        Self::Qdisc,
         Self::Address,
         Self::Route,
         Self::Neighbour,
@@ -332,6 +683,7 @@ impl DumpKind {
     const fn request_type(self) -> u16 {
         match self {
             Self::Link => RTM_GETLINK,
+            Self::Qdisc => RTM_GETQDISC,
             Self::Address => RTM_GETADDR,
             Self::Route => RTM_GETROUTE,
             Self::Neighbour | Self::ProxyNeighbour => RTM_GETNEIGH,
@@ -343,6 +695,7 @@ impl DumpKind {
     const fn response_type(self) -> u16 {
         match self {
             Self::Link => RTM_NEWLINK,
+            Self::Qdisc => RTM_NEWQDISC,
             Self::Address => RTM_NEWADDR,
             Self::Route => RTM_NEWROUTE,
             Self::Neighbour | Self::ProxyNeighbour => RTM_NEWNEIGH,
@@ -354,6 +707,7 @@ impl DumpKind {
     fn request_payload(self) -> Vec<u8> {
         match self {
             Self::Link => vec![0; IFINFO_LEN],
+            Self::Qdisc => vec![0; TCMSG_LEN],
             Self::Address => vec![0; IFADDR_LEN],
             Self::Route => vec![0; RTMSG_LEN],
             Self::Neighbour => vec![0; NDMSG_LEN],
@@ -379,6 +733,7 @@ impl DumpKind {
     const fn fixed_header_len(self) -> usize {
         match self {
             Self::Link => IFINFO_LEN,
+            Self::Qdisc => TCMSG_LEN,
             Self::Address => IFADDR_LEN,
             Self::Route => RTMSG_LEN,
             Self::Neighbour | Self::ProxyNeighbour => NDMSG_LEN,
@@ -391,6 +746,7 @@ impl DumpKind {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct NetworkSnapshot {
     links: Vec<Vec<u8>>,
+    qdiscs: Vec<Vec<u8>>,
     addresses: Vec<Vec<u8>>,
     routes: Vec<Vec<u8>>,
     neighbours: Vec<Vec<u8>>,
@@ -404,6 +760,7 @@ impl NetworkSnapshot {
     fn records_mut(&mut self, kind: DumpKind) -> &mut Vec<Vec<u8>> {
         match kind {
             DumpKind::Link => &mut self.links,
+            DumpKind::Qdisc => &mut self.qdiscs,
             DumpKind::Address => &mut self.addresses,
             DumpKind::Route => &mut self.routes,
             DumpKind::Neighbour => &mut self.neighbours,
@@ -417,6 +774,7 @@ impl NetworkSnapshot {
     fn canonicalize(&mut self) -> Result<(), NetworkError> {
         for records in [
             &mut self.links,
+            &mut self.qdiscs,
             &mut self.addresses,
             &mut self.routes,
             &mut self.neighbours,
@@ -653,15 +1011,24 @@ fn collect_consistent_pristine_snapshot() -> Result<NetworkSnapshot, NetworkErro
     collect_consistent_pristine_snapshot_before(deadline)
 }
 
+#[cfg(test)]
 fn collect_consistent_pristine_snapshot_before(
     deadline: Deadline,
 ) -> Result<NetworkSnapshot, NetworkError> {
+    let snapshot = collect_consistent_snapshot_before(deadline)?;
+    verify_pristine_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
+fn collect_consistent_snapshot_before(deadline: Deadline) -> Result<NetworkSnapshot, NetworkError> {
     let mut collector = NetlinkCollector::connect(deadline)?;
     let mut budget = CollectionBudget::production();
     let first = collector.collect_snapshot(deadline, &mut budget)?;
     let second = collector.collect_snapshot(deadline, &mut budget)?;
     deadline.ensure_unexpired()?;
-    verify_consistent_pristine(&first, &second)?;
+    if first != second {
+        return Err(NetworkError::Inconsistent);
+    }
     deadline.ensure_unexpired()?;
     Ok(first)
 }
@@ -669,11 +1036,19 @@ fn collect_consistent_pristine_snapshot_before(
 fn collect_pre_go_network_baseline<RunState>(
     mounts: &PrivateMounts<RunState>,
 ) -> Result<PreGoNetworkBaseline, NetworkError> {
+    let baseline = collect_stable_network_baseline(mounts)?;
+    verify_pristine_snapshot(&baseline.rtnl)?;
+    Ok(baseline)
+}
+
+fn collect_stable_network_baseline<RunState>(
+    mounts: &PrivateMounts<RunState>,
+) -> Result<PreGoNetworkBaseline, NetworkError> {
     let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
     let forwarding_before = mounts
         .read_ipv4_forwarding_record()
         .map_err(NetworkError::PrivateProc)?;
-    let rtnl = collect_consistent_pristine_snapshot_before(deadline)?;
+    let rtnl = collect_consistent_snapshot_before(deadline)?;
     let nftables = observe_empty_nftables(deadline.instant()).map_err(NetworkError::Nftables)?;
     let forwarding_after = mounts
         .read_ipv4_forwarding_record()
@@ -708,6 +1083,7 @@ fn classify_ipv4_forwarding_records(
     }
 }
 
+#[cfg(test)]
 fn verify_consistent_pristine(
     first: &NetworkSnapshot,
     second: &NetworkSnapshot,
@@ -721,6 +1097,7 @@ fn verify_consistent_pristine(
 
 fn verify_pristine_snapshot(snapshot: &NetworkSnapshot) -> Result<(), NetworkError> {
     if snapshot.links.len() != 1
+        || !snapshot.qdiscs.is_empty()
         || !snapshot.addresses.is_empty()
         || !snapshot.routes.is_empty()
         || !snapshot.neighbours.is_empty()
@@ -734,105 +1111,490 @@ fn verify_pristine_snapshot(snapshot: &NetworkSnapshot) -> Result<(), NetworkErr
     verify_rules(AF_INET6, &snapshot.rules_v6, &expected_ipv6_rules())
 }
 
-fn verify_loopback(payload: &[u8]) -> Result<(), NetworkError> {
-    verify_loopback_header(payload)?;
-    let attributes = parse_attributes(&payload[IFINFO_LEN..])?;
-    let mut name = None;
-    let mut operstate = None;
-    let mut address = None;
-    let mut broadcast = None;
-    let mut mtu = None;
-    let mut queue_length = None;
-    let mut qdisc = None;
-    let mut linkmode = None;
-    let mut group = None;
-    let mut promiscuity = None;
-    let mut allmulti = None;
-    let mut protocol_down = None;
-    let mut offload_limits = [None; LOOPBACK_OFFLOAD_LIMITS.len()];
-    let mut address_families_seen = false;
-    let mut xdp_seen = false;
-    for attribute in attributes {
-        match attribute.kind {
-            IFLA_ADDRESS => set_once(&mut address, attribute.unflagged_payload()?)?,
-            IFLA_BROADCAST => set_once(&mut broadcast, attribute.unflagged_payload()?)?,
-            IFLA_IFNAME => set_once(&mut name, attribute.unflagged_payload()?)?,
-            IFLA_MTU => set_once(&mut mtu, read_exact_u32(attribute.unflagged_payload()?)?)?,
-            IFLA_QDISC => set_once(&mut qdisc, attribute.unflagged_payload()?)?,
-            IFLA_TXQLEN => set_once(
-                &mut queue_length,
-                read_exact_u32(attribute.unflagged_payload()?)?,
-            )?,
-            IFLA_OPERSTATE => set_once(&mut operstate, attribute.unflagged_payload()?)?,
-            IFLA_LINKMODE => set_once(
-                &mut linkmode,
-                read_exact_u8(attribute.unflagged_payload()?)?,
-            )?,
-            IFLA_AF_SPEC => {
-                if address_families_seen {
-                    return Err(NetworkError::NotPristine);
-                }
-                address_families_seen = true;
-                verify_address_family_spec(attribute)?;
-            }
-            IFLA_GROUP => set_once(&mut group, read_exact_u32(attribute.unflagged_payload()?)?)?,
-            IFLA_PROMISCUITY => set_once(
-                &mut promiscuity,
-                read_exact_u32(attribute.unflagged_payload()?)?,
-            )?,
-            IFLA_PROTO_DOWN => set_once(
-                &mut protocol_down,
-                read_exact_u8(attribute.unflagged_payload()?)?,
-            )?,
-            kind @ (IFLA_GSO_MAX_SEGS
-            | IFLA_GSO_MAX_SIZE
-            | IFLA_GRO_MAX_SIZE
-            | IFLA_GSO_IPV4_MAX_SIZE
-            | IFLA_GRO_IPV4_MAX_SIZE) => {
-                let index = offload_limit_index(kind).ok_or(NetworkError::Malformed)?;
-                set_once(
-                    &mut offload_limits[index],
-                    read_exact_u32(attribute.unflagged_payload()?)?,
-                )?;
-            }
-            IFLA_ALLMULTI => set_once(
-                &mut allmulti,
-                read_exact_u32(attribute.unflagged_payload()?)?,
-            )?,
-            IFLA_LINK | IFLA_MASTER | IFLA_LINKINFO | IFLA_IFALIAS | IFLA_ALT_IFNAME => {
-                return Err(NetworkError::NotPristine);
-            }
-            IFLA_PROP_LIST if !attribute.payload.is_empty() => {
-                return Err(NetworkError::NotPristine);
-            }
-            IFLA_XDP => {
-                if xdp_seen {
-                    return Err(NetworkError::NotPristine);
-                }
-                xdp_seen = true;
-                verify_xdp(attribute)?;
-            }
-            _ => {}
-        }
+fn validate_parent_expectations(expected: [&ExpectedVethPair; 2]) -> Result<(), NetworkError> {
+    if expected[0].parent_name == expected[1].parent_name
+        || expected[0].parent_ifindex == expected[1].parent_ifindex
+        || expected[0].target_namespace == expected[1].target_namespace
+    {
+        Err(NetworkError::InvalidVethExpectation)
+    } else {
+        Ok(())
     }
-    if name == Some(&b"lo\0"[..])
-        && operstate == Some(&[IF_OPER_DOWN][..])
-        && address == Some(&[0; 6][..])
-        && broadcast == Some(&[0; 6][..])
-        && mtu == Some(LOOPBACK_MTU)
-        && queue_length == Some(LOOPBACK_TX_QUEUE_LENGTH)
-        && qdisc == Some(&b"noop\0"[..])
-        && linkmode == Some(0)
-        && group == Some(0)
-        && promiscuity == Some(0)
-        && allmulti == Some(0)
-        && protocol_down == Some(0)
-        && offload_limits == LOOPBACK_OFFLOAD_LIMITS.map(Some)
-        && address_families_seen
+}
+
+fn verify_exact_parent_veth_delta(
+    pristine: &PreGoNetworkBaseline,
+    active: &PreGoNetworkBaseline,
+    expected: [&ExpectedVethPair; 2],
+) -> Result<[VethLinkObservation; 2], NetworkError> {
+    verify_unchanged_composite_except_links(pristine, active)?;
+    verify_exact_parent_veth_snapshot_delta(&pristine.rtnl, &active.rtnl, expected)
+}
+
+fn verify_exact_parent_veth_snapshot_delta(
+    pristine: &NetworkSnapshot,
+    active: &NetworkSnapshot,
+    expected: [&ExpectedVethPair; 2],
+) -> Result<[VethLinkObservation; 2], NetworkError> {
+    verify_unchanged_rtnl_except_links(pristine, active)?;
+    if active.links.len() != 3 {
+        return Err(NetworkError::NotPristine);
+    }
+    require_exact_loopback_snapshot_delta(pristine, active)?;
+    let first = find_and_verify_veth_link(&active.links, expected[0], VethLinkSide::Parent)?;
+    let second = find_and_verify_veth_link(&active.links, expected[1], VethLinkSide::Parent)?;
+    if first.peer_netnsid == second.peer_netnsid {
+        return Err(NetworkError::NotPristine);
+    }
+    Ok([first, second])
+}
+
+fn verify_exact_endpoint_veth_delta(
+    pristine: &PreGoNetworkBaseline,
+    active: &PreGoNetworkBaseline,
+    expected: &ExpectedVethPair,
+) -> Result<VethLinkObservation, NetworkError> {
+    verify_unchanged_composite_except_links(pristine, active)?;
+    verify_exact_endpoint_veth_snapshot_delta(&pristine.rtnl, &active.rtnl, expected)
+}
+
+fn verify_exact_endpoint_veth_snapshot_delta(
+    pristine: &NetworkSnapshot,
+    active: &NetworkSnapshot,
+    expected: &ExpectedVethPair,
+) -> Result<VethLinkObservation, NetworkError> {
+    verify_unchanged_rtnl_except_links(pristine, active)?;
+    if active.links.len() != 2 {
+        return Err(NetworkError::NotPristine);
+    }
+    require_exact_loopback_snapshot_delta(pristine, active)?;
+    find_and_verify_veth_link(&active.links, expected, VethLinkSide::Endpoint)
+}
+
+fn verify_unchanged_composite_except_links(
+    pristine: &PreGoNetworkBaseline,
+    active: &PreGoNetworkBaseline,
+) -> Result<(), NetworkError> {
+    verify_unchanged_rtnl_except_links(&pristine.rtnl, &active.rtnl)?;
+    if active.ipv4_forwarding != pristine.ipv4_forwarding || active.nftables != pristine.nftables {
+        Err(NetworkError::Inconsistent)
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_unchanged_rtnl_except_links(
+    pristine: &NetworkSnapshot,
+    active: &NetworkSnapshot,
+) -> Result<(), NetworkError> {
+    verify_pristine_snapshot(pristine)?;
+    if active.qdiscs != pristine.qdiscs {
+        return Err(NetworkError::NotPristine);
+    }
+    if active.addresses != pristine.addresses
+        || active.routes != pristine.routes
+        || active.neighbours != pristine.neighbours
+        || active.proxy_neighbours != pristine.proxy_neighbours
+        || active.nexthops != pristine.nexthops
+        || active.rules_v4 != pristine.rules_v4
+        || active.rules_v6 != pristine.rules_v6
+    {
+        Err(NetworkError::Inconsistent)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_exact_loopback_snapshot_delta(
+    pristine: &NetworkSnapshot,
+    active: &NetworkSnapshot,
+) -> Result<(), NetworkError> {
+    let [expected_loopback] = pristine.links.as_slice() else {
+        return Err(NetworkError::NotPristine);
+    };
+    if active
+        .links
+        .iter()
+        .filter(|payload| *payload == expected_loopback)
+        .count()
+        == 1
     {
         Ok(())
     } else {
         Err(NetworkError::NotPristine)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum VethLinkSide {
+    Parent,
+    Endpoint,
+}
+
+fn find_and_verify_veth_link(
+    links: &[Vec<u8>],
+    expected: &ExpectedVethPair,
+    side: VethLinkSide,
+) -> Result<VethLinkObservation, NetworkError> {
+    let expected_index = match side {
+        VethLinkSide::Parent => expected.parent_ifindex,
+        VethLinkSide::Endpoint => expected.endpoint_ifindex,
+    };
+    let mut matching = links.iter().filter_map(|payload| {
+        let index = read_i32(payload, 4).ok()?;
+        (index == i32::try_from(expected_index).ok()?).then_some(payload.as_slice())
+    });
+    let payload = matching.next().ok_or(NetworkError::NotPristine)?;
+    if matching.next().is_some() {
+        return Err(NetworkError::NotPristine);
+    }
+    verify_veth_link(payload, expected, side)
+}
+
+#[derive(Default)]
+struct VethLinkAttributes<'a> {
+    name: Option<&'a [u8]>,
+    peer_index: Option<u32>,
+    peer_netnsid: Option<i32>,
+    address: Option<[u8; ETHERNET_ADDRESS_BYTES]>,
+    broadcast: Option<[u8; ETHERNET_ADDRESS_BYTES]>,
+    mtu: Option<u32>,
+    queue_length: Option<u32>,
+    transmit_queues: Option<u32>,
+    receive_queues: Option<u32>,
+    permanent_address: Option<[u8; ETHERNET_ADDRESS_BYTES]>,
+    qdisc: Option<&'a [u8]>,
+    operstate: Option<&'a [u8]>,
+    linkmode: Option<u8>,
+    group: Option<u32>,
+    promiscuity: Option<u32>,
+    allmulti: Option<u32>,
+    protocol_down: Option<u8>,
+    zeroed_structs_seen: u8,
+    link_info_seen: bool,
+    address_families_seen: bool,
+}
+
+fn verify_veth_link(
+    payload: &[u8],
+    expected: &ExpectedVethPair,
+    side: VethLinkSide,
+) -> Result<VethLinkObservation, NetworkError> {
+    let (expected_index, expected_peer_index, expected_name) = match side {
+        VethLinkSide::Parent => (
+            expected.parent_ifindex,
+            expected.endpoint_ifindex,
+            expected.parent_name.as_slice(),
+        ),
+        VethLinkSide::Endpoint => (
+            expected.endpoint_ifindex,
+            expected.parent_ifindex,
+            VETH_ENDPOINT_NAME,
+        ),
+    };
+    verify_veth_link_header(payload, expected_index)?;
+    let observed = parse_veth_link_attributes(&payload[IFINFO_LEN..])?;
+    let address = observed.address.ok_or(NetworkError::NotPristine)?;
+    if !interface_name_is_exact(observed.name, expected_name)
+        || observed.peer_index != Some(expected_peer_index)
+        || observed.peer_netnsid.is_none_or(|value| value < 0)
+        || observed.mtu != Some(VETH_MTU)
+        || observed.queue_length != Some(VETH_TX_QUEUE_LENGTH)
+        || observed.transmit_queues != Some(VETH_QUEUE_COUNT)
+        || observed.receive_queues != Some(VETH_QUEUE_COUNT)
+        || observed.qdisc != Some(&b"noop\0"[..])
+        || observed.operstate != Some(&[IF_OPER_DOWN][..])
+        || observed.linkmode != Some(0)
+        || observed.group != Some(0)
+        || observed.promiscuity != Some(0)
+        || observed.allmulti != Some(0)
+        || observed.protocol_down != Some(0)
+        || observed.zeroed_structs_seen != VETH_ZEROED_STRUCTS_SEEN
+        || observed.broadcast != Some([u8::MAX; ETHERNET_ADDRESS_BYTES])
+        || address == [0; ETHERNET_ADDRESS_BYTES]
+        || address[0] & 0b11 != 0b10
+        || observed
+            .permanent_address
+            .is_some_and(|permanent| permanent != address)
+        || !observed.link_info_seen
+        || !observed.address_families_seen
+    {
+        return Err(NetworkError::NotPristine);
+    }
+    Ok(VethLinkObservation {
+        identity: expected.clone(),
+        mac: address,
+        peer_netnsid: observed.peer_netnsid.ok_or(NetworkError::NotPristine)?,
+    })
+}
+
+fn verify_veth_link_header(payload: &[u8], expected_index: u32) -> Result<(), NetworkError> {
+    if payload.len() < IFINFO_LEN
+        || payload[0] != AF_UNSPEC
+        || payload[1] != 0
+        || read_u16(payload, 2)? != ARPHRD_ETHER
+        || read_i32(payload, 4)?
+            != i32::try_from(expected_index).map_err(|_| NetworkError::Limit)?
+        || read_u32(payload, 8)? != VETH_FLAGS
+        || read_u32(payload, 12)? != 0
+    {
+        Err(NetworkError::NotPristine)
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_veth_link_attributes(bytes: &[u8]) -> Result<VethLinkAttributes<'_>, NetworkError> {
+    let mut observed = VethLinkAttributes::default();
+    let mut attributes_seen = [false; MAX_DEBIAN13_LINK_ATTRIBUTE + 1];
+    for attribute in parse_attributes(bytes)? {
+        let kind_index = usize::from(attribute.kind);
+        if kind_index >= attributes_seen.len() || attributes_seen[kind_index] {
+            return Err(NetworkError::NotPristine);
+        }
+        attributes_seen[kind_index] = true;
+        apply_veth_link_attribute(&mut observed, attribute)?;
+    }
+    Ok(observed)
+}
+
+fn apply_veth_link_attribute<'a>(
+    observed: &mut VethLinkAttributes<'a>,
+    attribute: Attribute<'a>,
+) -> Result<(), NetworkError> {
+    match attribute.kind {
+        IFLA_ADDRESS => set_once(
+            &mut observed.address,
+            read_exact_ethernet_address(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_BROADCAST => set_once(
+            &mut observed.broadcast,
+            read_exact_ethernet_address(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_IFNAME => set_once(&mut observed.name, attribute.unflagged_payload()?),
+        IFLA_MTU => set_once(
+            &mut observed.mtu,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_LINK => set_once(
+            &mut observed.peer_index,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_QDISC => set_once(&mut observed.qdisc, attribute.unflagged_payload()?),
+        IFLA_MASTER | IFLA_IFALIAS | IFLA_ALT_IFNAME => Err(NetworkError::NotPristine),
+        IFLA_TXQLEN => set_once(
+            &mut observed.queue_length,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_NUM_TX_QUEUES => set_once(
+            &mut observed.transmit_queues,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_NUM_RX_QUEUES => set_once(
+            &mut observed.receive_queues,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_STATS => {
+            verify_zeroed_attribute(attribute, VETH_LINK_STATS_BYTES)?;
+            observed.zeroed_structs_seen |= VETH_STATS_SEEN;
+            Ok(())
+        }
+        IFLA_STATS64 => {
+            verify_zeroed_attribute(attribute, VETH_LINK_STATS64_BYTES)?;
+            observed.zeroed_structs_seen |= VETH_STATS64_SEEN;
+            Ok(())
+        }
+        IFLA_MAP => {
+            verify_zeroed_attribute(attribute, VETH_LINK_IFMAP_BYTES)?;
+            observed.zeroed_structs_seen |= VETH_IFMAP_SEEN;
+            Ok(())
+        }
+        IFLA_PERM_ADDRESS => set_once(
+            &mut observed.permanent_address,
+            read_exact_ethernet_address(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_OPERSTATE => set_once(&mut observed.operstate, attribute.unflagged_payload()?),
+        IFLA_LINKMODE => set_once(
+            &mut observed.linkmode,
+            read_exact_u8(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_LINKINFO => {
+            verify_veth_link_info(attribute)?;
+            observed.link_info_seen = true;
+            Ok(())
+        }
+        IFLA_AF_SPEC => {
+            verify_address_family_spec(attribute)?;
+            observed.address_families_seen = true;
+            Ok(())
+        }
+        IFLA_GROUP => set_once(
+            &mut observed.group,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_PROMISCUITY => set_once(
+            &mut observed.promiscuity,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_LINK_NETNSID => set_once(
+            &mut observed.peer_netnsid,
+            read_exact_i32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_PROTO_DOWN => set_once(
+            &mut observed.protocol_down,
+            read_exact_u8(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_ALLMULTI => set_once(
+            &mut observed.allmulti,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_PROP_LIST if !attribute.payload.is_empty() => Err(NetworkError::NotPristine),
+        IFLA_XDP => verify_xdp(attribute),
+        _ => verify_allowed_link_telemetry(attribute, LinkTelemetryProfile::Veth),
+    }
+}
+
+fn interface_name_is_exact(observed: Option<&[u8]>, expected: &[u8]) -> bool {
+    observed.is_some_and(|observed| {
+        observed.len() == expected.len() + 1
+            && observed.ends_with(&[0])
+            && &observed[..expected.len()] == expected
+    })
+}
+
+fn verify_veth_link_info(attribute: Attribute<'_>) -> Result<(), NetworkError> {
+    let mut kind = None;
+    for nested in parse_attributes(attribute.unflagged_payload()?)? {
+        match nested.kind {
+            IFLA_INFO_KIND => set_once(&mut kind, nested.unflagged_payload()?)?,
+            _ => return Err(NetworkError::NotPristine),
+        }
+    }
+    if kind == Some(&b"veth\0"[..]) {
+        Ok(())
+    } else {
+        Err(NetworkError::NotPristine)
+    }
+}
+
+#[derive(Default)]
+struct LoopbackLinkAttributes<'a> {
+    name: Option<&'a [u8]>,
+    operstate: Option<&'a [u8]>,
+    address: Option<&'a [u8]>,
+    broadcast: Option<&'a [u8]>,
+    mtu: Option<u32>,
+    queue_length: Option<u32>,
+    qdisc: Option<&'a [u8]>,
+    linkmode: Option<u8>,
+    group: Option<u32>,
+    promiscuity: Option<u32>,
+    allmulti: Option<u32>,
+    protocol_down: Option<u8>,
+    offload_limits: [Option<u32>; LOOPBACK_OFFLOAD_LIMITS.len()],
+    address_families_seen: bool,
+}
+
+fn verify_loopback(payload: &[u8]) -> Result<(), NetworkError> {
+    verify_loopback_header(payload)?;
+    let observed = parse_loopback_link_attributes(&payload[IFINFO_LEN..])?;
+    if observed.name == Some(&b"lo\0"[..])
+        && observed.operstate == Some(&[IF_OPER_DOWN][..])
+        && observed.address == Some(&[0; 6][..])
+        && observed.broadcast == Some(&[0; 6][..])
+        && observed.mtu == Some(LOOPBACK_MTU)
+        && observed.queue_length == Some(LOOPBACK_TX_QUEUE_LENGTH)
+        && observed.qdisc == Some(&b"noop\0"[..])
+        && observed.linkmode == Some(0)
+        && observed.group == Some(0)
+        && observed.promiscuity == Some(0)
+        && observed.allmulti == Some(0)
+        && observed.protocol_down == Some(0)
+        && observed.offload_limits == LOOPBACK_OFFLOAD_LIMITS.map(Some)
+        && observed.address_families_seen
+    {
+        Ok(())
+    } else {
+        Err(NetworkError::NotPristine)
+    }
+}
+
+fn parse_loopback_link_attributes(
+    bytes: &[u8],
+) -> Result<LoopbackLinkAttributes<'_>, NetworkError> {
+    let mut observed = LoopbackLinkAttributes::default();
+    let mut attributes_seen = [false; MAX_DEBIAN13_LINK_ATTRIBUTE + 1];
+    for attribute in parse_attributes(bytes)? {
+        let kind_index = usize::from(attribute.kind);
+        if kind_index >= attributes_seen.len() || attributes_seen[kind_index] {
+            return Err(NetworkError::NotPristine);
+        }
+        attributes_seen[kind_index] = true;
+        apply_loopback_link_attribute(&mut observed, attribute)?;
+    }
+    Ok(observed)
+}
+
+fn apply_loopback_link_attribute<'a>(
+    observed: &mut LoopbackLinkAttributes<'a>,
+    attribute: Attribute<'a>,
+) -> Result<(), NetworkError> {
+    match attribute.kind {
+        IFLA_ADDRESS => set_once(&mut observed.address, attribute.unflagged_payload()?),
+        IFLA_BROADCAST => set_once(&mut observed.broadcast, attribute.unflagged_payload()?),
+        IFLA_IFNAME => set_once(&mut observed.name, attribute.unflagged_payload()?),
+        IFLA_MTU => set_once(
+            &mut observed.mtu,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_QDISC => set_once(&mut observed.qdisc, attribute.unflagged_payload()?),
+        IFLA_TXQLEN => set_once(
+            &mut observed.queue_length,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_OPERSTATE => set_once(&mut observed.operstate, attribute.unflagged_payload()?),
+        IFLA_LINKMODE => set_once(
+            &mut observed.linkmode,
+            read_exact_u8(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_AF_SPEC => {
+            verify_address_family_spec(attribute)?;
+            observed.address_families_seen = true;
+            Ok(())
+        }
+        IFLA_GROUP => set_once(
+            &mut observed.group,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_PROMISCUITY => set_once(
+            &mut observed.promiscuity,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_PROTO_DOWN => set_once(
+            &mut observed.protocol_down,
+            read_exact_u8(attribute.unflagged_payload()?)?,
+        ),
+        kind @ (IFLA_GSO_MAX_SEGS
+        | IFLA_GSO_MAX_SIZE
+        | IFLA_GRO_MAX_SIZE
+        | IFLA_GSO_IPV4_MAX_SIZE
+        | IFLA_GRO_IPV4_MAX_SIZE) => {
+            let index = offload_limit_index(kind).ok_or(NetworkError::Malformed)?;
+            set_once(
+                &mut observed.offload_limits[index],
+                read_exact_u32(attribute.unflagged_payload()?)?,
+            )
+        }
+        IFLA_ALLMULTI => set_once(
+            &mut observed.allmulti,
+            read_exact_u32(attribute.unflagged_payload()?)?,
+        ),
+        IFLA_LINK | IFLA_MASTER | IFLA_LINKINFO | IFLA_IFALIAS | IFLA_ALT_IFNAME => {
+            Err(NetworkError::NotPristine)
+        }
+        IFLA_PROP_LIST if !attribute.payload.is_empty() => Err(NetworkError::NotPristine),
+        IFLA_XDP => verify_xdp(attribute),
+        _ => verify_allowed_link_telemetry(attribute, LinkTelemetryProfile::Loopback),
     }
 }
 
@@ -862,6 +1624,96 @@ const fn offload_limit_index(kind: u16) -> Option<usize> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LinkTelemetryProfile {
+    Loopback,
+    Veth,
+}
+
+fn verify_allowed_link_telemetry(
+    attribute: Attribute<'_>,
+    profile: LinkTelemetryProfile,
+) -> Result<(), NetworkError> {
+    if matches!(
+        attribute.kind,
+        IFLA_PROP_LIST | IFLA_DEVLINK_PORT | IFLA_DPLL_PIN
+    ) && attribute.flags == NLA_F_NESTED
+        && attribute.payload.is_empty()
+    {
+        return Ok(());
+    }
+    let payload = attribute.unflagged_payload()?;
+    let (queues, carrier, carrier_changes, carrier_up, carrier_down, minimum_mtu, maximum_mtu) =
+        match profile {
+            LinkTelemetryProfile::Loopback => (1, 1, 0, 0, 0, 0, 0),
+            LinkTelemetryProfile::Veth => {
+                (VETH_QUEUE_COUNT, 0, 1, 0, 1, VETH_MIN_MTU, VETH_MAX_MTU)
+            }
+        };
+    match attribute.kind {
+        IFLA_STATS => verify_profile_statistics(payload, profile, VETH_LINK_STATS_BYTES),
+        IFLA_STATS64 => verify_profile_statistics(payload, profile, VETH_LINK_STATS64_BYTES),
+        IFLA_MAP => verify_profile_statistics(payload, profile, VETH_LINK_IFMAP_BYTES),
+        IFLA_NUM_TX_QUEUES | IFLA_NUM_RX_QUEUES if read_exact_u32(payload)? == queues => Ok(()),
+        IFLA_CARRIER if read_exact_u8(payload)? == carrier => Ok(()),
+        IFLA_CARRIER_CHANGES if read_exact_u32(payload)? == carrier_changes => Ok(()),
+        IFLA_CARRIER_UP_COUNT if read_exact_u32(payload)? == carrier_up => Ok(()),
+        IFLA_CARRIER_DOWN_COUNT if read_exact_u32(payload)? == carrier_down => Ok(()),
+        IFLA_EVENT if read_exact_u32(payload)? == 0 => Ok(()),
+        IFLA_MIN_MTU if read_exact_u32(payload)? == minimum_mtu => Ok(()),
+        IFLA_MAX_MTU if read_exact_u32(payload)? == maximum_mtu => Ok(()),
+        IFLA_GSO_MAX_SEGS if read_exact_u32(payload)? == LOOPBACK_GSO_MAX_SEGMENTS => Ok(()),
+        IFLA_GSO_MAX_SIZE | IFLA_GRO_MAX_SIZE | IFLA_GSO_IPV4_MAX_SIZE | IFLA_GRO_IPV4_MAX_SIZE
+            if read_exact_u32(payload)? == LOOPBACK_OFFLOAD_MAX_SIZE =>
+        {
+            Ok(())
+        }
+        IFLA_TSO_MAX_SIZE if read_exact_u32(payload)? == DEFAULT_TSO_MAX_SIZE => Ok(()),
+        IFLA_TSO_MAX_SEGS if read_exact_u32(payload)? == DEFAULT_TSO_MAX_SEGMENTS => Ok(()),
+        IFLA_PERM_ADDRESS => {
+            let address = read_exact_ethernet_address(payload)?;
+            match profile {
+                LinkTelemetryProfile::Loopback if address == [0; ETHERNET_ADDRESS_BYTES] => Ok(()),
+                LinkTelemetryProfile::Veth
+                    if address != [0; ETHERNET_ADDRESS_BYTES] && address[0] & 0b11 == 0b10 =>
+                {
+                    Ok(())
+                }
+                _ => Err(NetworkError::NotPristine),
+            }
+        }
+        _ => Err(NetworkError::NotPristine),
+    }
+}
+
+fn verify_profile_statistics(
+    payload: &[u8],
+    profile: LinkTelemetryProfile,
+    veth_length: usize,
+) -> Result<(), NetworkError> {
+    match profile {
+        LinkTelemetryProfile::Loopback if !payload.is_empty() => Ok(()),
+        LinkTelemetryProfile::Veth
+            if payload.len() == veth_length && payload.iter().all(|b| *b == 0) =>
+        {
+            Ok(())
+        }
+        _ => Err(NetworkError::NotPristine),
+    }
+}
+
+fn verify_zeroed_attribute(
+    attribute: Attribute<'_>,
+    exact_length: usize,
+) -> Result<(), NetworkError> {
+    let payload = attribute.unflagged_payload()?;
+    if payload.len() == exact_length && payload.iter().all(|byte| *byte == 0) {
+        Ok(())
+    } else {
+        Err(NetworkError::NotPristine)
+    }
+}
+
 fn verify_address_family_spec(attribute: Attribute<'_>) -> Result<(), NetworkError> {
     if attribute.flags != 0 {
         return Err(NetworkError::NotPristine);
@@ -878,7 +1730,18 @@ fn verify_address_family_spec(attribute: Attribute<'_>) -> Result<(), NetworkErr
                     return Err(NetworkError::NotPristine);
                 }
                 ipv4_seen = true;
-                parse_attributes(family.payload)?;
+                let mut configuration_seen = false;
+                for ipv4_attribute in parse_attributes(family.payload)? {
+                    if ipv4_attribute.kind != IFLA_INET_CONF
+                        || ipv4_attribute.flags != 0
+                        || ipv4_attribute.payload.is_empty()
+                        || ipv4_attribute.payload.len() % 4 != 0
+                        || configuration_seen
+                    {
+                        return Err(NetworkError::NotPristine);
+                    }
+                    configuration_seen = true;
+                }
             }
             family_kind if family_kind == u16::from(AF_INET6) => {
                 set_once(&mut ipv6, family.payload)?;
@@ -887,12 +1750,32 @@ fn verify_address_family_spec(attribute: Attribute<'_>) -> Result<(), NetworkErr
         }
     }
     let mut address_generation_mode = None;
+    let mut seen = [false; 10];
     for ipv6_attribute in parse_attributes(ipv6.ok_or(NetworkError::NotPristine)?)? {
-        if ipv6_attribute.kind == IFLA_INET6_ADDR_GEN_MODE {
-            set_once(
-                &mut address_generation_mode,
-                read_exact_u8(ipv6_attribute.unflagged_payload()?)?,
-            )?;
+        if ipv6_attribute.flags != 0
+            || usize::from(ipv6_attribute.kind) >= seen.len()
+            || ipv6_attribute.kind == 0
+            || seen[usize::from(ipv6_attribute.kind)]
+        {
+            return Err(NetworkError::NotPristine);
+        }
+        seen[usize::from(ipv6_attribute.kind)] = true;
+        let payload = ipv6_attribute.payload;
+        match ipv6_attribute.kind {
+            IFLA_INET6_FLAGS | IFLA_INET6_RA_MTU => {
+                read_exact_u32(payload)?;
+            }
+            IFLA_INET6_CONF
+            | IFLA_INET6_STATS
+            | IFLA_INET6_MCAST
+            | IFLA_INET6_CACHEINFO
+            | IFLA_INET6_ICMP6STATS
+                if !payload.is_empty() && payload.len() % 4 == 0 => {}
+            IFLA_INET6_TOKEN if payload.len() == 16 => {}
+            IFLA_INET6_ADDR_GEN_MODE => {
+                address_generation_mode = Some(read_exact_u8(payload)?);
+            }
+            _ => return Err(NetworkError::NotPristine),
         }
     }
     if ipv4_seen && address_generation_mode == Some(IN6_ADDR_GEN_MODE_EUI64) {
@@ -1088,6 +1971,7 @@ fn validate_record(kind: DumpKind, payload: &[u8]) -> Result<(), NetworkError> {
 const fn record_limit(kind: DumpKind) -> usize {
     match kind {
         DumpKind::Link => MAX_LINKS,
+        DumpKind::Qdisc => MAX_QDISCS,
         DumpKind::Address => MAX_ADDRESSES,
         DumpKind::Route => MAX_ROUTES,
         DumpKind::Neighbour | DumpKind::ProxyNeighbour | DumpKind::Nexthop => MAX_NEIGHBOURS,
@@ -1264,6 +2148,18 @@ fn read_exact_u32(bytes: &[u8]) -> Result<u32, NetworkError> {
     }
 }
 
+fn read_exact_i32(bytes: &[u8]) -> Result<i32, NetworkError> {
+    if bytes.len() == 4 {
+        read_i32(bytes, 0)
+    } else {
+        Err(NetworkError::NotPristine)
+    }
+}
+
+fn read_exact_ethernet_address(bytes: &[u8]) -> Result<[u8; ETHERNET_ADDRESS_BYTES], NetworkError> {
+    bytes.try_into().map_err(|_| NetworkError::NotPristine)
+}
+
 fn read_exact_u8(bytes: &[u8]) -> Result<u8, NetworkError> {
     let [value] = bytes else {
         return Err(NetworkError::NotPristine);
@@ -1292,12 +2188,17 @@ fn timeout_error() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, process::Command};
+    use std::{
+        env,
+        io::Read,
+        process::{Command, Stdio},
+    };
 
     use super::*;
 
     const LIVE_COLLECTOR_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_COLLECTOR_CHILD";
     const LIVE_MUTATION_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_MUTATION_CHILD";
+    const LIVE_VETH_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_VETH_CHILD";
     const TEST_SEQUENCE: u32 = 7;
     const TEST_PORT: u32 = 41;
 
@@ -1334,6 +2235,336 @@ mod tests {
         let snapshot = pristine_snapshot();
         verify_pristine_snapshot(&snapshot).expect("pristine baseline");
         verify_consistent_pristine(&snapshot, &snapshot).expect("consistent pristine baseline");
+    }
+
+    #[test]
+    fn fixed_veth_expectations_are_bounded_and_unambiguous() {
+        let first = expected_pair("vpa01234567", 2, 2, 11);
+        let second = expected_pair("vpb01234567", 3, 2, 12);
+        validate_parent_expectations([&first, &second]).expect("distinct parent identities");
+        assert_eq!(first.parent_name, b"vpa01234567");
+        assert_eq!(first.parent_ifindex, 2);
+        assert_eq!(first.endpoint_ifindex, 2);
+
+        for (name, parent, endpoint) in [
+            ("", 2, 2),
+            ("lo", 2, 2),
+            ("eth0", 2, 2),
+            ("abcdefghijklmnop", 2, 2),
+            ("vpa01234567", 1, 2),
+            ("vpa01234567", 2, 1),
+        ] {
+            assert!(matches!(
+                ExpectedVethPair::new_with_namespace_identity(
+                    name,
+                    parent,
+                    endpoint,
+                    test_namespace_identity(11),
+                ),
+                Err(NetworkError::InvalidVethExpectation)
+            ));
+        }
+        let duplicate_name = expected_pair("vpa01234567", 4, 3, 13);
+        let duplicate_index = expected_pair("vpc01234567", 2, 3, 14);
+        assert!(matches!(
+            validate_parent_expectations([&first, &duplicate_name]),
+            Err(NetworkError::InvalidVethExpectation)
+        ));
+        assert!(matches!(
+            validate_parent_expectations([&first, &duplicate_index]),
+            Err(NetworkError::InvalidVethExpectation)
+        ));
+    }
+
+    #[test]
+    fn endpoint_namespace_identity_is_fresh_and_exact() {
+        let identity = current_network_namespace_identity().expect("current network nsfs identity");
+        require_current_network_namespace(identity).expect("same network namespace");
+        let swapped = NetworkNamespaceIdentity {
+            device: identity.device,
+            inode: identity.inode.checked_add(1).expect("nonzero test inode"),
+        };
+        assert!(matches!(
+            require_current_network_namespace(swapped),
+            Err(NetworkError::Inconsistent)
+        ));
+    }
+
+    #[test]
+    fn exact_veth_parent_and_endpoint_deltas_are_accepted() {
+        let pristine = pristine_snapshot();
+        let first = expected_pair("vpa01234567", 2, 2, 11);
+        let second = expected_pair("vpb01234567", 3, 2, 12);
+        let mut parent = pristine.clone();
+        parent.links.extend([
+            veth_link_payload(
+                &first.parent_name,
+                first.parent_ifindex,
+                first.endpoint_ifindex,
+                0,
+                [0x02, 1, 2, 3, 4, 5],
+            ),
+            veth_link_payload(
+                &second.parent_name,
+                second.parent_ifindex,
+                second.endpoint_ifindex,
+                1,
+                [0x06, 1, 2, 3, 4, 5],
+            ),
+        ]);
+        let parent_links =
+            verify_exact_parent_veth_snapshot_delta(&pristine, &parent, [&first, &second])
+                .expect("exact parent delta");
+
+        let mut endpoint_a = pristine.clone();
+        endpoint_a.links.push(veth_link_payload(
+            VETH_ENDPOINT_NAME,
+            first.endpoint_ifindex,
+            first.parent_ifindex,
+            0,
+            [0x0a, 1, 2, 3, 4, 5],
+        ));
+        let endpoint_a = verify_exact_endpoint_veth_snapshot_delta(&pristine, &endpoint_a, &first)
+            .expect("exact A delta");
+        let mut endpoint_b = pristine.clone();
+        endpoint_b.links.push(veth_link_payload(
+            VETH_ENDPOINT_NAME,
+            second.endpoint_ifindex,
+            second.parent_ifindex,
+            0,
+            [0x0e, 1, 2, 3, 4, 5],
+        ));
+        let endpoint_b = verify_exact_endpoint_veth_snapshot_delta(&pristine, &endpoint_b, &second)
+            .expect("exact B delta");
+        let namespace_a = NetworkNamespaceIdentity {
+            device: 7,
+            inode: 11,
+        };
+        let namespace_b = NetworkNamespaceIdentity {
+            device: 7,
+            inode: 12,
+        };
+        verify_veth_observation_relations(
+            &parent_links,
+            [&endpoint_a, &endpoint_b],
+            [namespace_a, namespace_b],
+        )
+        .expect("owner-target relations and distinct endpoint identities");
+        assert!(matches!(
+            verify_veth_observation_relations(
+                &parent_links,
+                [&endpoint_b, &endpoint_a],
+                [namespace_b, namespace_a],
+            ),
+            Err(NetworkError::Inconsistent)
+        ));
+        assert!(matches!(
+            verify_veth_observation_relations(
+                &parent_links,
+                [&endpoint_a, &endpoint_b],
+                [namespace_a, namespace_a],
+            ),
+            Err(NetworkError::NotPristine)
+        ));
+
+        let mut duplicate_parent_netnsid = parent.clone();
+        duplicate_parent_netnsid.links[2] = replace_link_attribute(
+            &duplicate_parent_netnsid.links[2],
+            IFLA_LINK_NETNSID,
+            &0_i32.to_ne_bytes(),
+        );
+        assert!(matches!(
+            verify_exact_parent_veth_snapshot_delta(
+                &pristine,
+                &duplicate_parent_netnsid,
+                [&first, &second],
+            ),
+            Err(NetworkError::NotPristine)
+        ));
+    }
+
+    #[test]
+    fn exact_veth_profile_rejects_identity_state_and_relationship_changes() {
+        let pristine = pristine_snapshot();
+        let expected = expected_pair("vpa01234567", 2, 2, 11);
+        let valid = veth_link_payload(
+            VETH_ENDPOINT_NAME,
+            expected.endpoint_ifindex,
+            expected.parent_ifindex,
+            0,
+            [0x02, 1, 2, 3, 4, 5],
+        );
+        let mut variants = Vec::new();
+        for (kind, replacement) in [
+            (IFLA_IFNAME, b"wrong\0".to_vec()),
+            (IFLA_LINK, 99_u32.to_ne_bytes().to_vec()),
+            (IFLA_MTU, 1_400_u32.to_ne_bytes().to_vec()),
+            (IFLA_TXQLEN, 0_u32.to_ne_bytes().to_vec()),
+            (IFLA_NUM_TX_QUEUES, 2_u32.to_ne_bytes().to_vec()),
+            (IFLA_NUM_RX_QUEUES, 2_u32.to_ne_bytes().to_vec()),
+            (IFLA_OPERSTATE, vec![6]),
+            (IFLA_ADDRESS, vec![0; ETHERNET_ADDRESS_BYTES]),
+            (IFLA_PERM_ADDRESS, vec![0x06, 1, 2, 3, 4, 5]),
+        ] {
+            variants.push(replace_link_attribute(&valid, kind, &replacement));
+        }
+        let mut wrong_flags = valid.clone();
+        wrong_flags[8..12].copy_from_slice(&(VETH_FLAGS | 1).to_ne_bytes());
+        variants.push(wrong_flags);
+        let mut wrong_type = valid.clone();
+        wrong_type[2..4].copy_from_slice(&ARPHRD_LOOPBACK.to_ne_bytes());
+        variants.push(wrong_type);
+        for kind in [IFLA_MASTER, IFLA_IFALIAS, IFLA_ALT_IFNAME] {
+            let mut variant = valid.clone();
+            variant.extend(attribute(kind, &1_u32.to_ne_bytes()));
+            variants.push(variant);
+        }
+        let mut attached_xdp = valid.clone();
+        attached_xdp.extend(attribute(IFLA_XDP, &attribute(IFLA_XDP_ATTACHED, &[1])));
+        variants.push(attached_xdp);
+        let mut unknown_attribute = valid.clone();
+        unknown_attribute.extend(attribute(99, &[1]));
+        variants.push(unknown_attribute);
+
+        for payload in variants {
+            let mut active = pristine.clone();
+            active.links.push(payload);
+            assert!(matches!(
+                verify_exact_endpoint_veth_snapshot_delta(&pristine, &active, &expected),
+                Err(NetworkError::NotPristine)
+            ));
+        }
+    }
+
+    #[test]
+    fn exact_veth_profile_rejects_ambiguous_queues_and_nonzero_fresh_telemetry() {
+        let pristine = pristine_snapshot();
+        let expected = expected_pair("vpa01234567", 2, 2, 11);
+        let valid = veth_link_payload(
+            VETH_ENDPOINT_NAME,
+            expected.endpoint_ifindex,
+            expected.parent_ifindex,
+            0,
+            [0x02, 1, 2, 3, 4, 5],
+        );
+        let mut variants = Vec::new();
+        for kind in [IFLA_NUM_TX_QUEUES, IFLA_NUM_RX_QUEUES] {
+            variants.push(without_link_attribute(&valid, kind));
+            variants.push(replace_link_attribute_with_raw_kind(
+                &valid,
+                kind,
+                kind | NLA_F_NET_BYTEORDER,
+                &VETH_QUEUE_COUNT.to_ne_bytes(),
+            ));
+            let mut duplicate = valid.clone();
+            duplicate.extend(attribute(kind, &VETH_QUEUE_COUNT.to_ne_bytes()));
+            variants.push(duplicate);
+        }
+        for (kind, length) in [
+            (IFLA_STATS, VETH_LINK_STATS_BYTES),
+            (IFLA_STATS64, VETH_LINK_STATS64_BYTES),
+            (IFLA_MAP, VETH_LINK_IFMAP_BYTES),
+        ] {
+            variants.push(without_link_attribute(&valid, kind));
+            let mut nonzero = vec![0; length];
+            nonzero[length - 1] = 1;
+            variants.push(replace_link_attribute(&valid, kind, &nonzero));
+            variants.push(replace_link_attribute(&valid, kind, &vec![0; length - 1]));
+            variants.push(replace_link_attribute_with_raw_kind(
+                &valid,
+                kind,
+                kind | NLA_F_NET_BYTEORDER,
+                &vec![0; length],
+            ));
+        }
+
+        for payload in variants {
+            let mut active = pristine.clone();
+            active.links.push(payload);
+            assert!(matches!(
+                verify_exact_endpoint_veth_snapshot_delta(&pristine, &active, &expected),
+                Err(NetworkError::NotPristine)
+            ));
+        }
+    }
+
+    #[test]
+    fn exact_veth_delta_rejects_every_other_network_object_and_policy_change() {
+        let pristine = pristine_snapshot();
+        let expected = expected_pair("vpa01234567", 2, 2, 11);
+        let mut active = pristine.clone();
+        active.links.push(veth_link_payload(
+            VETH_ENDPOINT_NAME,
+            expected.endpoint_ifindex,
+            expected.parent_ifindex,
+            0,
+            [0x02, 1, 2, 3, 4, 5],
+        ));
+        let mut variants = Vec::new();
+        let mut address = active.clone();
+        address.addresses.push(vec![0]);
+        variants.push(address);
+        let mut route = active.clone();
+        route.routes.push(vec![0]);
+        variants.push(route);
+        let mut neighbour = active.clone();
+        neighbour.neighbours.push(vec![0]);
+        variants.push(neighbour);
+        let mut proxy_neighbour = active.clone();
+        proxy_neighbour.proxy_neighbours.push(vec![0]);
+        variants.push(proxy_neighbour);
+        let mut nexthop = active.clone();
+        nexthop.nexthops.push(vec![0]);
+        variants.push(nexthop);
+        let mut changed_rules = active.clone();
+        changed_rules.rules_v4.pop();
+        variants.push(changed_rules);
+        let mut changed_loopback = active.clone();
+        mutate_link_operstate(&mut changed_loopback.links[0]);
+        variants.push(changed_loopback);
+        let mut extra_link = active.clone();
+        extra_link.links.push(valid_extra_veth_link());
+        variants.push(extra_link);
+        for variant in variants {
+            assert!(
+                verify_exact_endpoint_veth_snapshot_delta(&pristine, &variant, &expected).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn qdisc_delta_rejects_clsact_ingress_and_unknown_records() {
+        let pristine = pristine_snapshot();
+        let expected = expected_pair("vpa01234567", 2, 2, 11);
+        let mut active = pristine.clone();
+        active.links.push(veth_link_payload(
+            VETH_ENDPOINT_NAME,
+            expected.endpoint_ifindex,
+            expected.parent_ifindex,
+            0,
+            [0x02, 1, 2, 3, 4, 5],
+        ));
+        verify_exact_endpoint_veth_snapshot_delta(&pristine, &active, &expected)
+            .expect("kernel-default empty qdisc dump");
+
+        for kind in [b"clsact\0".as_slice(), b"ingress\0".as_slice()] {
+            let mut changed = active.clone();
+            changed
+                .qdiscs
+                .push(qdisc_payload(expected.endpoint_ifindex, kind));
+            assert!(matches!(
+                verify_exact_endpoint_veth_snapshot_delta(&pristine, &changed, &expected),
+                Err(NetworkError::NotPristine)
+            ));
+        }
+        let mut unknown = active;
+        let mut unknown_record = qdisc_payload(expected.endpoint_ifindex, b"unknown\0");
+        unknown_record.extend(attribute(99, &[1]));
+        unknown.qdiscs.push(unknown_record);
+        assert!(matches!(
+            verify_exact_endpoint_veth_snapshot_delta(&pristine, &unknown, &expected),
+            Err(NetworkError::NotPristine)
+        ));
     }
 
     #[test]
@@ -1415,6 +2646,12 @@ mod tests {
                 Err(NetworkError::NotPristine)
             ));
         }
+        let mut unknown = pristine_snapshot();
+        unknown.links[0].extend(attribute(99, &[1]));
+        assert!(matches!(
+            verify_pristine_snapshot(&unknown),
+            Err(NetworkError::NotPristine)
+        ));
     }
 
     #[test]
@@ -1422,6 +2659,10 @@ mod tests {
         let mut wrong_address_families = attribute(u16::from(AF_INET), &[]);
         let wrong_ipv6 = attribute(IFLA_INET6_ADDR_GEN_MODE, &[1]);
         wrong_address_families.extend(attribute(u16::from(AF_INET6), &wrong_ipv6));
+        let mut unknown_address_family_attribute = attribute(u16::from(AF_INET), &[]);
+        let mut ipv6_unknown = attribute(IFLA_INET6_ADDR_GEN_MODE, &[IN6_ADDR_GEN_MODE_EUI64]);
+        ipv6_unknown.extend(attribute(99, &[0]));
+        unknown_address_family_attribute.extend(attribute(u16::from(AF_INET6), &ipv6_unknown));
         for (kind, replacement) in [
             (IFLA_ADDRESS, vec![1; 6]),
             (IFLA_BROADCAST, vec![1; 6]),
@@ -1439,6 +2680,7 @@ mod tests {
             (IFLA_GSO_IPV4_MAX_SIZE, 70_000_u32.to_ne_bytes().to_vec()),
             (IFLA_GRO_IPV4_MAX_SIZE, 70_000_u32.to_ne_bytes().to_vec()),
             (IFLA_AF_SPEC, wrong_address_families),
+            (IFLA_AF_SPEC, unknown_address_family_attribute),
         ] {
             let mut snapshot = pristine_snapshot();
             snapshot.links[0] = replace_link_attribute(&snapshot.links[0], kind, &replacement);
@@ -1488,6 +2730,9 @@ mod tests {
         let mut link = pristine_snapshot();
         link.links.push(link.links[0].clone());
         variants.push(link);
+        let mut qdisc = pristine_snapshot();
+        qdisc.qdiscs.push(qdisc_payload(1, b"clsact\0"));
+        variants.push(qdisc);
         for snapshot in variants {
             assert!(matches!(
                 verify_pristine_snapshot(&snapshot),
@@ -1791,6 +3036,10 @@ mod tests {
                     run_ip(&["link", "set", "lo", "down"]);
                     Some(DumpKind::Nexthop)
                 }
+                kind @ ("clsact" | "ingress") => {
+                    add_live_qdisc(1, kind.as_bytes());
+                    Some(DumpKind::Qdisc)
+                }
                 _ => panic!("unknown live mutation scenario"),
             };
             if let Some(kind) = selected_dump {
@@ -1807,7 +3056,14 @@ mod tests {
         }
 
         let executable = env::current_exe().expect("current test executable");
-        for scenario in ["mtu", "gso-max-size", "proxy-neighbour", "nexthop"] {
+        for scenario in [
+            "mtu",
+            "gso-max-size",
+            "proxy-neighbour",
+            "nexthop",
+            "clsact",
+            "ingress",
+        ] {
             let output = Command::new("unshare")
                 .args(["--user", "--map-root-user", "--net"])
                 .arg(&executable)
@@ -1832,6 +3088,138 @@ mod tests {
                 "live {scenario} mutation was not rejected"
             );
         }
+    }
+
+    fn prove_live_down_veth_parent_profile() {
+        let mut target = Command::new("unshare")
+            .args(["--net", "sh", "-c", "printf ready; read value"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn synchronized target network namespace");
+        let mut ready = [0; 5];
+        target
+            .stdout
+            .as_mut()
+            .expect("target readiness pipe")
+            .read_exact(&mut ready)
+            .expect("target readiness");
+        assert_eq!(&ready, b"ready");
+        let target_path = format!("/proc/{}/ns/net", target.id());
+        let descriptor = open(
+            target_path.as_str(),
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .expect("open target network namespace");
+        let metadata = fstat(&descriptor).expect("target namespace identity");
+        let target_identity = NetworkNamespaceIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        };
+        let pid = target.id().to_string();
+        let pristine = collect_consistent_pristine_snapshot().expect("live pristine baseline");
+        run_ip(&[
+            "link",
+            "add",
+            "vpa01234567",
+            "numtxqueues",
+            "1",
+            "numrxqueues",
+            "1",
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "eth0",
+            "numtxqueues",
+            "1",
+            "numrxqueues",
+            "1",
+            "netns",
+            &pid,
+        ]);
+        let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT).expect("live proof deadline");
+        let snapshot = collect_consistent_snapshot_before(deadline).expect("stable veth state");
+        assert!(
+            snapshot.qdiscs.is_empty(),
+            "default veth qdisc must be empty"
+        );
+        let payload = snapshot
+            .links
+            .iter()
+            .find(|payload| link_fixture_has_name(payload, b"vpa01234567"))
+            .expect("parent veth observation");
+        let parent_ifindex =
+            u32::try_from(read_i32(payload, 4).expect("parent ifindex")).expect("positive index");
+        let peer_ifindex = parse_attributes(&payload[IFINFO_LEN..])
+            .expect("parent attributes")
+            .into_iter()
+            .find(|attribute| attribute.kind == IFLA_LINK)
+            .map(|attribute| read_exact_u32(attribute.payload).expect("peer ifindex"))
+            .expect("peer relation");
+        let expected = ExpectedVethPair::new_with_namespace_identity(
+            "vpa01234567",
+            parent_ifindex,
+            peer_ifindex,
+            target_identity,
+        )
+        .expect("live pair expectation");
+        let result = verify_veth_link(payload, &expected, VethLinkSide::Parent);
+        let summary = link_attribute_summary(payload);
+        let component_failures = veth_component_failures(payload);
+        assert!(
+            result.is_ok(),
+            "live veth profile rejected: {result:?}; header={:?}; components={component_failures:?}; attributes={summary:?}",
+            &payload[..IFINFO_LEN]
+        );
+
+        add_live_qdisc(parent_ifindex, b"clsact");
+        let mutated = collect_consistent_snapshot_before(
+            Deadline::after(NETWORK_PROOF_TIMEOUT).expect("mutated collector deadline"),
+        )
+        .expect("stable live qdisc mutation");
+        assert!(!mutated.qdiscs.is_empty(), "live clsact must be observable");
+        assert!(matches!(
+            verify_unchanged_rtnl_except_links(&pristine, &mutated),
+            Err(NetworkError::NotPristine)
+        ));
+
+        drop(target.stdin.take());
+        target.wait().expect("reap target namespace");
+    }
+
+    #[test]
+    fn collector_accepts_exact_live_down_veth_parent_profile() {
+        if env::var_os(LIVE_VETH_CHILD_ENV).is_some() {
+            prove_live_down_veth_parent_profile();
+            return;
+        }
+        let executable = env::current_exe().expect("current test executable");
+        let output = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(executable)
+            .arg("--exact")
+            .arg("network::tests::collector_accepts_exact_live_down_veth_parent_profile")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(LIVE_VETH_CHILD_ENV, "1")
+            .env("LC_ALL", "C")
+            .output()
+            .expect("spawn isolated live-veth collector test");
+        if unprivileged_user_namespace_policy_denied(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ) {
+            eprintln!("skipped live veth-profile proof: user namespaces denied by policy");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "isolated live-veth proof failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1887,6 +3275,30 @@ mod tests {
         assert!(status.success(), "iproute diagnostic mutation failed");
     }
 
+    fn add_live_qdisc(ifindex: u32, kind: &[u8]) {
+        let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT).expect("qdisc mutation deadline");
+        let mut client = NetlinkCollector::connect(deadline).expect("qdisc mutation socket");
+        let sequence = client.next_sequence().expect("qdisc mutation sequence");
+        let mut payload = vec![0; TCMSG_LEN];
+        payload[4..8].copy_from_slice(
+            &i32::try_from(ifindex)
+                .expect("qdisc ifindex fits")
+                .to_ne_bytes(),
+        );
+        payload[12..16].copy_from_slice(&TC_H_CLSACT.to_ne_bytes());
+        let mut nul_kind = kind.to_vec();
+        nul_kind.push(0);
+        payload.extend(attribute(TCA_KIND, &nul_kind));
+        let request = netlink_frame(
+            RTM_NEWQDISC,
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
+            sequence,
+            0,
+            &payload,
+        );
+        send_bounded(&client.socket, &request, deadline).expect("create disposable qdisc");
+    }
+
     fn collect_live_dump(kind: DumpKind) -> Vec<Vec<u8>> {
         let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT).expect("live dump deadline");
         let mut collector = NetlinkCollector::connect(deadline).expect("live dump collector");
@@ -1895,9 +3307,104 @@ mod tests {
             .expect("live dump")
     }
 
+    fn link_fixture_has_name(payload: &[u8], expected: &[u8]) -> bool {
+        parse_attributes(payload.get(IFINFO_LEN..).unwrap_or_default())
+            .ok()
+            .is_some_and(|attributes| {
+                attributes.into_iter().any(|attribute| {
+                    attribute.kind == IFLA_IFNAME
+                        && interface_name_is_exact(Some(attribute.payload), expected)
+                })
+            })
+    }
+
+    fn link_attribute_summary(payload: &[u8]) -> Vec<(u16, u16, usize, Vec<u8>)> {
+        parse_attributes(payload.get(IFINFO_LEN..).unwrap_or_default())
+            .map(|attributes| {
+                attributes
+                    .into_iter()
+                    .map(|attribute| {
+                        (
+                            attribute.kind,
+                            attribute.flags,
+                            attribute.payload.len(),
+                            attribute.payload.iter().copied().take(16).collect(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn veth_component_failures(payload: &[u8]) -> Vec<(u16, String)> {
+        parse_attributes(payload.get(IFINFO_LEN..).unwrap_or_default()).map_or_else(
+            |error| vec![(0, format!("{error:?}"))],
+            |attributes| {
+                attributes
+                    .into_iter()
+                    .filter_map(|attribute| {
+                        let result = match attribute.kind {
+                            IFLA_AF_SPEC => verify_address_family_spec(attribute),
+                            IFLA_LINKINFO => verify_veth_link_info(attribute),
+                            IFLA_STATS
+                            | IFLA_STATS64
+                            | IFLA_MAP
+                            | IFLA_NUM_TX_QUEUES
+                            | IFLA_NUM_RX_QUEUES
+                            | IFLA_CARRIER
+                            | IFLA_CARRIER_CHANGES
+                            | IFLA_CARRIER_UP_COUNT
+                            | IFLA_CARRIER_DOWN_COUNT
+                            | IFLA_EVENT
+                            | IFLA_MIN_MTU
+                            | IFLA_MAX_MTU
+                            | IFLA_GSO_MAX_SEGS
+                            | IFLA_GSO_MAX_SIZE
+                            | IFLA_GRO_MAX_SIZE
+                            | IFLA_GSO_IPV4_MAX_SIZE
+                            | IFLA_GRO_IPV4_MAX_SIZE
+                            | IFLA_TSO_MAX_SIZE
+                            | IFLA_TSO_MAX_SEGS
+                            | IFLA_PERM_ADDRESS
+                            | IFLA_PROP_LIST
+                            | IFLA_DEVLINK_PORT
+                            | IFLA_DPLL_PIN => {
+                                verify_allowed_link_telemetry(attribute, LinkTelemetryProfile::Veth)
+                            }
+                            _ => Ok(()),
+                        };
+                        result
+                            .err()
+                            .map(|error| (attribute.kind, format!("{error:?}")))
+                    })
+                    .collect()
+            },
+        )
+    }
+
+    fn test_namespace_identity(inode: u64) -> NetworkNamespaceIdentity {
+        NetworkNamespaceIdentity { device: 7, inode }
+    }
+
+    fn expected_pair(
+        name: &str,
+        parent_ifindex: u32,
+        endpoint_ifindex: u32,
+        namespace_inode: u64,
+    ) -> ExpectedVethPair {
+        ExpectedVethPair::new_with_namespace_identity(
+            name,
+            parent_ifindex,
+            endpoint_ifindex,
+            test_namespace_identity(namespace_inode),
+        )
+        .expect("valid fixed-veth expectation")
+    }
+
     fn pristine_snapshot() -> NetworkSnapshot {
         NetworkSnapshot {
             links: vec![link_payload()],
+            qdiscs: Vec::new(),
             addresses: Vec::new(),
             routes: Vec::new(),
             neighbours: Vec::new(),
@@ -1951,6 +3458,79 @@ mod tests {
         address_families.extend(attribute(u16::from(AF_INET6), &ipv6));
         payload.extend(attribute(IFLA_AF_SPEC, &address_families));
         payload
+    }
+
+    fn qdisc_payload(ifindex: u32, kind: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0; TCMSG_LEN];
+        payload[4..8].copy_from_slice(
+            &i32::try_from(ifindex)
+                .expect("fixture qdisc ifindex fits")
+                .to_ne_bytes(),
+        );
+        payload[12..16].copy_from_slice(&TC_H_ROOT.to_ne_bytes());
+        payload.extend(attribute(TCA_KIND, kind));
+        payload
+    }
+
+    fn veth_link_payload(
+        name: &[u8],
+        ifindex: u32,
+        peer_ifindex: u32,
+        peer_netnsid: i32,
+        mac: [u8; ETHERNET_ADDRESS_BYTES],
+    ) -> Vec<u8> {
+        let mut payload = vec![0; IFINFO_LEN];
+        payload[2..4].copy_from_slice(&ARPHRD_ETHER.to_ne_bytes());
+        payload[4..8].copy_from_slice(
+            &i32::try_from(ifindex)
+                .expect("fixture ifindex fits")
+                .to_ne_bytes(),
+        );
+        payload[8..12].copy_from_slice(&VETH_FLAGS.to_ne_bytes());
+        let mut nul_name = name.to_vec();
+        nul_name.push(0);
+        payload.extend(attribute(IFLA_IFNAME, &nul_name));
+        payload.extend(attribute(IFLA_LINK, &peer_ifindex.to_ne_bytes()));
+        payload.extend(attribute(IFLA_LINK_NETNSID, &peer_netnsid.to_ne_bytes()));
+        payload.extend(attribute(IFLA_OPERSTATE, &[IF_OPER_DOWN]));
+        payload.extend(attribute(IFLA_ADDRESS, &mac));
+        payload.extend(attribute(
+            IFLA_BROADCAST,
+            &[u8::MAX; ETHERNET_ADDRESS_BYTES],
+        ));
+        payload.extend(attribute(IFLA_MTU, &VETH_MTU.to_ne_bytes()));
+        payload.extend(attribute(IFLA_TXQLEN, &VETH_TX_QUEUE_LENGTH.to_ne_bytes()));
+        payload.extend(attribute(
+            IFLA_NUM_TX_QUEUES,
+            &VETH_QUEUE_COUNT.to_ne_bytes(),
+        ));
+        payload.extend(attribute(
+            IFLA_NUM_RX_QUEUES,
+            &VETH_QUEUE_COUNT.to_ne_bytes(),
+        ));
+        payload.extend(attribute(IFLA_STATS, &[0; VETH_LINK_STATS_BYTES]));
+        payload.extend(attribute(IFLA_STATS64, &[0; VETH_LINK_STATS64_BYTES]));
+        payload.extend(attribute(IFLA_MAP, &[0; VETH_LINK_IFMAP_BYTES]));
+        payload.extend(attribute(IFLA_PERM_ADDRESS, &mac));
+        payload.extend(attribute(IFLA_QDISC, b"noop\0"));
+        payload.extend(attribute(IFLA_LINKMODE, &[0]));
+        payload.extend(attribute(IFLA_GROUP, &0_u32.to_ne_bytes()));
+        payload.extend(attribute(IFLA_PROMISCUITY, &0_u32.to_ne_bytes()));
+        payload.extend(attribute(IFLA_ALLMULTI, &0_u32.to_ne_bytes()));
+        payload.extend(attribute(IFLA_PROTO_DOWN, &[0]));
+        payload.extend(attribute(
+            IFLA_LINKINFO,
+            &attribute(IFLA_INFO_KIND, b"veth\0"),
+        ));
+        let mut address_families = attribute(u16::from(AF_INET), &[]);
+        let ipv6 = attribute(IFLA_INET6_ADDR_GEN_MODE, &[IN6_ADDR_GEN_MODE_EUI64]);
+        address_families.extend(attribute(u16::from(AF_INET6), &ipv6));
+        payload.extend(attribute(IFLA_AF_SPEC, &address_families));
+        payload
+    }
+
+    fn valid_extra_veth_link() -> Vec<u8> {
+        veth_link_payload(b"extra0", 4, 2, 2, [0x12, 1, 2, 3, 4, 5])
     }
 
     fn rule_payload(family: u8, priority: u32, table: u32) -> Vec<u8> {
@@ -2008,6 +3588,27 @@ mod tests {
     }
 
     fn replace_link_attribute(payload: &[u8], kind: u16, replacement: &[u8]) -> Vec<u8> {
+        rebuild_link_attribute(payload, kind, Some((kind, replacement)))
+    }
+
+    fn replace_link_attribute_with_raw_kind(
+        payload: &[u8],
+        kind: u16,
+        raw_kind: u16,
+        replacement: &[u8],
+    ) -> Vec<u8> {
+        rebuild_link_attribute(payload, kind, Some((raw_kind, replacement)))
+    }
+
+    fn without_link_attribute(payload: &[u8], kind: u16) -> Vec<u8> {
+        rebuild_link_attribute(payload, kind, None)
+    }
+
+    fn rebuild_link_attribute(
+        payload: &[u8],
+        kind: u16,
+        replacement: Option<(u16, &[u8])>,
+    ) -> Vec<u8> {
         let mut rebuilt = payload[..IFINFO_LEN].to_vec();
         let mut remaining = &payload[IFINFO_LEN..];
         let mut replaced = false;
@@ -2017,8 +3618,10 @@ mod tests {
             let observed_kind = read_u16(remaining, 2).expect("fixture kind") & NLA_TYPE_MASK;
             if observed_kind == kind {
                 assert!(!replaced, "fixture attribute must be unique");
-                rebuilt.extend(attribute(kind, replacement));
                 replaced = true;
+                if let Some((raw_kind, replacement)) = replacement {
+                    rebuilt.extend(attribute(raw_kind, replacement));
+                }
             } else {
                 rebuilt.extend_from_slice(&remaining[..aligned]);
             }

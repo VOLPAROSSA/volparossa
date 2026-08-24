@@ -1558,6 +1558,11 @@ impl AuthorizedPrivateRun {
         Ok(run_id)
     }
 
+    /// Reprove the fixed directory binding and expose its canonical naming authority.
+    pub(super) fn verified_run_id(&self) -> Result<&RunId, AuthorizedPrivateRunError> {
+        self.verify_fixed_directories()
+    }
+
     pub(super) fn verify_namespace_pin_backing(&self) -> Result<(), AuthorizedPrivateRunError> {
         let run_id = self.verify_fixed_directories()?;
         for slot in &self.slots {

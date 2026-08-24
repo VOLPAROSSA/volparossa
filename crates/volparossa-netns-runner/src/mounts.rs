@@ -23,7 +23,8 @@ use thiserror::Error;
 use volparossa_test_support::MutationAuthorization;
 
 use crate::topology::{
-    AuthorizedNamespacePins, NamespacePinError, NamespaceVisitError,
+    AuthorizedNamespacePins, AuthorizedVethPairs, NamespaceEndpoint, NamespacePinError,
+    NamespaceVisitError, VethPairError,
     ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError},
 };
 
@@ -249,16 +250,29 @@ impl PrivateMounts<AuthorizedNamespacePins> {
         })
     }
 
-    /// Visit A then B and apply the full read-only pristine-network collector
-    /// inside each live namespace, with exact parent restoration between them.
-    pub(crate) fn prove_pristine_network_namespace_pins(
+    /// Visit A then B and retain their exact pristine composite observations.
+    pub(crate) fn observe_pristine_network_namespace_pins(
         &self,
-    ) -> Result<(), NamespacePinsNetworkProofError> {
+    ) -> Result<
+        [crate::network::PristineNetworkNamespaceObservation; 2],
+        NamespacePinsNetworkProofError,
+    > {
         self.verify_authorized_namespace_pins()
             .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let mut observations = [None, None];
         self.run_state
-            .visit_network_namespaces(|_endpoint| {
-                crate::network::prove_current_pristine_network_namespace(self)
+            .visit_network_namespaces(|endpoint| {
+                let index = match endpoint {
+                    NamespaceEndpoint::A => 0,
+                    NamespaceEndpoint::B => 1,
+                };
+                if observations[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                observations[index] = Some(
+                    crate::network::observe_current_pristine_network_namespace(self)?,
+                );
+                Ok(())
             })
             .map_err(|error| match error {
                 NamespaceVisitError::Namespace(source) => NamespacePinsNetworkProofError::Mount(
@@ -268,6 +282,89 @@ impl PrivateMounts<AuthorizedNamespacePins> {
                     NamespacePinsNetworkProofError::Network(source)
                 }
             })?;
+        self.verify_authorized_namespace_pins()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let [Some(alpha), Some(omega)] = observations else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        };
+        Ok([alpha, omega])
+    }
+
+    /// Reprove both pristine pins, then atomically create the fixed A/B veth pairs.
+    pub(crate) fn create_fixed_veth_pairs(
+        self,
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedVethPairs>,
+            [crate::network::PristineNetworkNamespaceObservation; 2],
+        ),
+        NamespacePinsNetworkProofError,
+    > {
+        let endpoint_baselines = self.observe_pristine_network_namespace_pins()?;
+        let PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        } = self;
+        let run_state = run_state.create_fixed_veth_pairs().map_err(|source| {
+            NamespacePinsNetworkProofError::Mount(veth_pair_error(
+                "create fixed veth pairs",
+                source,
+            ))
+        })?;
+        let active = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        };
+        active
+            .verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        Ok((active, endpoint_baselines))
+    }
+
+    /// Consume A/B baselines and prove both endpoints exactly pristine after link rollback.
+    pub(crate) fn verify_pristine_network_namespace_rollbacks(
+        &self,
+        baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_namespace_pins()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let mut baselines = baselines.map(Some);
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = match endpoint {
+                    NamespaceEndpoint::A => 0,
+                    NamespaceEndpoint::B => 1,
+                };
+                let baseline = baselines[index]
+                    .take()
+                    .ok_or(crate::network::NetworkError::Inconsistent)?;
+                baseline.verify_pristine_rollback(self)
+            })
+            .map_err(|error| match error {
+                NamespaceVisitError::Namespace(source) => NamespacePinsNetworkProofError::Mount(
+                    namespace_pin_error("visit rolled-back network namespace", source),
+                ),
+                NamespaceVisitError::Visitor(source) => {
+                    NamespacePinsNetworkProofError::Network(source)
+                }
+            })?;
+        if baselines.iter().any(Option::is_some) {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
         self.verify_authorized_namespace_pins()
             .map_err(NamespacePinsNetworkProofError::Mount)
     }
@@ -314,6 +411,140 @@ impl PrivateMounts<AuthorizedNamespacePins> {
         .map_err(|source| hard_error("verify reversed nsfs mount table", source))?;
         authorized.verify_authorized_private_run()?;
         Ok(authorized)
+    }
+}
+
+impl PrivateMounts<AuthorizedVethPairs> {
+    /// Reprove private mounts, both live nsfs pins, and both retained veth pairs.
+    pub(crate) fn verify_authorized_veth_pairs(&self) -> Result<(), PrivateMountSetupError> {
+        self.run_state
+            .verify()
+            .map_err(|source| veth_pair_error("verify authorized veth pairs", source))?;
+        let mountinfo = self.observe_visible_private_mounts(false)?;
+        verify_authorized_namespace_mountinfo(
+            &self.baseline_mountinfo,
+            &mountinfo,
+            self.ids,
+            self.run_state.mount_ids(),
+            self.run_state.mount_point_bytes(),
+        )
+        .map_err(|source| hard_error("verify veth-backed nsfs mount table", source))?;
+        self.run_state
+            .verify()
+            .map_err(|source| veth_pair_error("reverify authorized veth pairs", source))
+    }
+
+    /// Prove the exact parent/A/B link deltas and reobserve all three active states.
+    pub(crate) fn prove_exact_veth_pairs(
+        &self,
+        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let pairs = self.run_state.fixed_pairs();
+        let expectations = [
+            crate::network::ExpectedVethPair::new(
+                pairs[0].parent_name(),
+                pairs[0].parent_ifindex(),
+                pairs[0].peer_ifindex(),
+                pairs[0].target_namespace_identity(),
+            )
+            .map_err(NamespacePinsNetworkProofError::Network)?,
+            crate::network::ExpectedVethPair::new(
+                pairs[1].parent_name(),
+                pairs[1].parent_ifindex(),
+                pairs[1].peer_ifindex(),
+                pairs[1].target_namespace_identity(),
+            )
+            .map_err(NamespacePinsNetworkProofError::Network)?,
+        ];
+        let parent_observation = parent_baseline
+            .observe_exact_veth_parent(self, [&expectations[0], &expectations[1]])
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+        let mut endpoint_observations = [None, None];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = match endpoint {
+                    NamespaceEndpoint::A => 0,
+                    NamespaceEndpoint::B => 1,
+                };
+                if endpoint_observations[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                endpoint_observations[index] = Some(
+                    endpoint_baselines[index]
+                        .observe_exact_veth_endpoint(self, &expectations[index])?,
+                );
+                Ok(())
+            })
+            .map_err(|error| map_veth_visit_error("observe exact endpoint veth delta", error))?;
+        let [Some(alpha), Some(omega)] = &endpoint_observations else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        };
+        crate::network::verify_exact_veth_pair_observations(&parent_observation, [alpha, omega])
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+        parent_observation
+            .verify(self)
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+
+        let mut reverified = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = match endpoint {
+                    NamespaceEndpoint::A => 0,
+                    NamespaceEndpoint::B => 1,
+                };
+                if reverified[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                endpoint_observations[index]
+                    .as_ref()
+                    .ok_or(crate::network::NetworkError::Inconsistent)?
+                    .verify(self)?;
+                reverified[index] = true;
+                Ok(())
+            })
+            .map_err(|error| map_veth_visit_error("reverify exact endpoint veth delta", error))?;
+        if reverified != [true, true] {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
+        self.verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+
+    /// Delete B then A and recover the unchanged live namespace-pin owner.
+    pub(crate) fn rollback_fixed_veth_pairs(
+        self,
+    ) -> Result<PrivateMounts<AuthorizedNamespacePins>, PrivateMountSetupError> {
+        self.verify_authorized_veth_pairs()?;
+        let PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        } = self;
+        let run_state = run_state
+            .rollback()
+            .map_err(|source| veth_pair_error("roll back fixed veth pairs", source))?;
+        let pinned = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        };
+        pinned.verify_authorized_namespace_pins()?;
+        Ok(pinned)
     }
 }
 
@@ -1394,6 +1625,22 @@ fn namespace_pin_error(
     source: NamespacePinError,
 ) -> PrivateMountSetupError {
     hard_error(operation, io::Error::other(source))
+}
+
+fn veth_pair_error(operation: &'static str, source: VethPairError) -> PrivateMountSetupError {
+    hard_error(operation, io::Error::other(source))
+}
+
+fn map_veth_visit_error(
+    operation: &'static str,
+    error: NamespaceVisitError<crate::network::NetworkError>,
+) -> NamespacePinsNetworkProofError {
+    match error {
+        NamespaceVisitError::Namespace(source) => {
+            NamespacePinsNetworkProofError::Mount(namespace_pin_error(operation, source))
+        }
+        NamespaceVisitError::Visitor(source) => NamespacePinsNetworkProofError::Network(source),
+    }
 }
 
 fn invalid_data(message: &'static str) -> io::Error {
