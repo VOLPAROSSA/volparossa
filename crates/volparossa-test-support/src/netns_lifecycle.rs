@@ -1086,9 +1086,11 @@ pub enum LifecycleEofDisposition {
 
 /// Affine proof that a valid, same-run `GO` was consumed by the inner sandbox.
 ///
-/// The token is intentionally neither `Clone` nor publicly constructible. It is
-/// consumed by [`InnerLifecycleState::topology_ready`], preventing a second
-/// topology mutation from the same authorization.
+/// The token is intentionally neither `Clone` nor publicly constructible. A
+/// trusted mutation owner must consume it exactly once. The complete lifecycle
+/// consumes it through [`InnerLifecycleState::topology_ready`]; bounded earlier
+/// implementation slices may instead retain it inside their affine owner until
+/// full rollback, without minting a second authorization.
 #[derive(Debug)]
 pub struct MutationAuthorization {
     run_id: RunId,

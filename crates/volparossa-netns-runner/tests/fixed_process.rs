@@ -1,4 +1,4 @@
-//! Real-process regressions for the fixed pre-`GO` isolation supervisor boundary.
+//! Real-process regressions for the fixed bounded isolation-supervisor boundary.
 
 use std::{
     fs,
@@ -97,7 +97,7 @@ fn fixed_run_is_blocked_reaped_and_ignores_command_environment() {
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
     assert!(
         stderr
-            == "BLOCKED: the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; GO was never emitted, no network-topology mutation occurred, and no network-object cleanup, A14, A15, or acceptance evidence was produced.\n"
+            == "BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized descriptor-relative private-run roots and two empty namespace slots; PID 1 proved and removed every created object in exact reverse order, emitted one rollback-complete checkpoint, and the outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap. No namespace pin, network-topology object, TOPOLOGY_READY, A14, A15, or acceptance evidence was produced.\n"
             || stderr
                 == "BLOCKED: anonymous namespaces, exact ID mappings, and a self-reexecuted PID 1 were verified, but kernel policy denied the fixed private-mount setup; no BOOTSTRAP_READY or GO was emitted.\n"
             || stderr
@@ -231,7 +231,7 @@ fn preview_and_argument_surface_are_exact() {
     assert!(preview.status.success());
     assert_eq!(
         String::from_utf8(preview.stdout).expect("UTF-8 preview"),
-        "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY are implemented; GO, every network-topology mutation, network-object cleanup, A14, A15, and acceptance evidence remain blocked.\n"
+        "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, one canonical GO, and descriptor-relative private-run roots and empty namespace slots with exact reverse rollback are implemented; namespace pins, network-topology objects, TOPOLOGY_READY, A14, A15, and acceptance evidence remain blocked.\n"
     );
     assert!(preview.stderr.is_empty());
 

@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         }
         Some(argument) if argument == OsStr::new(PREVIEW_ARGUMENT) => {
             println!(
-                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY are implemented; GO, every network-topology mutation, network-object cleanup, A14, A15, and acceptance evidence remain blocked."
+                "VOLPAROSSA fixed supervisor preview: anonymous namespace bootstrap, exact UID/GID mapping, exact self-reexec PID-1 proof, private mounts, fixed pidfd-to-signalfd supervision, the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, one canonical GO, and descriptor-relative private-run roots and empty namespace slots with exact reverse rollback are implemented; namespace pins, network-topology objects, TOPOLOGY_READY, A14, A15, and acceptance evidence remain blocked."
             );
             ExitCode::SUCCESS
         }
@@ -55,15 +55,15 @@ fn main() -> ExitCode {
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
-            Ok(LifecycleOutcome::BlockedAfterBootstrapReadyProof) => {
+            Ok(LifecycleOutcome::BlockedAfterAuthorizedMutationRollback) => {
                 eprintln!(
-                    "BLOCKED: the exact new-netns RTNL baseline, a descriptor-anchored stable canonical IPv4 ip_forward value, zero nftables tables bracketed by unchanged generation 1, and one pinned BOOTSTRAP_READY were verified before the fixed pidfd-to-PID1-signalfd TERM, pre-GO EOF, and exact reap; GO was never emitted, no network-topology mutation occurred, and no network-object cleanup, A14, A15, or acceptance evidence was produced."
+                    "BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized descriptor-relative private-run roots and two empty namespace slots; PID 1 proved and removed every created object in exact reverse order, emitted one rollback-complete checkpoint, and the outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap. No namespace pin, network-topology object, TOPOLOGY_READY, A14, A15, or acceptance evidence was produced."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }
             Ok(LifecycleOutcome::BlockedByManagedSignal) => {
                 eprintln!(
-                    "BLOCKED: a managed outer termination signal triggered bounded fail-closed containment before GO or any network-topology mutation."
+                    "BLOCKED: a managed outer termination signal triggered bounded fail-closed containment; no topology-completion, cleanup-evidence, or acceptance claim was made."
                 );
                 ExitCode::from(BLOCKED_EXIT_CODE)
             }

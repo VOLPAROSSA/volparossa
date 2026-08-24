@@ -17,6 +17,8 @@ const PRIVATE_MOUNTS_VERIFIED_HEADER: &str =
     "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PRIVATE_MOUNTS_VERIFIED";
 const PRIVATE_MOUNTS_UNAVAILABLE_HEADER: &str =
     "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PRIVATE_MOUNTS_UNAVAILABLE";
+const MUTATION_ROLLBACK_COMPLETE_HEADER: &str =
+    "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 MUTATION_ROLLBACK_COMPLETE";
 const PID1_SIGNAL_OBSERVED_HEADER: &str =
     "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_SIGNAL_OBSERVED";
 const PID1_REAPED_HEADER: &str = "VOLPAROSSA_NETNS_BOOTSTRAP_CONTROL_V1 PID1_REAPED";
@@ -81,6 +83,7 @@ enum RecordKind {
     PrivateMountsReady,
     PrivateMountsVerified,
     PrivateMountsUnavailable,
+    MutationRollbackComplete,
     Pid1SignalObserved,
     Pid1Reaped,
 }
@@ -97,6 +100,7 @@ impl RecordKind {
             Self::PrivateMountsReady => PRIVATE_MOUNTS_READY_HEADER,
             Self::PrivateMountsVerified => PRIVATE_MOUNTS_VERIFIED_HEADER,
             Self::PrivateMountsUnavailable => PRIVATE_MOUNTS_UNAVAILABLE_HEADER,
+            Self::MutationRollbackComplete => MUTATION_ROLLBACK_COMPLETE_HEADER,
             Self::Pid1SignalObserved => PID1_SIGNAL_OBSERVED_HEADER,
             Self::Pid1Reaped => PID1_REAPED_HEADER,
         }
@@ -113,6 +117,7 @@ impl RecordKind {
             PRIVATE_MOUNTS_READY_HEADER => Ok(Self::PrivateMountsReady),
             PRIVATE_MOUNTS_VERIFIED_HEADER => Ok(Self::PrivateMountsVerified),
             PRIVATE_MOUNTS_UNAVAILABLE_HEADER => Ok(Self::PrivateMountsUnavailable),
+            MUTATION_ROLLBACK_COMPLETE_HEADER => Ok(Self::MutationRollbackComplete),
             PID1_SIGNAL_OBSERVED_HEADER => Ok(Self::Pid1SignalObserved),
             PID1_REAPED_HEADER => Ok(Self::Pid1Reaped),
             _ => Err(BootstrapControlError::FrameShape),
@@ -127,6 +132,7 @@ impl RecordKind {
                 | Self::PrivateMountsReady
                 | Self::PrivateMountsVerified
                 | Self::PrivateMountsUnavailable
+                | Self::MutationRollbackComplete
                 | Self::Pid1SignalObserved
                 | Self::Pid1Reaped
         )
@@ -345,7 +351,9 @@ pub(crate) enum OuterBootstrapPhase {
     AwaitingPrivateMountsReady,
     /// Private-mount readiness was accepted; its verification may be emitted once.
     PrivateMountsReady,
-    /// Private-mount verification was emitted; exact managed-signal observation is outstanding.
+    /// Private mounts were verified; mutation rollback completion is outstanding.
+    AwaitingMutationRollbackComplete,
+    /// Mutation rollback completion was accepted; exact managed-signal observation is outstanding.
     AwaitingSignalObserved,
     /// Exact managed-signal observation was accepted; PID-1 reaping is outstanding.
     AwaitingPid1Reaped,
@@ -509,8 +517,32 @@ impl OuterBootstrapControl {
         let encoded =
             ControlRecord::for_pid(RecordKind::PrivateMountsVerified, self.run_id.clone(), pid)
                 .encode()?;
-        self.phase = OuterBootstrapPhase::AwaitingSignalObserved;
+        self.phase = OuterBootstrapPhase::AwaitingMutationRollbackComplete;
         Ok(encoded)
+    }
+
+    /// Accept the launcher's sole rollback-complete bridge for the retained PID.
+    ///
+    /// This records only an internal rollback checkpoint; it does not assert topology readiness,
+    /// lifecycle completion, or acceptance evidence.
+    pub(crate) fn accept_mutation_rollback_complete(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), BootstrapControlError> {
+        if self.phase != OuterBootstrapPhase::AwaitingMutationRollbackComplete {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        let expected_pid = self
+            .pid1_pid
+            .ok_or(BootstrapControlError::StateTransition)?;
+        accept_pid_record(
+            bytes,
+            RecordKind::MutationRollbackComplete,
+            &self.run_id,
+            Some(expected_pid),
+        )?;
+        self.phase = OuterBootstrapPhase::AwaitingSignalObserved;
+        Ok(())
     }
 
     /// Accept the launcher's sole signal observation for the retained PID and expected signal.
@@ -574,7 +606,9 @@ pub(crate) enum LauncherBootstrapPhase {
     PrivateMountsReadyPending,
     /// Mount readiness was emitted; the outer verification acknowledgement is outstanding.
     AwaitingPrivateMountsVerified,
-    /// Positive mount verification completed; managed-signal observation is outstanding.
+    /// Private mounts were verified; the rollback-complete bridge may be emitted once.
+    MutationRollbackCompletePending,
+    /// Mutation rollback completion was emitted; managed-signal observation is outstanding.
     AwaitingSignalObserved,
     /// One exact mount-result branch completed; PID-1 reap may be emitted once.
     Pid1ReapPending,
@@ -740,8 +774,32 @@ impl LauncherBootstrapControl {
             &self.run_id,
             Some(expected_pid),
         )?;
-        self.phase = LauncherBootstrapPhase::AwaitingSignalObserved;
+        self.phase = LauncherBootstrapPhase::MutationRollbackCompletePending;
         Ok(())
+    }
+
+    /// Emit the sole rollback-complete bridge for the retained PID.
+    ///
+    /// This records only an internal rollback checkpoint; it does not assert topology readiness,
+    /// lifecycle completion, or acceptance evidence.
+    pub(crate) fn mutation_rollback_complete(
+        &mut self,
+        pid: u32,
+    ) -> Result<String, BootstrapControlError> {
+        if self.phase != LauncherBootstrapPhase::MutationRollbackCompletePending {
+            return Err(BootstrapControlError::StateTransition);
+        }
+        if self.pid1_pid != Some(pid) {
+            return Err(BootstrapControlError::PidMismatch);
+        }
+        let encoded = ControlRecord::for_pid(
+            RecordKind::MutationRollbackComplete,
+            self.run_id.clone(),
+            pid,
+        )
+        .encode()?;
+        self.phase = LauncherBootstrapPhase::AwaitingSignalObserved;
+        Ok(encoded)
     }
 
     /// Emit the sole managed-signal observation for the retained PID.
@@ -926,6 +984,57 @@ mod tests {
             .expect("launcher accepts pin record");
     }
 
+    fn advance_to_private_mounts_after_oversized_rejections(
+        oversized: &[u8],
+    ) -> (OuterBootstrapControl, LauncherBootstrapControl) {
+        let mut outer = OuterBootstrapControl::new(run_id());
+        assert_eq!(
+            outer.accept_namespaces_created(oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingNamespacesCreated
+        );
+
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        let _ = launcher.namespaces_created().expect("namespaces record");
+        assert_eq!(
+            launcher.accept_mappings_installed(oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::AwaitingMappingsInstalled
+        );
+
+        let mut outer = OuterBootstrapControl::new(run_id());
+        let mut launcher = LauncherBootstrapControl::new(run_id());
+        complete_mapping_exchange(&mut outer, &mut launcher);
+        assert_eq!(
+            outer.accept_pid1_spawned(oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
+
+        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawn record");
+        outer
+            .accept_pid1_spawned(spawned.as_bytes())
+            .expect("matching spawn record");
+        let _ = outer.pid1_pinned(PID1_PID).expect("pin record");
+        assert_eq!(
+            launcher.accept_pid1_pinned(oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
+
+        let pinned = pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID);
+        launcher
+            .accept_pid1_pinned(pinned.as_bytes())
+            .expect("matching pin record");
+        (outer, launcher)
+    }
+
     #[test]
     fn every_record_round_trips_in_exact_canonical_lf_format() {
         for kind in [
@@ -951,6 +1060,7 @@ mod tests {
             RecordKind::PrivateMountsReady,
             RecordKind::PrivateMountsVerified,
             RecordKind::PrivateMountsUnavailable,
+            RecordKind::MutationRollbackComplete,
         ] {
             let record = ControlRecord::for_pid(kind, run_id(), PID1_PID);
             let canonical = record.encode().expect("canonical PID encoding");
@@ -999,67 +1109,11 @@ mod tests {
     fn complete_affine_exchange_has_exact_direction_and_order() {
         let mut outer = OuterBootstrapControl::new(run_id());
         let mut launcher = LauncherBootstrapControl::new(run_id());
-        assert_eq!(
-            outer.phase(),
-            OuterBootstrapPhase::AwaitingNamespacesCreated
-        );
-        assert_eq!(
-            launcher.phase(),
-            LauncherBootstrapPhase::NamespacesCreatedPending
-        );
-
-        let namespaces = launcher.namespaces_created().expect("namespaces record");
-        assert_eq!(
-            launcher.phase(),
-            LauncherBootstrapPhase::AwaitingMappingsInstalled
-        );
-        outer
-            .accept_namespaces_created(namespaces.as_bytes())
-            .expect("outer accepts namespaces");
-        assert_eq!(outer.phase(), OuterBootstrapPhase::NamespacesCreated);
-
-        let installed = outer.mappings_installed().expect("mapping record");
-        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingMappingsVerified);
-        launcher
-            .accept_mappings_installed(installed.as_bytes())
-            .expect("launcher accepts mapping record");
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::MappingsInstalled);
-
-        let verified = launcher.mappings_verified().expect("verified record");
-        assert_eq!(
-            launcher.phase(),
-            LauncherBootstrapPhase::AwaitingMappingsPinned
-        );
-        outer
-            .accept_mappings_verified(verified.as_bytes())
-            .expect("outer accepts verification");
-        assert_eq!(outer.phase(), OuterBootstrapPhase::MappingsVerified);
-
-        let mappings_pinned = outer.mappings_pinned().expect("mapping pin record");
-        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
-        launcher
-            .accept_mappings_pinned(mappings_pinned.as_bytes())
-            .expect("launcher accepts mapping pin");
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::Pid1SpawnPending);
-
-        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawned record");
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
-        assert_eq!(
-            outer
-                .accept_pid1_spawned(spawned.as_bytes())
-                .expect("outer accepts spawned PID"),
-            PID1_PID
-        );
-        assert_eq!(outer.phase(), OuterBootstrapPhase::Pid1Spawned);
-
-        let pinned = outer.pid1_pinned(PID1_PID).expect("pinned record");
+        complete_pid1_pin_exchange(&mut outer, &mut launcher);
         assert_eq!(
             outer.phase(),
             OuterBootstrapPhase::AwaitingPrivateMountsReady
         );
-        launcher
-            .accept_pid1_pinned(pinned.as_bytes())
-            .expect("launcher accepts pinned PID");
         assert_eq!(
             launcher.phase(),
             LauncherBootstrapPhase::PrivateMountsReadyPending
@@ -1080,14 +1134,33 @@ mod tests {
         let mounts_verified = outer
             .private_mounts_verified(PID1_PID)
             .expect("private mounts verified record");
-        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingMutationRollbackComplete
+        );
         launcher
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("launcher accepts private mounts verification");
         assert_eq!(
             launcher.phase(),
+            LauncherBootstrapPhase::MutationRollbackCompletePending
+        );
+
+        let rollback_complete = launcher
+            .mutation_rollback_complete(PID1_PID)
+            .expect("mutation rollback checkpoint");
+        assert_eq!(
+            rollback_complete,
+            format!("{MUTATION_ROLLBACK_COMPLETE_HEADER}\nrun_id={RUN}\npid={PID1_PID}\n")
+        );
+        assert_eq!(
+            launcher.phase(),
             LauncherBootstrapPhase::AwaitingSignalObserved
         );
+        outer
+            .accept_mutation_rollback_complete(rollback_complete.as_bytes())
+            .expect("outer accepts mutation rollback checkpoint");
+        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingSignalObserved);
 
         let signal_observed = launcher
             .pid1_signal_observed(PID1_PID, ManagedSignal::Term)
@@ -1304,6 +1377,8 @@ mod tests {
         let mounts_verified = pid_encoded(RecordKind::PrivateMountsVerified, run_id(), PID1_PID);
         let mounts_unavailable =
             pid_encoded(RecordKind::PrivateMountsUnavailable, run_id(), PID1_PID);
+        let rollback_complete =
+            pid_encoded(RecordKind::MutationRollbackComplete, run_id(), PID1_PID);
         let signal_observed = signal_observed_encoded(run_id(), PID1_PID, ManagedSignal::Term);
         let reaped = reaped_encoded(run_id(), PID1_PID);
 
@@ -1312,6 +1387,7 @@ mod tests {
             &mounts_ready,
             &mounts_verified,
             &mounts_unavailable,
+            &rollback_complete,
             &reaped,
             &verified,
         ] {
@@ -1332,6 +1408,7 @@ mod tests {
             &mounts_ready,
             &mounts_verified,
             &mounts_unavailable,
+            &rollback_complete,
             &reaped,
             &installed,
         ] {
@@ -1350,6 +1427,7 @@ mod tests {
             &pinned,
             &mounts_verified,
             &mounts_unavailable,
+            &rollback_complete,
             &reaped,
             &verified,
         ] {
@@ -1377,6 +1455,7 @@ mod tests {
             &pinned,
             &mounts_ready,
             &mounts_unavailable,
+            &rollback_complete,
             &reaped,
             &installed,
         ] {
@@ -1399,6 +1478,38 @@ mod tests {
             &mounts_ready,
             &mounts_verified,
             &mounts_unavailable,
+            &signal_observed,
+            &reaped,
+            &verified,
+        ] {
+            assert_eq!(
+                outer.accept_mutation_rollback_complete(wrong.as_bytes()),
+                Err(BootstrapControlError::UnexpectedRecord)
+            );
+            assert_eq!(
+                outer.phase(),
+                OuterBootstrapPhase::AwaitingMutationRollbackComplete
+            );
+        }
+        assert_eq!(
+            launcher.pid1_signal_observed(PID1_PID, ManagedSignal::Term),
+            Err(BootstrapControlError::StateTransition)
+        );
+        let emitted_rollback = launcher
+            .mutation_rollback_complete(PID1_PID)
+            .expect("matching rollback checkpoint");
+        assert_eq!(emitted_rollback, rollback_complete);
+        outer
+            .accept_mutation_rollback_complete(emitted_rollback.as_bytes())
+            .expect("matching rollback-checkpoint acceptance");
+
+        for wrong in [
+            &spawned,
+            &pinned,
+            &mounts_ready,
+            &mounts_verified,
+            &mounts_unavailable,
+            &rollback_complete,
             &reaped,
             &verified,
         ] {
@@ -1422,6 +1533,7 @@ mod tests {
             &mounts_ready,
             &mounts_verified,
             &mounts_unavailable,
+            &rollback_complete,
             &signal_observed,
             &verified,
         ] {
@@ -1529,6 +1641,26 @@ mod tests {
         launcher
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("accept matching mounts-verified record");
+
+        let wrong_rollback = pid_encoded(
+            RecordKind::MutationRollbackComplete,
+            other_run_id(),
+            PID1_PID,
+        );
+        assert_eq!(
+            outer.accept_mutation_rollback_complete(wrong_rollback.as_bytes()),
+            Err(BootstrapControlError::RunIdMismatch)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingMutationRollbackComplete
+        );
+        let rollback = launcher
+            .mutation_rollback_complete(PID1_PID)
+            .expect("matching rollback checkpoint");
+        outer
+            .accept_mutation_rollback_complete(rollback.as_bytes())
+            .expect("accept matching rollback checkpoint");
 
         let wrong_observation =
             signal_observed_encoded(other_run_id(), PID1_PID, ManagedSignal::Term);
@@ -1651,6 +1783,30 @@ mod tests {
         launcher
             .accept_private_mounts_verified(verified.as_bytes())
             .expect("matching mount-verified acceptance");
+
+        assert_eq!(
+            launcher.mutation_rollback_complete(OTHER_PID),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            launcher.phase(),
+            LauncherBootstrapPhase::MutationRollbackCompletePending
+        );
+        let wrong_rollback = pid_encoded(RecordKind::MutationRollbackComplete, run_id(), OTHER_PID);
+        assert_eq!(
+            outer.accept_mutation_rollback_complete(wrong_rollback.as_bytes()),
+            Err(BootstrapControlError::PidMismatch)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingMutationRollbackComplete
+        );
+        let rollback = launcher
+            .mutation_rollback_complete(PID1_PID)
+            .expect("matching rollback checkpoint");
+        outer
+            .accept_mutation_rollback_complete(rollback.as_bytes())
+            .expect("matching rollback-checkpoint acceptance");
 
         assert_eq!(
             launcher.pid1_signal_observed(OTHER_PID, ManagedSignal::Term),
@@ -1822,6 +1978,12 @@ mod tests {
             Err(BootstrapControlError::StateTransition)
         );
         assert_eq!(
+            outer.accept_mutation_rollback_complete(
+                pid_encoded(RecordKind::MutationRollbackComplete, run_id(), PID1_PID,).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
             launcher.accept_pid1_pinned(
                 pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID).as_bytes()
             ),
@@ -1847,6 +2009,10 @@ mod tests {
             launcher.accept_private_mounts_verified(
                 pid_encoded(RecordKind::PrivateMountsVerified, run_id(), PID1_PID).as_bytes()
             ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        assert_eq!(
+            launcher.mutation_rollback_complete(PID1_PID),
             Err(BootstrapControlError::StateTransition)
         );
 
@@ -1934,7 +2100,28 @@ mod tests {
         );
         assert_eq!(
             launcher.phase(),
-            LauncherBootstrapPhase::AwaitingSignalObserved
+            LauncherBootstrapPhase::MutationRollbackCompletePending
+        );
+        assert_eq!(
+            outer.accept_pid1_signal_observed(
+                signal_observed_encoded(run_id(), PID1_PID, ManagedSignal::Term).as_bytes(),
+                ManagedSignal::Term
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
+        let rollback = launcher
+            .mutation_rollback_complete(PID1_PID)
+            .expect("first rollback-checkpoint emission");
+        assert_eq!(
+            launcher.mutation_rollback_complete(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
+        outer
+            .accept_mutation_rollback_complete(rollback.as_bytes())
+            .expect("first rollback-checkpoint acceptance");
+        assert_eq!(
+            outer.accept_mutation_rollback_complete(rollback.as_bytes()),
+            Err(BootstrapControlError::StateTransition)
         );
         let wrong_signal = signal_observed_encoded(run_id(), PID1_PID, ManagedSignal::Hup);
         assert_eq!(
@@ -2018,6 +2205,10 @@ mod tests {
             ),
             Err(BootstrapControlError::StateTransition)
         );
+        assert_eq!(
+            launcher.mutation_rollback_complete(PID1_PID),
+            Err(BootstrapControlError::StateTransition)
+        );
 
         let wrong_run = pid_encoded(
             RecordKind::PrivateMountsUnavailable,
@@ -2055,6 +2246,12 @@ mod tests {
             outer.private_mounts_verified(PID1_PID),
             Err(BootstrapControlError::StateTransition)
         );
+        assert_eq!(
+            outer.accept_mutation_rollback_complete(
+                pid_encoded(RecordKind::MutationRollbackComplete, run_id(), PID1_PID).as_bytes()
+            ),
+            Err(BootstrapControlError::StateTransition)
+        );
 
         let reaped = launcher
             .pid1_reaped(PID1_PID, PID1_REAPED_STATUS)
@@ -2074,51 +2271,8 @@ mod tests {
             Err(BootstrapControlError::FrameTooLarge)
         );
 
-        let mut outer = OuterBootstrapControl::new(run_id());
-        assert_eq!(
-            outer.accept_namespaces_created(&oversized),
-            Err(BootstrapControlError::FrameTooLarge)
-        );
-        assert_eq!(
-            outer.phase(),
-            OuterBootstrapPhase::AwaitingNamespacesCreated
-        );
-
-        let mut launcher = LauncherBootstrapControl::new(run_id());
-        let _ = launcher.namespaces_created().expect("namespaces record");
-        assert_eq!(
-            launcher.accept_mappings_installed(&oversized),
-            Err(BootstrapControlError::FrameTooLarge)
-        );
-        assert_eq!(
-            launcher.phase(),
-            LauncherBootstrapPhase::AwaitingMappingsInstalled
-        );
-
-        let mut outer = OuterBootstrapControl::new(run_id());
-        let mut launcher = LauncherBootstrapControl::new(run_id());
-        complete_mapping_exchange(&mut outer, &mut launcher);
-        assert_eq!(
-            outer.accept_pid1_spawned(&oversized),
-            Err(BootstrapControlError::FrameTooLarge)
-        );
-        assert_eq!(outer.phase(), OuterBootstrapPhase::AwaitingPid1Spawned);
-
-        let spawned = launcher.pid1_spawned(PID1_PID).expect("spawn record");
-        outer
-            .accept_pid1_spawned(spawned.as_bytes())
-            .expect("matching spawn record");
-        let _ = outer.pid1_pinned(PID1_PID).expect("pin record");
-        assert_eq!(
-            launcher.accept_pid1_pinned(&oversized),
-            Err(BootstrapControlError::FrameTooLarge)
-        );
-        assert_eq!(launcher.phase(), LauncherBootstrapPhase::AwaitingPid1Pinned);
-
-        let pinned = pid_encoded(RecordKind::Pid1Pinned, run_id(), PID1_PID);
-        launcher
-            .accept_pid1_pinned(pinned.as_bytes())
-            .expect("matching pin record");
+        let (mut outer, mut launcher) =
+            advance_to_private_mounts_after_oversized_rejections(&oversized);
         assert_eq!(
             outer.accept_private_mounts_ready(&oversized),
             Err(BootstrapControlError::FrameTooLarge)
@@ -2152,6 +2306,20 @@ mod tests {
         launcher
             .accept_private_mounts_verified(mounts_verified.as_bytes())
             .expect("matching mount-verified record");
+        assert_eq!(
+            outer.accept_mutation_rollback_complete(&oversized),
+            Err(BootstrapControlError::FrameTooLarge)
+        );
+        assert_eq!(
+            outer.phase(),
+            OuterBootstrapPhase::AwaitingMutationRollbackComplete
+        );
+        let rollback = launcher
+            .mutation_rollback_complete(PID1_PID)
+            .expect("matching rollback-checkpoint record");
+        outer
+            .accept_mutation_rollback_complete(rollback.as_bytes())
+            .expect("matching rollback-checkpoint acceptance");
         assert_eq!(
             outer.accept_pid1_signal_observed(&oversized, ManagedSignal::Term),
             Err(BootstrapControlError::FrameTooLarge)

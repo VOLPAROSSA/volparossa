@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     fs::File,
     io::{self, Read as _},
-    marker::PhantomData,
     mem::MaybeUninit,
     os::fd::OwnedFd,
 };
@@ -21,6 +20,9 @@ use rustix::{
     },
 };
 use thiserror::Error;
+use volparossa_test_support::MutationAuthorization;
+
+use crate::topology::ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError};
 
 /// Exact byte ceiling for one kernel mount-table observation.
 pub(crate) const MAX_PRIVATE_MOUNTINFO_BYTES: usize = 1024 * 1024;
@@ -77,20 +79,20 @@ impl PrivateMountSetupError {
 ///
 /// The retained root and visible mount descriptors pin the measured objects.
 /// Reverification reopens both fixed paths below the pinned root and requires
-/// their visible mount IDs to remain unchanged. The state parameter marks the
-/// current proof as pristine and reserves a compile-time transition boundary;
-/// this slice deliberately defines no post-`GO` successor yet.
+/// their visible mount IDs to remain unchanged. The state parameter enforces
+/// the affine transition from an empty private `/run` into the bounded
+/// post-`GO` root-and-slot transaction and back to the pristine state.
 pub(crate) struct PrivateMounts<RunState = PristineRun> {
     root: OwnedFd,
     run_pin: OwnedFd,
     proc_pin: OwnedFd,
     root_mount_id: u64,
     ids: PrivateMountIds,
-    run_state: PhantomData<RunState>,
+    run_state: RunState,
 }
 
 /// Type-level proof that the private `/run` directory was observed empty.
-pub(crate) enum PristineRun {}
+pub(crate) struct PristineRun;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProcRecordIdentity {
@@ -121,6 +123,90 @@ impl Ipv4ForwardingRecordSnapshot {
 impl PrivateMounts<PristineRun> {
     /// Repeat the complete local mount-table and procfs proof.
     pub(crate) fn verify(&self) -> Result<(), PrivateMountSetupError> {
+        self.verify_mounts(true)
+    }
+
+    /// Consume one pristine mount owner and the affine `GO` authorization to
+    /// create exactly one run-bound private directory transaction.
+    pub(crate) fn authorize_private_run(
+        self,
+        authorization: MutationAuthorization,
+    ) -> Result<PrivateMounts<AuthorizedPrivateRun>, PrivateMountSetupError> {
+        self.verify()?;
+        let state = AuthorizedPrivateRun::stage(&self.run_pin, authorization)
+            .map_err(|source| private_run_error("create authorized private-run roots", source))?;
+        let authorized = self.with_run_state(state);
+        authorized.verify_authorized_private_run()?;
+        Ok(authorized)
+    }
+
+    /// Read the fixed namespace-local IPv4-forwarding record through the retained procfs pin.
+    pub(crate) fn read_ipv4_forwarding_record(
+        &self,
+    ) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
+        read_ipv4_forwarding_record_at(&self.proc_pin, self.ids.proc_mount_id)
+    }
+}
+
+impl PrivateMounts<AuthorizedPrivateRun> {
+    /// Reprove the private mounts and the exact post-authorization run layout.
+    pub(crate) fn verify_authorized_private_run(&self) -> Result<(), PrivateMountSetupError> {
+        self.verify_mounts(false)?;
+        self.run_state
+            .verify()
+            .map_err(|source| private_run_error("verify authorized private-run roots", source))
+    }
+
+    /// Consume the authorized state, drop its internal token, reverse every
+    /// owned creation, and return an exactly pristine mount owner.
+    pub(crate) fn rollback_private_run(
+        self,
+    ) -> Result<PrivateMounts<PristineRun>, PrivateMountSetupError> {
+        let PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            run_state,
+        } = self;
+        run_state.rollback().map_err(|source| {
+            private_run_error("roll back authorized private-run roots", source)
+        })?;
+        let pristine = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            run_state: PristineRun,
+        };
+        pristine.verify()?;
+        Ok(pristine)
+    }
+}
+
+impl<RunState> PrivateMounts<RunState> {
+    fn with_run_state<NextState>(self, run_state: NextState) -> PrivateMounts<NextState> {
+        let Self {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            run_state: _,
+        } = self;
+        PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            run_state,
+        }
+    }
+
+    fn verify_mounts(&self, require_pristine_run: bool) -> Result<(), PrivateMountSetupError> {
         let root_stat = hard_rustix(
             "re-read pinned root mount identity",
             statx_fd(&self.root, StatxFlags::TYPE | StatxFlags::MNT_ID),
@@ -143,14 +229,12 @@ impl PrivateMounts<PristineRun> {
             ));
         }
 
-        verify_visible_private_mounts(&self.root, self.root_mount_id, self.ids)
-    }
-
-    /// Read the fixed namespace-local IPv4-forwarding record through the retained procfs pin.
-    pub(crate) fn read_ipv4_forwarding_record(
-        &self,
-    ) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
-        read_ipv4_forwarding_record_at(&self.proc_pin, self.ids.proc_mount_id)
+        verify_visible_private_mounts(
+            &self.root,
+            self.root_mount_id,
+            self.ids,
+            require_pristine_run,
+        )
     }
 }
 
@@ -255,7 +339,7 @@ pub(crate) fn setup_and_verify_private_mounts() -> Result<PrivateMounts, Private
         proc_pin: visible_proc,
         root_mount_id: targets.root_mount_id,
         ids,
-        run_state: PhantomData,
+        run_state: PristineRun,
     };
     mounts.verify()?;
     Ok(mounts)
@@ -426,6 +510,7 @@ fn verify_visible_private_mounts(
     root: &OwnedFd,
     expected_root_mount_id: u64,
     expected_ids: PrivateMountIds,
+    require_pristine_run: bool,
 ) -> Result<(), PrivateMountSetupError> {
     let run = hard_rustix(
         "open visible private /run",
@@ -448,7 +533,7 @@ fn verify_visible_private_mounts(
         ));
     }
 
-    verify_run_filesystem(&run)?;
+    verify_run_filesystem(&run, require_pristine_run)?;
     verify_proc_filesystem(&proc_before)?;
     verify_exact_proc_state(&proc_before)?;
     let mountinfo = read_proc_record(&proc_before, "1/mountinfo", MAX_PRIVATE_MOUNTINFO_BYTES)?;
@@ -476,7 +561,10 @@ fn verify_visible_private_mounts(
     verify_exact_proc_state(&proc_after)
 }
 
-fn verify_run_filesystem(run: &OwnedFd) -> Result<(), PrivateMountSetupError> {
+fn verify_run_filesystem(
+    run: &OwnedFd,
+    require_pristine_run: bool,
+) -> Result<(), PrivateMountSetupError> {
     let filesystem = hard_rustix("read private /run filesystem type", fstatfs(run))?;
     let metadata = hard_rustix(
         "read private /run metadata",
@@ -508,7 +596,10 @@ fn verify_run_filesystem(run: &OwnedFd) -> Result<(), PrivateMountSetupError> {
             invalid_data("private /run filesystem or root metadata is not exact"),
         ));
     }
-    hard_io("verify private /run is empty", verify_empty_directory(run))
+    if require_pristine_run {
+        hard_io("verify private /run is empty", verify_empty_directory(run))?;
+    }
+    Ok(())
 }
 
 fn verify_proc_filesystem(proc: &OwnedFd) -> Result<(), PrivateMountSetupError> {
@@ -973,6 +1064,13 @@ fn hard_error(operation: &'static str, source: io::Error) -> PrivateMountSetupEr
     PrivateMountSetupError::HardFailure { operation, source }
 }
 
+fn private_run_error(
+    operation: &'static str,
+    source: AuthorizedPrivateRunError,
+) -> PrivateMountSetupError {
+    hard_error(operation, io::Error::other(source))
+}
+
 fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -1042,7 +1140,7 @@ mod tests {
                 run_mount_id,
                 proc_mount_id,
             },
-            run_state: PhantomData,
+            run_state: PristineRun,
         };
 
         let first = mounts

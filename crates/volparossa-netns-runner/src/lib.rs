@@ -1,4 +1,4 @@
-//! Fixed pre-`GO` isolation supervisor substrate for the disposable acceptance runner.
+//! Fixed bounded isolation supervisor substrate for the disposable acceptance runner.
 //!
 //! The current executable provisions one fixed re-executed launcher over
 //! unnamed inherited IPC, creates anonymous user/mount/network namespaces,
@@ -10,10 +10,14 @@
 //! exact pristine RTNL baseline, pins a stable canonical IPv4-forwarding record,
 //! proves zero nftables tables bracketed by unchanged generation 1, and emits
 //! one namespace-bound `BOOTSTRAP_READY`. After matching that frame to its
-//! retained PID-1 pins, the outer delivers TERM through a retained pidfd; PID 1 consumes it through a
-//! fixed `signalfd` and returns one affine observation before exact PID-1 and
-//! launcher reaping. The slice deliberately stops before `GO`; it cannot emit
-//! acceptance evidence or create network topology.
+//! retained PID-1 pins, the outer issues one canonical `GO`. PID 1 consumes the
+//! affine authorization, creates and proves the fixed descriptor-relative
+//! private-run roots and two empty namespace slots, rolls every object back in
+//! reverse order, and reports one internal rollback checkpoint. The outer then
+//! independently re-proves empty private mounts before delivering TERM through
+//! a retained pidfd. PID 1 consumes it through a fixed `signalfd` before exact
+//! PID-1 and launcher reaping. The slice creates no namespace pin or network
+//! topology and cannot emit `TOPOLOGY_READY` or acceptance evidence.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
@@ -31,7 +35,6 @@ mod pid1;
 mod process;
 mod runner;
 mod signals;
-#[cfg(test)]
 mod topology;
 
 pub use process::{INTERNAL_CHILD_ARGUMENT, INTERNAL_PID_ONE_ARGUMENT};
