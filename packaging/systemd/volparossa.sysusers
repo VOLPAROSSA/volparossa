@@ -1,5 +1,8 @@
-# Type Name              ID GECOS                         Home                   Shell
-g      volparossa        -
-g      volparossa-users  -
-u      volparossa        -  "VOLPAROSSA system service" /var/lib/volparossa    /usr/sbin/nologin
-m      volparossa        volparossa-users
+# Type Name               ID GECOS                                Home                 Shell
+# Debian 13's systemd 257 `u!` form fully locks the isolated worker account.
+g      volparossa         -
+g      volparossa-users   -
+g      volparossa-worker  -
+u      volparossa         -  "VOLPAROSSA system service"        /var/lib/volparossa  /usr/sbin/nologin
+u!     volparossa-worker  -  "VOLPAROSSA isolated route worker" /nonexistent         /usr/sbin/nologin
+m      volparossa         volparossa-users

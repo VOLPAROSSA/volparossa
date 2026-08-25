@@ -23,10 +23,22 @@ The package refuses to build unless these release binaries exist after the Cargo
 - `/usr/libexec/volparossa/volparossa-helper`;
 - `/usr/libexec/volparossa/volparossa-mpquic`.
 
-The services are installed but not enabled. `volparossa` and `volparossa-users` system groups are
-created. The service account is a member of both; human operators who need the agent control socket
-must be added deliberately to `volparossa-users` and re-login. That group cannot access the helper
-socket, which is root-owned, group `volparossa`, mode 0660.
+The services are installed but not enabled. `volparossa`, `volparossa-users`, and
+`volparossa-worker` system groups are created. The service account is a member of the first two;
+human operators who need the agent control socket must be added deliberately to
+`volparossa-users` and re-login. The fully locked, no-login `volparossa-worker` account has only its
+same-name primary group and is never added to the `volparossa` service group. The operator group
+cannot access the helper socket, which is root-owned, group `volparossa`, mode 0660.
+Because `systemd-sysusers` never rewrites a pre-existing account, helper startup also reads the
+root-owned bounded passwd, group, nsswitch and shadow databases. It permits only the canonical
+`files` or `files systemd` account-source order, rejects local name/numeric-ID aliases, and requires
+name- and number-based NSS results plus initgroups to reproduce the local package identities
+exactly. The shadow metadata must prevent worker/agent mutation or broad access, and the unique live
+agent and worker entries must both have `!`-prefixed passwords; the worker additionally requires
+account-expiry field `1`, exactly matching Debian 13's account-wide `u!` lock. The service identities must not belong to the resolved live
+`shadow` group. Enterprise LDAP/SSS/NIS account sources are deliberately unsupported by this
+pre-alpha boundary and make helper startup fail closed. `volparossa doctor` reports the binding and
+lock check when run with sufficient access.
 
 The systemd units are deliberately strict candidates. They must pass `systemd-analyze security` and
 the complete Debian 13 namespace suite before release. `ProtectKernelTunables=no` on the helper is a

@@ -2,9 +2,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::CString,
     fs::{self, OpenOptions},
     io::{self, Read},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
@@ -13,6 +17,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::VerifyingKey;
+use nix::unistd::{Gid, Group, User, getgrouplist};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use volparossa_config::{Config, MptcpPathManager, RuntimeMode};
@@ -22,6 +27,7 @@ use volparossa_policy::{
     VerificationPolicy, verify_manifest,
 };
 use volparossa_quic::NATIVE_API_VERSION;
+use zeroize::Zeroizing;
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const MAX_KERNEL_CONFIG_BYTES: usize = 4 * 1024 * 1024;
@@ -29,10 +35,26 @@ const MAX_PROC_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SYSCTL_BYTES: usize = 4 * 1024;
 const MAX_TRUST_FILE_BYTES: usize = 64 * 1024;
 const MAX_UNIT_BYTES: usize = 64 * 1024;
+const MAX_SYSUSERS_BYTES: usize = 16 * 1024;
+const MAX_SHADOW_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_DETAIL_BYTES: usize = 512;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_MPQUIC_BINARY: &str = "/usr/libexec/volparossa/volparossa-mpquic";
+const DEFAULT_SYSUSERS_CONFIG: &str = "/usr/lib/sysusers.d/volparossa.conf";
+const DEFAULT_SHADOW_FILE: &str = "/etc/shadow";
+const DEFAULT_PASSWD_FILE: &str = "/etc/passwd";
+const DEFAULT_GROUP_FILE: &str = "/etc/group";
+const DEFAULT_NSSWITCH_FILE: &str = "/etc/nsswitch.conf";
+const SHADOW_GROUP: &str = "shadow";
+const AGENT_ACCOUNT: &str = "volparossa";
+const WORKER_ACCOUNT: &str = "volparossa-worker";
+const OPERATOR_GROUP: &str = "volparossa-users";
+const MAX_PUBLIC_ACCOUNT_DATABASE_BYTES: usize = 1024 * 1024;
+const MAX_NSSWITCH_BYTES: usize = 64 * 1024;
+const MAX_ACCOUNT_DATABASE_LINE_BYTES: usize = 4096;
+const SYSTEMD_RESERVED_ID: u32 = 65_535;
+const POSIX_ACCESS_ACL_XATTR: &str = "system.posix_acl_access";
 const POLICY_TRUST_FILE: &str = "policy-maintainers.json";
 const TRUST_SCHEMA_VERSION: u32 = 1;
 const RESERVED_TABLE_MIN: u64 = 7_600;
@@ -43,6 +65,38 @@ const OVERLAY_PREFIX: [u8; 16] = [
     0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const OVERLAY_PREFIX_LENGTH: u8 = 48;
+const HELPER_BOOTSTRAP_CAPABILITIES: [&str; 7] = [
+    "CAP_KILL",
+    "CAP_NET_ADMIN",
+    "CAP_NET_RAW",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_ADMIN",
+];
+
+const fn service_identity_id_is_valid(id: u32) -> bool {
+    id != 0 && id != SYSTEMD_RESERVED_ID && id != u32::MAX
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalPasswdIdentity<'a> {
+    name: &'a [u8],
+    password: &'a [u8],
+    uid: u32,
+    gid: u32,
+    gecos: &'a [u8],
+    directory: &'a [u8],
+    shell: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalGroupIdentity<'a> {
+    name: &'a [u8],
+    password: &'a [u8],
+    gid: u32,
+    members: &'a [u8],
+}
 
 /// Result category for one read-only diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -126,6 +180,8 @@ pub fn run(config_path: &Path) -> DoctorReport {
             "0",
         ),
         capability_check(),
+        worker_identity_contract_check(),
+        worker_account_lock_check(),
         service_sandbox_check(),
         route_collision_check(),
         reserved_policy_routing_check(),
@@ -419,17 +475,10 @@ fn capability_check() -> Check {
     let Some(service) = parse_service_unit(&unit) else {
         return failed("helper_capabilities", "installed helper unit is malformed");
     };
-    let required = ["CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_SYS_ADMIN"];
-    if service.get("User").is_some_and(|value| value == "root")
-        && service
-            .get("Group")
-            .is_some_and(|value| value == "volparossa")
-        && value_set_matches(&service, "CapabilityBoundingSet", &required)
-        && value_set_matches(&service, "AmbientCapabilities", &required)
-    {
+    if helper_capability_contract_matches(&service) {
         passed(
             "helper_capabilities",
-            "helper unit grants only CAP_NET_ADMIN, CAP_NET_RAW, and namespace CAP_SYS_ADMIN",
+            "helper unit grants exactly the reviewed seven-capability worker bootstrap set",
         )
     } else {
         failed(
@@ -437,6 +486,732 @@ fn capability_check() -> Check {
             "helper unit capability/user boundary does not match the reviewed profile",
         )
     }
+}
+
+fn helper_capability_contract_matches(service: &BTreeMap<String, String>) -> bool {
+    service.get("User").is_some_and(|value| value == "root")
+        && service
+            .get("Group")
+            .is_some_and(|value| value == "volparossa")
+        && value_set_matches(
+            service,
+            "CapabilityBoundingSet",
+            &HELPER_BOOTSTRAP_CAPABILITIES,
+        )
+        && value_set_matches(
+            service,
+            "AmbientCapabilities",
+            &HELPER_BOOTSTRAP_CAPABILITIES,
+        )
+}
+
+fn worker_identity_contract_check() -> Check {
+    let contract = read_bounded(Path::new(DEFAULT_SYSUSERS_CONFIG), MAX_SYSUSERS_BYTES);
+    if contract
+        .as_deref()
+        .is_ok_and(worker_sysusers_contract_matches)
+    {
+        passed(
+            "worker_identity_contract",
+            "installed sysusers contract declares a locked no-login worker with its own group and no service-group membership",
+        )
+    } else {
+        failed(
+            "worker_identity_contract",
+            "installed sysusers contract is absent, unreadable, malformed, or not the reviewed isolated-worker profile",
+        )
+    }
+}
+
+fn worker_account_lock_check() -> Check {
+    match live_account_identity_is_bound() {
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            return failed(
+                "worker_account_lock",
+                "live NSS, passwd, group, or initgroups identity is not bound to the reviewed local package accounts",
+            );
+        }
+    }
+    match read_locked_shadow_accounts(Path::new(DEFAULT_SHADOW_FILE)) {
+        Ok(true) => passed(
+            "worker_account_lock",
+            "live local/NSS service identities have the reviewed agent password lock and worker account-wide lock",
+        ),
+        Ok(false) => failed(
+            "worker_account_lock",
+            "live agent/worker shadow entries are absent, malformed, duplicated, or unlocked",
+        ),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => warning(
+            "worker_account_lock",
+            "live shadow account lock is unverified without elevated diagnostic access; helper startup rechecks it fail-closed",
+        ),
+        Err(_) => failed(
+            "worker_account_lock",
+            "live shadow account database is absent, unsafe, oversized, or unreadable",
+        ),
+    }
+}
+
+fn live_account_identity_is_bound() -> io::Result<bool> {
+    let nsswitch =
+        read_root_account_database(Path::new(DEFAULT_NSSWITCH_FILE), MAX_NSSWITCH_BYTES)?;
+    if !nss_files_are_authoritative(&nsswitch) {
+        return Ok(false);
+    }
+    let passwd = read_root_account_database(
+        Path::new(DEFAULT_PASSWD_FILE),
+        MAX_PUBLIC_ACCOUNT_DATABASE_BYTES,
+    )?;
+    let groups = read_root_account_database(
+        Path::new(DEFAULT_GROUP_FILE),
+        MAX_PUBLIC_ACCOUNT_DATABASE_BYTES,
+    )?;
+    let Some(agent) = local_passwd_identity(&passwd, AGENT_ACCOUNT) else {
+        return Ok(false);
+    };
+    let Some(worker) = local_passwd_identity(&passwd, WORKER_ACCOUNT) else {
+        return Ok(false);
+    };
+    let Some(agent_group) = local_group_identity(&groups, AGENT_ACCOUNT) else {
+        return Ok(false);
+    };
+    let Some(operator_group) = local_group_identity(&groups, OPERATOR_GROUP) else {
+        return Ok(false);
+    };
+    let Some(worker_group) = local_group_identity(&groups, WORKER_ACCOUNT) else {
+        return Ok(false);
+    };
+    let Some(shadow_group) = local_group_identity(&groups, SHADOW_GROUP) else {
+        return Ok(false);
+    };
+    if !local_account_contract_matches(
+        agent,
+        worker,
+        agent_group,
+        operator_group,
+        worker_group,
+        shadow_group,
+        &groups,
+    ) {
+        return Ok(false);
+    }
+    let identities_match = nss_user_matches(AGENT_ACCOUNT, agent)
+        && nss_user_matches(WORKER_ACCOUNT, worker)
+        && nss_group_matches(AGENT_ACCOUNT, agent_group)
+        && nss_group_matches(OPERATOR_GROUP, operator_group)
+        && nss_group_matches(WORKER_ACCOUNT, worker_group)
+        && nss_group_matches(SHADOW_GROUP, shadow_group)
+        && account_groups_match(
+            AGENT_ACCOUNT,
+            agent.gid,
+            &[agent_group.gid, operator_group.gid],
+        )
+        && account_groups_match(WORKER_ACCOUNT, worker.gid, &[worker_group.gid]);
+    Ok(identities_match)
+}
+
+fn read_root_account_database(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+    if maximum == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "zero account bound",
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let before = file.metadata()?;
+    let permissions = before.mode() & 0o7777;
+    if !before.is_file()
+        || before.uid() != 0
+        || before.gid() != 0
+        || before.nlink() != 1
+        || permissions & 0o400 == 0
+        || permissions & !0o644 != 0
+        || before.len() == 0
+        || before.len() > u64::try_from(maximum).unwrap_or(u64::MAX)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsafe local account database",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(maximum.saturating_add(1));
+    let mut limited = file.take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1));
+    limited.read_to_end(&mut bytes)?;
+    let after = limited.into_inner().metadata()?;
+    if bytes.len() > maximum
+        || u64::try_from(bytes.len()).ok() != Some(before.len())
+        || !same_database_snapshot(&before, &after)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "local account database changed while read",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn same_database_snapshot(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.uid() == after.uid()
+        && before.gid() == after.gid()
+        && before.mode() == after.mode()
+        && before.nlink() == after.nlink()
+        && before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
+}
+
+fn nss_files_are_authoritative(bytes: &[u8]) -> bool {
+    if !database_has_safe_physical_lines(bytes, true) {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut seen = [false; 4];
+    for raw_line in text.lines() {
+        let line = raw_line
+            .split_once('#')
+            .map_or(raw_line, |(before, _)| before)
+            .trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((database, sources)) = line.split_once(':') else {
+            continue;
+        };
+        let index = match database.trim() {
+            "passwd" => 0,
+            "group" => 1,
+            "shadow" => 2,
+            "initgroups" => 3,
+            _ => continue,
+        };
+        let mut sources = sources.split_ascii_whitespace();
+        if seen[index]
+            || sources.next() != Some("files")
+            || !matches!(sources.next(), None | Some("systemd"))
+            || sources.next().is_some()
+        {
+            return false;
+        }
+        seen[index] = true;
+    }
+    seen[..3].iter().all(|entry| *entry)
+}
+
+fn database_has_safe_physical_lines(bytes: &[u8], allow_empty: bool) -> bool {
+    if bytes.is_empty() || !bytes.ends_with(b"\n") || bytes.contains(&0) || bytes.contains(&b'\r') {
+        return false;
+    }
+    bytes[..bytes.len() - 1]
+        .split(|byte| *byte == b'\n')
+        .all(|line| {
+            line.len() <= MAX_ACCOUNT_DATABASE_LINE_BYTES && (allow_empty || !line.is_empty())
+        })
+}
+
+fn parse_canonical_account_id(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || (bytes.len() > 1 && bytes.first() == Some(&b'0')) {
+        return None;
+    }
+    let mut value = 0_u32;
+    for byte in bytes {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u32::from(digit))?;
+    }
+    (value != u32::MAX).then_some(value)
+}
+
+fn local_passwd_identity<'a>(bytes: &'a [u8], account: &str) -> Option<LocalPasswdIdentity<'a>> {
+    if !database_has_safe_physical_lines(bytes, false) {
+        return None;
+    }
+    let mut found = None;
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let mut fields = line.split(|byte| *byte == b':');
+        let name = fields.next()?;
+        let password = fields.next()?;
+        let uid = parse_canonical_account_id(fields.next()?)?;
+        let gid = parse_canonical_account_id(fields.next()?)?;
+        let gecos = fields.next()?;
+        let directory = fields.next()?;
+        let shell = fields.next()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        if name == account.as_bytes() {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(LocalPasswdIdentity {
+                name,
+                password,
+                uid,
+                gid,
+                gecos,
+                directory,
+                shell,
+            });
+        }
+    }
+    let found = found?;
+    let mut uid_uses = 0_usize;
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let mut fields = line.split(|byte| *byte == b':');
+        fields.next()?;
+        fields.next()?;
+        if parse_canonical_account_id(fields.next()?)? == found.uid {
+            uid_uses = uid_uses.checked_add(1)?;
+        }
+    }
+    (uid_uses == 1).then_some(found)
+}
+
+fn local_group_identity<'a>(bytes: &'a [u8], account: &str) -> Option<LocalGroupIdentity<'a>> {
+    if !database_has_safe_physical_lines(bytes, false) {
+        return None;
+    }
+    let mut found = None;
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let mut fields = line.split(|byte| *byte == b':');
+        let name = fields.next()?;
+        let password = fields.next()?;
+        let gid = parse_canonical_account_id(fields.next()?)?;
+        let members = fields.next()?;
+        if fields.next().is_some() || !local_group_member_list_is_canonical(members) {
+            return None;
+        }
+        if name == account.as_bytes() {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(LocalGroupIdentity {
+                name,
+                password,
+                gid,
+                members,
+            });
+        }
+    }
+    let found = found?;
+    let mut gid_uses = 0_usize;
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let mut fields = line.split(|byte| *byte == b':');
+        fields.next()?;
+        fields.next()?;
+        if parse_canonical_account_id(fields.next()?)? == found.gid {
+            gid_uses = gid_uses.checked_add(1)?;
+        }
+    }
+    (gid_uses == 1).then_some(found)
+}
+
+fn local_group_member_list_is_canonical(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let members = bytes.split(|byte| *byte == b',').collect::<Vec<_>>();
+    members.iter().enumerate().all(|(index, member)| {
+        !member.is_empty() && !members[..index].iter().any(|earlier| earlier == member)
+    })
+}
+
+fn local_account_contract_matches(
+    agent: LocalPasswdIdentity<'_>,
+    worker: LocalPasswdIdentity<'_>,
+    agent_group: LocalGroupIdentity<'_>,
+    operator_group: LocalGroupIdentity<'_>,
+    worker_group: LocalGroupIdentity<'_>,
+    shadow_group: LocalGroupIdentity<'_>,
+    groups: &[u8],
+) -> bool {
+    let group_ids = [
+        agent_group.gid,
+        operator_group.gid,
+        worker_group.gid,
+        shadow_group.gid,
+    ];
+    agent.name == AGENT_ACCOUNT.as_bytes()
+        && worker.name == WORKER_ACCOUNT.as_bytes()
+        && agent.password == b"x"
+        && worker.password == b"x"
+        && service_identity_id_is_valid(agent.uid)
+        && service_identity_id_is_valid(worker.uid)
+        && agent.uid != worker.uid
+        && agent.gid == agent_group.gid
+        && worker.gid == worker_group.gid
+        && agent.directory == b"/var/lib/volparossa"
+        && worker.directory == b"/nonexistent"
+        && agent.shell == b"/usr/sbin/nologin"
+        && worker.shell == b"/usr/sbin/nologin"
+        && agent_group.name == AGENT_ACCOUNT.as_bytes()
+        && operator_group.name == OPERATOR_GROUP.as_bytes()
+        && worker_group.name == WORKER_ACCOUNT.as_bytes()
+        && shadow_group.name == SHADOW_GROUP.as_bytes()
+        && [
+            agent_group.password,
+            operator_group.password,
+            worker_group.password,
+            shadow_group.password,
+        ]
+        .into_iter()
+        .all(|password| password == b"x")
+        && group_ids.into_iter().all(service_identity_id_is_valid)
+        && group_ids
+            .iter()
+            .enumerate()
+            .all(|(index, gid)| !group_ids[..index].contains(gid))
+        && agent_group.members.is_empty()
+        && worker_group.members.is_empty()
+        && group_members_contain(operator_group.members, AGENT_ACCOUNT)
+        && !group_members_contain(operator_group.members, WORKER_ACCOUNT)
+        && !group_members_contain(shadow_group.members, AGENT_ACCOUNT)
+        && !group_members_contain(shadow_group.members, WORKER_ACCOUNT)
+        && local_group_ids_match(
+            groups,
+            AGENT_ACCOUNT,
+            agent.gid,
+            &[agent_group.gid, operator_group.gid],
+        )
+        && local_group_ids_match(groups, WORKER_ACCOUNT, worker.gid, &[worker_group.gid])
+}
+
+fn local_group_ids_match(bytes: &[u8], account: &str, primary_gid: u32, expected: &[u32]) -> bool {
+    let Some(mut observed) = local_group_ids_for_account(bytes, account, primary_gid) else {
+        return false;
+    };
+    let mut expected = expected.to_vec();
+    observed.sort_unstable();
+    expected.sort_unstable();
+    observed == expected
+}
+
+fn local_group_ids_for_account(bytes: &[u8], account: &str, primary_gid: u32) -> Option<Vec<u32>> {
+    let mut groups = vec![primary_gid];
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let mut fields = line.split(|byte| *byte == b':');
+        fields.next()?;
+        fields.next()?;
+        let gid = parse_canonical_account_id(fields.next()?)?;
+        let members = fields.next()?;
+        if fields.next().is_some() || !local_group_member_list_is_canonical(members) {
+            return None;
+        }
+        if group_members_contain(members, account) {
+            groups.push(gid);
+        }
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    Some(groups)
+}
+
+fn group_members_contain(bytes: &[u8], account: &str) -> bool {
+    !bytes.is_empty()
+        && bytes
+            .split(|byte| *byte == b',')
+            .any(|member| member == account.as_bytes())
+}
+
+fn nss_user_matches(account: &str, local: LocalPasswdIdentity<'_>) -> bool {
+    let Ok(Some(by_name)) = User::from_name(account) else {
+        return false;
+    };
+    let Ok(Some(by_uid)) = User::from_uid(nix::unistd::Uid::from_raw(local.uid)) else {
+        return false;
+    };
+    by_name == by_uid
+        && by_name.name == account
+        && by_name.passwd.as_bytes() == local.password
+        && by_name.uid.as_raw() == local.uid
+        && by_name.gid.as_raw() == local.gid
+        && by_name.gecos.as_bytes() == local.gecos
+        && by_name.dir.as_os_str().as_bytes() == local.directory
+        && by_name.shell.as_os_str().as_bytes() == local.shell
+}
+
+fn nss_group_matches(account: &str, local: LocalGroupIdentity<'_>) -> bool {
+    let Ok(Some(by_name)) = Group::from_name(account) else {
+        return false;
+    };
+    let Ok(Some(by_gid)) = Group::from_gid(Gid::from_raw(local.gid)) else {
+        return false;
+    };
+    by_name == by_gid
+        && by_name.name == account
+        && by_name.passwd.as_bytes() == local.password
+        && by_name.gid.as_raw() == local.gid
+        && local_group_members_match(local.members, &by_name.mem)
+}
+
+fn local_group_members_match(bytes: &[u8], members: &[String]) -> bool {
+    if bytes.is_empty() {
+        return members.is_empty();
+    }
+    let mut expected = bytes.split(|byte| *byte == b',');
+    members
+        .iter()
+        .all(|member| expected.next() == Some(member.as_bytes()))
+        && expected.next().is_none()
+}
+
+fn account_groups_match(account: &str, primary_gid: u32, expected: &[u32]) -> bool {
+    let Ok(name) = CString::new(account) else {
+        return false;
+    };
+    let Ok(observed) = getgrouplist(&name, Gid::from_raw(primary_gid)) else {
+        return false;
+    };
+    let mut observed = observed.into_iter().map(Gid::as_raw).collect::<Vec<_>>();
+    observed.sort_unstable();
+    if observed.windows(2).any(|pair| pair[0] == pair[1]) {
+        return false;
+    }
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    observed == expected
+}
+
+fn validate_posix_access_acl_probe(result: Result<usize, rustix::io::Errno>) -> io::Result<()> {
+    match result {
+        Err(error) if error == rustix::io::Errno::NODATA => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shadow account database has a POSIX access ACL",
+        )),
+        Err(error) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("shadow POSIX access ACL probe failed: {error}"),
+        )),
+    }
+}
+
+fn validate_no_posix_access_acl(file: &fs::File) -> io::Result<()> {
+    // One byte is enough for an existence probe without unsafe code. A present POSIX ACL is larger
+    // and returns ERANGE; even a zero/one-byte value returns success. Both paths are rejected. Only
+    // explicit absence is accepted; an unsupported ACL query cannot prove exclusivity and fails.
+    let mut probe = [0_u8; 1];
+    let result = rustix::fs::fgetxattr(file, POSIX_ACCESS_ACL_XATTR, &mut probe[..]);
+    validate_posix_access_acl_probe(result)
+}
+
+fn read_locked_shadow_accounts(path: &Path) -> io::Result<bool> {
+    let shadow_gid = Group::from_name(SHADOW_GROUP)
+        .map_err(|error| io::Error::from_raw_os_error(error as i32))?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "shadow group missing"))?
+        .gid
+        .as_raw();
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file()
+        || before.uid() != 0
+        || before.nlink() != 1
+        || !shadow_permissions_are_safe(before.mode(), before.gid(), shadow_gid)
+        || before.len() == 0
+        || before.len() > u64::try_from(MAX_SHADOW_BYTES).unwrap_or(u64::MAX)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsafe shadow account database",
+        ));
+    }
+    validate_no_posix_access_acl(&file)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_SHADOW_BYTES.saturating_add(1)));
+    let mut limited = file.take(
+        u64::try_from(MAX_SHADOW_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    );
+    limited.read_to_end(&mut bytes)?;
+    let after = limited.into_inner().metadata()?;
+    if bytes.len() > MAX_SHADOW_BYTES
+        || u64::try_from(bytes.len()).ok() != Some(before.len())
+        || !same_database_snapshot(&before, &after)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "oversized shadow account database",
+        ));
+    }
+    Ok(shadow_accounts_match_contract(&bytes))
+}
+
+fn shadow_permissions_are_safe(mode: u32, gid: u32, shadow_gid: u32) -> bool {
+    let permissions = mode & 0o7777;
+    permissions & 0o400 != 0
+        && permissions & !0o640 == 0
+        && (permissions & 0o040 == 0 || gid == shadow_gid)
+}
+
+fn shadow_accounts_match_contract(bytes: &[u8]) -> bool {
+    if !database_has_safe_physical_lines(bytes, false) {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut agent_locked = None;
+    let mut worker_locked = None;
+    for line in text.lines() {
+        let mut fields = line.split(':');
+        let Some(name) = fields.next() else {
+            return false;
+        };
+        let Some(password) = fields.next() else {
+            return false;
+        };
+        let Some(_last_change) = fields.next() else {
+            return false;
+        };
+        let Some(_minimum_age) = fields.next() else {
+            return false;
+        };
+        let Some(_maximum_age) = fields.next() else {
+            return false;
+        };
+        let Some(_warning_period) = fields.next() else {
+            return false;
+        };
+        let Some(_inactivity_period) = fields.next() else {
+            return false;
+        };
+        let Some(account_expiry) = fields.next() else {
+            return false;
+        };
+        let Some(_reserved) = fields.next() else {
+            return false;
+        };
+        if fields.next().is_some() {
+            return false;
+        }
+        if name == AGENT_ACCOUNT {
+            if agent_locked.is_some() {
+                return false;
+            }
+            agent_locked = Some(password.starts_with('!'));
+        } else if name == WORKER_ACCOUNT {
+            if worker_locked.is_some() {
+                return false;
+            }
+            worker_locked = Some(password.starts_with('!') && account_expiry == "1");
+        }
+    }
+    agent_locked == Some(true) && worker_locked == Some(true)
+}
+
+fn worker_sysusers_contract_matches(bytes: &[u8]) -> bool {
+    let Some(directives) = parse_sysusers_directives(bytes) else {
+        return false;
+    };
+    let expected = [
+        ["g", "volparossa", "-", "", "", ""],
+        ["g", "volparossa-users", "-", "", "", ""],
+        ["g", "volparossa-worker", "-", "", "", ""],
+        [
+            "u",
+            "volparossa",
+            "VOLPAROSSA system service",
+            "/var/lib/volparossa",
+            "/usr/sbin/nologin",
+            "",
+        ],
+        [
+            "u!",
+            "volparossa-worker",
+            "VOLPAROSSA isolated route worker",
+            "/nonexistent",
+            "/usr/sbin/nologin",
+            "",
+        ],
+        ["m", "volparossa", "volparossa-users", "", "", ""],
+    ];
+    directives == expected
+}
+
+fn parse_sysusers_directives(bytes: &[u8]) -> Option<Vec<[&str; 6]>> {
+    let input = std::str::from_utf8(bytes).ok()?;
+    let mut directives = Vec::new();
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if directives.len() >= 128 {
+            return None;
+        }
+        let fields = split_sysusers_fields(line)?;
+        let directive = match fields.as_slice() {
+            [kind @ ("g" | "m"), name, id] => [*kind, *name, *id, "", "", ""],
+            [kind @ ("u" | "u!"), name, "-", gecos, home, shell] => {
+                [*kind, *name, *gecos, *home, *shell, ""]
+            }
+            _ => return None,
+        };
+        directives.push(directive);
+    }
+    Some(directives)
+}
+
+fn split_sysusers_fields(line: &str) -> Option<Vec<&str>> {
+    let mut fields = Vec::new();
+    let mut start = None;
+    let mut quoted = false;
+    let mut closed_quote = false;
+    for (index, character) in line.char_indices() {
+        if !character.is_ascii() || character.is_ascii_control() {
+            return None;
+        }
+        if closed_quote {
+            if character.is_ascii_whitespace() {
+                closed_quote = false;
+                continue;
+            }
+            return None;
+        }
+        match character {
+            '"' => {
+                if quoted {
+                    fields.push(&line[start?..index]);
+                    start = None;
+                    closed_quote = true;
+                } else if start.is_some() {
+                    return None;
+                }
+                quoted = !quoted;
+            }
+            value if value.is_ascii_whitespace() && !quoted => {
+                if let Some(field_start) = start.take() {
+                    fields.push(&line[field_start..index]);
+                }
+            }
+            _ => {
+                if start.is_none() {
+                    start = Some(index);
+                }
+            }
+        }
+    }
+    if quoted {
+        return None;
+    }
+    if let Some(field_start) = start {
+        fields.push(&line[field_start..]);
+    }
+    (!fields.is_empty()).then_some(fields)
 }
 
 #[derive(Clone, Copy)]
@@ -519,7 +1294,7 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
                 "no",
                 "net",
                 ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"].as_slice(),
-                ["@system-service", "@network-io", "@mount"].as_slice(),
+                ["@system-service", "@network-io", "@mount", "seccomp"].as_slice(),
             ),
             UnitKind::Native => (
                 "volparossa",
@@ -1356,6 +2131,21 @@ mod tests {
 
     use super::*;
 
+    fn valid_posix_access_acl() -> [u8; 36] {
+        let mut acl = [0_u8; 36];
+        acl[0..4].copy_from_slice(&2_u32.to_le_bytes());
+        for (index, (tag, permission)) in [(1_u16, 0o6_u16), (4, 0o6), (16, 0o4), (32, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = 4 + index * 8;
+            acl[offset..offset + 2].copy_from_slice(&tag.to_le_bytes());
+            acl[offset + 2..offset + 4].copy_from_slice(&permission.to_le_bytes());
+            acl[offset + 4..offset + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+        }
+        acl
+    }
+
     #[test]
     fn report_fails_closed_only_for_failures() {
         let warnings = DoctorReport {
@@ -1428,6 +2218,311 @@ mod tests {
             assert!(unit_has_required_sandbox(&service, kind));
             service.insert("NoNewPrivileges".to_owned(), "no".to_owned());
             assert!(!unit_has_required_sandbox(&service, kind));
+        }
+    }
+
+    #[test]
+    fn packaged_helper_has_only_the_reviewed_worker_bootstrap_capabilities() {
+        let helper = parse_service_unit(include_bytes!(
+            "../../../packaging/systemd/volparossa-helper.service"
+        ))
+        .expect("packaged helper unit");
+        assert!(unit_has_required_sandbox(&helper, UnitKind::Helper));
+        assert!(helper_capability_contract_matches(&helper));
+        assert_eq!(
+            helper.get("SystemCallFilter").map(String::as_str),
+            Some("@system-service @network-io @mount seccomp")
+        );
+
+        let mut broader_syscalls = helper.clone();
+        broader_syscalls.insert(
+            "SystemCallFilter".to_owned(),
+            "@system-service @network-io @mount seccomp @privileged".to_owned(),
+        );
+        assert!(!unit_has_required_sandbox(
+            &broader_syscalls,
+            UnitKind::Helper
+        ));
+
+        for omitted in HELPER_BOOTSTRAP_CAPABILITIES {
+            let mut missing = helper.clone();
+            let reduced = HELPER_BOOTSTRAP_CAPABILITIES
+                .iter()
+                .copied()
+                .filter(|capability| *capability != omitted)
+                .collect::<Vec<_>>()
+                .join(" ");
+            missing.insert("CapabilityBoundingSet".to_owned(), reduced.clone());
+            missing.insert("AmbientCapabilities".to_owned(), reduced);
+            assert!(
+                !helper_capability_contract_matches(&missing),
+                "omitted {omitted}"
+            );
+        }
+
+        let mut extra = helper.clone();
+        extra.insert(
+            "CapabilityBoundingSet".to_owned(),
+            format!("{} CAP_SYS_PTRACE", HELPER_BOOTSTRAP_CAPABILITIES.join(" ")),
+        );
+        extra.insert(
+            "AmbientCapabilities".to_owned(),
+            format!("{} CAP_SYS_PTRACE", HELPER_BOOTSTRAP_CAPABILITIES.join(" ")),
+        );
+        assert!(!helper_capability_contract_matches(&extra));
+
+        let mut mismatched_ambient = helper;
+        mismatched_ambient.insert(
+            "AmbientCapabilities".to_owned(),
+            "CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN".to_owned(),
+        );
+        assert!(!helper_capability_contract_matches(&mismatched_ambient));
+    }
+
+    #[test]
+    fn packaged_worker_sysusers_contract_is_fully_locked_and_group_isolated() {
+        let packaged = include_bytes!("../../../packaging/systemd/volparossa.sysusers");
+        assert!(worker_sysusers_contract_matches(packaged));
+
+        let text = std::str::from_utf8(packaged).expect("UTF-8 sysusers contract");
+        let unlocked = text.replacen("u!     volparossa-worker", "u      volparossa-worker", 1);
+        assert!(!worker_sysusers_contract_matches(unlocked.as_bytes()));
+
+        let login_shell = text.replacen(
+            "/nonexistent         /usr/sbin/nologin",
+            "/nonexistent         /bin/sh",
+            1,
+        );
+        assert!(!worker_sysusers_contract_matches(login_shell.as_bytes()));
+
+        let service_group_member = format!("{text}m volparossa-worker volparossa\n");
+        assert!(!worker_sysusers_contract_matches(
+            service_group_member.as_bytes()
+        ));
+
+        let wrong_primary_group = text.replacen(
+            "u!     volparossa-worker  -",
+            "u!     volparossa-worker  -:volparossa",
+            1,
+        );
+        assert!(!worker_sysusers_contract_matches(
+            wrong_primary_group.as_bytes()
+        ));
+
+        let concatenated_fields = text.replacen("worker\" /nonexistent", "worker\"/nonexistent", 1);
+        assert!(!worker_sysusers_contract_matches(
+            concatenated_fields.as_bytes()
+        ));
+    }
+
+    #[test]
+    fn live_account_nss_order_is_local_only_and_action_free() {
+        for valid in [
+            b"passwd: files systemd\ngroup: files systemd\nshadow: files systemd\n".as_slice(),
+            b"# canonical local accounts\npasswd: files\ngroup: files\nshadow: files\ninitgroups: files\n",
+        ] {
+            assert!(nss_files_are_authoritative(valid));
+        }
+        for invalid in [
+            b"passwd: sss files\ngroup: files\nshadow: files\n".as_slice(),
+            b"passwd: files sss\ngroup: files\nshadow: files\n",
+            b"passwd: files [SUCCESS=continue] sss\ngroup: files\nshadow: files\n",
+            b"passwd: files\ngroup: files\n",
+            b"passwd: files\ngroup: files\nshadow: files",
+        ] {
+            assert!(!nss_files_are_authoritative(invalid));
+        }
+    }
+
+    #[test]
+    fn live_local_account_contract_rejects_id_aliases_and_group_leaks() {
+        let passwd = concat!(
+            "volparossa:x:20001:20011:agent:/var/lib/volparossa:/usr/sbin/nologin\n",
+            "volparossa-worker:x:20002:20012:worker:/nonexistent:/usr/sbin/nologin\n",
+        );
+        let groups = concat!(
+            "volparossa:x:20011:\n",
+            "volparossa-users:x:20013:volparossa\n",
+            "volparossa-worker:x:20012:\n",
+            "shadow:x:42:\n",
+        );
+        let contract = |passwd_bytes: &[u8], group_bytes: &[u8]| {
+            let Some(agent_group) = local_group_identity(group_bytes, AGENT_ACCOUNT) else {
+                return false;
+            };
+            let Some(operator_group) = local_group_identity(group_bytes, OPERATOR_GROUP) else {
+                return false;
+            };
+            let Some(worker_group) = local_group_identity(group_bytes, WORKER_ACCOUNT) else {
+                return false;
+            };
+            let Some(shadow_group) = local_group_identity(group_bytes, SHADOW_GROUP) else {
+                return false;
+            };
+            local_account_contract_matches(
+                local_passwd_identity(passwd_bytes, AGENT_ACCOUNT).expect("agent"),
+                local_passwd_identity(passwd_bytes, WORKER_ACCOUNT).expect("worker"),
+                agent_group,
+                operator_group,
+                worker_group,
+                shadow_group,
+                group_bytes,
+            )
+        };
+        assert!(contract(passwd.as_bytes(), groups.as_bytes()));
+        assert!(contract(
+            passwd.as_bytes(),
+            groups
+                .replace(
+                    "volparossa-users:x:20013:volparossa",
+                    "volparossa-users:x:20013:volparossa,alice",
+                )
+                .as_bytes()
+        ));
+        for reserved_passwd in [
+            passwd.replace("volparossa:x:20001:", "volparossa:x:65535:"),
+            passwd.replace("volparossa-worker:x:20002:", "volparossa-worker:x:65535:"),
+        ] {
+            assert!(!contract(reserved_passwd.as_bytes(), groups.as_bytes()));
+        }
+        for reserved_group in [
+            groups.replace("volparossa:x:20011:", "volparossa:x:65535:"),
+            groups.replace("volparossa-users:x:20013:", "volparossa-users:x:65535:"),
+            groups.replace("volparossa-worker:x:20012:", "volparossa-worker:x:65535:"),
+            groups.replace("shadow:x:42:", "shadow:x:65535:"),
+        ] {
+            assert!(!contract(passwd.as_bytes(), reserved_group.as_bytes()));
+        }
+        assert!(!contract(
+            passwd.as_bytes(),
+            groups
+                .replace("shadow:x:42:", "shadow:x:42:volparossa-worker")
+                .as_bytes()
+        ));
+        assert!(!contract(
+            passwd.as_bytes(),
+            groups
+                .replace(
+                    "volparossa-users:x:20013:volparossa",
+                    "volparossa-users:x:20013:volparossa,volparossa-worker",
+                )
+                .as_bytes()
+        ));
+        assert!(!contract(
+            passwd.as_bytes(),
+            groups
+                .replace(
+                    "volparossa-users:x:20013:volparossa",
+                    "volparossa-users:x:20013:",
+                )
+                .as_bytes()
+        ));
+        assert!(
+            local_passwd_identity(
+                concat!(
+                    "alias:x:20002:30000:alias:/nonexistent:/usr/sbin/nologin\n",
+                    "volparossa-worker:x:20002:20012:worker:/nonexistent:/usr/sbin/nologin\n",
+                )
+                .as_bytes(),
+                WORKER_ACCOUNT,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn live_shadow_parser_requires_locked_agent_and_account_locked_worker() {
+        let shadow = |agent_password: &str, worker_password: &str| {
+            format!(
+                "root:*:20000:0:99999:7:::\n{AGENT_ACCOUNT}:{agent_password}:20000::::::\n{WORKER_ACCOUNT}:{worker_password}:20000:::::1:\n"
+            )
+        };
+        for agent_password in ["!", "!!", "!$y$j9T$disabled", "!*"] {
+            for worker_password in ["!", "!!", "!$y$j9T$disabled", "!*"] {
+                assert!(shadow_accounts_match_contract(
+                    shadow(agent_password, worker_password).as_bytes()
+                ));
+            }
+        }
+        for shadow in [
+            shadow("$6$live", "!*"),
+            shadow("*", "!*"),
+            shadow("", "!*"),
+            shadow("!*", "$6$live"),
+            shadow("!*", "*"),
+            shadow("!*", ""),
+            format!("{AGENT_ACCOUNT}:!*:20000::::::\n{WORKER_ACCOUNT}:!*:20000::::::\n"),
+            format!("{AGENT_ACCOUNT}:!*:20000::::::\n"),
+            format!("{WORKER_ACCOUNT}:!*:20000:::::1:\n"),
+            format!(
+                "{AGENT_ACCOUNT}:!*:20000::::::\n{AGENT_ACCOUNT}:!:20000::::::\n{WORKER_ACCOUNT}:!*:20000:::::1:\n"
+            ),
+            format!(
+                "{AGENT_ACCOUNT}:!*:20000::::::\n{WORKER_ACCOUNT}:!*:20000:::::1:\n{WORKER_ACCOUNT}:!:20000:::::1:\n"
+            ),
+            format!("{AGENT_ACCOUNT}:!*:20000::::::\n{WORKER_ACCOUNT}:!:20000:::::1"),
+            "root:*:20000:0:99999:7:::\n".to_owned(),
+        ] {
+            assert!(!shadow_accounts_match_contract(shadow.as_bytes()));
+        }
+        assert!(!shadow_accounts_match_contract(&[0xff]));
+    }
+
+    #[test]
+    fn live_shadow_metadata_rejects_mutable_executable_or_broad_access() {
+        let shadow_gid = 42;
+        for mode in [0o400, 0o440, 0o600, 0o640] {
+            assert!(shadow_permissions_are_safe(mode, shadow_gid, shadow_gid));
+        }
+        assert!(shadow_permissions_are_safe(0o600, 12_345, shadow_gid));
+        for mode in [0o000, 0o200, 0o660, 0o700, 0o644, 0o4640] {
+            assert!(!shadow_permissions_are_safe(mode, shadow_gid, shadow_gid));
+        }
+        assert!(!shadow_permissions_are_safe(0o640, 12_345, shadow_gid));
+    }
+
+    #[test]
+    fn live_shadow_posix_access_acl_probe_is_explicit_and_fail_closed() {
+        validate_posix_access_acl_probe(Err(rustix::io::Errno::NODATA))
+            .expect("explicitly absent access ACL");
+        for result in [
+            Ok(0),
+            Ok(1),
+            Ok(36),
+            Err(rustix::io::Errno::RANGE),
+            Err(rustix::io::Errno::NOTSUP),
+            Err(rustix::io::Errno::OPNOTSUPP),
+            Err(rustix::io::Errno::ACCESS),
+            Err(rustix::io::Errno::PERM),
+            Err(rustix::io::Errno::IO),
+            Err(rustix::io::Errno::NOSYS),
+        ] {
+            let error = validate_posix_access_acl_probe(result).expect_err("ACL must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+
+        let directory = tempdir().expect("temporary directory");
+        let file =
+            fs::File::create(directory.path().join("shadow")).expect("temporary shadow file");
+        match rustix::fs::fsetxattr(
+            &file,
+            POSIX_ACCESS_ACL_XATTR,
+            &valid_posix_access_acl(),
+            rustix::fs::XattrFlags::empty(),
+        ) {
+            Ok(()) => {
+                let error = validate_no_posix_access_acl(&file)
+                    .expect_err("an installed access ACL must be rejected");
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            }
+            Err(error)
+                if error == rustix::io::Errno::NOTSUP || error == rustix::io::Errno::OPNOTSUPP =>
+            {
+                let error = validate_no_posix_access_acl(&file)
+                    .expect_err("unsupported ACL inspection must fail closed");
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            }
+            Err(error) => panic!("valid access ACL fixture failed: {error}"),
         }
     }
 
@@ -1621,7 +2716,10 @@ mod tests {
                             "RestrictAddressFamilies",
                             "AF_UNIX AF_INET AF_INET6 AF_NETLINK",
                         ),
-                        ("SystemCallFilter", "@system-service @network-io @mount"),
+                        (
+                            "SystemCallFilter",
+                            "@system-service @network-io @mount seccomp",
+                        ),
                     ],
                 );
             }

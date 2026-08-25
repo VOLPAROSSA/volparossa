@@ -44,18 +44,29 @@ Last updated: 2026-08-25
 - [ ] Unprivileged `volparossa-agent` owns control-plane, selection, sessions, and local metrics.
 - [ ] Minimal `volparossa-helper` owns only allowlisted privileged network operations; v3
   has a bounded typed external state machine plus a disconnected child bootstrap that applies and
-  independently verifies NEWNET, exact capability/NNP reduction, exact descriptors, a fixed
-  post-install descendant-denying seccomp filter, credential-bound proof-to-Accepted-to-Ready and
-  leader pin retention. The parent attests filter mode plus exactly one filter beyond its pre-spawn
-  thread baseline; exact BPF content is structurally bound by the current executable's fixed UAPI
-  rather than claimed from `/proc`. `clone`, `clone3`, `fork` and `vfork` monotonically return
-  `EPERM` after installation, including post-Ready and across exec. It has no production caller and
+  independently verifies NEWNET, pre-barrier NNP plus a fixed descendant-and-namespace-transition
+  denying seccomp filter, a parent-pinned pre-drop namespace, exact descriptors and one task, an
+  exact dedicated non-root UID/GID with empty supplementary groups, exact capability reduction,
+  restored parent-death signal,
+  credential-bound staged proof-to-Accepted-to-Ready, a second parent-side descriptor audit after
+  proof, and leader pin retention. The parent attests
+  filter mode plus exactly one filter beyond its pre-spawn thread baseline; exact BPF content is
+  structurally bound by the current executable's fixed UAPI rather than claimed from `/proc`.
+  `clone`, `clone3`, `fork`, `vfork`, `setns` and `unshare` monotonically return `EPERM` before the
+  namespace-pin barrier, including post-Ready and across exec. It has no production caller and
   production deliberately returns
-  `Unavailable`. This is not full worker isolation or context cleanup: the child remains effective
-  UID 0, can signal the parent and can access the root-writable runtime token/socket paths; this
-  slice also does not independently attest descendant absence before filter installation. Wiring
-  remains blocked on (1) a dedicated identity/broker that excludes runtime/socket impersonation and
-  (2) disposable live-root proof of the complete bootstrap, including prefilter process-tree state.
+  `Unavailable`. The package declares a locked, group-isolated `volparossa-worker`, pins its numeric
+  identity at startup, and first binds unique local passwd/group names and numeric IDs to exact
+  name- and number-based NSS results. Only the canonical `files` or `files systemd` order is
+  accepted for passwd/group/shadow and optional initgroups; service group sets must exactly match
+  the local package contract. It excludes both service identities from the live `shadow` group and validates
+  unique agent and worker shadow entries from one zeroizing snapshot: both passwords begin with
+  `!`, the worker account expiry is exactly `1`, and root-owned metadata is not writable by either
+  service identity, with group read limited to the resolved
+  `shadow` group. The bounded zeroizing read cannot reallocate hashes. This is still not complete isolation or
+  context cleanup: disposable Debian 13 live-root proof of the identity transition, parent-signal
+  and runtime-path denials, pre-filter process-tree state and unchanged host state is outstanding;
+  retirement also owns only the exact leader.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
@@ -75,9 +86,14 @@ Last updated: 2026-08-25
   live root proof exists.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
-  and doctor contract deliberately omit the disconnected launcher's required `CAP_SETPCAP`.
-  Expanding that authority requires explicit approval plus disposable live-root proof.
-- [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine tests pass, but live namespace/kernel cleanup proof does not.
+  and doctor contract now require exactly the reviewed seven-capability bootstrap set
+  (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
+  `CAP_SYS_ADMIN`) and
+  reject `CAP_SYS_PTRACE`; staged-package and disposable Debian 13 live-root validation remains
+  outstanding, and the final worker proof permits only `CAP_NET_ADMIN`.
+- [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine
+  tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
+  but live namespace/kernel cleanup proof does not.
 - [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation and close-on-reject socketpair/fake-backend tests pass, but production returns `Unavailable` before network work and worker-side socket creation, kernel validation, datapath adoption and live namespace proof remain.
 - [ ] Native MPQUIC API v4 consumes exactly one request-bound UDP descriptor for `AddPath` and zero descriptors otherwise; release, negative ancillary/tuple/ownership tests and the clean full-graph ASan+UBSan gate pass, but SCM_RIGHTS, its request hash and a same-session namespace cookie do not authenticate helper origin, so production path adoption and the launcher remain blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
