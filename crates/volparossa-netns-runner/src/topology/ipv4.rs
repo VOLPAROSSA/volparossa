@@ -38,7 +38,10 @@ use rustix::fs::{FsWord, Mode, OFlags, fstat, fstatfs, open};
 use thiserror::Error;
 use volparossa_linux_uapi::namespace_type;
 
-use super::veth::{FIXED_VETH_PEER_NAME, FixedVethEndpoint, FixedVethPair};
+use super::{
+    link::FixedPairAbsenceProof,
+    veth::{FIXED_VETH_PEER_NAME, FixedVethEndpoint, FixedVethPair},
+};
 
 const IPV4_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CURRENT_NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
@@ -171,6 +174,11 @@ impl Ipv4NamespaceIdentity {
     pub(crate) const fn inode(self) -> u64 {
         self.inode
     }
+
+    #[cfg(test)]
+    pub(super) const fn from_test_parts(device: u64, inode: u64) -> Self {
+        Self { device, inode }
+    }
 }
 
 /// Bounded RTNETLINK or current-namespace verification failure.
@@ -238,6 +246,11 @@ pub(crate) struct Ipv4VerifyError(#[source] Ipv4OperationError);
 #[error("fixed IPv4 rollback required reconciliation; exact absence was restored")]
 pub(crate) struct Ipv4RollbackError(#[source] Ipv4OperationError);
 
+/// Failure to bind a deleted-topology proof to one retained address owner.
+#[derive(Debug, Error)]
+#[error("fixed IPv4 post-delete retirement proof did not match the retained owner")]
+pub(crate) struct Ipv4RetirementError(#[source] Ipv4OperationError);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InterfaceBinding {
     ifindex: u32,
@@ -276,12 +289,20 @@ impl RetainedCurrentNamespace {
     }
 
     fn verify_current(&self) -> Result<(), Ipv4OperationError> {
-        validate_namespace_descriptor(&self.descriptor)?;
-        if object_identity(&self.descriptor)? != self.identity
-            || object_identity(&open_current_network_namespace()?)? != self.identity
-        {
+        self.verify_retained()?;
+        if object_identity(&open_current_network_namespace()?)? != self.identity {
             return Err(Ipv4OperationError::Unsafe(
                 "retained address namespace is no longer current on this thread",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_retained(&self) -> Result<(), Ipv4OperationError> {
+        validate_namespace_descriptor(&self.descriptor)?;
+        if object_identity(&self.descriptor)? != self.identity {
+            return Err(Ipv4OperationError::Unsafe(
+                "retained address namespace identity changed",
             ));
         }
         Ok(())
@@ -372,6 +393,48 @@ impl FixedIpv4AddressOwner {
                 Err(Ipv4RollbackError(source))
             }
         }
+    }
+
+    /// Fallibly bind this owner to the exact full-pair absence proof without
+    /// consuming or disarming it. The aggregate calls this for all four
+    /// addresses before any infallible retirement begins.
+    pub(super) fn prevalidate_pair_absence_retirement(
+        &self,
+        proof: &FixedPairAbsenceProof,
+    ) -> Result<(), Ipv4RetirementError> {
+        let journal = self.journal();
+        journal
+            .namespace
+            .verify_retained()
+            .map_err(Ipv4RetirementError)?;
+        if !proof.validates_ipv4_address(
+            journal.specification,
+            journal.veth.interface.ifindex,
+            &journal.veth.interface.name,
+            journal.veth.mutation_namespace,
+            journal.veth.target_namespace,
+        ) {
+            return Err(Ipv4RetirementError(Ipv4OperationError::Unsafe(
+                "pair-absence proof does not bind the retained fixed IPv4 address",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Infallibly disarm after the enclosing aggregate prevalidated every
+    /// address and pair against the same exact absence proof.
+    pub(super) fn retire_after_validated_pair_absence(mut self, proof: &FixedPairAbsenceProof) {
+        let journal = self.journal();
+        if !proof.validates_ipv4_address(
+            journal.specification,
+            journal.veth.interface.ifindex,
+            &journal.veth.interface.name,
+            journal.veth.mutation_namespace,
+            journal.veth.target_namespace,
+        ) {
+            std::process::abort();
+        }
+        self.journal = None;
     }
 
     fn journal(&self) -> &AddressJournal {

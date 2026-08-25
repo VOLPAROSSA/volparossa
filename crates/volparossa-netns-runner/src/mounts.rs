@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    convert::Infallible,
     fs::File,
     io::{self, Read as _},
     mem::MaybeUninit,
@@ -22,6 +23,10 @@ use rustix::{
 use thiserror::Error;
 use volparossa_test_support::MutationAuthorization;
 
+use crate::topology::namespaces::{
+    AuthorizedActivatedTopology, AuthorizedDeletedTopology, AuthorizedIpv4AddrgenNone,
+    FixedLinkActivationError, FixedLinkActivationFailure, FixedTopologyVisitError,
+};
 use crate::topology::{
     AuthorizedIpv4Addresses, AuthorizedNamespacePins, AuthorizedVethPairs,
     FixedIpv4AddressSetError, NamespaceEndpoint, NamespacePinError, NamespaceVisitError,
@@ -91,21 +96,150 @@ pub(crate) enum NamespacePinsNetworkProofError {
     Network(#[source] crate::network::NetworkError),
 }
 
-/// Exact parent/A/B down-veth observations retained across a bounded sub-transaction.
-///
-/// This proof owns no kernel object. It permits a caller to establish that a
-/// later address-request-only rollback, including its kernel-owned local-route
-/// side effects, restored the byte-identical observable veth state rather than
-/// merely a fresh link with the same broad profile.
-pub(crate) struct ExactVethPairNetworkProof {
-    parent: crate::network::ExactVethParentObservation,
-    endpoints: [crate::network::ExactVethEndpointObservation; 2],
+/// Failure source retained alongside an affine mount/link cleanup state.
+#[derive(Debug, Error)]
+pub(crate) enum PrivateMountLinkActivationError {
+    /// The fixed low-level transition failed before its complete barrier.
+    #[error("fixed link transition failed: {0}")]
+    Activation(#[source] FixedLinkActivationError),
+    /// The private mounts or their retained nsfs attachments failed reproof.
+    #[error("fixed link mount authority failed: {0}")]
+    Mount(#[source] PrivateMountSetupError),
+    /// The exact parent/A/B network barrier failed.
+    #[error("fixed link network barrier failed: {0}")]
+    Proof(#[source] NamespacePinsNetworkProofError),
+}
+
+/// Mount authority retained after a failed activation transition.
+pub(crate) enum PrivateMountLinkFailureState {
+    /// No request crossed the possibly-sent boundary and complete ordinary
+    /// unwind was re-proven against the original private-mount baseline.
+    Pristine(PrivateMounts<PristineRun>),
+    /// SETLINK may have executed; B/A deletion is proven, but the external
+    /// parent/A/B pristine proof must still authorize lower-owner disarm.
+    Deleted(Box<PrivateMounts<AuthorizedDeletedTopology>>),
+}
+
+/// Affine activation failure whose mount authority cannot be accidentally lost.
+#[must_use = "failed link activation retains cleanup-bearing private mounts"]
+pub(crate) struct PrivateMountLinkActivationFailure {
+    source: PrivateMountLinkActivationError,
+    state: Box<PrivateMountLinkFailureState>,
+}
+
+impl std::fmt::Debug for PrivateMountLinkActivationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PrivateMountLinkActivationFailure")
+            .field("source", &self.source)
+            .field(
+                "state",
+                &match self.state.as_ref() {
+                    PrivateMountLinkFailureState::Pristine(_) => "pristine",
+                    PrivateMountLinkFailureState::Deleted(_) => "deleted",
+                },
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Display for PrivateMountLinkActivationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for PrivateMountLinkActivationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl PrivateMountLinkActivationFailure {
+    /// Recover both the failure and its mandatory affine cleanup state.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        PrivateMountLinkActivationError,
+        PrivateMountLinkFailureState,
+    ) {
+        (self.source, *self.state)
+    }
+
+    fn pristine(
+        source: PrivateMountLinkActivationError,
+        mounts: PrivateMounts<PristineRun>,
+    ) -> Self {
+        Self {
+            source,
+            state: Box::new(PrivateMountLinkFailureState::Pristine(mounts)),
+        }
+    }
+
+    fn deleted(
+        source: PrivateMountLinkActivationError,
+        mounts: PrivateMounts<AuthorizedDeletedTopology>,
+    ) -> Self {
+        Self {
+            source,
+            state: Box::new(PrivateMountLinkFailureState::Deleted(Box::new(mounts))),
+        }
+    }
+
+    fn pristine_after_owned_cleanup(
+        source: PrivateMountLinkActivationError,
+        backing: PrivateMountBacking,
+    ) -> Self {
+        let mounts = backing.with_run_state(PristineRun);
+        let source = mounts
+            .verify()
+            .err()
+            .map_or(source, PrivateMountLinkActivationError::Mount);
+        Self::pristine(source, mounts)
+    }
+
+    fn deleted_after_retirement(
+        source: PrivateMountLinkActivationError,
+        backing: PrivateMountBacking,
+        deleted: AuthorizedDeletedTopology,
+    ) -> Self {
+        let mounts = backing.with_run_state(deleted);
+        let source = mounts
+            .verify_authorized_deleted_topology()
+            .err()
+            .map_or(source, PrivateMountLinkActivationError::Mount);
+        Self::deleted(source, mounts)
+    }
+
+    fn from_fixed_failure(
+        backing: PrivateMountBacking,
+        failure: FixedLinkActivationFailure,
+    ) -> Self {
+        let (source, deleted) = failure.into_parts();
+        let source = PrivateMountLinkActivationError::Activation(source);
+        match deleted {
+            Some(deleted) => Self::deleted_after_retirement(source, backing, deleted),
+            None => Self::pristine_after_owned_cleanup(source, backing),
+        }
+    }
 }
 
 /// Exact addressed parent/A/B observations retained until reverse cleanup.
 pub(crate) struct ExactIpv4AddressNetworkProof {
     parent: crate::network::ExactIpv4AddressParentObservation,
     endpoints: [crate::network::ExactIpv4AddressEndpointObservation; 2],
+}
+
+/// Exact addressed all-NONE parent/A/B observations retained until activation.
+pub(crate) struct ExactIpv4AddrgenNoneNetworkProof {
+    parent: crate::network::ExactIpv4AddrgenNoneParentObservation,
+    endpoints: [crate::network::ExactIpv4AddrgenNoneEndpointObservation; 2],
+}
+
+/// Exact parent/A/B observations retained after all four links became active.
+pub(crate) struct ExactActivatedIpv4NetworkProof {
+    parent: crate::network::ExactActivatedIpv4ParentObservation,
+    endpoints: [crate::network::ExactActivatedIpv4EndpointObservation; 2],
 }
 
 struct ExactIpv4AddressExpectations {
@@ -129,6 +263,39 @@ pub(crate) struct PrivateMounts<RunState = PristineRun> {
     ids: PrivateMountIds,
     baseline_mountinfo: Vec<u8>,
     run_state: RunState,
+}
+
+struct PrivateMountBacking {
+    root: OwnedFd,
+    run_pin: OwnedFd,
+    proc_pin: OwnedFd,
+    root_mount_id: u64,
+    ids: PrivateMountIds,
+    baseline_mountinfo: Vec<u8>,
+}
+
+/// Affine proof minted only by this higher mount/network layer after the
+/// retained parent and both endpoint baselines were re-proven pristine.
+///
+/// The lower topology layer must consume this unforgeable safe-Rust token
+/// before it can disarm any address or pair owner.
+#[must_use = "the pristine-network proof must authorize lower-owner retirement"]
+pub(crate) struct PristineNetworkRetirementProof {
+    _private: (),
+}
+
+impl PrivateMountBacking {
+    fn with_run_state<RunState>(self, run_state: RunState) -> PrivateMounts<RunState> {
+        PrivateMounts {
+            root: self.root,
+            run_pin: self.run_pin,
+            proc_pin: self.proc_pin,
+            root_mount_id: self.root_mount_id,
+            ids: self.ids,
+            baseline_mountinfo: self.baseline_mountinfo,
+            run_state,
+        }
+    }
 }
 
 /// Type-level proof that the private `/run` directory was observed empty.
@@ -363,42 +530,6 @@ impl PrivateMounts<AuthorizedNamespacePins> {
         Ok((active, endpoint_baselines))
     }
 
-    /// Consume A/B baselines and prove both endpoints exactly pristine after link rollback.
-    pub(crate) fn verify_pristine_network_namespace_rollbacks(
-        &self,
-        baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
-    ) -> Result<(), NamespacePinsNetworkProofError> {
-        self.verify_authorized_namespace_pins()
-            .map_err(NamespacePinsNetworkProofError::Mount)?;
-        let mut baselines = baselines.map(Some);
-        self.run_state
-            .visit_network_namespaces(|endpoint| {
-                let index = match endpoint {
-                    NamespaceEndpoint::A => 0,
-                    NamespaceEndpoint::B => 1,
-                };
-                let baseline = baselines[index]
-                    .take()
-                    .ok_or(crate::network::NetworkError::Inconsistent)?;
-                baseline.verify_pristine_rollback(self)
-            })
-            .map_err(|error| match error {
-                NamespaceVisitError::Namespace(source) => NamespacePinsNetworkProofError::Mount(
-                    namespace_pin_error("visit rolled-back network namespace", source),
-                ),
-                NamespaceVisitError::Visitor(source) => {
-                    NamespacePinsNetworkProofError::Network(source)
-                }
-            })?;
-        if baselines.iter().any(Option::is_some) {
-            return Err(NamespacePinsNetworkProofError::Network(
-                crate::network::NetworkError::Inconsistent,
-            ));
-        }
-        self.verify_authorized_namespace_pins()
-            .map_err(NamespacePinsNetworkProofError::Mount)
-    }
-
     /// Detach both owned nsfs mounts in reverse order, prove that their mount
     /// IDs and path records disappeared, and recover the unchanged authorized
     /// private-run state.
@@ -485,7 +616,7 @@ impl PrivateMounts<AuthorizedVethPairs> {
         &self,
         parent_baseline: &crate::network::MutationRollbackNetworkProof,
         endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
-    ) -> Result<ExactVethPairNetworkProof, NamespacePinsNetworkProofError> {
+    ) -> Result<(), NamespacePinsNetworkProofError> {
         self.verify_authorized_veth_pairs()
             .map_err(NamespacePinsNetworkProofError::Mount)?;
         let pairs = self.run_state.fixed_pairs();
@@ -559,61 +690,6 @@ impl PrivateMounts<AuthorizedVethPairs> {
                 crate::network::NetworkError::Inconsistent,
             ));
         }
-        self.verify_authorized_veth_pairs()
-            .map_err(NamespacePinsNetworkProofError::Mount)
-            .map(|()| ExactVethPairNetworkProof {
-                parent: parent_observation,
-                endpoints: [
-                    endpoint_observations[0]
-                        .take()
-                        .unwrap_or_else(|| std::process::abort()),
-                    endpoint_observations[1]
-                        .take()
-                        .unwrap_or_else(|| std::process::abort()),
-                ],
-            })
-    }
-
-    /// Reprove byte-identical parent/A/B veth state after a bounded sub-transaction.
-    pub(crate) fn verify_exact_veth_pair_state(
-        &self,
-        proof: &ExactVethPairNetworkProof,
-    ) -> Result<(), NamespacePinsNetworkProofError> {
-        self.verify_authorized_veth_pairs()
-            .map_err(NamespacePinsNetworkProofError::Mount)?;
-        proof
-            .parent
-            .verify(self)
-            .map_err(NamespacePinsNetworkProofError::Network)?;
-        let mut reverified = [false, false];
-        self.run_state
-            .visit_network_namespaces(|endpoint| {
-                let index = match endpoint {
-                    NamespaceEndpoint::A => 0,
-                    NamespaceEndpoint::B => 1,
-                };
-                if reverified[index] {
-                    return Err(crate::network::NetworkError::Inconsistent);
-                }
-                proof.endpoints[index].verify(self)?;
-                reverified[index] = true;
-                Ok(())
-            })
-            .map_err(|error| map_veth_visit_error("reprove exact endpoint veth state", error))?;
-        if reverified != [true, true] {
-            return Err(NamespacePinsNetworkProofError::Network(
-                crate::network::NetworkError::Inconsistent,
-            ));
-        }
-        crate::network::verify_exact_veth_pair_observations(
-            &proof.parent,
-            [&proof.endpoints[0], &proof.endpoints[1]],
-        )
-        .map_err(NamespacePinsNetworkProofError::Network)?;
-        proof
-            .parent
-            .verify(self)
-            .map_err(NamespacePinsNetworkProofError::Network)?;
         self.verify_authorized_veth_pairs()
             .map_err(NamespacePinsNetworkProofError::Mount)
     }
@@ -755,67 +831,450 @@ impl PrivateMounts<AuthorizedIpv4Addresses> {
         self.verify_veth_backed_state(self.run_state.veth_pairs())
             .map_err(NamespacePinsNetworkProofError::Mount)
     }
+}
 
-    /// Remove endpoint B/A then parent B/A and recover the unchanged veth owner.
-    pub(crate) fn rollback_fixed_ipv4_addresses(
-        self,
-    ) -> Result<PrivateMounts<AuthorizedVethPairs>, PrivateMountSetupError> {
-        self.verify_veth_backed_state(self.run_state.veth_pairs())?;
-        let PrivateMounts {
-            root,
-            run_pin,
-            proc_pin,
-            root_mount_id,
-            ids,
-            baseline_mountinfo,
-            run_state,
-        } = self;
-        let run_state = run_state
-            .rollback()
-            .map_err(|source| ipv4_address_set_error("roll back fixed IPv4 addresses", source))?;
-        let veth_pairs = PrivateMounts {
-            root,
-            run_pin,
-            proc_pin,
-            root_mount_id,
-            ids,
-            baseline_mountinfo,
-            run_state,
+impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
+    /// Reprove the all-NONE owner, both live nsfs attachments, and their exact
+    /// visible mount-table records without invoking the obsolete DOWN/EUI64
+    /// veth parser.
+    pub(crate) fn verify_authorized_ipv4_addrgen_none(&self) -> Result<(), PrivateMountSetupError> {
+        self.run_state
+            .verify()
+            .map_err(|source| fixed_link_error("verify all-NONE fixed link authority", source))?;
+        self.verify_namespace_backed_mountinfo(
+            self.run_state.mount_ids(),
+            self.run_state.mount_point_bytes(),
+            "verify all-NONE nsfs mount table",
+        )?;
+        self.run_state
+            .verify()
+            .map_err(|source| fixed_link_error("reverify all-NONE fixed link authority", source))
+    }
+
+    /// Observe the exact addressed all-NONE parent/A/B barrier and bind every
+    /// observation to the retained topology and mounts.
+    fn prove_exact_ipv4_addrgen_none(
+        &self,
+        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<ExactIpv4AddrgenNoneNetworkProof, NamespacePinsNetworkProofError> {
+        self.verify_authorized_ipv4_addrgen_none()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let expectations = exact_ipv4_address_expectations_from(
+            self.run_state.fixed_pairs(),
+            self.run_state.owners(),
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        let parent = self
+            .run_state
+            .visit_parent_network_namespace(|| {
+                parent_baseline.observe_exact_ipv4_addrgen_none_parent(
+                    self,
+                    [&expectations.pairs[0], &expectations.pairs[1]],
+                    [&expectations.addresses[0], &expectations.addresses[2]],
+                )
+            })
+            .map_err(|error| {
+                map_topology_visit_error("observe exact all-NONE parent state", error)
+            })?;
+        let endpoint_addresses = [&expectations.addresses[1], &expectations.addresses[3]];
+        let mut endpoints = [None, None];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if endpoints[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                endpoints[index] = Some(
+                    endpoint_baselines[index].observe_exact_ipv4_addrgen_none_endpoint(
+                        self,
+                        &expectations.pairs[index],
+                        endpoint_addresses[index],
+                    )?,
+                );
+                Ok(())
+            })
+            .map_err(|error| {
+                map_topology_visit_error("observe exact all-NONE endpoint state", error)
+            })?;
+        let [Some(alpha), Some(omega)] = endpoints else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
         };
-        veth_pairs.verify_authorized_veth_pairs()?;
-        Ok(veth_pairs)
+        let proof = ExactIpv4AddrgenNoneNetworkProof {
+            parent,
+            endpoints: [alpha, omega],
+        };
+        self.verify_exact_ipv4_addrgen_none_state(&proof)?;
+        Ok(proof)
+    }
+
+    /// Reobserve the exact all-NONE barrier before any link-UP request.
+    fn verify_exact_ipv4_addrgen_none_state(
+        &self,
+        proof: &ExactIpv4AddrgenNoneNetworkProof,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_ipv4_addrgen_none()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        self.run_state
+            .visit_parent_network_namespace(|| proof.parent.verify(self))
+            .map_err(|error| {
+                map_topology_visit_error("reprove exact all-NONE parent state", error)
+            })?;
+        let mut visited = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if visited[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                proof.endpoints[index].verify(self)?;
+                visited[index] = true;
+                Ok(())
+            })
+            .map_err(|error| {
+                map_topology_visit_error("reprove exact all-NONE endpoint state", error)
+            })?;
+        require_complete_endpoint_visit(visited)?;
+        crate::network::verify_exact_ipv4_addrgen_none_observations(
+            &proof.parent,
+            [&proof.endpoints[0], &proof.endpoints[1]],
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        self.verify_authorized_ipv4_addrgen_none()
+            .map_err(NamespacePinsNetworkProofError::Mount)
     }
 }
 
-impl PrivateMounts<AuthorizedVethPairs> {
-    /// Delete B then A and recover the unchanged live namespace-pin owner.
-    pub(crate) fn rollback_fixed_veth_pairs(
-        self,
-    ) -> Result<PrivateMounts<AuthorizedNamespacePins>, PrivateMountSetupError> {
-        self.verify_authorized_veth_pairs()?;
-        let PrivateMounts {
-            root,
-            run_pin,
-            proc_pin,
-            root_mount_id,
-            ids,
-            baseline_mountinfo,
-            run_state,
-        } = self;
-        let run_state = run_state
-            .rollback()
-            .map_err(|source| veth_pair_error("roll back fixed veth pairs", source))?;
-        let pinned = PrivateMounts {
-            root,
-            run_pin,
-            proc_pin,
-            root_mount_id,
-            ids,
-            baseline_mountinfo,
-            run_state,
+impl PrivateMounts<AuthorizedActivatedTopology> {
+    /// Reprove the all-UP owner, both nsfs attachments, and their exact visible
+    /// mount-table records without invoking any lower rollback parser.
+    pub(crate) fn verify_authorized_activated_topology(
+        &self,
+    ) -> Result<(), PrivateMountSetupError> {
+        self.run_state
+            .verify()
+            .map_err(|source| fixed_link_error("verify activated fixed topology", source))?;
+        self.verify_namespace_backed_mountinfo(
+            self.run_state.mount_ids(),
+            self.run_state.mount_point_bytes(),
+            "verify activated nsfs mount table",
+        )?;
+        self.run_state
+            .verify()
+            .map_err(|source| fixed_link_error("reverify activated fixed topology", source))
+    }
+
+    fn prove_exact_activated_ipv4(
+        &self,
+        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<ExactActivatedIpv4NetworkProof, NamespacePinsNetworkProofError> {
+        self.verify_authorized_activated_topology()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let expectations = exact_ipv4_address_expectations_from(
+            self.run_state.fixed_pairs(),
+            self.run_state.owners(),
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        let parent = self
+            .run_state
+            .visit_parent_network_namespace(|| {
+                parent_baseline.observe_exact_activated_ipv4_parent(
+                    self,
+                    [&expectations.pairs[0], &expectations.pairs[1]],
+                    [&expectations.addresses[0], &expectations.addresses[2]],
+                )
+            })
+            .map_err(|error| {
+                map_topology_visit_error("observe exact activated parent state", error)
+            })?;
+        let endpoint_addresses = [&expectations.addresses[1], &expectations.addresses[3]];
+        let mut endpoints = [None, None];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if endpoints[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                endpoints[index] = Some(
+                    endpoint_baselines[index].observe_exact_activated_ipv4_endpoint(
+                        self,
+                        &expectations.pairs[index],
+                        endpoint_addresses[index],
+                    )?,
+                );
+                Ok(())
+            })
+            .map_err(|error| {
+                map_topology_visit_error("observe exact activated endpoint state", error)
+            })?;
+        let [Some(alpha), Some(omega)] = endpoints else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
         };
-        pinned.verify_authorized_namespace_pins()?;
-        Ok(pinned)
+        let proof = ExactActivatedIpv4NetworkProof {
+            parent,
+            endpoints: [alpha, omega],
+        };
+        self.verify_exact_activated_ipv4_state(&proof)?;
+        Ok(proof)
+    }
+
+    fn verify_exact_activated_ipv4_state(
+        &self,
+        proof: &ExactActivatedIpv4NetworkProof,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_activated_topology()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        self.run_state
+            .visit_parent_network_namespace(|| proof.parent.verify(self))
+            .map_err(|error| {
+                map_topology_visit_error("reprove exact activated parent state", error)
+            })?;
+        let mut visited = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if visited[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                proof.endpoints[index].verify(self)?;
+                visited[index] = true;
+                Ok(())
+            })
+            .map_err(|error| {
+                map_topology_visit_error("reprove exact activated endpoint state", error)
+            })?;
+        require_complete_endpoint_visit(visited)?;
+        crate::network::verify_exact_activated_ipv4_observations(
+            &proof.parent,
+            [&proof.endpoints[0], &proof.endpoints[1]],
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        self.verify_authorized_activated_topology()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+}
+
+impl PrivateMounts<AuthorizedDeletedTopology> {
+    /// Reprove the retained nsfs mount authority after raw B/A pair deletion.
+    /// No address, veth, DOWN, or EUI64 readback is permitted in this state.
+    pub(crate) fn verify_authorized_deleted_topology(&self) -> Result<(), PrivateMountSetupError> {
+        verify_deleted_pair_identities(&self.run_state.fixed_pair_identities())?;
+        self.run_state
+            .visit_parent_network_namespace(|| Ok::<(), Infallible>(()))
+            .map_err(|error| {
+                map_infallible_topology_visit_error(
+                    "verify deleted topology parent namespace",
+                    error,
+                )
+            })?;
+        self.verify_namespace_backed_mountinfo(
+            self.run_state.mount_ids(),
+            self.run_state.mount_point_bytes(),
+            "verify deleted-topology nsfs mount table",
+        )?;
+        self.run_state
+            .visit_network_namespaces(|_| Ok::<(), Infallible>(()))
+            .map_err(|error| {
+                map_infallible_topology_visit_error(
+                    "verify deleted topology endpoint namespaces",
+                    error,
+                )
+            })?;
+        self.run_state
+            .visit_parent_network_namespace(|| Ok::<(), Infallible>(()))
+            .map_err(|error| {
+                map_infallible_topology_visit_error(
+                    "reverify deleted topology parent namespace",
+                    error,
+                )
+            })
+    }
+
+    /// Consume the external pristine parent/A/B proof before disarming any of
+    /// the six lower affine owners and returning ordinary namespace-pin authority.
+    ///
+    /// Any failure before the proof token is minted remains intentionally
+    /// terminal: dropping the still-armed deleted topology aborts fail-closed.
+    /// The returned error path begins only after infallible owner retirement,
+    /// when the recovered namespace-pin mount authority is reverified.
+    pub(crate) fn finish_after_pristine_network_proof(
+        self,
+        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<PrivateMounts<AuthorizedNamespacePins>, PrivateMountSetupError> {
+        self.verify_authorized_deleted_topology()?;
+        self.run_state
+            .visit_parent_network_namespace(|| parent_baseline.verify_pristine_state(&self))
+            .map_err(|error| {
+                topology_network_visit_error("verify deleted topology pristine parent state", error)
+            })?;
+
+        let mut endpoint_baselines = endpoint_baselines.map(Some);
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                endpoint_baselines[endpoint_index(endpoint)]
+                    .take()
+                    .ok_or(crate::network::NetworkError::Inconsistent)?
+                    .verify_pristine_rollback(&self)
+            })
+            .map_err(|error| {
+                topology_network_visit_error(
+                    "verify deleted topology pristine endpoint states",
+                    error,
+                )
+            })?;
+        if endpoint_baselines.iter().any(Option::is_some) {
+            return Err(network_proof_setup_error(
+                "verify deleted topology pristine endpoint visit",
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
+
+        self.run_state
+            .visit_parent_network_namespace(|| parent_baseline.verify_pristine_state(&self))
+            .map_err(|error| {
+                topology_network_visit_error(
+                    "reverify deleted topology pristine parent state",
+                    error,
+                )
+            })?;
+        self.verify_authorized_deleted_topology()?;
+        let proof = PristineNetworkRetirementProof { _private: () };
+        let (backing, deleted) = self.into_backing_and_run_state();
+        let pins = deleted.finish_after_pristine_network_proof(proof);
+        let mounts = backing.with_run_state(pins);
+        mounts.verify_authorized_namespace_pins()?;
+        Ok(mounts)
+    }
+}
+
+impl PrivateMounts<AuthorizedIpv4Addresses> {
+    /// Consume the exact addressed-DOWN state into the four-end all-NONE
+    /// barrier. Every possible SETLINK path returns either an exact all-NONE
+    /// proof or deletion-only cleanup authority.
+    pub(crate) fn disable_ipv6_address_generation(
+        self,
+        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedIpv4AddrgenNone>,
+            ExactIpv4AddrgenNoneNetworkProof,
+        ),
+        PrivateMountLinkActivationFailure,
+    > {
+        if let Err(source) = self.prove_exact_ipv4_addresses(parent_baseline, endpoint_baselines) {
+            let (backing, addressed) = self.into_backing_and_run_state();
+            drop(addressed);
+            return Err(
+                PrivateMountLinkActivationFailure::pristine_after_owned_cleanup(
+                    PrivateMountLinkActivationError::Proof(source),
+                    backing,
+                ),
+            );
+        }
+
+        let (backing, addressed) = self.into_backing_and_run_state();
+        let all_none = match addressed.disable_ipv6_address_generation() {
+            Ok(all_none) => all_none,
+            Err(failure) => {
+                return Err(PrivateMountLinkActivationFailure::from_fixed_failure(
+                    backing, failure,
+                ));
+            }
+        };
+        let mounts = backing.with_run_state(all_none);
+        if let Err(source) = mounts.verify_authorized_ipv4_addrgen_none() {
+            return Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Mount(source)));
+        }
+        match mounts.prove_exact_ipv4_addrgen_none(parent_baseline, endpoint_baselines) {
+            Ok(proof) => Ok((mounts, proof)),
+            Err(source) => {
+                Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)))
+            }
+        }
+    }
+}
+
+impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
+    /// Consume the exact all-NONE proof into four link-UP operations and an
+    /// exact active parent/A/B barrier.
+    pub(crate) fn activate_links(
+        self,
+        none_proof: &ExactIpv4AddrgenNoneNetworkProof,
+        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedActivatedTopology>,
+            ExactActivatedIpv4NetworkProof,
+        ),
+        PrivateMountLinkActivationFailure,
+    > {
+        if let Err(source) = self.verify_exact_ipv4_addrgen_none_state(none_proof) {
+            return Err(self.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)));
+        }
+        let (backing, all_none) = self.into_backing_and_run_state();
+        let activated = match all_none.activate_links() {
+            Ok(activated) => activated,
+            Err(failure) => {
+                return Err(PrivateMountLinkActivationFailure::from_fixed_failure(
+                    backing, failure,
+                ));
+            }
+        };
+        let mounts = backing.with_run_state(activated);
+        if let Err(source) = mounts.verify_authorized_activated_topology() {
+            return Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Mount(source)));
+        }
+        match mounts.prove_exact_activated_ipv4(parent_baseline, endpoint_baselines) {
+            Ok(proof) => Ok((mounts, proof)),
+            Err(source) => {
+                Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)))
+            }
+        }
+    }
+
+    fn into_deleted_failure(
+        self,
+        source: PrivateMountLinkActivationError,
+    ) -> PrivateMountLinkActivationFailure {
+        let (backing, all_none) = self.into_backing_and_run_state();
+        PrivateMountLinkActivationFailure::deleted_after_retirement(
+            source,
+            backing,
+            all_none.begin_retirement(),
+        )
+    }
+}
+
+impl PrivateMounts<AuthorizedActivatedTopology> {
+    /// Directly delete pair B then A and retain all lower owners until the
+    /// external parent/A/B pristine proof authorizes their disarm.
+    pub(crate) fn begin_retirement(self) -> PrivateMounts<AuthorizedDeletedTopology> {
+        let (backing, activated) = self.into_backing_and_run_state();
+        let mounts = backing.with_run_state(activated.begin_retirement());
+        if mounts.verify_authorized_deleted_topology().is_err() {
+            std::process::abort();
+        }
+        mounts
+    }
+
+    fn into_deleted_failure(
+        self,
+        source: PrivateMountLinkActivationError,
+    ) -> PrivateMountLinkActivationFailure {
+        let (backing, activated) = self.into_backing_and_run_state();
+        PrivateMountLinkActivationFailure::deleted_after_retirement(
+            source,
+            backing,
+            activated.begin_retirement(),
+        )
     }
 }
 
@@ -847,6 +1306,46 @@ impl<RunState> PrivateMounts<RunState> {
         pairs
             .verify()
             .map_err(|source| veth_pair_error("reverify authorized veth pairs", source))
+    }
+
+    fn verify_namespace_backed_mountinfo(
+        &self,
+        mount_ids: [u64; 2],
+        mount_points: [&[u8]; 2],
+        operation: &'static str,
+    ) -> Result<(), PrivateMountSetupError> {
+        let mountinfo = self.observe_visible_private_mounts(false)?;
+        verify_authorized_namespace_mountinfo(
+            &self.baseline_mountinfo,
+            &mountinfo,
+            self.ids,
+            mount_ids,
+            mount_points,
+        )
+        .map_err(|source| hard_error(operation, source))
+    }
+
+    fn into_backing_and_run_state(self) -> (PrivateMountBacking, RunState) {
+        let Self {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        } = self;
+        (
+            PrivateMountBacking {
+                root,
+                run_pin,
+                proc_pin,
+                root_mount_id,
+                ids,
+                baseline_mountinfo,
+            },
+            run_state,
+        )
     }
 
     fn with_run_state<NextState>(self, run_state: NextState) -> PrivateMounts<NextState> {
@@ -1930,10 +2429,42 @@ fn ipv4_address_set_error(
     hard_error(operation, io::Error::other(source))
 }
 
+fn fixed_link_error(
+    operation: &'static str,
+    source: FixedLinkActivationError,
+) -> PrivateMountSetupError {
+    hard_error(operation, io::Error::other(source))
+}
+
+fn endpoint_index(endpoint: NamespaceEndpoint) -> usize {
+    match endpoint {
+        NamespaceEndpoint::A => 0,
+        NamespaceEndpoint::B => 1,
+    }
+}
+
+fn require_complete_endpoint_visit(
+    visited: [bool; 2],
+) -> Result<(), NamespacePinsNetworkProofError> {
+    if visited == [true, true] {
+        Ok(())
+    } else {
+        Err(NamespacePinsNetworkProofError::Network(
+            crate::network::NetworkError::Inconsistent,
+        ))
+    }
+}
+
 fn exact_ipv4_address_expectations(
     addresses: &AuthorizedIpv4Addresses,
 ) -> Result<ExactIpv4AddressExpectations, crate::network::NetworkError> {
-    let fixed_pairs = addresses.veth_pairs().fixed_pairs();
+    exact_ipv4_address_expectations_from(addresses.veth_pairs().fixed_pairs(), addresses.owners())
+}
+
+fn exact_ipv4_address_expectations_from(
+    fixed_pairs: [&crate::topology::veth::FixedVethPair; 2],
+    owners: [&crate::topology::ipv4::FixedIpv4AddressOwner; 4],
+) -> Result<ExactIpv4AddressExpectations, crate::network::NetworkError> {
     let pair_expectations = [
         crate::network::ExpectedVethPair::new(
             fixed_pairs[0].parent_name(),
@@ -1948,7 +2479,6 @@ fn exact_ipv4_address_expectations(
             fixed_pairs[1].target_namespace_identity(),
         )?,
     ];
-    let owners = addresses.owners();
     if owners
         .iter()
         .any(|owner| owner.address().prefix_length() != 30)
@@ -2013,6 +2543,84 @@ fn map_veth_visit_error(
             NamespacePinsNetworkProofError::Mount(namespace_pin_error(operation, source))
         }
         NamespaceVisitError::Visitor(source) => NamespacePinsNetworkProofError::Network(source),
+    }
+}
+
+fn map_topology_visit_error(
+    operation: &'static str,
+    error: FixedTopologyVisitError<crate::network::NetworkError>,
+) -> NamespacePinsNetworkProofError {
+    match error {
+        FixedTopologyVisitError::Topology(source) => {
+            NamespacePinsNetworkProofError::Mount(fixed_link_error(operation, source))
+        }
+        FixedTopologyVisitError::Namespace(source) => {
+            NamespacePinsNetworkProofError::Mount(namespace_pin_error(operation, source))
+        }
+        FixedTopologyVisitError::Visitor(source) => NamespacePinsNetworkProofError::Network(source),
+    }
+}
+
+fn map_infallible_topology_visit_error(
+    operation: &'static str,
+    error: FixedTopologyVisitError<Infallible>,
+) -> PrivateMountSetupError {
+    match error {
+        FixedTopologyVisitError::Topology(source) => fixed_link_error(operation, source),
+        FixedTopologyVisitError::Namespace(source) => namespace_pin_error(operation, source),
+        FixedTopologyVisitError::Visitor(never) => match never {},
+    }
+}
+
+fn topology_network_visit_error(
+    operation: &'static str,
+    error: FixedTopologyVisitError<crate::network::NetworkError>,
+) -> PrivateMountSetupError {
+    match error {
+        FixedTopologyVisitError::Topology(source) => fixed_link_error(operation, source),
+        FixedTopologyVisitError::Namespace(source) => namespace_pin_error(operation, source),
+        FixedTopologyVisitError::Visitor(source) => network_proof_setup_error(operation, source),
+    }
+}
+
+fn network_proof_setup_error(
+    operation: &'static str,
+    source: crate::network::NetworkError,
+) -> PrivateMountSetupError {
+    hard_error(operation, io::Error::other(source))
+}
+
+fn verify_deleted_pair_identities(
+    identities: &[crate::topology::namespaces::DeletedVethPairIdentity; 2],
+) -> Result<(), PrivateMountSetupError> {
+    let target_alpha = (
+        identities[0].target_namespace_device(),
+        identities[0].target_namespace_inode(),
+    );
+    let target_omega = (
+        identities[1].target_namespace_device(),
+        identities[1].target_namespace_inode(),
+    );
+    let exact = identities[0].endpoint() == NamespaceEndpoint::A
+        && identities[1].endpoint() == NamespaceEndpoint::B
+        && !identities[0].parent_name().is_empty()
+        && !identities[1].parent_name().is_empty()
+        && identities[0].parent_name() != identities[1].parent_name()
+        && identities[0].parent_ifindex() != 0
+        && identities[1].parent_ifindex() != 0
+        && identities[0].parent_ifindex() != identities[1].parent_ifindex()
+        && identities[0].peer_ifindex() != 0
+        && identities[1].peer_ifindex() != 0
+        && target_alpha.1 != 0
+        && target_omega.1 != 0
+        && target_alpha != target_omega;
+    if exact {
+        Ok(())
+    } else {
+        Err(hard_error(
+            "verify deleted topology retained pair identities",
+            invalid_data("deleted topology retained pair identities are not exact"),
+        ))
     }
 }
 

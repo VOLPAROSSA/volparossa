@@ -53,8 +53,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// Four fixed `/30` addresses and local routes, both veth pairs, pins, and backing rolled back.
-    BlockedAfterIpv4AddressRollback,
+    /// Four addressed links were activated, directly deleted, and exactly proven pristine.
+    BlockedAfterLinkActivationTeardown,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -63,7 +63,12 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    AuthorizedIpv4AddressesRolledBack,
+    AuthorizedLinkActivationTornDown,
+}
+
+enum FixedLinkTeardownMounts {
+    NamespacePins(Box<crate::mounts::PrivateMounts<crate::topology::AuthorizedNamespacePins>>),
+    Pristine(crate::mounts::PrivateMounts),
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -99,6 +104,9 @@ pub enum RunnerError {
     /// One fixed private-mount operation or its direct kernel proof failed.
     #[error("private-mount setup or proof failed: {0}")]
     PrivateMount(#[source] io::Error),
+    /// The fixed link activation or deletion-only teardown transaction failed.
+    #[error("fixed link activation or teardown failed: {0}")]
+    LinkActivation(#[source] io::Error),
     /// Fixed managed-signal setup, observation, or quiescence proof failed.
     #[error("fixed signal supervision failed: {0}")]
     SignalSupervision(#[source] io::Error),
@@ -174,10 +182,13 @@ impl From<PidOneControlError> for RunnerError {
 /// exact pristine network state, atomically creates two fixed down-veth pairs,
 /// proves the exact parent/A/B deltas, and installs four fixed `/30` IPv4
 /// addresses. It proves those addresses and their four kernel-owned local-table
-/// `/32` routes while every veth end remains down, rolls the addresses back in
-/// endpoint B/A then parent B/A order, and byte-exactly re-proves the retained
-/// down-veth state. It then deletes veth B followed by A, proves all three
-/// namespaces pristine again, rolls the pins and roots back, and emits one
+/// `/32` routes while every veth end remains down. It then proves all four ends
+/// at IPv6 address-generation mode `none`, activates them, and proves their
+/// exact carrier-up links, qdiscs, IPv4 routes, and IPv6 multicast routes. It
+/// directly deletes veth B followed by A and retains every lower owner until
+/// all three namespaces are byte-exactly equal to their retained enumerated
+/// network baselines. It then retires those
+/// owners, rolls the pins and roots back, and emits one
 /// internal rollback-complete checkpoint. The outer independently re-proves empty private
 /// mounts before sending fixed TERM through the retained pidfd and requiring one
 /// affine PID-1 `signalfd` observation before exact reap. This slice does not
@@ -287,8 +298,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::AuthorizedIpv4AddressesRolledBack => {
-            LifecycleOutcome::BlockedAfterIpv4AddressRollback
+        PidOneBarrierOutcome::AuthorizedLinkActivationTornDown => {
+            LifecycleOutcome::BlockedAfterLinkActivationTeardown
         }
     };
     Ok(outcome)
@@ -432,7 +443,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::AuthorizedIpv4AddressesRolledBack)
+        Ok(PidOneBarrierOutcome::AuthorizedLinkActivationTornDown)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -612,7 +623,7 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterIpv4AddressRollback {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterLinkActivationTeardown {
         LifecycleEofDisposition::CleanupRequired
     } else {
         LifecycleEofDisposition::NoTopologyMutationAuthorized
@@ -970,10 +981,13 @@ fn finish_pid_one(
 /// run-bound network-namespace pins, atomically creates and proves two fixed
 /// down-veth pairs, then installs and proves four fixed `/30` addresses and
 /// their four kernel-owned local-table `/32` routes while the links stay down.
-/// It rolls back endpoint B/A then parent B/A, re-proves the retained veth state
-/// byte-exactly, reverses veth B then A, proves every namespace pristine again,
-/// and reverses both pins and then every
-/// private-run creation, and reports the internal rollback checkpoint. Only
+/// It next proves an exact all-IPv6-addrgen-NONE barrier, activates all four
+/// ends, and re-proves the carrier-up links, `noqueue` qdiscs, and complete
+/// kernel-owned route side effects. It then directly deletes veth B followed by
+/// A and proves all three namespaces byte-exactly equal to their retained
+/// enumerated network baselines before retiring the still-armed address and
+/// pair owners. It reverses both pins and every private-run creation and reports
+/// the internal rollback checkpoint. Only
 /// after the outer independently re-proves
 /// empty private mounts does PID 1 consume pidfd-delivered TERM and report the
 /// affine observation over the launcher-private control channel. The final EOF
@@ -1177,38 +1191,36 @@ fn complete_authorized_private_run_rollback(
     veth_pairs
         .verify_authorized_veth_pairs()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    let veth_pairs = complete_fixed_ipv4_address_rollback(
+    let (teardown_mounts, deferred_link_error) = complete_fixed_link_activation_teardown(
         veth_pairs,
         &rollback_network_proof,
-        &endpoint_baselines,
+        endpoint_baselines,
     )?;
-    let namespace_pins = veth_pairs
-        .rollback_fixed_veth_pairs()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    namespace_pins
-        .verify_pristine_network_namespace_rollbacks(endpoint_baselines)
-        .map_err(|error| match error {
-            crate::mounts::NamespacePinsNetworkProofError::Mount(error) => {
-                RunnerError::PrivateMount(io::Error::other(error))
-            }
-            crate::mounts::NamespacePinsNetworkProofError::Network(_) => RunnerError::NetworkProof,
-        })?;
-    namespace_pins
-        .verify_authorized_namespace_pins()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    let authorized_mounts = namespace_pins
-        .rollback_namespace_pins()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    authorized_mounts
-        .verify_authorized_private_run()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    let mounts = authorized_mounts
-        .rollback_private_run()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let mounts = match teardown_mounts {
+        FixedLinkTeardownMounts::NamespacePins(namespace_pins) => {
+            let namespace_pins = *namespace_pins;
+            namespace_pins
+                .verify_authorized_namespace_pins()
+                .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+            let authorized_mounts = namespace_pins
+                .rollback_namespace_pins()
+                .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+            authorized_mounts
+                .verify_authorized_private_run()
+                .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+            authorized_mounts
+                .rollback_private_run()
+                .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?
+        }
+        FixedLinkTeardownMounts::Pristine(mounts) => mounts,
+    };
     rollback_network_proof
         .verify_rollback(&mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
     verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
+    if let Some(source) = deferred_link_error {
+        return Err(RunnerError::LinkActivation(io::Error::other(source)));
+    }
     let final_network_proof = crate::network::prove_pre_go_network_baseline(&mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
     verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
@@ -1218,13 +1230,19 @@ fn complete_authorized_private_run_rollback(
     Ok((mounts, final_network_proof))
 }
 
-fn complete_fixed_ipv4_address_rollback(
+fn complete_fixed_link_activation_teardown(
     veth_pairs: crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>,
     rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
-    endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
-) -> Result<crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>, RunnerError> {
-    let veth_network_proof = veth_pairs
-        .prove_exact_veth_pairs(rollback_network_proof, endpoint_baselines)
+    endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
+) -> Result<
+    (
+        FixedLinkTeardownMounts,
+        Option<crate::mounts::PrivateMountLinkActivationError>,
+    ),
+    RunnerError,
+> {
+    veth_pairs
+        .prove_exact_veth_pairs(rollback_network_proof, &endpoint_baselines)
         .map_err(map_namespace_network_proof_error)?;
     veth_pairs
         .verify_authorized_veth_pairs()
@@ -1232,22 +1250,66 @@ fn complete_fixed_ipv4_address_rollback(
     let ipv4_addresses = veth_pairs
         .configure_fixed_ipv4_addresses()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    let ipv4_network_proof = ipv4_addresses
-        .prove_exact_ipv4_addresses(rollback_network_proof, endpoint_baselines)
-        .map_err(map_namespace_network_proof_error)?;
-    ipv4_addresses
-        .verify_exact_ipv4_address_state(&ipv4_network_proof)
-        .map_err(map_namespace_network_proof_error)?;
-    let veth_pairs = ipv4_addresses
-        .rollback_fixed_ipv4_addresses()
+    let (all_none, none_proof) = match ipv4_addresses
+        .disable_ipv6_address_generation(rollback_network_proof, &endpoint_baselines)
+    {
+        Ok(result) => result,
+        Err(failure) => {
+            return recover_failed_link_activation(
+                failure,
+                rollback_network_proof,
+                endpoint_baselines,
+            );
+        }
+    };
+    let (activated, _active_proof) =
+        match all_none.activate_links(&none_proof, rollback_network_proof, &endpoint_baselines) {
+            Ok(result) => result,
+            Err(failure) => {
+                return recover_failed_link_activation(
+                    failure,
+                    rollback_network_proof,
+                    endpoint_baselines,
+                );
+            }
+        };
+    let deleted = activated.begin_retirement();
+    let namespace_pins = deleted
+        .finish_after_pristine_network_proof(rollback_network_proof, endpoint_baselines)
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    veth_pairs
-        .verify_exact_veth_pair_state(&veth_network_proof)
-        .map_err(map_namespace_network_proof_error)?;
-    veth_pairs
-        .verify_authorized_veth_pairs()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    Ok(veth_pairs)
+    Ok((
+        FixedLinkTeardownMounts::NamespacePins(Box::new(namespace_pins)),
+        None,
+    ))
+}
+
+fn recover_failed_link_activation(
+    failure: crate::mounts::PrivateMountLinkActivationFailure,
+    rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
+    endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
+) -> Result<
+    (
+        FixedLinkTeardownMounts,
+        Option<crate::mounts::PrivateMountLinkActivationError>,
+    ),
+    RunnerError,
+> {
+    let (source, state) = failure.into_parts();
+    let mounts = match state {
+        crate::mounts::PrivateMountLinkFailureState::Pristine(mounts) => {
+            mounts
+                .verify()
+                .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+            FixedLinkTeardownMounts::Pristine(mounts)
+        }
+        crate::mounts::PrivateMountLinkFailureState::Deleted(mounts) => {
+            let namespace_pins = (*mounts)
+                .finish_after_pristine_network_proof(rollback_network_proof, endpoint_baselines)
+                .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+            FixedLinkTeardownMounts::NamespacePins(Box::new(namespace_pins))
+        }
+    };
+    Ok((mounts, Some(source)))
 }
 
 fn map_namespace_network_proof_error(

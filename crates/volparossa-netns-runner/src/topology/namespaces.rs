@@ -29,6 +29,11 @@ use super::{
         FixedIpv4Address, FixedIpv4AddressOwner, Ipv4AddError, Ipv4RollbackError, Ipv4VerifyError,
         add_fixed_ipv4_address,
     },
+    link::{
+        AllLinksAddrgenNone, AllLinksUp, FixedLinkEnd, FixedLinkMutationJournal,
+        FixedLinkOperationError, FixedLinkRetirement, FixedPairAbsenceProof,
+        PendingFixedPairAbsenceProof,
+    },
     ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError, NamespacePinTarget},
     veth::{
         FixedVethEndpoint, FixedVethPair, VethCreateError, VethRollbackError, VethVerifyError,
@@ -40,6 +45,7 @@ const CURRENT_NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
 const PRIVATE_NETNS_PREFIX: &str = "/run/netns/";
 const NSFS_MAGIC: FsWord = 0x6e73_6673;
 const ENDPOINT_COUNT: usize = 2;
+const RAW_LINK_RETIREMENT_PROOF_ATTEMPTS: usize = 2;
 
 const NAMESPACE_STATX_FLAGS: StatxFlags = StatxFlags::TYPE
     .union(StatxFlags::INO)
@@ -136,6 +142,89 @@ pub(crate) enum FixedIpv4AddressSetError {
     /// The exact address set or affine owner was incomplete.
     #[error("fixed IPv4 address-set proof failed: {0}")]
     Unsafe(&'static str),
+}
+
+/// Failure before or during the fixed link activation transaction.
+#[derive(Debug, Error)]
+pub(crate) enum FixedLinkActivationError {
+    /// The original four-address authority failed its last preflight proof.
+    #[error("fixed link activation address binding failed: {0}")]
+    Addressed(#[source] FixedIpv4AddressSetError),
+    /// One fixed link mutation or retained-state proof failed.
+    #[error("fixed link activation failed: {0}")]
+    Link(#[source] FixedLinkOperationError),
+    /// Entering, proving, or restoring one retained endpoint namespace failed.
+    #[error("fixed link activation namespace binding failed: {0}")]
+    Namespace(#[from] NamespacePinError),
+}
+
+/// Affine failed-transition result preserving any mandatory deleted topology.
+///
+/// `deleted == None` means the low-level journal proved that no SETLINK request
+/// crossed the possibly-sent boundary, so ordinary lower-owner cleanup was
+/// still safe and has already occurred. Otherwise the caller must run the full
+/// pristine-network proof over the retained deleted topology before extracting
+/// its source error and releasing namespace authority.
+#[must_use = "a failed post-SETLINK transition retains mandatory cleanup authority"]
+pub(crate) struct FixedLinkActivationFailure {
+    source: FixedLinkActivationError,
+    deleted: Option<Box<AuthorizedDeletedTopology>>,
+}
+
+/// Failure from a scoped parent or endpoint visit through a link typestate.
+#[derive(Debug)]
+pub(crate) enum FixedTopologyVisitError<VisitorError> {
+    /// The retained link typestate failed its pre- or post-visit proof.
+    Topology(FixedLinkActivationError),
+    /// Entering or restoring a retained endpoint namespace failed.
+    Namespace(NamespacePinError),
+    /// The scoped caller operation failed after exact restoration.
+    Visitor(VisitorError),
+}
+
+impl std::fmt::Debug for FixedLinkActivationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FixedLinkActivationFailure")
+            .field("source", &self.source)
+            .field("deleted", &self.deleted.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FixedLinkActivationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for FixedLinkActivationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl FixedLinkActivationFailure {
+    /// Consume the affine failure into its source and optional deleted topology.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (FixedLinkActivationError, Option<AuthorizedDeletedTopology>) {
+        (self.source, self.deleted.map(|deleted| *deleted))
+    }
+
+    fn untouched(source: FixedLinkActivationError) -> Self {
+        Self {
+            source,
+            deleted: None,
+        }
+    }
+
+    fn deleted(source: FixedLinkActivationError, deleted: AuthorizedDeletedTopology) -> Self {
+        Self {
+            source,
+            deleted: Some(Box::new(deleted)),
+        }
+    }
 }
 
 impl NamespacePinError {
@@ -1004,6 +1093,83 @@ pub(crate) struct AuthorizedIpv4Addresses {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+/// Affine authority after all four addressed links passed the all-NONE barrier.
+///
+/// The original addressed owner remains whole inside an `Option`; neither it
+/// nor either lower Drop type is ever destructured. Any transition after this
+/// point is deletion-only and cannot restore EUI64 or invoke ordinary address
+/// or veth rollback.
+#[must_use = "the all-NONE topology owns deletion-only retirement authority"]
+pub(crate) struct AuthorizedIpv4AddrgenNone {
+    addressed: Option<AuthorizedIpv4Addresses>,
+    links: Option<AllLinksAddrgenNone>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Affine authority for exactly four addressed, addrgen-NONE, active veth ends.
+#[must_use = "the activated topology must begin deletion-only retirement"]
+pub(crate) struct AuthorizedActivatedTopology {
+    addressed: Option<AuthorizedIpv4Addresses>,
+    links: Option<AllLinksUp>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Intermediate authority after direct B/A pair deletion and raw lineage proof.
+///
+/// All four address owners and both pair owners remain armed. Only the higher
+/// private-mount owner can compare its retained parent and endpoint baselines;
+/// it must do so before calling `finish_after_pristine_network_proof`.
+#[must_use = "deleted topology still requires the full pristine-network barrier"]
+pub(crate) struct AuthorizedDeletedTopology {
+    addressed: Option<AuthorizedIpv4Addresses>,
+    absence: Option<FixedPairAbsenceProof>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// One retained pair identity that remains readable after its link disappeared.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeletedVethPairIdentity {
+    endpoint: NamespaceEndpoint,
+    parent_name: String,
+    parent_ifindex: u32,
+    peer_ifindex: u32,
+    target_namespace_device: u64,
+    target_namespace_inode: u64,
+}
+
+impl DeletedVethPairIdentity {
+    pub(crate) const fn endpoint(&self) -> NamespaceEndpoint {
+        self.endpoint
+    }
+
+    pub(crate) fn parent_name(&self) -> &str {
+        &self.parent_name
+    }
+
+    pub(crate) const fn parent_ifindex(&self) -> u32 {
+        self.parent_ifindex
+    }
+
+    pub(crate) const fn peer_ifindex(&self) -> u32 {
+        self.peer_ifindex
+    }
+
+    pub(crate) const fn target_namespace_device(&self) -> u64 {
+        self.target_namespace_device
+    }
+
+    pub(crate) const fn target_namespace_inode(&self) -> u64 {
+        self.target_namespace_inode
+    }
+}
+
+/// Private guard spanning the first possibly-sent SETLINK and all-NONE proof.
+struct ProvisionalLinkActivation {
+    addressed: Option<AuthorizedIpv4Addresses>,
+    links: Option<FixedLinkMutationJournal>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
 impl AuthorizedPrivateRun {
     /// Consume the empty-slot state and attach exactly two distinct live network namespaces.
     pub(crate) fn pin_network_namespaces(
@@ -1444,20 +1610,6 @@ impl AuthorizedVethPairs {
         Ok(authorized)
     }
 
-    /// Delete B then A, prove both absent, and recover the unchanged pin owner.
-    pub(crate) fn rollback(mut self) -> Result<AuthorizedNamespacePins, VethPairError> {
-        self.verify()?;
-        let cleanup = self.veths.rollback();
-        let namespace_pins = take_backing_after_cleanup(cleanup, &mut self.namespace_pins, || {
-            VethPairError::Unsafe("namespace-pin owner was consumed before veth rollback")
-        })?;
-        let backing = namespace_pins.verify().map_err(VethPairError::Namespace);
-        match backing {
-            Ok(()) => Ok(namespace_pins),
-            Err(error) => Err(error),
-        }
-    }
-
     fn namespace_pins(&self) -> &AuthorizedNamespacePins {
         self.namespace_pins
             .as_ref()
@@ -1615,21 +1767,712 @@ impl AuthorizedIpv4Addresses {
             .unwrap_or_else(|| std::process::abort())
     }
 
-    /// Remove endpoint B/A then parent B/A and recover the intact veth owner.
-    pub(crate) fn rollback(mut self) -> Result<AuthorizedVethPairs, FixedIpv4AddressSetError> {
-        self.verify()?;
-        let cleanup = {
-            let veth_pairs = self
-                .veth_pairs
+    /// Consume the addressed DOWN topology through four exact addrgen-NONE
+    /// updates and a separate four-end proof barrier.
+    pub(crate) fn disable_ipv6_address_generation(
+        self,
+    ) -> Result<AuthorizedIpv4AddrgenNone, FixedLinkActivationFailure> {
+        if let Err(source) = self.verify() {
+            drop(self);
+            return Err(FixedLinkActivationFailure::untouched(
+                FixedLinkActivationError::Addressed(source),
+            ));
+        }
+        let links = {
+            let pairs = self.veth_pairs().fixed_pairs();
+            match FixedLinkMutationJournal::begin(pairs[0], pairs[1]) {
+                Ok(links) => links,
+                Err(source) => {
+                    drop(self);
+                    return Err(FixedLinkActivationFailure::untouched(
+                        FixedLinkActivationError::Link(source),
+                    ));
+                }
+            }
+        };
+        let mut provisional = ProvisionalLinkActivation {
+            addressed: Some(self),
+            links: Some(links),
+            _thread_bound: PhantomData,
+        };
+        if let Err(source) = provisional.stage_all_addrgen_none() {
+            return Err(provisional.into_failure(source));
+        }
+        provisional.finish()
+    }
+}
+
+impl ProvisionalLinkActivation {
+    fn stage_all_addrgen_none(&mut self) -> Result<(), FixedLinkActivationError> {
+        {
+            let addressed = self
+                .addressed
                 .as_ref()
                 .unwrap_or_else(|| std::process::abort());
-            self.journal.rollback(veth_pairs)
+            let links = self.links.as_mut().unwrap_or_else(|| std::process::abort());
+            let pairs = addressed.veth_pairs().fixed_pairs();
+            links
+                .set_addrgen_none(FixedLinkEnd::ParentA, pairs[0])
+                .map_err(FixedLinkActivationError::Link)?;
+            links
+                .set_addrgen_none(FixedLinkEnd::ParentB, pairs[1])
+                .map_err(FixedLinkActivationError::Link)?;
+            addressed
+                .veth_pairs()
+                .visit_network_namespaces(|endpoint| {
+                    let index = endpoint.index();
+                    let end = match endpoint {
+                        NamespaceEndpoint::A => FixedLinkEnd::EndpointA,
+                        NamespaceEndpoint::B => FixedLinkEnd::EndpointB,
+                    };
+                    links.set_addrgen_none(end, pairs[index])
+                })
+                .map_err(map_link_visit_error)?;
+        }
+        {
+            let addressed = self
+                .addressed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort());
+            let links = self.links.as_mut().unwrap_or_else(|| std::process::abort());
+            let pairs = addressed.veth_pairs().fixed_pairs();
+            links
+                .prove_addrgen_none(FixedLinkEnd::ParentA, pairs[0])
+                .map_err(FixedLinkActivationError::Link)?;
+            links
+                .prove_addrgen_none(FixedLinkEnd::ParentB, pairs[1])
+                .map_err(FixedLinkActivationError::Link)?;
+            addressed
+                .veth_pairs()
+                .visit_network_namespaces(|endpoint| {
+                    let index = endpoint.index();
+                    let end = match endpoint {
+                        NamespaceEndpoint::A => FixedLinkEnd::EndpointA,
+                        NamespaceEndpoint::B => FixedLinkEnd::EndpointB,
+                    };
+                    links.prove_addrgen_none(end, pairs[index])
+                })
+                .map_err(map_link_visit_error)?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<AuthorizedIpv4AddrgenNone, FixedLinkActivationFailure> {
+        let links = self
+            .links
+            .take()
+            .unwrap_or_else(|| std::process::abort())
+            .finish_all_none_barrier();
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let authorized = AuthorizedIpv4AddrgenNone {
+            addressed: Some(addressed),
+            links: Some(links),
+            _thread_bound: PhantomData,
         };
-        take_backing_after_cleanup(cleanup, &mut self.veth_pairs, || {
-            FixedIpv4AddressSetError::Unsafe(
-                "veth-pair owner was consumed before fixed IPv4 rollback",
-            )
+        match authorized.verify() {
+            Ok(()) => Ok(authorized),
+            Err(source) => Err(authorized.into_failure(source)),
+        }
+    }
+
+    fn into_failure(mut self, source: FixedLinkActivationError) -> FixedLinkActivationFailure {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        failure_after_retirement(source, addressed, links.into_retirement())
+    }
+}
+
+impl AuthorizedIpv4AddrgenNone {
+    /// Reprove the retained namespace pins and the low-level all-NONE barrier.
+    pub(crate) fn verify(&self) -> Result<(), FixedLinkActivationError> {
+        let addressed = self.addressed();
+        addressed
+            .veth_pairs()
+            .namespace_pins()
+            .verify()
+            .map_err(FixedLinkActivationError::Namespace)?;
+        self.links()
+            .verify()
+            .map_err(FixedLinkActivationError::Link)?;
+        addressed
+            .veth_pairs()
+            .namespace_pins()
+            .verify()
+            .map_err(FixedLinkActivationError::Namespace)
+    }
+
+    /// Borrow the four retained address identities in canonical order.
+    pub(crate) fn owners(&self) -> [&FixedIpv4AddressOwner; 4] {
+        self.addressed().owners()
+    }
+
+    /// Borrow both retained pair identities without invoking the DOWN parser.
+    pub(crate) fn fixed_pairs(&self) -> [&FixedVethPair; ENDPOINT_COUNT] {
+        self.addressed().veth_pairs().fixed_pairs()
+    }
+
+    pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
+        self.addressed().veth_pairs().mount_ids()
+    }
+
+    pub(crate) fn mount_point_bytes(&self) -> [&[u8]; ENDPOINT_COUNT] {
+        self.addressed().veth_pairs().mount_point_bytes()
+    }
+
+    /// Run one parent-scoped proof between fresh all-NONE reproofs.
+    pub(crate) fn visit_parent_network_namespace<Visitor, Output, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<Output, FixedTopologyVisitError<VisitorError>>
+    where
+        Visitor: FnOnce() -> Result<Output, VisitorError>,
+    {
+        visit_link_state_parent(self, Self::verify, visitor)
+    }
+
+    /// Visit endpoint A then B while retaining the exact all-NONE authority.
+    pub(crate) fn visit_network_namespaces<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), FixedTopologyVisitError<VisitorError>>
+    where
+        Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+    {
+        visit_link_state_endpoints(self, Self::verify, visitor)
+    }
+
+    /// Consume the all-NONE barrier through four exact link-UP mutations and
+    /// a separate four-end active proof barrier.
+    pub(crate) fn activate_links(
+        mut self,
+    ) -> Result<AuthorizedActivatedTopology, FixedLinkActivationFailure> {
+        if let Err(source) = self.verify() {
+            return Err(self.into_failure(source));
+        }
+        if let Err(source) = self.stage_all_links_up() {
+            return Err(self.into_failure(source));
+        }
+        let links = self
+            .links
+            .take()
+            .unwrap_or_else(|| std::process::abort())
+            .finish_all_up();
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let authorized = AuthorizedActivatedTopology {
+            addressed: Some(addressed),
+            links: Some(links),
+            _thread_bound: PhantomData,
+        };
+        match authorized.verify() {
+            Ok(()) => Ok(authorized),
+            Err(source) => Err(authorized.into_failure(source)),
+        }
+    }
+
+    /// Enter deletion-only retirement without attempting any link-UP request.
+    pub(crate) fn begin_retirement(mut self) -> AuthorizedDeletedTopology {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        match links.into_retirement() {
+            FixedLinkRetirement::Deleted(pending) => {
+                complete_raw_link_retirement(addressed, pending)
+            }
+            FixedLinkRetirement::Untouched => std::process::abort(),
+        }
+    }
+
+    fn stage_all_links_up(&mut self) -> Result<(), FixedLinkActivationError> {
+        {
+            let addressed = self
+                .addressed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort());
+            let links = self.links.as_mut().unwrap_or_else(|| std::process::abort());
+            let pairs = addressed.veth_pairs().fixed_pairs();
+            links
+                .set_link_up(FixedLinkEnd::ParentA, pairs[0])
+                .map_err(FixedLinkActivationError::Link)?;
+            links
+                .set_link_up(FixedLinkEnd::ParentB, pairs[1])
+                .map_err(FixedLinkActivationError::Link)?;
+            addressed
+                .veth_pairs()
+                .visit_network_namespaces(|endpoint| {
+                    let index = endpoint.index();
+                    let end = match endpoint {
+                        NamespaceEndpoint::A => FixedLinkEnd::EndpointA,
+                        NamespaceEndpoint::B => FixedLinkEnd::EndpointB,
+                    };
+                    links.set_link_up(end, pairs[index])
+                })
+                .map_err(map_link_visit_error)?;
+        }
+        {
+            let addressed = self
+                .addressed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort());
+            let links = self.links.as_mut().unwrap_or_else(|| std::process::abort());
+            let pairs = addressed.veth_pairs().fixed_pairs();
+            links
+                .prove_link_up(FixedLinkEnd::ParentA, pairs[0])
+                .map_err(FixedLinkActivationError::Link)?;
+            links
+                .prove_link_up(FixedLinkEnd::ParentB, pairs[1])
+                .map_err(FixedLinkActivationError::Link)?;
+            addressed
+                .veth_pairs()
+                .visit_network_namespaces(|endpoint| {
+                    let index = endpoint.index();
+                    let end = match endpoint {
+                        NamespaceEndpoint::A => FixedLinkEnd::EndpointA,
+                        NamespaceEndpoint::B => FixedLinkEnd::EndpointB,
+                    };
+                    links.prove_link_up(end, pairs[index])
+                })
+                .map_err(map_link_visit_error)?;
+        }
+        Ok(())
+    }
+
+    fn addressed(&self) -> &AuthorizedIpv4Addresses {
+        self.addressed
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn links(&self) -> &AllLinksAddrgenNone {
+        self.links.as_ref().unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_failure(mut self, source: FixedLinkActivationError) -> FixedLinkActivationFailure {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        failure_after_retirement(source, addressed, links.into_retirement())
+    }
+}
+
+impl AuthorizedActivatedTopology {
+    /// Reprove the retained namespace pins and exact four-end active barrier.
+    pub(crate) fn verify(&self) -> Result<(), FixedLinkActivationError> {
+        let addressed = self.addressed();
+        addressed
+            .veth_pairs()
+            .namespace_pins()
+            .verify()
+            .map_err(FixedLinkActivationError::Namespace)?;
+        self.links()
+            .verify()
+            .map_err(FixedLinkActivationError::Link)?;
+        addressed
+            .veth_pairs()
+            .namespace_pins()
+            .verify()
+            .map_err(FixedLinkActivationError::Namespace)
+    }
+
+    pub(crate) fn owners(&self) -> [&FixedIpv4AddressOwner; 4] {
+        self.addressed().owners()
+    }
+
+    pub(crate) fn fixed_pairs(&self) -> [&FixedVethPair; ENDPOINT_COUNT] {
+        self.addressed().veth_pairs().fixed_pairs()
+    }
+
+    pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
+        self.addressed().veth_pairs().mount_ids()
+    }
+
+    pub(crate) fn mount_point_bytes(&self) -> [&[u8]; ENDPOINT_COUNT] {
+        self.addressed().veth_pairs().mount_point_bytes()
+    }
+
+    pub(crate) fn visit_parent_network_namespace<Visitor, Output, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<Output, FixedTopologyVisitError<VisitorError>>
+    where
+        Visitor: FnOnce() -> Result<Output, VisitorError>,
+    {
+        visit_link_state_parent(self, Self::verify, visitor)
+    }
+
+    pub(crate) fn visit_network_namespaces<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), FixedTopologyVisitError<VisitorError>>
+    where
+        Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+    {
+        visit_link_state_endpoints(self, Self::verify, visitor)
+    }
+
+    /// Delete pair B then A and retain every lower owner through the external
+    /// full pristine-network proof barrier.
+    pub(crate) fn begin_retirement(mut self) -> AuthorizedDeletedTopology {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        match links.into_retirement() {
+            FixedLinkRetirement::Deleted(pending) => {
+                complete_raw_link_retirement(addressed, pending)
+            }
+            FixedLinkRetirement::Untouched => std::process::abort(),
+        }
+    }
+
+    fn addressed(&self) -> &AuthorizedIpv4Addresses {
+        self.addressed
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn links(&self) -> &AllLinksUp {
+        self.links.as_ref().unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_failure(mut self, source: FixedLinkActivationError) -> FixedLinkActivationFailure {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        failure_after_retirement(source, addressed, links.into_retirement())
+    }
+}
+
+trait RetainedLinkState {
+    fn retained_namespace_pins(&self) -> &AuthorizedNamespacePins;
+}
+
+impl RetainedLinkState for AuthorizedIpv4AddrgenNone {
+    fn retained_namespace_pins(&self) -> &AuthorizedNamespacePins {
+        self.addressed().veth_pairs().namespace_pins()
+    }
+}
+
+impl RetainedLinkState for AuthorizedActivatedTopology {
+    fn retained_namespace_pins(&self) -> &AuthorizedNamespacePins {
+        self.addressed().veth_pairs().namespace_pins()
+    }
+}
+
+fn visit_link_state_parent<State, Visitor, Output, VisitorError>(
+    state: &State,
+    verify: fn(&State) -> Result<(), FixedLinkActivationError>,
+    visitor: Visitor,
+) -> Result<Output, FixedTopologyVisitError<VisitorError>>
+where
+    Visitor: FnOnce() -> Result<Output, VisitorError>,
+{
+    verify(state).map_err(FixedTopologyVisitError::Topology)?;
+    let visited = visitor();
+    verify(state).map_err(FixedTopologyVisitError::Topology)?;
+    visited.map_err(FixedTopologyVisitError::Visitor)
+}
+
+fn visit_link_state_endpoints<State, Visitor, VisitorError>(
+    state: &State,
+    verify: fn(&State) -> Result<(), FixedLinkActivationError>,
+    visitor: Visitor,
+) -> Result<(), FixedTopologyVisitError<VisitorError>>
+where
+    State: RetainedLinkState,
+    Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+{
+    verify(state).map_err(FixedTopologyVisitError::Topology)?;
+    let visited = state
+        .retained_namespace_pins()
+        .visit_network_namespaces(visitor)
+        .map_err(|error| match error {
+            NamespaceVisitError::Namespace(source) => FixedTopologyVisitError::Namespace(source),
+            NamespaceVisitError::Visitor(source) => FixedTopologyVisitError::Visitor(source),
+        });
+    verify(state).map_err(FixedTopologyVisitError::Topology)?;
+    visited
+}
+
+impl AuthorizedDeletedTopology {
+    /// Retained B/A identities for higher-level exact pristine observations.
+    pub(crate) fn fixed_pair_identities(&self) -> [DeletedVethPairIdentity; ENDPOINT_COUNT] {
+        let pairs = self.addressed().veth_pairs().fixed_pairs();
+        pairs.map(|pair| {
+            let target = pair.target_namespace_identity();
+            DeletedVethPairIdentity {
+                endpoint: match pair.endpoint() {
+                    FixedVethEndpoint::A => NamespaceEndpoint::A,
+                    FixedVethEndpoint::B => NamespaceEndpoint::B,
+                },
+                parent_name: pair.parent_name().to_owned(),
+                parent_ifindex: pair.parent_ifindex(),
+                peer_ifindex: pair.peer_ifindex(),
+                target_namespace_device: target.device(),
+                target_namespace_inode: target.inode(),
+            }
         })
+    }
+
+    pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
+        self.namespace_pins().mount_ids()
+    }
+
+    pub(crate) fn mount_point_bytes(&self) -> [&[u8]; ENDPOINT_COUNT] {
+        self.namespace_pins().mount_point_bytes()
+    }
+
+    /// Run a parent-scoped pristine proof while every lower owner remains armed.
+    pub(crate) fn visit_parent_network_namespace<Visitor, Output, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<Output, FixedTopologyVisitError<VisitorError>>
+    where
+        Visitor: FnOnce() -> Result<Output, VisitorError>,
+    {
+        self.namespace_pins()
+            .verify()
+            .map_err(FixedTopologyVisitError::Namespace)?;
+        let visited = visitor();
+        self.namespace_pins()
+            .verify()
+            .map_err(FixedTopologyVisitError::Namespace)?;
+        visited.map_err(FixedTopologyVisitError::Visitor)
+    }
+
+    /// Visit endpoint A then B for consuming pristine-baseline verification.
+    pub(crate) fn visit_network_namespaces<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), FixedTopologyVisitError<VisitorError>>
+    where
+        Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+    {
+        self.namespace_pins()
+            .visit_network_namespaces(visitor)
+            .map_err(|error| match error {
+                NamespaceVisitError::Namespace(source) => {
+                    FixedTopologyVisitError::Namespace(source)
+                }
+                NamespaceVisitError::Visitor(source) => FixedTopologyVisitError::Visitor(source),
+            })
+    }
+
+    /// Release lower affine owners only after consuming the unforgeable affine
+    /// token minted by the higher layer's external parent/A/B pristine-network
+    /// proof. All six absence-proof validations precede the first infallible
+    /// journal disarm.
+    pub(crate) fn finish_after_pristine_network_proof(
+        mut self,
+        _pristine_network_proof: crate::mounts::PristineNetworkRetirementProof,
+    ) -> AuthorizedNamespacePins {
+        let proof = self
+            .absence
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .as_mut()
+            .unwrap_or_else(|| std::process::abort());
+        let address_prevalidated = addressed
+            .journal
+            .owners()
+            .into_iter()
+            .all(|owner| owner.prevalidate_pair_absence_retirement(proof).is_ok());
+        let pair_prevalidated = addressed
+            .veth_pairs()
+            .fixed_pairs()
+            .into_iter()
+            .all(|pair| pair.prevalidate_pair_absence_retirement(proof).is_ok());
+        if !address_prevalidated || !pair_prevalidated {
+            std::process::abort();
+        }
+
+        for index in (0..ENDPOINT_COUNT).rev() {
+            addressed.journal.endpoints[index]
+                .take()
+                .unwrap_or_else(|| std::process::abort())
+                .retire_after_validated_pair_absence(proof);
+        }
+        for index in (0..ENDPOINT_COUNT).rev() {
+            addressed.journal.parent[index]
+                .take()
+                .unwrap_or_else(|| std::process::abort())
+                .retire_after_validated_pair_absence(proof);
+        }
+        addressed.journal.armed = false;
+
+        let veth_pairs = addressed
+            .veth_pairs
+            .as_mut()
+            .unwrap_or_else(|| std::process::abort());
+        while let Some(pair) = veth_pairs.veths.entries.pop() {
+            pair.retire_after_validated_pair_absence(proof);
+        }
+        veth_pairs.veths.armed = false;
+        let namespace_pins = veth_pairs
+            .namespace_pins
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        drop(
+            addressed
+                .veth_pairs
+                .take()
+                .unwrap_or_else(|| std::process::abort()),
+        );
+        drop(
+            self.addressed
+                .take()
+                .unwrap_or_else(|| std::process::abort()),
+        );
+        self.absence = None;
+        namespace_pins
+    }
+
+    fn addressed(&self) -> &AuthorizedIpv4Addresses {
+        self.addressed
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn namespace_pins(&self) -> &AuthorizedNamespacePins {
+        self.addressed().veth_pairs().namespace_pins()
+    }
+}
+
+fn failure_after_retirement(
+    source: FixedLinkActivationError,
+    addressed: AuthorizedIpv4Addresses,
+    retirement: FixedLinkRetirement,
+) -> FixedLinkActivationFailure {
+    match retirement {
+        FixedLinkRetirement::Untouched => {
+            drop(addressed);
+            FixedLinkActivationFailure::untouched(source)
+        }
+        FixedLinkRetirement::Deleted(pending) => FixedLinkActivationFailure::deleted(
+            source,
+            complete_raw_link_retirement(addressed, pending),
+        ),
+    }
+}
+
+fn complete_raw_link_retirement(
+    addressed: AuthorizedIpv4Addresses,
+    mut pending: PendingFixedPairAbsenceProof,
+) -> AuthorizedDeletedTopology {
+    let mut endpoint_proved = false;
+    for _ in 0..RAW_LINK_RETIREMENT_PROOF_ATTEMPTS {
+        let result = addressed
+            .veth_pairs()
+            .visit_network_namespaces_reverse(|endpoint| {
+                pending.prove_endpoint_absence(match endpoint {
+                    NamespaceEndpoint::A => FixedVethEndpoint::A,
+                    NamespaceEndpoint::B => FixedVethEndpoint::B,
+                })
+            });
+        if result.is_ok() {
+            endpoint_proved = true;
+            break;
+        }
+    }
+    if !endpoint_proved {
+        std::process::abort();
+    }
+
+    let mut parent_proved = false;
+    for _ in 0..RAW_LINK_RETIREMENT_PROOF_ATTEMPTS {
+        if pending.prove_parent_absence().is_ok() {
+            parent_proved = true;
+            break;
+        }
+    }
+    if !parent_proved {
+        std::process::abort();
+    }
+    AuthorizedDeletedTopology {
+        addressed: Some(addressed),
+        absence: Some(pending.finish()),
+        _thread_bound: PhantomData,
+    }
+}
+
+fn map_link_visit_error(
+    error: NamespaceVisitError<FixedLinkOperationError>,
+) -> FixedLinkActivationError {
+    match error {
+        NamespaceVisitError::Namespace(source) => FixedLinkActivationError::Namespace(source),
+        NamespaceVisitError::Visitor(source) => FixedLinkActivationError::Link(source),
+    }
+}
+
+impl Drop for ProvisionalLinkActivation {
+    fn drop(&mut self) {
+        match (self.addressed.take(), self.links.take()) {
+            (None, None) => {}
+            (Some(addressed), Some(links)) => {
+                drop_activation_state(addressed, links.into_retirement());
+            }
+            _ => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for AuthorizedIpv4AddrgenNone {
+    fn drop(&mut self) {
+        match (self.addressed.take(), self.links.take()) {
+            (None, None) => {}
+            (Some(addressed), Some(links)) => {
+                drop_activation_state(addressed, links.into_retirement());
+            }
+            _ => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for AuthorizedActivatedTopology {
+    fn drop(&mut self) {
+        match (self.addressed.take(), self.links.take()) {
+            (None, None) => {}
+            (Some(addressed), Some(links)) => {
+                drop_activation_state(addressed, links.into_retirement());
+            }
+            _ => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for AuthorizedDeletedTopology {
+    fn drop(&mut self) {
+        if self.addressed.is_some() || self.absence.is_some() {
+            // The higher mount/network layer did not authorize affine release.
+            // Abort before either armed lower Drop field can execute.
+            std::process::abort();
+        }
+    }
+}
+
+fn drop_activation_state(addressed: AuthorizedIpv4Addresses, retirement: FixedLinkRetirement) {
+    match retirement {
+        FixedLinkRetirement::Untouched => drop(addressed),
+        FixedLinkRetirement::Deleted(pending) => {
+            drop(complete_raw_link_retirement(addressed, pending));
+        }
     }
 }
 
@@ -2405,6 +3248,880 @@ mod tests {
                 "veth pair owner dropped",
             ]
         );
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ModelLinkOperation {
+        NoneParentA,
+        NoneParentB,
+        NoneEndpointA,
+        NoneEndpointB,
+        UpParentA,
+        UpParentB,
+        UpEndpointA,
+        UpEndpointB,
+    }
+
+    const MODEL_LINK_OPERATIONS: [ModelLinkOperation; 8] = [
+        ModelLinkOperation::NoneParentA,
+        ModelLinkOperation::NoneParentB,
+        ModelLinkOperation::NoneEndpointA,
+        ModelLinkOperation::NoneEndpointB,
+        ModelLinkOperation::UpParentA,
+        ModelLinkOperation::UpParentB,
+        ModelLinkOperation::UpEndpointA,
+        ModelLinkOperation::UpEndpointB,
+    ];
+
+    impl ModelLinkOperation {
+        const fn event(self) -> &'static str {
+            match self {
+                Self::NoneParentA => "set NONE parent A",
+                Self::NoneParentB => "set NONE parent B",
+                Self::NoneEndpointA => "set NONE endpoint A",
+                Self::NoneEndpointB => "set NONE endpoint B",
+                Self::UpParentA => "set UP parent A",
+                Self::UpParentB => "set UP parent B",
+                Self::UpEndpointA => "set UP endpoint A",
+                Self::UpEndpointB => "set UP endpoint B",
+            }
+        }
+
+        const fn namespace(self) -> ModelNetworkNamespace {
+            match self {
+                Self::NoneParentA | Self::NoneParentB | Self::UpParentA | Self::UpParentB => {
+                    ModelNetworkNamespace::Parent
+                }
+                Self::NoneEndpointA | Self::UpEndpointA => {
+                    ModelNetworkNamespace::Endpoint(NamespaceEndpoint::A)
+                }
+                Self::NoneEndpointB | Self::UpEndpointB => {
+                    ModelNetworkNamespace::Endpoint(NamespaceEndpoint::B)
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ModelLinkFailure {
+        NotSent,
+        Rejected,
+        AppliedAckLost,
+        MalformedAck,
+    }
+
+    impl ModelLinkFailure {
+        const fn event(self) -> &'static str {
+            match self {
+                Self::NotSent => "link request not sent",
+                Self::Rejected => "link request rejected",
+                Self::AppliedAckLost => "link request applied with lost ACK",
+                Self::MalformedAck => "link request returned malformed ACK",
+            }
+        }
+    }
+
+    const MODEL_LINK_FAILURES: [ModelLinkFailure; 4] = [
+        ModelLinkFailure::NotSent,
+        ModelLinkFailure::Rejected,
+        ModelLinkFailure::AppliedAckLost,
+        ModelLinkFailure::MalformedAck,
+    ];
+
+    struct ModelActivationPins {
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Drop for ModelActivationPins {
+        fn drop(&mut self) {
+            self.events.borrow_mut().push("namespace pins dropped");
+        }
+    }
+
+    struct ModelActivationAddressedAuthority {
+        events: Rc<RefCell<Vec<&'static str>>>,
+        addresses_armed: [bool; 4],
+        address_lineage_valid: [bool; 4],
+        pairs_armed: [bool; ENDPOINT_COUNT],
+        pairs_live: [bool; ENDPOINT_COUNT],
+        pair_lineage_valid: [bool; ENDPOINT_COUNT],
+        endpoint_absence_valid: [bool; ENDPOINT_COUNT],
+        parent_absence_valid: bool,
+        pins: Option<ModelActivationPins>,
+    }
+
+    impl ModelActivationAddressedAuthority {
+        fn new(events: Rc<RefCell<Vec<&'static str>>>) -> Self {
+            Self {
+                pins: Some(ModelActivationPins {
+                    events: Rc::clone(&events),
+                }),
+                events,
+                addresses_armed: [true; 4],
+                address_lineage_valid: [true; 4],
+                pairs_armed: [true; ENDPOINT_COUNT],
+                pairs_live: [true; ENDPOINT_COUNT],
+                pair_lineage_valid: [true; ENDPOINT_COUNT],
+                endpoint_absence_valid: [true; ENDPOINT_COUNT],
+                parent_absence_valid: true,
+            }
+        }
+
+        fn delete_pairs_reverse(&mut self) -> Result<(), ()> {
+            let mut failed = false;
+            for endpoint in REVERSE_NAMESPACE_VISIT_ORDER {
+                let index = endpoint.index();
+                if !self.pairs_live[index] {
+                    continue;
+                }
+                if !self.pair_lineage_valid[index] {
+                    self.events.borrow_mut().push(match endpoint {
+                        NamespaceEndpoint::A => "reject wrong pair A lineage",
+                        NamespaceEndpoint::B => "reject wrong pair B lineage",
+                    });
+                    failed = true;
+                    continue;
+                }
+                self.events.borrow_mut().push(match endpoint {
+                    NamespaceEndpoint::A => "delete pair A",
+                    NamespaceEndpoint::B => "delete pair B",
+                });
+                self.pairs_live[index] = false;
+            }
+            if failed { Err(()) } else { Ok(()) }
+        }
+
+        fn prove_absence(&mut self, current: &Cell<ModelNetworkNamespace>) -> Result<(), ()> {
+            if self.pairs_live != [false; ENDPOINT_COUNT] {
+                return Err(());
+            }
+            for endpoint in REVERSE_NAMESPACE_VISIT_ORDER {
+                self.events.borrow_mut().push(model_enter_event(endpoint));
+                current.set(ModelNetworkNamespace::Endpoint(endpoint));
+                let index = endpoint.index();
+                let endpoint_valid = self.endpoint_absence_valid[index];
+                if endpoint_valid {
+                    self.events.borrow_mut().push(match endpoint {
+                        NamespaceEndpoint::A => "prove pair A endpoint absent",
+                        NamespaceEndpoint::B => "prove pair B endpoint absent",
+                    });
+                }
+                current.set(ModelNetworkNamespace::Parent);
+                self.events.borrow_mut().push(model_restore_event(endpoint));
+                if !endpoint_valid {
+                    return Err(());
+                }
+            }
+            if !self.parent_absence_valid {
+                return Err(());
+            }
+            self.events
+                .borrow_mut()
+                .push("prove both parent links absent");
+            Ok(())
+        }
+
+        fn disarm_after_absence(&mut self) -> ModelActivationPins {
+            assert_eq!(self.pairs_live, [false; ENDPOINT_COUNT]);
+            assert!(self.parent_absence_valid);
+            assert_eq!(self.endpoint_absence_valid, [true; ENDPOINT_COUNT]);
+            assert_eq!(self.address_lineage_valid, [true; 4]);
+            assert_eq!(self.pair_lineage_valid, [true; ENDPOINT_COUNT]);
+            for (index, event) in [
+                "disarm endpoint B address",
+                "disarm endpoint A address",
+                "disarm parent B address",
+                "disarm parent A address",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let address_index = [3, 2, 1, 0][index];
+                assert!(self.addresses_armed[address_index]);
+                self.addresses_armed[address_index] = false;
+                self.events.borrow_mut().push(event);
+            }
+            for endpoint in REVERSE_NAMESPACE_VISIT_ORDER {
+                let index = endpoint.index();
+                assert!(self.pairs_armed[index]);
+                self.pairs_armed[index] = false;
+                self.events.borrow_mut().push(match endpoint {
+                    NamespaceEndpoint::A => "disarm pair A",
+                    NamespaceEndpoint::B => "disarm pair B",
+                });
+            }
+            self.events.borrow_mut().push("release namespace pins");
+            self.pins
+                .take()
+                .expect("model namespace pins must be released exactly once")
+        }
+    }
+
+    impl Drop for ModelActivationAddressedAuthority {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.addresses_armed, [false; 4],
+                "activation owner attempted ordinary address rollback"
+            );
+            assert_eq!(
+                self.pairs_armed, [false; ENDPOINT_COUNT],
+                "activation owner attempted ordinary veth rollback"
+            );
+            assert!(
+                self.pins.is_none(),
+                "activation owner leaked namespace pins"
+            );
+        }
+    }
+
+    struct ModelActivationCore {
+        // This mirrors the production requirement: the original Drop type is
+        // retained whole in an Option and is never destructured after SETLINK.
+        addressed: Option<ModelActivationAddressedAuthority>,
+        events: Rc<RefCell<Vec<&'static str>>>,
+        current: Rc<Cell<ModelNetworkNamespace>>,
+        completed_operations: usize,
+    }
+
+    impl ModelActivationCore {
+        fn new(
+            events: Rc<RefCell<Vec<&'static str>>>,
+            current: Rc<Cell<ModelNetworkNamespace>>,
+        ) -> Self {
+            Self {
+                addressed: Some(ModelActivationAddressedAuthority::new(Rc::clone(&events))),
+                events,
+                current,
+                completed_operations: 0,
+            }
+        }
+
+        fn stage(
+            &mut self,
+            operation: ModelLinkOperation,
+            failure: Option<ModelLinkFailure>,
+        ) -> Result<(), ()> {
+            assert_eq!(MODEL_LINK_OPERATIONS[self.completed_operations], operation);
+            assert_eq!(self.current.get(), ModelNetworkNamespace::Parent);
+            let endpoint = match operation.namespace() {
+                ModelNetworkNamespace::Parent => None,
+                ModelNetworkNamespace::Endpoint(endpoint) => {
+                    self.events.borrow_mut().push(model_enter_event(endpoint));
+                    self.current.set(ModelNetworkNamespace::Endpoint(endpoint));
+                    Some(endpoint)
+                }
+            };
+            assert_eq!(self.current.get(), operation.namespace());
+            self.events.borrow_mut().push(operation.event());
+            let result = if let Some(failure) = failure {
+                self.events.borrow_mut().push(failure.event());
+                Err(())
+            } else {
+                self.completed_operations += 1;
+                Ok(())
+            };
+            if let Some(endpoint) = endpoint {
+                self.current.set(ModelNetworkNamespace::Parent);
+                self.events.borrow_mut().push(model_restore_event(endpoint));
+            }
+            result
+        }
+
+        fn begin_retirement(&mut self) -> Result<ModelDeletedTopology, ()> {
+            let addressed = self
+                .addressed
+                .as_mut()
+                .expect("model addressed owner must remain present until retirement");
+            addressed.delete_pairs_reverse()?;
+            addressed.prove_absence(&self.current)?;
+            assert_eq!(self.current.get(), ModelNetworkNamespace::Parent);
+            Ok(ModelDeletedTopology {
+                addressed: self.addressed.take(),
+            })
+        }
+    }
+
+    impl Drop for ModelActivationCore {
+        fn drop(&mut self) {
+            if self.addressed.is_some() {
+                if let Ok(deleted) = self.begin_retirement() {
+                    drop(deleted);
+                } else {
+                    self.events
+                        .borrow_mut()
+                        .push("abort after failed raw retirement");
+                    if let Some(addressed) = self.addressed.take() {
+                        std::mem::forget(addressed);
+                    }
+                }
+            }
+        }
+    }
+
+    struct ModelDeletedTopology {
+        addressed: Option<ModelActivationAddressedAuthority>,
+    }
+
+    impl std::fmt::Debug for ModelDeletedTopology {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("ModelDeletedTopology")
+                .field("addressed", &self.addressed.is_some())
+                .finish()
+        }
+    }
+
+    impl ModelDeletedTopology {
+        fn finish_after_pristine_network_proof(
+            &mut self,
+            proof_valid: bool,
+        ) -> Result<ModelActivationPins, ()> {
+            let addressed = self
+                .addressed
+                .as_ref()
+                .expect("deleted topology must retain its addressed owner");
+            if !proof_valid
+                || addressed.address_lineage_valid != [true; 4]
+                || addressed.pair_lineage_valid != [true; ENDPOINT_COUNT]
+            {
+                return Err(());
+            }
+            let addressed = self
+                .addressed
+                .as_mut()
+                .expect("deleted topology must retain its addressed owner");
+            addressed.events.borrow_mut().push("prove pristine network");
+            let pins = addressed.disarm_after_absence();
+            drop(
+                self.addressed
+                    .take()
+                    .expect("deleted addressed owner must be consumed after disarm"),
+            );
+            Ok(pins)
+        }
+    }
+
+    impl Drop for ModelDeletedTopology {
+        fn drop(&mut self) {
+            if let Some(addressed) = self.addressed.take() {
+                addressed
+                    .events
+                    .borrow_mut()
+                    .push("abort before unproven authority release");
+                std::mem::forget(addressed);
+            }
+        }
+    }
+
+    struct ModelProvisionalActivation {
+        core: Option<ModelActivationCore>,
+    }
+
+    impl ModelProvisionalActivation {
+        fn new(
+            events: Rc<RefCell<Vec<&'static str>>>,
+            current: Rc<Cell<ModelNetworkNamespace>>,
+        ) -> Self {
+            Self {
+                core: Some(ModelActivationCore::new(events, current)),
+            }
+        }
+
+        fn stage_none(
+            &mut self,
+            operation: ModelLinkOperation,
+            failure: Option<ModelLinkFailure>,
+        ) -> Result<(), ()> {
+            assert!(self.core().completed_operations < 4);
+            self.core_mut().stage(operation, failure)
+        }
+
+        fn finish_none(
+            mut self,
+            proof_valid: bool,
+        ) -> Result<ModelAllNoneActivation, ModelDeletedTopology> {
+            assert_eq!(self.core().completed_operations, 4);
+            self.core().events.borrow_mut().push("prove all links NONE");
+            if !proof_valid {
+                return Err(self.begin_retirement());
+            }
+            Ok(ModelAllNoneActivation {
+                core: self.core.take(),
+            })
+        }
+
+        fn begin_retirement(mut self) -> ModelDeletedTopology {
+            let deleted = self
+                .core_mut()
+                .begin_retirement()
+                .expect("model provisional raw retirement");
+            drop(self.core.take());
+            deleted
+        }
+
+        fn core(&self) -> &ModelActivationCore {
+            self.core
+                .as_ref()
+                .expect("model provisional core must remain owned")
+        }
+
+        fn core_mut(&mut self) -> &mut ModelActivationCore {
+            self.core
+                .as_mut()
+                .expect("model provisional core must remain owned")
+        }
+    }
+
+    impl Drop for ModelProvisionalActivation {
+        fn drop(&mut self) {
+            drop(self.core.take());
+        }
+    }
+
+    struct ModelAllNoneActivation {
+        core: Option<ModelActivationCore>,
+    }
+
+    impl ModelAllNoneActivation {
+        fn stage_up(
+            &mut self,
+            operation: ModelLinkOperation,
+            failure: Option<ModelLinkFailure>,
+        ) -> Result<(), ()> {
+            assert!((4..8).contains(&self.core().completed_operations));
+            self.core_mut().stage(operation, failure)
+        }
+
+        fn finish_up(
+            mut self,
+            proof_valid: bool,
+        ) -> Result<ModelActivatedTopology, ModelDeletedTopology> {
+            assert_eq!(self.core().completed_operations, 8);
+            self.core().events.borrow_mut().push("prove all links UP");
+            if !proof_valid {
+                return Err(self.begin_retirement());
+            }
+            Ok(ModelActivatedTopology {
+                core: self.core.take(),
+            })
+        }
+
+        fn begin_retirement(mut self) -> ModelDeletedTopology {
+            let deleted = self
+                .core_mut()
+                .begin_retirement()
+                .expect("model all-NONE raw retirement");
+            drop(self.core.take());
+            deleted
+        }
+
+        fn core(&self) -> &ModelActivationCore {
+            self.core
+                .as_ref()
+                .expect("model all-NONE core must remain owned")
+        }
+
+        fn core_mut(&mut self) -> &mut ModelActivationCore {
+            self.core
+                .as_mut()
+                .expect("model all-NONE core must remain owned")
+        }
+    }
+
+    impl Drop for ModelAllNoneActivation {
+        fn drop(&mut self) {
+            drop(self.core.take());
+        }
+    }
+
+    struct ModelActivatedTopology {
+        core: Option<ModelActivationCore>,
+    }
+
+    impl ModelActivatedTopology {
+        fn core_mut(&mut self) -> &mut ModelActivationCore {
+            self.core
+                .as_mut()
+                .expect("model activated core must remain owned")
+        }
+
+        fn begin_retirement(mut self) -> ModelDeletedTopology {
+            let deleted = self
+                .core_mut()
+                .begin_retirement()
+                .expect("model activated raw retirement");
+            drop(self.core.take());
+            deleted
+        }
+    }
+
+    impl Drop for ModelActivatedTopology {
+        fn drop(&mut self) {
+            drop(self.core.take());
+        }
+    }
+
+    fn model_stage_all_none(
+        provisional: &mut ModelProvisionalActivation,
+        fail_at: Option<(usize, ModelLinkFailure)>,
+    ) -> Result<(), ()> {
+        for (index, operation) in MODEL_LINK_OPERATIONS[..4].iter().copied().enumerate() {
+            provisional.stage_none(
+                operation,
+                fail_at
+                    .filter(|(failure_index, _)| *failure_index == index)
+                    .map(|(_, failure)| failure),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn model_stage_all_up(
+        all_none: &mut ModelAllNoneActivation,
+        fail_at: Option<(usize, ModelLinkFailure)>,
+    ) -> Result<(), ()> {
+        for (index, operation) in MODEL_LINK_OPERATIONS[4..].iter().copied().enumerate() {
+            let absolute_index = index + 4;
+            all_none.stage_up(
+                operation,
+                fail_at
+                    .filter(|(failure_index, _)| *failure_index == absolute_index)
+                    .map(|(_, failure)| failure),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn model_complete_activation(
+        events: &Rc<RefCell<Vec<&'static str>>>,
+        current: &Rc<Cell<ModelNetworkNamespace>>,
+    ) -> ModelActivatedTopology {
+        let mut provisional =
+            ModelProvisionalActivation::new(Rc::clone(events), Rc::clone(current));
+        model_stage_all_none(&mut provisional, None).expect("model stage all NONE");
+        let mut all_none = provisional.finish_none(true).expect("model all-NONE proof");
+        model_stage_all_up(&mut all_none, None).expect("model stage all UP");
+        all_none.finish_up(true).expect("model all-UP proof")
+    }
+
+    fn assert_model_raw_retirement(events: &[&'static str]) {
+        let pair_b = events
+            .iter()
+            .rposition(|event| *event == "delete pair B")
+            .expect("model retirement must delete pair B");
+        let pair_a = events
+            .iter()
+            .rposition(|event| *event == "delete pair A")
+            .expect("model retirement must delete pair A");
+        assert!(pair_b < pair_a, "model pair retirement was not B then A");
+        let endpoint_b = events
+            .iter()
+            .rposition(|event| *event == "prove pair B endpoint absent")
+            .expect("model retirement must prove endpoint B absent");
+        let endpoint_a = events
+            .iter()
+            .rposition(|event| *event == "prove pair A endpoint absent")
+            .expect("model retirement must prove endpoint A absent");
+        let parent = events
+            .iter()
+            .rposition(|event| *event == "prove both parent links absent")
+            .expect("model retirement must reprove parent absence");
+        assert!(pair_a < endpoint_b && endpoint_b < endpoint_a && endpoint_a < parent);
+    }
+
+    fn assert_model_finished_retirement(events: &[&'static str]) {
+        assert_model_raw_retirement(events);
+        assert!(events.ends_with(&[
+            "prove pristine network",
+            "disarm endpoint B address",
+            "disarm endpoint A address",
+            "disarm parent B address",
+            "disarm parent A address",
+            "disarm pair B",
+            "disarm pair A",
+            "release namespace pins",
+            "namespace pins dropped",
+        ]));
+    }
+
+    #[test]
+    fn every_partial_link_stage_failure_directly_retires_pairs_without_lower_rollback() {
+        for failure_index in 0..MODEL_LINK_OPERATIONS.len() {
+            for failure in MODEL_LINK_FAILURES {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+                let mut provisional =
+                    ModelProvisionalActivation::new(Rc::clone(&events), Rc::clone(&current));
+                if failure_index < 4 {
+                    assert_eq!(
+                        model_stage_all_none(&mut provisional, Some((failure_index, failure)),),
+                        Err(())
+                    );
+                    let mut deleted = provisional.begin_retirement();
+                    let pins = deleted
+                        .finish_after_pristine_network_proof(true)
+                        .expect("finish failed-NONE retirement");
+                    drop(pins);
+                } else {
+                    model_stage_all_none(&mut provisional, None)
+                        .expect("stage pre-failure NONE operations");
+                    let mut all_none = provisional
+                        .finish_none(true)
+                        .expect("prove pre-failure all-NONE state");
+                    assert_eq!(
+                        model_stage_all_up(&mut all_none, Some((failure_index, failure))),
+                        Err(())
+                    );
+                    let mut deleted = all_none.begin_retirement();
+                    let pins = deleted
+                        .finish_after_pristine_network_proof(true)
+                        .expect("finish failed-UP retirement");
+                    drop(pins);
+                }
+                let observed = events.borrow();
+                assert!(observed.contains(&failure.event()));
+                assert!(!observed.iter().any(|event| event.contains("rollback")));
+                assert_model_finished_retirement(&observed);
+                assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+            }
+        }
+    }
+
+    #[test]
+    fn none_and_up_barrier_failures_drop_through_direct_pair_retirement() {
+        for fail_none_barrier in [true, false] {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+            let mut provisional =
+                ModelProvisionalActivation::new(Rc::clone(&events), Rc::clone(&current));
+            model_stage_all_none(&mut provisional, None).expect("stage all NONE");
+            let mut deleted = if fail_none_barrier {
+                match provisional.finish_none(false) {
+                    Err(deleted) => deleted,
+                    Ok(_) => panic!("invalid all-NONE barrier was accepted"),
+                }
+            } else {
+                let mut all_none = provisional.finish_none(true).expect("all-NONE proof");
+                model_stage_all_up(&mut all_none, None).expect("stage all UP");
+                match all_none.finish_up(false) {
+                    Err(deleted) => deleted,
+                    Ok(_) => panic!("invalid all-UP barrier was accepted"),
+                }
+            };
+            let pins = deleted
+                .finish_after_pristine_network_proof(true)
+                .expect("finish barrier-failure retirement");
+            drop(pins);
+            assert_model_finished_retirement(&events.borrow());
+            assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        }
+    }
+
+    #[test]
+    fn deleted_topology_returns_pins_only_after_external_pristine_proof() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let activated = model_complete_activation(&events, &current);
+        let mut deleted = activated.begin_retirement();
+        assert!(deleted.finish_after_pristine_network_proof(false).is_err());
+        let addressed = deleted
+            .addressed
+            .as_ref()
+            .expect("unproved deleted authority must remain owned");
+        assert_eq!(addressed.addresses_armed, [true; 4]);
+        assert_eq!(addressed.pairs_armed, [true; ENDPOINT_COUNT]);
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| event.starts_with("disarm"))
+        );
+
+        let pins = deleted
+            .finish_after_pristine_network_proof(true)
+            .expect("model pristine retirement barrier");
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        assert!(events.borrow().ends_with(&[
+            "prove pristine network",
+            "disarm endpoint B address",
+            "disarm endpoint A address",
+            "disarm parent B address",
+            "disarm parent A address",
+            "disarm pair B",
+            "disarm pair A",
+            "release namespace pins",
+        ]));
+        assert!(!events.borrow().contains(&"namespace pins dropped"));
+        drop(pins);
+        assert_eq!(
+            events.borrow().last().copied(),
+            Some("namespace pins dropped")
+        );
+    }
+
+    #[test]
+    fn deleted_wrong_lineage_prevalidation_disarms_nothing_and_retains_authority() {
+        for corrupt_address in [true, false] {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+            let activated = model_complete_activation(&events, &current);
+            let mut deleted = activated.begin_retirement();
+            let events_before_prevalidation = events.borrow().len();
+            {
+                let addressed = deleted.addressed.as_mut().expect("deleted model authority");
+                if corrupt_address {
+                    addressed.address_lineage_valid[3] = false;
+                } else {
+                    addressed.pair_lineage_valid[1] = false;
+                }
+            }
+
+            assert!(deleted.finish_after_pristine_network_proof(true).is_err());
+            let addressed = deleted
+                .addressed
+                .as_mut()
+                .expect("failed prevalidation must retain authority");
+            assert_eq!(addressed.addresses_armed, [true; 4]);
+            assert_eq!(addressed.pairs_armed, [true; ENDPOINT_COUNT]);
+            assert_eq!(events.borrow().len(), events_before_prevalidation);
+            addressed.address_lineage_valid = [true; 4];
+            addressed.pair_lineage_valid = [true; ENDPOINT_COUNT];
+
+            let pins = deleted
+                .finish_after_pristine_network_proof(true)
+                .expect("retry valid retirement prevalidation");
+            drop(pins);
+            assert_model_finished_retirement(&events.borrow());
+            assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        }
+    }
+
+    #[test]
+    fn wrong_pair_lineage_never_disarms_and_retry_deletes_only_owned_lineage() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let mut activated = model_complete_activation(&events, &current);
+        events.borrow_mut().clear();
+        {
+            let addressed = activated
+                .core_mut()
+                .addressed
+                .as_mut()
+                .expect("model addressed authority");
+            addressed.pair_lineage_valid[1] = false;
+        }
+
+        assert!(activated.core_mut().begin_retirement().is_err());
+        {
+            let core = activated.core_mut();
+            let addressed = core.addressed.as_mut().expect("authority retained");
+            assert_eq!(addressed.addresses_armed, [true; 4]);
+            assert_eq!(addressed.pairs_armed, [true; ENDPOINT_COUNT]);
+            assert_eq!(addressed.pairs_live, [false, true]);
+            addressed.pair_lineage_valid[1] = true;
+        }
+        assert_eq!(
+            *events.borrow(),
+            ["reject wrong pair B lineage", "delete pair A"]
+        );
+
+        let mut deleted = activated.begin_retirement();
+        let pins = deleted
+            .finish_after_pristine_network_proof(true)
+            .expect("finish retried exact retirement");
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| event.contains("rollback"))
+        );
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        drop(pins);
+    }
+
+    #[test]
+    fn partial_absence_proof_retains_all_journals_for_idempotent_drop_retry() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let mut activated = model_complete_activation(&events, &current);
+        events.borrow_mut().clear();
+        activated
+            .core_mut()
+            .addressed
+            .as_mut()
+            .expect("model addressed authority")
+            .endpoint_absence_valid[1] = false;
+
+        assert!(activated.core_mut().begin_retirement().is_err());
+        {
+            let addressed = activated
+                .core_mut()
+                .addressed
+                .as_mut()
+                .expect("authority retained after partial proof");
+            assert_eq!(addressed.pairs_live, [false; ENDPOINT_COUNT]);
+            assert_eq!(addressed.addresses_armed, [true; 4]);
+            assert_eq!(addressed.pairs_armed, [true; ENDPOINT_COUNT]);
+            addressed.endpoint_absence_valid[1] = true;
+        }
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| event.starts_with("disarm"))
+        );
+
+        let mut deleted = activated.begin_retirement();
+        let pins = deleted
+            .finish_after_pristine_network_proof(true)
+            .expect("finish idempotent proof retry");
+        drop(pins);
+        assert_model_finished_retirement(&events.borrow());
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+    }
+
+    #[test]
+    fn automatic_drop_proves_raw_absence_then_aborts_before_unproved_release() {
+        for phase in 0..3 {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+            let mut provisional =
+                ModelProvisionalActivation::new(Rc::clone(&events), Rc::clone(&current));
+            provisional
+                .stage_none(ModelLinkOperation::NoneParentA, None)
+                .expect("stage first NONE operation");
+            if phase == 0 {
+                drop(provisional);
+            } else {
+                for operation in MODEL_LINK_OPERATIONS[1..4].iter().copied() {
+                    provisional
+                        .stage_none(operation, None)
+                        .expect("stage remaining NONE operation");
+                }
+                let mut all_none = provisional.finish_none(true).expect("all-NONE proof");
+                if phase == 1 {
+                    drop(all_none);
+                } else {
+                    model_stage_all_up(&mut all_none, None).expect("stage all UP");
+                    let activated = all_none.finish_up(true).expect("all-UP proof");
+                    drop(activated);
+                }
+            }
+            assert_model_raw_retirement(&events.borrow());
+            assert_eq!(
+                events.borrow().last().copied(),
+                Some("abort before unproven authority release")
+            );
+            assert!(
+                !events
+                    .borrow()
+                    .iter()
+                    .any(|event| event.starts_with("disarm"))
+            );
+            assert!(!events.borrow().contains(&"namespace pins dropped"));
+            assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        }
     }
 
     #[test]

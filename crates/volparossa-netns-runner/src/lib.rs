@@ -18,18 +18,23 @@
 //! It creates and exactly proves two fixed down-veth pairs, each through one
 //! atomic `RTM_NEWLINK` request. It then installs and exactly proves four fixed
 //! `/30` IPv4 addresses plus their four kernel-owned local-table `/32` routes
-//! while every veth end remains down. Address rollback runs endpoint B/A then
-//! parent B/A, after which the retained veth-only states are re-proved
-//! byte-exactly. It deletes veth B then A, proves all three namespaces pristine
-//! again, ordinarily unmounts nsfs B then A, proves the hidden slots reappeared, rolls every
+//! while every veth end remains down. It separately sets and proves IPv6
+//! address-generation mode `none` on all four ends, activates every end, and
+//! proves the exact carrier-up links, `noqueue` qdiscs, absence of IPv6
+//! addresses, and kernel-owned local, connected, high-broadcast, and IPv6
+//! multicast routes. It then directly deletes veth B followed by A. All address
+//! and pair owners remain armed until the parent and both endpoints are proven
+//! byte-exactly equal to their retained enumerated network baselines; only then
+//! are those affine owners retired. PID 1
+//! ordinarily unmounts nsfs B then A, proves the hidden slots reappeared, rolls every
 //! filesystem object back, and reports one internal rollback checkpoint. The
 //! outer then independently re-proves empty private mounts before delivering
 //! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
-//! before exact PID-1 and launcher reaping. The slice activates no link and
-//! sends no explicit route request. It creates no connected, main-table,
-//! default, or explicit host route, forwarding change, firewall object, packet,
-//! probe, ownership manifest, or topology readiness and cannot emit
-//! `TOPOLOGY_READY` or acceptance evidence.
+//! before exact PID-1 and launcher reaping. The slice sends no explicit route or
+//! forwarding-setting request and makes no firewall mutation. It produces no
+//! packet-capture or probe evidence, ownership manifest, dataplane topology,
+//! `TOPOLOGY_READY`, or acceptance evidence; the observed routes are kernel side effects of the
+//! fixed addresses and active links, not production route orchestration.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
