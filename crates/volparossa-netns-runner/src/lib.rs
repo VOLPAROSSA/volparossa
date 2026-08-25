@@ -22,19 +22,22 @@
 //! address-generation mode `none` on all four ends, activates every end, and
 //! proves the exact carrier-up links, `noqueue` qdiscs, absence of IPv6
 //! addresses, and kernel-owned local, connected, high-broadcast, and IPv6
-//! multicast routes. It then directly deletes veth B followed by A. All address
-//! and pair owners remain armed until the parent and both endpoints are proven
+//! multicast routes. It then installs and exactly observes the two fixed
+//! main-table static endpoint `/32` routes through bounded raw `RTM_NEWROUTE`
+//! requests while the parent remains unchanged. It directly deletes veth B
+//! followed by A as the only route-removal mechanism. All route, address, and
+//! pair owners remain armed until the parent and both endpoints are proven
 //! byte-exactly equal to their retained enumerated network baselines; only then
-//! are those affine owners retired. PID 1
-//! ordinarily unmounts nsfs B then A, proves the hidden slots reappeared, rolls every
-//! filesystem object back, and reports one internal rollback checkpoint. The
+//! are those affine owners retired. PID 1 ordinarily unmounts nsfs B then A,
+//! proves the hidden slots reappeared, rolls every filesystem object back, and
+//! reports one internal rollback checkpoint. The
 //! outer then independently re-proves empty private mounts before delivering
 //! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
-//! before exact PID-1 and launcher reaping. The slice sends no explicit route or
+//! before exact PID-1 and launcher reaping. The slice sends no
 //! forwarding-setting request and makes no firewall mutation. It produces no
 //! packet-capture or probe evidence, ownership manifest, dataplane topology,
-//! `TOPOLOGY_READY`, or acceptance evidence; the observed routes are kernel side effects of the
-//! fixed addresses and active links, not production route orchestration.
+//! `TOPOLOGY_READY`, or acceptance evidence; its explicit endpoint routes are
+//! configuration proof, not production route orchestration.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]

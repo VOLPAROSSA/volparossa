@@ -53,8 +53,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// Four addressed links were activated, directly deleted, and exactly proven pristine.
-    BlockedAfterLinkActivationTeardown,
+    /// Two exact endpoint routes were installed, link-bound deleted, and proven pristine.
+    BlockedAfterEndpointRouteTeardown,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -63,10 +63,10 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    AuthorizedLinkActivationTornDown,
+    AuthorizedEndpointRoutesTornDown,
 }
 
-enum FixedLinkTeardownMounts {
+enum FixedEndpointRouteTeardownMounts {
     NamespacePins(Box<crate::mounts::PrivateMounts<crate::topology::AuthorizedNamespacePins>>),
     Pristine(crate::mounts::PrivateMounts),
 }
@@ -104,9 +104,9 @@ pub enum RunnerError {
     /// One fixed private-mount operation or its direct kernel proof failed.
     #[error("private-mount setup or proof failed: {0}")]
     PrivateMount(#[source] io::Error),
-    /// The fixed link activation or deletion-only teardown transaction failed.
-    #[error("fixed link activation or teardown failed: {0}")]
-    LinkActivation(#[source] io::Error),
+    /// The fixed endpoint-route or deletion-only teardown transaction failed.
+    #[error("fixed endpoint-route installation or teardown failed: {0}")]
+    EndpointRoute(#[source] io::Error),
     /// Fixed managed-signal setup, observation, or quiescence proof failed.
     #[error("fixed signal supervision failed: {0}")]
     SignalSupervision(#[source] io::Error),
@@ -298,8 +298,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::AuthorizedLinkActivationTornDown => {
-            LifecycleOutcome::BlockedAfterLinkActivationTeardown
+        PidOneBarrierOutcome::AuthorizedEndpointRoutesTornDown => {
+            LifecycleOutcome::BlockedAfterEndpointRouteTeardown
         }
     };
     Ok(outcome)
@@ -443,7 +443,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::AuthorizedLinkActivationTornDown)
+        Ok(PidOneBarrierOutcome::AuthorizedEndpointRoutesTornDown)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -623,7 +623,7 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterLinkActivationTeardown {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterEndpointRouteTeardown {
         LifecycleEofDisposition::CleanupRequired
     } else {
         LifecycleEofDisposition::NoTopologyMutationAuthorized
@@ -983,15 +983,16 @@ fn finish_pid_one(
 /// their four kernel-owned local-table `/32` routes while the links stay down.
 /// It next proves an exact all-IPv6-addrgen-NONE barrier, activates all four
 /// ends, and re-proves the carrier-up links, `noqueue` qdiscs, and complete
-/// kernel-owned route side effects. It then directly deletes veth B followed by
-/// A and proves all three namespaces byte-exactly equal to their retained
-/// enumerated network baselines before retiring the still-armed address and
-/// pair owners. It reverses both pins and every private-run creation and reports
-/// the internal rollback checkpoint. Only
-/// after the outer independently re-proves
-/// empty private mounts does PID 1 consume pidfd-delivered TERM and report the
-/// affine observation over the launcher-private control channel. The final EOF
-/// is post-`GO` and therefore remains cleanup-required.
+/// kernel-owned route side effects. It installs and exactly observes the two
+/// fixed main-table static endpoint `/32` routes while the parent stays
+/// unchanged. It then directly deletes veth B followed by A as the sole route
+/// removal and proves all three namespaces byte-exactly equal to their retained
+/// enumerated network baselines before retiring the still-armed route, address,
+/// and pair owners. It reverses both pins and every private-run creation and
+/// reports the internal rollback checkpoint. Only after the outer independently
+/// re-proves empty private mounts does PID 1 consume pidfd-delivered TERM and
+/// report the affine observation over the launcher-private control channel. The
+/// final EOF is post-`GO` and therefore remains cleanup-required.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_pid_one() -> ExitCode {
@@ -1191,13 +1192,13 @@ fn complete_authorized_private_run_rollback(
     veth_pairs
         .verify_authorized_veth_pairs()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    let (teardown_mounts, deferred_link_error) = complete_fixed_link_activation_teardown(
+    let (teardown_mounts, deferred_topology_error) = complete_fixed_endpoint_route_teardown(
         veth_pairs,
         &rollback_network_proof,
         endpoint_baselines,
     )?;
     let mounts = match teardown_mounts {
-        FixedLinkTeardownMounts::NamespacePins(namespace_pins) => {
+        FixedEndpointRouteTeardownMounts::NamespacePins(namespace_pins) => {
             let namespace_pins = *namespace_pins;
             namespace_pins
                 .verify_authorized_namespace_pins()
@@ -1212,14 +1213,14 @@ fn complete_authorized_private_run_rollback(
                 .rollback_private_run()
                 .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?
         }
-        FixedLinkTeardownMounts::Pristine(mounts) => mounts,
+        FixedEndpointRouteTeardownMounts::Pristine(mounts) => mounts,
     };
     rollback_network_proof
         .verify_rollback(&mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
     verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
-    if let Some(source) = deferred_link_error {
-        return Err(RunnerError::LinkActivation(io::Error::other(source)));
+    if let Some(source) = deferred_topology_error {
+        return Err(RunnerError::EndpointRoute(io::Error::other(source)));
     }
     let final_network_proof = crate::network::prove_pre_go_network_baseline(&mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
@@ -1230,13 +1231,13 @@ fn complete_authorized_private_run_rollback(
     Ok((mounts, final_network_proof))
 }
 
-fn complete_fixed_link_activation_teardown(
+fn complete_fixed_endpoint_route_teardown(
     veth_pairs: crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>,
     rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
     endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
 ) -> Result<
     (
-        FixedLinkTeardownMounts,
+        FixedEndpointRouteTeardownMounts,
         Option<crate::mounts::PrivateMountLinkActivationError>,
     ),
     RunnerError,
@@ -1255,41 +1256,51 @@ fn complete_fixed_link_activation_teardown(
     {
         Ok(result) => result,
         Err(failure) => {
-            return recover_failed_link_activation(
+            return recover_failed_topology_transition(
                 failure,
                 rollback_network_proof,
                 endpoint_baselines,
             );
         }
     };
-    let (activated, _active_proof) =
+    let (activated, active_proof) =
         match all_none.activate_links(&none_proof, rollback_network_proof, &endpoint_baselines) {
             Ok(result) => result,
             Err(failure) => {
-                return recover_failed_link_activation(
+                return recover_failed_topology_transition(
                     failure,
                     rollback_network_proof,
                     endpoint_baselines,
                 );
             }
         };
-    let deleted = activated.begin_retirement();
+    let (routed, _routed_proof) = match activated.install_endpoint_routes(active_proof) {
+        Ok(result) => result,
+        Err(failure) => {
+            return recover_failed_topology_transition(
+                failure,
+                rollback_network_proof,
+                endpoint_baselines,
+            );
+        }
+    };
+    let deleted = routed.begin_retirement();
     let namespace_pins = deleted
         .finish_after_pristine_network_proof(rollback_network_proof, endpoint_baselines)
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
     Ok((
-        FixedLinkTeardownMounts::NamespacePins(Box::new(namespace_pins)),
+        FixedEndpointRouteTeardownMounts::NamespacePins(Box::new(namespace_pins)),
         None,
     ))
 }
 
-fn recover_failed_link_activation(
+fn recover_failed_topology_transition(
     failure: crate::mounts::PrivateMountLinkActivationFailure,
     rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
     endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
 ) -> Result<
     (
-        FixedLinkTeardownMounts,
+        FixedEndpointRouteTeardownMounts,
         Option<crate::mounts::PrivateMountLinkActivationError>,
     ),
     RunnerError,
@@ -1300,13 +1311,13 @@ fn recover_failed_link_activation(
             mounts
                 .verify()
                 .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-            FixedLinkTeardownMounts::Pristine(mounts)
+            FixedEndpointRouteTeardownMounts::Pristine(mounts)
         }
         crate::mounts::PrivateMountLinkFailureState::Deleted(mounts) => {
             let namespace_pins = (*mounts)
                 .finish_after_pristine_network_proof(rollback_network_proof, endpoint_baselines)
                 .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-            FixedLinkTeardownMounts::NamespacePins(Box::new(namespace_pins))
+            FixedEndpointRouteTeardownMounts::NamespacePins(Box::new(namespace_pins))
         }
     };
     Ok((mounts, Some(source)))

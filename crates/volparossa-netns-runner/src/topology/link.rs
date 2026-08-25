@@ -290,6 +290,143 @@ struct PairBinding {
     endpoint_peer_netnsid: Option<i32>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PairAuthorityIdentity {
+    endpoint: FixedVethEndpoint,
+    parent_name: String,
+    parent_ifindex: u32,
+    peer_ifindex: u32,
+    target_namespace: NamespaceIdentity,
+}
+
+impl PairAuthorityIdentity {
+    fn from_pair(pair: &FixedVethPair) -> Self {
+        Self {
+            endpoint: pair.endpoint(),
+            parent_name: pair.parent_name().to_owned(),
+            parent_ifindex: pair.parent_ifindex(),
+            peer_ifindex: pair.peer_ifindex(),
+            target_namespace: NamespaceIdentity::from_veth(pair.target_namespace_identity()),
+        }
+    }
+
+    fn from_binding(binding: &PairBinding) -> Self {
+        Self {
+            endpoint: binding.endpoint,
+            parent_name: binding.parent_name.clone(),
+            parent_ifindex: binding.parent_ifindex,
+            peer_ifindex: binding.peer_ifindex,
+            target_namespace: binding.target_namespace,
+        }
+    }
+}
+
+/// Compact retained provenance for one endpoint route and both activated pairs.
+///
+/// This value can only be minted by an exact all-UP authority after both pair
+/// arguments match its retained pair set. It also carries that authority's
+/// retained parent namespace, so a different topology's post-delete proof
+/// cannot retire the route journal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FixedEndpointRoutePairLineage {
+    parent_namespace: NamespaceIdentity,
+    local_endpoint: FixedVethEndpoint,
+    pairs: [PairBinding; 2],
+}
+
+impl FixedEndpointRoutePairLineage {
+    #[cfg(test)]
+    pub(super) fn from_test_parts(local_endpoint: FixedVethEndpoint) -> Self {
+        Self {
+            parent_namespace: NamespaceIdentity {
+                device: 1,
+                inode: 10,
+            },
+            local_endpoint,
+            pairs: [
+                PairBinding {
+                    endpoint: FixedVethEndpoint::A,
+                    parent_name: "vpa01234567".to_owned(),
+                    parent_ifindex: 2,
+                    peer_ifindex: 3,
+                    target_namespace: NamespaceIdentity {
+                        device: 2,
+                        inode: 20,
+                    },
+                    parent_peer_netnsid: 0,
+                    parent_mac: [0x02, 1, 2, 3, 4, 5],
+                    endpoint_mac: Some([0x02, 6, 7, 8, 9, 10]),
+                    endpoint_peer_netnsid: Some(0),
+                },
+                PairBinding {
+                    endpoint: FixedVethEndpoint::B,
+                    parent_name: "vpb01234567".to_owned(),
+                    parent_ifindex: 4,
+                    peer_ifindex: 3,
+                    target_namespace: NamespaceIdentity {
+                        device: 3,
+                        inode: 30,
+                    },
+                    parent_peer_netnsid: 1,
+                    parent_mac: [0x02, 11, 12, 13, 14, 15],
+                    endpoint_mac: Some([0x02, 16, 17, 18, 19, 20]),
+                    endpoint_peer_netnsid: Some(0),
+                },
+            ],
+        }
+    }
+
+    pub(super) fn local_endpoint(&self) -> FixedVethEndpoint {
+        self.local_endpoint
+    }
+
+    pub(super) fn local_parent_name(&self) -> &str {
+        &self.local_pair().parent_name
+    }
+
+    pub(super) fn local_parent_ifindex(&self) -> u32 {
+        self.local_pair().parent_ifindex
+    }
+
+    pub(super) fn local_peer_ifindex(&self) -> u32 {
+        self.local_pair().peer_ifindex
+    }
+
+    pub(super) fn local_target_namespace_matches(
+        &self,
+        identity: VethTargetNamespaceIdentity,
+    ) -> bool {
+        self.local_pair().target_namespace == NamespaceIdentity::from_veth(identity)
+    }
+
+    pub(super) fn remote_parent_name(&self) -> &str {
+        &self.remote_pair().parent_name
+    }
+
+    pub(super) fn remote_parent_ifindex(&self) -> u32 {
+        self.remote_pair().parent_ifindex
+    }
+
+    pub(super) fn remote_peer_ifindex(&self) -> u32 {
+        self.remote_pair().peer_ifindex
+    }
+
+    pub(super) fn remote_target_namespace_matches(
+        &self,
+        identity: VethTargetNamespaceIdentity,
+    ) -> bool {
+        self.remote_pair().target_namespace == NamespaceIdentity::from_veth(identity)
+    }
+
+    fn local_pair(&self) -> &PairBinding {
+        &self.pairs[endpoint_index(self.local_endpoint)]
+    }
+
+    fn remote_pair(&self) -> &PairBinding {
+        &self.pairs[endpoint_index(opposite_endpoint(self.local_endpoint))]
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LinkStage {
     DownEui64,
@@ -495,6 +632,26 @@ impl AllLinksUp {
         self.core().require_all_up()
     }
 
+    /// Bind both caller-retained pair owners and the retained parent
+    /// namespace to one compact endpoint-route lineage.
+    pub(super) fn bind_endpoint_route_pairs(
+        &self,
+        local_pair: &FixedVethPair,
+        remote_pair: &FixedVethPair,
+    ) -> Result<FixedEndpointRoutePairLineage, FixedLinkOperationError> {
+        let core = self.core();
+        core.require_all_up()?;
+        core.parent.verify()?;
+        bind_endpoint_route_pair_lineage(
+            core.parent.identity,
+            &core.pairs,
+            &[
+                PairAuthorityIdentity::from_pair(local_pair),
+                PairAuthorityIdentity::from_pair(remote_pair),
+            ],
+        )
+    }
+
     /// Consume the activated state through mandatory B-then-A deletion.
     pub(crate) fn into_retirement(mut self) -> FixedLinkRetirement {
         FixedLinkRetirement::Deleted(self.take_core().delete_into_proof())
@@ -618,6 +775,10 @@ impl FixedPairAbsenceProof {
             && NamespaceIdentity::from_ipv4(mutation_namespace) == expected_namespace
             && NamespaceIdentity::from_ipv4(target_namespace) == pair.target_namespace
     }
+
+    pub(super) fn validates_endpoint_route(&self, lineage: &FixedEndpointRoutePairLineage) -> bool {
+        self.parent_namespace == lineage.parent_namespace && self.pairs == lineage.pairs
+    }
 }
 
 const fn fixed_link_end_for_address(address: FixedIpv4Address) -> FixedLinkEnd {
@@ -634,6 +795,38 @@ const fn endpoint_index(endpoint: FixedVethEndpoint) -> usize {
         FixedVethEndpoint::A => 0,
         FixedVethEndpoint::B => 1,
     }
+}
+
+const fn opposite_endpoint(endpoint: FixedVethEndpoint) -> FixedVethEndpoint {
+    match endpoint {
+        FixedVethEndpoint::A => FixedVethEndpoint::B,
+        FixedVethEndpoint::B => FixedVethEndpoint::A,
+    }
+}
+
+fn bind_endpoint_route_pair_lineage(
+    parent_namespace: NamespaceIdentity,
+    retained_pairs: &[PairBinding; 2],
+    supplied_pairs: &[PairAuthorityIdentity; 2],
+) -> Result<FixedEndpointRoutePairLineage, FixedLinkOperationError> {
+    let local_endpoint = supplied_pairs[0].endpoint;
+    if supplied_pairs[1].endpoint != opposite_endpoint(local_endpoint)
+        || supplied_pairs[0]
+            != PairAuthorityIdentity::from_binding(&retained_pairs[endpoint_index(local_endpoint)])
+        || supplied_pairs[1]
+            != PairAuthorityIdentity::from_binding(
+                &retained_pairs[endpoint_index(opposite_endpoint(local_endpoint))],
+            )
+    {
+        return Err(FixedLinkOperationError::Unsafe(
+            "all-UP authority does not bind both endpoint-route pair arguments",
+        ));
+    }
+    Ok(FixedEndpointRoutePairLineage {
+        parent_namespace,
+        local_endpoint,
+        pairs: retained_pairs.clone(),
+    })
 }
 
 fn capture_pair_binding(
@@ -3126,6 +3319,88 @@ mod tests {
         ] {
             assert!(!valid);
         }
+    }
+
+    fn endpoint_route_lineage(
+        proof: &FixedPairAbsenceProof,
+        local_endpoint: FixedVethEndpoint,
+    ) -> FixedEndpointRoutePairLineage {
+        FixedEndpointRoutePairLineage {
+            parent_namespace: proof.parent_namespace,
+            local_endpoint,
+            pairs: proof.pairs.clone(),
+        }
+    }
+
+    #[test]
+    fn absence_proof_binds_both_orientations_of_exact_endpoint_route_lineage() {
+        let proof = proof_fixture();
+        for endpoint in [FixedVethEndpoint::A, FixedVethEndpoint::B] {
+            assert!(proof.validates_endpoint_route(&endpoint_route_lineage(&proof, endpoint)));
+        }
+    }
+
+    #[test]
+    fn all_up_binding_rejects_cross_topology_pair_snapshot() {
+        let retained = proof_fixture();
+        let supplied = [
+            PairAuthorityIdentity::from_binding(&retained.pairs[0]),
+            PairAuthorityIdentity::from_binding(&retained.pairs[1]),
+        ];
+        bind_endpoint_route_pair_lineage(retained.parent_namespace, &retained.pairs, &supplied)
+            .expect("same all-UP pair snapshot");
+
+        let mut other_topology = retained.pairs.clone();
+        other_topology[1].parent_ifindex = 9;
+        assert!(
+            bind_endpoint_route_pair_lineage(retained.parent_namespace, &other_topology, &supplied)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_route_retirement_rejects_wrong_parent_namespace() {
+        let proof = proof_fixture();
+        let mut lineage = endpoint_route_lineage(&proof, FixedVethEndpoint::A);
+        lineage.parent_namespace = NamespaceIdentity {
+            device: 9,
+            inode: 90,
+        };
+        assert!(!proof.validates_endpoint_route(&lineage));
+    }
+
+    #[test]
+    fn endpoint_route_retirement_rejects_changed_pair_lineage() {
+        let proof = proof_fixture();
+        let exact = endpoint_route_lineage(&proof, FixedVethEndpoint::A);
+        let mut variants = Vec::new();
+
+        let mut changed = exact.clone();
+        changed.pairs[0].parent_name = "wrong".to_owned();
+        variants.push(changed);
+        let mut changed = exact.clone();
+        changed.pairs[0].target_namespace.inode = 99;
+        variants.push(changed);
+        let mut changed = exact.clone();
+        changed.pairs[1].peer_ifindex = 9;
+        variants.push(changed);
+        let mut changed = exact;
+        changed.pairs[1].endpoint_mac = Some([0x02, 99, 98, 97, 96, 95]);
+        variants.push(changed);
+
+        assert!(
+            variants
+                .iter()
+                .all(|lineage| !proof.validates_endpoint_route(lineage))
+        );
+    }
+
+    #[test]
+    fn endpoint_route_proof_allows_equal_peer_indices_in_distinct_namespaces() {
+        let mut proof = proof_fixture();
+        proof.pairs[1].peer_ifindex = proof.pairs[0].peer_ifindex;
+        let lineage = endpoint_route_lineage(&proof, FixedVethEndpoint::A);
+        assert!(proof.validates_endpoint_route(&lineage));
     }
 
     #[test]
