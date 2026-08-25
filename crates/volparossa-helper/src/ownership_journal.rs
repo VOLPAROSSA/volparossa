@@ -296,6 +296,25 @@ impl TryFrom<u8> for OwnershipPhase {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum AbsentOrigin {
+    NeverDispatched = 1,
+    RecoveredMayOwn = 2,
+}
+
+impl TryFrom<u8> for AbsentOrigin {
+    type Error = JournalError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::NeverDispatched),
+            2 => Ok(Self::RecoveredMayOwn),
+            _ => Err(JournalError::InvalidRecord),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct ReconcileBinding {
     request_id: Id16,
@@ -339,15 +358,24 @@ struct OwnershipRecord {
     hard_expires_at_unix: NonZeroU64,
     plan: ClosedPlan,
     phase: OwnershipPhase,
+    absent_origin: Option<AbsentOrigin>,
     reconcile: Option<ReconcileBinding>,
     recovery_anchor: Option<PrepareRecoveryAnchorV1>,
 }
 
 impl OwnershipRecord {
     fn validate(&self) -> Result<(), JournalError> {
-        if self.hard_expires_at_unix < self.setup_expires_at_unix
-            || (self.phase == OwnershipPhase::MayOwnPrepare) != self.recovery_anchor.is_some()
-        {
+        let phase_evidence_is_valid = matches!(
+            (self.phase, self.absent_origin, self.recovery_anchor),
+            (OwnershipPhase::Intent, None, None)
+                | (OwnershipPhase::MayOwnPrepare, None, Some(_))
+                | (
+                    OwnershipPhase::Absent,
+                    Some(AbsentOrigin::NeverDispatched | AbsentOrigin::RecoveredMayOwn),
+                    None
+                )
+        );
+        if self.hard_expires_at_unix < self.setup_expires_at_unix || !phase_evidence_is_valid {
             return Err(JournalError::InvalidRecord);
         }
         let canonical = ClosedPlan::new(self.plan.context_role, self.plan.paths.clone())?;
@@ -361,25 +389,33 @@ impl OwnershipRecord {
         &mut self,
         next: OwnershipPhase,
         recovery_anchor: Option<PrepareRecoveryAnchorV1>,
+        absent_origin: Option<AbsentOrigin>,
     ) -> Result<(), JournalError> {
-        let valid = matches!(
-            (self.phase, next),
+        let transition_is_valid = matches!(
+            (self.phase, next, absent_origin, recovery_anchor),
             (
                 OwnershipPhase::Intent,
-                OwnershipPhase::MayOwnPrepare | OwnershipPhase::Absent
-            ) | (OwnershipPhase::MayOwnPrepare, OwnershipPhase::Absent)
+                OwnershipPhase::MayOwnPrepare,
+                None,
+                Some(_)
+            ) | (
+                OwnershipPhase::Intent,
+                OwnershipPhase::Absent,
+                Some(AbsentOrigin::NeverDispatched),
+                None
+            ) | (
+                OwnershipPhase::MayOwnPrepare,
+                OwnershipPhase::Absent,
+                Some(AbsentOrigin::RecoveredMayOwn),
+                None
+            )
         );
-        if !valid {
-            return Err(JournalError::InvalidTransition);
-        }
-        if next == OwnershipPhase::MayOwnPrepare && recovery_anchor.is_none() {
-            return Err(JournalError::InvalidTransition);
-        }
-        if next == OwnershipPhase::Absent && recovery_anchor.is_some() {
+        if !transition_is_valid {
             return Err(JournalError::InvalidTransition);
         }
         let mut candidate = self.clone();
         candidate.phase = next;
+        candidate.absent_origin = absent_origin;
         candidate.recovery_anchor = recovery_anchor;
         candidate.validate()?;
         *self = candidate;
@@ -402,6 +438,7 @@ impl fmt::Debug for OwnershipRecord {
             .field("hard_expires_at_unix", &"<redacted>")
             .field("plan", &self.plan)
             .field("phase", &self.phase)
+            .field("absent_origin", &self.absent_origin)
             .field("reconcile", &self.reconcile)
             .field("recovery_anchor", &self.recovery_anchor)
             .finish()
@@ -599,6 +636,13 @@ fn encode_record(encoded: &mut Vec<u8>, record: &OwnershipRecord) {
         encoded.push(path.role as u8);
     }
     encoded.push(record.phase as u8);
+    match record.absent_origin {
+        None => encoded.push(0),
+        Some(origin) => {
+            encoded.push(1);
+            encoded.push(origin as u8);
+        }
+    }
     match record.reconcile {
         None => encoded.push(0),
         Some(binding) => {
@@ -653,6 +697,11 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<OwnershipRecord, JournalEr
     }
     let plan = ClosedPlan::new(context_role, paths).map_err(|_| JournalError::Corrupt)?;
     let phase = OwnershipPhase::try_from(decoder.u8()?).map_err(|_| JournalError::Corrupt)?;
+    let absent_origin = match decoder.u8()? {
+        0 => None,
+        1 => Some(AbsentOrigin::try_from(decoder.u8()?).map_err(|_| JournalError::Corrupt)?),
+        _ => return Err(JournalError::Corrupt),
+    };
     let reconcile = match decoder.u8()? {
         0 => None,
         1 => Some(ReconcileBinding {
@@ -687,6 +736,7 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<OwnershipRecord, JournalEr
         hard_expires_at_unix,
         plan,
         phase,
+        absent_origin,
         reconcile,
         recovery_anchor,
     };
@@ -853,6 +903,24 @@ impl fmt::Debug for NewOwnershipIntent {
     }
 }
 
+fn record_matches_intent(record: &OwnershipRecord, intent: &NewOwnershipIntent) -> bool {
+    record.origin_runtime_id == intent.origin_runtime_id
+        && record.context_id == intent.context_id
+        && record.prepare_request_id == intent.prepare_request_id
+        && record.prepare_operation_digest == intent.prepare_operation_digest
+        && record.setup_expires_at_unix == intent.setup_expires_at_unix
+        && record.hard_expires_at_unix == intent.hard_expires_at_unix
+        && record.plan == intent.plan
+}
+
+fn record_is_exact_post_insert(record: &OwnershipRecord, intent: &NewOwnershipIntent) -> bool {
+    record_matches_intent(record, intent)
+        && record.phase == OwnershipPhase::Intent
+        && record.absent_origin.is_none()
+        && record.reconcile.is_none()
+        && record.recovery_anchor.is_none()
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct InsertedOwnership {
     ownership_id: OwnershipId,
@@ -988,6 +1056,25 @@ impl OwnershipJournal {
         intent: NewOwnershipIntent,
     ) -> Result<InsertedOwnership, JournalError> {
         self.ensure_expected_revision(expected_revision)?;
+        // A durable insert may have completed after its reply was lost. Only the complete immutable
+        // intent is an idempotency key; every partial match remains a conflicting new insert.
+        if let Some(record) = self
+            .snapshot
+            .records
+            .values()
+            .find(|record| record_matches_intent(record, &intent))
+        {
+            if !record_is_exact_post_insert(record, &intent) {
+                return Err(JournalError::InvalidTransition);
+            }
+            let inserted = InsertedOwnership {
+                ownership_id: record.ownership_id,
+                generation: record.generation,
+                revision: self.snapshot.revision,
+            };
+            self.ensure_durable_matches()?;
+            return Ok(inserted);
+        }
         if self.snapshot.records.len() >= MAX_RECORDS
             || self
                 .snapshot
@@ -1014,6 +1101,7 @@ impl OwnershipJournal {
             hard_expires_at_unix: intent.hard_expires_at_unix,
             plan: intent.plan,
             phase: OwnershipPhase::Intent,
+            absent_origin: None,
             reconcile: None,
             recovery_anchor: None,
         };
@@ -1069,6 +1157,25 @@ impl OwnershipJournal {
         anchor: PrepareRecoveryAnchorV1,
     ) -> Result<u64, JournalError> {
         self.ensure_expected_revision(expected_revision)?;
+        let record = self
+            .snapshot
+            .records
+            .get(&ownership_id)
+            .ok_or(JournalError::InvalidRecord)?;
+        if record.generation != generation {
+            return Err(JournalError::InvalidRecord);
+        }
+        if record.phase == OwnershipPhase::MayOwnPrepare {
+            // At the exact current revision, acknowledge only the durable transition already made.
+            if record.recovery_anchor != Some(anchor)
+                || record.absent_origin.is_some()
+                || record.reconcile.is_some()
+            {
+                return Err(JournalError::InvalidTransition);
+            }
+            self.ensure_durable_matches()?;
+            return Ok(self.snapshot.revision);
+        }
         let mut next = self.snapshot.clone();
         let record = next
             .records
@@ -1080,7 +1187,7 @@ impl OwnershipJournal {
         if record.reconcile.is_some() {
             return Err(JournalError::InvalidTransition);
         }
-        record.advance(OwnershipPhase::MayOwnPrepare, Some(anchor))?;
+        record.advance(OwnershipPhase::MayOwnPrepare, Some(anchor), None)?;
         self.compare_and_swap(expected_revision, next)
     }
 
@@ -1091,6 +1198,22 @@ impl OwnershipJournal {
         generation: NonZeroU64,
     ) -> Result<u64, JournalError> {
         self.ensure_expected_revision(expected_revision)?;
+        let record = self
+            .snapshot
+            .records
+            .get(&ownership_id)
+            .ok_or(JournalError::InvalidRecord)?;
+        if record.generation != generation {
+            return Err(JournalError::InvalidRecord);
+        }
+        if record.phase == OwnershipPhase::Absent {
+            // Only the exact never-dispatched transition may be acknowledged without another write.
+            if record.absent_origin != Some(AbsentOrigin::NeverDispatched) {
+                return Err(JournalError::InvalidTransition);
+            }
+            self.ensure_durable_matches()?;
+            return Ok(self.snapshot.revision);
+        }
         let mut next = self.snapshot.clone();
         let record = next
             .records
@@ -1102,7 +1225,11 @@ impl OwnershipJournal {
         if record.phase != OwnershipPhase::Intent || record.recovery_anchor.is_some() {
             return Err(JournalError::InvalidTransition);
         }
-        record.advance(OwnershipPhase::Absent, None)?;
+        record.advance(
+            OwnershipPhase::Absent,
+            None,
+            Some(AbsentOrigin::NeverDispatched),
+        )?;
         self.compare_and_swap(expected_revision, next)
     }
 
@@ -1119,15 +1246,25 @@ impl OwnershipJournal {
             .snapshot
             .records
             .get(&ownership_id)
-            .filter(|record| {
-                record.generation == generation
-                    && record.phase == OwnershipPhase::MayOwnPrepare
-                    && record.recovery_anchor.is_some()
-            })
+            .filter(|record| record.generation == generation)
             .cloned()
-            .ok_or(RecoveryAttemptError::Journal(
+            .ok_or(RecoveryAttemptError::Journal(JournalError::InvalidRecord))?;
+        if record.phase == OwnershipPhase::Absent {
+            // Only a recovery-produced tombstone may suppress the trusted executor on retry.
+            if record.absent_origin != Some(AbsentOrigin::RecoveredMayOwn) {
+                return Err(RecoveryAttemptError::Journal(
+                    JournalError::InvalidTransition,
+                ));
+            }
+            self.ensure_durable_matches()
+                .map_err(RecoveryAttemptError::Journal)?;
+            return Ok(self.snapshot.revision);
+        }
+        if record.phase != OwnershipPhase::MayOwnPrepare || record.recovery_anchor.is_none() {
+            return Err(RecoveryAttemptError::Journal(
                 JournalError::InvalidTransition,
-            ))?;
+            ));
+        }
         self.ensure_durable_matches()
             .map_err(RecoveryAttemptError::Journal)?;
         let target = RecoveryTarget {
@@ -1143,7 +1280,11 @@ impl OwnershipJournal {
         next.records
             .get_mut(&ownership_id)
             .expect("checked ownership")
-            .advance(OwnershipPhase::Absent, None)
+            .advance(
+                OwnershipPhase::Absent,
+                None,
+                Some(AbsentOrigin::RecoveredMayOwn),
+            )
             .map_err(RecoveryAttemptError::Journal)?;
         self.compare_and_swap(expected_revision, next)
             .map_err(RecoveryAttemptError::Journal)
@@ -1886,6 +2027,8 @@ mod tests {
             hard_expires_at_unix: nz(200),
             plan: client_plan(&[1, 2]),
             phase,
+            absent_origin: (phase == OwnershipPhase::Absent)
+                .then_some(AbsentOrigin::NeverDispatched),
             reconcile: None,
             recovery_anchor: (phase == OwnershipPhase::MayOwnPrepare).then(|| anchor(7)),
         }
@@ -2002,6 +2145,133 @@ mod tests {
             Err(JournalError::Corrupt)
         ));
         assert!(!format!("{snapshot:?}").contains("03030303"));
+    }
+
+    #[test]
+    fn absent_origin_is_persisted_and_phase_exact() {
+        let journal_epoch = epoch(1);
+        let never_dispatched = record(journal_epoch, 2, 3, 4, 1, OwnershipPhase::Absent);
+        let mut recovered = record(journal_epoch, 5, 6, 7, 2, OwnershipPhase::Absent);
+        recovered.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        let snapshot = snapshot_with(vec![never_dispatched.clone(), recovered.clone()]);
+        let decoded =
+            JournalSnapshot::decode(&snapshot.encode().expect("encoded typed tombstones"))
+                .expect("decoded typed tombstones");
+        assert_eq!(decoded, snapshot);
+        assert_eq!(
+            decoded
+                .records
+                .get(&never_dispatched.ownership_id)
+                .expect("never-dispatched tombstone")
+                .absent_origin,
+            Some(AbsentOrigin::NeverDispatched)
+        );
+        assert_eq!(
+            decoded
+                .records
+                .get(&recovered.ownership_id)
+                .expect("recovered tombstone")
+                .absent_origin,
+            Some(AbsentOrigin::RecoveredMayOwn)
+        );
+
+        let mut intent_with_origin = record(journal_epoch, 8, 9, 10, 3, OwnershipPhase::Intent);
+        intent_with_origin.absent_origin = Some(AbsentOrigin::NeverDispatched);
+        assert!(matches!(
+            intent_with_origin.validate(),
+            Err(JournalError::InvalidRecord)
+        ));
+        let mut may_own_with_origin =
+            record(journal_epoch, 11, 12, 13, 4, OwnershipPhase::MayOwnPrepare);
+        may_own_with_origin.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        assert!(matches!(
+            may_own_with_origin.validate(),
+            Err(JournalError::InvalidRecord)
+        ));
+        let mut absent_without_origin = never_dispatched;
+        absent_without_origin.absent_origin = None;
+        assert!(matches!(
+            absent_without_origin.validate(),
+            Err(JournalError::InvalidRecord)
+        ));
+
+        let mut never_dispatched_with_recovery_origin =
+            record(journal_epoch, 14, 15, 16, 5, OwnershipPhase::Intent);
+        assert!(matches!(
+            never_dispatched_with_recovery_origin.advance(
+                OwnershipPhase::Absent,
+                None,
+                Some(AbsentOrigin::RecoveredMayOwn),
+            ),
+            Err(JournalError::InvalidTransition)
+        ));
+        let mut recovered_with_never_dispatched_origin =
+            record(journal_epoch, 17, 18, 19, 6, OwnershipPhase::MayOwnPrepare);
+        assert!(matches!(
+            recovered_with_never_dispatched_origin.advance(
+                OwnershipPhase::Absent,
+                None,
+                Some(AbsentOrigin::NeverDispatched),
+            ),
+            Err(JournalError::InvalidTransition)
+        ));
+    }
+
+    #[test]
+    fn codec_rejects_raw_absent_origin_ambiguity_with_a_valid_checksum() {
+        const HEADER_BYTES: usize = 8 + 2 + 32 + 8 + 8 + 4;
+        const RECORD_PREFIX_TO_PATHS: usize = 32 + 32 + 32 + 16 + 16 + 32 + 8 + 8 + 8 + 1 + 1;
+        const CLIENT_PATH_BYTES: usize = 4;
+        const PHASE_OFFSET: usize = HEADER_BYTES + RECORD_PREFIX_TO_PATHS + CLIENT_PATH_BYTES;
+        const ABSENT_ORIGIN_PRESENCE_OFFSET: usize = PHASE_OFFSET + 1;
+        const ABSENT_ORIGIN_VALUE_OFFSET: usize = ABSENT_ORIGIN_PRESENCE_OFFSET + 1;
+
+        fn replace_checksum(encoded: &mut [u8]) {
+            let payload_len = encoded
+                .len()
+                .checked_sub(DIGEST_BYTES)
+                .expect("encoded journal checksum");
+            let checksum = *blake3::hash(&encoded[..payload_len]).as_bytes();
+            encoded[payload_len..].copy_from_slice(&checksum);
+        }
+
+        let intent_snapshot =
+            snapshot_with(vec![record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Intent)]);
+        let mut invalid_presence = intent_snapshot.encode().expect("encoded Intent record");
+        assert_eq!(invalid_presence[PHASE_OFFSET], OwnershipPhase::Intent as u8);
+        assert_eq!(invalid_presence[ABSENT_ORIGIN_PRESENCE_OFFSET], 0);
+        invalid_presence[ABSENT_ORIGIN_PRESENCE_OFFSET] = 2;
+        replace_checksum(&mut invalid_presence);
+        assert!(matches!(
+            JournalSnapshot::decode(&invalid_presence),
+            Err(JournalError::Corrupt)
+        ));
+
+        let absent_snapshot =
+            snapshot_with(vec![record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Absent)]);
+        let valid_absent = absent_snapshot.encode().expect("encoded Absent record");
+        assert_eq!(valid_absent[PHASE_OFFSET], OwnershipPhase::Absent as u8);
+        assert_eq!(valid_absent[ABSENT_ORIGIN_PRESENCE_OFFSET], 1);
+        assert_eq!(
+            valid_absent[ABSENT_ORIGIN_VALUE_OFFSET],
+            AbsentOrigin::NeverDispatched as u8
+        );
+
+        let mut invalid_value = valid_absent.clone();
+        invalid_value[ABSENT_ORIGIN_VALUE_OFFSET] = 99;
+        replace_checksum(&mut invalid_value);
+        assert!(matches!(
+            JournalSnapshot::decode(&invalid_value),
+            Err(JournalError::Corrupt)
+        ));
+
+        let mut mismatched_phase = valid_absent;
+        mismatched_phase[PHASE_OFFSET] = OwnershipPhase::Intent as u8;
+        replace_checksum(&mut mismatched_phase);
+        assert!(matches!(
+            JournalSnapshot::decode(&mismatched_phase),
+            Err(JournalError::Corrupt)
+        ));
     }
 
     #[test]
@@ -2400,6 +2670,371 @@ mod tests {
     }
 
     #[test]
+    fn lost_insert_reply_restarts_to_the_same_exact_ownership_identity() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let exact_intent = intent(2, 3);
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        journal
+            .insert_intent(0, exact_intent.clone())
+            .expect("durable insert whose reply is discarded");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
+        let existing = journal
+            .snapshot()
+            .expect("usable restarted snapshot")
+            .records
+            .values()
+            .next()
+            .expect("durable ownership")
+            .clone();
+        let before = fs::read(&config.journal_path).expect("durable insert bytes");
+        for wrong_revision in [0, 2] {
+            assert!(matches!(
+                journal.insert_intent(wrong_revision, exact_intent.clone()),
+                Err(JournalError::RevisionConflict)
+            ));
+        }
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after stale insert retry"),
+            before
+        );
+        let retried = journal
+            .insert_intent(1, exact_intent.clone())
+            .expect("exact retry at the current revision");
+        assert_eq!(retried.ownership_id, existing.ownership_id);
+        assert_eq!(retried.generation, existing.generation);
+        assert_eq!(retried.revision, 1);
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after exact retry"),
+            before
+        );
+
+        let mut conflicts = Vec::new();
+        let mut changed = exact_intent.clone();
+        changed.origin_runtime_id = runtime(9);
+        conflicts.push(changed);
+        let mut changed = exact_intent.clone();
+        changed.context_id = id16(4);
+        conflicts.push(changed);
+        let mut changed = exact_intent.clone();
+        changed.prepare_request_id = id16(5);
+        conflicts.push(changed);
+        let mut changed = exact_intent.clone();
+        changed.prepare_operation_digest = [1; DIGEST_BYTES];
+        conflicts.push(changed);
+        let mut changed = exact_intent.clone();
+        changed.setup_expires_at_unix = nz(101);
+        conflicts.push(changed);
+        let mut changed = exact_intent.clone();
+        changed.hard_expires_at_unix = nz(201);
+        conflicts.push(changed);
+        let mut changed = exact_intent;
+        changed.plan = client_plan(&[1]);
+        conflicts.push(changed);
+
+        for conflict in conflicts {
+            assert!(matches!(
+                journal.insert_intent(1, conflict),
+                Err(JournalError::InvalidRecord)
+            ));
+            assert_eq!(
+                fs::read(&config.journal_path).expect("bytes after conflicting retry"),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn lost_arm_reply_restarts_to_exact_same_anchor_success() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let exact_anchor = anchor(7);
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        journal
+            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, exact_anchor)
+            .expect("durable arm whose reply is discarded");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
+        let before = fs::read(&config.journal_path).expect("durable arm bytes");
+        for wrong_revision in [1, 3] {
+            assert!(matches!(
+                journal.mark_may_own_prepare(
+                    wrong_revision,
+                    inserted.ownership_id,
+                    inserted.generation,
+                    exact_anchor,
+                ),
+                Err(JournalError::RevisionConflict)
+            ));
+        }
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after stale arm retry"),
+            before
+        );
+        assert_eq!(
+            journal
+                .mark_may_own_prepare(2, inserted.ownership_id, inserted.generation, exact_anchor,)
+                .expect("exact arm retry at the current revision"),
+            2
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after exact arm retry"),
+            before
+        );
+        assert!(matches!(
+            journal.mark_may_own_prepare(2, inserted.ownership_id, inserted.generation, anchor(8),),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after conflicting arm retry"),
+            before
+        );
+    }
+
+    #[test]
+    fn interposed_transitions_are_never_misreported_as_insert_or_arm_retries() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let exact_intent = intent(2, 3);
+        let exact_anchor = anchor(7);
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, exact_intent.clone())
+            .expect("durable intent");
+        journal
+            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, exact_anchor)
+            .expect("interposed durable arm");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("restart after arm");
+        let before_insert_retry =
+            fs::read(&config.journal_path).expect("durable armed journal bytes");
+        let revision_before_insert_retry =
+            journal.snapshot().expect("usable armed snapshot").revision;
+        assert_eq!(revision_before_insert_retry, 2);
+        assert!(matches!(
+            journal.insert_intent(2, exact_intent),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert_eq!(
+            journal
+                .snapshot()
+                .expect("insert retry leaves snapshot usable")
+                .revision,
+            revision_before_insert_retry
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after interposed insert retry"),
+            before_insert_retry
+        );
+
+        journal
+            .bind_reconcile(2, inserted.ownership_id, inserted.generation, binding(4))
+            .expect("interposed reconcile binding");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("restart after binding");
+        let before_arm_retry = fs::read(&config.journal_path).expect("durable bound journal bytes");
+        let revision_before_arm_retry = journal.snapshot().expect("usable bound snapshot").revision;
+        assert_eq!(revision_before_arm_retry, 3);
+        assert!(matches!(
+            journal.mark_may_own_prepare(
+                3,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_anchor,
+            ),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert_eq!(
+            journal
+                .snapshot()
+                .expect("arm retry leaves snapshot usable")
+                .revision,
+            revision_before_arm_retry
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after interposed arm retry"),
+            before_arm_retry
+        );
+
+        let bound_intent_directory = tempdir().expect("bound Intent temporary directory");
+        let bound_intent_config = test_config(bound_intent_directory.path());
+        let bound_intent = intent(5, 6);
+        let mut journal =
+            OwnershipJournal::open(bound_intent_config.clone()).expect("new bound-Intent journal");
+        let inserted = journal
+            .insert_intent(0, bound_intent.clone())
+            .expect("durable bound-Intent fixture");
+        journal
+            .bind_reconcile(1, inserted.ownership_id, inserted.generation, binding(7))
+            .expect("interposed Intent reconcile binding");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(bound_intent_config.clone())
+            .expect("restart after Intent binding");
+        let before_bound_insert_retry =
+            fs::read(&bound_intent_config.journal_path).expect("durable bound-Intent bytes");
+        assert_eq!(
+            journal
+                .snapshot()
+                .expect("usable bound-Intent snapshot")
+                .revision,
+            2
+        );
+        assert!(matches!(
+            journal.insert_intent(2, bound_intent),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert_eq!(
+            journal
+                .snapshot()
+                .expect("bound insert retry leaves snapshot usable")
+                .revision,
+            2
+        );
+        assert_eq!(
+            fs::read(&bound_intent_config.journal_path).expect("bytes after bound insert retry"),
+            before_bound_insert_retry
+        );
+    }
+
+    #[test]
+    fn lost_never_dispatched_reply_restarts_to_exact_absent_success() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        journal
+            .mark_intent_absent(1, inserted.ownership_id, inserted.generation)
+            .expect("durable retirement whose reply is discarded");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
+        let before = fs::read(&config.journal_path).expect("durable absent bytes");
+        for wrong_revision in [1, 3] {
+            assert!(matches!(
+                journal.mark_intent_absent(
+                    wrong_revision,
+                    inserted.ownership_id,
+                    inserted.generation,
+                ),
+                Err(JournalError::RevisionConflict)
+            ));
+        }
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after stale absent retry"),
+            before
+        );
+        assert_eq!(
+            journal
+                .mark_intent_absent(2, inserted.ownership_id, inserted.generation)
+                .expect("exact absent retry at the current revision"),
+            2
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after exact absent retry"),
+            before
+        );
+        assert!(matches!(
+            journal.recover_may_own_prepare(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut PanicIfRecoveryRuns,
+            ),
+            Err(RecoveryAttemptError::Journal(
+                JournalError::InvalidTransition
+            ))
+        ));
+    }
+
+    struct PanicIfRecoveryRuns;
+
+    impl RecoveryExecutor for PanicIfRecoveryRuns {
+        type Error = ();
+
+        fn confirm_absent(
+            &mut self,
+            _target: &RecoveryTarget,
+        ) -> Result<ConfirmedAbsentProof, Self::Error> {
+            panic!("an already-Absent retry must not run recovery again")
+        }
+    }
+
+    #[test]
+    fn lost_recovery_reply_restarts_to_absent_without_rerunning_executor() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        journal
+            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
+            .expect("durable MayOwnPrepare");
+        journal
+            .recover_may_own_prepare(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut FakeRecoveryExecutor {
+                    exact: true,
+                    calls: 0,
+                },
+            )
+            .expect("durable recovery whose reply is discarded");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
+        let before = fs::read(&config.journal_path).expect("durable recovered bytes");
+        for wrong_revision in [2, 4] {
+            assert!(matches!(
+                journal.recover_may_own_prepare(
+                    wrong_revision,
+                    inserted.ownership_id,
+                    inserted.generation,
+                    &mut PanicIfRecoveryRuns,
+                ),
+                Err(RecoveryAttemptError::Journal(
+                    JournalError::RevisionConflict
+                ))
+            ));
+        }
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after stale recovered retry"),
+            before
+        );
+        assert_eq!(
+            journal
+                .recover_may_own_prepare(
+                    3,
+                    inserted.ownership_id,
+                    inserted.generation,
+                    &mut PanicIfRecoveryRuns,
+                )
+                .expect("exact recovered retry at current revision skips executor"),
+            3
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after exact recovered retry"),
+            before
+        );
+        assert!(matches!(
+            journal.mark_intent_absent(3, inserted.ownership_id, inserted.generation),
+            Err(JournalError::InvalidTransition)
+        ));
+    }
+
+    #[test]
     fn may_own_requires_exact_typed_proof_and_no_dispatch_api_cannot_bypass_it() {
         let directory = tempdir().expect("temporary directory");
         let config = test_config(directory.path());
@@ -2504,6 +3139,7 @@ mod tests {
             .get(&inserted.ownership_id)
             .expect("recovered tombstone");
         assert_eq!(recovered.phase, OwnershipPhase::Absent);
+        assert_eq!(recovered.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
         assert!(recovered.recovery_anchor.is_none());
     }
 

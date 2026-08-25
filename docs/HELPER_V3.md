@@ -105,6 +105,16 @@ state is absent, and the interlock cannot issue a cross-runtime tag-28 receipt. 
 has no helper-v3 crash-ownership readiness check, so its other successful checks must not be
 interpreted as evidence of live recovery or cleanup.
 
+The dormant store's insert, prepare-arm, never-dispatched retirement, and confirmed-recovery
+transitions are exact-current-revision retry-safe after a lost reply. A retry succeeds only when the
+complete durable post-state of that same operation still exists; an intervening transition, changed
+intent, generation, recovery anchor, or reconciliation binding fails closed without another write.
+`Absent` records persist whether they came from a never-dispatched intent or from confirmed
+MayOwn recovery, so one operation can never acknowledge the other's tombstone and an already
+confirmed recovery never reruns its executor. These are private pre-production codec semantics:
+the store remains disconnected, version 3 has no supported on-disk migration contract yet, and any
+production-path v3 object still triggers the read-only startup interlock rather than being decoded.
+
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
 handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
 public key, kernel-proven public UDP endpoint, and `DirectAssigned` evidence. Later operations may

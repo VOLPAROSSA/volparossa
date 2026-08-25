@@ -94,8 +94,13 @@ Last updated: 2026-08-25
   is an independent process-wide operation outside per-route reconciliation. Production Prepare
   remains `Unavailable`, and no production manager calls this path. A dormant boot-scoped,
   secret-free canonical/CAS ownership store and a read-only startup interlock have temp-directory
-  tests, but no production writer, recovery backend, restart reaper, cross-runtime tag-28 proof, or
-  live root proof exists.
+  tests. Its insert, prepare-arm, never-dispatched retirement, and confirmed-recovery transitions
+  are exact-current-revision retry-safe after lost replies; persisted typed `Absent` origins prevent
+  cross-operation acknowledgement and repeated recovery execution. Intervening transitions and
+  conflicting identity, plan, expiry, generation, anchor, or reconciliation state fail closed
+  without journal mutation. The codec remains private and pre-production; no production writer,
+  actor, recovery backend, restart reaper, supported on-disk migration, cross-runtime tag-28 proof,
+  or live root proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.
