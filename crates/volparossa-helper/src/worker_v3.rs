@@ -1105,6 +1105,10 @@ where
     if HandshakeRecord::decode(&encoded)? != accepted {
         return Err(WorkerV3Error::Authentication);
     }
+    prctl::set_dumpable(false).map_err(nix_io)?;
+    if prctl::get_dumpable().map_err(nix_io)? {
+        return Err(WorkerV3Error::Authentication);
+    }
     validate_parent_snapshot(
         initial_parent,
         getppid().as_raw(),
@@ -2690,6 +2694,8 @@ impl WorkerRegistry {
                 Self::reject_finish(record, token, error)
             } else if ensure_worker_deadline(token.in_flight.deadline).is_err() {
                 Self::reject_finish(record, token, WorkerV3Error::Deadline)
+            } else if response.result == InternalWorkerResult::CleanupIncomplete as i32 {
+                Self::reject_finish(record, token, WorkerV3Error::Ambiguous)
             } else if let Ok(result) = InternalWorkerResult::try_from(response.result) {
                 record.in_flight = None;
                 if result == InternalWorkerResult::Ok {
@@ -5583,10 +5589,13 @@ mod tests {
         let ready = bootstrap
             .find("accepted.sandbox_ready().encode()")
             .expect("ready send");
+        let dumpable = bootstrap
+            .find("prctl::set_dumpable(false)")
+            .expect("post-observation core-dump disablement");
         let loop_entry = bootstrap
             .rfind("child_loop(&channel")
             .expect("child-loop entry");
-        assert!(proof < accepted && accepted < ready && ready < loop_entry);
+        assert!(proof < accepted && accepted < dumpable && dumpable < ready && ready < loop_entry);
     }
 
     #[test]
@@ -6076,6 +6085,41 @@ mod tests {
         else {
             panic!("commit must recheck process liveness after a stale positive snapshot")
         };
+        stop_and_purge(&mut registry, detached);
+    }
+
+    #[test]
+    fn cleanup_incomplete_worker_result_quarantines_and_detaches_exact_generation() {
+        let now = Instant::now();
+        let context_id = [52; 16];
+        let request = initialise(context_id, 47);
+        let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+        let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), now)
+            .expect("register");
+        let planned = call(
+            registry
+                .plan(context_id, generation, &request, now)
+                .expect("plan"),
+        );
+        let response = correlated_response(&request, InternalWorkerResult::CleanupIncomplete, None)
+            .expect("cleanup-incomplete response");
+
+        let FinishOutcome::Rejected {
+            error: WorkerV3Error::Ambiguous,
+            detached: Some(detached),
+        } = registry.finish(planned.token, &request, &response, now, true)
+        else {
+            panic!("uncertain cleanup must retire the exact worker generation")
+        };
+        assert!(registry.cache.is_empty());
+        assert_eq!(
+            registry
+                .visible_phase(context_id, generation)
+                .expect("quarantined phase"),
+            VisiblePhase::Quarantined
+        );
         stop_and_purge(&mut registry, detached);
     }
 

@@ -493,6 +493,7 @@ fn helper_capability_contract_matches(service: &BTreeMap<String, String>) -> boo
         && service
             .get("Group")
             .is_some_and(|value| value == "volparossa")
+        && service.get("LimitCORE").is_some_and(|value| value == "0")
         && value_set_matches(
             service,
             "CapabilityBoundingSet",
@@ -1325,7 +1326,7 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
         && value_set_matches(service, "RestrictAddressFamilies", families)
         && value_set_matches(service, "SystemCallFilter", syscalls)
         && match kind {
-            UnitKind::Helper => true,
+            UnitKind::Helper => service.get("LimitCORE").is_some_and(|value| value == "0"),
             UnitKind::Agent | UnitKind::Native => {
                 service
                     .get("CapabilityBoundingSet")
@@ -2233,6 +2234,12 @@ mod tests {
             helper.get("SystemCallFilter").map(String::as_str),
             Some("@system-service @network-io @mount seccomp")
         );
+        assert_eq!(helper.get("LimitCORE").map(String::as_str), Some("0"));
+
+        let mut dumpable = helper.clone();
+        dumpable.insert("LimitCORE".to_owned(), "infinity".to_owned());
+        assert!(!unit_has_required_sandbox(&dumpable, UnitKind::Helper));
+        assert!(!helper_capability_contract_matches(&dumpable));
 
         let mut broader_syscalls = helper.clone();
         broader_syscalls.insert(
@@ -2720,6 +2727,7 @@ mod tests {
                             "SystemCallFilter",
                             "@system-service @network-io @mount seccomp",
                         ),
+                        ("LimitCORE", "0"),
                     ],
                 );
             }

@@ -64,10 +64,16 @@ A successful `PrepareLeaseBatch` response is required to contain:
   correlated WireGuard `GET` that also matches the expected public key.
 
 The internal v3 worker protocol, underlay evidence policy, secret-free link derivation, exact
-WireGuard `SET` encoders, and bounded `GET` proof parser have pure tests. `NamespaceKernel` also
-contains inactive v3 prepare, peer-activation, and probe primitives. They are not connected to a
-production child lifecycle or the external engine, and do not yet provide transaction-wide
-rollback. The production `HelperEngine::new` backend therefore returns the explicit `Unavailable`
+WireGuard `SET` encoders, and bounded `GET` proof parser have pure tests. Successful internal
+Prepare, Activate, Probe and MPTCP endpoint responses are now bound to the request's exact identity
+order; the external engine also rejects duplicate public keys and public endpoints before pairing
+affine handles. `NamespaceKernel` contains inactive v3 prepare, peer-activation, and probe
+primitives plus a complete-batch preflight that requires exact name, current ownership alias,
+WireGuard kind and fresh DOWN/key-zero/port-zero/fwmark-zero/peerless state before mutation. Its
+exact-owned delete re-proves absence. The current alias is still deterministic rather than bound to
+a durable journal ownership ID, and these operations are not connected to a production child
+lifecycle or transaction-wide rollback. The production `HelperEngine::new` backend therefore
+returns the explicit `Unavailable`
 / `PREPARE_FAILED` result and creates no context. It never returns an agent-supplied address,
 placeholder address, guessed port, public key, or endpoint.
 
@@ -226,7 +232,10 @@ liveness before and after every phase, and retains a pre-drop-opened `/proc/<pid
 an independent exact `{1, 2, 3}` re-enumeration after the proof. It verifies every proof field and
 hashes the exact proof bytes. It then sends
 `SandboxAccepted(proof_hash)`; the child must verify every field before returning an exact
-`SandboxReady(proof_hash)`. The parent repeats liveness checks after Ready, and no child loop or
+`SandboxReady(proof_hash)`. Only after that independent parent observation and Accepted binding does
+the child set and read back `PR_SET_DUMPABLE = 0`; this still precedes Ready, every operational
+request and any future ephemeral-key generation. The shipped helper unit and transient proof driver
+also set `LimitCORE=0`. The parent repeats liveness checks after Ready, and no child loop or
 successful spawn return is reachable earlier.
 
 The pidfd, anchored proc descriptor and network-namespace pin move into `ProcessRetirement` before
@@ -715,7 +724,8 @@ remain:
 - validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
-  absent and the final worker must retain only `CAP_NET_ADMIN`;
+  absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
+  the final worker must retain only `CAP_NET_ADMIN`;
 - connect the authenticated worker-v3 launcher and generation registry to creation of the anonymous
   namespace only as part of an atomic underlay-snapshot, capability-reduction,
   independently observed sandbox-proof, birth-link, WireGuard-prepare and rollback transaction; the
@@ -735,7 +745,8 @@ remain:
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - capture activation baselines and perform correlated handshake/RX/TX commit probes;
 - connect the dormant secret-free ownership store only after a real cleanup backend can prove
-  reaper cleanup;
+  reaper cleanup; bind each link alias to the durable journal epoch, ownership ID and generation so
+  an old same-name/same-static-alias link can never be adopted;
 - add the production tag-35/tag-28 writer plus restart reaper; until then a runtime mismatch must
   remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
 - invoke the implemented factories inside the correct committed child namespace and feed their

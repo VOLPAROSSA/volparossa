@@ -405,12 +405,37 @@ fn response_matches_operation(
         (Operation::Initialise(request), Outcome::Initialised(response)) => {
             request.route_context_id == response.route_context_id
         }
-        (Operation::PrepareLeases(_), Outcome::Prepared(_))
-        | (Operation::ActivateLeases(_), Outcome::Activated(_))
-        | (Operation::ProbeCommitLeases(_), Outcome::ProbedCommitted(_))
-        | (Operation::AddMptcpEndpoint(_), Outcome::MptcpEndpointAdded(_))
-        | (Operation::RemoveMptcpEndpoint(_), Outcome::MptcpEndpointRemoved(_))
-        | (Operation::DestroyContext(_), Outcome::Destroyed(_)) => true,
+        (Operation::PrepareLeases(request), Outcome::Prepared(response)) => request
+            .leases
+            .iter()
+            .map(|lease| (lease.path_id, lease.role))
+            .eq(response
+                .leases
+                .iter()
+                .map(|lease| (lease.path_id, lease.role))),
+        (Operation::ActivateLeases(request), Outcome::Activated(response)) => request
+            .leases
+            .iter()
+            .map(|lease| (lease.path_id, lease.role))
+            .eq(response
+                .leases
+                .iter()
+                .map(|lease| (lease.path_id, lease.role))),
+        (Operation::ProbeCommitLeases(request), Outcome::ProbedCommitted(response)) => request
+            .leases
+            .iter()
+            .map(|lease| (lease.path_id, lease.role))
+            .eq(response
+                .leases
+                .iter()
+                .map(|lease| (lease.path_id, lease.role))),
+        (Operation::AddMptcpEndpoint(request), Outcome::MptcpEndpointAdded(response)) => {
+            request.path_id == response.path_id
+        }
+        (Operation::RemoveMptcpEndpoint(request), Outcome::MptcpEndpointRemoved(response)) => {
+            request.path_id == response.path_id
+        }
+        (Operation::DestroyContext(_), Outcome::Destroyed(_)) => true,
         (Operation::AcquireTransportSocket(request), Outcome::TransportSocketReady(response)) => {
             request.path_id == response.path_id
                 && request.role == response.role
@@ -1280,6 +1305,60 @@ mod tests {
         assert!(encode_response(&response).is_ok());
         assert!(validate_response_for_request(&prepare, &response).is_ok());
         assert!(encode_response(&prepared(0)).is_err());
+    }
+
+    #[test]
+    fn successful_batch_and_endpoint_responses_bind_exact_request_order_and_identity() {
+        let prepare = request(internal_worker_request::Operation::PrepareLeases(
+            PrepareLeases {
+                route_context_id: vec![1; 16],
+                leases: vec![plan(1), plan(2)],
+            },
+        ));
+        let prepared = |identities: [(u32, i32); 2]| {
+            correlated_response(
+                &prepare,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::Prepared(
+                    PreparedLeases {
+                        leases: identities
+                            .into_iter()
+                            .map(|(path_id, role)| PreparedLease {
+                                path_id,
+                                role,
+                                public_key: vec![u8::try_from(path_id).expect("path byte"); 32],
+                                listen_port: 51_820 + path_id,
+                            })
+                            .collect(),
+                    },
+                )),
+            )
+        };
+        let client = InternalEndpointRole::Client as i32;
+        assert!(
+            validate_response_for_request(&prepare, &prepared([(1, client), (2, client)])).is_ok()
+        );
+        assert!(
+            validate_response_for_request(&prepare, &prepared([(2, client), (1, client)])).is_err(),
+            "a set-equal permutation must not rebind affine lease owners"
+        );
+
+        let add = request(internal_worker_request::Operation::AddMptcpEndpoint(
+            AddMptcpEndpoint {
+                route_context_id: vec![1; 16],
+                path_id: 1,
+                mode: InternalMptcpMode::Subflow as i32,
+                backup: false,
+            },
+        ));
+        let mismatched = correlated_response(
+            &add,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::MptcpEndpointAdded(
+                MptcpEndpointAdded { path_id: 2 },
+            )),
+        );
+        assert!(validate_response_for_request(&add, &mismatched).is_err());
     }
 
     #[test]

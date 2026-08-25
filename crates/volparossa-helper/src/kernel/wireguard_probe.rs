@@ -356,7 +356,7 @@ impl DeviceAccumulator {
                 }
                 WGDEVICE_A_LISTEN_PORT => {
                     let port = exact_u16(value)?;
-                    if port == 0 || self.listen_port.replace(port).is_some() {
+                    if self.listen_port.replace(port).is_some() {
                         return Err(KernelError::Malformed);
                     }
                 }
@@ -415,10 +415,7 @@ impl DeviceAccumulator {
         let public_key = self.public_key.ok_or(KernelError::Malformed)?;
         let listen_port = self.listen_port.ok_or(KernelError::Malformed)?;
         let firewall_mark = self.firewall_mark.ok_or(KernelError::Malformed)?;
-        if !self.private_key_seen
-            || interface_name != expected_interface
-            || public_key.iter().all(|byte| *byte == 0)
-        {
+        if !self.private_key_seen || interface_name != expected_interface {
             return Err(KernelError::Malformed);
         }
         let peers = self
@@ -975,6 +972,23 @@ mod tests {
         assert_eq!(peer.allowed_ips.len(), 1);
 
         requires_zeroizing(&reply(&valid_frames()).message);
+    }
+
+    #[test]
+    fn complete_peerless_dump_can_represent_a_fresh_unconfigured_device() {
+        let mut fresh = Vec::new();
+        push_attribute(&mut fresh, WGDEVICE_A_IFINDEX, &17_u32.to_ne_bytes()).expect("ifindex");
+        push_string_attribute(&mut fresh, WGDEVICE_A_IFNAME, TEST_INTERFACE).expect("ifname");
+        push_attribute(&mut fresh, WGDEVICE_A_PRIVATE_KEY, &[0; 32]).expect("private key");
+        push_attribute(&mut fresh, WGDEVICE_A_PUBLIC_KEY, &[0; 32]).expect("public key");
+        push_attribute(&mut fresh, WGDEVICE_A_LISTEN_PORT, &0_u16.to_ne_bytes())
+            .expect("listen port");
+        push_attribute(&mut fresh, WGDEVICE_A_FWMARK, &0_u32.to_ne_bytes()).expect("fwmark");
+        let state = parse(&[data_frame(&fresh), done_frame(0)]).expect("fresh state");
+        assert_eq!(state.public_key, [0; 32]);
+        assert_eq!(state.listen_port, 0);
+        assert_eq!(state.firewall_mark, 0);
+        assert!(state.peers.is_empty());
     }
 
     #[test]
