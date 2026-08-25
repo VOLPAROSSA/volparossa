@@ -9,8 +9,11 @@
 //! empty nftables-table observation. After authorization, the RTNL/proc
 //! baseline remains independent from the affine nftables policy lineage so a
 //! semantically empty generation-3 ruleset can be proven without pretending
-//! that the kernel generation returned to one. This module exposes no proc or
-//! network-state writer; fixed GETs may trigger ordinary kernel module loading.
+//! that the kernel generation returned to one. After the exact generation-2
+//! drop policy is active, the parent lineage can temporarily enable only its
+//! descriptor-pinned IPv4-forwarding record. That affine authority must prove
+//! the original record restored before the policy or lower owners are retired.
+//! Fixed GETs may trigger ordinary kernel module loading.
 
 use std::{
     io,
@@ -31,7 +34,10 @@ use thiserror::Error;
 use volparossa_linux_uapi::namespace_type;
 
 use crate::{
-    mounts::{Ipv4ForwardingRecordSnapshot, PrivateMountSetupError, PrivateMounts},
+    mounts::{
+        Ipv4ForwardingMutationFailureState, Ipv4ForwardingRecordSnapshot, Ipv4ForwardingState,
+        PrivateMountSetupError, PrivateMounts,
+    },
     nftables::{
         ActiveNftablesPolicy, NftablesBaseline, NftablesError, SemanticallyEmptyNftables,
         observe_empty_nftables, verify_empty_nftables, verify_exact_forward_policy,
@@ -309,12 +315,6 @@ pub(crate) enum NetworkError {
     Nftables(#[source] NftablesError),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Ipv4ForwardingState {
-    Disabled,
-    Enabled,
-}
-
 #[derive(Debug, Eq, PartialEq)]
 struct Ipv4ForwardingBaseline {
     record: Ipv4ForwardingRecordSnapshot,
@@ -351,8 +351,103 @@ pub(crate) struct PreGoNetworkProof {
 /// into [`AuthorizedNetworkMutationProof`] so later parent observations can
 /// remain valid under the exact active generation-two policy.
 pub(crate) struct MutationRollbackNetworkProof {
-    baseline: RtnlProcNetworkBaseline,
+    baseline: Box<RtnlProcNetworkBaseline>,
     _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Affine parent lineage while the disposable namespace has IPv4 forwarding enabled.
+///
+/// The original enumerated RTNL/proc proof remains retained behind this token.
+/// The active enumerated baseline carries the original RTNL snapshot and the
+/// exact enabled forwarding record. Related IPv4 devconf state is deliberately
+/// outside this proof and is discarded with the disposable namespace.
+/// Dropping this authority while armed aborts the disposable PID 1 fail closed.
+#[must_use = "enabled IPv4-forwarding authority must restore its original record"]
+pub(crate) struct ForwardingEnabledNetworkProof {
+    original: Option<MutationRollbackNetworkProof>,
+    active: Box<RtnlProcNetworkBaseline>,
+    armed: bool,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Exact enumerated RTNL/proc lineage after the original record was re-proven restored.
+#[must_use = "restored IPv4-forwarding lineage must complete policy teardown"]
+pub(crate) struct ForwardingRestoredNetworkProof {
+    original: MutationRollbackNetworkProof,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Opaque possibly-written forwarding authority which can only abort fail closed.
+#[must_use = "indeterminate IPv4-forwarding authority must abort fail closed"]
+pub(crate) struct ForwardingIndeterminateNetworkProof {
+    original: Option<MutationRollbackNetworkProof>,
+    armed: bool,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Affine authority returned when enabling the forwarding record fails.
+pub(crate) enum ForwardingEnableFailureState {
+    /// No write request crossed its boundary.
+    Initial(MutationRollbackNetworkProof),
+    /// The enabled target was freshly reconciled and remains armed.
+    Enabled(ForwardingEnabledNetworkProof),
+    /// The possibly-written request could not be classified.
+    Indeterminate(ForwardingIndeterminateNetworkProof),
+}
+
+/// Affine authority returned when restoring the forwarding record fails.
+pub(crate) enum ForwardingRestoreFailureState {
+    /// The enabled record is still freshly proven and restoration may be retried.
+    Enabled(ForwardingEnabledNetworkProof),
+    /// The original record is restored; only the adjacent proof failed.
+    Restored(ForwardingRestoredNetworkProof),
+    /// The possibly-written restore could not be classified.
+    Indeterminate(ForwardingIndeterminateNetworkProof),
+}
+
+impl std::fmt::Debug for ForwardingEnabledNetworkProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ForwardingEnabledNetworkProof")
+            .field("armed", &self.armed)
+            .field(
+                "original_state",
+                &self
+                    .original
+                    .as_ref()
+                    .map(|proof| proof.baseline.ipv4_forwarding.state),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ForwardingEnabledNetworkProof {
+    fn drop(&mut self) {
+        if self.armed {
+            std::process::abort();
+        }
+    }
+}
+
+impl Drop for ForwardingIndeterminateNetworkProof {
+    fn drop(&mut self) {
+        if self.armed {
+            std::process::abort();
+        }
+    }
+}
+
+impl ForwardingIndeterminateNetworkProof {
+    /// Consume the opaque authority and deliberately terminate the disposable PID 1.
+    pub(crate) fn abort_fail_closed(mut self) -> ! {
+        let original = self
+            .original
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        self.armed = false;
+        std::mem::forget((self, original));
+        std::process::abort()
+    }
 }
 
 /// The exact parent authorities released by the pre-`GO` proof at mutation authorization.
@@ -360,7 +455,9 @@ pub(crate) struct MutationRollbackNetworkProof {
 /// The split is affine: the caller receives one RTNL/proc rollback proof and
 /// the sole initial empty nftables authority. Canonical inherited
 /// `ip_forward` may be either `0\n` or `1\n`; its record identity and bytes must
-/// remain exactly unchanged throughout the lineage.
+/// be restored exactly before generation two may be retired. An inherited
+/// enabled value therefore remains enabled without issuing either transition
+/// write.
 pub(crate) struct AuthorizedNetworkMutationProof {
     rollback: MutationRollbackNetworkProof,
     nftables: NftablesBaseline,
@@ -374,7 +471,7 @@ pub(crate) struct AuthorizedNetworkMutationProof {
 /// policy transaction. Reverification therefore checks semantics and lineage,
 /// not equality with the original generation number.
 pub(crate) struct FinalNetworkProof {
-    baseline: RtnlProcNetworkBaseline,
+    baseline: Box<RtnlProcNetworkBaseline>,
     nftables: SemanticallyEmptyNftables,
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -646,10 +743,10 @@ impl PreGoNetworkProof {
         } = self.baseline;
         Ok(AuthorizedNetworkMutationProof {
             rollback: MutationRollbackNetworkProof {
-                baseline: RtnlProcNetworkBaseline {
+                baseline: Box::new(RtnlProcNetworkBaseline {
                     rtnl,
                     ipv4_forwarding,
-                },
+                }),
                 _thread_bound: PhantomData,
             },
             nftables,
@@ -673,6 +770,109 @@ impl<Authority> NetworkLineageFailure<Authority> {
 }
 
 impl MutationRollbackNetworkProof {
+    /// Enable the sole fixed parent forwarding record while generation two is exact.
+    ///
+    /// The caller establishes the all-DOWN/NONE topology barrier. This method
+    /// binds the fixed procfs transition to the retained original record and
+    /// brackets it with the exact active nftables policy. A possibly-written
+    /// request is reconciled through two identical fresh same-object reads.
+    pub(crate) fn enable_ipv4_forwarding<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ActiveNftablesPolicy,
+    ) -> Result<ForwardingEnabledNetworkProof, NetworkLineageFailure<ForwardingEnableFailureState>>
+    {
+        let deadline = match Deadline::after(NETWORK_PROOF_TIMEOUT) {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(NetworkLineageFailure {
+                    source,
+                    authority: ForwardingEnableFailureState::Initial(self),
+                });
+            }
+        };
+        if let Err(source) = verify_exact_forward_policy(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: ForwardingEnableFailureState::Initial(self),
+            });
+        }
+        let enabled = apply_ipv4_forwarding_enable(self, mounts)?;
+        if let Err(source) = verify_exact_forward_policy(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: ForwardingEnableFailureState::Enabled(enabled),
+            });
+        }
+        if let Err(source) = deadline.ensure_unexpired() {
+            return Err(NetworkLineageFailure {
+                source,
+                authority: ForwardingEnableFailureState::Enabled(enabled),
+            });
+        }
+        Ok(enabled)
+    }
+
+    /// Confirm that forwarding never changed and advance directly to restored authority.
+    ///
+    /// This transition is used when generation two became active but topology
+    /// cleanup completed before forwarding was enabled. It performs only two
+    /// identical descriptor-pinned reads bracketed by exact-policy proofs; it
+    /// never invokes the forwarding writer.
+    pub(crate) fn confirm_ipv4_forwarding_unmodified<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ActiveNftablesPolicy,
+    ) -> Result<ForwardingRestoredNetworkProof, NetworkLineageFailure<MutationRollbackNetworkProof>>
+    {
+        let deadline = match Deadline::after(NETWORK_PROOF_TIMEOUT) {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(NetworkLineageFailure {
+                    source,
+                    authority: self,
+                });
+            }
+        };
+        if let Err(source) = verify_exact_forward_policy(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: self,
+            });
+        }
+        let observed = match collect_stable_forwarding_record_before(mounts, deadline) {
+            Ok(observed) => observed,
+            Err(source) => {
+                return Err(NetworkLineageFailure {
+                    source,
+                    authority: self,
+                });
+            }
+        };
+        if observed != self.baseline.ipv4_forwarding.record {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Inconsistent,
+                authority: self,
+            });
+        }
+        if let Err(source) = verify_exact_forward_policy(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: self,
+            });
+        }
+        if let Err(source) = deadline.ensure_unexpired() {
+            return Err(NetworkLineageFailure {
+                source,
+                authority: self,
+            });
+        }
+        Ok(ForwardingRestoredNetworkProof {
+            original: self,
+            _thread_bound: PhantomData,
+        })
+    }
+
     /// Observe the exact parent delta for two owner-retained, down veth pairs.
     ///
     /// Every non-link RTNL record and the IPv4-forwarding record must still
@@ -750,12 +950,44 @@ impl MutationRollbackNetworkProof {
         })
     }
 
-    /// Observe both fixed parent veths after complete link activation.
-    ///
-    /// Every expected link must be carrier-up with `addrgenmode none` and
-    /// `noqueue`. The only admitted new objects are the fixed IPv4 addresses,
-    /// their exact kernel local/connected/high-broadcast routes, one root
-    /// `noqueue` qdisc, and one local-table IPv6 multicast route per link.
+    /// Re-prove pristine parent RTNL/proc state and the untouched empty generation-one lineage.
+    pub(crate) fn verify_pristine_with_initial_nftables<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        nftables: &NftablesBaseline,
+    ) -> Result<(), NetworkError> {
+        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
+            verify_empty_nftables(nftables, deadline).map_err(NetworkError::Nftables)
+        })
+    }
+}
+
+impl ForwardingEnabledNetworkProof {
+    /// Observe both addressed, DOWN parent veths under the exact enabled record.
+    pub(crate) fn observe_exact_ipv4_addrgen_none_parent<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        expected_pairs: [&ExpectedVethPair; 2],
+        expected_addresses: [&ExpectedIpv4Address; 2],
+    ) -> Result<ExactIpv4AddrgenNoneParentObservation, NetworkError> {
+        validate_parent_expectations(expected_pairs)?;
+        validate_parent_ipv4_expectations(expected_pairs, expected_addresses)?;
+        let (active, links) = collect_exact_stable_parent_delta(mounts, |active| {
+            verify_exact_parent_ipv4_addrgen_none_delta(
+                &self.active,
+                active,
+                expected_pairs,
+                expected_addresses,
+            )
+        })?;
+        Ok(ExactIpv4AddrgenNoneParentObservation {
+            active,
+            links,
+            _thread_bound: PhantomData,
+        })
+    }
+
+    /// Observe both fully activated parent veths under the enabled record.
     pub(crate) fn observe_exact_activated_ipv4_parent<RunState>(
         &self,
         mounts: &PrivateMounts<RunState>,
@@ -766,7 +998,7 @@ impl MutationRollbackNetworkProof {
         validate_parent_ipv4_expectations(expected_pairs, expected_addresses)?;
         let (active, links) = collect_exact_stable_parent_delta(mounts, |active| {
             verify_exact_parent_activated_ipv4_delta(
-                &self.baseline,
+                &self.active,
                 active,
                 expected_pairs,
                 expected_addresses,
@@ -779,45 +1011,99 @@ impl MutationRollbackNetworkProof {
         })
     }
 
-    /// Re-prove pristine parent RTNL/proc state and the untouched empty generation-one lineage.
-    pub(crate) fn verify_pristine_with_initial_nftables<RunState>(
-        &self,
-        mounts: &PrivateMounts<RunState>,
-        nftables: &NftablesBaseline,
-    ) -> Result<(), NetworkError> {
-        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
-            verify_empty_nftables(nftables, deadline).map_err(NetworkError::Nftables)
-        })
-    }
-
-    /// Re-prove pristine parent RTNL/proc state while the exact drop policy remains active.
-    ///
-    /// Callers use this after deletion-only B/A veth retirement and before
-    /// `DELTABLE`; endpoint absence is proved separately through the retained
-    /// endpoint observations.
+    /// Re-prove pristine parent RTNL state while forwarding and generation two remain exact.
     pub(crate) fn verify_pristine_with_active_policy<RunState>(
         &self,
         mounts: &PrivateMounts<RunState>,
         policy: &ActiveNftablesPolicy,
     ) -> Result<(), NetworkError> {
-        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
+        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.active, |deadline| {
             verify_exact_forward_policy(policy, deadline).map_err(NetworkError::Nftables)
         })
     }
 
-    /// Consume rollback and semantic-empty authorities into the reusable final parent proof.
+    /// Restore the exact original forwarding record while generation two stays active.
+    ///
+    /// A failure returns the precise remaining affine authority. A request
+    /// which may have crossed the write boundary is classified only after two
+    /// identical fresh same-object reads. A freshly enabled value is
+    /// retryable, a freshly original value advances to restored authority, and
+    /// every other outcome becomes opaque fail-closed authority.
+    pub(crate) fn restore_ipv4_forwarding<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ActiveNftablesPolicy,
+    ) -> Result<ForwardingRestoredNetworkProof, NetworkLineageFailure<ForwardingRestoreFailureState>>
+    {
+        let deadline = match Deadline::after(NETWORK_PROOF_TIMEOUT) {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(NetworkLineageFailure {
+                    source,
+                    authority: ForwardingRestoreFailureState::Enabled(self),
+                });
+            }
+        };
+        if let Err(source) = verify_exact_forward_policy(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: ForwardingRestoreFailureState::Enabled(self),
+            });
+        }
+        let original_state = self.original.as_ref().map_or_else(
+            || std::process::abort(),
+            |proof| proof.baseline.ipv4_forwarding.state,
+        );
+        let restored = apply_ipv4_forwarding_restore(self, mounts, original_state)?;
+        if let Err(source) = verify_exact_forward_policy(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: ForwardingRestoreFailureState::Restored(restored),
+            });
+        }
+        if let Err(source) = deadline.ensure_unexpired() {
+            return Err(NetworkLineageFailure {
+                source,
+                authority: ForwardingRestoreFailureState::Restored(restored),
+            });
+        }
+        Ok(restored)
+    }
+}
+
+impl ForwardingRestoredNetworkProof {
+    /// Re-prove pristine parent RTNL/proc state while generation two remains exact.
+    pub(crate) fn verify_pristine_with_active_policy<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ActiveNftablesPolicy,
+    ) -> Result<(), NetworkError> {
+        require_current_pristine_rtnl_proc_with_nftables(
+            mounts,
+            &self.original.baseline,
+            |deadline| {
+                verify_exact_forward_policy(policy, deadline).map_err(NetworkError::Nftables)
+            },
+        )
+    }
+
+    /// Consume restored and semantic-empty authorities into the reusable final parent proof.
     pub(crate) fn finish_after_semantically_empty<RunState>(
         self,
         mounts: &PrivateMounts<RunState>,
         nftables: SemanticallyEmptyNftables,
     ) -> Result<FinalNetworkProof, NetworkLineageFailure<Box<(Self, SemanticallyEmptyNftables)>>>
     {
-        match require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
-            verify_semantically_empty_after_forward_policy(&nftables, deadline)
-                .map_err(NetworkError::Nftables)
-        }) {
+        match require_current_pristine_rtnl_proc_with_nftables(
+            mounts,
+            &self.original.baseline,
+            |deadline| {
+                verify_semantically_empty_after_forward_policy(&nftables, deadline)
+                    .map_err(NetworkError::Nftables)
+            },
+        ) {
             Ok(()) => Ok(FinalNetworkProof {
-                baseline: self.baseline,
+                baseline: self.original.baseline,
                 nftables,
                 _thread_bound: PhantomData,
             }),
@@ -827,6 +1113,325 @@ impl MutationRollbackNetworkProof {
             }),
         }
     }
+}
+
+fn apply_ipv4_forwarding_enable<RunState>(
+    original: MutationRollbackNetworkProof,
+    mounts: &PrivateMounts<RunState>,
+) -> Result<ForwardingEnabledNetworkProof, NetworkLineageFailure<ForwardingEnableFailureState>> {
+    let expected = &original.baseline.ipv4_forwarding;
+    match mounts.set_ipv4_forwarding(&expected.record, Ipv4ForwardingState::Enabled) {
+        Ok(transition) => {
+            let (before, after, previous, target, write_was_requested) = transition.into_parts();
+            enabled_forwarding_proof(
+                original,
+                &before,
+                after,
+                previous,
+                target,
+                write_was_requested,
+            )
+            .map_err(|authority| NetworkLineageFailure {
+                source: NetworkError::Inconsistent,
+                authority: ForwardingEnableFailureState::Indeterminate(authority),
+            })
+        }
+        Err(failure) => {
+            let (source, state) = failure.into_parts();
+            match state {
+                Ipv4ForwardingMutationFailureState::BeforeRequest => Err(NetworkLineageFailure {
+                    source: NetworkError::PrivateProc(source),
+                    authority: ForwardingEnableFailureState::Initial(original),
+                }),
+                Ipv4ForwardingMutationFailureState::PossiblyWritten {
+                    before,
+                    previous,
+                    target,
+                } => reconcile_possibly_written_enable(
+                    original, mounts, source, &before, previous, target,
+                ),
+            }
+        }
+    }
+}
+
+fn reconcile_possibly_written_enable<RunState>(
+    original: MutationRollbackNetworkProof,
+    mounts: &PrivateMounts<RunState>,
+    source: PrivateMountSetupError,
+    before: &Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+) -> Result<ForwardingEnabledNetworkProof, NetworkLineageFailure<ForwardingEnableFailureState>> {
+    let context_is_exact = before == &original.baseline.ipv4_forwarding.record
+        && previous == original.baseline.ipv4_forwarding.state
+        && target == Ipv4ForwardingState::Enabled;
+    if !context_is_exact {
+        let authority = indeterminate_forwarding_proof(original);
+        return Err(NetworkLineageFailure {
+            source: NetworkError::PrivateProc(source),
+            authority: ForwardingEnableFailureState::Indeterminate(authority),
+        });
+    }
+    match collect_stable_forwarding_record(mounts) {
+        Ok(after)
+            if possibly_written_enable_reconciles_as_enabled(
+                &original, before, &after, previous, target,
+            ) =>
+        {
+            enabled_forwarding_proof(original, before, after, previous, target, true).map_err(
+                |authority| NetworkLineageFailure {
+                    source: NetworkError::PrivateProc(source),
+                    authority: ForwardingEnableFailureState::Indeterminate(authority),
+                },
+            )
+        }
+        Ok(_) | Err(_) => {
+            let authority = indeterminate_forwarding_proof(original);
+            Err(NetworkLineageFailure {
+                source: NetworkError::PrivateProc(source),
+                authority: ForwardingEnableFailureState::Indeterminate(authority),
+            })
+        }
+    }
+}
+
+fn possibly_written_enable_reconciles_as_enabled(
+    original: &MutationRollbackNetworkProof,
+    before: &Ipv4ForwardingRecordSnapshot,
+    after: &Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+) -> bool {
+    before == &original.baseline.ipv4_forwarding.record
+        && previous == original.baseline.ipv4_forwarding.state
+        && previous != target
+        && target == Ipv4ForwardingState::Enabled
+        && after.has_same_identity(before)
+        && after.canonical_state() == Some(Ipv4ForwardingState::Enabled)
+}
+
+fn apply_ipv4_forwarding_restore<RunState>(
+    enabled: ForwardingEnabledNetworkProof,
+    mounts: &PrivateMounts<RunState>,
+    original_state: Ipv4ForwardingState,
+) -> Result<ForwardingRestoredNetworkProof, NetworkLineageFailure<ForwardingRestoreFailureState>> {
+    match mounts.set_ipv4_forwarding(&enabled.active.ipv4_forwarding.record, original_state) {
+        Ok(transition) => {
+            let (before, after, previous, target, write_was_requested) = transition.into_parts();
+            restored_forwarding_proof(
+                enabled,
+                &before,
+                &after,
+                previous,
+                target,
+                write_was_requested,
+            )
+            .map_err(|authority| NetworkLineageFailure {
+                source: NetworkError::Inconsistent,
+                authority: ForwardingRestoreFailureState::Indeterminate(authority),
+            })
+        }
+        Err(failure) => {
+            let (source, state) = failure.into_parts();
+            match state {
+                Ipv4ForwardingMutationFailureState::BeforeRequest => Err(NetworkLineageFailure {
+                    source: NetworkError::PrivateProc(source),
+                    authority: ForwardingRestoreFailureState::Enabled(enabled),
+                }),
+                Ipv4ForwardingMutationFailureState::PossiblyWritten {
+                    before,
+                    previous,
+                    target,
+                } => reconcile_possibly_written_restore(
+                    enabled, mounts, source, &before, previous, target,
+                ),
+            }
+        }
+    }
+}
+
+fn reconcile_possibly_written_restore<RunState>(
+    enabled: ForwardingEnabledNetworkProof,
+    mounts: &PrivateMounts<RunState>,
+    source: PrivateMountSetupError,
+    before: &Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+) -> Result<ForwardingRestoredNetworkProof, NetworkLineageFailure<ForwardingRestoreFailureState>> {
+    if !possibly_written_restore_context_is_exact(&enabled, before, previous, target) {
+        let authority = indeterminate_forwarding_from_enabled(enabled);
+        return Err(NetworkLineageFailure {
+            source: NetworkError::PrivateProc(source),
+            authority: ForwardingRestoreFailureState::Indeterminate(authority),
+        });
+    }
+    let Ok(observed) = collect_stable_forwarding_record(mounts) else {
+        let authority = indeterminate_forwarding_from_enabled(enabled);
+        return Err(NetworkLineageFailure {
+            source: NetworkError::PrivateProc(source),
+            authority: ForwardingRestoreFailureState::Indeterminate(authority),
+        });
+    };
+    let is_original = enabled
+        .original
+        .as_ref()
+        .is_some_and(|proof| observed == proof.baseline.ipv4_forwarding.record);
+    if is_original {
+        return Ok(restored_forwarding_proof_after_reconciliation(enabled));
+    }
+    if observed == enabled.active.ipv4_forwarding.record {
+        return Err(NetworkLineageFailure {
+            source: NetworkError::PrivateProc(source),
+            authority: ForwardingRestoreFailureState::Enabled(enabled),
+        });
+    }
+    let authority = indeterminate_forwarding_from_enabled(enabled);
+    Err(NetworkLineageFailure {
+        source: NetworkError::PrivateProc(source),
+        authority: ForwardingRestoreFailureState::Indeterminate(authority),
+    })
+}
+
+fn enabled_forwarding_proof(
+    original: MutationRollbackNetworkProof,
+    before: &Ipv4ForwardingRecordSnapshot,
+    after: Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+    write_was_requested: bool,
+) -> Result<ForwardingEnabledNetworkProof, ForwardingIndeterminateNetworkProof> {
+    let transition_is_exact = before == &original.baseline.ipv4_forwarding.record
+        && previous == original.baseline.ipv4_forwarding.state
+        && target == Ipv4ForwardingState::Enabled
+        && after.has_same_identity(before)
+        && after.canonical_state() == Some(target)
+        && forwarding_write_request_is_exact(previous, target, write_was_requested);
+    if !transition_is_exact {
+        return Err(indeterminate_forwarding_proof(original));
+    }
+    let active = Box::new(RtnlProcNetworkBaseline {
+        rtnl: original.baseline.rtnl.clone(),
+        ipv4_forwarding: Ipv4ForwardingBaseline {
+            record: after,
+            state: Ipv4ForwardingState::Enabled,
+        },
+    });
+    Ok(ForwardingEnabledNetworkProof {
+        original: Some(original),
+        active,
+        armed: true,
+        _thread_bound: PhantomData,
+    })
+}
+
+fn restored_forwarding_proof(
+    enabled: ForwardingEnabledNetworkProof,
+    before: &Ipv4ForwardingRecordSnapshot,
+    after: &Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+    write_was_requested: bool,
+) -> Result<ForwardingRestoredNetworkProof, ForwardingIndeterminateNetworkProof> {
+    let transition_is_exact = enabled.original.as_ref().is_some_and(|original| {
+        before == &enabled.active.ipv4_forwarding.record
+            && previous == Ipv4ForwardingState::Enabled
+            && target == original.baseline.ipv4_forwarding.state
+            && after.has_same_identity(before)
+            && after == &original.baseline.ipv4_forwarding.record
+            && forwarding_write_request_is_exact(previous, target, write_was_requested)
+    });
+    if !transition_is_exact {
+        return Err(indeterminate_forwarding_from_enabled(enabled));
+    }
+    Ok(restored_forwarding_proof_after_reconciliation(enabled))
+}
+
+fn possibly_written_restore_context_is_exact(
+    enabled: &ForwardingEnabledNetworkProof,
+    before: &Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+) -> bool {
+    enabled.original.as_ref().is_some_and(|original| {
+        before == &enabled.active.ipv4_forwarding.record
+            && previous == Ipv4ForwardingState::Enabled
+            && target == original.baseline.ipv4_forwarding.state
+            && previous != target
+    })
+}
+
+fn forwarding_write_request_is_exact(
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+    write_was_requested: bool,
+) -> bool {
+    write_was_requested == (previous != target)
+}
+
+fn restored_forwarding_proof_after_reconciliation(
+    mut enabled: ForwardingEnabledNetworkProof,
+) -> ForwardingRestoredNetworkProof {
+    let original = enabled
+        .original
+        .take()
+        .unwrap_or_else(|| std::process::abort());
+    enabled.armed = false;
+    drop(enabled);
+    ForwardingRestoredNetworkProof {
+        original,
+        _thread_bound: PhantomData,
+    }
+}
+
+fn indeterminate_forwarding_proof(
+    original: MutationRollbackNetworkProof,
+) -> ForwardingIndeterminateNetworkProof {
+    ForwardingIndeterminateNetworkProof {
+        original: Some(original),
+        armed: true,
+        _thread_bound: PhantomData,
+    }
+}
+
+fn indeterminate_forwarding_from_enabled(
+    mut enabled: ForwardingEnabledNetworkProof,
+) -> ForwardingIndeterminateNetworkProof {
+    let original = enabled
+        .original
+        .take()
+        .unwrap_or_else(|| std::process::abort());
+    enabled.armed = false;
+    drop(enabled);
+    indeterminate_forwarding_proof(original)
+}
+
+fn collect_stable_forwarding_record<RunState>(
+    mounts: &PrivateMounts<RunState>,
+) -> Result<Ipv4ForwardingRecordSnapshot, NetworkError> {
+    let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
+    collect_stable_forwarding_record_before(mounts, deadline)
+}
+
+fn collect_stable_forwarding_record_before<RunState>(
+    mounts: &PrivateMounts<RunState>,
+    deadline: Deadline,
+) -> Result<Ipv4ForwardingRecordSnapshot, NetworkError> {
+    let first = mounts
+        .read_ipv4_forwarding_record()
+        .map_err(NetworkError::PrivateProc)?;
+    deadline.ensure_unexpired()?;
+    let second = mounts
+        .read_ipv4_forwarding_record()
+        .map_err(NetworkError::PrivateProc)?;
+    deadline.ensure_unexpired()?;
+    if first != second {
+        return Err(NetworkError::Inconsistent);
+    }
+    if first.canonical_state().is_none() {
+        return Err(NetworkError::Malformed);
+    }
+    Ok(first)
 }
 
 impl FinalNetworkProof {
@@ -4323,6 +4928,7 @@ mod tests {
         cell::Cell,
         env,
         io::Read,
+        os::unix::process::ExitStatusExt as _,
         process::{Command, Stdio},
     };
 
@@ -4335,6 +4941,7 @@ mod tests {
     const LIVE_VETH_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_VETH_CHILD";
     const LIVE_IPV4_ROLLBACK_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_IPV4_ROLLBACK_CHILD";
     const LIVE_LINK_ACTIVATION_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_LINK_ACTIVATION_CHILD";
+    const FORWARDING_DROP_GUARD_CHILD_ENV: &str = "VOLPAROSSA_FORWARDING_DROP_GUARD_CHILD";
     const TEST_SEQUENCE: u32 = 7;
     const TEST_PORT: u32 = 41;
 
@@ -5577,6 +6184,134 @@ mod tests {
             classify_ipv4_forwarding_records(b"1\n", b"0\n"),
             Err(NetworkError::Inconsistent)
         ));
+    }
+
+    #[test]
+    fn forwarding_transition_metadata_requires_writes_only_for_value_changes() {
+        assert!(forwarding_write_request_is_exact(
+            Ipv4ForwardingState::Disabled,
+            Ipv4ForwardingState::Enabled,
+            true,
+        ));
+        assert!(forwarding_write_request_is_exact(
+            Ipv4ForwardingState::Enabled,
+            Ipv4ForwardingState::Disabled,
+            true,
+        ));
+        assert!(forwarding_write_request_is_exact(
+            Ipv4ForwardingState::Enabled,
+            Ipv4ForwardingState::Enabled,
+            false,
+        ));
+        assert!(!forwarding_write_request_is_exact(
+            Ipv4ForwardingState::Enabled,
+            Ipv4ForwardingState::Enabled,
+            true,
+        ));
+        assert!(!forwarding_write_request_is_exact(
+            Ipv4ForwardingState::Disabled,
+            Ipv4ForwardingState::Enabled,
+            false,
+        ));
+    }
+
+    #[test]
+    fn possibly_written_enable_never_recovers_original_value_as_initial_authority() {
+        let original = synthetic_forwarding_rollback(Ipv4ForwardingState::Disabled);
+        let before =
+            Ipv4ForwardingRecordSnapshot::synthetic_for_drop_guard(Ipv4ForwardingState::Disabled);
+        let still_original =
+            Ipv4ForwardingRecordSnapshot::synthetic_for_drop_guard(Ipv4ForwardingState::Disabled);
+        let enabled =
+            Ipv4ForwardingRecordSnapshot::synthetic_for_drop_guard(Ipv4ForwardingState::Enabled);
+
+        assert!(!possibly_written_enable_reconciles_as_enabled(
+            &original,
+            &before,
+            &still_original,
+            Ipv4ForwardingState::Disabled,
+            Ipv4ForwardingState::Enabled,
+        ));
+        assert!(possibly_written_enable_reconciles_as_enabled(
+            &original,
+            &before,
+            &enabled,
+            Ipv4ForwardingState::Disabled,
+            Ipv4ForwardingState::Enabled,
+        ));
+    }
+
+    #[test]
+    fn enabled_and_indeterminate_forwarding_drop_guards_abort() {
+        const TEST_NAME: &str =
+            "network::tests::enabled_and_indeterminate_forwarding_drop_guards_abort";
+
+        if let Ok(kind) = env::var(FORWARDING_DROP_GUARD_CHILD_ENV) {
+            let original = synthetic_forwarding_rollback(Ipv4ForwardingState::Disabled);
+            match kind.as_str() {
+                "enabled" => {
+                    let result = enabled_forwarding_proof(
+                        original,
+                        &Ipv4ForwardingRecordSnapshot::synthetic_for_drop_guard(
+                            Ipv4ForwardingState::Disabled,
+                        ),
+                        Ipv4ForwardingRecordSnapshot::synthetic_for_drop_guard(
+                            Ipv4ForwardingState::Enabled,
+                        ),
+                        Ipv4ForwardingState::Disabled,
+                        Ipv4ForwardingState::Enabled,
+                        true,
+                    );
+                    let Ok(_guard) = result else {
+                        panic!("exact enabled fixture became indeterminate");
+                    };
+                }
+                "indeterminate" => {
+                    let _guard = indeterminate_forwarding_proof(original);
+                }
+                _ => panic!("unknown forwarding drop-guard child case"),
+            }
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        for kind in ["enabled", "indeterminate"] {
+            let output = Command::new(&executable)
+                .arg("--exact")
+                .arg(TEST_NAME)
+                .arg("--test-threads=1")
+                .arg("--nocapture")
+                .env(FORWARDING_DROP_GUARD_CHILD_ENV, kind)
+                .env("LC_ALL", "C")
+                .output()
+                .expect("spawn forwarding drop-guard child");
+            assert_eq!(
+                output.status.signal(),
+                Some(libc::SIGABRT),
+                "{kind} guard did not abort: status={:?} stdout={:?} stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+
+        drop(ForwardingRestoredNetworkProof {
+            original: synthetic_forwarding_rollback(Ipv4ForwardingState::Disabled),
+            _thread_bound: PhantomData,
+        });
+    }
+
+    fn synthetic_forwarding_rollback(state: Ipv4ForwardingState) -> MutationRollbackNetworkProof {
+        MutationRollbackNetworkProof {
+            baseline: Box::new(RtnlProcNetworkBaseline {
+                rtnl: pristine_snapshot(),
+                ipv4_forwarding: Ipv4ForwardingBaseline {
+                    record: Ipv4ForwardingRecordSnapshot::synthetic_for_drop_guard(state),
+                    state,
+                },
+            }),
+            _thread_bound: PhantomData,
+        }
     }
 
     #[test]

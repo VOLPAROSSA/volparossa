@@ -25,6 +25,10 @@ use volparossa_test_support::MutationAuthorization;
 
 use crate::network::{
     FinalNetworkProof as PolicyFinalNetworkProof,
+    ForwardingEnableFailureState as PolicyForwardingEnableFailureState,
+    ForwardingEnabledNetworkProof as PolicyEnabledNetworkProof,
+    ForwardingRestoreFailureState as PolicyForwardingRestoreFailureState,
+    ForwardingRestoredNetworkProof as PolicyRestoredNetworkProof,
     MutationRollbackNetworkProof as PolicyRollbackProof, NetworkError as PolicyNetworkError,
     PristineNetworkNamespaceObservation as EndpointNetworkBaseline,
 };
@@ -312,17 +316,26 @@ pub(crate) struct IndeterminateForwardPolicyCleanup {
 #[must_use = "indeterminate policy cleanup must remain armed and fail closed"]
 pub(crate) struct IndeterminatePristineForwardPolicyCleanup {
     mounts: PrivateMounts<PristineRun>,
-    rollback: PolicyRollbackProof,
+    rollback: PolicyRestoredNetworkProof,
+    nftables: IndeterminateNftablesPolicy,
+    binding: FixedForwardPolicyBinding,
+}
+
+/// Indeterminate policy deletion after forwarding was exactly restored.
+#[must_use = "indeterminate policy cleanup must remain armed and fail closed"]
+pub(crate) struct IndeterminateRestoredForwardPolicyCleanup {
+    mounts: PrivateMounts<AuthorizedDeletedTopology>,
+    rollback: PolicyRestoredNetworkProof,
     nftables: IndeterminateNftablesPolicy,
     binding: FixedForwardPolicyBinding,
 }
 
 /// Exact generation-two policy coupled to one topology and parent rollback lineage.
 #[must_use = "an active policy-bound topology must be retired through its typed lifecycle"]
-pub(crate) struct PolicyBoundPrivateMounts<RunState> {
+pub(crate) struct PolicyBoundPrivateMounts<RunState, NetworkAuthority = PolicyRollbackProof> {
     mounts: PrivateMounts<RunState>,
     policy: ActiveNftablesPolicy,
-    rollback: PolicyRollbackProof,
+    rollback: NetworkAuthority,
     binding: FixedForwardPolicyBinding,
 }
 
@@ -330,10 +343,14 @@ pub(crate) struct PolicyBoundPrivateMounts<RunState> {
 pub(crate) enum FixedForwardPolicyFailureState {
     /// Nothing was installed; B then A were deleted under the original empty ruleset.
     Initial(Box<InitialForwardPolicyCleanup>),
+    /// Generation two is active, but forwarding was proven never enabled.
+    InitialDeleted(Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>>),
     /// The exact active policy remains armed over a deleted topology.
-    ActiveDeleted(Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>>),
+    ActiveDeleted(
+        Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyEnabledNetworkProof>>,
+    ),
     /// Lower ordinary unwind completed before any link mutation, while policy retirement remains.
-    ActivePristine(Box<PolicyBoundPrivateMounts<PristineRun>>),
+    ActivePristine(Box<PolicyBoundPrivateMounts<PristineRun, PolicyEnabledNetworkProof>>),
     /// A possibly-sent nftables transaction remains deliberately indeterminate and armed.
     Indeterminate(Box<IndeterminateForwardPolicyCleanup>),
 }
@@ -371,6 +388,7 @@ impl FixedForwardPolicyFailureState {
     const fn kind(&self) -> &'static str {
         match self {
             Self::Initial(_) => "initial",
+            Self::InitialDeleted(_) => "initial-deleted",
             Self::ActiveDeleted(_) => "active-deleted",
             Self::ActivePristine(_) => "active-pristine",
             Self::Indeterminate(cleanup) => {
@@ -396,7 +414,7 @@ impl FixedForwardPolicyFailure {
 
     fn active_deleted(
         source: FixedForwardPolicyError,
-        cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology>,
+        cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyEnabledNetworkProof>,
     ) -> Self {
         Self {
             source,
@@ -404,9 +422,19 @@ impl FixedForwardPolicyFailure {
         }
     }
 
+    fn initial_deleted(
+        source: FixedForwardPolicyError,
+        cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology>,
+    ) -> Self {
+        Self {
+            source,
+            state: FixedForwardPolicyFailureState::InitialDeleted(Box::new(cleanup)),
+        }
+    }
+
     fn active_pristine(
         source: FixedForwardPolicyError,
-        cleanup: PolicyBoundPrivateMounts<PristineRun>,
+        cleanup: PolicyBoundPrivateMounts<PristineRun, PolicyEnabledNetworkProof>,
     ) -> Self {
         Self {
             source,
@@ -426,7 +454,7 @@ impl FixedForwardPolicyFailure {
 }
 
 enum RetiredParentNetworkAuthority {
-    Pending(PolicyRollbackProof, SemanticallyEmptyNftables),
+    Pending(PolicyRestoredNetworkProof, SemanticallyEmptyNftables),
     Final(PolicyFinalNetworkProof),
 }
 
@@ -447,10 +475,26 @@ pub(crate) struct RetiredPristineForwardPolicyCleanup {
 
 /// Authority returned by a recoverable deleted-topology teardown failure.
 pub(crate) enum FixedForwardPolicyTeardownFailureState {
+    /// Forwarding was proven unchanged but the Initial-to-Restored confirmation can be retried.
+    Initial {
+        /// Active deleted topology and exact generation-two policy authority.
+        cleanup: Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>>,
+        /// Still-affine endpoint baseline observations.
+        endpoints: Box<[EndpointNetworkBaseline; 2]>,
+    },
     /// Generation two remains active and can be reverified and deleted again.
     Active {
         /// Active deleted topology and exact policy authority.
-        cleanup: Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>>,
+        cleanup:
+            Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyEnabledNetworkProof>>,
+        /// Still-affine endpoint baseline observations.
+        endpoints: Box<[EndpointNetworkBaseline; 2]>,
+    },
+    /// Forwarding is restored and generation two can be deleted without another sysctl write.
+    Restored {
+        /// Restored deleted topology and exact policy authority.
+        cleanup:
+            Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyRestoredNetworkProof>>,
         /// Still-affine endpoint baseline observations.
         endpoints: Box<[EndpointNetworkBaseline; 2]>,
     },
@@ -464,12 +508,14 @@ pub(crate) enum FixedForwardPolicyTeardownFailureState {
     /// Policy deletion became indeterminate and therefore remains fail-closed armed.
     Indeterminate {
         /// Indeterminate deleted-topology cleanup authority.
-        cleanup: Box<IndeterminateForwardPolicyCleanup>,
+        cleanup: Box<IndeterminateRestoredForwardPolicyCleanup>,
         /// Still-affine endpoint baseline observations.
         endpoints: Box<[EndpointNetworkBaseline; 2]>,
     },
     /// Lower ordinary unwind is pristine, but generation two is still active.
-    ActivePristine(Box<PolicyBoundPrivateMounts<PristineRun>>),
+    ActivePristine(Box<PolicyBoundPrivateMounts<PristineRun, PolicyEnabledNetworkProof>>),
+    /// Lower ordinary unwind is pristine and forwarding is already restored.
+    RestoredPristine(Box<PolicyBoundPrivateMounts<PristineRun, PolicyRestoredNetworkProof>>),
     /// Lower ordinary unwind is pristine and generation three awaits final proof.
     RetiredPristine(Box<RetiredPristineForwardPolicyCleanup>),
     /// Lower ordinary unwind is pristine, but DELTABLE authority is indeterminate.
@@ -486,13 +532,16 @@ pub(crate) struct FixedForwardPolicyTeardownFailure {
 impl std::fmt::Debug for FixedForwardPolicyTeardownFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match &self.state {
+            FixedForwardPolicyTeardownFailureState::Initial { .. } => "initial",
             FixedForwardPolicyTeardownFailureState::Active { .. } => "active",
+            FixedForwardPolicyTeardownFailureState::Restored { .. } => "restored",
             FixedForwardPolicyTeardownFailureState::Retired { .. } => "retired",
             FixedForwardPolicyTeardownFailureState::Indeterminate { cleanup, endpoints } => {
                 let _ = (cleanup, endpoints);
                 "indeterminate"
             }
             FixedForwardPolicyTeardownFailureState::ActivePristine(_) => "active-pristine",
+            FixedForwardPolicyTeardownFailureState::RestoredPristine(_) => "restored-pristine",
             FixedForwardPolicyTeardownFailureState::RetiredPristine(_) => "retired-pristine",
             FixedForwardPolicyTeardownFailureState::IndeterminatePristine(cleanup) => {
                 let _ = cleanup;
@@ -561,6 +610,21 @@ impl IndeterminatePristineForwardPolicyCleanup {
     }
 }
 
+impl IndeterminateRestoredForwardPolicyCleanup {
+    /// Consume every opaque authority and deliberately terminate fail closed.
+    pub(crate) fn abort_fail_closed(self) -> ! {
+        let Self {
+            mounts,
+            rollback,
+            nftables,
+            binding,
+        } = self;
+        std::mem::forget((mounts, rollback, binding));
+        drop(nftables);
+        std::process::abort()
+    }
+}
+
 /// Exact addressed parent/A/B observations retained until reverse cleanup.
 pub(crate) struct ExactIpv4AddressNetworkProof {
     parent: crate::network::ExactIpv4AddressParentObservation,
@@ -571,6 +635,37 @@ pub(crate) struct ExactIpv4AddressNetworkProof {
 pub(crate) struct ExactIpv4AddrgenNoneNetworkProof {
     parent: crate::network::ExactIpv4AddrgenNoneParentObservation,
     endpoints: [crate::network::ExactIpv4AddrgenNoneEndpointObservation; 2],
+}
+
+trait Ipv4AddrgenNoneParentProof {
+    fn observe_exact_parent<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        pairs: [&crate::network::ExpectedVethPair; 2],
+        addresses: [&crate::network::ExpectedIpv4Address; 2],
+    ) -> Result<crate::network::ExactIpv4AddrgenNoneParentObservation, PolicyNetworkError>;
+}
+
+impl Ipv4AddrgenNoneParentProof for PolicyRollbackProof {
+    fn observe_exact_parent<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        pairs: [&crate::network::ExpectedVethPair; 2],
+        addresses: [&crate::network::ExpectedIpv4Address; 2],
+    ) -> Result<crate::network::ExactIpv4AddrgenNoneParentObservation, PolicyNetworkError> {
+        self.observe_exact_ipv4_addrgen_none_parent(mounts, pairs, addresses)
+    }
+}
+
+impl Ipv4AddrgenNoneParentProof for PolicyEnabledNetworkProof {
+    fn observe_exact_parent<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        pairs: [&crate::network::ExpectedVethPair; 2],
+        addresses: [&crate::network::ExpectedIpv4Address; 2],
+    ) -> Result<crate::network::ExactIpv4AddrgenNoneParentObservation, PolicyNetworkError> {
+        self.observe_exact_ipv4_addrgen_none_parent(mounts, pairs, addresses)
+    }
 }
 
 /// Exact parent/A/B observations retained after all four links became active.
@@ -652,6 +747,24 @@ struct ProcRecordIdentity {
     mount_id: u64,
 }
 
+/// The only two canonical values accepted by the fixed IPv4-forwarding writer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Ipv4ForwardingState {
+    /// Kernel IPv4 forwarding is disabled (`0\n`).
+    Disabled,
+    /// Kernel IPv4 forwarding is enabled (`1\n`).
+    Enabled,
+}
+
+impl Ipv4ForwardingState {
+    const fn bytes(self) -> &'static [u8; MAX_IPV4_FORWARDING_RECORD_BYTES] {
+        match self {
+            Self::Disabled => b"0\n",
+            Self::Enabled => b"1\n",
+        }
+    }
+}
+
 /// Opaque observation of the fixed namespace-local IPv4-forwarding record.
 ///
 /// Equality binds both the bounded exact bytes and the procfs object identity
@@ -664,9 +777,180 @@ pub(crate) struct Ipv4ForwardingRecordSnapshot {
 }
 
 impl Ipv4ForwardingRecordSnapshot {
+    /// Construct one identity-stable canonical fixture for cross-module drop-guard tests.
+    #[cfg(test)]
+    pub(crate) fn synthetic_for_drop_guard(state: Ipv4ForwardingState) -> Self {
+        Self {
+            bytes: state.bytes().to_vec(),
+            identity: ProcRecordIdentity {
+                device_major: 0,
+                device_minor: 1,
+                inode: 2,
+                mount_id: 3,
+            },
+        }
+    }
+
     /// Return the bounded raw kernel record for canonical parsing by the network proof.
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Classify this exact record without accepting any non-canonical spelling.
+    pub(crate) fn canonical_state(&self) -> Option<Ipv4ForwardingState> {
+        match self.bytes.as_slice() {
+            b"0\n" => Some(Ipv4ForwardingState::Disabled),
+            b"1\n" => Some(Ipv4ForwardingState::Enabled),
+            _ => None,
+        }
+    }
+
+    /// Whether two bounded observations refer to the same pinned procfs record.
+    pub(crate) fn has_same_identity(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+
+/// Exact pre/post evidence returned by one fixed IPv4-forwarding transition.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "the IPv4-forwarding mutation evidence must be retained"]
+pub(crate) struct Ipv4ForwardingMutation {
+    before: Ipv4ForwardingRecordSnapshot,
+    after: Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+    write_was_requested: bool,
+}
+
+impl Ipv4ForwardingMutation {
+    /// Exact snapshot matched immediately before the possible write boundary.
+    #[cfg(test)]
+    pub(crate) fn before(&self) -> &Ipv4ForwardingRecordSnapshot {
+        &self.before
+    }
+
+    /// Exact snapshot observed after the no-op or completed write.
+    #[cfg(test)]
+    pub(crate) fn after(&self) -> &Ipv4ForwardingRecordSnapshot {
+        &self.after
+    }
+
+    /// Canonical value established by the matched pre-mutation snapshot.
+    #[cfg(test)]
+    pub(crate) const fn previous(&self) -> Ipv4ForwardingState {
+        self.previous
+    }
+
+    /// Canonical value freshly re-proven after the transition.
+    #[cfg(test)]
+    pub(crate) const fn target(&self) -> Ipv4ForwardingState {
+        self.target
+    }
+
+    /// Whether the target differed and exactly one write syscall was requested.
+    #[cfg(test)]
+    pub(crate) const fn write_was_requested(&self) -> bool {
+        self.write_was_requested
+    }
+
+    /// Consume the evidence into its exact snapshots and fixed transition metadata.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Ipv4ForwardingRecordSnapshot,
+        Ipv4ForwardingRecordSnapshot,
+        Ipv4ForwardingState,
+        Ipv4ForwardingState,
+        bool,
+    ) {
+        (
+            self.before,
+            self.after,
+            self.previous,
+            self.target,
+            self.write_was_requested,
+        )
+    }
+}
+
+/// Phase and retained context for a failed fixed IPv4-forwarding transition.
+#[derive(Debug)]
+pub(crate) enum Ipv4ForwardingMutationFailureState {
+    /// No write syscall was requested, so ordinary affine unwind remains sound.
+    BeforeRequest,
+    /// One write syscall was requested; fresh reconciliation is mandatory.
+    PossiblyWritten {
+        /// Exact observed snapshot which matched the caller's expected baseline.
+        before: Ipv4ForwardingRecordSnapshot,
+        /// Canonical value of the matched snapshot.
+        previous: Ipv4ForwardingState,
+        /// Canonical value supplied to the one bounded write request.
+        target: Ipv4ForwardingState,
+    },
+}
+
+/// Failure which preserves whether the kernel may have processed a write.
+#[derive(Debug)]
+#[must_use = "failed IPv4-forwarding mutation retains its request phase and recovery context"]
+pub(crate) struct Ipv4ForwardingMutationFailure {
+    source: PrivateMountSetupError,
+    state: Ipv4ForwardingMutationFailureState,
+}
+
+impl std::fmt::Display for Ipv4ForwardingMutationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.state {
+            Ipv4ForwardingMutationFailureState::BeforeRequest => {
+                write!(
+                    formatter,
+                    "IPv4-forwarding mutation failed before its write request: {}",
+                    self.source
+                )
+            }
+            Ipv4ForwardingMutationFailureState::PossiblyWritten { .. } => {
+                write!(
+                    formatter,
+                    "IPv4-forwarding mutation may have reached the kernel: {}",
+                    self.source
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Ipv4ForwardingMutationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl Ipv4ForwardingMutationFailure {
+    /// Recover the bounded failure source and its exact mutation phase/context.
+    pub(crate) fn into_parts(self) -> (PrivateMountSetupError, Ipv4ForwardingMutationFailureState) {
+        (self.source, self.state)
+    }
+
+    fn before_request(source: PrivateMountSetupError) -> Self {
+        Self {
+            source,
+            state: Ipv4ForwardingMutationFailureState::BeforeRequest,
+        }
+    }
+
+    fn possibly_written(
+        source: PrivateMountSetupError,
+        before: Ipv4ForwardingRecordSnapshot,
+        previous: Ipv4ForwardingState,
+        target: Ipv4ForwardingState,
+    ) -> Self {
+        Self {
+            source,
+            state: Ipv4ForwardingMutationFailureState::PossiblyWritten {
+                before,
+                previous,
+                target,
+            },
+        }
     }
 }
 
@@ -1196,11 +1480,14 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
 
     /// Observe the exact addressed all-NONE parent/A/B barrier and bind every
     /// observation to the retained topology and mounts.
-    fn prove_exact_ipv4_addrgen_none(
+    fn prove_exact_ipv4_addrgen_none<ParentProof>(
         &self,
-        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        parent_baseline: &ParentProof,
         endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
-    ) -> Result<ExactIpv4AddrgenNoneNetworkProof, NamespacePinsNetworkProofError> {
+    ) -> Result<ExactIpv4AddrgenNoneNetworkProof, NamespacePinsNetworkProofError>
+    where
+        ParentProof: Ipv4AddrgenNoneParentProof,
+    {
         self.verify_authorized_ipv4_addrgen_none()
             .map_err(NamespacePinsNetworkProofError::Mount)?;
         let expectations = exact_ipv4_address_expectations_from(
@@ -1211,7 +1498,7 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
         let parent = self
             .run_state
             .visit_parent_network_namespace(|| {
-                parent_baseline.observe_exact_ipv4_addrgen_none_parent(
+                parent_baseline.observe_exact_parent(
                     self,
                     [&expectations.pairs[0], &expectations.pairs[1]],
                     [&expectations.addresses[0], &expectations.addresses[2]],
@@ -1291,6 +1578,121 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
 }
 
 impl PolicyBoundPrivateMounts<AuthorizedIpv4AddrgenNone> {
+    /// Enable the fixed parent forwarding record only behind the exact policy.
+    ///
+    /// The pre-enable all-NONE proof is consumed because its parent proc
+    /// observation is no longer current. Success returns a freshly observed
+    /// all-NONE proof bound to the enabled-record authority.
+    pub(crate) fn enable_ipv4_forwarding(
+        self,
+        none_proof: ExactIpv4AddrgenNoneNetworkProof,
+        endpoint_baselines: &[EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PolicyBoundPrivateMounts<AuthorizedIpv4AddrgenNone, PolicyEnabledNetworkProof>,
+            ExactIpv4AddrgenNoneNetworkProof,
+        ),
+        FixedForwardPolicyFailure,
+    > {
+        if let Err(source) = self.verify_active_policy() {
+            return Err(self.into_initial_deleted_failure(source));
+        }
+        if let Err(source) = self
+            .mounts
+            .verify_exact_ipv4_addrgen_none_state(&none_proof)
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source))
+            })
+        {
+            return Err(self.into_initial_deleted_failure(source));
+        }
+        drop(none_proof);
+
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let rollback = match rollback.enable_ipv4_forwarding(&mounts, &policy) {
+            Ok(rollback) => rollback,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                let source = FixedForwardPolicyError::Network(source);
+                return match authority {
+                    PolicyForwardingEnableFailureState::Initial(rollback) => {
+                        let initial = PolicyBoundPrivateMounts {
+                            mounts,
+                            policy,
+                            rollback,
+                            binding,
+                        };
+                        Err(initial.into_initial_deleted_failure(source))
+                    }
+                    PolicyForwardingEnableFailureState::Enabled(rollback) => {
+                        let enabled = PolicyBoundPrivateMounts {
+                            mounts,
+                            policy,
+                            rollback,
+                            binding,
+                        };
+                        Err(enabled.into_deleted_failure(source))
+                    }
+                    PolicyForwardingEnableFailureState::Indeterminate(authority) => {
+                        authority.abort_fail_closed()
+                    }
+                };
+            }
+        };
+        let enabled = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        if let Err(source) = enabled.verify_active_policy() {
+            return Err(enabled.into_deleted_failure(source));
+        }
+        match enabled
+            .mounts
+            .prove_exact_ipv4_addrgen_none(&enabled.rollback, endpoint_baselines)
+        {
+            Ok(proof) => Ok((enabled, proof)),
+            Err(source) => Err(
+                enabled.into_deleted_failure(FixedForwardPolicyError::Topology(
+                    PrivateMountLinkActivationError::Proof(source),
+                )),
+            ),
+        }
+    }
+
+    fn into_initial_deleted_failure(
+        self,
+        source: FixedForwardPolicyError,
+    ) -> FixedForwardPolicyFailure {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (backing, all_none) = mounts.into_backing_and_run_state();
+        let mounts = backing.with_run_state(all_none.begin_retirement());
+        let source =
+            retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+        FixedForwardPolicyFailure::initial_deleted(
+            source,
+            PolicyBoundPrivateMounts {
+                mounts,
+                policy,
+                rollback,
+                binding,
+            },
+        )
+    }
+}
+
+impl PolicyBoundPrivateMounts<AuthorizedIpv4AddrgenNone, PolicyEnabledNetworkProof> {
     /// Consume the all-NONE proof and activate all four ends only while the
     /// exact generation-two policy remains freshly observed before and after.
     pub(crate) fn activate_links(
@@ -1299,7 +1701,7 @@ impl PolicyBoundPrivateMounts<AuthorizedIpv4AddrgenNone> {
         endpoint_baselines: &[EndpointNetworkBaseline; 2],
     ) -> Result<
         (
-            PolicyBoundPrivateMounts<AuthorizedActivatedTopology>,
+            PolicyBoundPrivateMounts<AuthorizedActivatedTopology, PolicyEnabledNetworkProof>,
             ExactActivatedIpv4NetworkProof,
         ),
         FixedForwardPolicyFailure,
@@ -1388,7 +1790,7 @@ impl PrivateMounts<AuthorizedActivatedTopology> {
 
     fn prove_exact_activated_ipv4(
         &self,
-        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        parent_baseline: &PolicyEnabledNetworkProof,
         endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
     ) -> Result<ExactActivatedIpv4NetworkProof, NamespacePinsNetworkProofError> {
         self.verify_authorized_activated_topology()
@@ -1771,7 +2173,7 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
             binding,
         };
         if let Err(source) = cleanup.verify_active_policy() {
-            return Err(cleanup.into_deleted_failure(source));
+            return Err(cleanup.into_initial_deleted_failure(source));
         }
         if let Err(source) = cleanup
             .mounts
@@ -1780,16 +2182,16 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
                 FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source))
             })
         {
-            return Err(cleanup.into_deleted_failure(source));
+            return Err(cleanup.into_initial_deleted_failure(source));
         }
         match cleanup.mounts.run_state.fixed_forward_policy_binding() {
             Ok(observed) if observed == cleanup.binding => Ok(cleanup),
-            Ok(_) => Err(cleanup.into_deleted_failure(policy_binding_error())),
-            Err(source) => Err(
-                cleanup.into_deleted_failure(FixedForwardPolicyError::Topology(
-                    PrivateMountLinkActivationError::Activation(source),
+            Ok(_) => Err(cleanup.into_initial_deleted_failure(policy_binding_error())),
+            Err(source) => Err(cleanup.into_initial_deleted_failure(
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Activation(
+                    source,
                 )),
-            ),
+            )),
         }
     }
 
@@ -1840,7 +2242,7 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
     fn activate_links_without_policy(
         self,
         none_proof: ExactIpv4AddrgenNoneNetworkProof,
-        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        parent_baseline: &PolicyEnabledNetworkProof,
         endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
     ) -> Result<
         (
@@ -1963,14 +2365,14 @@ impl PrivateMounts<AuthorizedActivatedTopology> {
     }
 }
 
-impl PolicyBoundPrivateMounts<AuthorizedActivatedTopology> {
+impl PolicyBoundPrivateMounts<AuthorizedActivatedTopology, PolicyEnabledNetworkProof> {
     /// Install the fixed A then B endpoint routes while generation two stays exact.
     pub(crate) fn install_endpoint_routes(
         self,
         active_proof: ExactActivatedIpv4NetworkProof,
     ) -> Result<
         (
-            PolicyBoundPrivateMounts<AuthorizedEndpointRoutes>,
+            PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProof>,
             ExactIpv4EndpointRouteNetworkProof,
         ),
         FixedForwardPolicyFailure,
@@ -2159,14 +2561,16 @@ impl PrivateMounts<AuthorizedEndpointRoutes> {
     }
 }
 
-impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes> {
+impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProof> {
     /// Consume the routed proof, delete pair B then A while the exact policy
     /// stays armed, and return only deleted-topology generation-two authority.
     pub(crate) fn begin_retirement(
         self,
         routed_proof: ExactIpv4EndpointRouteNetworkProof,
-    ) -> Result<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>, FixedForwardPolicyFailure>
-    {
+    ) -> Result<
+        PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyEnabledNetworkProof>,
+        FixedForwardPolicyFailure,
+    > {
         if let Err(source) = self.verify_active_policy() {
             return Err(self.into_deleted_failure(source));
         }
@@ -2222,7 +2626,7 @@ impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes> {
     }
 }
 
-impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
+impl<NetworkAuthority> PolicyBoundPrivateMounts<AuthorizedDeletedTopology, NetworkAuthority> {
     fn verify_deleted_active_policy_state(&self) -> Result<(), FixedForwardPolicyError> {
         self.mounts
             .verify_authorized_deleted_topology()
@@ -2248,7 +2652,68 @@ impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
                 FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
             })
     }
+}
 
+impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
+    /// Confirm that a failed enable never changed the forwarding record, then
+    /// continue teardown from the explicit Restored authority.
+    pub(crate) fn finish_initial_forward_policy_teardown(
+        self,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedNamespacePins>,
+            PolicyFinalNetworkProof,
+        ),
+        FixedForwardPolicyTeardownFailure,
+    > {
+        if let Err(source) = self.verify_deleted_active_policy_state() {
+            return Err(initial_deleted_teardown_failure(
+                source,
+                self,
+                endpoint_baselines,
+            ));
+        }
+        if let Err(source) = verify_deleted_endpoint_baselines(&self.mounts, &endpoint_baselines) {
+            return Err(initial_deleted_teardown_failure(
+                source,
+                self,
+                endpoint_baselines,
+            ));
+        }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let rollback = match rollback.confirm_ipv4_forwarding_unmodified(&mounts, &policy) {
+            Ok(rollback) => rollback,
+            Err(failure) => {
+                let (source, rollback) = failure.into_parts();
+                return Err(initial_deleted_teardown_failure(
+                    FixedForwardPolicyError::Network(source),
+                    PolicyBoundPrivateMounts {
+                        mounts,
+                        policy,
+                        rollback,
+                        binding,
+                    },
+                    endpoint_baselines,
+                ));
+            }
+        };
+        PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        }
+        .finish_restored_forward_policy_teardown(endpoint_baselines)
+    }
+}
+
+impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyEnabledNetworkProof> {
     fn verify_generation_two_pristine_barrier(
         &self,
         endpoint_baselines: &[EndpointNetworkBaseline; 2],
@@ -2284,8 +2749,8 @@ impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
         self.verify_deleted_active_policy_state()
     }
 
-    /// Prove parent and both endpoints pristine under generation two, then
-    /// delete only the observed exact policy table and finish generation three.
+    /// Prove the forwarding-enabled parent and endpoints pristine, then restore
+    /// the exact inherited forwarding record while generation two stays active.
     pub(crate) fn finish_forward_policy_teardown(
         self,
         endpoint_baselines: [EndpointNetworkBaseline; 2],
@@ -2303,10 +2768,115 @@ impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
                 endpoint_baselines,
             ));
         }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let rollback = match rollback.restore_ipv4_forwarding(&mounts, &policy) {
+            Ok(rollback) => rollback,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                let source = FixedForwardPolicyError::Network(source);
+                return match authority {
+                    PolicyForwardingRestoreFailureState::Enabled(rollback) => {
+                        Err(active_deleted_teardown_failure(
+                            source,
+                            PolicyBoundPrivateMounts {
+                                mounts,
+                                policy,
+                                rollback,
+                                binding,
+                            },
+                            endpoint_baselines,
+                        ))
+                    }
+                    PolicyForwardingRestoreFailureState::Restored(rollback) => {
+                        Err(restored_deleted_teardown_failure(
+                            source,
+                            PolicyBoundPrivateMounts {
+                                mounts,
+                                policy,
+                                rollback,
+                                binding,
+                            },
+                            endpoint_baselines,
+                        ))
+                    }
+                    PolicyForwardingRestoreFailureState::Indeterminate(authority) => {
+                        authority.abort_fail_closed()
+                    }
+                };
+            }
+        };
+        PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        }
+        .finish_restored_forward_policy_teardown(endpoint_baselines)
+    }
+}
+
+impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyRestoredNetworkProof> {
+    fn verify_generation_two_pristine_barrier(
+        &self,
+        endpoint_baselines: &[EndpointNetworkBaseline; 2],
+    ) -> Result<(), FixedForwardPolicyError> {
+        self.verify_deleted_active_policy_state()?;
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_active_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "verify restored generation-two parent state",
+                    error,
+                )
+            })?;
+        verify_deleted_endpoint_baselines(&self.mounts, endpoint_baselines)?;
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_active_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "reverify restored generation-two parent state",
+                    error,
+                )
+            })?;
+        self.verify_deleted_active_policy_state()
+    }
+
+    /// Delete only the observed policy after exact forwarding restoration,
+    /// then prove generation three and retire every lower owner.
+    pub(crate) fn finish_restored_forward_policy_teardown(
+        self,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedNamespacePins>,
+            PolicyFinalNetworkProof,
+        ),
+        FixedForwardPolicyTeardownFailure,
+    > {
+        if let Err(source) = self.verify_generation_two_pristine_barrier(&endpoint_baselines) {
+            return Err(restored_deleted_teardown_failure(
+                source,
+                self,
+                endpoint_baselines,
+            ));
+        }
         let deadline = match mutation_deadline() {
             Ok(deadline) => deadline,
             Err(source) => {
-                return Err(active_deleted_teardown_failure(
+                return Err(restored_deleted_teardown_failure(
                     FixedForwardPolicyError::Nftables(source),
                     self,
                     endpoint_baselines,
@@ -2325,7 +2895,7 @@ impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
                 let (source, authority) = failure.into_parts();
                 return match authority {
                     NftablesDeleteAuthority::Active(policy) => {
-                        Err(active_deleted_teardown_failure(
+                        Err(restored_deleted_teardown_failure(
                             FixedForwardPolicyError::Nftables(source),
                             PolicyBoundPrivateMounts {
                                 mounts,
@@ -2339,7 +2909,7 @@ impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
                     NftablesDeleteAuthority::Indeterminate(nftables) => {
                         Err(indeterminate_deleted_teardown_failure(
                             FixedForwardPolicyError::Nftables(source),
-                            IndeterminateForwardPolicyCleanup {
+                            IndeterminateRestoredForwardPolicyCleanup {
                                 mounts,
                                 rollback,
                                 nftables,
@@ -2469,9 +3039,9 @@ impl RetiredForwardPolicyCleanup {
     }
 }
 
-impl PolicyBoundPrivateMounts<PristineRun> {
-    /// Retire the exact active policy after lower ordinary unwind already
-    /// restored pristine mounts before any link mutation crossed its boundary.
+impl PolicyBoundPrivateMounts<PristineRun, PolicyEnabledNetworkProof> {
+    /// Restore forwarding after lower ordinary unwind completed before any
+    /// link mutation crossed its boundary.
     pub(crate) fn finish_pristine_forward_policy_teardown(
         self,
     ) -> Result<
@@ -2484,12 +3054,93 @@ impl PolicyBoundPrivateMounts<PristineRun> {
                 state: FixedForwardPolicyTeardownFailureState::ActivePristine(Box::new(self)),
             });
         }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let rollback = match rollback.restore_ipv4_forwarding(&mounts, &policy) {
+            Ok(rollback) => rollback,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                let source = FixedForwardPolicyError::Network(source);
+                return match authority {
+                    PolicyForwardingRestoreFailureState::Enabled(rollback) => {
+                        Err(FixedForwardPolicyTeardownFailure {
+                            source,
+                            state: FixedForwardPolicyTeardownFailureState::ActivePristine(
+                                Box::new(PolicyBoundPrivateMounts {
+                                    mounts,
+                                    policy,
+                                    rollback,
+                                    binding,
+                                }),
+                            ),
+                        })
+                    }
+                    PolicyForwardingRestoreFailureState::Restored(rollback) => {
+                        Err(FixedForwardPolicyTeardownFailure {
+                            source,
+                            state: FixedForwardPolicyTeardownFailureState::RestoredPristine(
+                                Box::new(PolicyBoundPrivateMounts {
+                                    mounts,
+                                    policy,
+                                    rollback,
+                                    binding,
+                                }),
+                            ),
+                        })
+                    }
+                    PolicyForwardingRestoreFailureState::Indeterminate(authority) => {
+                        authority.abort_fail_closed()
+                    }
+                };
+            }
+        };
+        PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        }
+        .finish_restored_pristine_forward_policy_teardown()
+    }
+
+    fn verify_pristine_generation_two_state(&self) -> Result<(), FixedForwardPolicyError> {
+        self.mounts.verify().map_err(|source| {
+            FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+        })?;
+        self.rollback
+            .verify_pristine_with_active_policy(&self.mounts, &self.policy)
+            .map_err(FixedForwardPolicyError::Network)?;
+        self.verify_active_policy()?;
+        self.mounts.verify().map_err(|source| {
+            FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+        })
+    }
+}
+
+impl PolicyBoundPrivateMounts<PristineRun, PolicyRestoredNetworkProof> {
+    /// Delete generation two only after the exact forwarding record is restored.
+    pub(crate) fn finish_restored_pristine_forward_policy_teardown(
+        self,
+    ) -> Result<
+        (PrivateMounts<PristineRun>, PolicyFinalNetworkProof),
+        FixedForwardPolicyTeardownFailure,
+    > {
+        if let Err(source) = self.verify_pristine_generation_two_state() {
+            return Err(FixedForwardPolicyTeardownFailure {
+                source,
+                state: FixedForwardPolicyTeardownFailureState::RestoredPristine(Box::new(self)),
+            });
+        }
         let deadline = match mutation_deadline() {
             Ok(deadline) => deadline,
             Err(source) => {
                 return Err(FixedForwardPolicyTeardownFailure {
                     source: FixedForwardPolicyError::Nftables(source),
-                    state: FixedForwardPolicyTeardownFailureState::ActivePristine(Box::new(self)),
+                    state: FixedForwardPolicyTeardownFailureState::RestoredPristine(Box::new(self)),
                 });
             }
         };
@@ -2507,7 +3158,7 @@ impl PolicyBoundPrivateMounts<PristineRun> {
                     NftablesDeleteAuthority::Active(policy) => {
                         Err(FixedForwardPolicyTeardownFailure {
                             source: FixedForwardPolicyError::Nftables(source),
-                            state: FixedForwardPolicyTeardownFailureState::ActivePristine(
+                            state: FixedForwardPolicyTeardownFailureState::RestoredPristine(
                                 Box::new(PolicyBoundPrivateMounts {
                                     mounts,
                                     policy,
@@ -2612,7 +3263,7 @@ impl RetiredPristineForwardPolicyCleanup {
     }
 }
 
-impl<RunState> PolicyBoundPrivateMounts<RunState> {
+impl<RunState, NetworkAuthority> PolicyBoundPrivateMounts<RunState, NetworkAuthority> {
     fn verify_active_policy(&self) -> Result<(), FixedForwardPolicyError> {
         let deadline = mutation_deadline().map_err(FixedForwardPolicyError::Nftables)?;
         verify_exact_forward_policy(&self.policy, deadline)
@@ -2623,7 +3274,7 @@ impl<RunState> PolicyBoundPrivateMounts<RunState> {
 fn policy_failure_from_topology(
     failure: PrivateMountLinkActivationFailure,
     policy: ActiveNftablesPolicy,
-    rollback: PolicyRollbackProof,
+    rollback: PolicyEnabledNetworkProof,
     binding: FixedForwardPolicyBinding,
 ) -> FixedForwardPolicyFailure {
     let (source, state) = failure.into_parts();
@@ -2773,12 +3424,40 @@ fn verify_final_parent_state(
 
 fn active_deleted_teardown_failure(
     source: FixedForwardPolicyError,
-    cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology>,
+    cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyEnabledNetworkProof>,
     endpoints: [EndpointNetworkBaseline; 2],
 ) -> FixedForwardPolicyTeardownFailure {
     FixedForwardPolicyTeardownFailure {
         source,
         state: FixedForwardPolicyTeardownFailureState::Active {
+            cleanup: Box::new(cleanup),
+            endpoints: Box::new(endpoints),
+        },
+    }
+}
+
+fn initial_deleted_teardown_failure(
+    source: FixedForwardPolicyError,
+    cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology>,
+    endpoints: [EndpointNetworkBaseline; 2],
+) -> FixedForwardPolicyTeardownFailure {
+    FixedForwardPolicyTeardownFailure {
+        source,
+        state: FixedForwardPolicyTeardownFailureState::Initial {
+            cleanup: Box::new(cleanup),
+            endpoints: Box::new(endpoints),
+        },
+    }
+}
+
+fn restored_deleted_teardown_failure(
+    source: FixedForwardPolicyError,
+    cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology, PolicyRestoredNetworkProof>,
+    endpoints: [EndpointNetworkBaseline; 2],
+) -> FixedForwardPolicyTeardownFailure {
+    FixedForwardPolicyTeardownFailure {
+        source,
+        state: FixedForwardPolicyTeardownFailureState::Restored {
             cleanup: Box::new(cleanup),
             endpoints: Box::new(endpoints),
         },
@@ -2801,7 +3480,7 @@ fn retired_deleted_teardown_failure(
 
 fn indeterminate_deleted_teardown_failure(
     source: FixedForwardPolicyError,
-    cleanup: IndeterminateForwardPolicyCleanup,
+    cleanup: IndeterminateRestoredForwardPolicyCleanup,
     endpoints: [EndpointNetworkBaseline; 2],
 ) -> FixedForwardPolicyTeardownFailure {
     FixedForwardPolicyTeardownFailure {
@@ -2820,6 +3499,27 @@ impl<RunState> PrivateMounts<RunState> {
         &self,
     ) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
         read_ipv4_forwarding_record_at(&self.proc_pin, self.ids.proc_mount_id)
+    }
+
+    /// Set the fixed namespace-local IPv4-forwarding record through the
+    /// retained private procfs pin.
+    ///
+    /// The caller can supply neither a path nor bytes. The exact expected
+    /// snapshot must still match immediately before the write boundary. When
+    /// the canonical target already holds, the primitive performs a second
+    /// exact readback without issuing any write. Otherwise it issues exactly
+    /// one fixed two-byte write and requires a same-object canonical post-read.
+    pub(crate) fn set_ipv4_forwarding(
+        &self,
+        expected_before: &Ipv4ForwardingRecordSnapshot,
+        target: Ipv4ForwardingState,
+    ) -> Result<Ipv4ForwardingMutation, Ipv4ForwardingMutationFailure> {
+        set_ipv4_forwarding_at(
+            &self.proc_pin,
+            self.ids.proc_mount_id,
+            expected_before,
+            target,
+        )
     }
 
     fn verify_veth_backed_state(
@@ -3168,6 +3868,19 @@ fn open_ipv4_forwarding_record<Fd: AsFd>(proc: Fd) -> rustix::io::Result<OwnedFd
     )
 }
 
+fn open_ipv4_forwarding_record_for_mutation<Fd: AsFd>(proc: Fd) -> rustix::io::Result<OwnedFd> {
+    openat2(
+        proc,
+        IPV4_FORWARDING_RECORD_PATH,
+        OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS
+            | ResolveFlags::NO_XDEV,
+    )
+}
+
 fn statx_fd<Fd: AsFd>(fd: Fd, requested: StatxFlags) -> rustix::io::Result<Statx> {
     statx(
         fd,
@@ -3463,12 +4176,176 @@ fn read_ipv4_forwarding_record_at(
     Ok(Ipv4ForwardingRecordSnapshot { bytes, identity })
 }
 
+fn set_ipv4_forwarding_at(
+    proc: &OwnedFd,
+    expected_proc_mount_id: u64,
+    expected_before: &Ipv4ForwardingRecordSnapshot,
+    target: Ipv4ForwardingState,
+) -> Result<Ipv4ForwardingMutation, Ipv4ForwardingMutationFailure> {
+    set_ipv4_forwarding_at_with(
+        proc,
+        expected_proc_mount_id,
+        expected_before,
+        target,
+        io::Write::write,
+    )
+}
+
+fn set_ipv4_forwarding_at_with<WriteOnce>(
+    proc: &OwnedFd,
+    expected_proc_mount_id: u64,
+    expected_before: &Ipv4ForwardingRecordSnapshot,
+    target: Ipv4ForwardingState,
+    write_once: WriteOnce,
+) -> Result<Ipv4ForwardingMutation, Ipv4ForwardingMutationFailure>
+where
+    WriteOnce: FnOnce(&mut File, &[u8]) -> io::Result<usize>,
+{
+    let before = read_ipv4_forwarding_record_at(proc, expected_proc_mount_id)
+        .map_err(Ipv4ForwardingMutationFailure::before_request)?;
+    let previous = before.canonical_state().ok_or_else(|| {
+        Ipv4ForwardingMutationFailure::before_request(hard_error(
+            "classify fixed private IPv4-forwarding record before mutation",
+            invalid_data("fixed private IPv4-forwarding record is not canonical"),
+        ))
+    })?;
+    if &before != expected_before {
+        return Err(Ipv4ForwardingMutationFailure::before_request(hard_error(
+            "match fixed private IPv4-forwarding mutation baseline",
+            invalid_data("fixed private IPv4-forwarding baseline changed before mutation"),
+        )));
+    }
+
+    if previous == target {
+        let after = read_ipv4_forwarding_record_at(proc, expected_proc_mount_id)
+            .map_err(Ipv4ForwardingMutationFailure::before_request)?;
+        if after != before {
+            return Err(Ipv4ForwardingMutationFailure::before_request(hard_error(
+                "verify no-op fixed private IPv4-forwarding transition",
+                invalid_data("fixed private IPv4-forwarding record changed without a request"),
+            )));
+        }
+        return Ok(Ipv4ForwardingMutation {
+            before,
+            after,
+            previous,
+            target,
+            write_was_requested: false,
+        });
+    }
+
+    write_ipv4_forwarding_change(
+        proc,
+        expected_proc_mount_id,
+        before,
+        previous,
+        target,
+        write_once,
+    )
+}
+
+fn write_ipv4_forwarding_change<WriteOnce>(
+    proc: &OwnedFd,
+    expected_proc_mount_id: u64,
+    before: Ipv4ForwardingRecordSnapshot,
+    previous: Ipv4ForwardingState,
+    target: Ipv4ForwardingState,
+    write_once: WriteOnce,
+) -> Result<Ipv4ForwardingMutation, Ipv4ForwardingMutationFailure>
+where
+    WriteOnce: FnOnce(&mut File, &[u8]) -> io::Result<usize>,
+{
+    let descriptor = hard_rustix(
+        "open fixed private IPv4-forwarding record for mutation",
+        open_ipv4_forwarding_record_for_mutation(proc),
+    )
+    .map_err(Ipv4ForwardingMutationFailure::before_request)?;
+    let mut file = File::from(descriptor);
+    let identity_before_request = hard_rustix(
+        "re-measure fixed private IPv4-forwarding record before mutation",
+        statx_fd(
+            &file,
+            StatxFlags::TYPE | StatxFlags::INO | StatxFlags::MNT_ID,
+        ),
+    )
+    .and_then(|observed| {
+        proc_record_identity(&observed, expected_proc_mount_id).map_err(|source| {
+            hard_error(
+                "verify fixed private IPv4-forwarding identity before mutation",
+                source,
+            )
+        })
+    })
+    .map_err(Ipv4ForwardingMutationFailure::before_request)?;
+    if identity_before_request != before.identity {
+        return Err(Ipv4ForwardingMutationFailure::before_request(hard_error(
+            "match fixed private IPv4-forwarding identity before mutation",
+            invalid_data("fixed private IPv4-forwarding identity changed before mutation"),
+        )));
+    }
+
+    let bytes = target.bytes();
+    let written = match write_once(&mut file, bytes) {
+        Ok(written) => written,
+        Err(source) => {
+            return Err(Ipv4ForwardingMutationFailure::possibly_written(
+                hard_error("write fixed private IPv4-forwarding record", source),
+                before,
+                previous,
+                target,
+            ));
+        }
+    };
+    if written != bytes.len() {
+        return Err(Ipv4ForwardingMutationFailure::possibly_written(
+            hard_error(
+                "write fixed private IPv4-forwarding record",
+                io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "fixed private IPv4-forwarding write was partial",
+                ),
+            ),
+            before,
+            previous,
+            target,
+        ));
+    }
+    drop(file);
+
+    let after = match read_ipv4_forwarding_record_at(proc, expected_proc_mount_id) {
+        Ok(after) => after,
+        Err(source) => {
+            return Err(Ipv4ForwardingMutationFailure::possibly_written(
+                source, before, previous, target,
+            ));
+        }
+    };
+    if after.identity != before.identity || after.canonical_state() != Some(target) {
+        return Err(Ipv4ForwardingMutationFailure::possibly_written(
+            hard_error(
+                "verify fixed private IPv4-forwarding record after mutation",
+                invalid_data("fixed private IPv4-forwarding post-state or identity was not exact"),
+            ),
+            before,
+            previous,
+            target,
+        ));
+    }
+    Ok(Ipv4ForwardingMutation {
+        before,
+        after,
+        previous,
+        target,
+        write_was_requested: true,
+    })
+}
+
 fn read_bounded(file: &mut File, maximum: usize) -> io::Result<Vec<u8>> {
     let limit = maximum
         .checked_add(1)
         .ok_or_else(|| invalid_data("proof record read bound overflowed"))?;
     let mut bytes = Vec::with_capacity(limit);
-    file.by_ref()
+    io::Read::by_ref(file)
         .take(
             u64::try_from(limit)
                 .map_err(|_| invalid_data("proof record read bound does not fit u64"))?,
@@ -4194,9 +5071,10 @@ fn errno_io(error: Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        os::unix::fs::symlink,
+        env, fs,
+        os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink},
         path::{Path, PathBuf},
+        process::Command,
     };
 
     use rustix::fs::mkfifoat;
@@ -4208,6 +5086,10 @@ mod tests {
 21 20 0:21 / /run rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=16384k,nr_inodes=4096,mode=700,inode64\n\
 30 10 0:30 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n\
 31 30 0:31 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n";
+    const LIVE_IPV4_FORWARDING_CHILD_ENV: &str =
+        "VOLPAROSSA_TEST_LIVE_IPV4_FORWARDING_WRITER_CHILD";
+    const LIVE_IPV4_FORWARDING_PARENT_NETNS_ENV: &str =
+        "VOLPAROSSA_TEST_LIVE_IPV4_FORWARDING_PARENT_NETNS";
 
     fn open_test_directory(path: &Path) -> OwnedFd {
         File::open(path).expect("open test directory").into()
@@ -4233,6 +5115,36 @@ mod tests {
                 panic!("fixed read errors may never be mount-policy denials")
             }
         }
+    }
+
+    fn forwarding_snapshot(root: &OwnedFd) -> Ipv4ForwardingRecordSnapshot {
+        let mount_id = mount_id_for_fd(root).expect("fixture mount ID");
+        read_ipv4_forwarding_record_at(root, mount_id).expect("fixed forwarding snapshot")
+    }
+
+    fn current_network_namespace_identity() -> (u64, u64) {
+        let metadata = fs::metadata("/proc/self/ns/net").expect("network namespace metadata");
+        (metadata.dev(), metadata.ino())
+    }
+
+    fn parse_network_namespace_identity(value: &str) -> Option<(u64, u64)> {
+        let (device, inode) = value.split_once(':')?;
+        Some((device.parse().ok()?, inode.parse().ok()?))
+    }
+
+    fn unprivileged_user_namespace_policy_denied(
+        status_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> bool {
+        status_code == Some(1)
+            && stdout.is_empty()
+            && matches!(
+                stderr,
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            )
     }
 
     #[test]
@@ -4345,6 +5257,345 @@ mod tests {
                 .expect_err("oversized record must fail"),
         );
         assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_roundtrips_with_exact_snapshots() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        fs::write(fixed_record_path(directory.path()), b"0\n").expect("initial fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let initial = forwarding_snapshot(&root);
+
+        let enabled =
+            set_ipv4_forwarding_at(&root, mount_id, &initial, Ipv4ForwardingState::Enabled)
+                .expect("enable fixed forwarding record");
+        assert_eq!(enabled.before(), &initial);
+        assert_eq!(enabled.previous(), Ipv4ForwardingState::Disabled);
+        assert_eq!(enabled.target(), Ipv4ForwardingState::Enabled);
+        assert!(enabled.write_was_requested());
+        assert_eq!(enabled.after().bytes(), b"1\n");
+        assert_eq!(
+            fs::read(fixed_record_path(directory.path())).expect("enabled fixture"),
+            b"1\n"
+        );
+
+        let restored = set_ipv4_forwarding_at(&root, mount_id, enabled.after(), enabled.previous())
+            .expect("restore fixed forwarding record");
+        assert!(restored.write_was_requested());
+        assert_eq!(restored.after(), &initial);
+        assert_eq!(
+            fs::read(fixed_record_path(directory.path())).expect("restored fixture"),
+            b"0\n"
+        );
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_avoids_write_when_target_already_holds() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        fs::write(fixed_record_path(directory.path()), b"1\n").expect("initial fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let initial = forwarding_snapshot(&root);
+        let mut writer_called = false;
+
+        let unchanged = set_ipv4_forwarding_at_with(
+            &root,
+            mount_id,
+            &initial,
+            Ipv4ForwardingState::Enabled,
+            |_, _| {
+                writer_called = true;
+                panic!("no-op transition must not call its writer")
+            },
+        )
+        .expect("no-op fixed forwarding transition");
+        assert!(!writer_called);
+        assert!(!unchanged.write_was_requested());
+        assert_eq!(unchanged.before(), &initial);
+        assert_eq!(unchanged.after(), &initial);
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_no_op_needs_only_read_capability() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        let path = fixed_record_path(directory.path());
+        fs::write(&path, b"0\n").expect("initial fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400))
+            .expect("read-only forwarding fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let initial = forwarding_snapshot(&root);
+
+        let unchanged =
+            set_ipv4_forwarding_at(&root, mount_id, &initial, Ipv4ForwardingState::Disabled)
+                .expect("no-op forwarding transition with read-only capability");
+        assert!(!unchanged.write_was_requested());
+        assert_eq!(unchanged.after(), &initial);
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_rejects_changed_expected_snapshot_without_writing() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        let path = fixed_record_path(directory.path());
+        fs::write(&path, b"0\n").expect("initial fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let expected = forwarding_snapshot(&root);
+        fs::write(&path, b"1\n").expect("change fixture before request");
+        let mut writer_called = false;
+
+        let failure = set_ipv4_forwarding_at_with(
+            &root,
+            mount_id,
+            &expected,
+            Ipv4ForwardingState::Disabled,
+            |_, _| {
+                writer_called = true;
+                panic!("mismatched baseline must not call its writer")
+            },
+        )
+        .expect_err("changed expected snapshot must fail before request");
+        assert!(!writer_called);
+        let (source, state) = failure.into_parts();
+        assert!(matches!(
+            state,
+            Ipv4ForwardingMutationFailureState::BeforeRequest
+        ));
+        assert_eq!(
+            hard_failure_source(source).kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(path).expect("unchanged current fixture"), b"1\n");
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_rejects_substituted_expected_inode_without_writing() {
+        let expected_directory = tempfile::tempdir().expect("expected temporary directory");
+        let target_directory = tempfile::tempdir().expect("target temporary directory");
+        for directory in [&expected_directory, &target_directory] {
+            create_fixed_record_parents(directory.path());
+            fs::write(fixed_record_path(directory.path()), b"0\n").expect("initial fixture");
+        }
+        let expected_root = open_test_directory(expected_directory.path());
+        let target_root = open_test_directory(target_directory.path());
+        let target_mount_id = mount_id_for_fd(&target_root).expect("target fixture mount ID");
+        let substituted = forwarding_snapshot(&expected_root);
+        let mut writer_called = false;
+
+        let failure = set_ipv4_forwarding_at_with(
+            &target_root,
+            target_mount_id,
+            &substituted,
+            Ipv4ForwardingState::Enabled,
+            |_, _| {
+                writer_called = true;
+                panic!("substituted inode must not call its writer")
+            },
+        )
+        .expect_err("substituted expected inode must fail before request");
+        assert!(!writer_called);
+        let (_, state) = failure.into_parts();
+        assert!(matches!(
+            state,
+            Ipv4ForwardingMutationFailureState::BeforeRequest
+        ));
+        assert_eq!(
+            fs::read(fixed_record_path(target_directory.path())).expect("unchanged target fixture"),
+            b"0\n"
+        );
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_rejects_noncanonical_baseline_without_writing() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        let path = fixed_record_path(directory.path());
+        fs::write(&path, b"2\n").expect("noncanonical fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let expected = forwarding_snapshot(&root);
+
+        let failure = set_ipv4_forwarding_at_with(
+            &root,
+            mount_id,
+            &expected,
+            Ipv4ForwardingState::Enabled,
+            |_, _| panic!("noncanonical baseline must not call its writer"),
+        )
+        .expect_err("noncanonical baseline must fail before request");
+        let (_, state) = failure.into_parts();
+        assert!(matches!(
+            state,
+            Ipv4ForwardingMutationFailureState::BeforeRequest
+        ));
+        assert_eq!(fs::read(path).expect("noncanonical fixture"), b"2\n");
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_returns_context_after_partial_request() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        let path = fixed_record_path(directory.path());
+        fs::write(&path, b"0\n").expect("initial fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let expected = forwarding_snapshot(&root);
+
+        let failure = set_ipv4_forwarding_at_with(
+            &root,
+            mount_id,
+            &expected,
+            Ipv4ForwardingState::Enabled,
+            |file, bytes| io::Write::write(file, &bytes[..1]),
+        )
+        .expect_err("partial request must be indeterminate");
+        let (source, state) = failure.into_parts();
+        assert_eq!(hard_failure_source(source).kind(), io::ErrorKind::WriteZero);
+        match state {
+            Ipv4ForwardingMutationFailureState::PossiblyWritten {
+                before,
+                previous,
+                target,
+            } => {
+                assert_eq!(before, expected);
+                assert_eq!(previous, Ipv4ForwardingState::Disabled);
+                assert_eq!(target, Ipv4ForwardingState::Enabled);
+            }
+            Ipv4ForwardingMutationFailureState::BeforeRequest => {
+                panic!("partial request crossed the write boundary")
+            }
+        }
+        assert_eq!(fs::read(path).expect("partially changed fixture"), b"1\n");
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_treats_failed_post_read_as_possibly_written() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        create_fixed_record_parents(directory.path());
+        let path = fixed_record_path(directory.path());
+        fs::write(&path, b"0\n").expect("initial fixture");
+        let root = open_test_directory(directory.path());
+        let mount_id = mount_id_for_fd(&root).expect("fixture mount ID");
+        let expected = forwarding_snapshot(&root);
+
+        let failure = set_ipv4_forwarding_at_with(
+            &root,
+            mount_id,
+            &expected,
+            Ipv4ForwardingState::Enabled,
+            |file, bytes| {
+                let written = io::Write::write(file, bytes)?;
+                file.set_len(3)?;
+                Ok(written)
+            },
+        )
+        .expect_err("invalid post-read must be indeterminate");
+        let (_, state) = failure.into_parts();
+        assert!(matches!(
+            state,
+            Ipv4ForwardingMutationFailureState::PossiblyWritten {
+                previous: Ipv4ForwardingState::Disabled,
+                target: Ipv4ForwardingState::Enabled,
+                ..
+            }
+        ));
+        assert_eq!(fs::read(path).expect("oversized post-state").len(), 3);
+    }
+
+    #[test]
+    fn fixed_ipv4_forwarding_writer_live_roundtrip_is_network_namespace_isolated() {
+        if env::var_os(LIVE_IPV4_FORWARDING_CHILD_ENV).is_some() {
+            let parent_identity = env::var(LIVE_IPV4_FORWARDING_PARENT_NETNS_ENV)
+                .ok()
+                .and_then(|value| parse_network_namespace_identity(&value))
+                .expect("outer test must supply its network namespace identity");
+            assert_ne!(
+                current_network_namespace_identity(),
+                parent_identity,
+                "live forwarding writes require a distinct disposable network namespace"
+            );
+            let proc = open_test_directory(Path::new("/proc"));
+            let proc_mount_id = mount_id_for_fd(&proc).expect("proc mount ID");
+            let initial = read_ipv4_forwarding_record_at(&proc, proc_mount_id)
+                .expect("initial isolated forwarding record");
+            let previous = initial
+                .canonical_state()
+                .expect("canonical isolated forwarding state");
+            let disabled = set_ipv4_forwarding_at(
+                &proc,
+                proc_mount_id,
+                &initial,
+                Ipv4ForwardingState::Disabled,
+            )
+            .expect("establish disabled isolated forwarding baseline");
+            let enabled = set_ipv4_forwarding_at(
+                &proc,
+                proc_mount_id,
+                disabled.after(),
+                Ipv4ForwardingState::Enabled,
+            )
+            .expect("enable isolated forwarding record");
+            assert!(enabled.write_was_requested(), "0 -> 1 must write");
+            let disabled_again = set_ipv4_forwarding_at(
+                &proc,
+                proc_mount_id,
+                enabled.after(),
+                Ipv4ForwardingState::Disabled,
+            )
+            .expect("disable isolated forwarding record");
+            assert!(disabled_again.write_was_requested(), "1 -> 0 must write");
+            let restored =
+                set_ipv4_forwarding_at(&proc, proc_mount_id, disabled_again.after(), previous)
+                    .expect("restore original isolated forwarding record");
+            assert_eq!(restored.after(), &initial);
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        let (parent_device, parent_inode) = current_network_namespace_identity();
+        let output = match Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(executable)
+            .arg("--exact")
+            .arg(
+                "mounts::tests::fixed_ipv4_forwarding_writer_live_roundtrip_is_network_namespace_isolated",
+            )
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(LIVE_IPV4_FORWARDING_CHILD_ENV, "1")
+            .env(
+                LIVE_IPV4_FORWARDING_PARENT_NETNS_ENV,
+                format!("{parent_device}:{parent_inode}"),
+            )
+            .env("LC_ALL", "C")
+            .output()
+        {
+            Ok(output) => output,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                eprintln!("skipped live forwarding roundtrip: unshare is unavailable");
+                return;
+            }
+            Err(source) => panic!("spawn isolated forwarding roundtrip: {source}"),
+        };
+        if unprivileged_user_namespace_policy_denied(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ) {
+            eprintln!("skipped live forwarding roundtrip: user namespaces denied by policy");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "isolated forwarding roundtrip failed: stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -4553,7 +5804,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn routed_mount_typestate_can_only_finish_through_policy_bound_deleted_proof(
-        active: PolicyBoundPrivateMounts<AuthorizedActivatedTopology>,
+        active: PolicyBoundPrivateMounts<AuthorizedActivatedTopology, PolicyEnabledNetworkProof>,
         active_proof: ExactActivatedIpv4NetworkProof,
         endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
     ) {
