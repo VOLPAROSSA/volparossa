@@ -22,8 +22,9 @@ use nix::{
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 use volparossa_linux_uapi::{
-    mptcp_info, receive_binding_without_fd, receive_fd_with_binding, receive_seqpacket_without_fd,
-    send_binding_without_fd, send_fd_with_binding, send_seqpacket_without_fd,
+    duplicate_descriptor_cloexec, mptcp_info, receive_binding_without_fd, receive_fd_with_binding,
+    receive_seqpacket_without_fd, send_binding_without_fd, send_fd_with_binding,
+    send_seqpacket_without_fd,
 };
 
 use crate::{
@@ -79,12 +80,14 @@ impl ExpectedUnixCredentials {
 
 /// One descriptor freshly installed by a credentialed `recvmsg` call.
 ///
-/// The helper crate forbids local unsafe code, so this narrow wrapper owns the raw descriptor and
-/// closes it on every rejection or drop. It deliberately offers no ownership escape. The kernel
-/// installs it close-on-exec because every receive uses `MSG_CMSG_CLOEXEC`.
+/// The helper crate forbids local unsafe code, so this private affine wrapper owns the raw
+/// descriptor and closes it on every rejection or drop. Only [`Self::into_owned`] can consume a
+/// fully validated instance: it duplicates through the audited Linux-UAPI boundary and closes this
+/// original before ordinary [`OwnedFd`] ownership escapes. The kernel also installs this original
+/// close-on-exec because every receive uses `MSG_CMSG_CLOEXEC`.
 #[derive(Debug)]
 #[must_use = "dropping the received worker descriptor closes it"]
-pub(crate) struct CredentialedWorkerFd {
+struct CredentialedWorkerFd {
     raw: RawFd,
 }
 
@@ -92,6 +95,19 @@ impl CredentialedWorkerFd {
     fn from_recvmsg(raw: RawFd) -> Self {
         debug_assert!(raw >= 0);
         Self { raw }
+    }
+
+    fn into_owned(self) -> io::Result<OwnedFd> {
+        self.into_owned_with(duplicate_descriptor_cloexec)
+    }
+
+    fn into_owned_with<F>(self, duplicate: F) -> io::Result<OwnedFd>
+    where
+        F: FnOnce(&Self) -> io::Result<OwnedFd>,
+    {
+        let duplicate = duplicate(&self);
+        drop(self);
+        duplicate
     }
 }
 
@@ -173,7 +189,7 @@ pub(crate) struct CommittedSocketLease {
 /// One credential-authenticated response and its optional RAII-owned descriptor.
 pub(crate) struct CredentialedWorkerExecution {
     pub(crate) response: InternalWorkerResponse,
-    pub(crate) descriptor: Option<CredentialedWorkerFd>,
+    pub(crate) descriptor: Option<OwnedFd>,
 }
 
 /// One correlated internal response and its optional transferred descriptor.
@@ -357,7 +373,7 @@ pub(crate) fn receive_credential_fd_record<S: AsFd>(
     channel: &S,
     expected_binding: &[u8],
     expected: ExpectedUnixCredentials,
-) -> io::Result<CredentialedWorkerFd> {
+) -> io::Result<OwnedFd> {
     let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
     receive_credential_fd_record_with_deadline(channel, expected_binding, expected, deadline)
 }
@@ -368,7 +384,7 @@ pub(crate) fn receive_credential_fd_record_with_deadline<S: AsFd>(
     expected_binding: &[u8],
     expected: ExpectedUnixCredentials,
     deadline: HardDeadline,
-) -> io::Result<CredentialedWorkerFd> {
+) -> io::Result<OwnedFd> {
     deadline.ensure_remaining()?;
     validate_credential_binding(expected_binding)?;
     let (binding, mut descriptors) = receive_credential_record_inner(
@@ -384,6 +400,8 @@ pub(crate) fn receive_credential_fd_record_with_deadline<S: AsFd>(
     let descriptor = descriptors
         .pop()
         .ok_or_else(|| invalid_data("credentialed descriptor missing"))?;
+    deadline.ensure_remaining()?;
+    let descriptor = descriptor.into_owned()?;
     deadline.complete(descriptor)
 }
 
@@ -1102,7 +1120,7 @@ mod tests {
     use std::{
         io::{IoSlice, Read as _, Write as _},
         net::UdpSocket,
-        os::fd::{AsRawFd as _, OwnedFd},
+        os::fd::{AsRawFd as _, IntoRawFd as _, OwnedFd},
         os::unix::net::UnixStream,
         thread,
         time::Instant,
@@ -1347,6 +1365,48 @@ mod tests {
     }
 
     #[test]
+    fn credentialed_raw_owner_adoption_is_consuming_and_exact() {
+        let (source, mut peer) = UnixStream::pair().expect("descriptor pair");
+        let original = source.as_raw_fd();
+        let received = CredentialedWorkerFd::from_recvmsg(source.into_raw_fd());
+        let adopted = received
+            .into_owned()
+            .expect("adopt credentialed descriptor");
+
+        assert_ne!(adopted.as_raw_fd(), original);
+        let mut adopted = UnixStream::from(adopted);
+        peer.write_all(b"a").expect("write through peer");
+        let mut byte = [0_u8; 1];
+        adopted
+            .read_exact(&mut byte)
+            .expect("adopted descriptor remains live");
+        assert_eq!(byte, *b"a");
+
+        drop(adopted);
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        assert_eq!(peer.read(&mut byte).expect("exact final owner closes"), 0);
+    }
+
+    #[test]
+    fn credentialed_raw_owner_closes_when_adoption_fails() {
+        let (source, mut peer) = UnixStream::pair().expect("descriptor pair");
+        let received = CredentialedWorkerFd::from_recvmsg(source.into_raw_fd());
+        let error = received
+            .into_owned_with(|_| Err(io::Error::other("injected duplication failure")))
+            .expect_err("adoption failure");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            peer.read(&mut byte).expect("failed adoption closes source"),
+            0
+        );
+    }
+
+    #[test]
     fn passcred_records_round_trip_exact_credentials_and_one_cloexec_fd() {
         let expected = current_expected_credentials();
         let (parent, worker) =
@@ -1513,6 +1573,32 @@ mod tests {
                 .expect_err("missing descriptor")
                 .kind(),
             io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn credentialed_fd_record_rejects_wrong_binding_before_adoption() {
+        let expected = current_expected_credentials();
+        let (sender, receiver) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
+        send_credential_fd_record(&sender, &descriptor, b"wrong binding")
+            .expect("send wrong bound descriptor");
+        drop(descriptor);
+
+        assert_eq!(
+            receive_credential_fd_record(&receiver, b"expected binding", expected)
+                .expect_err("wrong binding rejected")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            peer.read(&mut byte)
+                .expect("wrong-bound descriptor closed before adoption"),
+            0
         );
     }
 

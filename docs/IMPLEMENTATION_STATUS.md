@@ -101,6 +101,11 @@ Last updated: 2026-08-25
   before PLAN leaves no state, late completion cannot commit, and a late installed FD is closed.
   This is a success/COMMIT acceptance boundary rather than a wall-clock return guarantee because
   exact-owner cleanup and scheduling may deliver the fail-closed result later.
+  A successful credentialed Acquire adopts its private raw-FD owner only after exact
+  PID/UID/GID, credential/FD count, ancillary, binding and deadline validation. The audited safe
+  boundary uses `F_DUPFD_CLOEXEC` with minimum 3, immediately owns and verifies the duplicate's
+  `FD_CLOEXEC`, consumes and closes the original, and closes the adopted `OwnedFd` if the final
+  deadline check fails.
   Its separate launcher carries one absolute spawn/handshake budget, polls spawn-lock acquisition
   against that deadline, pre-arms retirement ownership before the blocking `Command::spawn`
   operation and installs any returned child into that owner before further fallible work; only the
@@ -112,8 +117,7 @@ Last updated: 2026-08-25
   Terminal unresolved settlement atomically drains captured owners and immediately escalates any
   later owner instead of leaving it stranded.
   Production still installs only the `Unavailable` backend and performs no worker or network
-  mutation. Production adapter wiring, audited
-  `CredentialedWorkerFd` to `OwnedFd` transfer, durable journal/reaper integration, and the separate
+  mutation. Production adapter wiring, durable journal/reaper integration, and the separate
   Add/Remove MPTCP endpoint seam remain required; no datapath or acceptance checkbox closes.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
@@ -126,7 +130,7 @@ Last updated: 2026-08-25
 - [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   but live namespace/kernel cleanup proof does not.
-- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation and close-on-reject socketpair/fake-backend tests pass, but production returns `Unavailable` before network work and worker-side socket creation, kernel validation, datapath adoption and live namespace proof remain.
+- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure; a final post-adoption deadline check closes the duplicate rather than returning it late, but production returns `Unavailable` before network work and worker-side socket creation, kernel-object revalidation, datapath adoption and live namespace proof remain.
 - [ ] Native MPQUIC API v4 consumes exactly one request-bound UDP descriptor for `AddPath` and zero descriptors otherwise; release, negative ancillary/tuple/ownership tests and the clean full-graph ASan+UBSan gate pass, but SCM_RIGHTS, its request hash and a same-session namespace cookie do not authenticate helper origin, so production path adoption and the launcher remain blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 
