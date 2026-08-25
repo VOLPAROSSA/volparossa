@@ -1177,8 +1177,8 @@ fn complete_authorized_private_run_rollback(
     veth_pairs
         .verify_authorized_veth_pairs()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    complete_fixed_ipv4_address_rollback(
-        &veth_pairs,
+    let veth_pairs = complete_fixed_ipv4_address_rollback(
+        veth_pairs,
         &rollback_network_proof,
         &endpoint_baselines,
     )?;
@@ -1219,10 +1219,10 @@ fn complete_authorized_private_run_rollback(
 }
 
 fn complete_fixed_ipv4_address_rollback(
-    veth_pairs: &crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>,
+    veth_pairs: crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>,
     rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
     endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
-) -> Result<(), RunnerError> {
+) -> Result<crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>, RunnerError> {
     let veth_network_proof = veth_pairs
         .prove_exact_veth_pairs(rollback_network_proof, endpoint_baselines)
         .map_err(map_namespace_network_proof_error)?;
@@ -1232,21 +1232,22 @@ fn complete_fixed_ipv4_address_rollback(
     let ipv4_addresses = veth_pairs
         .configure_fixed_ipv4_addresses()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    let ipv4_network_proof = veth_pairs
-        .prove_exact_ipv4_addresses(&ipv4_addresses, rollback_network_proof, endpoint_baselines)
+    let ipv4_network_proof = ipv4_addresses
+        .prove_exact_ipv4_addresses(rollback_network_proof, endpoint_baselines)
         .map_err(map_namespace_network_proof_error)?;
-    veth_pairs
-        .verify_exact_ipv4_address_state(&ipv4_addresses, &ipv4_network_proof)
+    ipv4_addresses
+        .verify_exact_ipv4_address_state(&ipv4_network_proof)
         .map_err(map_namespace_network_proof_error)?;
-    veth_pairs
-        .rollback_fixed_ipv4_addresses(ipv4_addresses)
+    let veth_pairs = ipv4_addresses
+        .rollback_fixed_ipv4_addresses()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
     veth_pairs
         .verify_exact_veth_pair_state(&veth_network_proof)
         .map_err(map_namespace_network_proof_error)?;
     veth_pairs
         .verify_authorized_veth_pairs()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    Ok(veth_pairs)
 }
 
 fn map_namespace_network_proof_error(
