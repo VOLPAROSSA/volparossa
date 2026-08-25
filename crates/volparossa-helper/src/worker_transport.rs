@@ -26,12 +26,15 @@ use volparossa_linux_uapi::{
     send_binding_without_fd, send_fd_with_binding, send_seqpacket_without_fd,
 };
 
-use crate::internal_protocol::{
-    AcquireTransportSocket, InternalEndpointRole, InternalProtocolError, InternalSocketAddress,
-    InternalTransportSocketKind, InternalWorkerRequest, InternalWorkerResponse,
-    InternalWorkerResult, MAX_INTERNAL_WORKER_FRAME, decode_request, decode_response,
-    encode_request, encode_response, internal_worker_request, transport_descriptor_binding,
-    validate_response_for_request,
+use crate::{
+    deadline::{HardDeadline, wait_for_fd, wait_for_readable_fd},
+    internal_protocol::{
+        AcquireTransportSocket, InternalEndpointRole, InternalProtocolError, InternalSocketAddress,
+        InternalTransportSocketKind, InternalWorkerRequest, InternalWorkerResponse,
+        InternalWorkerResult, MAX_INTERNAL_WORKER_FRAME, decode_request, decode_response,
+        encode_request, encode_response, internal_worker_request, transport_descriptor_binding,
+        validate_response_for_request,
+    },
 };
 
 const WORKER_IPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -200,7 +203,7 @@ pub(crate) enum WorkerTransportError {
 ///
 /// Returns an I/O error when the socketpair or fixed deadlines cannot be configured.
 pub(crate) fn private_worker_channel() -> io::Result<(Socket, Socket)> {
-    let (parent, worker) = Socket::pair(Domain::UNIX, Type::SEQPACKET.cloexec(), None::<Protocol>)?;
+    let (parent, worker) = private_seqpacket_channel()?;
     for endpoint in [&parent, &worker] {
         endpoint.set_read_timeout(Some(WORKER_IPC_TIMEOUT))?;
         endpoint.set_write_timeout(Some(WORKER_IPC_TIMEOUT))?;
@@ -215,12 +218,19 @@ pub(crate) fn private_worker_channel() -> io::Result<(Socket, Socket)> {
 ///
 /// # Errors
 ///
-/// Returns an I/O error when channel creation, deadlines or credential reception cannot be proven.
+/// Returns an I/O error when channel creation or credential reception cannot be proven.
 pub(crate) fn private_credential_worker_channel() -> io::Result<(Socket, Socket)> {
-    let (parent, worker) = private_worker_channel()?;
+    // Credentialed traffic is driven by explicit nonblocking operations and one caller-owned
+    // absolute deadline. In particular, do not install SO_RCVTIMEO/SO_SNDTIMEO here: either
+    // option would restart a relative kernel timeout for every record in a multi-record Acquire.
+    let (parent, worker) = private_seqpacket_channel()?;
     enable_passcred_receiver(&parent)?;
     enable_passcred_receiver(&worker)?;
     Ok((parent, worker))
+}
+
+fn private_seqpacket_channel() -> io::Result<(Socket, Socket)> {
+    Socket::pair(Domain::UNIX, Type::SEQPACKET.cloexec(), None::<Protocol>)
 }
 
 /// Enables and revalidates per-record kernel credentials on one receiving endpoint.
@@ -249,19 +259,25 @@ pub(crate) fn enable_passcred_receiver<S: AsFd>(receiver: &S) -> io::Result<()> 
 ///
 /// Returns an I/O error for invalid bounds, a non-seqpacket channel, kernel failure or short send.
 pub(crate) fn send_credential_record<S: AsFd>(channel: &S, record: &[u8]) -> io::Result<()> {
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    send_credential_record_with_deadline(channel, record, deadline)
+}
+
+/// Sends one credential-only record before one caller-owned absolute deadline.
+///
+/// The syscall is always nonblocking. Readiness races, interrupts and backpressure reuse the same
+/// deadline; successful kernel consumption at or after expiry is reported as ambiguous timeout.
+pub(crate) fn send_credential_record_with_deadline<S: AsFd>(
+    channel: &S,
+    record: &[u8],
+    deadline: HardDeadline,
+) -> io::Result<()> {
+    deadline.ensure_remaining()?;
     validate_credential_record_length(record.len(), MAX_INTERNAL_WORKER_FRAME)?;
     validate_credential_seqpacket(channel)?;
     let vectors = [IoSlice::new(record)];
     let control: [ControlMessage<'_>; 0] = [];
-    let written = sendmsg::<()>(
-        channel.as_fd().as_raw_fd(),
-        &vectors,
-        &control,
-        MsgFlags::MSG_NOSIGNAL,
-        None,
-    )
-    .map_err(errno_io)?;
-    validate_complete_send(written, record.len())
+    send_credential_message_with_deadline(channel, &vectors, &control, record.len(), deadline)
 }
 
 /// Receives one bounded worker record carrying exactly the expected kernel credentials and no FD.
@@ -275,14 +291,27 @@ pub(crate) fn receive_credential_record<S: AsFd>(
     maximum_bytes: usize,
     expected: ExpectedUnixCredentials,
 ) -> io::Result<Vec<u8>> {
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    receive_credential_record_with_deadline(channel, maximum_bytes, expected, deadline)
+}
+
+/// Receives one credential-only record before one caller-owned absolute deadline.
+pub(crate) fn receive_credential_record_with_deadline<S: AsFd>(
+    channel: &S,
+    maximum_bytes: usize,
+    expected: ExpectedUnixCredentials,
+    deadline: HardDeadline,
+) -> io::Result<Vec<u8>> {
+    deadline.ensure_remaining()?;
     let (record, descriptors) = receive_credential_record_inner(
         channel,
         maximum_bytes,
         expected,
         DescriptorRequirement::None,
+        deadline,
     )?;
     debug_assert!(descriptors.is_empty());
-    Ok(record)
+    deadline.complete(record)
 }
 
 /// Sends one bounded binding together with exactly one descriptor.
@@ -298,20 +327,24 @@ pub(crate) fn send_credential_fd_record<S: AsFd, F: AsFd>(
     descriptor: &F,
     binding: &[u8],
 ) -> io::Result<()> {
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    send_credential_fd_record_with_deadline(channel, descriptor, binding, deadline)
+}
+
+/// Sends one credentialed descriptor binding before one caller-owned absolute deadline.
+pub(crate) fn send_credential_fd_record_with_deadline<S: AsFd, F: AsFd>(
+    channel: &S,
+    descriptor: &F,
+    binding: &[u8],
+    deadline: HardDeadline,
+) -> io::Result<()> {
+    deadline.ensure_remaining()?;
     validate_credential_binding(binding)?;
     validate_credential_seqpacket(channel)?;
     let vectors = [IoSlice::new(binding)];
     let descriptors = [descriptor.as_fd().as_raw_fd()];
     let control = [ControlMessage::ScmRights(&descriptors)];
-    let written = sendmsg::<()>(
-        channel.as_fd().as_raw_fd(),
-        &vectors,
-        &control,
-        MsgFlags::MSG_NOSIGNAL,
-        None,
-    )
-    .map_err(errno_io)?;
-    validate_complete_send(written, binding.len())
+    send_credential_message_with_deadline(channel, &vectors, &control, binding.len(), deadline)
 }
 
 /// Receives one exact binding, one exact kernel credential and one close-on-exec descriptor.
@@ -325,19 +358,33 @@ pub(crate) fn receive_credential_fd_record<S: AsFd>(
     expected_binding: &[u8],
     expected: ExpectedUnixCredentials,
 ) -> io::Result<CredentialedWorkerFd> {
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    receive_credential_fd_record_with_deadline(channel, expected_binding, expected, deadline)
+}
+
+/// Receives one exact credentialed descriptor binding before an absolute deadline.
+pub(crate) fn receive_credential_fd_record_with_deadline<S: AsFd>(
+    channel: &S,
+    expected_binding: &[u8],
+    expected: ExpectedUnixCredentials,
+    deadline: HardDeadline,
+) -> io::Result<CredentialedWorkerFd> {
+    deadline.ensure_remaining()?;
     validate_credential_binding(expected_binding)?;
     let (binding, mut descriptors) = receive_credential_record_inner(
         channel,
         expected_binding.len(),
         expected,
         DescriptorRequirement::ExactlyOne,
+        deadline,
     )?;
     if binding != expected_binding {
         return Err(invalid_data("credentialed descriptor binding mismatch"));
     }
-    descriptors
+    let descriptor = descriptors
         .pop()
-        .ok_or_else(|| invalid_data("credentialed descriptor missing"))
+        .ok_or_else(|| invalid_data("credentialed descriptor missing"))?;
+    deadline.complete(descriptor)
 }
 
 fn receive_credential_record_inner<S: AsFd>(
@@ -345,7 +392,9 @@ fn receive_credential_record_inner<S: AsFd>(
     maximum_bytes: usize,
     expected: ExpectedUnixCredentials,
     descriptor_requirement: DescriptorRequirement,
+    deadline: HardDeadline,
 ) -> io::Result<(Vec<u8>, Vec<CredentialedWorkerFd>)> {
+    deadline.ensure_remaining()?;
     validate_credential_record_length(maximum_bytes, MAX_INTERNAL_WORKER_FRAME)?;
     validate_credential_seqpacket(channel)?;
     if !getsockopt(channel, sockopt::PassCred).map_err(errno_io)? {
@@ -354,27 +403,37 @@ fn receive_credential_record_inner<S: AsFd>(
         ));
     }
 
-    let mut record = vec![0_u8; maximum_bytes];
-    let mut vectors = [IoSliceMut::new(&mut record)];
-    // Linux permits at most SCM_MAX_FD descriptors in one SCM_RIGHTS message. Together with the
-    // one SO_PASSCRED credential, this buffer captures every capability the peer can attach.
-    let mut control_space = nix::cmsg_space!(UnixCredentials, [RawFd; MAX_SCM_RIGHTS_FDS]);
-    let (bytes, flags, ancillary) = {
-        let message = recvmsg::<()>(
-            channel.as_fd().as_raw_fd(),
-            &mut vectors,
-            Some(&mut control_space),
-            MsgFlags::MSG_CMSG_CLOEXEC,
-        )
-        .map_err(errno_io)?;
-        let mut ancillary = CredentialAncillary::default();
-        let controls = message
-            .cmsgs()
-            .map_err(|_| invalid_data("credential ancillary data truncated"))?;
-        for control in controls {
-            ancillary.observe(control);
-        }
-        (message.bytes, message.flags, ancillary)
+    let (mut record, bytes, flags, ancillary) = loop {
+        deadline.ensure_remaining()?;
+        wait_for_credential_record(channel, deadline)?;
+        let mut record = vec![0_u8; maximum_bytes];
+        let mut vectors = [IoSliceMut::new(&mut record)];
+        // Linux permits at most SCM_MAX_FD descriptors in one SCM_RIGHTS message. Together with
+        // the one SO_PASSCRED credential, this captures every capability the peer can attach.
+        let mut control_space = nix::cmsg_space!(UnixCredentials, [RawFd; MAX_SCM_RIGHTS_FDS]);
+        let (bytes, flags, ancillary) = {
+            let received = recvmsg::<()>(
+                channel.as_fd().as_raw_fd(),
+                &mut vectors,
+                Some(&mut control_space),
+                MsgFlags::MSG_CMSG_CLOEXEC | MsgFlags::MSG_DONTWAIT,
+            );
+            let message = match received {
+                Ok(message) => message,
+                Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => continue,
+                Err(error) => return Err(errno_io(error)),
+            };
+            let mut ancillary = CredentialAncillary::default();
+            let controls = message
+                .cmsgs()
+                .map_err(|_| invalid_data("credential ancillary data truncated"))?;
+            for control in controls {
+                ancillary.observe(control);
+            }
+            (message.bytes, message.flags, ancillary)
+        };
+        deadline.ensure_remaining()?;
+        break (record, bytes, flags, ancillary);
     };
 
     if bytes == 0 {
@@ -389,6 +448,46 @@ fn receive_credential_record_inner<S: AsFd>(
     record.truncate(bytes);
     let descriptors = ancillary.finish(expected, descriptor_requirement)?;
     Ok((record, descriptors))
+}
+
+fn wait_for_credential_record<S: AsFd>(channel: &S, deadline: HardDeadline) -> io::Result<()> {
+    wait_for_readable_fd(channel, deadline).map_err(|error| {
+        if error.kind() == io::ErrorKind::Other {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "credentialed seqpacket peer became unavailable",
+            )
+        } else {
+            error
+        }
+    })
+}
+
+fn send_credential_message_with_deadline<S: AsFd>(
+    channel: &S,
+    vectors: &[IoSlice<'_>],
+    control: &[ControlMessage<'_>],
+    expected_bytes: usize,
+    deadline: HardDeadline,
+) -> io::Result<()> {
+    loop {
+        deadline.ensure_remaining()?;
+        wait_for_fd(channel, PollFlags::POLLOUT, deadline)?;
+        match sendmsg::<()>(
+            channel.as_fd().as_raw_fd(),
+            vectors,
+            control,
+            MsgFlags::MSG_NOSIGNAL | MsgFlags::MSG_DONTWAIT,
+            None,
+        ) {
+            Ok(written) => {
+                validate_complete_send(written, expected_bytes)?;
+                return deadline.complete(());
+            }
+            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => continue,
+            Err(error) => return Err(errno_io(error)),
+        }
+    }
 }
 
 fn validate_credential_seqpacket<S: AsFd>(channel: &S) -> io::Result<()> {
@@ -458,8 +557,19 @@ pub(crate) fn send_credential_worker_request<S: AsFd>(
     channel: &S,
     request: &InternalWorkerRequest,
 ) -> Result<(), WorkerTransportError> {
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    send_credential_worker_request_with_deadline(channel, request, deadline)
+}
+
+/// Sends one canonical request before the caller's absolute transaction deadline.
+pub(crate) fn send_credential_worker_request_with_deadline<S: AsFd>(
+    channel: &S,
+    request: &InternalWorkerRequest,
+    deadline: HardDeadline,
+) -> Result<(), WorkerTransportError> {
+    deadline.ensure_remaining()?;
     let encoded = encode_request(request).map_err(protocol_error)?;
-    send_credential_record(channel, encoded.as_slice())?;
+    send_credential_record_with_deadline(channel, encoded.as_slice(), deadline)?;
     Ok(())
 }
 
@@ -472,8 +582,25 @@ pub(crate) fn receive_credential_worker_request<S: AsFd>(
     channel: &S,
     expected: ExpectedUnixCredentials,
 ) -> Result<InternalWorkerRequest, WorkerTransportError> {
-    let encoded = receive_credential_record(channel, MAX_INTERNAL_WORKER_FRAME, expected)?;
-    decode_request(&encoded).map_err(protocol_error)
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    receive_credential_worker_request_with_deadline(channel, expected, deadline)
+}
+
+/// Receives one canonical request before the caller's absolute transaction deadline.
+pub(crate) fn receive_credential_worker_request_with_deadline<S: AsFd>(
+    channel: &S,
+    expected: ExpectedUnixCredentials,
+    deadline: HardDeadline,
+) -> Result<InternalWorkerRequest, WorkerTransportError> {
+    deadline.ensure_remaining()?;
+    let encoded = receive_credential_record_with_deadline(
+        channel,
+        MAX_INTERNAL_WORKER_FRAME,
+        expected,
+        deadline,
+    )?;
+    let request = decode_request(&encoded).map_err(protocol_error)?;
+    deadline.complete(request).map_err(Into::into)
 }
 
 /// Sends one canonical response and every required completion record with kernel credentials.
@@ -491,6 +618,19 @@ pub(crate) fn send_credential_worker_response<S: AsFd>(
     response: &InternalWorkerResponse,
     descriptor: Option<&OwnedFd>,
 ) -> Result<(), WorkerTransportError> {
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    send_credential_worker_response_with_deadline(channel, request, response, descriptor, deadline)
+}
+
+/// Sends one response and its optional completion record under one absolute deadline.
+pub(crate) fn send_credential_worker_response_with_deadline<S: AsFd>(
+    channel: &S,
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+    descriptor: Option<&OwnedFd>,
+    deadline: HardDeadline,
+) -> Result<(), WorkerTransportError> {
+    deadline.ensure_remaining()?;
     validate_response_for_request(request, response).map_err(protocol_error)?;
     let acquire = matches!(
         request.operation,
@@ -506,16 +646,16 @@ pub(crate) fn send_credential_worker_response<S: AsFd>(
         .then(|| transport_descriptor_binding(request, response).map_err(protocol_error))
         .transpose()?;
     let encoded = encode_response(response).map_err(protocol_error)?;
-    send_credential_record(channel, encoded.as_slice())?;
+    send_credential_record_with_deadline(channel, encoded.as_slice(), deadline)?;
     if let Some(binding) = binding {
         if let Some(descriptor) = descriptor {
-            send_credential_fd_record(channel, descriptor, &binding)?;
+            send_credential_fd_record_with_deadline(channel, descriptor, &binding, deadline)?;
         } else {
             validate_credential_binding(&binding)?;
-            send_credential_record(channel, &binding)?;
+            send_credential_record_with_deadline(channel, &binding, deadline)?;
         }
     }
-    Ok(())
+    deadline.complete(()).map_err(Into::into)
 }
 
 /// Receives one canonical response and its exact credential-authenticated descriptor state.
@@ -531,7 +671,27 @@ pub(crate) fn receive_credential_worker_response<S: AsFd>(
     request: &InternalWorkerRequest,
     expected: ExpectedUnixCredentials,
 ) -> Result<CredentialedWorkerExecution, WorkerTransportError> {
-    let encoded = receive_credential_record(channel, MAX_INTERNAL_WORKER_FRAME, expected)?;
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    receive_credential_worker_response_with_deadline(channel, request, expected, deadline)
+}
+
+/// Receives one response and its optional FD/binding record under one absolute deadline.
+///
+/// The same copied deadline is used for every record. Any descriptor installed after the deadline
+/// is immediately owned and closed before this function reports timeout.
+pub(crate) fn receive_credential_worker_response_with_deadline<S: AsFd>(
+    channel: &S,
+    request: &InternalWorkerRequest,
+    expected: ExpectedUnixCredentials,
+    deadline: HardDeadline,
+) -> Result<CredentialedWorkerExecution, WorkerTransportError> {
+    deadline.ensure_remaining()?;
+    let encoded = receive_credential_record_with_deadline(
+        channel,
+        MAX_INTERNAL_WORKER_FRAME,
+        expected,
+        deadline,
+    )?;
     let response = decode_response(&encoded).map_err(protocol_error)?;
     validate_response_for_request(request, &response).map_err(protocol_error)?;
     let acquire = matches!(
@@ -543,9 +703,16 @@ pub(crate) fn receive_credential_worker_response<S: AsFd>(
     let descriptor = if acquire {
         let binding = transport_descriptor_binding(request, &response).map_err(protocol_error)?;
         if response.result == InternalWorkerResult::Ok as i32 {
-            Some(receive_credential_fd_record(channel, &binding, expected)?)
+            Some(receive_credential_fd_record_with_deadline(
+                channel, &binding, expected, deadline,
+            )?)
         } else {
-            let received = receive_credential_record(channel, binding.len(), expected)?;
+            let received = receive_credential_record_with_deadline(
+                channel,
+                binding.len(),
+                expected,
+                deadline,
+            )?;
             if received.as_slice() != binding {
                 return Err(invalid_data("credentialed descriptor binding mismatch").into());
             }
@@ -554,10 +721,12 @@ pub(crate) fn receive_credential_worker_response<S: AsFd>(
     } else {
         None
     };
-    Ok(CredentialedWorkerExecution {
-        response,
-        descriptor,
-    })
+    deadline
+        .complete(CredentialedWorkerExecution {
+            response,
+            descriptor,
+        })
+        .map_err(Into::into)
 }
 
 /// Sends one canonical internal request record without ancillary data.
@@ -935,6 +1104,8 @@ mod tests {
         net::UdpSocket,
         os::fd::{AsRawFd as _, OwnedFd},
         os::unix::net::UnixStream,
+        thread,
+        time::Instant,
     };
 
     use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
@@ -1082,6 +1253,97 @@ mod tests {
             send_credential_worker_response(&worker, &request, &success, None),
             Err(WorkerTransportError::Invalid)
         ));
+    }
+
+    #[test]
+    fn acquire_response_and_late_fd_share_one_absolute_deadline_and_close_queued_fd() {
+        let expected = current_expected_credentials();
+        let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
+        let response = response(&request, InternalWorkerResult::Ok);
+        let encoded = encode_response(&response).expect("response encoding");
+        let binding = transport_descriptor_binding(&request, &response).expect("FD binding");
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        assert_eq!(parent.read_timeout().expect("parent read timeout"), None);
+        assert_eq!(parent.write_timeout().expect("parent write timeout"), None);
+
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
+        send_credential_record(&worker, &encoded).expect("primary response record");
+        let deadline = HardDeadline::after(Duration::from_millis(180)).expect("shared deadline");
+        let started = Instant::now();
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(260));
+            send_credential_fd_record(&worker, &descriptor, &binding)
+                .expect("late descriptor record remains queueable");
+            drop(descriptor);
+        });
+
+        // Model time already consumed by the credentialed request send and worker execution. The
+        // primary response is ready, but record two must receive only the original remainder.
+        thread::sleep(Duration::from_millis(120));
+        assert!(matches!(
+            receive_credential_worker_response_with_deadline(
+                &parent, &request, expected, deadline,
+            ),
+            Err(WorkerTransportError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+        ));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "second record did not wait on the original budget: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "record two reset the original deadline: {elapsed:?}"
+        );
+
+        sender.join().expect("late descriptor sender");
+        peer.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("peer read timeout");
+        let mut byte = [0_u8; 1];
+        assert!(matches!(
+            peer.read(&mut byte),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                )
+        ));
+        drop(parent);
+        assert_eq!(
+            peer.read(&mut byte)
+                .expect("queued FD closed on channel drop"),
+            0
+        );
+    }
+
+    #[test]
+    fn queued_terminal_response_and_fd_survive_simultaneous_peer_hangup() {
+        let expected = current_expected_credentials();
+        let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
+        let response = response(&request, InternalWorkerResult::Ok);
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
+        let descriptor = OwnedFd::from(descriptor);
+
+        send_credential_worker_response(&worker, &request, &response, Some(&descriptor))
+            .expect("queue complete terminal response");
+        drop(descriptor);
+        drop(worker);
+
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("receive deadline");
+        let execution =
+            receive_credential_worker_response_with_deadline(&parent, &request, expected, deadline)
+                .expect("POLLIN with POLLHUP retains queued authenticated records");
+        assert_eq!(execution.response, response);
+        drop(execution.descriptor.expect("queued close-on-exec FD"));
+
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).expect("received FD closed"), 0);
     }
 
     #[test]

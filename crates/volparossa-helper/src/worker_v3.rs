@@ -48,6 +48,7 @@ use tokio::{
 };
 
 use crate::{
+    deadline::HardDeadline,
     internal_protocol::{
         ContextDestroyed, ContextInitialised, INTERNAL_WORKER_MAGIC,
         INTERNAL_WORKER_PROTOCOL_VERSION, InternalWorkerRequest, InternalWorkerResponse,
@@ -58,8 +59,10 @@ use crate::{
     worker_transport::{
         CredentialedWorkerExecution, ExpectedUnixCredentials, WorkerTransportError,
         enable_passcred_receiver, private_credential_worker_channel, receive_credential_record,
-        receive_credential_worker_request, receive_credential_worker_response,
-        send_credential_record, send_credential_worker_request, send_credential_worker_response,
+        receive_credential_record_with_deadline, receive_credential_worker_request,
+        receive_credential_worker_response_with_deadline, send_credential_record,
+        send_credential_record_with_deadline, send_credential_worker_request_with_deadline,
+        send_credential_worker_response,
     },
 };
 use volparossa_linux_uapi::install_close_range_on_exec;
@@ -67,8 +70,10 @@ use volparossa_linux_uapi::install_close_range_on_exec;
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
 pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-worker-v3-live-proof";
 
+#[cfg(test)]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 const TERMINATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const TERMINATION_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_MAX_WORKERS: usize = 64;
@@ -84,6 +89,16 @@ type ContextId = [u8; 16];
 struct InitialProcessIdentity {
     uid: u32,
     gid: u32,
+}
+
+#[derive(Clone, Copy)]
+struct WorkerSpawnBinding<'a> {
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
+    context_id: ContextId,
+    generation: u64,
+    retained_environment: Option<(&'a str, &'a str)>,
+    deadline: HardDeadline,
 }
 
 #[derive(Debug, Error)]
@@ -110,6 +125,8 @@ enum WorkerV3Error {
     ShuttingDown,
     #[error("worker async runtime is unavailable")]
     RuntimeUnavailable,
+    #[error("worker operation hard deadline elapsed")]
+    Deadline,
     #[error("worker I/O failed")]
     Io(#[from] io::Error),
     #[error("worker transport failed")]
@@ -308,12 +325,6 @@ fn validate_child_descriptor_contract(channel: &Socket) -> Result<(), WorkerV3Er
     validate_connected_socket(channel)
 }
 
-fn configure_channel(socket: &Socket, timeout: Duration) -> Result<(), WorkerV3Error> {
-    socket.set_read_timeout(Some(timeout))?;
-    socket.set_write_timeout(Some(timeout))?;
-    Ok(())
-}
-
 fn random_challenge() -> Result<[u8; 32], WorkerV3Error> {
     let mut challenge = [0_u8; 32];
     OsRng
@@ -413,23 +424,41 @@ impl CapturedSandboxObservation {
 fn spawn_after_seccomp_baseline(
     command: &mut Command,
     observation_mode: SandboxObservationMode,
-) -> Result<(Child, CapturedSandboxObservation), WorkerV3Error> {
+    deadline: HardDeadline,
+    lifetime: &WorkerLifetime,
+) -> Result<(u32, CapturedSandboxObservation), WorkerV3Error> {
+    let mut child_slot = lifetime
+        .child_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ensure_worker_deadline(deadline)?;
     // Read the spawning thread, not a process-wide alias. The immediately spawned child inherits
     // this exact filter chain and must prove one additional fixed worker filter.
     let sandbox_observation = observation_mode.capture_parent_seccomp_baseline()?;
+    ensure_worker_deadline(deadline)?;
     let child = command.spawn()?;
-    Ok((child, sandbox_observation))
+    *child_slot = Some(child);
+    let child_pid = child_slot
+        .as_ref()
+        .map_or_else(|| std::process::abort(), Child::id);
+    Ok((child_pid, sandbox_observation))
 }
 
 fn parent_handshake(
     process: &WorkerProcess,
     sandbox_observation: CapturedSandboxObservation,
-    parent_identity: InitialProcessIdentity,
-    worker_identity: crate::worker_sandbox::WorkerIdentity,
-    context_id: ContextId,
-    generation: u64,
     challenge: [u8; 32],
+    binding: WorkerSpawnBinding<'_>,
 ) -> Result<(), WorkerV3Error> {
+    let WorkerSpawnBinding {
+        worker_identity,
+        context_id,
+        generation,
+        retained_environment: _,
+        deadline,
+        ..
+    } = binding;
+    ensure_worker_deadline(deadline)?;
     let parent_pid = std::process::id();
     let hello = HandshakeRecord {
         kind: HandshakeKind::ParentHello,
@@ -442,15 +471,43 @@ fn parent_handshake(
         worker_uid: worker_identity.uid(),
         worker_gid: worker_identity.gid(),
     };
-    send_credential_record(&process.channel, &hello.encode())?;
+    let expected_after_drop =
+        parent_handshake_before_drop(process, sandbox_observation, hello, binding)?;
+    parent_handshake_after_drop(
+        process,
+        sandbox_observation,
+        hello,
+        challenge,
+        binding,
+        expected_after_drop,
+    )
+}
+
+fn parent_handshake_before_drop(
+    process: &WorkerProcess,
+    sandbox_observation: CapturedSandboxObservation,
+    hello: HandshakeRecord,
+    binding: WorkerSpawnBinding<'_>,
+) -> Result<ExpectedUnixCredentials, WorkerV3Error> {
+    let WorkerSpawnBinding {
+        parent_identity,
+        worker_identity,
+        deadline,
+        ..
+    } = binding;
+    let parent_pid = std::process::id();
+    send_credential_record_with_deadline(&process.channel, &hello.encode(), deadline)?;
     let expected_before_drop =
         ExpectedUnixCredentials::new(process.child_pid, parent_identity.uid, parent_identity.gid)?;
-    let encoded = receive_credential_record(
+    let encoded = receive_credential_record_with_deadline(
         &process.channel,
         HandshakeRecord::LENGTH,
         expected_before_drop,
+        deadline,
     )?;
-    if HandshakeRecord::decode(&encoded)? != hello.namespace_ready() || !process.probe_alive() {
+    if HandshakeRecord::decode(&encoded)? != hello.namespace_ready()
+        || !process.liveness().probe_alive_until(deadline)?
+    {
         return Err(WorkerV3Error::Authentication);
     }
     process.pin_worker_network_namespace_before_identity_drop(
@@ -459,27 +516,54 @@ fn parent_handshake(
         parent_pid,
         process.child_pid,
     )?;
+    ensure_worker_deadline(deadline)?;
     process.ensure_pinned_child_alive()?;
-    send_credential_record(&process.channel, &hello.namespace_pinned().encode())?;
-
+    send_credential_record_with_deadline(
+        &process.channel,
+        &hello.namespace_pinned().encode(),
+        deadline,
+    )?;
     let expected_after_drop = ExpectedUnixCredentials::new(
         process.child_pid,
         worker_identity.uid(),
         worker_identity.gid(),
     )?;
-    let encoded = receive_credential_record(
+    Ok(expected_after_drop)
+}
+
+fn parent_handshake_after_drop(
+    process: &WorkerProcess,
+    sandbox_observation: CapturedSandboxObservation,
+    hello: HandshakeRecord,
+    challenge: [u8; 32],
+    binding: WorkerSpawnBinding<'_>,
+    expected_after_drop: ExpectedUnixCredentials,
+) -> Result<(), WorkerV3Error> {
+    let WorkerSpawnBinding {
+        worker_identity,
+        context_id,
+        generation,
+        deadline,
+        ..
+    } = binding;
+    let parent_pid = std::process::id();
+    let encoded = receive_credential_record_with_deadline(
         &process.channel,
         HandshakeRecord::LENGTH,
         expected_after_drop,
+        deadline,
     )?;
-    if HandshakeRecord::decode(&encoded)? != hello.child_reply() || !process.probe_alive() {
+    if HandshakeRecord::decode(&encoded)? != hello.child_reply()
+        || !process.liveness().probe_alive_until(deadline)?
+    {
         return Err(WorkerV3Error::Authentication);
     }
 
-    let proof = receive_credential_record(
+    let proof = receive_credential_record_with_deadline(
         &process.channel,
         crate::worker_sandbox::SandboxProofRecord::LENGTH,
         expected_after_drop,
+        deadline,
     )?;
     // Receipt of the credential-bound proof is the child's post-apply completion barrier.
     // Only now may the parent independently sample and pin the final per-thread kernel state.
@@ -489,6 +573,7 @@ fn parent_handshake(
         process.child_pid,
         worker_identity,
     )?;
+    ensure_worker_deadline(deadline)?;
     crate::worker_sandbox::SandboxProofExpectation::new(
         context_id,
         generation,
@@ -510,19 +595,21 @@ fn parent_handshake(
     }
     process.ensure_pinned_child_alive()?;
     let accepted = hello.sandbox_accepted(proof_hash);
-    send_credential_record(&process.channel, &accepted.encode())?;
-    let encoded = receive_credential_record(
+    send_credential_record_with_deadline(&process.channel, &accepted.encode(), deadline)?;
+    let encoded = receive_credential_record_with_deadline(
         &process.channel,
         HandshakeRecord::LENGTH,
         expected_after_drop,
+        deadline,
     )?;
     if HandshakeRecord::decode(&encoded)? != accepted.sandbox_ready() {
         return Err(WorkerV3Error::Authentication);
     }
     process.ensure_pinned_child_alive()?;
-    if !process.probe_alive() {
+    if !process.liveness().probe_alive_until(deadline)? {
         return Err(WorkerV3Error::Authentication);
     }
+    ensure_worker_deadline(deadline)?;
     Ok(())
 }
 
@@ -557,14 +644,40 @@ fn spawn_with_command(
     generation: u64,
     retained_environment: Option<(&str, &str)>,
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
-    let parent_network_namespace = crate::worker_sandbox::current_network_namespace_identity()?;
-    spawn_with_command_mode(
+    let deadline = HardDeadline::after(SPAWN_TIMEOUT).map_err(WorkerV3Error::Io)?;
+    spawn_with_command_until(
         command,
         parent_identity,
         worker_identity,
         context_id,
         generation,
         retained_environment,
+        deadline,
+    )
+}
+
+fn spawn_with_command_until(
+    command: Command,
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
+    context_id: ContextId,
+    generation: u64,
+    retained_environment: Option<(&str, &str)>,
+    deadline: HardDeadline,
+) -> Result<AuthenticatedWorker, WorkerV3Error> {
+    ensure_worker_deadline(deadline)?;
+    let parent_network_namespace = crate::worker_sandbox::current_network_namespace_identity()?;
+    let binding = WorkerSpawnBinding {
+        parent_identity,
+        worker_identity,
+        context_id,
+        generation,
+        retained_environment,
+        deadline,
+    };
+    spawn_with_command_mode(
+        command,
+        binding,
         SandboxObservationMode::Production {
             parent_network_namespace,
         },
@@ -581,61 +694,81 @@ fn spawn_with_command_fixture(
     retained_environment: Option<(&str, &str)>,
     snapshot: crate::worker_sandbox::WorkerSandboxSnapshot,
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
-    spawn_with_command_mode(
-        command,
+    let deadline = HardDeadline::after(SPAWN_TIMEOUT).map_err(WorkerV3Error::Io)?;
+    let binding = WorkerSpawnBinding {
         parent_identity,
         worker_identity,
         context_id,
         generation,
         retained_environment,
-        SandboxObservationMode::Fixture(snapshot),
-    )
+        deadline,
+    };
+    spawn_with_command_mode(command, binding, SandboxObservationMode::Fixture(snapshot))
 }
 
 fn spawn_with_command_mode(
     command: Command,
-    parent_identity: InitialProcessIdentity,
-    worker_identity: crate::worker_sandbox::WorkerIdentity,
-    context_id: ContextId,
-    generation: u64,
-    retained_environment: Option<(&str, &str)>,
+    binding: WorkerSpawnBinding<'_>,
     observation_mode: SandboxObservationMode,
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
-    if geteuid().as_raw() != parent_identity.uid
-        || getegid().as_raw() != parent_identity.gid
-        || context_id.iter().all(|byte| *byte == 0)
-        || generation == 0
+    ensure_worker_deadline(binding.deadline)?;
+    if geteuid().as_raw() != binding.parent_identity.uid
+        || getegid().as_raw() != binding.parent_identity.gid
+        || binding.context_id.iter().all(|byte| *byte == 0)
+        || binding.generation == 0
     {
         return Err(WorkerV3Error::Authentication);
     }
-    let _spawn_guard = WORKER_SPAWN_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    spawn_with_command_locked(
-        command,
-        parent_identity,
-        worker_identity,
-        context_id,
-        generation,
-        retained_environment,
-        observation_mode,
-    )
+    let _spawn_guard = lock_worker_spawn_until(binding.deadline)?;
+    ensure_worker_deadline(binding.deadline)?;
+    spawn_with_command_locked(command, binding, observation_mode)
+}
+
+fn lock_worker_spawn_until(
+    deadline: HardDeadline,
+) -> Result<std::sync::MutexGuard<'static, ()>, WorkerV3Error> {
+    loop {
+        ensure_worker_deadline(deadline)?;
+        match WORKER_SPAWN_LOCK.try_lock() {
+            Ok(guard) => {
+                ensure_worker_deadline(deadline)?;
+                return Ok(guard);
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                ensure_worker_deadline(deadline)?;
+                return Ok(error.into_inner());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let remaining = deadline.remaining().map_err(|error| {
+                    if error.kind() == io::ErrorKind::TimedOut {
+                        WorkerV3Error::Deadline
+                    } else {
+                        WorkerV3Error::Io(error)
+                    }
+                })?;
+                thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
+            }
+        }
+    }
 }
 
 /// Spawns only while the caller holds `WORKER_SPAWN_LOCK`.
 fn spawn_with_command_locked(
     mut command: Command,
-    parent_identity: InitialProcessIdentity,
-    worker_identity: crate::worker_sandbox::WorkerIdentity,
-    context_id: ContextId,
-    generation: u64,
-    retained_environment: Option<(&str, &str)>,
+    binding: WorkerSpawnBinding<'_>,
     observation_mode: SandboxObservationMode,
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
+    let WorkerSpawnBinding {
+        parent_identity: _,
+        worker_identity,
+        context_id,
+        generation,
+        retained_environment,
+        deadline,
+    } = binding;
+    ensure_worker_deadline(deadline)?;
     let challenge = random_challenge()?;
     let (parent, worker) = private_credential_worker_channel()?;
-    configure_channel(&parent, HANDSHAKE_TIMEOUT)?;
-    configure_channel(&worker, HANDSHAKE_TIMEOUT)?;
     validate_connected_socket(&parent)?;
     validate_connected_socket(&worker)?;
     let inherited: OwnedFd = worker.into();
@@ -649,60 +782,60 @@ fn spawn_with_command_locked(
         command.env(name, value);
     }
     let retirement_permit = acquire_retirement_permit()?;
+    let lifetime = Arc::new(WorkerLifetime::Child(Mutex::new(None)));
+    let alive_hint = Arc::new(AtomicBool::new(false));
+    let mut retirement = ProcessRetirement {
+        liveness: WorkerLiveness {
+            lifetime: Arc::clone(&lifetime),
+            alive_hint: Arc::clone(&alive_hint),
+        },
+        permit: Some(retirement_permit),
+        kernel_pins: None,
+        armed: true,
+    };
     // This is deliberately the final user pre-exec hook installed on the command.
     install_close_range_on_exec(&mut command);
-    let (child, observation) = spawn_after_seccomp_baseline(&mut command, observation_mode)?;
-    let child_pid = child.id();
-    let kernel_pins = crate::worker_sandbox::WorkerKernelPins::pin_process(&child);
-    let lifetime = Arc::new(WorkerLifetime::Child(Mutex::new(Some(child))));
-    let alive_hint = Arc::new(AtomicBool::new(true));
+    // Command::spawn is a blocking OS boundary and cannot itself be interrupted. Once it returns,
+    // the exact child is immediately moved into the already-armed linear retirement owner.
+    let launched =
+        spawn_after_seccomp_baseline(&mut command, observation_mode, deadline, lifetime.as_ref());
+    let (child_pid, observation) = match launched {
+        Ok(launched) => launched,
+        Err(error) => {
+            retirement.confirm_reaped();
+            return Err(error);
+        }
+    };
+    alive_hint.store(true, Ordering::SeqCst);
+    let kernel_pins = {
+        let child_slot = lifetime
+            .child_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let child = child_slot.as_ref().unwrap_or_else(|| std::process::abort());
+        crate::worker_sandbox::WorkerKernelPins::pin_process(child)
+    };
     let kernel_pins = match kernel_pins {
         Ok(kernel_pins) => kernel_pins,
         Err(error) => {
-            let retirement = ProcessRetirement {
-                liveness: WorkerLiveness {
-                    lifetime,
-                    alive_hint,
-                },
-                permit: Some(retirement_permit),
-                kernel_pins: None,
-                armed: true,
-            };
             return Err(finish_unconstructed_launch_failure(
                 retirement,
                 error.into(),
             ));
         }
     };
+    retirement.kernel_pins = Some(kernel_pins);
     let expected_peer =
         match ExpectedUnixCredentials::new(child_pid, worker_identity.uid(), worker_identity.gid())
         {
             Ok(expected_peer) => expected_peer,
             Err(error) => {
-                let retirement = ProcessRetirement {
-                    liveness: WorkerLiveness {
-                        lifetime,
-                        alive_hint,
-                    },
-                    permit: Some(retirement_permit),
-                    kernel_pins: Some(kernel_pins),
-                    armed: true,
-                };
                 return Err(finish_unconstructed_launch_failure(
                     retirement,
                     error.into(),
                 ));
             }
         };
-    let retirement = ProcessRetirement {
-        liveness: WorkerLiveness {
-            lifetime: Arc::clone(&lifetime),
-            alive_hint: Arc::clone(&alive_hint),
-        },
-        permit: Some(retirement_permit),
-        kernel_pins: Some(kernel_pins),
-        armed: true,
-    };
     let process = WorkerProcess {
         child_pid,
         binding: Some((context_id, generation)),
@@ -712,21 +845,13 @@ fn spawn_with_command_locked(
         alive_hint,
         retirement: Mutex::new(Some(retirement)),
     };
+    if let Err(error) = ensure_worker_deadline(deadline) {
+        return Err(finish_launch_failure(process, error));
+    }
     if !process.probe_alive() {
         return Err(finish_launch_failure(process, WorkerV3Error::Dead));
     }
-    if let Err(error) = parent_handshake(
-        &process,
-        observation,
-        parent_identity,
-        worker_identity,
-        context_id,
-        generation,
-        challenge,
-    ) {
-        return Err(finish_launch_failure(process, error));
-    }
-    if let Err(error) = configure_channel(&process.channel, CHANNEL_TIMEOUT) {
+    if let Err(error) = parent_handshake(&process, observation, challenge, binding) {
         return Err(finish_launch_failure(process, error));
     }
     Ok(AuthenticatedWorker {
@@ -738,7 +863,24 @@ fn spawn_with_command_locked(
 fn spawn_worker_v3(
     reservation: GenerationReservation,
 ) -> Result<SpawnedWorker, WorkerSpawnFailure> {
+    let deadline = match HardDeadline::after(SPAWN_TIMEOUT) {
+        Ok(deadline) => deadline,
+        Err(error) => {
+            return Err(WorkerSpawnFailure {
+                error: WorkerV3Error::Io(error),
+                reservation,
+            });
+        }
+    };
+    spawn_worker_v3_until(reservation, deadline)
+}
+
+fn spawn_worker_v3_until(
+    reservation: GenerationReservation,
+    deadline: HardDeadline,
+) -> Result<SpawnedWorker, WorkerSpawnFailure> {
     let result = (|| {
+        ensure_worker_deadline(deadline)?;
         if !geteuid().is_root() {
             return Err(WorkerV3Error::Authentication);
         }
@@ -749,7 +891,7 @@ fn spawn_worker_v3(
         let account = crate::runtime::pinned_production_worker_identity()?;
         let worker_identity =
             crate::worker_sandbox::WorkerIdentity::new(account.uid(), account.gid())?;
-        spawn_with_command(
+        spawn_with_command_until(
             command,
             InitialProcessIdentity {
                 uid: 0,
@@ -759,6 +901,7 @@ fn spawn_worker_v3(
             reservation.context_id,
             reservation.generation,
             None,
+            deadline,
         )
     })();
     match result {
@@ -906,7 +1049,6 @@ where
     let prepared_sandbox = begin_sandbox(parent_network_namespace)?;
     validate_child_descriptor_contract(&channel)?;
     enable_passcred_receiver(&channel)?;
-    configure_channel(&channel, HANDSHAKE_TIMEOUT)?;
 
     let parent_pid = u32::try_from(initial_parent).map_err(|_| WorkerV3Error::Authentication)?;
     let expected_parent = ExpectedUnixCredentials::new(parent_pid, required_user, required_group)?;
@@ -974,7 +1116,6 @@ where
     {
         return Err(WorkerV3Error::Authentication);
     }
-    configure_channel(&channel, CHANNEL_TIMEOUT)?;
     send_credential_record(&channel, &accepted.sandbox_ready().encode())?;
     child_loop(&channel, expected_parent, hello.context_id)
 }
@@ -1088,7 +1229,26 @@ enum WorkerLifetime {
         termination_results: Mutex<VecDeque<TerminationOutcome>>,
         default_result: TerminationOutcome,
         attempts: Arc<AtomicUsize>,
+        termination_delay: Duration,
+        probe_delay: Duration,
     },
+}
+
+impl WorkerLifetime {
+    fn child_slot(&self) -> &Mutex<Option<Child>> {
+        match self {
+            Self::Child(child) => child,
+            #[cfg(test)]
+            Self::Fake { .. } => std::process::abort(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct FakeWorkerDelays {
+    termination: Duration,
+    probe: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1398,6 +1558,55 @@ impl WorkerLiveness {
         }
     }
 
+    /// Probe liveness without waiting past the caller's absolute transaction deadline.
+    fn probe_alive_until(&self, deadline: HardDeadline) -> Result<bool, WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        if !self.known_alive() {
+            return Ok(false);
+        }
+        match self.lifetime.as_ref() {
+            WorkerLifetime::Child(child) => loop {
+                ensure_worker_deadline(deadline)?;
+                match child.try_lock() {
+                    Ok(mut child) => {
+                        let Some(process) = child.as_mut() else {
+                            self.alive_hint.store(false, Ordering::SeqCst);
+                            return Ok(false);
+                        };
+                        let alive = match classify_child_wait(&process.try_wait()) {
+                            ChildWaitObservation::Reaped => {
+                                *child = None;
+                                self.alive_hint.store(false, Ordering::SeqCst);
+                                false
+                            }
+                            ChildWaitObservation::Running => true,
+                            ChildWaitObservation::Fatal => false,
+                        };
+                        ensure_worker_deadline(deadline)?;
+                        return Ok(alive);
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        let remaining = deadline.remaining().map_err(|error| {
+                            if error.kind() == io::ErrorKind::TimedOut {
+                                WorkerV3Error::Deadline
+                            } else {
+                                WorkerV3Error::Io(error)
+                            }
+                        })?;
+                        thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => return Ok(false),
+                }
+            },
+            #[cfg(test)]
+            WorkerLifetime::Fake { probe_delay, .. } => {
+                thread::sleep(*probe_delay);
+                ensure_worker_deadline(deadline)?;
+                Ok(self.known_alive())
+            }
+        }
+    }
+
     /// Requests termination and proves reaping within one fixed bound.
     ///
     /// This is called only for an unregistered launch failure or after the owning process
@@ -1458,6 +1667,8 @@ impl WorkerLiveness {
                 termination_results,
                 default_result,
                 attempts,
+                termination_delay: _,
+                probe_delay: _,
             } => {
                 let outcome = termination_results
                     .lock()
@@ -1475,6 +1686,123 @@ impl WorkerLiveness {
 
     fn terminate_bounded(&self, timeout: Duration) -> bool {
         enforce_termination_outcome(self.termination_outcome(timeout))
+    }
+
+    fn termination_outcome_until(&self, deadline: HardDeadline) -> TerminationOutcome {
+        if deadline.ensure_remaining().is_err() {
+            return TerminationOutcome::TimedOut;
+        }
+        match self.lifetime.as_ref() {
+            WorkerLifetime::Child(child) => self.child_termination_outcome_until(child, deadline),
+            #[cfg(test)]
+            WorkerLifetime::Fake {
+                termination_results,
+                default_result,
+                attempts,
+                termination_delay,
+                probe_delay: _,
+            } => {
+                let outcome = termination_results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front()
+                    .unwrap_or(*default_result);
+                attempts.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(*termination_delay);
+                if outcome == TerminationOutcome::Reaped {
+                    self.alive_hint.store(false, Ordering::SeqCst);
+                }
+                if outcome == TerminationOutcome::Fatal {
+                    TerminationOutcome::Fatal
+                } else if deadline.ensure_remaining().is_err() {
+                    TerminationOutcome::TimedOut
+                } else {
+                    outcome
+                }
+            }
+        }
+    }
+
+    fn child_termination_outcome_until(
+        &self,
+        child: &Mutex<Option<Child>>,
+        deadline: HardDeadline,
+    ) -> TerminationOutcome {
+        let mut child = loop {
+            if deadline.ensure_remaining().is_err() {
+                return TerminationOutcome::TimedOut;
+            }
+            match child.try_lock() {
+                Ok(child) => break child,
+                Err(std::sync::TryLockError::Poisoned(_)) => return TerminationOutcome::Fatal,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let Ok(remaining) = deadline.remaining() else {
+                        return TerminationOutcome::TimedOut;
+                    };
+                    thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
+                }
+            }
+        };
+        let Some(process) = child.as_mut() else {
+            self.alive_hint.store(false, Ordering::SeqCst);
+            return if deadline.ensure_remaining().is_ok() {
+                TerminationOutcome::Reaped
+            } else {
+                TerminationOutcome::TimedOut
+            };
+        };
+        match classify_child_wait(&process.try_wait()) {
+            ChildWaitObservation::Reaped => {
+                *child = None;
+                self.alive_hint.store(false, Ordering::SeqCst);
+                return if deadline.ensure_remaining().is_ok() {
+                    TerminationOutcome::Reaped
+                } else {
+                    TerminationOutcome::TimedOut
+                };
+            }
+            ChildWaitObservation::Running => {}
+            ChildWaitObservation::Fatal => return TerminationOutcome::Fatal,
+        }
+        if deadline.ensure_remaining().is_err() {
+            return TerminationOutcome::TimedOut;
+        }
+        if process.kill().is_err() {
+            let outcome = outcome_after_kill_error(classify_child_wait(&process.try_wait()));
+            if outcome == TerminationOutcome::Reaped {
+                *child = None;
+                self.alive_hint.store(false, Ordering::SeqCst);
+            }
+            return if outcome == TerminationOutcome::Fatal {
+                TerminationOutcome::Fatal
+            } else if deadline.ensure_remaining().is_ok() {
+                outcome
+            } else {
+                TerminationOutcome::TimedOut
+            };
+        }
+        loop {
+            if deadline.ensure_remaining().is_err() {
+                return TerminationOutcome::TimedOut;
+            }
+            match classify_child_wait(&process.try_wait()) {
+                ChildWaitObservation::Reaped => {
+                    *child = None;
+                    self.alive_hint.store(false, Ordering::SeqCst);
+                    return if deadline.ensure_remaining().is_ok() {
+                        TerminationOutcome::Reaped
+                    } else {
+                        TerminationOutcome::TimedOut
+                    };
+                }
+                ChildWaitObservation::Running => {}
+                ChildWaitObservation::Fatal => return TerminationOutcome::Fatal,
+            }
+            let Ok(remaining) = deadline.remaining() else {
+                return TerminationOutcome::TimedOut;
+            };
+            thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
+        }
     }
 }
 
@@ -1583,6 +1911,21 @@ impl WorkerProcess {
         }
     }
 
+    fn disarm_retirement_for_shutdown(&self, deadline: HardDeadline) -> Result<(), WorkerV3Error> {
+        let mut owner = match self.retirement.try_lock() {
+            Ok(owner) => owner,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(WorkerV3Error::Deadline),
+        };
+        ensure_worker_deadline(deadline)?;
+        let Some(retirement) = owner.as_mut() else {
+            return Err(WorkerV3Error::Stale);
+        };
+        retirement.confirm_reaped();
+        *owner = None;
+        Ok(())
+    }
+
     fn transfer_retirement_to_reaper(&self) {
         if let Some(retirement) = self.take_retirement() {
             escalate_retirement(retirement);
@@ -1624,6 +1967,27 @@ impl WorkerProcess {
         default_result: bool,
         attempts: Arc<AtomicUsize>,
     ) -> Self {
+        Self::fake_with_delayed_termination_results(
+            channel,
+            child_pid,
+            alive,
+            termination_results,
+            default_result,
+            attempts,
+            FakeWorkerDelays::default(),
+        )
+    }
+
+    #[cfg(test)]
+    fn fake_with_delayed_termination_results(
+        channel: Socket,
+        child_pid: u32,
+        alive: Arc<AtomicBool>,
+        termination_results: VecDeque<bool>,
+        default_result: bool,
+        attempts: Arc<AtomicUsize>,
+        delays: FakeWorkerDelays,
+    ) -> Self {
         let lifetime = Arc::new(WorkerLifetime::Fake {
             termination_results: Mutex::new(
                 termination_results
@@ -1643,6 +2007,8 @@ impl WorkerProcess {
                 TerminationOutcome::TimedOut
             },
             attempts,
+            termination_delay: delays.termination,
+            probe_delay: delays.probe,
         });
         let retirement = ProcessRetirement {
             liveness: WorkerLiveness {
@@ -1725,6 +2091,14 @@ struct InFlight {
     prior_phase: StablePhase,
     success_phase: StablePhase,
     terminal: bool,
+    deadline: HardDeadline,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct FinishCommitHook {
+    reached: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
 }
 
 struct WorkerRecord {
@@ -1755,6 +2129,7 @@ struct CachedCall {
     token: CacheKey,
     response: InternalWorkerResponse,
     liveness: WorkerLiveness,
+    deadline: HardDeadline,
 }
 
 enum RegistryPlan {
@@ -1880,6 +2255,8 @@ struct WorkerRegistry {
     maximum_cache_entries: usize,
     maximum_ttl: Duration,
     shutting_down: bool,
+    #[cfg(test)]
+    finish_commit_hook: Option<FinishCommitHook>,
 }
 
 impl Default for WorkerRegistry {
@@ -1906,6 +2283,8 @@ impl WorkerRegistry {
             maximum_cache_entries,
             maximum_ttl,
             shutting_down: false,
+            #[cfg(test)]
+            finish_commit_hook: None,
         }
     }
 
@@ -2075,13 +2454,15 @@ impl WorkerRegistry {
         self.commit_reserved(reservation, process, now)
     }
 
-    fn plan(
+    fn plan_until(
         &mut self,
         context_id: ContextId,
         generation: u64,
         request: &InternalWorkerRequest,
         now: Instant,
+        deadline: HardDeadline,
     ) -> Result<RegistryPlan, WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
         self.expire_cache(now);
         self.expire_tombstones(now);
         if self.shutting_down {
@@ -2126,10 +2507,12 @@ impl WorkerRegistry {
                 return Err(WorkerV3Error::Conflict);
             }
             if let Some(entry) = self.cache.get(&key) {
+                ensure_worker_deadline(deadline)?;
                 return Ok(RegistryPlan::Cached(CachedCall {
                     token: key,
                     response: entry.response.clone(),
                     liveness,
+                    deadline,
                 }));
             }
             return Err(if in_flight.is_some_and(|value| value.key == key) {
@@ -2151,7 +2534,9 @@ impl WorkerRegistry {
             prior_phase: phase,
             success_phase,
             terminal,
+            deadline,
         };
+        ensure_worker_deadline(deadline)?;
         self.tombstones.insert(
             tombstone_key,
             Tombstone {
@@ -2176,6 +2561,18 @@ impl WorkerRegistry {
         }))
     }
 
+    #[cfg(test)]
+    fn plan(
+        &mut self,
+        context_id: ContextId,
+        generation: u64,
+        request: &InternalWorkerRequest,
+        now: Instant,
+    ) -> Result<RegistryPlan, WorkerV3Error> {
+        let deadline = HardDeadline::after(CHANNEL_TIMEOUT).map_err(WorkerV3Error::Io)?;
+        self.plan_until(context_id, generation, request, now, deadline)
+    }
+
     fn finish(
         &mut self,
         token: PlanToken,
@@ -2187,6 +2584,12 @@ impl WorkerRegistry {
         let valid = validate_response_for_request(request, response).is_ok()
             && request_key(token.context_id, token.generation, request)
                 .is_ok_and(|key| key == token.in_flight.key);
+        let deadline_live = ensure_worker_deadline(token.in_flight.deadline).is_ok();
+        #[cfg(test)]
+        if let Some(hook) = self.finish_commit_hook.clone() {
+            hook.reached.wait();
+            hook.release.wait();
+        }
         let shutting_down = self.shutting_down;
         let mut should_cache = false;
         let mut cache_expiry = now;
@@ -2209,24 +2612,24 @@ impl WorkerRegistry {
 
             let alive_at_commit = token.in_flight.terminal
                 || (worker_alive && record.alive_hint.load(Ordering::SeqCst));
-            if !valid || shutting_down || now >= record.expires_at || !alive_at_commit {
-                record.in_flight = None;
-                record.quarantined = true;
-                let detached = record.process.take().map(|process| DetachedWorker {
-                    context_id: token.context_id,
-                    generation: token.generation,
-                    process,
-                });
-                FinishOutcome::Rejected {
-                    error: if !valid {
-                        WorkerV3Error::Invalid
-                    } else if shutting_down {
-                        WorkerV3Error::ShuttingDown
-                    } else {
-                        WorkerV3Error::Dead
-                    },
-                    detached,
-                }
+            if !valid
+                || !deadline_live
+                || shutting_down
+                || now >= record.expires_at
+                || !alive_at_commit
+            {
+                let error = if !valid {
+                    WorkerV3Error::Invalid
+                } else if !deadline_live {
+                    WorkerV3Error::Deadline
+                } else if shutting_down {
+                    WorkerV3Error::ShuttingDown
+                } else {
+                    WorkerV3Error::Dead
+                };
+                Self::reject_finish(record, token, error)
+            } else if ensure_worker_deadline(token.in_flight.deadline).is_err() {
+                Self::reject_finish(record, token, WorkerV3Error::Deadline)
             } else if let Ok(result) = InternalWorkerResult::try_from(response.result) {
                 record.in_flight = None;
                 if result == InternalWorkerResult::Ok {
@@ -2258,20 +2661,36 @@ impl WorkerRegistry {
                     FinishOutcome::Committed
                 }
             } else {
-                record.in_flight = None;
-                record.quarantined = true;
-                let detached = record.process.take().map(|process| DetachedWorker {
-                    context_id: token.context_id,
-                    generation: token.generation,
-                    process,
-                });
-                FinishOutcome::Rejected {
-                    error: WorkerV3Error::Invalid,
-                    detached,
-                }
+                Self::reject_finish(record, token, WorkerV3Error::Invalid)
             }
         };
 
+        self.apply_finish_outcome(token, response, outcome, should_cache, cache_expiry)
+    }
+
+    fn reject_finish(
+        record: &mut WorkerRecord,
+        token: PlanToken,
+        error: WorkerV3Error,
+    ) -> FinishOutcome {
+        record.in_flight = None;
+        record.quarantined = true;
+        let detached = record.process.take().map(|process| DetachedWorker {
+            context_id: token.context_id,
+            generation: token.generation,
+            process,
+        });
+        FinishOutcome::Rejected { error, detached }
+    }
+
+    fn apply_finish_outcome(
+        &mut self,
+        token: PlanToken,
+        response: &InternalWorkerResponse,
+        outcome: FinishOutcome,
+        should_cache: bool,
+        cache_expiry: Instant,
+    ) -> FinishOutcome {
         if matches!(&outcome, FinishOutcome::Committed) {
             if should_cache {
                 self.insert_cache(token.in_flight.key, response.clone(), cache_expiry);
@@ -2289,6 +2708,12 @@ impl WorkerRegistry {
         worker_alive: bool,
     ) -> FinishOutcome {
         let cache_present = self.cache.contains_key(&call.token);
+        let deadline_live = ensure_worker_deadline(call.deadline).is_ok();
+        #[cfg(test)]
+        if let Some(hook) = self.finish_commit_hook.clone() {
+            hook.reached.wait();
+            hook.release.wait();
+        }
         let shutting_down = self.shutting_down;
         let mut purge = false;
         let outcome = {
@@ -2307,10 +2732,12 @@ impl WorkerRegistry {
             if !record.quarantined
                 && record.in_flight.is_none()
                 && cache_present
+                && deadline_live
                 && !shutting_down
                 && now < record.expires_at
                 && worker_alive
                 && record.alive_hint.load(Ordering::SeqCst)
+                && ensure_worker_deadline(call.deadline).is_ok()
             {
                 FinishOutcome::Committed
             } else {
@@ -2325,6 +2752,8 @@ impl WorkerRegistry {
                 FinishOutcome::Rejected {
                     error: if shutting_down {
                         WorkerV3Error::ShuttingDown
+                    } else if !deadline_live || ensure_worker_deadline(call.deadline).is_err() {
+                        WorkerV3Error::Deadline
                     } else {
                         WorkerV3Error::Dead
                     },
@@ -2622,6 +3051,14 @@ fn lock_worker_registry(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn ensure_worker_deadline(deadline: HardDeadline) -> Result<(), WorkerV3Error> {
+    match deadline.ensure_remaining() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => Err(WorkerV3Error::Deadline),
+        Err(error) => Err(WorkerV3Error::Io(error)),
+    }
+}
+
 struct SupervisorSettlements {
     shutdown_owners: Vec<DetachedWorker>,
     unresolved: bool,
@@ -2648,6 +3085,10 @@ impl SupervisorSettlements {
     }
 
     fn capture_shutdown_owner(&mut self, detached: DetachedWorker) {
+        if self.unresolved {
+            detached.escalate_to_reaper();
+            return;
+        }
         if self.shutdown_owners.len() >= MAX_PROCESS_OWNERS {
             std::process::abort();
         }
@@ -2656,6 +3097,9 @@ impl SupervisorSettlements {
 
     fn mark_unresolved(&mut self) {
         self.unresolved = true;
+        for detached in self.shutdown_owners.drain(..) {
+            detached.escalate_to_reaper();
+        }
     }
 
     fn take_for_shutdown(&mut self) -> (Vec<DetachedWorker>, bool) {
@@ -2700,6 +3144,13 @@ struct WorkerSupervisor {
     settlements: Arc<Mutex<SupervisorSettlements>>,
 }
 
+#[must_use = "shutdown retirement must retain retryable worker ownership"]
+enum ShutdownRetirement {
+    Confirmed,
+    Retryable(DetachedWorker),
+    Unresolved,
+}
+
 impl WorkerSupervisor {
     async fn run(
         &self,
@@ -2716,10 +3167,14 @@ impl WorkerSupervisor {
         &self,
         call: CachedCall,
     ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
+        let deadline = call.deadline;
         let liveness = call.liveness.clone();
-        let worker_alive = tokio::task::spawn_blocking(move || liveness.probe_alive())
-            .await
-            .unwrap_or(false);
+        let worker_alive =
+            tokio::task::spawn_blocking(move || liveness.probe_alive_until(deadline))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(false);
         let outcome = lock_worker_registry(&self.registry).validate_cached(
             &call,
             Instant::now(),
@@ -2738,16 +3193,24 @@ impl WorkerSupervisor {
         request: InternalWorkerRequest,
     ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
         let token = call.token;
+        let deadline = token.in_flight.deadline;
         let io_request = request.clone();
         let result = tokio::task::spawn_blocking(move || {
-            send_credential_worker_request(&call.channel, &io_request)?;
-            let execution =
-                receive_credential_worker_response(&call.channel, &io_request, call.expected_peer)?;
-            Ok::<_, WorkerV3Error>((execution, call.liveness.probe_alive()))
+            send_credential_worker_request_with_deadline(&call.channel, &io_request, deadline)?;
+            let execution = receive_credential_worker_response_with_deadline(
+                &call.channel,
+                &io_request,
+                call.expected_peer,
+                deadline,
+            )?;
+            let worker_alive = call.liveness.probe_alive_until(deadline)?;
+            ensure_worker_deadline(deadline)?;
+            Ok::<_, WorkerV3Error>((execution, worker_alive))
         })
         .await;
         let Ok(Ok((execution, worker_alive))) = result else {
-            return self.finish_ambiguous(token).await;
+            let deadline_elapsed = ensure_worker_deadline(deadline).is_err();
+            return self.finish_ambiguous(token, deadline_elapsed).await;
         };
         let outcome = lock_worker_registry(&self.registry).finish(
             token,
@@ -2762,15 +3225,22 @@ impl WorkerSupervisor {
     async fn finish_ambiguous(
         &self,
         token: PlanToken,
+        deadline_elapsed: bool,
     ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
         let detached = lock_worker_registry(&self.registry)
             .mark_ambiguous(token)
             .ok()
             .flatten();
         if let Some(worker) = detached {
-            let _ = self.retire(worker).await;
+            if !self.retire(worker).await {
+                return Err(WorkerV3Error::Ambiguous);
+            }
         }
-        Err(WorkerV3Error::Ambiguous)
+        Err(if deadline_elapsed {
+            WorkerV3Error::Deadline
+        } else {
+            WorkerV3Error::Ambiguous
+        })
     }
 
     async fn resolve_finish(
@@ -2859,22 +3329,52 @@ impl WorkerSupervisor {
         }
     }
 
-    async fn retire_for_shutdown(&self, detached: DetachedWorker) -> bool {
+    async fn retire_for_shutdown_until(
+        &self,
+        detached: DetachedWorker,
+        deadline: HardDeadline,
+    ) -> ShutdownRetirement {
         let liveness = detached.process.liveness();
-        let stopped =
-            tokio::task::spawn_blocking(move || liveness.terminate_bounded(TERMINATION_TIMEOUT))
-                .await
-                .unwrap_or(false);
-        if stopped {
-            detached.process.disarm_retirement();
-            let purged = lock_worker_registry(&self.registry)
-                .purge_confirmed(detached.context_id, detached.generation)
-                .is_ok();
-            drop(detached);
-            purged
-        } else {
-            detached.escalate_to_reaper();
-            false
+        match tokio::task::spawn_blocking(move || liveness.termination_outcome_until(deadline))
+            .await
+        {
+            Ok(TerminationOutcome::Reaped) => {
+                if ensure_worker_deadline(deadline).is_err() {
+                    return ShutdownRetirement::Retryable(detached);
+                }
+                let mut registry = match self.registry.try_lock() {
+                    Ok(registry) => registry,
+                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        return ShutdownRetirement::Retryable(detached);
+                    }
+                };
+                if ensure_worker_deadline(deadline).is_err() {
+                    return ShutdownRetirement::Retryable(detached);
+                }
+                if detached
+                    .process
+                    .disarm_retirement_for_shutdown(deadline)
+                    .is_err()
+                {
+                    return ShutdownRetirement::Retryable(detached);
+                }
+                let purged = registry
+                    .purge_confirmed(detached.context_id, detached.generation)
+                    .is_ok();
+                drop(registry);
+                drop(detached);
+                if purged {
+                    ShutdownRetirement::Confirmed
+                } else {
+                    ShutdownRetirement::Unresolved
+                }
+            }
+            Ok(TerminationOutcome::TimedOut) => ShutdownRetirement::Retryable(detached),
+            Ok(TerminationOutcome::Fatal) | Err(_) => {
+                detached.escalate_to_reaper();
+                ShutdownRetirement::Unresolved
+            }
         }
     }
 
@@ -2903,8 +3403,27 @@ struct ShutdownCompletion {
 }
 
 struct ShutdownCompletionInner {
-    result: Mutex<Option<bool>>,
+    result: Mutex<Option<TimedShutdownStatus>>,
     completed: Notify,
+}
+
+#[derive(Clone, Copy)]
+struct TimedShutdownStatus {
+    status: ShutdownStatus,
+    completed_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownStatus {
+    Pending,
+    Confirmed,
+    Retryable,
+    Unresolved,
+}
+
+enum ShutdownWaitTarget {
+    Immediate(ShutdownStatus),
+    Attempt(ShutdownCompletion),
 }
 
 impl ShutdownCompletion {
@@ -2917,20 +3436,26 @@ impl ShutdownCompletion {
         }
     }
 
-    fn complete(&self, confirmed: bool) {
+    fn complete(&self, status: ShutdownStatus) {
+        if status == ShutdownStatus::Pending {
+            std::process::abort();
+        }
         let mut result = self
             .inner
             .result
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if result.is_none() {
-            *result = Some(confirmed);
+            *result = Some(TimedShutdownStatus {
+                status,
+                completed_at: Instant::now(),
+            });
             drop(result);
             self.inner.completed.notify_waiters();
         }
     }
 
-    async fn wait(&self) -> bool {
+    async fn wait_until(&self, deadline: HardDeadline) -> ShutdownStatus {
         loop {
             let notified = self.inner.completed.notified();
             if let Some(result) = *self
@@ -2939,27 +3464,87 @@ impl ShutdownCompletion {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
             {
-                return result;
+                return if result.completed_at < deadline.expires_at() {
+                    result.status
+                } else {
+                    ShutdownStatus::Pending
+                };
             }
-            notified.await;
+            if deadline.ensure_remaining().is_err() {
+                return ShutdownStatus::Pending;
+            }
+            tokio::select! {
+                () = notified => {}
+                () = tokio::time::sleep_until(deadline.expires_at().into()) => {
+                    return ShutdownStatus::Pending;
+                }
+            }
         }
     }
 }
 
 struct ShutdownPublicationGuard {
+    supervisors: Arc<Mutex<SupervisorState>>,
+    settlements: Arc<Mutex<SupervisorSettlements>>,
+    attempt_id: u64,
     completion: Option<ShutdownCompletion>,
 }
 
 impl ShutdownPublicationGuard {
-    fn new(completion: ShutdownCompletion) -> Self {
+    fn new(
+        supervisors: Arc<Mutex<SupervisorState>>,
+        settlements: Arc<Mutex<SupervisorSettlements>>,
+        attempt_id: u64,
+        completion: ShutdownCompletion,
+    ) -> Self {
         Self {
+            supervisors,
+            settlements,
+            attempt_id,
             completion: Some(completion),
         }
     }
 
-    fn publish(mut self, confirmed: bool) {
+    fn publish(mut self, status: ShutdownStatus, mut owners: ShutdownAttemptOwners) {
+        if status == ShutdownStatus::Pending {
+            std::process::abort();
+        }
+        if status == ShutdownStatus::Unresolved {
+            self.settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mark_unresolved();
+        }
+        let (workers, handles) = owners.release();
+        {
+            let mut state = self
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.shutdown_attempt != self.attempt_id
+                || state.shutdown_status != Some(ShutdownStatus::Pending)
+                || state.shutdown_completion.as_ref().is_none_or(|current| {
+                    self.completion
+                        .as_ref()
+                        .is_none_or(|completion| !Arc::ptr_eq(&current.inner, &completion.inner))
+                })
+            {
+                std::process::abort();
+            }
+            if matches!(
+                status,
+                ShutdownStatus::Confirmed | ShutdownStatus::Unresolved
+            ) && (!workers.is_empty() || !handles.is_empty())
+            {
+                std::process::abort();
+            }
+            state.shutdown_workers = workers;
+            state.handles = handles;
+            state.shutdown_status = Some(status);
+            state.shutdown_completion = None;
+        }
         if let Some(completion) = self.completion.take() {
-            completion.complete(confirmed);
+            completion.complete(status);
         }
     }
 }
@@ -2967,7 +3552,83 @@ impl ShutdownPublicationGuard {
 impl Drop for ShutdownPublicationGuard {
     fn drop(&mut self) {
         if let Some(completion) = self.completion.take() {
-            completion.complete(false);
+            self.settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mark_unresolved();
+            let (workers, handles) = {
+                let mut state = self
+                    .supervisors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.shutdown_attempt == self.attempt_id
+                    && state.shutdown_status == Some(ShutdownStatus::Pending)
+                {
+                    state.shutdown_status = Some(ShutdownStatus::Unresolved);
+                    state.shutdown_completion = None;
+                    (
+                        std::mem::take(&mut state.shutdown_workers),
+                        std::mem::take(&mut state.handles),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            };
+            for worker in workers {
+                worker.escalate_to_reaper();
+            }
+            for handle in handles {
+                handle.abort();
+            }
+            completion.complete(ShutdownStatus::Unresolved);
+        }
+    }
+}
+
+#[must_use = "shutdown attempt owners must be published or escalated"]
+struct ShutdownAttemptOwners {
+    workers: Vec<DetachedWorker>,
+    handles: Vec<JoinHandle<()>>,
+    armed: bool,
+}
+
+impl ShutdownAttemptOwners {
+    fn new(workers: Vec<DetachedWorker>, handles: Vec<JoinHandle<()>>) -> Self {
+        Self {
+            workers,
+            handles,
+            armed: true,
+        }
+    }
+
+    fn release(&mut self) -> (Vec<DetachedWorker>, Vec<JoinHandle<()>>) {
+        self.armed = false;
+        (
+            std::mem::take(&mut self.workers),
+            std::mem::take(&mut self.handles),
+        )
+    }
+
+    fn escalate_all(&mut self) {
+        for handle in self.handles.drain(..) {
+            handle.abort();
+        }
+        for worker in self.workers.drain(..) {
+            worker.escalate_to_reaper();
+        }
+    }
+}
+
+impl Drop for ShutdownAttemptOwners {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for handle in self.handles.drain(..) {
+            handle.abort();
+        }
+        for worker in self.workers.drain(..) {
+            worker.escalate_to_reaper();
         }
     }
 }
@@ -2977,6 +3638,9 @@ struct SupervisorState {
     active_permits: usize,
     pending_admissions: usize,
     handles: Vec<JoinHandle<()>>,
+    shutdown_workers: Vec<DetachedWorker>,
+    shutdown_attempt: u64,
+    shutdown_status: Option<ShutdownStatus>,
     shutdown_completion: Option<ShutdownCompletion>,
 }
 
@@ -3078,6 +3742,9 @@ impl WorkerCoordinator {
                 active_permits: 0,
                 pending_admissions: 0,
                 handles: Vec::with_capacity(MAX_SUPERVISORS),
+                shutdown_workers: Vec::with_capacity(MAX_PROCESS_OWNERS),
+                shutdown_attempt: 0,
+                shutdown_status: None,
                 shutdown_completion: None,
             })),
             settlements: Arc::new(Mutex::new(SupervisorSettlements::new())),
@@ -3129,6 +3796,19 @@ impl WorkerCoordinator {
         generation: u64,
         request: InternalWorkerRequest,
     ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
+        let deadline = HardDeadline::after(CHANNEL_TIMEOUT).map_err(WorkerV3Error::Io)?;
+        self.execute_until(context_id, generation, request, deadline)
+            .await
+    }
+
+    async fn execute_until(
+        &self,
+        context_id: ContextId,
+        generation: u64,
+        request: InternalWorkerRequest,
+        deadline: HardDeadline,
+    ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| WorkerV3Error::RuntimeUnavailable)?;
         let supervisor_permit = self.acquire_supervisor_permit()?;
@@ -3149,9 +3829,13 @@ impl WorkerCoordinator {
                 drop(permit);
             }
         }
+        // The pre-plan check is repeated after every await. Expiry here releases the admission
+        // permit without creating a tombstone, in-flight token, or registry mutation.
+        ensure_worker_deadline(deadline)?;
         let (plan, cleanup_required) = {
             let mut registry = lock_worker_registry(&self.registry);
-            let plan = registry.plan(context_id, generation, &request, Instant::now());
+            let plan =
+                registry.plan_until(context_id, generation, &request, Instant::now(), deadline);
             let cleanup_required = plan.is_err()
                 && matches!(
                     registry.visible_phase(context_id, generation),
@@ -3392,90 +4076,341 @@ impl WorkerCoordinator {
     }
 
     fn shutdown(&self) -> impl Future<Output = bool> + Send + 'static {
-        let completion = {
-            let mut supervisors = self
-                .supervisors
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(completion) = supervisors.shutdown_completion.as_ref() {
-                completion.clone()
-            } else {
-                supervisors.shutting_down = true;
-                let Some(reserved_slots) = supervisors
-                    .handles
-                    .len()
-                    .checked_add(supervisors.pending_admissions)
-                else {
-                    std::process::abort();
-                };
-                if reserved_slots > MAX_SUPERVISORS || supervisors.active_permits > MAX_SUPERVISORS
-                {
-                    std::process::abort();
-                }
-                let detached = lock_worker_registry(&self.registry).begin_shutdown();
-                let handles = std::mem::take(&mut supervisors.handles);
-                let completion = ShutdownCompletion::new();
-                supervisors.shutdown_completion = Some(completion.clone());
+        let deadline = HardDeadline::after(CHANNEL_TIMEOUT);
+        let shutdown = deadline.ok().map(|deadline| self.shutdown_until(deadline));
+        async move {
+            let Some(shutdown) = shutdown else {
+                return false;
+            };
+            shutdown.await == ShutdownStatus::Confirmed
+        }
+    }
 
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    let supervisor = WorkerSupervisor {
-                        registry: Arc::clone(&self.registry),
-                        settlements: Arc::clone(&self.settlements),
-                    };
-                    let settlements = Arc::clone(&self.settlements);
-                    let publication = ShutdownPublicationGuard::new(completion.clone());
-                    #[cfg(test)]
-                    let shutdown_hook = settlements
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .shutdown_hook
-                        .clone();
-                    let shutdown_task = runtime.spawn(async move {
-                        let publication = publication;
-                        #[cfg(test)]
-                        if let Some(hook) = shutdown_hook {
-                            hook.started.store(true, Ordering::SeqCst);
-                            hook.release.notified().await;
-                        }
+    fn shutdown_until(
+        &self,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = ShutdownStatus> + Send + 'static {
+        let target = self.shutdown_wait_target(deadline);
 
-                        let mut confirmed = true;
-                        for worker in detached {
-                            confirmed &= supervisor.retire_for_shutdown(worker).await;
-                        }
-                        for handle in handles {
-                            confirmed &= handle.await.is_ok();
-                        }
-
-                        let (mut settlement_owners, supervisors_settled) = settlements
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take_for_shutdown();
-                        confirmed &= supervisors_settled;
-
-                        let mut final_sweep =
-                            lock_worker_registry(&supervisor.registry).begin_shutdown();
-                        settlement_owners.append(&mut final_sweep);
-                        for worker in settlement_owners {
-                            confirmed &= supervisor.retire_for_shutdown(worker).await;
-                        }
-
-                        let registry_empty = lock_worker_registry(&supervisor.registry)
-                            .records
-                            .is_empty();
-                        publication.publish(confirmed && registry_empty);
-                    });
-                    drop(shutdown_task);
-                } else {
-                    for worker in detached {
-                        worker.escalate_to_reaper();
-                    }
-                    drop(handles);
-                    completion.complete(false);
-                }
-                completion
+        async move {
+            match target {
+                ShutdownWaitTarget::Immediate(status) => status,
+                ShutdownWaitTarget::Attempt(completion) => completion.wait_until(deadline).await,
             }
+        }
+    }
+
+    fn shutdown_wait_target(&self, deadline: HardDeadline) -> ShutdownWaitTarget {
+        let supervisors = self
+            .supervisors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match supervisors.shutdown_status {
+            Some(ShutdownStatus::Confirmed) => {
+                ShutdownWaitTarget::Immediate(ShutdownStatus::Confirmed)
+            }
+            Some(ShutdownStatus::Unresolved) => {
+                ShutdownWaitTarget::Immediate(ShutdownStatus::Unresolved)
+            }
+            Some(ShutdownStatus::Pending) => supervisors.shutdown_completion.clone().map_or(
+                ShutdownWaitTarget::Immediate(ShutdownStatus::Unresolved),
+                ShutdownWaitTarget::Attempt,
+            ),
+            None | Some(ShutdownStatus::Retryable) => {
+                if ensure_worker_deadline(deadline).is_err() {
+                    return ShutdownWaitTarget::Immediate(ShutdownStatus::Retryable);
+                }
+                let runtime = tokio::runtime::Handle::try_current().ok();
+                self.begin_shutdown_attempt(supervisors, runtime, deadline)
+            }
+        }
+    }
+
+    fn begin_shutdown_attempt(
+        &self,
+        mut state: std::sync::MutexGuard<'_, SupervisorState>,
+        runtime: Option<tokio::runtime::Handle>,
+        deadline: HardDeadline,
+    ) -> ShutdownWaitTarget {
+        state.shutting_down = true;
+        let Some(reserved_slots) = state.handles.len().checked_add(state.pending_admissions) else {
+            std::process::abort();
         };
-        async move { completion.wait().await }
+        if reserved_slots > MAX_SUPERVISORS
+            || state.active_permits > MAX_SUPERVISORS
+            || state.shutdown_workers.len() > MAX_PROCESS_OWNERS
+        {
+            std::process::abort();
+        }
+
+        let mut workers = std::mem::take(&mut state.shutdown_workers);
+        workers.append(&mut lock_worker_registry(&self.registry).begin_shutdown());
+        if workers.len() > MAX_PROCESS_OWNERS {
+            std::process::abort();
+        }
+        let handles = std::mem::take(&mut state.handles);
+        let Some(attempt_id) = state.shutdown_attempt.checked_add(1) else {
+            std::process::abort();
+        };
+        state.shutdown_attempt = attempt_id;
+        state.shutdown_status = Some(ShutdownStatus::Pending);
+        let completion = ShutdownCompletion::new();
+        state.shutdown_completion = Some(completion.clone());
+        drop(state);
+
+        let owners = ShutdownAttemptOwners::new(workers, handles);
+        let publication = ShutdownPublicationGuard::new(
+            Arc::clone(&self.supervisors),
+            Arc::clone(&self.settlements),
+            attempt_id,
+            completion.clone(),
+        );
+        self.launch_shutdown_attempt(runtime, publication, owners, deadline);
+        ShutdownWaitTarget::Attempt(completion)
+    }
+
+    fn launch_shutdown_attempt(
+        &self,
+        runtime: Option<tokio::runtime::Handle>,
+        publication: ShutdownPublicationGuard,
+        owners: ShutdownAttemptOwners,
+        deadline: HardDeadline,
+    ) {
+        let Some(runtime) = runtime else {
+            drop(owners);
+            drop(publication);
+            return;
+        };
+        let supervisor = WorkerSupervisor {
+            registry: Arc::clone(&self.registry),
+            settlements: Arc::clone(&self.settlements),
+        };
+        let settlements = Arc::clone(&self.settlements);
+        let supervisors = Arc::clone(&self.supervisors);
+        #[cfg(test)]
+        let shutdown_hook = settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown_hook
+            .clone();
+        let task = async move {
+            Self::run_shutdown_attempt(
+                supervisor,
+                supervisors,
+                settlements,
+                publication,
+                owners,
+                deadline,
+                #[cfg(test)]
+                shutdown_hook,
+            )
+            .await;
+        };
+        if let Ok(handle) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.spawn(task)))
+        {
+            drop(handle);
+        }
+        // A rejected spawn drops the still-owned future: exact process owners escalate and the
+        // publication guard makes Unresolved sticky.
+    }
+
+    async fn run_shutdown_attempt(
+        supervisor: WorkerSupervisor,
+        supervisors: Arc<Mutex<SupervisorState>>,
+        settlements: Arc<Mutex<SupervisorSettlements>>,
+        publication: ShutdownPublicationGuard,
+        mut owners: ShutdownAttemptOwners,
+        deadline: HardDeadline,
+        #[cfg(test)] shutdown_hook: Option<ShutdownHook>,
+    ) {
+        #[cfg(test)]
+        if let Some(hook) = shutdown_hook {
+            let released = hook.release.notified();
+            tokio::pin!(released);
+            hook.started.store(true, Ordering::SeqCst);
+            tokio::select! {
+                () = &mut released => {}
+                () = tokio::time::sleep_until(deadline.expires_at().into()) => {
+                    publication.publish(ShutdownStatus::Retryable, owners);
+                    return;
+                }
+            }
+        }
+
+        loop {
+            if let Err(status) =
+                Self::retire_shutdown_workers(&supervisor, &mut owners, deadline).await
+            {
+                Self::publish_shutdown_status(publication, owners, status);
+                return;
+            }
+            if let Err(status) = Self::await_shutdown_handles(&mut owners, deadline).await {
+                Self::publish_shutdown_status(publication, owners, status);
+                return;
+            }
+            if Self::wait_for_shutdown_permits(&supervisors, deadline)
+                .await
+                .is_err()
+            {
+                publication.publish(ShutdownStatus::Retryable, owners);
+                return;
+            }
+            match Self::collect_shutdown_sweep(&supervisor, &settlements, &mut owners) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(status) => {
+                    Self::publish_shutdown_status(publication, owners, status);
+                    return;
+                }
+            }
+
+            let registry_empty = lock_worker_registry(&supervisor.registry)
+                .records
+                .is_empty();
+            let exact_supervisor_state = {
+                let state = supervisors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.active_permits == 0
+                    && state.pending_admissions == 0
+                    && state.handles.is_empty()
+                    && state.shutdown_workers.is_empty()
+            };
+            if registry_empty
+                && exact_supervisor_state
+                && owners.workers.is_empty()
+                && owners.handles.is_empty()
+            {
+                let status = if ensure_worker_deadline(deadline).is_ok() {
+                    ShutdownStatus::Confirmed
+                } else {
+                    ShutdownStatus::Retryable
+                };
+                publication.publish(status, owners);
+            } else if exact_supervisor_state
+                && (!owners.workers.is_empty() || !owners.handles.is_empty())
+            {
+                publication.publish(ShutdownStatus::Retryable, owners);
+            } else {
+                Self::publish_shutdown_status(publication, owners, ShutdownStatus::Unresolved);
+            }
+            return;
+        }
+    }
+
+    async fn retire_shutdown_workers(
+        supervisor: &WorkerSupervisor,
+        owners: &mut ShutdownAttemptOwners,
+        deadline: HardDeadline,
+    ) -> Result<(), ShutdownStatus> {
+        let mut retryable = Vec::new();
+        while let Some(worker) = owners.workers.pop() {
+            if ensure_worker_deadline(deadline).is_err() {
+                retryable.push(worker);
+                retryable.append(&mut owners.workers);
+                owners.workers = retryable;
+                return Err(ShutdownStatus::Retryable);
+            }
+            match supervisor.retire_for_shutdown_until(worker, deadline).await {
+                ShutdownRetirement::Confirmed => {}
+                ShutdownRetirement::Retryable(worker) => retryable.push(worker),
+                ShutdownRetirement::Unresolved => {
+                    owners.workers.append(&mut retryable);
+                    return Err(ShutdownStatus::Unresolved);
+                }
+            }
+        }
+        owners.workers = retryable;
+        Ok(())
+    }
+
+    async fn await_shutdown_handles(
+        owners: &mut ShutdownAttemptOwners,
+        deadline: HardDeadline,
+    ) -> Result<(), ShutdownStatus> {
+        let mut pending = Vec::new();
+        while let Some(mut handle) = owners.handles.pop() {
+            if ensure_worker_deadline(deadline).is_err() {
+                pending.push(handle);
+                pending.append(&mut owners.handles);
+                owners.handles = pending;
+                return Err(ShutdownStatus::Retryable);
+            }
+            match tokio::time::timeout_at(deadline.expires_at().into(), &mut handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    handle.abort();
+                    owners.handles.append(&mut pending);
+                    return Err(ShutdownStatus::Unresolved);
+                }
+                Err(_) => {
+                    pending.push(handle);
+                    pending.append(&mut owners.handles);
+                    owners.handles = pending;
+                    return Err(ShutdownStatus::Retryable);
+                }
+            }
+        }
+        owners.handles = pending;
+        Ok(())
+    }
+
+    async fn wait_for_shutdown_permits(
+        supervisors: &Mutex<SupervisorState>,
+        deadline: HardDeadline,
+    ) -> Result<(), ShutdownStatus> {
+        loop {
+            let settled = {
+                let state = supervisors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.active_permits == 0 && state.pending_admissions == 0
+            };
+            if settled {
+                return Ok(());
+            }
+            ensure_worker_deadline(deadline).map_err(|_| ShutdownStatus::Retryable)?;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn collect_shutdown_sweep(
+        supervisor: &WorkerSupervisor,
+        settlements: &Mutex<SupervisorSettlements>,
+        owners: &mut ShutdownAttemptOwners,
+    ) -> Result<bool, ShutdownStatus> {
+        let (mut settlement_owners, supervisors_settled) = settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_for_shutdown();
+        if !supervisors_settled {
+            owners.workers.append(&mut settlement_owners);
+            return Err(ShutdownStatus::Unresolved);
+        }
+        settlement_owners.append(&mut lock_worker_registry(&supervisor.registry).begin_shutdown());
+        if owners
+            .workers
+            .len()
+            .checked_add(settlement_owners.len())
+            .is_none_or(|count| count > MAX_PROCESS_OWNERS)
+        {
+            std::process::abort();
+        }
+        let found = !settlement_owners.is_empty();
+        owners.workers.append(&mut settlement_owners);
+        Ok(found)
+    }
+
+    fn publish_shutdown_status(
+        publication: ShutdownPublicationGuard,
+        mut owners: ShutdownAttemptOwners,
+        status: ShutdownStatus,
+    ) {
+        if status == ShutdownStatus::Unresolved {
+            owners.escalate_all();
+        }
+        publication.publish(status, owners);
     }
 }
 
@@ -3719,11 +4654,14 @@ mod tests {
         let started = Instant::now();
         let result = spawn_with_command_locked(
             child_command(mode),
-            current_initial_identity(),
-            current_worker_identity(),
-            context_id,
-            generation,
-            Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
+            WorkerSpawnBinding {
+                parent_identity: current_initial_identity(),
+                worker_identity: current_worker_identity(),
+                context_id,
+                generation,
+                retained_environment: Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
+                deadline: HardDeadline::after(HANDSHAKE_TIMEOUT).expect("spawn deadline"),
+            },
             SandboxObservationMode::Fixture(fake_production_sandbox_snapshot()),
         )
         .map(|authenticated| authenticated.process);
@@ -3749,14 +4687,22 @@ mod tests {
         generation: u64,
         observed_snapshot: WorkerSandboxSnapshot,
     ) -> Result<AuthenticatedWorker, WorkerV3Error> {
-        spawn_with_command_fixture(
+        let timeout = if matches!(mode, "wrong-ready" | "unexpected-fd" | "wrong-challenge") {
+            HANDSHAKE_TIMEOUT
+        } else {
+            SPAWN_TIMEOUT
+        };
+        spawn_with_command_mode(
             child_command(mode),
-            current_initial_identity(),
-            current_worker_identity(),
-            context_id,
-            generation,
-            Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
-            observed_snapshot,
+            WorkerSpawnBinding {
+                parent_identity: current_initial_identity(),
+                worker_identity: current_worker_identity(),
+                context_id,
+                generation,
+                retained_environment: Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
+                deadline: HardDeadline::after(timeout).expect("fixture spawn deadline"),
+            },
+            SandboxObservationMode::Fixture(observed_snapshot),
         )
     }
 
@@ -3918,11 +4864,14 @@ mod tests {
         fcntl(&sentinel, FcntlArg::F_SETFD(FdFlag::empty())).expect("make sentinel inheritable");
         let result = spawn_with_command_locked(
             child_command("connect"),
-            current_initial_identity(),
-            current_worker_identity(),
-            [15; 16],
-            1,
-            Some((CHILD_FIXTURE_ENVIRONMENT, "connect")),
+            WorkerSpawnBinding {
+                parent_identity: current_initial_identity(),
+                worker_identity: current_worker_identity(),
+                context_id: [15; 16],
+                generation: 1,
+                retained_environment: Some((CHILD_FIXTURE_ENVIRONMENT, "connect")),
+                deadline: HardDeadline::after(SPAWN_TIMEOUT).expect("spawn deadline"),
+            },
             SandboxObservationMode::Fixture(fake_production_sandbox_snapshot()),
         );
         let parent_flags = FdFlag::from_bits_truncate(
@@ -4015,6 +4964,51 @@ mod tests {
             alive,
             attempts,
         )
+    }
+
+    fn fake_process_with_delayed_termination(
+        termination_delay: Duration,
+    ) -> (WorkerProcess, Socket, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let (parent, peer) = private_credential_worker_channel().expect("private channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        (
+            WorkerProcess::fake_with_delayed_termination_results(
+                parent,
+                process::id(),
+                Arc::clone(&alive),
+                VecDeque::from([true]),
+                true,
+                Arc::clone(&attempts),
+                FakeWorkerDelays {
+                    termination: termination_delay,
+                    probe: Duration::ZERO,
+                },
+            ),
+            peer,
+            alive,
+            attempts,
+        )
+    }
+
+    fn fake_process_with_probe_delay(
+        probe_delay: Duration,
+    ) -> (WorkerProcess, Socket, Arc<AtomicBool>) {
+        let (parent, peer) = private_credential_worker_channel().expect("private channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let process = WorkerProcess::fake_with_delayed_termination_results(
+            parent,
+            process::id(),
+            Arc::clone(&alive),
+            VecDeque::new(),
+            true,
+            Arc::new(AtomicUsize::new(0)),
+            FakeWorkerDelays {
+                termination: Duration::ZERO,
+                probe: probe_delay,
+            },
+        );
+        (process, peer, alive)
     }
 
     fn fake_process_with_termination(
@@ -4264,7 +5258,9 @@ mod tests {
             .map(|offset| mode_start + offset)
             .expect("locked spawn function");
         let mode_body = &source[mode_start..locked_start];
-        let lock = mode_body.find("WORKER_SPAWN_LOCK").expect("spawn lock");
+        let lock = mode_body
+            .find("lock_worker_spawn_until(binding.deadline)?")
+            .expect("deadline-bounded spawn lock");
         let locked_call = mode_body
             .rfind("spawn_with_command_locked(")
             .expect("locked spawn call");
@@ -4283,9 +5279,13 @@ mod tests {
             .find("install_close_range_on_exec(&mut command)")
             .expect("pre-exec fd fence");
         let secured_spawn = body
-            .find("spawn_after_seccomp_baseline(&mut command, observation_mode)?")
+            .find("spawn_after_seccomp_baseline(")
             .expect("baseline-bound spawn helper");
-        assert!(permit < close_range && close_range < secured_spawn);
+        let armed_retirement = body
+            .find("let mut retirement = ProcessRetirement")
+            .expect("pre-spawn armed retirement owner");
+        assert!(permit < armed_retirement && armed_retirement < close_range);
+        assert!(close_range < secured_spawn);
         assert!(!body.contains("/proc/self/fd"));
         assert!(!body.contains("fdinfo"));
 
@@ -4300,12 +5300,53 @@ mod tests {
         let baseline = helper_body
             .find("observation_mode.capture_parent_seccomp_baseline()?")
             .expect("thread-self seccomp baseline");
-        let direct_spawn = helper_body
+        let deadline_gate = helper_body
             .find(
-                "observation_mode.capture_parent_seccomp_baseline()?;\n    let child = command.spawn()?;",
+                "observation_mode.capture_parent_seccomp_baseline()?;\n    ensure_worker_deadline(deadline)?;\n    let child = command.spawn()?;",
             )
-            .expect("baseline must immediately precede spawn");
-        assert_eq!(baseline, direct_spawn);
+            .expect("deadline gate must be the only operation between baseline and spawn");
+        assert_eq!(baseline, deadline_gate);
+        assert!(
+            helper_body.contains("let child = command.spawn()?;\n    *child_slot = Some(child);")
+        );
+    }
+
+    #[test]
+    fn spawn_until_times_out_while_lock_is_held_and_never_calls_command_spawn() {
+        let spawn_guard = WORKER_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(0);
+        let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            let deadline =
+                HardDeadline::after(Duration::from_millis(40)).expect("short spawn deadline");
+            started_sender.send(()).expect("start signal");
+            let started = Instant::now();
+            let result = spawn_with_command_mode(
+                Command::new("/volparossa-test-must-never-be-spawned"),
+                WorkerSpawnBinding {
+                    parent_identity: current_initial_identity(),
+                    worker_identity: current_worker_identity(),
+                    context_id: [45; 16],
+                    generation: 1,
+                    retained_environment: None,
+                    deadline,
+                },
+                SandboxObservationMode::Fixture(fake_production_sandbox_snapshot()),
+            );
+            result_sender
+                .send((result, started.elapsed()))
+                .expect("result signal");
+        });
+        started_receiver.recv().expect("spawn attempt started");
+        let (result, elapsed) = result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("spawn lock acquisition must obey its hard deadline");
+        assert!(matches!(result, Err(WorkerV3Error::Deadline)));
+        assert!(elapsed < Duration::from_secs(2));
+        drop(spawn_guard);
+        worker.join().expect("spawn waiter");
     }
 
     #[tokio::test]
@@ -4361,7 +5402,9 @@ mod tests {
     #[test]
     fn final_parent_descriptor_audit_rejects_a_post_pin_open() {
         match spawn_fixture("extra-fd-after-pin", [35; 16], 1) {
-            Err(WorkerV3Error::Authentication | WorkerV3Error::Sandbox(_)) => {}
+            Err(
+                WorkerV3Error::Authentication | WorkerV3Error::Deadline | WorkerV3Error::Sandbox(_),
+            ) => {}
             Err(error) => panic!("unexpected post-pin descriptor error: {error}"),
             Ok(process) => {
                 assert!(process.terminate_bounded(TERMINATION_TIMEOUT));
@@ -4385,10 +5428,15 @@ mod tests {
 
     #[test]
     fn wrong_sandbox_ready_hash_fails_closed_and_is_reaped() {
-        assert!(matches!(
-            spawn_fixture("wrong-ready", [32; 16], 1),
-            Err(WorkerV3Error::Authentication)
-        ));
+        match spawn_fixture("wrong-ready", [32; 16], 1) {
+            Err(WorkerV3Error::Authentication | WorkerV3Error::Deadline | WorkerV3Error::Io(_)) => {
+            }
+            Err(error) => panic!("unexpected wrong-ready error: {error}"),
+            Ok(process) => {
+                assert!(process.terminate_bounded(TERMINATION_TIMEOUT));
+                panic!("wrong-ready worker authenticated")
+            }
+        }
     }
 
     #[test]
@@ -4517,12 +5565,15 @@ mod tests {
                 && pin_ack < final_credentials
                 && final_credentials < child_hello_receive
         );
-        let before_pin = &parent[..pin];
+        let before_drop_start = parent
+            .find("fn parent_handshake_before_drop(")
+            .expect("pre-drop helper");
+        let before_pin = &parent[before_drop_start..pin];
         assert_eq!(before_pin.matches("expected_before_drop").count(), 2);
         assert!(!before_pin.contains("expected_after_drop"));
         let after_pin_ack = &parent[pin_ack..];
         assert!(!after_pin_ack.contains("expected_before_drop"));
-        assert_eq!(after_pin_ack.matches("expected_after_drop").count(), 4);
+        assert_eq!(after_pin_ack.matches("expected_after_drop").count(), 6);
     }
 
     #[test]
@@ -4537,7 +5588,7 @@ mod tests {
             .expect("parent handshake boundary");
         let handshake = &source[parent_start..parent_end];
         let proof = handshake
-            .find("    let proof = receive_credential_record(")
+            .find("    let proof = receive_credential_record_with_deadline(")
             .expect("credential-bound proof receipt");
         let observe = handshake
             .find("process.observe_and_pin_sandbox(")
@@ -4546,10 +5597,12 @@ mod tests {
             .find("    .verify_once(")
             .expect("proof verification");
         let accepted = handshake
-            .find("    send_credential_record(&process.channel, &accepted.encode())?;")
+            .find(
+                "    send_credential_record_with_deadline(&process.channel, &accepted.encode(), deadline)?;",
+            )
             .expect("Accepted send");
         let ready_receive = handshake[accepted..]
-            .find("    let encoded = receive_credential_record(")
+            .find("    let encoded = receive_credential_record_with_deadline(")
             .map(|offset| accepted + offset)
             .expect("Ready receipt");
         let ready_verify = handshake
@@ -4910,6 +5963,136 @@ mod tests {
     }
 
     #[test]
+    fn expired_operation_deadline_rejects_normal_commit_boundary() {
+        let context_id = [49; 16];
+        let request = initialise(context_id, 43);
+        let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+        let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("register");
+        let deadline = HardDeadline::after(Duration::from_millis(200)).expect("commit deadline");
+        let planned = call(
+            registry
+                .plan_until(context_id, generation, &request, Instant::now(), deadline)
+                .expect("plan"),
+        );
+        let response = initialised_response(&request, context_id);
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        registry.finish_commit_hook = Some(FinishCommitHook {
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        let finisher = thread::spawn(move || {
+            let outcome = registry.finish(planned.token, &request, &response, Instant::now(), true);
+            (registry, outcome)
+        });
+        reached.wait();
+        assert!(deadline.ensure_remaining().is_ok());
+        thread::sleep(
+            deadline.remaining().expect("remaining commit budget") + Duration::from_millis(20),
+        );
+        release.wait();
+        let (mut registry, outcome) = finisher.join().expect("finish thread");
+        let FinishOutcome::Rejected {
+            error: WorkerV3Error::Deadline,
+            detached: Some(detached),
+        } = outcome
+        else {
+            panic!("expired normal completion must reject exact generation")
+        };
+        assert!(registry.cache.is_empty());
+        assert_eq!(
+            registry
+                .visible_phase(context_id, generation)
+                .expect("phase"),
+            VisiblePhase::Quarantined,
+        );
+        stop_and_purge(&mut registry, detached);
+    }
+
+    #[test]
+    fn expired_operation_deadline_rejects_cached_commit_boundary() {
+        let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+        let cached_context = [50; 16];
+        let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let cached_generation = registry
+            .register(
+                cached_context,
+                process,
+                Duration::from_secs(5),
+                Instant::now(),
+            )
+            .expect("cached register");
+        let cached_request = initialise(cached_context, 44);
+        let first = call(
+            registry
+                .plan(
+                    cached_context,
+                    cached_generation,
+                    &cached_request,
+                    Instant::now(),
+                )
+                .expect("first plan"),
+        );
+        let cached_response = initialised_response(&cached_request, cached_context);
+        assert!(matches!(
+            registry.finish(
+                first.token,
+                &cached_request,
+                &cached_response,
+                Instant::now(),
+                true,
+            ),
+            FinishOutcome::Committed,
+        ));
+        let cached_deadline =
+            HardDeadline::after(Duration::from_millis(200)).expect("cached deadline");
+        let RegistryPlan::Cached(cached) = registry
+            .plan_until(
+                cached_context,
+                cached_generation,
+                &cached_request,
+                Instant::now(),
+                cached_deadline,
+            )
+            .expect("cached plan")
+        else {
+            panic!("exact cached plan")
+        };
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        registry.finish_commit_hook = Some(FinishCommitHook {
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        let validator = thread::spawn(move || {
+            let outcome = registry.validate_cached(&cached, Instant::now(), true);
+            (registry, outcome)
+        });
+        reached.wait();
+        assert!(cached_deadline.ensure_remaining().is_ok());
+        thread::sleep(
+            cached_deadline
+                .remaining()
+                .expect("remaining cached commit budget")
+                + Duration::from_millis(20),
+        );
+        release.wait();
+        let (mut registry, outcome) = validator.join().expect("cached validator");
+        let FinishOutcome::Rejected {
+            error: WorkerV3Error::Deadline,
+            detached: Some(detached),
+        } = outcome
+        else {
+            panic!("expired cached completion must reject exact generation")
+        };
+        assert!(registry.cache.is_empty());
+        stop_and_purge(&mut registry, detached);
+    }
+
+    #[test]
     fn exact_cache_never_masks_liveness_and_collision_quarantines() {
         let now = Instant::now();
         let context_id = [5; 16];
@@ -5005,7 +6188,7 @@ mod tests {
             .find("acquire_supervisor_permit()")
             .expect("supervisor admission");
         let plan = execute_source
-            .find("registry.plan(")
+            .find("registry.plan_until(")
             .expect("registry PLAN");
         assert!(runtime_gate < admission && admission < plan);
         let spawn_end = source[execute_end..]
@@ -5256,6 +6439,8 @@ mod tests {
                         termination_results: Mutex::new(VecDeque::new()),
                         default_result: TerminationOutcome::Reaped,
                         attempts: Arc::new(AtomicUsize::new(0)),
+                        termination_delay: Duration::ZERO,
+                        probe_delay: Duration::ZERO,
                     }),
                     alive_hint,
                 },
@@ -5352,15 +6537,16 @@ mod tests {
             .find("    let retirement_permit = acquire_retirement_permit()?;")
             .expect("pre-spawn retirement permit");
         let launch_start = locked_source
-            .find(
-                "    let (child, observation) = spawn_after_seccomp_baseline(&mut command, observation_mode)?;",
-            )
+            .find("spawn_after_seccomp_baseline(")
             .expect("baseline-bound launch section");
+        let armed_retirement = locked_source
+            .find("    let mut retirement = ProcessRetirement {")
+            .expect("pre-spawn retirement owner");
         let close_range_hook = ["    install_close_range_on_", "exec(&mut command);"].concat();
         let close_range = locked_source
             .find(&close_range_hook)
             .expect("final user pre-exec hook");
-        assert!(permit_start < launch_start);
+        assert!(permit_start < armed_retirement && armed_retirement < launch_start);
         assert!(permit_start < close_range && close_range < launch_start);
         let after_close_range = locked_source[close_range..]
             .find('\n')
@@ -5469,6 +6655,8 @@ mod tests {
                     ])),
                     default_result: TerminationOutcome::Reaped,
                     attempts: Arc::clone(&attempts),
+                    termination_delay: Duration::ZERO,
+                    probe_delay: Duration::ZERO,
                 }),
                 alive_hint,
             },
@@ -5513,6 +6701,8 @@ mod tests {
                     termination_results: Mutex::new(VecDeque::from([TerminationOutcome::Reaped])),
                     default_result: TerminationOutcome::Reaped,
                     attempts: Arc::new(AtomicUsize::new(0)),
+                    termination_delay: Duration::ZERO,
+                    probe_delay: Duration::ZERO,
                 }),
                 alive_hint: Arc::new(AtomicBool::new(true)),
             },
@@ -5826,6 +7016,167 @@ mod tests {
         assert!(!alive.load(Ordering::SeqCst));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_callers_share_retryable_attempt_and_one_exact_confirming_retry() {
+        let context_id = [51; 16];
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, _peer, alive, attempts) = fake_process_with_termination_results(
+            Duration::from_secs(1),
+            VecDeque::from([false, true]),
+            true,
+        );
+        registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("register");
+        let coordinator = WorkerCoordinator::new(registry);
+
+        let first_started = Arc::new(AtomicBool::new(false));
+        let first_release = Arc::new(Notify::new());
+        coordinator.set_shutdown_hook(ShutdownHook {
+            started: Arc::clone(&first_started),
+            release: Arc::clone(&first_release),
+        });
+        let first = coordinator.shutdown_until(
+            HardDeadline::after(Duration::from_secs(2)).expect("first caller deadline"),
+        );
+        let second = coordinator.shutdown_until(
+            HardDeadline::after(Duration::from_secs(2)).expect("second caller deadline"),
+        );
+        let first = tokio::spawn(first);
+        let second = tokio::spawn(second);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !first_started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first attempt starts");
+        assert_eq!(
+            coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown_attempt,
+            1,
+        );
+        first_release.notify_one();
+        assert_eq!(
+            first.await.expect("first caller"),
+            ShutdownStatus::Retryable
+        );
+        assert_eq!(
+            second.await.expect("second caller"),
+            ShutdownStatus::Retryable
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        let retry_started = Arc::new(AtomicBool::new(false));
+        let retry_release = Arc::new(Notify::new());
+        coordinator.set_shutdown_hook(ShutdownHook {
+            started: Arc::clone(&retry_started),
+            release: Arc::clone(&retry_release),
+        });
+        let retry_one = coordinator.shutdown_until(
+            HardDeadline::after(Duration::from_secs(2)).expect("retry one deadline"),
+        );
+        let retry_two = coordinator.shutdown_until(
+            HardDeadline::after(Duration::from_secs(2)).expect("retry two deadline"),
+        );
+        let retry_one = tokio::spawn(retry_one);
+        let retry_two = tokio::spawn(retry_two);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !retry_started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retry attempt starts");
+        assert_eq!(
+            coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown_attempt,
+            2,
+        );
+        retry_release.notify_one();
+        assert_eq!(
+            retry_one.await.expect("retry one"),
+            ShutdownStatus::Confirmed
+        );
+        assert_eq!(
+            retry_two.await.expect("retry two"),
+            ShutdownStatus::Confirmed
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn terminal_unresolved_drains_existing_and_late_settlement_owners_exactly_once() {
+        let (queued_process, _queued_peer, _queued_alive, queued_attempts) =
+            fake_process_with_termination_results(Duration::from_secs(1), VecDeque::new(), true);
+        let (late_process, _late_peer, _late_alive, late_attempts) =
+            fake_process_with_termination_results(Duration::from_secs(1), VecDeque::new(), true);
+        let queued = DetachedWorker {
+            context_id: [52; 16],
+            generation: 1,
+            process: queued_process,
+        };
+        let late = DetachedWorker {
+            context_id: [53; 16],
+            generation: 2,
+            process: late_process,
+        };
+        let settlements = Arc::new(Mutex::new(SupervisorSettlements::new()));
+        settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capture_shutdown_owner(queued);
+        let completion = ShutdownCompletion::new();
+        let supervisors = Arc::new(Mutex::new(SupervisorState {
+            shutting_down: true,
+            active_permits: 0,
+            pending_admissions: 0,
+            handles: Vec::new(),
+            shutdown_workers: Vec::new(),
+            shutdown_attempt: 1,
+            shutdown_status: Some(ShutdownStatus::Pending),
+            shutdown_completion: Some(completion.clone()),
+        }));
+        ShutdownPublicationGuard::new(
+            Arc::clone(&supervisors),
+            Arc::clone(&settlements),
+            1,
+            completion,
+        )
+        .publish(
+            ShutdownStatus::Unresolved,
+            ShutdownAttemptOwners::new(Vec::new(), Vec::new()),
+        );
+        settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capture_shutdown_owner(late);
+
+        wait_for_termination_attempts(&queued_attempts, 1);
+        wait_for_termination_attempts(&late_attempts, 1);
+        let settlements = settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(settlements.unresolved);
+        assert!(settlements.shutdown_owners.is_empty());
+        assert_eq!(queued_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(late_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown_status,
+            Some(ShutdownStatus::Unresolved),
+        );
+    }
+
     #[test]
     fn real_child_termination_is_bounded_and_reaped() {
         let (channel, _peer) = private_credential_worker_channel().expect("channel");
@@ -5870,7 +7221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eof_with_uncertain_termination_stays_quarantined_and_is_never_retried() {
+    async fn eof_with_uncertain_termination_is_retained_for_explicit_shutdown_retry() {
         let context_id = [8; 16];
         let request = initialise(context_id, 13);
         let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
@@ -5893,9 +7244,247 @@ mod tests {
             coordinator.phase(context_id, generation).expect("phase"),
             VisiblePhase::Quarantined
         );
-        assert!(!coordinator.shutdown().await);
-        wait_for_termination_attempts(&attempts, 3);
+        let first_deadline = HardDeadline::after(Duration::from_secs(1)).expect("first deadline");
+        assert_eq!(
+            coordinator.shutdown_until(first_deadline).await,
+            ShutdownStatus::Retryable
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(alive.load(Ordering::SeqCst));
+        {
+            let state = coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(state.shutdown_status, Some(ShutdownStatus::Retryable));
+            assert_eq!(state.shutdown_workers.len(), 1);
+            assert!(state.handles.is_empty());
+        }
+        let retry_deadline = HardDeadline::after(Duration::from_secs(1)).expect("retry deadline");
+        assert_eq!(
+            coordinator.shutdown_until(retry_deadline).await,
+            ShutdownStatus::Confirmed
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
         assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reap_observed_after_shutdown_deadline_is_retryable_and_owner_remains_retained() {
+        let context_id = [47; 16];
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, _peer, alive, attempts) =
+            fake_process_with_delayed_termination(Duration::from_millis(60));
+        registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("register");
+        let coordinator = WorkerCoordinator::new(registry);
+        let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short deadline");
+        assert_eq!(
+            coordinator.shutdown_until(deadline).await,
+            ShutdownStatus::Pending,
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let retryable = coordinator
+                    .supervisors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .shutdown_status
+                    == Some(ShutdownStatus::Retryable);
+                if retryable {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned shutdown attempt settles retryably");
+        {
+            let state = coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(state.shutdown_workers.len(), 1);
+            assert_eq!(state.shutdown_attempt, 1);
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(!alive.load(Ordering::SeqCst));
+
+        let retry = HardDeadline::after(Duration::from_secs(1)).expect("retry deadline");
+        assert_eq!(
+            coordinator.shutdown_until(retry).await,
+            ShutdownStatus::Confirmed,
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown_attempt,
+            2,
+        );
+        let expired = HardDeadline::after(Duration::from_millis(10)).expect("expiring deadline");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            coordinator.shutdown_until(expired).await,
+            ShutdownStatus::Confirmed,
+        );
+        assert_eq!(
+            coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown_attempt,
+            2,
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_initial_shutdown_deadline_is_a_zero_mutation_retryable_noop() {
+        let context_id = [58; 16];
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, _peer, alive, attempts) =
+            fake_process_with_termination_results(Duration::from_secs(1), VecDeque::new(), true);
+        registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("register live worker");
+        let coordinator = WorkerCoordinator::new(registry);
+        let expired = HardDeadline::after(Duration::from_millis(10)).expect("short deadline");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(
+            coordinator.shutdown_until(expired).await,
+            ShutdownStatus::Retryable,
+        );
+        {
+            let state = coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(!state.shutting_down);
+            assert_eq!(state.shutdown_attempt, 0);
+            assert_eq!(state.shutdown_status, None);
+            assert!(state.shutdown_completion.is_none());
+            assert!(state.shutdown_workers.is_empty());
+            assert!(state.handles.is_empty());
+        }
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            assert!(!registry.shutting_down);
+            let record = registry.records.get(&context_id).expect("live record");
+            assert!(record.process.is_some());
+            assert!(!record.quarantined);
+        }
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+        let retry = HardDeadline::after(Duration::from_secs(1)).expect("valid retry deadline");
+        assert_eq!(
+            coordinator.shutdown_until(retry).await,
+            ShutdownStatus::Confirmed,
+        );
+        assert!(!alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multiple_delayed_shutdown_owners_share_one_absolute_attempt_budget() {
+        let mut registry = WorkerRegistry::new(3, 8, Duration::from_secs(10));
+        let mut peers = Vec::new();
+        let mut alive = Vec::new();
+        let mut attempts = Vec::new();
+        for marker in 54_u8..57 {
+            let (process, peer, worker_alive, worker_attempts) =
+                fake_process_with_delayed_termination(Duration::from_millis(250));
+            registry
+                .register(
+                    [marker; 16],
+                    process,
+                    Duration::from_secs(5),
+                    Instant::now(),
+                )
+                .expect("register delayed worker");
+            peers.push(peer);
+            alive.push(worker_alive);
+            attempts.push(worker_attempts);
+        }
+        let coordinator = WorkerCoordinator::new(registry);
+        let deadline = HardDeadline::after(Duration::from_millis(200)).expect("shared deadline");
+        let shutdown = coordinator.shutdown_until(deadline);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while attempts
+                .iter()
+                .map(|count| count.load(Ordering::SeqCst))
+                .sum::<usize>()
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one retirement starts inside the shared budget");
+        assert_eq!(shutdown.await, ShutdownStatus::Pending);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let retryable = coordinator
+                    .supervisors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .shutdown_status
+                    == Some(ShutdownStatus::Retryable);
+                if retryable {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("late first owner settles retryably");
+        let first_attempts = attempts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .sum::<usize>();
+        assert_eq!(first_attempts, 1, "the deadline is not reset per owner");
+        assert_eq!(
+            coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown_workers
+                .len(),
+            3,
+        );
+
+        let retry = HardDeadline::after(Duration::from_secs(2)).expect("retry deadline");
+        assert_eq!(
+            coordinator.shutdown_until(retry).await,
+            ShutdownStatus::Confirmed
+        );
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|count| count.load(Ordering::SeqCst))
+                .sum::<usize>(),
+            first_attempts + 3,
+        );
+        assert!(alive.iter().all(|flag| !flag.load(Ordering::SeqCst)));
+        drop(peers);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waiter_accepts_only_completion_linearized_before_its_own_deadline() {
+        let late = ShutdownCompletion::new();
+        let short = HardDeadline::after(Duration::from_millis(20)).expect("short waiter deadline");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        late.complete(ShutdownStatus::Confirmed);
+        assert_eq!(late.wait_until(short).await, ShutdownStatus::Pending);
+
+        let timely = ShutdownCompletion::new();
+        let long = HardDeadline::after(Duration::from_secs(1)).expect("long waiter deadline");
+        timely.complete(ShutdownStatus::Retryable);
+        assert_eq!(timely.wait_until(long).await, ShutdownStatus::Retryable);
     }
 
     #[tokio::test]
@@ -5908,9 +7497,12 @@ mod tests {
             .register(context_id, process, Duration::from_secs(5), Instant::now())
             .expect("register");
         let coordinator = WorkerCoordinator::new(registry);
+        let deadline = HardDeadline::after(Duration::from_millis(25)).expect("call deadline");
         assert!(matches!(
-            coordinator.execute(context_id, generation, request).await,
-            Err(WorkerV3Error::Ambiguous)
+            coordinator
+                .execute_until(context_id, generation, request, deadline)
+                .await,
+            Err(WorkerV3Error::Deadline)
         ));
         assert!(!alive.load(Ordering::SeqCst));
         assert!(matches!(
@@ -6005,6 +7597,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deadline_expiry_before_plan_leaves_every_registry_and_admission_field_unchanged() {
+        let context_id = [46; 16];
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, peer, alive) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("register");
+        let coordinator = WorkerCoordinator::new(registry);
+        let reached = Arc::new(Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        coordinator.set_before_plan_hook(BeforePlanHook {
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        let deadline = HardDeadline::after(Duration::from_millis(30)).expect("short deadline");
+        let executing = coordinator.clone();
+        let task = tokio::spawn(async move {
+            executing
+                .execute_until(context_id, generation, initialise(context_id, 41), deadline)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), reached.notified())
+            .await
+            .expect("pre-plan hook reached");
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        release.add_permits(1);
+        assert!(matches!(
+            task.await.expect("execute task"),
+            Err(WorkerV3Error::Deadline)
+        ));
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            let record = registry.records.get(&context_id).expect("original record");
+            assert_eq!(record.stable_phase, StablePhase::Starting);
+            assert!(record.in_flight.is_none());
+            assert!(!record.quarantined);
+            assert!(record.process.is_some());
+            assert!(registry.tombstones.is_empty());
+            assert!(registry.cache.is_empty());
+        }
+        {
+            let state = coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(state.active_permits, 0);
+            assert_eq!(state.pending_admissions, 0);
+            assert!(state.handles.is_empty());
+        }
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            nix::sys::socket::recv(
+                peer.as_raw_fd(),
+                &mut byte,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            ),
+            Err(Errno::EAGAIN),
+            "expiry before PLAN must not write the worker channel",
+        );
+        assert!(alive.load(Ordering::SeqCst));
+        assert!(coordinator.shutdown().await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn expired_completion_is_rejected_after_blocking_call() {
         let context_id = [12; 16];
         let request = initialise(context_id, 17);
@@ -6079,6 +7735,47 @@ mod tests {
             0,
             "the rejected credentialed descriptor must close before returning"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn response_and_fd_before_deadline_cannot_commit_after_liveness_crosses_deadline() {
+        let context_id = [48; 16];
+        let request = acquire(context_id, 42);
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, peer, alive) = fake_process_with_probe_delay(Duration::from_millis(70));
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("register");
+        registry
+            .records
+            .get_mut(&context_id)
+            .expect("record")
+            .stable_phase = StablePhase::Committed;
+        let (sent, observer) = Socket::pair(Domain::UNIX, Type::STREAM.cloexec(), None::<Protocol>)
+            .expect("descriptor pair");
+        observer
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("observer timeout");
+        let sent: OwnedFd = sent.into();
+        let response = acquire_response(&request);
+        send_credential_worker_response(&peer, &request, &response, Some(&sent))
+            .expect("response and FD queued before execute");
+        drop(sent);
+        let coordinator = WorkerCoordinator::new(registry);
+        let deadline = HardDeadline::after(Duration::from_millis(30)).expect("commit deadline");
+        assert!(matches!(
+            coordinator
+                .execute_until(context_id, generation, request, deadline)
+                .await,
+            Err(WorkerV3Error::Deadline),
+        ));
+        let mut byte = [0_u8; 1];
+        assert_eq!((&observer).read(&mut byte).expect("observer EOF"), 0);
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(matches!(
+            coordinator.phase(context_id, generation),
+            Err(WorkerV3Error::Stale),
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
