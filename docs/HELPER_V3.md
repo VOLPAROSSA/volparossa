@@ -96,14 +96,30 @@ interlock.
 The v3 module contains a boot-scoped, secret-free, canonical and length-bounded codec/CAS store for
 exact `Intent`, `MayOwnPrepare`, and `Absent` ownership records. Its fixed lock, atomic
 file-fsync/rename/directory-fsync transaction, typed recovery anchor, and trusted
-non-cryptographic exact-echo absence-proof interface have temp-directory tests. No production
-writer, startup reaper, recovery backend, or engine integration uses that store. The required tag-35
-closed plan has a fallible exact conversion into the store's existing `ClosedPlan`; this removes the
-wire/schema mismatch but performs no journal I/O and grants no mutation authority. A missing journal
-is therefore not proof that stale kernel
-state is absent, and the interlock cannot issue a cross-runtime tag-28 receipt. The current `doctor`
-has no helper-v3 crash-ownership readiness check, so its other successful checks must not be
-interpreted as evidence of live recovery or cleanup.
+non-cryptographic exact-echo absence-proof interface have temp-directory tests. A private dormant
+single-writer actor now owns both this store and its recovery executor on one named thread. It
+retains one verified parent-directory descriptor, acquires a process-global one-shot store latch
+before opening the lock, sweeps every startup `Intent` and `MayOwnPrepare`, rechecks the complete
+durable boundary, and only then reports ready. Its non-blocking admission accepts at most four
+operations while reserving channel capacity for shutdown; opaque non-`Clone` keys expose neither
+the journal revision nor raw ownership coordinates.
+
+The actor remains disconnected from the server, engine, and worker coordinator. There is no
+production recovery executor and no server-wired startup/restart reaper; any private startup-sweep
+failure aborts startup, and readiness follows only after every record in the observed snapshot is
+durably `Absent` and the complete boundary rechecks. There is also no supported on-disk migration
+or live root proof. A bounded reply or thread-settlement timeout permanently fences admission as
+ambiguous. If the actor thread is stuck inside the non-cancellable recovery executor, its join
+handle is detached after the bounded settlement wait; that thread may retain the journal lock,
+while the process-global latch remains set until process exit. A clean shutdown acknowledges only
+an intact durable boundary: it does not retire or recover outstanding records, and reopening
+requires a fresh process. These limitations must be resolved at the production service boundary
+before the actor can become the production writer. The required tag-35 closed plan has a fallible
+exact conversion into the store's existing `ClosedPlan`; this removes the wire/schema mismatch but
+performs no journal I/O and grants no mutation authority. A missing journal is therefore not proof
+that stale kernel state is absent, and the interlock cannot issue a cross-runtime tag-28 receipt.
+The current `doctor` has no helper-v3 crash-ownership readiness check, so its other successful
+checks must not be interpreted as evidence of live recovery or cleanup.
 
 The dormant store's insert, prepare-arm, never-dispatched retirement, and confirmed-recovery
 transitions are exact-current-revision retry-safe after a lost reply. A retry succeeds only when the
@@ -114,6 +130,9 @@ MayOwn recovery, so one operation can never acknowledge the other's tombstone an
 confirmed recovery never reruns its executor. These are private pre-production codec semantics:
 the store remains disconnected, version 3 has no supported on-disk migration contract yet, and any
 production-path v3 object still triggers the read-only startup interlock rather than being decoded.
+After a definite pre-rename I/O failure, another mutation is admitted only if a read-only health
+check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
+temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the actor permanently.
 
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
 handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated

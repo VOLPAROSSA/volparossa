@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-25
+Last updated: 2026-08-26
 
 ## Repository and engineering baseline
 
@@ -98,9 +98,19 @@ Last updated: 2026-08-25
   are exact-current-revision retry-safe after lost replies; persisted typed `Absent` origins prevent
   cross-operation acknowledgement and repeated recovery execution. Intervening transitions and
   conflicting identity, plan, expiry, generation, anchor, or reconciliation state fail closed
-  without journal mutation. The codec remains private and pre-production; no production writer,
-  actor, recovery backend, restart reaper, supported on-disk migration, cross-runtime tag-28 proof,
-  or live root proof exists.
+  without journal mutation. A private dormant single-writer actor owns the store and recovery
+  executor on one named thread, opens and retains one verified parent-directory descriptor, and
+  trips a process-global one-shot start latch before lock creation. The latch remains set after
+  startup failure or clean shutdown. The private startup sweep resolves every observed uncertain
+  record before reporting ready, and admission is bounded to four operations plus shutdown.
+  Definite pre-rename I/O failures permit a retry only after the retained parent, exact exclusive
+  lock, absent temporary entry, and durable snapshot are all re-proved; otherwise the actor is
+  permanently ambiguous. Reply and thread-settlement waits are bounded, but an actor thread stuck
+  inside the non-cancellable recovery executor can only be detached while retaining the journal
+  lock; the process latch remains set. Clean shutdown proves only the durable boundary and does not
+  retire outstanding records. The codec and actor remain private and pre-production; no production
+  writer/recovery wiring, server-wired restart reaper, supported on-disk migration, cross-runtime
+  tag-28 proof, or live root proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.

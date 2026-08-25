@@ -8,6 +8,8 @@
 
 #![allow(dead_code)] // Dormant v3 store; production uses only read-only ownership interlocks.
 
+mod actor;
+
 use rand_core::{OsRng, RngCore};
 use rustix::{
     fs::{
