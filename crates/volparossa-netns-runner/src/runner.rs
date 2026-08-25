@@ -40,7 +40,11 @@ pub const BLOCKED_EXIT_CODE: u8 = 77;
 /// Process result for an internal runner or invariant failure.
 pub const INTERNAL_ERROR_EXIT_CODE: u8 = 70;
 
-const BOOTSTRAP_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
+// A full post-GO lifecycle performs many independently two-second-bounded
+// kernel mutation, reconciliation, and proof phases in sequence. The private
+// record channels retain one finite aggregate bound large enough for that
+// valid cleanup chain without weakening any individual kernel-operation bound.
+const LIFECYCLE_RECORD_TIMEOUT: Duration = Duration::from_secs(60);
 // Admit at most three typed continuation attempts. That bound covers the
 // monotonic enabled/initial -> restored -> retired recovery chain; any
 // authority still failing after it, or any indeterminate authority, aborts.
@@ -57,8 +61,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// Policy, routes, and four permanent neighbours were established and exactly retired.
-    BlockedAfterForwardPolicyTeardown,
+    /// One exact fixed ICMP echo and its complete rollback were proved.
+    BlockedAfterFixedIcmpEchoTeardown,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -67,7 +71,7 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    AuthorizedForwardPolicyTornDown,
+    FixedIcmpEchoTornDown,
 }
 
 enum FixedForwardPolicyTeardownMounts {
@@ -200,8 +204,13 @@ impl From<PidOneControlError> for RunnerError {
 /// conditionally establishes the enabled parent IPv4-forwarding record and
 /// activates the four ends. It proves their exact carrier-up links, qdiscs,
 /// IPv4 routes, and IPv6 multicast routes, then installs and proves the two
-/// exact endpoint `/32` routes while retaining that policy. It directly deletes
-/// veth B followed by A, restores the exact original forwarding record, and
+/// exact endpoint `/32` routes while retaining that policy. It installs four
+/// exact permanent neighbours, sends one run-bound raw `ICMPv4` echo request,
+/// receives its exact reply, and joins that affine exchange to policy counters
+/// `1/60`, `1/60`, `0/0` plus exact one-packet/74-byte four-veth telemetry.
+/// It removes all neighbours in exact reverse order and re-proves the routed
+/// post-echo state before directly deleting veth B followed by A. It restores
+/// the exact original forwarding record and
 /// retains every lower owner until all three namespaces are byte-exactly equal
 /// to their retained enumerated network baselines while generation two remains
 /// exact. It then deletes only the freshly observed policy table handle, proves
@@ -250,17 +259,17 @@ pub fn run_fixed_lifecycle() -> Result<LifecycleOutcome, RunnerError> {
     child
         .provisioning_channel()
         .map_err(RunnerError::Channel)?
-        .set_io_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .set_io_timeout(LIFECYCLE_RECORD_TIMEOUT)
         .map_err(RunnerError::Channel)?;
     child
         .control_channel()
         .map_err(RunnerError::Channel)?
-        .set_io_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .set_io_timeout(LIFECYCLE_RECORD_TIMEOUT)
         .map_err(RunnerError::Channel)?;
     child
         .lifecycle_channel()
         .map_err(RunnerError::Channel)?
-        .set_io_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .set_io_timeout(LIFECYCLE_RECORD_TIMEOUT)
         .map_err(RunnerError::Channel)?;
     let attempt = continue_fixed_lifecycle(
         &signal_supervisor,
@@ -317,8 +326,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::AuthorizedForwardPolicyTornDown => {
-            LifecycleOutcome::BlockedAfterForwardPolicyTeardown
+        PidOneBarrierOutcome::FixedIcmpEchoTornDown => {
+            LifecycleOutcome::BlockedAfterFixedIcmpEchoTeardown
         }
     };
     Ok(outcome)
@@ -462,7 +471,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::AuthorizedForwardPolicyTornDown)
+        Ok(PidOneBarrierOutcome::FixedIcmpEchoTornDown)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -596,7 +605,7 @@ fn receive_outer(
     channel: &crate::ipc::LifecycleChannel,
 ) -> Result<Vec<u8>, RunnerError> {
     let deadline =
-        AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT).map_err(RunnerError::Channel)?;
+        AbsoluteDeadline::after(LIFECYCLE_RECORD_TIMEOUT).map_err(RunnerError::Channel)?;
     signal_supervisor
         .receive_outer(channel, deadline)
         .map_err(supervised_receive_error)
@@ -607,7 +616,7 @@ fn receive_outer_final_eof(
     channel: &crate::ipc::LifecycleChannel,
 ) -> Result<(), RunnerError> {
     let deadline =
-        AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT).map_err(RunnerError::Channel)?;
+        AbsoluteDeadline::after(LIFECYCLE_RECORD_TIMEOUT).map_err(RunnerError::Channel)?;
     signal_supervisor
         .receive_outer_final_eof(channel, deadline)
         .map_err(supervised_receive_error)
@@ -642,7 +651,7 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterForwardPolicyTeardown {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterFixedIcmpEchoTeardown {
         LifecycleEofDisposition::CleanupRequired
     } else {
         LifecycleEofDisposition::NoTopologyMutationAuthorized
@@ -728,9 +737,9 @@ fn internal_child() -> Result<(), RunnerError> {
         Err(error) => return Err(error),
     };
     let current = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
-    let context = receive_launch_context(&provisioning_channel, current, BOOTSTRAP_RECORD_TIMEOUT)?;
+    let context = receive_launch_context(&provisioning_channel, current, LIFECYCLE_RECORD_TIMEOUT)?;
     control_channel
-        .set_io_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .set_io_timeout(LIFECYCLE_RECORD_TIMEOUT)
         .map_err(RunnerError::Channel)?;
     let isolation = match create_launcher_namespaces().map_err(RunnerError::IsolationCreation)? {
         IsolationAttempt::Created(isolation) => isolation,
@@ -814,7 +823,7 @@ fn complete_internal_pid_one(
     pid_one
         .bootstrap_channel()
         .map_err(RunnerError::Channel)?
-        .set_io_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .set_io_timeout(LIFECYCLE_RECORD_TIMEOUT)
         .map_err(RunnerError::Channel)?;
     let isolated = NamespaceSnapshot::capture().map_err(RunnerError::Namespace)?;
     let provision = PidOneProvision::new(
@@ -1007,9 +1016,13 @@ fn finish_pid_one(
 /// links, `noqueue` qdiscs, and complete kernel-owned route side effects. It
 /// installs and exactly observes the two fixed main-table static endpoint `/32`
 /// routes while the policy remains exact. It installs and semantically proves
-/// exactly four permanent neighbours, explicitly removes them in reverse, and
-/// proves restoration of the routed barrier before directly deleting veth B
-/// followed by A as the sole route removal. It restores the original forwarding
+/// exactly four permanent neighbours, then consumes zero-counter authority for
+/// one no-retry, run-bound raw ICMPv4 request and exact reply. Two stable policy
+/// observations prove counters `1/60`, `1/60`, `0/0`; fresh parent/A/B RTNL
+/// observations prove exact one-packet/74-byte RX and TX telemetry on all four
+/// veth ends. It explicitly removes the neighbours in reverse, re-proves the
+/// routed post-echo state and counters, and directly deletes veth B followed by
+/// A as the sole route removal. It restores the original forwarding
 /// record and proves all three namespaces exactly equal to their retained
 /// enumerated network baselines. Only then does it remove the policy, prove
 /// semantic emptiness, and retire the still-armed route, neighbour, address,
@@ -1035,10 +1048,10 @@ fn internal_pid_one() -> Result<(), RunnerError> {
         inherited_pid_one_lifecycle_channel_from_stdout().map_err(RunnerError::Channel)?;
     set_pdeathsig(Signal::SIGKILL).map_err(errno_runner)?;
     bootstrap_channel
-        .set_io_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .set_io_timeout(LIFECYCLE_RECORD_TIMEOUT)
         .map_err(RunnerError::Channel)?;
     lifecycle_channel
-        .set_io_timeout(BOOTSTRAP_RECORD_TIMEOUT)
+        .set_io_timeout(LIFECYCLE_RECORD_TIMEOUT)
         .map_err(RunnerError::Channel)?;
     let mut control = PidOneControl::new();
     let provision_record = bootstrap_channel.receive().map_err(RunnerError::Channel)?;
@@ -1121,7 +1134,7 @@ fn complete_pid_one_ready_retirement(
         .receive_pid_one_lifecycle_record(
             bootstrap_channel,
             lifecycle_channel,
-            AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
+            AbsoluteDeadline::after(LIFECYCLE_RECORD_TIMEOUT)
                 .map_err(RunnerError::SignalSupervision)?,
         )
         .map_err(RunnerError::SignalSupervision)?;
@@ -1143,7 +1156,7 @@ fn complete_pid_one_ready_retirement(
             bootstrap_channel,
             lifecycle_channel,
             ManagedSignal::Term,
-            AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
+            AbsoluteDeadline::after(LIFECYCLE_RECORD_TIMEOUT)
                 .map_err(RunnerError::SignalSupervision)?,
         )
         .map_err(RunnerError::SignalSupervision)?;
@@ -1158,7 +1171,7 @@ fn complete_pid_one_ready_retirement(
         .wait_pid_one_retire_barrier(
             bootstrap_channel,
             lifecycle_channel,
-            AbsoluteDeadline::after(BOOTSTRAP_RECORD_TIMEOUT)
+            AbsoluteDeadline::after(LIFECYCLE_RECORD_TIMEOUT)
                 .map_err(RunnerError::SignalSupervision)?,
         )
         .map_err(RunnerError::SignalSupervision)?;
@@ -1326,26 +1339,100 @@ fn complete_fixed_forward_policy_teardown(
             return recover_failed_forward_policy_transition(failure, endpoint_baselines);
         }
     };
-    let (routed, routed_proof) = match neighbours.remove_permanent_neighbours(neighbour_proof) {
+    let (neighbours, echo_proof) = match neighbours.prove_fixed_ipv4_icmp_echo(neighbour_proof) {
         Ok(result) => result,
         Err(failure) => {
-            return recover_failed_forward_policy_transition(failure, endpoint_baselines);
+            return recover_failed_fixed_icmp_echo(failure, endpoint_baselines);
         }
     };
-    let deleted = match routed.begin_retirement(routed_proof) {
-        Ok(deleted) => deleted,
+    let (routed, routed_proof) =
+        match neighbours.remove_permanent_neighbours_after_fixed_ipv4_icmp_echo(echo_proof) {
+            Ok(result) => result,
+            Err(failure) => {
+                return recover_failed_fixed_icmp_echo(failure, endpoint_baselines);
+            }
+        };
+    let deleted = match routed.begin_retirement_after_fixed_ipv4_icmp_echo(routed_proof) {
+        Ok(result) => result,
         Err(failure) => {
-            return recover_failed_forward_policy_transition(failure, endpoint_baselines);
+            return recover_failed_fixed_icmp_echo(failure, endpoint_baselines);
         }
     };
-    match deleted.finish_forward_policy_teardown(endpoint_baselines) {
+    match deleted.finish_fixed_icmp_echo_teardown(endpoint_baselines) {
         Ok((namespace_pins, final_network_proof)) => Ok(retired_forward_policy_teardown(
             FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(namespace_pins)),
             final_network_proof,
             None,
         )),
-        Err(failure) => recover_failed_forward_policy_teardown(failure, None),
+        Err(failure) => recover_failed_fixed_icmp_echo_teardown(failure, None),
     }
+}
+
+fn recover_failed_fixed_icmp_echo(
+    failure: crate::mounts::FixedIcmpEchoFailure,
+    endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
+) -> Result<FixedForwardPolicyTeardown, RunnerError> {
+    let (source, cleanup) = failure.into_parts();
+    match cleanup.finish_fixed_icmp_echo_teardown(endpoint_baselines) {
+        Ok((namespace_pins, final_network_proof)) => Ok(retired_forward_policy_teardown(
+            FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(namespace_pins)),
+            final_network_proof,
+            Some(source),
+        )),
+        Err(failure) => recover_failed_fixed_icmp_echo_teardown(failure, Some(source)),
+    }
+}
+
+fn recover_failed_fixed_icmp_echo_teardown(
+    mut failure: crate::mounts::FixedIcmpEchoTeardownFailure,
+    mut deferred_error: Option<crate::mounts::FixedForwardPolicyError>,
+) -> Result<FixedForwardPolicyTeardown, RunnerError> {
+    for _ in 0..FORWARD_POLICY_RECOVERY_STEPS {
+        failure = match failure {
+            crate::mounts::FixedIcmpEchoTeardownFailure::Active {
+                source,
+                cleanup,
+                endpoints,
+            } => {
+                if deferred_error.is_none() {
+                    deferred_error = Some(source);
+                }
+                match (*cleanup).finish_fixed_icmp_echo_teardown(*endpoints) {
+                    Ok((mounts, proof)) => {
+                        return Ok(retired_forward_policy_teardown(
+                            FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(mounts)),
+                            proof,
+                            deferred_error,
+                        ));
+                    }
+                    Err(next) => next,
+                }
+            }
+            crate::mounts::FixedIcmpEchoTeardownFailure::Restored {
+                source,
+                cleanup,
+                endpoints,
+            } => {
+                if deferred_error.is_none() {
+                    deferred_error = Some(source);
+                }
+                match (*cleanup).finish_restored_fixed_icmp_echo_teardown(*endpoints) {
+                    Ok((mounts, proof)) => {
+                        return Ok(retired_forward_policy_teardown(
+                            FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(mounts)),
+                            proof,
+                            deferred_error,
+                        ));
+                    }
+                    Err(next) => next,
+                }
+            }
+            crate::mounts::FixedIcmpEchoTeardownFailure::Forward(failure) => {
+                return recover_failed_forward_policy_teardown(failure, deferred_error);
+            }
+        };
+    }
+    std::process::abort()
 }
 
 fn recover_failed_pre_policy_transition(

@@ -39,8 +39,9 @@ use crate::{
         PrivateMountSetupError, PrivateMounts,
     },
     nftables::{
-        ActiveNftablesPolicy, NftablesBaseline, NftablesError, SemanticallyEmptyNftables,
-        observe_empty_nftables, verify_empty_nftables, verify_exact_forward_policy,
+        ActiveNftablesPolicy, ForwardPolicyCleanupAuthority, NftablesBaseline, NftablesError,
+        SemanticallyEmptyNftables, observe_empty_nftables, verify_empty_nftables,
+        verify_exact_forward_policy, verify_forward_policy_cleanup,
         verify_semantically_empty_after_forward_policy,
     },
     topology::veth::VethTargetNamespaceIdentity,
@@ -216,13 +217,17 @@ const VETH_UP_FLAGS: u32 = VETH_FLAGS | IFF_UP | IFF_RUNNING | IFF_LOWER_UP;
 const VETH_QUEUE_COUNT: u32 = 1;
 const VETH_MIN_MTU: u32 = 68;
 const VETH_MAX_MTU: u32 = 65_535;
-const VETH_LINK_STATS_BYTES: usize = 24 * size_of::<u32>();
-const VETH_LINK_STATS64_BYTES: usize = 25 * size_of::<u64>();
+const VETH_LINK_STATS_FIELDS: usize = 24;
+const VETH_LINK_STATS64_FIELDS: usize = 25;
+const VETH_LINK_STATS_BYTES: usize = VETH_LINK_STATS_FIELDS * size_of::<u32>();
+const VETH_LINK_STATS64_BYTES: usize = VETH_LINK_STATS64_FIELDS * size_of::<u64>();
 const VETH_LINK_IFMAP_BYTES: usize = 32;
 const VETH_STATS_SEEN: u8 = 1 << 0;
 const VETH_STATS64_SEEN: u8 = 1 << 1;
 const VETH_IFMAP_SEEN: u8 = 1 << 2;
-const VETH_ZEROED_STRUCTS_SEEN: u8 = VETH_STATS_SEEN | VETH_STATS64_SEEN | VETH_IFMAP_SEEN;
+const VETH_REQUIRED_STRUCTS_SEEN: u8 = VETH_STATS_SEEN | VETH_STATS64_SEEN | VETH_IFMAP_SEEN;
+const FIXED_ICMP_ECHO_PACKETS: u64 = 1;
+const FIXED_ICMP_ECHO_ETHERNET_BYTES: u64 = crate::icmp::ETHERNET_ECHO_FRAME_BYTES;
 const VETH_ENDPOINT_NAME: &[u8] = b"eth0";
 const ETHERNET_ADDRESS_BYTES: usize = 6;
 const MAX_INTERFACE_NAME_BYTES: usize = 15;
@@ -696,6 +701,53 @@ pub(crate) struct ExactIpv4PermanentNeighbourEndpointObservation {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+/// Exact parent observation after one fixed IPv4 ICMP echo round trip.
+///
+/// Both parent veth ends retain the complete permanent-neighbour configuration
+/// and report exactly one received and one transmitted 74-byte Ethernet frame.
+/// This is link/configuration telemetry only; the caller must independently
+/// retain the exact reply and forward-policy counter proofs.
+pub(crate) struct ExactIpv4IcmpEchoPermanentNeighbourParentObservation {
+    routed: RtnlProcNetworkBaseline,
+    active: RtnlProcNetworkBaseline,
+    links: [VethLinkObservation; 2],
+    neighbours: [ExpectedIpv4PermanentNeighbour; 2],
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Exact endpoint observation after one fixed IPv4 ICMP echo round trip.
+///
+/// The endpoint veth retains its route and permanent neighbour and reports
+/// exactly one received and one transmitted 74-byte Ethernet frame. This token
+/// alone does not prove the reply, forwarding policy, datapath, or readiness.
+pub(crate) struct ExactIpv4IcmpEchoPermanentNeighbourEndpointObservation {
+    routed: PreGoNetworkBaseline,
+    active: PreGoNetworkBaseline,
+    link: VethLinkObservation,
+    address: ExpectedIpv4Address,
+    route: ExpectedIpv4EndpointRoute,
+    neighbour: ExpectedIpv4PermanentNeighbour,
+    namespace: NetworkNamespaceIdentity,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Exact routed parent observation after post-echo neighbours were explicitly removed.
+pub(crate) struct ExactIpv4IcmpEchoEndpointRouteParentObservation {
+    active: RtnlProcNetworkBaseline,
+    links: [VethLinkObservation; 2],
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Exact routed endpoint observation after its post-echo neighbour was explicitly removed.
+pub(crate) struct ExactIpv4IcmpEchoEndpointRouteEndpointObservation {
+    active: PreGoNetworkBaseline,
+    link: VethLinkObservation,
+    address: ExpectedIpv4Address,
+    route: ExpectedIpv4EndpointRoute,
+    namespace: NetworkNamespaceIdentity,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
 impl ExpectedVethPair {
     /// Construct one exact observation expectation from owner-retained identity.
     pub(crate) fn new(
@@ -1085,6 +1137,22 @@ impl ForwardingEnabledNetworkProof {
         })
     }
 
+    /// Re-prove pristine parent RTNL state while forwarding remains enabled
+    /// and the post-send generation-two policy retains exact cleanup authority.
+    ///
+    /// Policy counters are parsed but deliberately carry no packet meaning at
+    /// this cleanup boundary. This method cannot recreate zero-counter or
+    /// fixed-packet evidence.
+    pub(crate) fn verify_pristine_with_cleanup_policy<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ForwardPolicyCleanupAuthority,
+    ) -> Result<(), NetworkError> {
+        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.active, |deadline| {
+            verify_forward_policy_cleanup(policy, deadline).map_err(NetworkError::Nftables)
+        })
+    }
+
     /// Restore the exact original forwarding record while generation two stays active.
     ///
     /// A failure returns the precise remaining affine authority. A request
@@ -1132,6 +1200,54 @@ impl ForwardingEnabledNetworkProof {
         }
         Ok(restored)
     }
+
+    /// Restore the exact inherited forwarding record while a post-send
+    /// generation-two policy remains armed solely for counter-agnostic cleanup.
+    ///
+    /// Both policy brackets require the complete retained structure and
+    /// handles through [`verify_forward_policy_cleanup`]. Mutable counters can
+    /// neither authorize nor block restoration and are never promoted back to
+    /// zero-counter or fixed-packet evidence.
+    pub(crate) fn restore_ipv4_forwarding_with_cleanup_policy<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ForwardPolicyCleanupAuthority,
+    ) -> Result<ForwardingRestoredNetworkProof, NetworkLineageFailure<ForwardingRestoreFailureState>>
+    {
+        let deadline = match Deadline::after(NETWORK_PROOF_TIMEOUT) {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(NetworkLineageFailure {
+                    source,
+                    authority: ForwardingRestoreFailureState::Enabled(self),
+                });
+            }
+        };
+        if let Err(source) = verify_forward_policy_cleanup(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: ForwardingRestoreFailureState::Enabled(self),
+            });
+        }
+        let original_state = self.original.as_ref().map_or_else(
+            || std::process::abort(),
+            |proof| proof.baseline.ipv4_forwarding.state,
+        );
+        let restored = apply_ipv4_forwarding_restore(self, mounts, original_state)?;
+        if let Err(source) = verify_forward_policy_cleanup(policy, deadline.instant()) {
+            return Err(NetworkLineageFailure {
+                source: NetworkError::Nftables(source),
+                authority: ForwardingRestoreFailureState::Restored(restored),
+            });
+        }
+        if let Err(source) = deadline.ensure_unexpired() {
+            return Err(NetworkLineageFailure {
+                source,
+                authority: ForwardingRestoreFailureState::Restored(restored),
+            });
+        }
+        Ok(restored)
+    }
 }
 
 impl ForwardingRestoredNetworkProof {
@@ -1146,6 +1262,22 @@ impl ForwardingRestoredNetworkProof {
             &self.original.baseline,
             |deadline| {
                 verify_exact_forward_policy(policy, deadline).map_err(NetworkError::Nftables)
+            },
+        )
+    }
+
+    /// Re-prove pristine parent RTNL/proc state while the post-send
+    /// generation-two policy retains only counter-agnostic cleanup authority.
+    pub(crate) fn verify_pristine_with_cleanup_policy<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ForwardPolicyCleanupAuthority,
+    ) -> Result<(), NetworkError> {
+        require_current_pristine_rtnl_proc_with_nftables(
+            mounts,
+            &self.original.baseline,
+            |deadline| {
+                verify_forward_policy_cleanup(policy, deadline).map_err(NetworkError::Nftables)
             },
         )
     }
@@ -1890,15 +2022,27 @@ impl ExactIpv4PermanentNeighbourParentObservation {
         require_current_stable_rtnl_proc_baseline(mounts, &self.active)
     }
 
-    /// Consume the neighbour proof after explicit deletion restored the routed parent.
-    pub(crate) fn observe_exact_ipv4_permanent_neighbour_removal_parent<RunState>(
+    /// Consume the zero-traffic neighbour observation and prove the exact
+    /// four-veth telemetry produced by one fixed ICMP echo round trip.
+    pub(crate) fn observe_exact_ipv4_icmp_echo_parent<RunState>(
         self,
         mounts: &PrivateMounts<RunState>,
-    ) -> Result<ExactIpv4EndpointRouteParentObservation, NetworkError> {
-        require_current_stable_rtnl_proc_baseline(mounts, &self.routed)?;
-        Ok(ExactIpv4EndpointRouteParentObservation {
-            active: self.routed,
-            links: self.links,
+    ) -> Result<ExactIpv4IcmpEchoPermanentNeighbourParentObservation, NetworkError> {
+        let Self {
+            routed,
+            active: before_echo,
+            links: before_links,
+            neighbours,
+            _thread_bound: _,
+        } = self;
+        let (active, links) = collect_exact_stable_parent_delta(mounts, |active| {
+            verify_exact_parent_ipv4_icmp_echo_delta(&before_echo, active, &before_links)
+        })?;
+        Ok(ExactIpv4IcmpEchoPermanentNeighbourParentObservation {
+            routed,
+            active,
+            links,
+            neighbours,
             _thread_bound: PhantomData,
         })
     }
@@ -1915,22 +2059,147 @@ impl ExactIpv4PermanentNeighbourEndpointObservation {
         require_current_network_namespace(self.namespace)
     }
 
-    /// Consume the neighbour proof after explicit deletion restored the routed endpoint.
-    pub(crate) fn observe_exact_ipv4_permanent_neighbour_removal_endpoint<RunState>(
+    /// Consume the zero-traffic neighbour observation and prove the exact
+    /// endpoint-veth telemetry produced by one fixed ICMP echo round trip.
+    pub(crate) fn observe_exact_ipv4_icmp_echo_endpoint<RunState>(
         self,
         mounts: &PrivateMounts<RunState>,
-    ) -> Result<ExactIpv4EndpointRouteEndpointObservation, NetworkError> {
+    ) -> Result<ExactIpv4IcmpEchoPermanentNeighbourEndpointObservation, NetworkError> {
         require_current_network_namespace(self.namespace)?;
-        require_current_stable_baseline(mounts, &self.routed)?;
-        require_current_network_namespace(self.namespace)?;
-        Ok(ExactIpv4EndpointRouteEndpointObservation {
-            active: self.routed,
-            link: self.link,
-            address: self.address,
-            route: self.route,
-            namespace: self.namespace,
+        let Self {
+            routed,
+            active: before_echo,
+            link: before_link,
+            address,
+            route,
+            neighbour,
+            namespace,
+            _thread_bound: _,
+        } = self;
+        let (active, link) = collect_exact_stable_network_delta(mounts, |active| {
+            require_current_network_namespace(namespace)?;
+            verify_exact_endpoint_ipv4_icmp_echo_delta(&before_echo, active, &before_link)
+        })?;
+        require_current_network_namespace(namespace)?;
+        Ok(ExactIpv4IcmpEchoPermanentNeighbourEndpointObservation {
+            routed,
+            active,
+            link,
+            address,
+            route,
+            neighbour,
+            namespace,
             _thread_bound: PhantomData,
         })
+    }
+}
+
+impl ExactIpv4IcmpEchoPermanentNeighbourParentObservation {
+    /// Reobserve and require exact semantic equality with the retained
+    /// post-echo parent state.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
+    }
+
+    /// Consume the post-echo neighbour proof after explicit deletion restored
+    /// the routed configuration while preserving the exact echo link telemetry.
+    pub(crate) fn observe_exact_ipv4_icmp_echo_neighbour_removal_parent<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<ExactIpv4IcmpEchoEndpointRouteParentObservation, NetworkError> {
+        let Self {
+            routed,
+            active: before_removal,
+            links,
+            neighbours: _,
+            _thread_bound: _,
+        } = self;
+        let (active, ()) = collect_exact_stable_parent_delta(mounts, |active| {
+            verify_exact_parent_ipv4_icmp_echo_neighbour_removal_delta(
+                &routed,
+                &before_removal,
+                active,
+            )
+        })?;
+        Ok(ExactIpv4IcmpEchoEndpointRouteParentObservation {
+            active,
+            links,
+            _thread_bound: PhantomData,
+        })
+    }
+}
+
+impl ExactIpv4IcmpEchoPermanentNeighbourEndpointObservation {
+    /// Reobserve and require exact semantic equality with the retained
+    /// post-echo endpoint state.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_stable_baseline(mounts, &self.active)?;
+        require_current_network_namespace(self.namespace)
+    }
+
+    /// Consume the post-echo neighbour proof after explicit deletion restored
+    /// the routed configuration while preserving the exact echo link telemetry.
+    pub(crate) fn observe_exact_ipv4_icmp_echo_neighbour_removal_endpoint<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<ExactIpv4IcmpEchoEndpointRouteEndpointObservation, NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        let Self {
+            routed,
+            active: before_removal,
+            link,
+            address,
+            route,
+            neighbour: _,
+            namespace,
+            _thread_bound: _,
+        } = self;
+        let (active, ()) = collect_exact_stable_network_delta(mounts, |active| {
+            require_current_network_namespace(namespace)?;
+            verify_exact_endpoint_ipv4_icmp_echo_neighbour_removal_delta(
+                &routed,
+                &before_removal,
+                active,
+            )
+        })?;
+        require_current_network_namespace(namespace)?;
+        Ok(ExactIpv4IcmpEchoEndpointRouteEndpointObservation {
+            active,
+            link,
+            address,
+            route,
+            namespace,
+            _thread_bound: PhantomData,
+        })
+    }
+}
+
+impl ExactIpv4IcmpEchoEndpointRouteParentObservation {
+    /// Reobserve the exact routed parent with the retained echo telemetry.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
+    }
+}
+
+impl ExactIpv4IcmpEchoEndpointRouteEndpointObservation {
+    /// Reobserve the exact routed endpoint with the retained echo telemetry.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_stable_baseline(mounts, &self.active)?;
+        require_current_network_namespace(self.namespace)
     }
 }
 
@@ -2048,6 +2317,69 @@ pub(crate) fn verify_exact_ipv4_permanent_neighbour_observations(
         if parent.neighbours[index] != expected_parent || endpoint.neighbour != expected_endpoint {
             return Err(NetworkError::InvalidIpv4NeighbourExpectation);
         }
+    }
+    Ok(())
+}
+
+/// Cross-check the exact post-echo 2+1+1 neighbour observations and retained
+/// route, namespace, MAC, and pair lineage.
+///
+/// The four link observations have already required exactly one RX/TX packet
+/// and 74 RX/TX bytes. This function does not substitute for an ICMP reply or
+/// nftables-counter proof and makes no datapath or readiness claim.
+pub(crate) fn verify_exact_ipv4_icmp_echo_permanent_neighbour_observations(
+    parent: &ExactIpv4IcmpEchoPermanentNeighbourParentObservation,
+    endpoints: [&ExactIpv4IcmpEchoPermanentNeighbourEndpointObservation; 2],
+) -> Result<(), NetworkError> {
+    verify_veth_observation_relations(
+        &parent.links,
+        [&endpoints[0].link, &endpoints[1].link],
+        [endpoints[0].namespace, endpoints[1].namespace],
+    )?;
+    for (index, endpoint) in endpoints.into_iter().enumerate() {
+        require_ipv4_endpoint_route_expectation(
+            &endpoint.route,
+            &endpoint.link.identity,
+            &endpoint.address,
+            endpoint.namespace,
+        )?;
+        let expected_parent = ExpectedIpv4PermanentNeighbour {
+            namespace: None,
+            ifindex: parent.links[index].identity.parent_ifindex,
+            destination: endpoint.address.address,
+            link_layer_address: endpoint.link.mac,
+        };
+        let expected_endpoint = ExpectedIpv4PermanentNeighbour {
+            namespace: Some(endpoint.namespace),
+            ifindex: endpoint.link.identity.endpoint_ifindex,
+            destination: endpoint.route.gateway,
+            link_layer_address: parent.links[index].mac,
+        };
+        if parent.neighbours[index] != expected_parent || endpoint.neighbour != expected_endpoint {
+            return Err(NetworkError::InvalidIpv4NeighbourExpectation);
+        }
+    }
+    Ok(())
+}
+
+/// Cross-check post-echo routed observations after all four permanent
+/// neighbours were explicitly removed without changing link telemetry.
+pub(crate) fn verify_exact_ipv4_icmp_echo_endpoint_route_observations(
+    parent: &ExactIpv4IcmpEchoEndpointRouteParentObservation,
+    endpoints: [&ExactIpv4IcmpEchoEndpointRouteEndpointObservation; 2],
+) -> Result<(), NetworkError> {
+    verify_veth_observation_relations(
+        &parent.links,
+        [&endpoints[0].link, &endpoints[1].link],
+        [endpoints[0].namespace, endpoints[1].namespace],
+    )?;
+    for endpoint in endpoints {
+        require_ipv4_endpoint_route_expectation(
+            &endpoint.route,
+            &endpoint.link.identity,
+            &endpoint.address,
+            endpoint.namespace,
+        )?;
     }
     Ok(())
 }
@@ -3306,6 +3638,186 @@ fn verify_exact_endpoint_ipv4_permanent_neighbour_delta(
     )
 }
 
+fn verify_exact_parent_ipv4_icmp_echo_delta(
+    before_echo: &RtnlProcNetworkBaseline,
+    after_echo: &RtnlProcNetworkBaseline,
+    expected: &[VethLinkObservation; 2],
+) -> Result<[VethLinkObservation; 2], NetworkError> {
+    if after_echo.ipv4_forwarding != before_echo.ipv4_forwarding {
+        return Err(NetworkError::Inconsistent);
+    }
+    verify_exact_parent_ipv4_icmp_echo_snapshot_delta(&before_echo.rtnl, &after_echo.rtnl, expected)
+}
+
+fn verify_exact_endpoint_ipv4_icmp_echo_delta(
+    before_echo: &PreGoNetworkBaseline,
+    after_echo: &PreGoNetworkBaseline,
+    expected: &VethLinkObservation,
+) -> Result<VethLinkObservation, NetworkError> {
+    if after_echo.ipv4_forwarding != before_echo.ipv4_forwarding
+        || after_echo.nftables != before_echo.nftables
+    {
+        return Err(NetworkError::Inconsistent);
+    }
+    verify_exact_endpoint_ipv4_icmp_echo_snapshot_delta(
+        &before_echo.rtnl,
+        &after_echo.rtnl,
+        expected,
+    )
+}
+
+fn verify_exact_parent_ipv4_icmp_echo_snapshot_delta(
+    before_echo: &NetworkSnapshot,
+    after_echo: &NetworkSnapshot,
+    expected: &[VethLinkObservation; 2],
+) -> Result<[VethLinkObservation; 2], NetworkError> {
+    verify_unchanged_after_icmp_echo_except_links(before_echo, after_echo)?;
+    if after_echo.links.len() != 3 {
+        return Err(NetworkError::NotPristine);
+    }
+    require_exact_retained_loopback_link(before_echo, after_echo)?;
+    let observed = [
+        find_and_verify_veth_link_with_profile(
+            &after_echo.links,
+            &expected[0].identity,
+            VethLinkSide::Parent,
+            VethLinkProfile::ActivatedIcmpEcho,
+        )?,
+        find_and_verify_veth_link_with_profile(
+            &after_echo.links,
+            &expected[1].identity,
+            VethLinkSide::Parent,
+            VethLinkProfile::ActivatedIcmpEcho,
+        )?,
+    ];
+    if &observed != expected || observed[0].peer_netnsid == observed[1].peer_netnsid {
+        return Err(NetworkError::Inconsistent);
+    }
+    Ok(observed)
+}
+
+fn verify_exact_endpoint_ipv4_icmp_echo_snapshot_delta(
+    before_echo: &NetworkSnapshot,
+    after_echo: &NetworkSnapshot,
+    expected: &VethLinkObservation,
+) -> Result<VethLinkObservation, NetworkError> {
+    verify_unchanged_after_icmp_echo_except_links(before_echo, after_echo)?;
+    if after_echo.links.len() != 2 {
+        return Err(NetworkError::NotPristine);
+    }
+    require_exact_retained_loopback_link(before_echo, after_echo)?;
+    let observed = find_and_verify_veth_link_with_profile(
+        &after_echo.links,
+        &expected.identity,
+        VethLinkSide::Endpoint,
+        VethLinkProfile::ActivatedIcmpEcho,
+    )?;
+    if &observed != expected {
+        return Err(NetworkError::Inconsistent);
+    }
+    Ok(observed)
+}
+
+fn verify_unchanged_after_icmp_echo_except_links(
+    before_echo: &NetworkSnapshot,
+    after_echo: &NetworkSnapshot,
+) -> Result<(), NetworkError> {
+    if after_echo.qdiscs != before_echo.qdiscs
+        || after_echo.addresses != before_echo.addresses
+        || after_echo.routes != before_echo.routes
+        || after_echo.neighbours != before_echo.neighbours
+        || after_echo.proxy_neighbours != before_echo.proxy_neighbours
+        || after_echo.nexthops != before_echo.nexthops
+        || after_echo.rules_v4 != before_echo.rules_v4
+        || after_echo.rules_v6 != before_echo.rules_v6
+    {
+        Err(NetworkError::Inconsistent)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_exact_retained_loopback_link(
+    before_echo: &NetworkSnapshot,
+    after_echo: &NetworkSnapshot,
+) -> Result<(), NetworkError> {
+    let mut before = before_echo
+        .links
+        .iter()
+        .filter(|payload| read_i32(payload, 4).ok() == Some(1));
+    let expected = before.next().ok_or(NetworkError::Inconsistent)?;
+    if before.next().is_some() {
+        return Err(NetworkError::Inconsistent);
+    }
+    let mut after = after_echo
+        .links
+        .iter()
+        .filter(|payload| read_i32(payload, 4).ok() == Some(1));
+    let observed = after.next().ok_or(NetworkError::Inconsistent)?;
+    if after.next().is_some() || observed != expected {
+        Err(NetworkError::Inconsistent)
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_exact_parent_ipv4_icmp_echo_neighbour_removal_delta(
+    routed: &RtnlProcNetworkBaseline,
+    before_removal: &RtnlProcNetworkBaseline,
+    after_removal: &RtnlProcNetworkBaseline,
+) -> Result<(), NetworkError> {
+    if before_removal.ipv4_forwarding != routed.ipv4_forwarding
+        || after_removal.ipv4_forwarding != routed.ipv4_forwarding
+    {
+        return Err(NetworkError::Inconsistent);
+    }
+    verify_exact_ipv4_icmp_echo_neighbour_removal_snapshot_delta(
+        &routed.rtnl,
+        &before_removal.rtnl,
+        &after_removal.rtnl,
+    )
+}
+
+fn verify_exact_endpoint_ipv4_icmp_echo_neighbour_removal_delta(
+    routed: &PreGoNetworkBaseline,
+    before_removal: &PreGoNetworkBaseline,
+    after_removal: &PreGoNetworkBaseline,
+) -> Result<(), NetworkError> {
+    if before_removal.ipv4_forwarding != routed.ipv4_forwarding
+        || after_removal.ipv4_forwarding != routed.ipv4_forwarding
+        || before_removal.nftables != routed.nftables
+        || after_removal.nftables != routed.nftables
+    {
+        return Err(NetworkError::Inconsistent);
+    }
+    verify_exact_ipv4_icmp_echo_neighbour_removal_snapshot_delta(
+        &routed.rtnl,
+        &before_removal.rtnl,
+        &after_removal.rtnl,
+    )
+}
+
+fn verify_exact_ipv4_icmp_echo_neighbour_removal_snapshot_delta(
+    routed: &NetworkSnapshot,
+    before_removal: &NetworkSnapshot,
+    after_removal: &NetworkSnapshot,
+) -> Result<(), NetworkError> {
+    if after_removal.links != before_removal.links
+        || after_removal.qdiscs != routed.qdiscs
+        || after_removal.addresses != routed.addresses
+        || after_removal.routes != routed.routes
+        || after_removal.neighbours != routed.neighbours
+        || after_removal.proxy_neighbours != routed.proxy_neighbours
+        || after_removal.nexthops != routed.nexthops
+        || after_removal.rules_v4 != routed.rules_v4
+        || after_removal.rules_v6 != routed.rules_v6
+    {
+        Err(NetworkError::Inconsistent)
+    } else {
+        Ok(())
+    }
+}
+
 fn verify_exact_ipv4_permanent_neighbour_snapshot_delta(
     routed: &NetworkSnapshot,
     active: &NetworkSnapshot,
@@ -4216,41 +4728,46 @@ enum VethLinkProfile {
     DownEui64,
     DownAddrgenNone,
     ActivatedAddrgenNone,
+    ActivatedIcmpEcho,
 }
 
 impl VethLinkProfile {
     const fn flags(self) -> u32 {
         match self {
             Self::DownEui64 | Self::DownAddrgenNone => VETH_FLAGS,
-            Self::ActivatedAddrgenNone => VETH_UP_FLAGS,
+            Self::ActivatedAddrgenNone | Self::ActivatedIcmpEcho => VETH_UP_FLAGS,
         }
     }
 
     const fn qdisc(self) -> &'static [u8] {
         match self {
             Self::DownEui64 | Self::DownAddrgenNone => b"noop\0",
-            Self::ActivatedAddrgenNone => b"noqueue\0",
+            Self::ActivatedAddrgenNone | Self::ActivatedIcmpEcho => b"noqueue\0",
         }
     }
 
     const fn operstate(self) -> u8 {
         match self {
             Self::DownEui64 | Self::DownAddrgenNone => IF_OPER_DOWN,
-            Self::ActivatedAddrgenNone => IF_OPER_UP,
+            Self::ActivatedAddrgenNone | Self::ActivatedIcmpEcho => IF_OPER_UP,
         }
     }
 
     const fn addrgen_mode(self) -> u8 {
         match self {
             Self::DownEui64 => IN6_ADDR_GEN_MODE_EUI64,
-            Self::DownAddrgenNone | Self::ActivatedAddrgenNone => IN6_ADDR_GEN_MODE_NONE,
+            Self::DownAddrgenNone | Self::ActivatedAddrgenNone | Self::ActivatedIcmpEcho => {
+                IN6_ADDR_GEN_MODE_NONE
+            }
         }
     }
 
     const fn telemetry(self) -> LinkTelemetryProfile {
         match self {
             Self::DownEui64 | Self::DownAddrgenNone => LinkTelemetryProfile::Veth,
-            Self::ActivatedAddrgenNone => LinkTelemetryProfile::ActivatedVeth,
+            Self::ActivatedAddrgenNone | Self::ActivatedIcmpEcho => {
+                LinkTelemetryProfile::ActivatedVeth
+            }
         }
     }
 }
@@ -4307,7 +4824,9 @@ struct VethLinkAttributes<'a> {
     carrier_changes: Option<u32>,
     carrier_up_count: Option<u32>,
     carrier_down_count: Option<u32>,
-    zeroed_structs_seen: u8,
+    statistics32: Option<[u32; VETH_LINK_STATS_FIELDS]>,
+    statistics64: Option<[u64; VETH_LINK_STATS64_FIELDS]>,
+    required_structs_seen: u8,
     link_info_seen: bool,
     address_families_seen: bool,
 }
@@ -4341,6 +4860,7 @@ fn verify_veth_link_with_profile(
     };
     verify_veth_link_header(payload, expected_index, profile)?;
     let observed = parse_veth_link_attributes(&payload[IFINFO_LEN..], profile)?;
+    verify_fixed_icmp_echo_veth_statistics(&observed, profile)?;
     let address = observed.address.ok_or(NetworkError::NotPristine)?;
     if !interface_name_is_exact(observed.name, expected_name)
         || observed.peer_index != Some(expected_peer_index)
@@ -4357,7 +4877,7 @@ fn verify_veth_link_with_profile(
         || observed.allmulti != Some(0)
         || observed.protocol_down != Some(0)
         || !veth_carrier_telemetry_matches(&observed, profile)
-        || observed.zeroed_structs_seen != VETH_ZEROED_STRUCTS_SEEN
+        || observed.required_structs_seen != VETH_REQUIRED_STRUCTS_SEEN
         || observed.broadcast != Some([u8::MAX; ETHERNET_ADDRESS_BYTES])
         || address == [0; ETHERNET_ADDRESS_BYTES]
         || address[0] & 0b11 != 0b10
@@ -4405,7 +4925,11 @@ fn parse_veth_link_attributes(
     for attribute in parse_attributes(bytes)? {
         let kind_index = usize::from(attribute.kind);
         if kind_index >= attributes_seen.len() || attributes_seen[kind_index] {
-            return Err(NetworkError::NotPristine);
+            return Err(if matches!(profile, VethLinkProfile::ActivatedIcmpEcho) {
+                NetworkError::Malformed
+            } else {
+                NetworkError::NotPristine
+            });
         }
         attributes_seen[kind_index] = true;
         apply_veth_link_attribute(&mut observed, attribute, profile)?;
@@ -4450,19 +4974,12 @@ fn apply_veth_link_attribute<'a>(
             &mut observed.receive_queues,
             read_exact_u32(attribute.unflagged_payload()?)?,
         ),
-        IFLA_STATS => {
-            verify_zeroed_attribute(attribute, VETH_LINK_STATS_BYTES)?;
-            observed.zeroed_structs_seen |= VETH_STATS_SEEN;
-            Ok(())
-        }
-        IFLA_STATS64 => {
-            verify_zeroed_attribute(attribute, VETH_LINK_STATS64_BYTES)?;
-            observed.zeroed_structs_seen |= VETH_STATS64_SEEN;
-            Ok(())
+        IFLA_STATS | IFLA_STATS64 => {
+            apply_veth_link_statistics_attribute(observed, attribute, profile)
         }
         IFLA_MAP => {
             verify_zeroed_attribute(attribute, VETH_LINK_IFMAP_BYTES)?;
-            observed.zeroed_structs_seen |= VETH_IFMAP_SEEN;
+            observed.required_structs_seen |= VETH_IFMAP_SEEN;
             Ok(())
         }
         IFLA_PERM_ADDRESS => set_once(
@@ -4513,6 +5030,108 @@ fn apply_veth_link_attribute<'a>(
     }
 }
 
+fn apply_veth_link_statistics_attribute(
+    observed: &mut VethLinkAttributes<'_>,
+    attribute: Attribute<'_>,
+    profile: VethLinkProfile,
+) -> Result<(), NetworkError> {
+    match attribute.kind {
+        IFLA_STATS => {
+            if matches!(profile, VethLinkProfile::ActivatedIcmpEcho) {
+                set_once(
+                    &mut observed.statistics32,
+                    decode_veth_link_statistics32(attribute)?,
+                )?;
+            } else {
+                verify_zeroed_attribute(attribute, VETH_LINK_STATS_BYTES)?;
+            }
+            observed.required_structs_seen |= VETH_STATS_SEEN;
+        }
+        IFLA_STATS64 => {
+            if matches!(profile, VethLinkProfile::ActivatedIcmpEcho) {
+                set_once(
+                    &mut observed.statistics64,
+                    decode_veth_link_statistics64(attribute)?,
+                )?;
+            } else {
+                verify_zeroed_attribute(attribute, VETH_LINK_STATS64_BYTES)?;
+            }
+            observed.required_structs_seen |= VETH_STATS64_SEEN;
+        }
+        _ => return Err(NetworkError::Malformed),
+    }
+    Ok(())
+}
+
+fn decode_veth_link_statistics32(
+    attribute: Attribute<'_>,
+) -> Result<[u32; VETH_LINK_STATS_FIELDS], NetworkError> {
+    let payload = attribute.unflagged_payload()?;
+    if payload.len() != VETH_LINK_STATS_BYTES {
+        return Err(NetworkError::Malformed);
+    }
+    let mut statistics = [0; VETH_LINK_STATS_FIELDS];
+    for (index, value) in statistics.iter_mut().enumerate() {
+        *value = read_u32(payload, index * size_of::<u32>())?;
+    }
+    Ok(statistics)
+}
+
+fn decode_veth_link_statistics64(
+    attribute: Attribute<'_>,
+) -> Result<[u64; VETH_LINK_STATS64_FIELDS], NetworkError> {
+    let payload = attribute.unflagged_payload()?;
+    if payload.len() != VETH_LINK_STATS64_BYTES {
+        return Err(NetworkError::Malformed);
+    }
+    let mut statistics = [0; VETH_LINK_STATS64_FIELDS];
+    for (index, value) in statistics.iter_mut().enumerate() {
+        *value = read_u64(payload, index * size_of::<u64>())?;
+    }
+    Ok(statistics)
+}
+
+fn verify_fixed_icmp_echo_veth_statistics(
+    observed: &VethLinkAttributes<'_>,
+    profile: VethLinkProfile,
+) -> Result<(), NetworkError> {
+    if !matches!(profile, VethLinkProfile::ActivatedIcmpEcho) {
+        return Ok(());
+    }
+    let statistics32 = observed.statistics32.ok_or(NetworkError::Malformed)?;
+    let statistics64 = observed.statistics64.ok_or(NetworkError::Malformed)?;
+    for index in 0..VETH_LINK_STATS_FIELDS {
+        if u64::from(statistics32[index]) != statistics64[index] {
+            return Err(NetworkError::Inconsistent);
+        }
+    }
+    let mut under_converged = false;
+    for (packet_index, byte_index) in [(0, 2), (1, 3)] {
+        match (statistics64[packet_index], statistics64[byte_index]) {
+            (FIXED_ICMP_ECHO_PACKETS, FIXED_ICMP_ECHO_ETHERNET_BYTES) => {}
+            (0, 0) => under_converged = true,
+            _ => return Err(NetworkError::Inconsistent),
+        }
+    }
+    if statistics64[4..].iter().any(|value| *value != 0) {
+        return Err(NetworkError::Inconsistent);
+    }
+    if under_converged {
+        Err(NetworkError::NotPristine)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+const fn fixed_icmp_echo_veth_statistic(index: usize) -> u64 {
+    match index {
+        0 | 1 => FIXED_ICMP_ECHO_PACKETS,
+        2 | 3 => FIXED_ICMP_ECHO_ETHERNET_BYTES,
+        _ => 0,
+    }
+}
+
 fn apply_veth_carrier_attribute(
     observed: &mut VethLinkAttributes<'_>,
     attribute: Attribute<'_>,
@@ -4535,7 +5154,7 @@ fn veth_carrier_telemetry_matches(
 ) -> bool {
     let expected = match profile {
         VethLinkProfile::DownEui64 | VethLinkProfile::DownAddrgenNone => (0, 1, 0, 1),
-        VethLinkProfile::ActivatedAddrgenNone => (1, 2, 1, 1),
+        VethLinkProfile::ActivatedAddrgenNone | VethLinkProfile::ActivatedIcmpEcho => (1, 2, 1, 1),
     };
     let values = (
         observed.carrier,
@@ -4550,7 +5169,7 @@ fn veth_carrier_telemetry_matches(
                 && values.2.is_none_or(|value| value == expected.2)
                 && values.3.is_none_or(|value| value == expected.3)
         }
-        VethLinkProfile::ActivatedAddrgenNone => {
+        VethLinkProfile::ActivatedAddrgenNone | VethLinkProfile::ActivatedIcmpEcho => {
             values
                 == (
                     Some(expected.0),
@@ -5347,6 +5966,15 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, NetworkError> {
     Ok(u32::from_ne_bytes(value))
 }
 
+fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, NetworkError> {
+    let value = bytes
+        .get(offset..offset.checked_add(8).ok_or(NetworkError::Limit)?)
+        .ok_or(NetworkError::Malformed)?
+        .try_into()
+        .map_err(|_| NetworkError::Malformed)?;
+    Ok(u64::from_ne_bytes(value))
+}
+
 fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, NetworkError> {
     let value = bytes
         .get(offset..offset.checked_add(4).ok_or(NetworkError::Limit)?)
@@ -5901,6 +6529,391 @@ mod tests {
             [test_namespace_identity(11), test_namespace_identity(12)],
         )
         .expect("activated pair relations");
+    }
+
+    #[test]
+    fn fixed_icmp_echo_veth_profile_requires_exact_consistent_statistics() {
+        let expected = expected_pair("vpa01234567", 2, 2, 11);
+        let payload = veth_link_payload_with_profile(
+            &expected.parent_name,
+            expected.parent_ifindex,
+            expected.endpoint_ifindex,
+            0,
+            [0x02, 1, 2, 3, 4, 5],
+            VethLinkProfile::ActivatedIcmpEcho,
+        );
+        verify_veth_link_with_profile(
+            &payload,
+            &expected,
+            VethLinkSide::Parent,
+            VethLinkProfile::ActivatedIcmpEcho,
+        )
+        .expect("exact fixed echo telemetry");
+
+        for index in 0..(VETH_LINK_STATS_BYTES / size_of::<u32>()) {
+            let mut wrong = fixed_icmp_echo_statistics32_payload();
+            let offset = index * size_of::<u32>();
+            let value = u32::try_from(fixed_icmp_echo_veth_statistic(index))
+                .expect("fixed echo statistic fits u32")
+                + 1;
+            wrong[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_ne_bytes());
+            let wrong = replace_record_attribute(&payload, IFINFO_LEN, IFLA_STATS, &wrong);
+            assert!(
+                matches!(
+                    verify_veth_link_with_profile(
+                        &wrong,
+                        &expected,
+                        VethLinkSide::Parent,
+                        VethLinkProfile::ActivatedIcmpEcho,
+                    ),
+                    Err(NetworkError::Inconsistent)
+                ),
+                "32-bit statistic {index} must be exact",
+            );
+        }
+
+        for index in 0..(VETH_LINK_STATS64_BYTES / size_of::<u64>()) {
+            let mut wrong = fixed_icmp_echo_statistics64_payload();
+            let offset = index * size_of::<u64>();
+            let value = fixed_icmp_echo_veth_statistic(index) + 1;
+            wrong[offset..offset + size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
+            let wrong = replace_record_attribute(&payload, IFINFO_LEN, IFLA_STATS64, &wrong);
+            assert!(
+                matches!(
+                    verify_veth_link_with_profile(
+                        &wrong,
+                        &expected,
+                        VethLinkSide::Parent,
+                        VethLinkProfile::ActivatedIcmpEcho,
+                    ),
+                    Err(NetworkError::Inconsistent)
+                ),
+                "64-bit statistic {index} must be exact",
+            );
+        }
+
+        let mut nonzero_map = vec![0; VETH_LINK_IFMAP_BYTES];
+        nonzero_map[0] = 1;
+        let nonzero_map = replace_record_attribute(&payload, IFINFO_LEN, IFLA_MAP, &nonzero_map);
+        assert!(
+            verify_veth_link_with_profile(
+                &nonzero_map,
+                &expected,
+                VethLinkSide::Parent,
+                VethLinkProfile::ActivatedIcmpEcho,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fixed_icmp_echo_statistics_classify_only_coherent_under_convergence_as_retryable() {
+        let expected = expected_pair("vpa01234567", 2, 2, 11);
+        let exact = veth_link_payload_with_profile(
+            &expected.parent_name,
+            expected.parent_ifindex,
+            expected.endpoint_ifindex,
+            0,
+            [0x02, 1, 2, 3, 4, 5],
+            VethLinkProfile::ActivatedIcmpEcho,
+        );
+
+        let under = replace_fixed_icmp_echo_statistics(
+            &exact,
+            &[0; VETH_LINK_STATS_BYTES],
+            &[0; VETH_LINK_STATS64_BYTES],
+        );
+        assert!(matches!(
+            verify_veth_link_with_profile(
+                &under,
+                &expected,
+                VethLinkSide::Parent,
+                VethLinkProfile::ActivatedIcmpEcho,
+            ),
+            Err(NetworkError::NotPristine)
+        ));
+
+        let mut impossible32 = fixed_icmp_echo_statistics32_payload();
+        impossible32[..size_of::<u32>()].fill(0);
+        let mut impossible64 = fixed_icmp_echo_statistics64_payload();
+        impossible64[..size_of::<u64>()].fill(0);
+        let impossible = replace_fixed_icmp_echo_statistics(&exact, &impossible32, &impossible64);
+        assert!(matches!(
+            verify_veth_link_with_profile(
+                &impossible,
+                &expected,
+                VethLinkSide::Parent,
+                VethLinkProfile::ActivatedIcmpEcho,
+            ),
+            Err(NetworkError::Inconsistent)
+        ));
+
+        let width_mismatch =
+            replace_record_attribute(&exact, IFINFO_LEN, IFLA_STATS, &[0; VETH_LINK_STATS_BYTES]);
+        assert!(matches!(
+            verify_veth_link_with_profile(
+                &width_mismatch,
+                &expected,
+                VethLinkSide::Parent,
+                VethLinkProfile::ActivatedIcmpEcho,
+            ),
+            Err(NetworkError::Inconsistent)
+        ));
+
+        let statistics32 = fixed_icmp_echo_statistics32_payload();
+        let malformed = replace_record_attribute(
+            &exact,
+            IFINFO_LEN,
+            IFLA_STATS,
+            &statistics32[..statistics32.len() - size_of::<u32>()],
+        );
+        assert!(matches!(
+            verify_veth_link_with_profile(
+                &malformed,
+                &expected,
+                VethLinkSide::Parent,
+                VethLinkProfile::ActivatedIcmpEcho,
+            ),
+            Err(NetworkError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn fixed_icmp_echo_observation_retries_under_convergence_but_not_overcount() {
+        let expected = expected_pair("vpa01234567", 2, 2, 11);
+        let exact = veth_link_payload_with_profile(
+            &expected.parent_name,
+            expected.parent_ifindex,
+            expected.endpoint_ifindex,
+            0,
+            [0x02, 1, 2, 3, 4, 5],
+            VethLinkProfile::ActivatedIcmpEcho,
+        );
+        let under = replace_fixed_icmp_echo_statistics(
+            &exact,
+            &[0; VETH_LINK_STATS_BYTES],
+            &[0; VETH_LINK_STATS64_BYTES],
+        );
+        let attempts = Cell::new(0_u8);
+        retry_exact_observation_before(
+            Deadline::after(Duration::from_millis(100)).expect("post-echo retry deadline"),
+            || {
+                attempts.set(attempts.get() + 1);
+                Ok(if attempts.get() == 1 {
+                    under.clone()
+                } else {
+                    exact.clone()
+                })
+            },
+            |payload| {
+                verify_veth_link_with_profile(
+                    payload,
+                    &expected,
+                    VethLinkSide::Parent,
+                    VethLinkProfile::ActivatedIcmpEcho,
+                )
+            },
+        )
+        .expect("coherent zero telemetry converges once");
+        assert_eq!(attempts.get(), 2);
+
+        let mut over32 = fixed_icmp_echo_statistics32_payload();
+        over32[..size_of::<u32>()].copy_from_slice(&2_u32.to_ne_bytes());
+        let mut over64 = fixed_icmp_echo_statistics64_payload();
+        over64[..size_of::<u64>()].copy_from_slice(&2_u64.to_ne_bytes());
+        let over = replace_fixed_icmp_echo_statistics(&exact, &over32, &over64);
+        let terminal_attempt = |candidate: &Vec<u8>| {
+            let attempts = Cell::new(0_u8);
+            let result = retry_exact_observation_before(
+                Deadline::after(Duration::from_millis(100)).expect("post-echo terminal deadline"),
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Ok(candidate.clone())
+                },
+                |payload| {
+                    verify_veth_link_with_profile(
+                        payload,
+                        &expected,
+                        VethLinkSide::Parent,
+                        VethLinkProfile::ActivatedIcmpEcho,
+                    )
+                },
+            );
+            (attempts.get(), result)
+        };
+        let (attempts, result) = terminal_attempt(&over);
+        assert!(matches!(result, Err(NetworkError::Inconsistent)));
+        assert_eq!(attempts, 1);
+
+        let mut impossible32 = fixed_icmp_echo_statistics32_payload();
+        impossible32[..size_of::<u32>()].fill(0);
+        let mut impossible64 = fixed_icmp_echo_statistics64_payload();
+        impossible64[..size_of::<u64>()].fill(0);
+        let impossible = replace_fixed_icmp_echo_statistics(&exact, &impossible32, &impossible64);
+        let (attempts, result) = terminal_attempt(&impossible);
+        assert!(matches!(result, Err(NetworkError::Inconsistent)));
+        assert_eq!(attempts, 1);
+
+        let statistics32 = fixed_icmp_echo_statistics32_payload();
+        let malformed = replace_record_attribute(
+            &exact,
+            IFINFO_LEN,
+            IFLA_STATS,
+            &statistics32[..statistics32.len() - size_of::<u32>()],
+        );
+        let (attempts, result) = terminal_attempt(&malformed);
+        assert!(matches!(result, Err(NetworkError::Malformed)));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn fixed_icmp_echo_snapshot_and_neighbour_removal_preserve_exact_telemetry() {
+        let pristine = pristine_snapshot();
+        let first = expected_pair("vpa01234567", 2, 2, 11);
+        let second = expected_pair("vpb01234567", 3, 2, 12);
+        let first_mac = [0x02, 1, 2, 3, 4, 5];
+        let second_mac = [0x06, 1, 2, 3, 4, 5];
+
+        let mut parent_before = pristine.clone();
+        parent_before.links.extend([
+            veth_link_payload_with_profile(
+                &first.parent_name,
+                first.parent_ifindex,
+                first.endpoint_ifindex,
+                0,
+                first_mac,
+                VethLinkProfile::ActivatedAddrgenNone,
+            ),
+            veth_link_payload_with_profile(
+                &second.parent_name,
+                second.parent_ifindex,
+                second.endpoint_ifindex,
+                1,
+                second_mac,
+                VethLinkProfile::ActivatedAddrgenNone,
+            ),
+        ]);
+        let before_links = [
+            verify_veth_link_with_profile(
+                &parent_before.links[1],
+                &first,
+                VethLinkSide::Parent,
+                VethLinkProfile::ActivatedAddrgenNone,
+            )
+            .expect("zero-traffic parent A"),
+            verify_veth_link_with_profile(
+                &parent_before.links[2],
+                &second,
+                VethLinkSide::Parent,
+                VethLinkProfile::ActivatedAddrgenNone,
+            )
+            .expect("zero-traffic parent B"),
+        ];
+        let mut parent_after = pristine.clone();
+        parent_after.links.extend([
+            veth_link_payload_with_profile(
+                &first.parent_name,
+                first.parent_ifindex,
+                first.endpoint_ifindex,
+                0,
+                first_mac,
+                VethLinkProfile::ActivatedIcmpEcho,
+            ),
+            veth_link_payload_with_profile(
+                &second.parent_name,
+                second.parent_ifindex,
+                second.endpoint_ifindex,
+                1,
+                second_mac,
+                VethLinkProfile::ActivatedIcmpEcho,
+            ),
+        ]);
+        verify_exact_parent_ipv4_icmp_echo_snapshot_delta(
+            &parent_before,
+            &parent_after,
+            &before_links,
+        )
+        .expect("exact parent echo telemetry");
+
+        let mut endpoint_before = pristine.clone();
+        endpoint_before.links.push(veth_link_payload_with_profile(
+            VETH_ENDPOINT_NAME,
+            first.endpoint_ifindex,
+            first.parent_ifindex,
+            0,
+            [0x0a, 1, 2, 3, 4, 5],
+            VethLinkProfile::ActivatedAddrgenNone,
+        ));
+        let endpoint_link = verify_veth_link_with_profile(
+            &endpoint_before.links[1],
+            &first,
+            VethLinkSide::Endpoint,
+            VethLinkProfile::ActivatedAddrgenNone,
+        )
+        .expect("zero-traffic endpoint A");
+        let mut endpoint_after = pristine.clone();
+        endpoint_after.links.push(veth_link_payload_with_profile(
+            VETH_ENDPOINT_NAME,
+            first.endpoint_ifindex,
+            first.parent_ifindex,
+            0,
+            endpoint_link.mac,
+            VethLinkProfile::ActivatedIcmpEcho,
+        ));
+        verify_exact_endpoint_ipv4_icmp_echo_snapshot_delta(
+            &endpoint_before,
+            &endpoint_after,
+            &endpoint_link,
+        )
+        .expect("exact endpoint echo telemetry");
+
+        let endpoint_expected_neighbour = ExpectedIpv4PermanentNeighbour {
+            namespace: Some(test_namespace_identity(11)),
+            ifindex: first.endpoint_ifindex,
+            destination: [10, 241, 1, 1],
+            link_layer_address: first_mac,
+        };
+        let mut endpoint_before_removal = endpoint_after.clone();
+        endpoint_before_removal.neighbours.push(
+            canonical_ipv4_permanent_neighbour(&endpoint_expected_neighbour)
+                .expect("canonical endpoint echo neighbour"),
+        );
+        verify_exact_ipv4_icmp_echo_neighbour_removal_snapshot_delta(
+            &endpoint_before,
+            &endpoint_before_removal,
+            &endpoint_after,
+        )
+        .expect("endpoint neighbour removal retains echo telemetry");
+
+        let expected_neighbour = ExpectedIpv4PermanentNeighbour {
+            namespace: None,
+            ifindex: first.parent_ifindex,
+            destination: [10, 241, 1, 2],
+            link_layer_address: endpoint_link.mac,
+        };
+        let mut before_removal = parent_after.clone();
+        before_removal.neighbours.push(
+            canonical_ipv4_permanent_neighbour(&expected_neighbour)
+                .expect("canonical echo neighbour"),
+        );
+        verify_exact_ipv4_icmp_echo_neighbour_removal_snapshot_delta(
+            &parent_before,
+            &before_removal,
+            &parent_after,
+        )
+        .expect("neighbour removal retains echo telemetry");
+
+        let mut changed_after_removal = parent_after.clone();
+        changed_after_removal.links[1] = parent_before.links[1].clone();
+        assert!(
+            verify_exact_ipv4_icmp_echo_neighbour_removal_snapshot_delta(
+                &parent_before,
+                &before_removal,
+                &changed_after_removal,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -8936,8 +9949,20 @@ mod tests {
             IFLA_NUM_RX_QUEUES,
             &VETH_QUEUE_COUNT.to_ne_bytes(),
         ));
-        payload.extend(attribute(IFLA_STATS, &[0; VETH_LINK_STATS_BYTES]));
-        payload.extend(attribute(IFLA_STATS64, &[0; VETH_LINK_STATS64_BYTES]));
+        let (statistics32, statistics64) = if matches!(profile, VethLinkProfile::ActivatedIcmpEcho)
+        {
+            (
+                fixed_icmp_echo_statistics32_payload(),
+                fixed_icmp_echo_statistics64_payload(),
+            )
+        } else {
+            (
+                vec![0; VETH_LINK_STATS_BYTES],
+                vec![0; VETH_LINK_STATS64_BYTES],
+            )
+        };
+        payload.extend(attribute(IFLA_STATS, &statistics32));
+        payload.extend(attribute(IFLA_STATS64, &statistics64));
         payload.extend(attribute(IFLA_MAP, &[0; VETH_LINK_IFMAP_BYTES]));
         payload.extend(attribute(IFLA_PERM_ADDRESS, &mac));
         payload.extend(attribute(IFLA_QDISC, profile.qdisc()));
@@ -8954,13 +9979,41 @@ mod tests {
         let ipv6 = attribute(IFLA_INET6_ADDR_GEN_MODE, &[profile.addrgen_mode()]);
         address_families.extend(attribute(u16::from(AF_INET6), &ipv6));
         payload.extend(attribute(IFLA_AF_SPEC, &address_families));
-        if matches!(profile, VethLinkProfile::ActivatedAddrgenNone) {
+        if matches!(
+            profile,
+            VethLinkProfile::ActivatedAddrgenNone | VethLinkProfile::ActivatedIcmpEcho
+        ) {
             payload.extend(attribute(IFLA_CARRIER, &[1]));
             payload.extend(attribute(IFLA_CARRIER_CHANGES, &2_u32.to_ne_bytes()));
             payload.extend(attribute(IFLA_CARRIER_UP_COUNT, &1_u32.to_ne_bytes()));
             payload.extend(attribute(IFLA_CARRIER_DOWN_COUNT, &1_u32.to_ne_bytes()));
         }
         payload
+    }
+
+    fn fixed_icmp_echo_statistics32_payload() -> Vec<u8> {
+        (0..(VETH_LINK_STATS_BYTES / size_of::<u32>()))
+            .flat_map(|index| {
+                u32::try_from(fixed_icmp_echo_veth_statistic(index))
+                    .expect("fixed echo statistic fits u32")
+                    .to_ne_bytes()
+            })
+            .collect()
+    }
+
+    fn fixed_icmp_echo_statistics64_payload() -> Vec<u8> {
+        (0..(VETH_LINK_STATS64_BYTES / size_of::<u64>()))
+            .flat_map(|index| fixed_icmp_echo_veth_statistic(index).to_ne_bytes())
+            .collect()
+    }
+
+    fn replace_fixed_icmp_echo_statistics(
+        payload: &[u8],
+        statistics32: &[u8],
+        statistics64: &[u8],
+    ) -> Vec<u8> {
+        let payload = replace_record_attribute(payload, IFINFO_LEN, IFLA_STATS, statistics32);
+        replace_record_attribute(&payload, IFINFO_LEN, IFLA_STATS64, statistics64)
     }
 
     fn valid_extra_veth_link() -> Vec<u8> {

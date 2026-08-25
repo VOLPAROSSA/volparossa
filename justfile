@@ -49,23 +49,24 @@ test-package-licenses:
 test-netns:
     ./tests/netns/run-topology.sh --preview --only all
 
-test-netns-permanent-neighbour-proof:
+test-netns-fixed-icmp-echo-proof:
     cargo build --locked --target x86_64-unknown-linux-gnu \
-        --target-dir target/permanent-neighbour-proof -p volparossa-netns-runner
+        --target-dir target/fixed-icmp-echo-proof -p volparossa-netns-runner
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
-        ./tests/netns/require-permanent-neighbour-proof.sh
+        ./tests/netns/require-fixed-icmp-echo-proof.sh
 
-# Backwards-compatible names for the now-stronger no-packet permanent-neighbour proof.
-test-netns-counted-forward-policy-proof: test-netns-permanent-neighbour-proof
-test-netns-ipv4-forwarding-runtime-proof: test-netns-permanent-neighbour-proof
-test-netns-forward-policy-teardown-proof: test-netns-permanent-neighbour-proof
-test-netns-endpoint-route-teardown-proof: test-netns-permanent-neighbour-proof
-test-netns-link-activation-teardown-proof: test-netns-permanent-neighbour-proof
-test-netns-ipv4-address-rollback-proof: test-netns-permanent-neighbour-proof
-test-netns-veth-rollback-proof: test-netns-permanent-neighbour-proof
-test-netns-live-nsfs-proof: test-netns-permanent-neighbour-proof
-test-netns-authorized-private-run-proof: test-netns-permanent-neighbour-proof
-test-netns-bootstrap-ready-proof: test-netns-permanent-neighbour-proof
+# Backwards-compatible names for the now-stronger fixed ICMP echo plus rollback proof.
+test-netns-permanent-neighbour-proof: test-netns-fixed-icmp-echo-proof
+test-netns-counted-forward-policy-proof: test-netns-fixed-icmp-echo-proof
+test-netns-ipv4-forwarding-runtime-proof: test-netns-fixed-icmp-echo-proof
+test-netns-forward-policy-teardown-proof: test-netns-fixed-icmp-echo-proof
+test-netns-endpoint-route-teardown-proof: test-netns-fixed-icmp-echo-proof
+test-netns-link-activation-teardown-proof: test-netns-fixed-icmp-echo-proof
+test-netns-ipv4-address-rollback-proof: test-netns-fixed-icmp-echo-proof
+test-netns-veth-rollback-proof: test-netns-fixed-icmp-echo-proof
+test-netns-live-nsfs-proof: test-netns-fixed-icmp-echo-proof
+test-netns-authorized-private-run-proof: test-netns-fixed-icmp-echo-proof
+test-netns-bootstrap-ready-proof: test-netns-fixed-icmp-echo-proof
 
 test-mptcp:
     ./tests/netns/run-topology.sh --preview --only mptcp

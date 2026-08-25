@@ -2633,6 +2633,48 @@ impl AuthorizedActivatedTopology {
             FixedLinkRetirement::Untouched => std::process::abort(),
         }
     }
+
+    fn into_fixed_icmp_echo_deleted_topology(
+        mut self,
+        route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
+    ) -> AuthorizedDeletedTopology {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        match links.into_fixed_icmp_echo_retirement() {
+            FixedLinkRetirement::Deleted(pending) => complete_raw_link_retirement(
+                addressed,
+                pending,
+                route_retirements,
+                empty_permanent_neighbour_retirements(),
+            ),
+            FixedLinkRetirement::Untouched => std::process::abort(),
+        }
+    }
+
+    fn into_fixed_icmp_cleanup_deleted_topology(
+        mut self,
+        route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
+        neighbour_retirements: [Option<FixedPermanentNeighbourRetirement>;
+            PERMANENT_NEIGHBOUR_COUNT],
+    ) -> AuthorizedDeletedTopology {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        match links.into_fixed_icmp_cleanup_retirement() {
+            FixedLinkRetirement::Deleted(pending) => complete_raw_link_retirement(
+                addressed,
+                pending,
+                route_retirements,
+                neighbour_retirements,
+            ),
+            FixedLinkRetirement::Untouched => std::process::abort(),
+        }
+    }
 }
 
 impl AuthorizedEndpointRoutes {
@@ -2821,6 +2863,36 @@ impl AuthorizedEndpointRoutes {
         activated.into_deleted_topology(routes, empty_permanent_neighbour_retirements())
     }
 
+    /// Delete pair B then A after the exact one-packet fixed ICMP echo proof.
+    ///
+    /// Only this explicitly named transition admits the exact post-echo link
+    /// statistics during pre-delete reconciliation. The ordinary retirement
+    /// transition remains strictly bound to zero statistics.
+    pub(crate) fn begin_fixed_icmp_echo_retirement(mut self) -> AuthorizedDeletedTopology {
+        let activated = self
+            .activated
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let routes = take_route_retirements(&mut self.routes);
+        activated.into_fixed_icmp_echo_deleted_topology(routes)
+    }
+
+    /// Delete pair B then A after a fixed ICMP send might have occurred.
+    ///
+    /// This bounded cleanup transition admits only coherent zero-or-one-frame
+    /// RX/TX directions; it is not available to ordinary pre-send retirement.
+    pub(crate) fn begin_fixed_icmp_cleanup_retirement(mut self) -> AuthorizedDeletedTopology {
+        let activated = self
+            .activated
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let routes = take_route_retirements(&mut self.routes);
+        activated.into_fixed_icmp_cleanup_deleted_topology(
+            routes,
+            empty_permanent_neighbour_retirements(),
+        )
+    }
+
     fn activated(&self) -> &AuthorizedActivatedTopology {
         self.activated
             .as_ref()
@@ -2838,6 +2910,19 @@ impl AuthorizedEndpointRoutes {
             .unwrap_or_else(|| std::process::abort());
         let routes = take_route_retirements(&mut self.routes);
         activated.into_deleted_topology(routes, neighbour_retirements)
+    }
+
+    fn into_fixed_icmp_cleanup_deleted_topology_with_neighbours(
+        mut self,
+        neighbour_retirements: [Option<FixedPermanentNeighbourRetirement>;
+            PERMANENT_NEIGHBOUR_COUNT],
+    ) -> AuthorizedDeletedTopology {
+        let activated = self
+            .activated
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let routes = take_route_retirements(&mut self.routes);
+        activated.into_fixed_icmp_cleanup_deleted_topology(routes, neighbour_retirements)
     }
 
     fn into_failure(mut self, source: FixedEndpointRouteSetError) -> FixedEndpointRouteFailure {
@@ -2942,12 +3027,17 @@ impl AuthorizedPermanentNeighbours {
         visited
     }
 
-    /// Explicitly delete endpoint B/A then parent B/A and recover routed authority.
-    pub(crate) fn remove_permanent_neighbours(
+    /// Explicitly delete endpoint B/A then parent B/A after a possible fixed
+    /// ICMP send and recover routed authority.
+    ///
+    /// The successful neighbour transition is identical to the ordinary API.
+    /// Any verification or possibly-sent DELNEIGH failure instead retains the
+    /// bounded post-send link cleanup profile through pair deletion.
+    pub(crate) fn remove_permanent_neighbours_after_fixed_icmp(
         mut self,
     ) -> Result<AuthorizedEndpointRoutes, FixedPermanentNeighbourFailure> {
         if let Err(source) = self.verify() {
-            return Err(self.into_failure(source));
+            return Err(self.into_fixed_icmp_cleanup_failure(source));
         }
         let mut retirements = empty_permanent_neighbour_retirements();
         let cleanup = cleanup_permanent_neighbour_owners(
@@ -2958,10 +3048,10 @@ impl AuthorizedPermanentNeighbours {
             &mut retirements,
         );
         if let Some(source) = cleanup {
-            return Err(self.into_failure_after_cleanup(source, retirements));
+            return Err(self.into_fixed_icmp_cleanup_failure_after_cleanup(source, retirements));
         }
         if self.neighbours.iter().any(Option::is_some) {
-            return Err(self.into_failure_after_cleanup(
+            return Err(self.into_fixed_icmp_cleanup_failure_after_cleanup(
                 FixedPermanentNeighbourSetError::Unsafe(
                     "explicit permanent-neighbour removal left an owner",
                 ),
@@ -2990,6 +3080,27 @@ impl AuthorizedPermanentNeighbours {
         }
         let routed = self.routed.take().unwrap_or_else(|| std::process::abort());
         routed.into_deleted_topology_with_neighbours(retirements)
+    }
+
+    /// Fail-closed retirement after a fixed ICMP send might have occurred.
+    ///
+    /// Neighbours are offered the canonical reverse deletion first. Link
+    /// deletion then accepts only the bounded zero-or-one-frame cleanup
+    /// statistics profile; ordinary retirement remains zero-strict.
+    pub(crate) fn begin_fixed_icmp_cleanup_retirement(mut self) -> AuthorizedDeletedTopology {
+        let mut retirements = empty_permanent_neighbour_retirements();
+        let _ = cleanup_permanent_neighbour_owners(
+            self.routed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort()),
+            &mut self.neighbours,
+            &mut retirements,
+        );
+        if self.neighbours.iter().any(Option::is_some) {
+            std::process::abort();
+        }
+        let routed = self.routed.take().unwrap_or_else(|| std::process::abort());
+        routed.into_fixed_icmp_cleanup_deleted_topology_with_neighbours(retirements)
     }
 
     fn routed(&self) -> &AuthorizedEndpointRoutes {
@@ -3021,7 +3132,30 @@ impl AuthorizedPermanentNeighbours {
         )
     }
 
-    fn into_failure_after_cleanup(
+    fn into_fixed_icmp_cleanup_failure(
+        mut self,
+        source: FixedPermanentNeighbourSetError,
+    ) -> FixedPermanentNeighbourFailure {
+        let mut retirements = empty_permanent_neighbour_retirements();
+        let cleanup = cleanup_permanent_neighbour_owners(
+            self.routed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort()),
+            &mut self.neighbours,
+            &mut retirements,
+        );
+        let source = combine_permanent_neighbour_cleanup_error(source, cleanup);
+        if self.neighbours.iter().any(Option::is_some) {
+            std::process::abort();
+        }
+        let routed = self.routed.take().unwrap_or_else(|| std::process::abort());
+        FixedPermanentNeighbourFailure::deleted(
+            source,
+            routed.into_fixed_icmp_cleanup_deleted_topology_with_neighbours(retirements),
+        )
+    }
+
+    fn into_fixed_icmp_cleanup_failure_after_cleanup(
         mut self,
         source: FixedPermanentNeighbourSetError,
         retirements: [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
@@ -3032,7 +3166,7 @@ impl AuthorizedPermanentNeighbours {
         let routed = self.routed.take().unwrap_or_else(|| std::process::abort());
         FixedPermanentNeighbourFailure::deleted(
             source,
-            routed.into_deleted_topology_with_neighbours(retirements),
+            routed.into_fixed_icmp_cleanup_deleted_topology_with_neighbours(retirements),
         )
     }
 }

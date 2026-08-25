@@ -33,10 +33,15 @@ use crate::network::{
     PristineNetworkNamespaceObservation as EndpointNetworkBaseline,
 };
 use crate::nftables::{
-    ActiveNftablesPolicy, FixedForwardPolicyExpectation, IndeterminateNftablesPolicy,
-    NftablesBaseline, NftablesDeleteAuthority, NftablesError, NftablesInstallAuthority,
-    SemanticallyEmptyNftables, delete_exact_forward_policy, install_exact_forward_policy,
-    mutation_deadline, verify_empty_nftables, verify_exact_forward_policy,
+    ActiveNftablesPolicy, ExactFixedIcmpCounterProof, ExactFixedIcmpNftablesPolicy,
+    FixedForwardPolicyExpectation, FixedIcmpCounterPhase, ForwardPolicyCleanupAuthority,
+    ForwardPolicyCleanupDeleteAuthority, IndeterminateNftablesPolicy, NftablesBaseline,
+    NftablesDeleteAuthority, NftablesError, NftablesInstallAuthority, SemanticallyEmptyNftables,
+    begin_fixed_icmp_counter_phase, delete_exact_forward_policy, delete_forward_policy_cleanup,
+    install_exact_forward_policy, mutation_deadline,
+    observe_exact_fixed_icmp_counters_after_socket_close, verify_empty_nftables,
+    verify_exact_fixed_icmp_nftables_policy, verify_exact_forward_policy,
+    verify_forward_policy_cleanup,
 };
 use crate::topology::namespaces::{
     AuthorizedActivatedTopology, AuthorizedDeletedTopology, AuthorizedEndpointRoutes,
@@ -300,6 +305,9 @@ pub(crate) enum FixedForwardPolicyError {
     /// The final composite RTNL/proc/nftables lineage proof failed.
     #[error("fixed forward network lineage failed: {0}")]
     Network(#[source] PolicyNetworkError),
+    /// The sole bounded raw ICMP exchange or its exact reply proof failed.
+    #[error("fixed ICMP echo proof failed: {0}")]
+    Icmp(#[source] crate::icmp::IcmpEchoError),
     /// The original failure is retained when cleanup-authority reproof also fails.
     #[error("{transition}; retained policy cleanup authority also failed: {cleanup}")]
     CleanupReproof {
@@ -348,9 +356,13 @@ pub(crate) struct IndeterminateRestoredForwardPolicyCleanup {
 
 /// Exact generation-two policy coupled to one topology and parent rollback lineage.
 #[must_use = "an active policy-bound topology must be retired through its typed lifecycle"]
-pub(crate) struct PolicyBoundPrivateMounts<RunState, NetworkAuthority = PolicyRollbackProof> {
+pub(crate) struct PolicyBoundPrivateMounts<
+    RunState,
+    NetworkAuthority = PolicyRollbackProof,
+    PolicyAuthority = ActiveNftablesPolicy,
+> {
     mounts: PrivateMounts<RunState>,
-    policy: ActiveNftablesPolicy,
+    policy: PolicyAuthority,
     rollback: NetworkAuthority,
     binding: FixedForwardPolicyBinding,
 }
@@ -376,6 +388,116 @@ pub(crate) enum FixedForwardPolicyFailureState {
 pub(crate) struct FixedForwardPolicyFailure {
     source: FixedForwardPolicyError,
     state: FixedForwardPolicyFailureState,
+}
+
+/// Failed one-shot packet proof with the sole deletion-only cleanup authority.
+#[must_use = "failed ICMP proof retains mandatory topology and policy cleanup authority"]
+pub(crate) struct FixedIcmpEchoFailure {
+    source: FixedForwardPolicyError,
+    cleanup: Box<
+        PolicyBoundPrivateMounts<
+            AuthorizedDeletedTopology,
+            PolicyEnabledNetworkProof,
+            ForwardPolicyCleanupAuthority,
+        >,
+    >,
+}
+
+impl std::fmt::Debug for FixedIcmpEchoFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FixedIcmpEchoFailure")
+            .field("source", &self.source)
+            .field("state", &"deleted-cleanup-only")
+            .field("cleanup", &"armed")
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FixedIcmpEchoFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for FixedIcmpEchoFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl FixedIcmpEchoFailure {
+    /// Recover the original packet error and its unique cleanup authority.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        FixedForwardPolicyError,
+        PolicyBoundPrivateMounts<
+            AuthorizedDeletedTopology,
+            PolicyEnabledNetworkProof,
+            ForwardPolicyCleanupAuthority,
+        >,
+    ) {
+        (self.source, *self.cleanup)
+    }
+}
+
+/// Recoverable continuation after post-echo cleanup could not finish in one pass.
+pub(crate) enum FixedIcmpEchoTeardownFailure {
+    /// Forwarding is still enabled and exact cleanup-policy verification can retry.
+    Active {
+        /// The bounded cleanup failure.
+        source: FixedForwardPolicyError,
+        /// Deleted topology and counter-agnostic generation-two policy authority.
+        cleanup: Box<
+            PolicyBoundPrivateMounts<
+                AuthorizedDeletedTopology,
+                PolicyEnabledNetworkProof,
+                ForwardPolicyCleanupAuthority,
+            >,
+        >,
+        /// Still-affine endpoint baselines.
+        endpoints: Box<[EndpointNetworkBaseline; 2]>,
+    },
+    /// Forwarding is restored and exact cleanup-policy deletion can retry.
+    Restored {
+        /// The bounded cleanup failure.
+        source: FixedForwardPolicyError,
+        /// Restored topology and counter-agnostic generation-two policy authority.
+        cleanup: Box<
+            PolicyBoundPrivateMounts<
+                AuthorizedDeletedTopology,
+                PolicyRestoredNetworkProof,
+                ForwardPolicyCleanupAuthority,
+            >,
+        >,
+        /// Still-affine endpoint baselines.
+        endpoints: Box<[EndpointNetworkBaseline; 2]>,
+    },
+    /// Policy retirement advanced to the existing generation-three lifecycle.
+    Forward(FixedForwardPolicyTeardownFailure),
+}
+
+pub(crate) trait IntoForwardPolicyCleanupAuthority {
+    fn into_forward_policy_cleanup(self) -> ForwardPolicyCleanupAuthority;
+}
+
+impl IntoForwardPolicyCleanupAuthority for ActiveNftablesPolicy {
+    fn into_forward_policy_cleanup(self) -> ForwardPolicyCleanupAuthority {
+        self.into_cleanup_authority()
+    }
+}
+
+impl IntoForwardPolicyCleanupAuthority for FixedIcmpCounterPhase {
+    fn into_forward_policy_cleanup(self) -> ForwardPolicyCleanupAuthority {
+        self.into_cleanup_authority()
+    }
+}
+
+impl IntoForwardPolicyCleanupAuthority for ExactFixedIcmpNftablesPolicy {
+    fn into_forward_policy_cleanup(self) -> ForwardPolicyCleanupAuthority {
+        self.into_cleanup_authority()
+    }
 }
 
 impl std::fmt::Debug for FixedForwardPolicyFailure {
@@ -700,6 +822,22 @@ pub(crate) struct ExactIpv4EndpointRouteNetworkProof {
 pub(crate) struct ExactIpv4PermanentNeighbourNetworkProof {
     parent: crate::network::ExactIpv4PermanentNeighbourParentObservation,
     endpoints: [crate::network::ExactIpv4PermanentNeighbourEndpointObservation; 2],
+}
+
+/// Joined exact reply, forward-counter, and post-echo permanent-neighbour proof.
+pub(crate) struct ExactIpv4IcmpEchoPermanentNeighbourNetworkProof {
+    parent: crate::network::ExactIpv4IcmpEchoPermanentNeighbourParentObservation,
+    endpoints: [crate::network::ExactIpv4IcmpEchoPermanentNeighbourEndpointObservation; 2],
+    reply: crate::icmp::ExactIcmpEchoReply,
+    counters: ExactFixedIcmpCounterProof,
+}
+
+/// Joined exact reply, counter, and routed post-echo proof after neighbour removal.
+pub(crate) struct ExactIpv4IcmpEchoEndpointRouteNetworkProof {
+    parent: crate::network::ExactIpv4IcmpEchoEndpointRouteParentObservation,
+    endpoints: [crate::network::ExactIpv4IcmpEchoEndpointRouteEndpointObservation; 2],
+    reply: crate::icmp::ExactIcmpEchoReply,
+    counters: ExactFixedIcmpCounterProof,
 }
 
 struct ExactIpv4AddressExpectations {
@@ -2505,6 +2643,44 @@ impl PrivateMounts<AuthorizedEndpointRoutes> {
             .map_err(NamespacePinsNetworkProofError::Mount)
     }
 
+    fn verify_exact_ipv4_icmp_echo_endpoint_route_state(
+        &self,
+        proof: &ExactIpv4IcmpEchoEndpointRouteNetworkProof,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_endpoint_routes()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        self.run_state
+            .visit_parent_network_namespace(|| proof.parent.verify(self))
+            .map_err(|error| {
+                map_endpoint_route_visit_error("reprove exact post-echo routed parent state", error)
+            })?;
+        let mut visited = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if visited[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                proof.endpoints[index].verify(self)?;
+                visited[index] = true;
+                Ok(())
+            })
+            .map_err(|error| {
+                map_endpoint_route_visit_error(
+                    "reprove exact post-echo routed endpoint state",
+                    error,
+                )
+            })?;
+        require_complete_endpoint_visit(visited)?;
+        crate::network::verify_exact_ipv4_icmp_echo_endpoint_route_observations(
+            &proof.parent,
+            [&proof.endpoints[0], &proof.endpoints[1]],
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        self.verify_authorized_endpoint_routes()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+
     fn prove_exact_ipv4_endpoint_routes(
         &self,
         active_proof: ExactActivatedIpv4NetworkProof,
@@ -2609,68 +2785,35 @@ impl PrivateMounts<AuthorizedEndpointRoutes> {
         }
     }
 
-    fn restore_exact_ipv4_endpoint_route_proof(
-        &self,
-        proof: ExactIpv4PermanentNeighbourNetworkProof,
-    ) -> Result<ExactIpv4EndpointRouteNetworkProof, NamespacePinsNetworkProofError> {
-        self.verify_authorized_endpoint_routes()
-            .map_err(NamespacePinsNetworkProofError::Mount)?;
-        let ExactIpv4PermanentNeighbourNetworkProof { parent, endpoints } = proof;
-        let parent = self
-            .run_state
-            .visit_parent_network_namespace(|| {
-                parent.observe_exact_ipv4_permanent_neighbour_removal_parent(self)
-            })
-            .map_err(|error| {
-                map_endpoint_route_visit_error(
-                    "observe routed parent after permanent-neighbour removal",
-                    error,
-                )
-            })?;
-        let mut neighbour_endpoints = endpoints.map(Some);
-        let mut routed_endpoints = [None, None];
-        self.run_state
-            .visit_network_namespaces(|endpoint| {
-                let index = endpoint_index(endpoint);
-                if routed_endpoints[index].is_some() {
-                    return Err(crate::network::NetworkError::Inconsistent);
-                }
-                let neighbour = neighbour_endpoints[index]
-                    .take()
-                    .ok_or(crate::network::NetworkError::Inconsistent)?;
-                routed_endpoints[index] =
-                    Some(neighbour.observe_exact_ipv4_permanent_neighbour_removal_endpoint(self)?);
-                Ok(())
-            })
-            .map_err(|error| {
-                map_endpoint_route_visit_error(
-                    "observe routed endpoint after permanent-neighbour removal",
-                    error,
-                )
-            })?;
-        if neighbour_endpoints.iter().any(Option::is_some) {
-            return Err(NamespacePinsNetworkProofError::Network(
-                crate::network::NetworkError::Inconsistent,
-            ));
-        }
-        let [Some(alpha), Some(omega)] = routed_endpoints else {
-            return Err(NamespacePinsNetworkProofError::Network(
-                crate::network::NetworkError::Inconsistent,
-            ));
-        };
-        let routed = ExactIpv4EndpointRouteNetworkProof {
-            parent,
-            endpoints: [alpha, omega],
-        };
-        self.verify_exact_ipv4_endpoint_route_state(&routed)?;
-        Ok(routed)
-    }
-
     /// Directly delete pair B then A and retain route/address/pair authorities
     /// until the existing pristine parent/A/B proof authorizes retirement.
     fn begin_retirement_without_policy(self) -> PrivateMounts<AuthorizedDeletedTopology> {
         let (backing, routed) = self.into_backing_and_run_state();
         let mounts = backing.with_run_state(routed.begin_retirement());
+        if mounts.verify_authorized_deleted_topology().is_err() {
+            std::process::abort();
+        }
+        mounts
+    }
+
+    /// Delete the routed topology only after the joined exact fixed-echo proof.
+    fn begin_fixed_icmp_echo_retirement_without_policy(
+        self,
+    ) -> PrivateMounts<AuthorizedDeletedTopology> {
+        let (backing, routed) = self.into_backing_and_run_state();
+        let mounts = backing.with_run_state(routed.begin_fixed_icmp_echo_retirement());
+        if mounts.verify_authorized_deleted_topology().is_err() {
+            std::process::abort();
+        }
+        mounts
+    }
+
+    /// Delete after a fixed ICMP send might have crossed the kernel boundary.
+    fn begin_fixed_icmp_cleanup_retirement_without_policy(
+        self,
+    ) -> PrivateMounts<AuthorizedDeletedTopology> {
+        let (backing, routed) = self.into_backing_and_run_state();
+        let mounts = backing.with_run_state(routed.begin_fixed_icmp_cleanup_retirement());
         if mounts.verify_authorized_deleted_topology().is_err() {
             std::process::abort();
         }
@@ -2812,41 +2955,216 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
         Ok(proof)
     }
 
-    /// Explicitly remove endpoint B/A then parent B/A and restore routed authority.
-    fn remove_permanent_neighbours_without_policy(
-        self,
+    fn prove_exact_ipv4_icmp_echo_state(
+        &self,
         proof: ExactIpv4PermanentNeighbourNetworkProof,
+        reply: crate::icmp::ExactIcmpEchoReply,
+        counters: ExactFixedIcmpCounterProof,
+    ) -> Result<ExactIpv4IcmpEchoPermanentNeighbourNetworkProof, NamespacePinsNetworkProofError>
+    {
+        self.verify_authorized_permanent_neighbours()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let ExactIpv4PermanentNeighbourNetworkProof { parent, endpoints } = proof;
+        let parent = self
+            .run_state
+            .visit_parent_network_namespace(|| parent.observe_exact_ipv4_icmp_echo_parent(self))
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "observe exact post-echo permanent-neighbour parent state",
+                    error,
+                )
+            })?;
+        let mut before_endpoints = endpoints.map(Some);
+        let mut after_endpoints = [None, None];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if after_endpoints[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                let before = before_endpoints[index]
+                    .take()
+                    .ok_or(crate::network::NetworkError::Inconsistent)?;
+                after_endpoints[index] = Some(before.observe_exact_ipv4_icmp_echo_endpoint(self)?);
+                Ok(())
+            })
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "observe exact post-echo permanent-neighbour endpoint state",
+                    error,
+                )
+            })?;
+        if before_endpoints.iter().any(Option::is_some) {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
+        let [Some(alpha), Some(omega)] = after_endpoints else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        };
+        let proof = ExactIpv4IcmpEchoPermanentNeighbourNetworkProof {
+            parent,
+            endpoints: [alpha, omega],
+            reply,
+            counters,
+        };
+        self.verify_exact_ipv4_icmp_echo_permanent_neighbour_state(&proof)?;
+        Ok(proof)
+    }
+
+    fn verify_exact_ipv4_icmp_echo_permanent_neighbour_state(
+        &self,
+        proof: &ExactIpv4IcmpEchoPermanentNeighbourNetworkProof,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_permanent_neighbours()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        self.run_state
+            .visit_parent_network_namespace(|| proof.parent.verify(self))
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "reprove exact post-echo permanent-neighbour parent state",
+                    error,
+                )
+            })?;
+        let mut visited = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if visited[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                proof.endpoints[index].verify(self)?;
+                visited[index] = true;
+                Ok(())
+            })
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "reprove exact post-echo permanent-neighbour endpoint state",
+                    error,
+                )
+            })?;
+        require_complete_endpoint_visit(visited)?;
+        crate::network::verify_exact_ipv4_icmp_echo_permanent_neighbour_observations(
+            &proof.parent,
+            [&proof.endpoints[0], &proof.endpoints[1]],
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        self.verify_authorized_permanent_neighbours()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+
+    fn remove_permanent_neighbours_after_icmp_echo_without_policy(
+        self,
+        proof: ExactIpv4IcmpEchoPermanentNeighbourNetworkProof,
     ) -> Result<
         (
             PrivateMounts<AuthorizedEndpointRoutes>,
-            ExactIpv4EndpointRouteNetworkProof,
+            ExactIpv4IcmpEchoEndpointRouteNetworkProof,
         ),
-        PrivateMountLinkActivationFailure,
+        (
+            PrivateMountLinkActivationError,
+            PrivateMounts<AuthorizedDeletedTopology>,
+        ),
     > {
-        if let Err(source) = self.verify_exact_ipv4_permanent_neighbour_state(&proof) {
-            return Err(self.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)));
+        if let Err(source) = self.verify_exact_ipv4_icmp_echo_permanent_neighbour_state(&proof) {
+            let (backing, neighbours) = self.into_backing_and_run_state();
+            let deleted = backing.with_run_state(neighbours.begin_fixed_icmp_cleanup_retirement());
+            return Err((PrivateMountLinkActivationError::Proof(source), deleted));
         }
+        let ExactIpv4IcmpEchoPermanentNeighbourNetworkProof {
+            parent,
+            endpoints,
+            reply,
+            counters,
+        } = proof;
         let (backing, neighbours) = self.into_backing_and_run_state();
-        let routed = match neighbours.remove_permanent_neighbours() {
+        let routed = match neighbours.remove_permanent_neighbours_after_fixed_icmp() {
             Ok(routed) => routed,
             Err(failure) => {
-                return Err(
-                    PrivateMountLinkActivationFailure::from_fixed_neighbour_failure(
-                        backing, failure,
-                    ),
-                );
+                let (source, deleted) = failure.into_parts();
+                return Err((
+                    PrivateMountLinkActivationError::Neighbour(source),
+                    backing.with_run_state(deleted),
+                ));
             }
         };
         let mounts = backing.with_run_state(routed);
-        if let Err(source) = mounts.verify_authorized_endpoint_routes() {
-            return Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Mount(source)));
-        }
-        match mounts.restore_exact_ipv4_endpoint_route_proof(proof) {
-            Ok(routed_proof) => Ok((mounts, routed_proof)),
+        let parent = mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                parent.observe_exact_ipv4_icmp_echo_neighbour_removal_parent(&mounts)
+            })
+            .map_err(|error| {
+                map_endpoint_route_visit_error(
+                    "observe post-echo routed parent after permanent-neighbour removal",
+                    error,
+                )
+            });
+        let parent = match parent {
+            Ok(parent) => parent,
             Err(source) => {
-                Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)))
+                return Err((
+                    PrivateMountLinkActivationError::Proof(source),
+                    mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+                ));
             }
+        };
+        let mut before_endpoints = endpoints.map(Some);
+        let mut after_endpoints = [None, None];
+        let visited = mounts.run_state.visit_network_namespaces(|endpoint| {
+            let index = endpoint_index(endpoint);
+            if after_endpoints[index].is_some() {
+                return Err(crate::network::NetworkError::Inconsistent);
+            }
+            let before = before_endpoints[index]
+                .take()
+                .ok_or(crate::network::NetworkError::Inconsistent)?;
+            after_endpoints[index] =
+                Some(before.observe_exact_ipv4_icmp_echo_neighbour_removal_endpoint(&mounts)?);
+            Ok(())
+        });
+        if let Err(error) = visited {
+            let source = map_endpoint_route_visit_error(
+                "observe post-echo routed endpoint after permanent-neighbour removal",
+                error,
+            );
+            return Err((
+                PrivateMountLinkActivationError::Proof(source),
+                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+            ));
         }
+        if before_endpoints.iter().any(Option::is_some) {
+            return Err((
+                PrivateMountLinkActivationError::Proof(NamespacePinsNetworkProofError::Network(
+                    crate::network::NetworkError::Inconsistent,
+                )),
+                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+            ));
+        }
+        let [Some(alpha), Some(omega)] = after_endpoints else {
+            return Err((
+                PrivateMountLinkActivationError::Proof(NamespacePinsNetworkProofError::Network(
+                    crate::network::NetworkError::Inconsistent,
+                )),
+                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+            ));
+        };
+        let routed_proof = ExactIpv4IcmpEchoEndpointRouteNetworkProof {
+            parent,
+            endpoints: [alpha, omega],
+            reply,
+            counters,
+        };
+        if let Err(source) = mounts.verify_exact_ipv4_icmp_echo_endpoint_route_state(&routed_proof)
+        {
+            return Err((
+                PrivateMountLinkActivationError::Proof(source),
+                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+            ));
+        }
+        Ok((mounts, routed_proof))
     }
 
     fn into_deleted_failure(
@@ -2906,6 +3224,7 @@ impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProo
 
     /// Consume the routed proof, delete pair B then A while the exact policy
     /// stays armed, and return only deleted-topology generation-two authority.
+    #[cfg(test)]
     pub(crate) fn begin_retirement(
         self,
         routed_proof: ExactIpv4EndpointRouteNetworkProof,
@@ -2969,47 +3288,6 @@ impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProo
 }
 
 impl PolicyBoundPrivateMounts<AuthorizedPermanentNeighbours, PolicyEnabledNetworkProof> {
-    /// Explicitly remove endpoint B/A then parent B/A and restore exact routed proof.
-    pub(crate) fn remove_permanent_neighbours(
-        self,
-        neighbour_proof: ExactIpv4PermanentNeighbourNetworkProof,
-    ) -> Result<
-        (
-            PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProof>,
-            ExactIpv4EndpointRouteNetworkProof,
-        ),
-        FixedForwardPolicyFailure,
-    > {
-        if let Err(source) = self.verify_active_policy() {
-            return Err(self.into_deleted_failure(source));
-        }
-        let Self {
-            mounts,
-            policy,
-            rollback,
-            binding,
-        } = self;
-        let (mounts, routed_proof) =
-            match mounts.remove_permanent_neighbours_without_policy(neighbour_proof) {
-                Ok(result) => result,
-                Err(failure) => {
-                    return Err(policy_failure_from_topology(
-                        failure, policy, rollback, binding,
-                    ));
-                }
-            };
-        let routed = PolicyBoundPrivateMounts {
-            mounts,
-            policy,
-            rollback,
-            binding,
-        };
-        if let Err(source) = routed.verify_active_policy() {
-            return Err(routed.into_deleted_failure(source));
-        }
-        Ok((routed, routed_proof))
-    }
-
     fn into_deleted_failure(self, source: FixedForwardPolicyError) -> FixedForwardPolicyFailure {
         let Self {
             mounts,
@@ -3030,6 +3308,733 @@ impl PolicyBoundPrivateMounts<AuthorizedPermanentNeighbours, PolicyEnabledNetwor
                 binding,
             },
         )
+    }
+}
+
+type FixedIcmpActiveMounts = PolicyBoundPrivateMounts<
+    AuthorizedPermanentNeighbours,
+    PolicyEnabledNetworkProof,
+    ActiveNftablesPolicy,
+>;
+type FixedIcmpArmedMounts = PolicyBoundPrivateMounts<
+    AuthorizedPermanentNeighbours,
+    PolicyEnabledNetworkProof,
+    FixedIcmpCounterPhase,
+>;
+type FixedIcmpExactMounts = PolicyBoundPrivateMounts<
+    AuthorizedPermanentNeighbours,
+    PolicyEnabledNetworkProof,
+    ExactFixedIcmpNftablesPolicy,
+>;
+type FixedIcmpEchoSuccess = (
+    FixedIcmpExactMounts,
+    ExactIpv4IcmpEchoPermanentNeighbourNetworkProof,
+);
+
+struct PreparedFixedIcmpEcho {
+    socket: crate::icmp::PreparedIcmpEcho,
+    expected_tag: crate::icmp::IcmpEchoTag,
+    expected_run_id_ascii: [u8; 32],
+    endpoint_a_ifindex: u32,
+}
+
+impl FixedIcmpActiveMounts {
+    /// Send exactly one run-bound raw ICMP request from endpoint A and join its
+    /// exact reply with two stable policy-counter and four-link observations.
+    pub(crate) fn prove_fixed_ipv4_icmp_echo(
+        self,
+        neighbour_proof: ExactIpv4PermanentNeighbourNetworkProof,
+    ) -> Result<FixedIcmpEchoSuccess, FixedIcmpEchoFailure> {
+        let (active, prepared) = self.prepare_fixed_icmp_echo(&neighbour_proof)?;
+        let (armed, prepared) = active.arm_fixed_icmp_counter_phase(prepared)?;
+        let (armed, reply) = armed.attempt_fixed_icmp_echo(prepared)?;
+        let (exact, counters) = armed.observe_fixed_icmp_counters()?;
+        exact.join_fixed_icmp_echo_proof(neighbour_proof, reply, counters)
+    }
+
+    fn prepare_fixed_icmp_echo(
+        self,
+        neighbour_proof: &ExactIpv4PermanentNeighbourNetworkProof,
+    ) -> Result<(Self, PreparedFixedIcmpEcho), FixedIcmpEchoFailure> {
+        if let Err(source) = self.verify_fixed_icmp_pre_send_state(neighbour_proof) {
+            return Err(self.into_icmp_deleted_failure(source));
+        }
+        let prepared = match self.prepare_endpoint_a_fixed_icmp_socket() {
+            Ok(prepared) => prepared,
+            Err(source) => return Err(self.into_icmp_deleted_failure(source)),
+        };
+        if let Err(source) = self.verify_fixed_icmp_pre_send_state(neighbour_proof) {
+            drop(prepared);
+            return Err(self.into_icmp_deleted_failure(source));
+        }
+        Ok((self, prepared))
+    }
+
+    fn verify_fixed_icmp_pre_send_state(
+        &self,
+        neighbour_proof: &ExactIpv4PermanentNeighbourNetworkProof,
+    ) -> Result<(), FixedForwardPolicyError> {
+        self.verify_active_policy()?;
+        self.mounts
+            .verify_exact_ipv4_permanent_neighbour_state(neighbour_proof)
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source))
+            })
+    }
+
+    fn prepare_endpoint_a_fixed_icmp_socket(
+        &self,
+    ) -> Result<PreparedFixedIcmpEcho, FixedForwardPolicyError> {
+        let plan = crate::icmp::IcmpEchoProbePlan::for_run(self.binding.run_id())
+            .map_err(FixedForwardPolicyError::Icmp)?;
+        let expected_tag = plan.tag();
+        let expected_run_id_ascii = *plan.run_id_ascii();
+        let [alpha, omega] = self.binding.pair_identities();
+        if alpha.endpoint() != NamespaceEndpoint::A
+            || omega.endpoint() != NamespaceEndpoint::B
+            || alpha.peer_ifindex() <= 1
+        {
+            return Err(policy_binding_error());
+        }
+        let endpoint_a_ifindex = alpha.peer_ifindex();
+        let deadline = mutation_deadline().map_err(FixedForwardPolicyError::Nftables)?;
+        let mut plan = Some(plan);
+        let mut prepared = None;
+        self.mounts
+            .run_state
+            .visit_network_namespaces(|endpoint| {
+                if endpoint == NamespaceEndpoint::A {
+                    let plan = plan
+                        .take()
+                        .ok_or(crate::icmp::IcmpEchoError::InvalidRunBinding)?;
+                    prepared = Some(plan.prepare(endpoint_a_ifindex, deadline)?);
+                }
+                Ok(())
+            })
+            .map_err(|error| {
+                fixed_icmp_visit_error("prepare the fixed endpoint-A ICMP socket", error)
+            })?;
+        let prepared = prepared.ok_or(FixedForwardPolicyError::Icmp(
+            crate::icmp::IcmpEchoError::InvalidRunBinding,
+        ))?;
+        if plan.is_some() {
+            drop(prepared);
+            return Err(FixedForwardPolicyError::Icmp(
+                crate::icmp::IcmpEchoError::InvalidRunBinding,
+            ));
+        }
+        Ok(PreparedFixedIcmpEcho {
+            socket: prepared,
+            expected_tag,
+            expected_run_id_ascii,
+            endpoint_a_ifindex,
+        })
+    }
+
+    fn arm_fixed_icmp_counter_phase(
+        self,
+        prepared: PreparedFixedIcmpEcho,
+    ) -> Result<(FixedIcmpArmedMounts, PreparedFixedIcmpEcho), FixedIcmpEchoFailure> {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let deadline = match mutation_deadline() {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                drop(prepared);
+                return Err(PolicyBoundPrivateMounts {
+                    mounts,
+                    policy,
+                    rollback,
+                    binding,
+                }
+                .into_icmp_deleted_failure(FixedForwardPolicyError::Nftables(source)));
+            }
+        };
+        let policy = match begin_fixed_icmp_counter_phase(policy, deadline) {
+            Ok(policy) => policy,
+            Err(failure) => {
+                drop(prepared);
+                let (source, policy) = failure.into_parts();
+                return Err(PolicyBoundPrivateMounts {
+                    mounts,
+                    policy,
+                    rollback,
+                    binding,
+                }
+                .into_icmp_deleted_failure(FixedForwardPolicyError::Nftables(source)));
+            }
+        };
+        Ok((
+            PolicyBoundPrivateMounts {
+                mounts,
+                policy,
+                rollback,
+                binding,
+            },
+            prepared,
+        ))
+    }
+}
+
+impl FixedIcmpArmedMounts {
+    fn attempt_fixed_icmp_echo(
+        self,
+        prepared: PreparedFixedIcmpEcho,
+    ) -> Result<(Self, crate::icmp::ExactIcmpEchoReply), FixedIcmpEchoFailure> {
+        let PreparedFixedIcmpEcho {
+            socket,
+            expected_tag,
+            expected_run_id_ascii,
+            endpoint_a_ifindex,
+        } = prepared;
+        let reply = match socket.attempt_once() {
+            Ok(reply) => reply,
+            Err(failure) => {
+                let (source, attempted) = failure.into_parts();
+                if attempted.tag() != expected_tag
+                    || attempted.run_id_ascii() != &expected_run_id_ascii
+                    || attempted.endpoint_a_ifindex() != endpoint_a_ifindex
+                {
+                    std::process::abort();
+                }
+                return Err(self.into_icmp_deleted_failure(FixedForwardPolicyError::Icmp(source)));
+            }
+        };
+        if reply.tag() != expected_tag || reply.run_id_ascii() != &expected_run_id_ascii {
+            return Err(
+                self.into_icmp_deleted_failure(FixedForwardPolicyError::Icmp(
+                    crate::icmp::IcmpEchoError::InvalidRunBinding,
+                )),
+            );
+        }
+        Ok((self, reply))
+    }
+
+    fn observe_fixed_icmp_counters(
+        self,
+    ) -> Result<(FixedIcmpExactMounts, ExactFixedIcmpCounterProof), FixedIcmpEchoFailure> {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let deadline = match mutation_deadline() {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(PolicyBoundPrivateMounts {
+                    mounts,
+                    policy,
+                    rollback,
+                    binding,
+                }
+                .into_icmp_deleted_failure(FixedForwardPolicyError::Nftables(source)));
+            }
+        };
+        let (policy, counters) =
+            match observe_exact_fixed_icmp_counters_after_socket_close(policy, deadline) {
+                Ok(result) => result,
+                Err(failure) => {
+                    let (source, policy) = failure.into_parts();
+                    return Err(PolicyBoundPrivateMounts {
+                        mounts,
+                        policy,
+                        rollback,
+                        binding,
+                    }
+                    .into_icmp_deleted_failure(FixedForwardPolicyError::Nftables(source)));
+                }
+            };
+        let exact = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        Ok((exact, counters))
+    }
+}
+
+impl
+    PolicyBoundPrivateMounts<
+        AuthorizedPermanentNeighbours,
+        PolicyEnabledNetworkProof,
+        ExactFixedIcmpNftablesPolicy,
+    >
+{
+    fn join_fixed_icmp_echo_proof(
+        self,
+        neighbour_proof: ExactIpv4PermanentNeighbourNetworkProof,
+        reply: crate::icmp::ExactIcmpEchoReply,
+        counters: ExactFixedIcmpCounterProof,
+    ) -> Result<FixedIcmpEchoSuccess, FixedIcmpEchoFailure> {
+        let proof =
+            match self
+                .mounts
+                .prove_exact_ipv4_icmp_echo_state(neighbour_proof, reply, counters)
+            {
+                Ok(proof) => proof,
+                Err(source) => {
+                    return Err(
+                        self.into_icmp_deleted_failure(FixedForwardPolicyError::Topology(
+                            PrivateMountLinkActivationError::Proof(source),
+                        )),
+                    );
+                }
+            };
+        if let Err(source) = self.verify_exact_icmp_policy(&proof.counters) {
+            return Err(self.into_icmp_deleted_failure(source));
+        }
+        Ok((self, proof))
+    }
+
+    /// Explicitly remove all four permanent neighbours while preserving the
+    /// exact reply, counter, and post-echo link evidence.
+    pub(crate) fn remove_permanent_neighbours_after_fixed_ipv4_icmp_echo(
+        self,
+        proof: ExactIpv4IcmpEchoPermanentNeighbourNetworkProof,
+    ) -> Result<
+        (
+            PolicyBoundPrivateMounts<
+                AuthorizedEndpointRoutes,
+                PolicyEnabledNetworkProof,
+                ExactFixedIcmpNftablesPolicy,
+            >,
+            ExactIpv4IcmpEchoEndpointRouteNetworkProof,
+        ),
+        FixedIcmpEchoFailure,
+    > {
+        if let Err(source) = self.verify_exact_icmp_policy(&proof.counters) {
+            return Err(self.into_icmp_deleted_failure(source));
+        }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (mounts, proof) =
+            match mounts.remove_permanent_neighbours_after_icmp_echo_without_policy(proof) {
+                Ok(result) => result,
+                Err((source, mounts)) => {
+                    return Err(fixed_icmp_deleted_failure(
+                        FixedForwardPolicyError::Topology(source),
+                        mounts,
+                        policy.into_cleanup_authority(),
+                        rollback,
+                        binding,
+                    ));
+                }
+            };
+        let routed = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        if let Err(source) = routed.verify_exact_icmp_policy(&proof.counters) {
+            return Err(routed.into_icmp_deleted_failure(source));
+        }
+        Ok((routed, proof))
+    }
+}
+
+impl
+    PolicyBoundPrivateMounts<
+        AuthorizedEndpointRoutes,
+        PolicyEnabledNetworkProof,
+        ExactFixedIcmpNftablesPolicy,
+    >
+{
+    /// Reprove the complete post-echo routed state, delete veth B then A, and
+    /// irreversibly downgrade packet policy ownership to cleanup-only.
+    pub(crate) fn begin_retirement_after_fixed_ipv4_icmp_echo(
+        self,
+        proof: ExactIpv4IcmpEchoEndpointRouteNetworkProof,
+    ) -> Result<
+        PolicyBoundPrivateMounts<
+            AuthorizedDeletedTopology,
+            PolicyEnabledNetworkProof,
+            ForwardPolicyCleanupAuthority,
+        >,
+        FixedIcmpEchoFailure,
+    > {
+        if let Err(source) = self.verify_exact_icmp_policy(&proof.counters) {
+            return Err(self.into_icmp_deleted_failure(source));
+        }
+        if let Err(source) = self
+            .mounts
+            .verify_exact_ipv4_icmp_echo_endpoint_route_state(&proof)
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source))
+            })
+        {
+            return Err(self.into_icmp_deleted_failure(source));
+        }
+        let ExactIpv4IcmpEchoEndpointRouteNetworkProof {
+            parent: _,
+            endpoints: _,
+            reply,
+            counters,
+        } = proof;
+        if reply.tag().sequence() != 1 {
+            std::process::abort();
+        }
+        drop((reply, counters));
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let mounts = mounts.begin_fixed_icmp_echo_retirement_without_policy();
+        let deleted = PolicyBoundPrivateMounts {
+            mounts,
+            policy: policy.into_cleanup_authority(),
+            rollback,
+            binding,
+        };
+        match deleted.verify_deleted_cleanup_policy_state() {
+            Ok(()) => Ok(deleted),
+            Err(source) => Err(FixedIcmpEchoFailure {
+                source,
+                cleanup: Box::new(deleted),
+            }),
+        }
+    }
+}
+
+impl<RunState, NetworkAuthority>
+    PolicyBoundPrivateMounts<RunState, NetworkAuthority, ExactFixedIcmpNftablesPolicy>
+{
+    fn verify_exact_icmp_policy(
+        &self,
+        proof: &ExactFixedIcmpCounterProof,
+    ) -> Result<(), FixedForwardPolicyError> {
+        let deadline = mutation_deadline().map_err(FixedForwardPolicyError::Nftables)?;
+        verify_exact_fixed_icmp_nftables_policy(&self.policy, proof, deadline)
+            .map_err(FixedForwardPolicyError::Nftables)
+    }
+}
+
+impl<PolicyAuthority>
+    PolicyBoundPrivateMounts<
+        AuthorizedPermanentNeighbours,
+        PolicyEnabledNetworkProof,
+        PolicyAuthority,
+    >
+where
+    PolicyAuthority: IntoForwardPolicyCleanupAuthority,
+{
+    fn into_icmp_deleted_failure(self, source: FixedForwardPolicyError) -> FixedIcmpEchoFailure {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (backing, neighbours) = mounts.into_backing_and_run_state();
+        let mounts = backing.with_run_state(neighbours.begin_fixed_icmp_cleanup_retirement());
+        fixed_icmp_deleted_failure(
+            source,
+            mounts,
+            policy.into_forward_policy_cleanup(),
+            rollback,
+            binding,
+        )
+    }
+}
+
+impl<PolicyAuthority>
+    PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProof, PolicyAuthority>
+where
+    PolicyAuthority: IntoForwardPolicyCleanupAuthority,
+{
+    fn into_icmp_deleted_failure(self, source: FixedForwardPolicyError) -> FixedIcmpEchoFailure {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        fixed_icmp_deleted_failure(
+            source,
+            mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+            policy.into_forward_policy_cleanup(),
+            rollback,
+            binding,
+        )
+    }
+}
+
+impl<NetworkAuthority>
+    PolicyBoundPrivateMounts<
+        AuthorizedDeletedTopology,
+        NetworkAuthority,
+        ForwardPolicyCleanupAuthority,
+    >
+{
+    fn verify_deleted_cleanup_policy_state(&self) -> Result<(), FixedForwardPolicyError> {
+        self.mounts
+            .verify_authorized_deleted_topology()
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+            })?;
+        let observed = self
+            .mounts
+            .run_state
+            .fixed_forward_policy_binding()
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(
+                    namespace_pin_error("verify deleted ICMP cleanup-policy binding", source),
+                ))
+            })?;
+        if observed != self.binding {
+            return Err(policy_binding_error());
+        }
+        let deadline = mutation_deadline().map_err(FixedForwardPolicyError::Nftables)?;
+        verify_forward_policy_cleanup(&self.policy, deadline)
+            .map_err(FixedForwardPolicyError::Nftables)?;
+        self.mounts
+            .verify_authorized_deleted_topology()
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+            })
+    }
+}
+
+impl
+    PolicyBoundPrivateMounts<
+        AuthorizedDeletedTopology,
+        PolicyEnabledNetworkProof,
+        ForwardPolicyCleanupAuthority,
+    >
+{
+    fn verify_generation_two_cleanup_barrier(
+        &self,
+        endpoint_baselines: &[EndpointNetworkBaseline; 2],
+    ) -> Result<(), FixedForwardPolicyError> {
+        self.verify_deleted_cleanup_policy_state()?;
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_cleanup_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "verify deleted post-echo cleanup parent state",
+                    error,
+                )
+            })?;
+        verify_deleted_endpoint_baselines(&self.mounts, endpoint_baselines)?;
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_cleanup_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "reverify deleted post-echo cleanup parent state",
+                    error,
+                )
+            })?;
+        self.verify_deleted_cleanup_policy_state()
+    }
+
+    /// Restore the inherited forwarding record while retaining only exact,
+    /// counter-agnostic cleanup authority for the post-echo policy.
+    pub(crate) fn finish_fixed_icmp_echo_teardown(
+        self,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedNamespacePins>,
+            PolicyFinalNetworkProof,
+        ),
+        FixedIcmpEchoTeardownFailure,
+    > {
+        if let Err(source) = self.verify_generation_two_cleanup_barrier(&endpoint_baselines) {
+            return Err(FixedIcmpEchoTeardownFailure::Active {
+                source,
+                cleanup: Box::new(self),
+                endpoints: Box::new(endpoint_baselines),
+            });
+        }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let rollback = match rollback.restore_ipv4_forwarding_with_cleanup_policy(&mounts, &policy)
+        {
+            Ok(rollback) => rollback,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                let source = FixedForwardPolicyError::Network(source);
+                return match authority {
+                    PolicyForwardingRestoreFailureState::Enabled(rollback) => {
+                        Err(FixedIcmpEchoTeardownFailure::Active {
+                            source,
+                            cleanup: Box::new(PolicyBoundPrivateMounts {
+                                mounts,
+                                policy,
+                                rollback,
+                                binding,
+                            }),
+                            endpoints: Box::new(endpoint_baselines),
+                        })
+                    }
+                    PolicyForwardingRestoreFailureState::Restored(rollback) => {
+                        Err(FixedIcmpEchoTeardownFailure::Restored {
+                            source,
+                            cleanup: Box::new(PolicyBoundPrivateMounts {
+                                mounts,
+                                policy,
+                                rollback,
+                                binding,
+                            }),
+                            endpoints: Box::new(endpoint_baselines),
+                        })
+                    }
+                    PolicyForwardingRestoreFailureState::Indeterminate(authority) => {
+                        authority.abort_fail_closed()
+                    }
+                };
+            }
+        };
+        PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        }
+        .finish_restored_fixed_icmp_echo_teardown(endpoint_baselines)
+    }
+}
+
+impl
+    PolicyBoundPrivateMounts<
+        AuthorizedDeletedTopology,
+        PolicyRestoredNetworkProof,
+        ForwardPolicyCleanupAuthority,
+    >
+{
+    fn verify_generation_two_cleanup_barrier(
+        &self,
+        endpoint_baselines: &[EndpointNetworkBaseline; 2],
+    ) -> Result<(), FixedForwardPolicyError> {
+        self.verify_deleted_cleanup_policy_state()?;
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_cleanup_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "verify restored post-echo cleanup parent state",
+                    error,
+                )
+            })?;
+        verify_deleted_endpoint_baselines(&self.mounts, endpoint_baselines)?;
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_cleanup_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "reverify restored post-echo cleanup parent state",
+                    error,
+                )
+            })?;
+        self.verify_deleted_cleanup_policy_state()
+    }
+
+    /// Delete the exact run-bound table with its retained handle, then reuse
+    /// the existing semantic-empty final proof and lower-owner retirement.
+    pub(crate) fn finish_restored_fixed_icmp_echo_teardown(
+        self,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedNamespacePins>,
+            PolicyFinalNetworkProof,
+        ),
+        FixedIcmpEchoTeardownFailure,
+    > {
+        if let Err(source) = self.verify_generation_two_cleanup_barrier(&endpoint_baselines) {
+            return Err(FixedIcmpEchoTeardownFailure::Restored {
+                source,
+                cleanup: Box::new(self),
+                endpoints: Box::new(endpoint_baselines),
+            });
+        }
+        let deadline = match mutation_deadline() {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(FixedIcmpEchoTeardownFailure::Restored {
+                    source: FixedForwardPolicyError::Nftables(source),
+                    cleanup: Box::new(self),
+                    endpoints: Box::new(endpoint_baselines),
+                });
+            }
+        };
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let nftables = match delete_forward_policy_cleanup(policy, deadline) {
+            Ok(nftables) => nftables,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                return match authority {
+                    ForwardPolicyCleanupDeleteAuthority::Cleanup(policy) => {
+                        Err(FixedIcmpEchoTeardownFailure::Restored {
+                            source: FixedForwardPolicyError::Nftables(source),
+                            cleanup: Box::new(PolicyBoundPrivateMounts {
+                                mounts,
+                                policy,
+                                rollback,
+                                binding,
+                            }),
+                            endpoints: Box::new(endpoint_baselines),
+                        })
+                    }
+                    ForwardPolicyCleanupDeleteAuthority::Indeterminate(nftables) => {
+                        Err(FixedIcmpEchoTeardownFailure::Forward(
+                            indeterminate_deleted_teardown_failure(
+                                FixedForwardPolicyError::Nftables(source),
+                                IndeterminateRestoredForwardPolicyCleanup {
+                                    mounts,
+                                    rollback,
+                                    nftables,
+                                    binding,
+                                },
+                                endpoint_baselines,
+                            ),
+                        ))
+                    }
+                };
+            }
+        };
+        RetiredForwardPolicyCleanup {
+            mounts,
+            parent: RetiredParentNetworkAuthority::Pending(rollback, nftables),
+            binding,
+        }
+        .finish(endpoint_baselines)
+        .map_err(FixedIcmpEchoTeardownFailure::Forward)
     }
 }
 
@@ -3720,6 +4725,40 @@ fn retain_policy_cleanup_reproof(
             transition: Box::new(source),
             cleanup,
         },
+    }
+}
+
+fn fixed_icmp_deleted_failure(
+    source: FixedForwardPolicyError,
+    mounts: PrivateMounts<AuthorizedDeletedTopology>,
+    policy: ForwardPolicyCleanupAuthority,
+    rollback: PolicyEnabledNetworkProof,
+    binding: FixedForwardPolicyBinding,
+) -> FixedIcmpEchoFailure {
+    let source = retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+    FixedIcmpEchoFailure {
+        source,
+        cleanup: Box::new(PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        }),
+    }
+}
+
+fn fixed_icmp_visit_error(
+    operation: &'static str,
+    error: FixedPermanentNeighbourVisitError<crate::icmp::IcmpEchoError>,
+) -> FixedForwardPolicyError {
+    match error {
+        FixedPermanentNeighbourVisitError::Topology(source) => FixedForwardPolicyError::Topology(
+            PrivateMountLinkActivationError::Mount(fixed_neighbour_error(operation, source)),
+        ),
+        FixedPermanentNeighbourVisitError::Namespace(source) => FixedForwardPolicyError::Topology(
+            PrivateMountLinkActivationError::Mount(namespace_pin_error(operation, source)),
+        ),
+        FixedPermanentNeighbourVisitError::Visitor(source) => FixedForwardPolicyError::Icmp(source),
     }
 }
 

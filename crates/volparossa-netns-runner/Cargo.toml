@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 netlink-sys.workspace = true
-nix = { workspace = true, features = ["sched"] }
+nix = { workspace = true, features = ["sched", "uio"] }
 rand_core.workspace = true
 rustix.workspace = true
 socket2.workspace = true
