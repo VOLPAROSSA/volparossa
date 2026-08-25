@@ -7,7 +7,7 @@ usage() {
     printf '%s\n' \
         'usage:' \
         '  tests/netns/topology.sh --preview' \
-        '  tests/netns/topology.sh --run      # blocked until the namespace-local nftables policy driver exists' \
+        '  tests/netns/topology.sh --run      # blocked until packet-level policy proof exists' \
         '  tests/netns/topology.sh --cleanup  # always refuses unowned standalone cleanup'
 }
 
@@ -21,12 +21,12 @@ print_plan() {
         '  prove exact RTNL, stable canonical IPv4 forwarding, and zero-table nftables baselines' \
         '  emit one pinned BOOTSTRAP_READY and one canonical affine GO authorization' \
         '  current slice: publish two live nsfs pins and create two fixed veth pairs, each through one atomic RTM_NEWLINK' \
-        '  configure four fixed IPv4 /30 addresses, disable IPv6 address generation, and prove all four links active with their exact kernel route side effects' \
+        '  configure four fixed IPv4 /30 addresses, disable IPv6 address generation, and prove the all-NONE barrier while all four links remain down' \
+        '  atomically install and prove the run-bound generation-2 parent FORWARD drop policy with only the exact ICMP request/reply rules before link activation' \
+        '  activate and prove all four links with their exact kernel qdisc and route side effects while the policy remains exact' \
         '  install and prove endpoint A 10.241.2.2/32 via 10.241.1.1 and endpoint B 10.241.1.2/32 via 10.241.2.1 as exact main-table static routes' \
-        '  delete veth B then A as the sole route-removal mechanism, prove all three namespaces pristine, retire every affine owner, and reverse every private-run object' \
-        '  future full topology: retain the roots, pins, veth pairs, addressed links, and exact routes after GO until final teardown' \
-        '  install a namespace-local nftables forward chain with policy drop' \
-        '  permit only the fixed lifecycle probe between the two test endpoints' \
+        '  retain and reprove that policy while deleting veth B then A, prove all three namespaces pristine under generation 2, delete only its table handle, prove semantic-empty generation 3, then retire lower owners after final reproof' \
+        '  future full topology: send the fixed lifecycle probe and prove the exact policy behaviour before final teardown' \
         '  bind every cleanup decision to the recorded namespace mount inode' \
         '  tear down in reverse order and verify zero owned objects remain' \
         '  capture the same host digest manifest and require an exact match' \
@@ -56,7 +56,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner now proves active fixed links and two exact main-table static endpoint /32 routes, then removes those routes solely by deleting veth B followed by A and proves complete pristine namespace/private-run rollback before exact TERM/EOF/reap. It creates no default route, forwarding change, nftables object, packet, probe, ownership manifest, or topology readiness, and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence; this shell entry point remains non-executing until the namespace-local nftables policy driver exists.' \
+            'BLOCKED: the Rust runner now installs and proves the sole exact generation-2 parent FORWARD policy before link activation, retains it through the two endpoint routes and veth B/A deletion, proves pristine network state, deletes only the observed table handle, proves semantic-empty generation 3, and completes private-run rollback before exact TERM/EOF/reap. It never writes the inherited forwarding setting and creates no packet, probe, ownership manifest, or topology readiness evidence; this shell entry point remains non-executing until packet-level policy proof exists, and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence.' \
             'This invocation created no namespace, link, address, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;
