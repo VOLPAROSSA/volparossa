@@ -431,17 +431,29 @@ Last updated: 2026-08-25
   exact default IPv4/IPv6 rules. Each complete observation also reads the fixed namespace-local
   `/proc/sys/net/ipv4/ip_forward` record through the retained private-proc descriptor, accepts
   only canonical `0\n` or `1\n`, and requires its procfs object identity and value to remain
-  unchanged. A fixed read-only `NETLINK_NETFILTER` exchange requires generation 1 immediately
-  before and after a dump containing zero nftables tables. This sampled evidence is not a
-  claim that IPv4 forwarding is disabled or that every netconf or firewall/netfilter facility is
-  empty. Qdisc enumeration and disposable live `ingress`/`clsact` rejection tests prevent such a
-  hook from hiding behind link qdisc name `noop`; traffic-control classes, filters, and chains are
+  unchanged. A bounded read-only `NETLINK_NETFILTER` exchange requires generation 1 immediately
+  before and after complete table, chain, rule, set, object, and flowtable dumps, all of which must
+  be empty. This is not a claim that IPv4 forwarding is disabled, and this slice makes no
+  forwarding-setting request. These observations do not claim that every netconf or
+  firewall/netfilter facility is empty. Qdisc enumeration and disposable live `ingress`/`clsact`
+  rejection tests prevent such a hook from hiding behind link qdisc name `noop`; traffic-control
+  classes, filters, and chains are
   not separately enumerated because this slice admits no non-baseline qdisc on which they could
   attach. Other netconf, address-label,
   neighbour-parameter, conntrack, ipset,
   NFQUEUE/NFLOG, legacy-xtables, and independent-hook state remains outside this proof. The fixed
-  GET requests may cause ordinary kernel module loading but create no firewall object. The outer
-  accepts that actual lifecycle frame only after matching all three identities to its retained
+  GET requests may cause ordinary kernel module loading but create no firewall object. A strict
+  raw-`NFNETLINK` test foundation separately observes the exact future lifecycle policy: one
+  run-derived `inet vpl_<run_id>` table, one priority-0 `filter` base chain named `forward` with a
+  drop policy, and only the exact endpoint-A-to-B IPv4 ICMP echo-request tuple plus its exact
+  B-to-A echo reply. Disposable namespace tests prove an empty generation-1 baseline, that complete
+  exact policy at generation 2, and a semantically empty ruleset at generation 3 after test-only
+  removal. The fixture also proves its initial canonical forwarding value remains unchanged; extra
+  or altered policy objects and generation lineages fail closed. This is observer and test
+  groundwork only. Production/runtime has no exact-policy matcher, nftables mutation encoder or
+  writer, installs no policy, changes no forwarding setting, performs no forwarding, sends no
+  packet or probe, and makes no acceptance claim. The outer accepts that actual lifecycle frame
+  only after matching all three identities to its retained
   PID-1 namespace pins and repeating the live mount and signal proofs. Only then does the outer
   send one canonical `GO`. PID 1 consumes the resulting affine `MutationAuthorization` and
   immediately revalidates the complete pristine network baseline before its first write. Using

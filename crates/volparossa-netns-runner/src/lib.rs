@@ -8,7 +8,8 @@
 //! a bounded hardened tmpfs at `/run` and a PID-namespace-bound procfs at
 //! `/proc`, retains both while the outer independently verifies them, proves the
 //! exact pristine RTNL baseline, pins a stable canonical IPv4-forwarding record,
-//! proves zero nftables tables bracketed by unchanged generation 1, and emits
+//! proves empty nftables table/chain/rule/set/object/flowtable dumps bracketed
+//! by unchanged generation 1, and emits
 //! one namespace-bound `BOOTSTRAP_READY`. After matching that frame to its
 //! retained PID-1 pins, the outer issues one canonical `GO`. PID 1 consumes the
 //! affine authorization, creates and proves the fixed descriptor-relative
