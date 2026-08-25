@@ -1,5 +1,5 @@
 #!/bin/sh
-# Require the two-veth rollback proof on an unprivileged Debian 13 host.
+# Require the fixed IPv4-address rollback proof on an unprivileged Debian 13 host.
 set -eu
 
 export LC_ALL=C
@@ -8,11 +8,11 @@ export PATH
 umask 077
 
 usage() {
-    printf '%s\n' 'usage: tests/netns/require-bootstrap-ready-proof.sh' >&2
+    printf '%s\n' 'usage: tests/netns/require-ipv4-address-rollback-proof.sh' >&2
 }
 
 fail() {
-    printf '%s\n' "veth rollback proof gate failed: $1" >&2
+    printf '%s\n' "IPv4 address rollback proof gate failed: $1" >&2
     exit 1
 }
 
@@ -22,7 +22,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-runner_source=$repository_root/target/veth-rollback-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
+runner_source=$repository_root/target/ipv4-address-rollback-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
 if [ ! -f "$runner_source" ] || [ ! -x "$runner_source" ] || [ -L "$runner_source" ]; then
     fail 'fixed workspace runner must be one executable regular file, not a symlink'
 fi
@@ -98,7 +98,7 @@ do
     fi
 done
 
-proof_tmp=$(mktemp -d /tmp/volparossa-veth-rollback-proof.XXXXXX)
+proof_tmp=$(mktemp -d /tmp/volparossa-ipv4-address-rollback-proof.XXXXXX)
 cleanup() {
     rm -rf -- "$proof_tmp"
 }
@@ -303,10 +303,10 @@ if [ -s "$proof_tmp/stdout" ]; then
     fail 'runner wrote unexpected standard output'
 fi
 printf '%s\n' \
-    'BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized descriptor-relative private-run roots, two live run-bound nsfs pins, and two fixed down-veth pairs, each created atomically with its eth0 peer born directly in the exact retained endpoint namespace. PID 1 proved the exact parent and A/B network deltas, deleted veth B then A, proved parent and both endpoints pristine again, unmounted nsfs B then A, restored the hidden slots, and reversed every private-run creation. It emitted one rollback-complete checkpoint, and the outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap. No configured address, route, forwarding change, nftables mutation, packet, probe, ownership manifest, network-topology readiness, TOPOLOGY_READY, A14, A15, or acceptance evidence was produced.' \
+    'BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized descriptor-relative private-run roots, two live run-bound nsfs pins, two fixed down-veth pairs, and one scoped four-address transaction. Each pair was created atomically with its eth0 peer born directly in the exact retained endpoint namespace. PID 1 proved the exact parent and A/B down-veth deltas, installed and exactly proved 10.241.1.1/30, 10.241.1.2/30, 10.241.2.1/30, and 10.241.2.2/30 plus exactly four kernel-owned local-table /32 routes while every veth end remained down, rolled back endpoint B then A and parent B then A, re-proved the byte-exact retained down-veth state, deleted veth B then A, proved parent and both endpoints pristine again, unmounted nsfs B then A, restored the hidden slots, and reversed every private-run creation. It emitted one rollback-complete checkpoint, and the outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap. No link was activated, no explicit route request was sent, and no connected, main-table, default, or explicit host route, forwarding change, nftables mutation, packet, probe, ownership manifest, network-topology readiness, TOPOLOGY_READY, A14, A15, or acceptance evidence was produced.' \
     >"$proof_tmp/expected-stderr"
 if ! cmp -s "$proof_tmp/expected-stderr" "$proof_tmp/stderr"; then
-    fail 'runner did not report the veth rollback outcome'
+    fail 'runner did not report the IPv4 address rollback outcome'
 fi
 for record in \
     namespaces \
@@ -335,14 +335,14 @@ done
 # This unprivileged gate deliberately does not escalate merely to inspect the
 # host firewall.  Host nftables/legacy-firewall state and VPN-private peer/key
 # state are not authoritatively readable here.  The visible link/configuration
-# fingerprint is useful rollback evidence, but it is not A14 or A15 acceptance.
+# fingerprint is useful address-rollback evidence, but it is not A14 or A15 acceptance.
 
 case $proof_scope in
     vm)
-        printf '%s\n' 'Debian 13 VM veth rollback configuration-fingerprint gate passed (not A14/A15)'
+        printf '%s\n' 'Debian 13 VM IPv4 address rollback configuration-fingerprint gate passed (not A14/A15)'
         ;;
     additional-bare-metal-local)
-        printf '%s\n' 'additional bare-metal local veth rollback configuration-fingerprint gate passed (not A14/A15)'
+        printf '%s\n' 'additional bare-metal local IPv4 address rollback configuration-fingerprint gate passed (not A14/A15)'
         ;;
-    *) fail 'veth rollback proof scope was not classified' ;;
+    *) fail 'IPv4 address rollback proof scope was not classified' ;;
 esac

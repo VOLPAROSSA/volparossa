@@ -7,7 +7,7 @@ usage() {
     printf '%s\n' \
         'usage:' \
         '  tests/netns/topology.sh --preview' \
-        '  tests/netns/topology.sh --run      # blocked until the post-GO configured-network driver exists' \
+        '  tests/netns/topology.sh --run      # blocked until the post-address link-state/route driver exists' \
         '  tests/netns/topology.sh --cleanup  # always refuses unowned standalone cleanup'
 }
 
@@ -20,10 +20,11 @@ print_plan() {
         '  mount bounded private /run and PID-bound private /proc inside that sandbox' \
         '  prove exact RTNL, stable canonical IPv4 forwarding, and zero-table nftables baselines' \
         '  emit one pinned BOOTSTRAP_READY and one canonical affine GO authorization' \
-        '  current slice: publish two live nsfs pins, create and prove two fixed down-veth pairs, each through one atomic RTM_NEWLINK, then delete B/A and reverse-roll back every private-run object' \
-        '  future full topology: retain those roots, pins, and veth pairs after GO until final teardown' \
-        '  configure fixed addresses only after the unchanged down-veth skeleton proof' \
-        '  add exact local routes; do not add a default route' \
+        '  current slice: publish two live nsfs pins and create two fixed down-veth pairs, each through one atomic RTM_NEWLINK' \
+        '  configure and prove exactly four permanent IPv4 /30 addresses on the still-down veth ends, together with only their kernel-owned local-table local /32 routes' \
+        '  roll back endpoint addresses B/A then parent addresses B/A, re-prove the original veth-only states, delete veth B/A, and reverse every private-run object' \
+        '  future full topology: retain the roots, pins, veth pairs, and addressed links after GO until final teardown' \
+        '  bring links up only in a later bounded slice and add only exact non-default routes' \
         '  install a namespace-local nftables forward chain with policy drop' \
         '  permit only the fixed lifecycle probe between the two test endpoints' \
         '  bind every cleanup decision to the recorded namespace mount inode' \
@@ -55,8 +56,8 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, exact RTNL, stable canonical IPv4 forwarding, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, canonical GO, descriptor-relative private-run roots and slots, two distinct live run-bound nsfs pins, two fixed down-veth pairs each created through one atomic RTM_NEWLINK, their exact parent/A/B network deltas, reverse deletion, pristine rollback, ordinary reverse unmount, exact filesystem rollback, and TERM/EOF/reap. It configures no address, route, forwarding change, nftables object, packet, probe, ownership manifest, or topology readiness and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence; this shell entry point remains non-executing until the post-GO configured-network driver exists.' \
-            'This invocation created no namespace, link, route, rule, firewall object, VPN, or sysctl.' >&2
+            'BLOCKED: the Rust runner proves anonymous namespaces, PID 1, fixed private mounts, exact RTNL, stable canonical IPv4 forwarding, zero nftables tables bracketed by unchanged generation 1, one pinned BOOTSTRAP_READY, canonical GO, descriptor-relative private-run roots and slots, two distinct live run-bound nsfs pins, and two fixed down-veth pairs each created through one atomic RTM_NEWLINK. It configures and proves exactly four permanent IPv4 /30 addresses on the still-down veth ends together with only their kernel-owned local-table local /32 routes, rolls back endpoint addresses B/A then parent addresses B/A, re-proves the original veth-only states, deletes veth B/A, completes pristine namespace/private-run rollback, and performs exact TERM/EOF/reap. It brings no link up and creates no explicit route, default route, forwarding change, nftables object, packet, probe, ownership manifest, or topology readiness, and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence; this shell entry point remains non-executing until the post-address link-state/route driver exists.' \
+            'This invocation created no namespace, link, address, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;
     *)
