@@ -1,8 +1,9 @@
 //! Minimal safe wrappers around Linux UAPI calls not exposed by the standard library.
 //!
 //! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], the fixed
-//! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], taking immediate
-//! RAII ownership of descriptors installed by the bounded receive helpers, the
+//! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], the fixed
+//! close-on-exec duplication in [`duplicate_descriptor_cloexec`], taking immediate RAII ownership
+//! of descriptors installed by the bounded receive helpers, the
 //! [`install_close_range_on_exec`] process hook, the read-only
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
@@ -57,6 +58,7 @@ const MPTCP_INFO_FLAG_REMOTE_KEY_RECEIVED: u32 = 1 << 1;
 const MAX_HANDOFF_FDS: usize = 2;
 const MAX_HANDOFF_BINDING_BYTES: usize = 256;
 const MAX_SEQPACKET_BYTES: usize = 1024 * 1024;
+const MIN_PRIVATE_DESCRIPTOR: RawFd = 3;
 const CLOSE_RANGE_UNSHARE_AND_CLOEXEC: libc::c_uint =
     libc::CLOSE_RANGE_UNSHARE | libc::CLOSE_RANGE_CLOEXEC;
 const PID_ONE_LIFECYCLE_SIGNALS: [libc::c_int; 3] = [libc::SIGHUP, libc::SIGINT, libc::SIGTERM];
@@ -82,6 +84,51 @@ const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const WORKER_CONFINEMENT_FILTER_LENGTH: usize = 14;
+
+/// Duplicates one caller-retained descriptor into independent close-on-exec ownership.
+///
+/// The source remains borrowed and open. The caller must keep the descriptor number returned by
+/// [`AsRawFd::as_raw_fd`] stable for this non-blocking call. The kernel chooses a new descriptor at
+/// or above three with `F_DUPFD_CLOEXEC`; this wrapper immediately takes RAII ownership and verifies
+/// `FD_CLOEXEC` before returning it. This is intended for the narrow handoff from a private raw-FD
+/// receive owner into ordinary safe Rust ownership.
+///
+/// # Errors
+///
+/// Returns an I/O error when the source is invalid, duplication fails, or close-on-exec readback
+/// does not prove the required flag. Any successfully duplicated descriptor is closed on error.
+pub fn duplicate_descriptor_cloexec<Fd: AsRawFd + ?Sized>(source: &Fd) -> io::Result<OwnedFd> {
+    let source = source.as_raw_fd();
+    if source < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source descriptor is invalid",
+        ));
+    }
+
+    let duplicated = loop {
+        // SAFETY: `F_DUPFD_CLOEXEC` accepts one descriptor number and one integer lower bound; it
+        // reads no caller memory and never consumes or closes the source. A nonnegative result is
+        // a fresh descriptor owned by this process.
+        let result = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, MIN_PRIVATE_DESCRIPTOR) };
+        if result >= 0 {
+            break result;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    };
+
+    // SAFETY: the successful fixed `F_DUPFD_CLOEXEC` call returned a fresh descriptor. This is
+    // deliberately the first operation after the success check, before fallible validation.
+    let duplicate = unsafe { OwnedFd::from_raw_fd(duplicated) };
+    let flags = FdFlag::from_bits_truncate(fcntl(&duplicate, FcntlArg::F_GETFD).map_err(errno_io)?);
+    if !flags.contains(FdFlag::FD_CLOEXEC) {
+        return Err(invalid_data("duplicated descriptor is not close-on-exec"));
+    }
+    Ok(duplicate)
+}
 
 /// Returns the Linux clone flag identifying an nsfs namespace descriptor.
 ///
@@ -1453,6 +1500,61 @@ mod tests {
     const SIGCHLD_ACTION_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SIGCHLD_ACTION_CHILD";
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     const SECCOMP_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SECCOMP_CHILD";
+
+    struct InvalidDescriptor;
+
+    impl AsRawFd for InvalidDescriptor {
+        fn as_raw_fd(&self) -> RawFd {
+            -1
+        }
+    }
+
+    #[test]
+    fn descriptor_duplication_rejects_invalid_source_without_ownership() {
+        assert_eq!(
+            duplicate_descriptor_cloexec(&InvalidDescriptor)
+                .expect_err("negative descriptor rejected")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn descriptor_duplication_is_independently_owned_and_close_on_exec() {
+        let (mut source, mut peer) = UnixStream::pair().expect("open descriptor pair");
+        let original = source.as_raw_fd();
+        let duplicate = duplicate_descriptor_cloexec(&source).expect("duplicate descriptor");
+
+        assert_ne!(duplicate.as_raw_fd(), original);
+        assert!(duplicate.as_raw_fd() >= MIN_PRIVATE_DESCRIPTOR);
+        assert!(
+            FdFlag::from_bits_truncate(
+                fcntl(&duplicate, FcntlArg::F_GETFD).expect("read duplicate descriptor flags")
+            )
+            .contains(FdFlag::FD_CLOEXEC)
+        );
+        fcntl(&source, FcntlArg::F_GETFD).expect("source remains open");
+
+        peer.write_all(b"s").expect("write through peer");
+        let mut byte = [0_u8; 1];
+        source
+            .read_exact(&mut byte)
+            .expect("original remains usable");
+        assert_eq!(byte, *b"s");
+
+        drop(source);
+        let mut duplicate = UnixStream::from(duplicate);
+        peer.write_all(b"d").expect("write after source close");
+        duplicate
+            .read_exact(&mut byte)
+            .expect("duplicate remains usable");
+        assert_eq!(byte, *b"d");
+
+        drop(duplicate);
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("peer read timeout");
+        assert_eq!(peer.read(&mut byte).expect("last owner closes"), 0);
+    }
 
     #[test]
     fn nsfs_namespace_type_is_exact_and_rejects_non_namespace_descriptors() {

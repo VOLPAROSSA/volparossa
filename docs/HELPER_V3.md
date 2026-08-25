@@ -391,6 +391,17 @@ returned. This deadline is the PLAN/IPC/liveness/COMMIT acceptance boundary, not
 call future is delivered by that instant: Tokio scheduling and mandatory exact-owner cleanup can
 delay an error result, but can never authorize a late success or COMMIT.
 
+An Acquire descriptor remains inside the private affine `CredentialedWorkerFd` owner until the
+second record has the exact expected PID/UID/GID credential, exactly one credential and one FD, no
+other ancillary data or truncation, the complete request/response binding, and remaining deadline.
+Only then does the consuming adoption call the audited Linux-UAPI wrapper: `F_DUPFD_CLOEXEC` with
+minimum descriptor 3 creates independent ownership, that result moves immediately into `OwnedFd`,
+and `F_GETFD` must read back `FD_CLOEXEC`. The wrapper closes the duplicate on failed readback; the
+private owner is consumed and closes the original when the duplication call returns, on either
+success or error. One final deadline completion check returns the adopted `OwnedFd` or closes it on
+expiry. Thus rejection, adoption failure and final-deadline failure retain no descriptor, while a
+success exposes exactly one ordinary affine owner.
+
 All blocking credentialed IPC and liveness work runs outside the registry mutex. The supervisor
 reacquires the mutex only to commit after revalidating generation, token, digest, deadline, TTL,
 shutdown and the latest registry-lock-free liveness hint, or to quarantine and detach for cleanup.
@@ -510,14 +521,13 @@ Production wiring remains a separate audited change with these explicit blockers
 
 - No production adapter maps `BackendLineage`/`OperationBinding` to a generation reservation and
   `WorkerCoordinator`, or carries the engine's exact deadline through `spawn_worker_v3_until` and
-  `execute_until`. The implemented deadline and retryable-shutdown machinery therefore remains
-  disconnected from `HelperEngine`.
+  `execute_until`. Before returning success it must also revalidate every adopted kernel object
+  against the requested socket kind, protocol, local/remote tuple, nonblocking/listening state and
+  genuine MPTCP evidence. The implemented deadline, adoption and retryable-shutdown machinery
+  therefore remains disconnected from `HelperEngine`.
 - Retryable shutdown ownership and the escalation reaper are still process-memory-only. The dormant
   journal has no production writer or restart reaper, so helper-crash reconciliation is not yet
   durable.
-- `CredentialedWorkerFd` intentionally exposes no affine `OwnedFd` transfer. The adapter needs an
-  audited ownership transfer (or safe duplicate/adoption in the Linux UAPI layer) plus
-  close-on-reject tests.
 - Add/Remove MPTCP endpoint operations are intentionally outside `AsyncLeaseBackend`; their typed
   asynchronous seam and dispatch are a separate bounded extension.
 
@@ -606,13 +616,17 @@ client-only, listening MPTCP is exit-only, UDP is client/exit-only, and relay ro
 an application transport socket.
 
 Socketpair and fake-kernel tests cover the three metadata kinds, response/digest binding, retry-cache
-cleanup on context destruction, CLOEXEC, missing/wrong binding, FD-on-error, worker EOF, unexpected
-ancillary data and close-on-reject. Loopback sockets test only read-only kernel revalidation; no
-namespace, route, link, firewall or sysctl was changed. The production backend still advertises the
-operation as unsupported and returns `Unavailable/TRANSPORT_SOCKET_UNAVAILABLE` before context
-lookup or any socket/network work. The factories are not invoked by a production v3 namespace
-worker, and the agent transport stacks do not yet consume this helper API. No working namespace
-datapath is claimed.
+cleanup on context destruction, missing/wrong binding, FD-on-error, worker EOF, unexpected
+ancillary data and close-on-reject. Credentialed-channel tests separately cover exact credential and
+descriptor counts, wrong-binding closure, shared-deadline receipt, successful consuming raw-owner
+adoption and injected adoption-failure closure. The audited UAPI/adoption regressions prove invalid
+source rejection, `F_DUPFD_CLOEXEC` with minimum 3, independent ownership, `FD_CLOEXEC` readback,
+original closure and closure of the final owner. Loopback sockets test only read-only kernel
+revalidation; no namespace, route, link, firewall or sysctl was changed. The production backend
+still advertises the operation as unsupported and returns
+`Unavailable/TRANSPORT_SOCKET_UNAVAILABLE` before context lookup or any socket/network work. The
+factories are not invoked by a production v3 namespace worker, and the agent transport stacks do
+not yet consume this helper API. No working namespace datapath is claimed.
 
 ## Pre-route client ingress boundary
 
