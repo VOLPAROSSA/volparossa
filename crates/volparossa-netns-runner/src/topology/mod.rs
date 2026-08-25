@@ -1,8 +1,10 @@
+pub(crate) mod ipv4;
 pub(crate) mod namespaces;
 pub(crate) mod ownership;
 pub(crate) mod veth;
 
 pub(crate) use namespaces::{
-    AuthorizedNamespacePins, AuthorizedVethPairs, NamespaceEndpoint, NamespacePinError,
-    NamespaceVisitError, VethPairError,
+    AuthorizedIpv4Addresses, AuthorizedNamespacePins, AuthorizedVethPairs,
+    FixedIpv4AddressSetError, NamespaceEndpoint, NamespacePinError, NamespaceVisitError,
+    VethPairError,
 };

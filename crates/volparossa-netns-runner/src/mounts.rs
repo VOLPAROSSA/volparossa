@@ -23,8 +23,9 @@ use thiserror::Error;
 use volparossa_test_support::MutationAuthorization;
 
 use crate::topology::{
-    AuthorizedNamespacePins, AuthorizedVethPairs, NamespaceEndpoint, NamespacePinError,
-    NamespaceVisitError, VethPairError,
+    AuthorizedIpv4Addresses, AuthorizedNamespacePins, AuthorizedVethPairs,
+    FixedIpv4AddressSetError, NamespaceEndpoint, NamespacePinError, NamespaceVisitError,
+    VethPairError,
     ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError},
 };
 
@@ -88,6 +89,28 @@ pub(crate) enum NamespacePinsNetworkProofError {
     /// The existing composite pristine-network collector rejected one endpoint.
     #[error("authorized namespace pin is not pristine: {0}")]
     Network(#[source] crate::network::NetworkError),
+}
+
+/// Exact parent/A/B down-veth observations retained across a bounded sub-transaction.
+///
+/// This proof owns no kernel object. It permits a caller to establish that a
+/// later address-request-only rollback, including its kernel-owned local-route
+/// side effects, restored the byte-identical observable veth state rather than
+/// merely a fresh link with the same broad profile.
+pub(crate) struct ExactVethPairNetworkProof {
+    parent: crate::network::ExactVethParentObservation,
+    endpoints: [crate::network::ExactVethEndpointObservation; 2],
+}
+
+/// Exact addressed parent/A/B observations retained until reverse cleanup.
+pub(crate) struct ExactIpv4AddressNetworkProof {
+    parent: crate::network::ExactIpv4AddressParentObservation,
+    endpoints: [crate::network::ExactIpv4AddressEndpointObservation; 2],
+}
+
+struct ExactIpv4AddressExpectations {
+    pairs: [crate::network::ExpectedVethPair; 2],
+    addresses: [crate::network::ExpectedIpv4Address; 4],
 }
 
 /// Affine owner of the exact private mounts installed by namespace PID 1.
@@ -194,6 +217,13 @@ impl PrivateMounts<AuthorizedPrivateRun> {
             baseline_mountinfo,
             run_state,
         };
+        pinned.verify_authorized_namespace_pins()?;
+        pinned
+            .run_state
+            .prove_reverse_visit_restoration_after_visitor_error()
+            .map_err(|source| {
+                namespace_pin_error("prove reverse namespace visitor restoration", source)
+            })?;
         pinned.verify_authorized_namespace_pins()?;
         Ok(pinned)
     }
@@ -434,12 +464,28 @@ impl PrivateMounts<AuthorizedVethPairs> {
             .map_err(|source| veth_pair_error("reverify authorized veth pairs", source))
     }
 
+    /// Install the four fixed `/30` addresses as one scoped affine transaction.
+    pub(crate) fn configure_fixed_ipv4_addresses(
+        &self,
+    ) -> Result<AuthorizedIpv4Addresses<'_>, PrivateMountSetupError> {
+        self.verify_authorized_veth_pairs()?;
+        let addresses = self
+            .run_state
+            .configure_fixed_ipv4_addresses()
+            .map_err(|source| ipv4_address_set_error("configure fixed IPv4 addresses", source))?;
+        addresses.verify().map_err(|source| {
+            ipv4_address_set_error("verify configured fixed IPv4 addresses", source)
+        })?;
+        self.verify_authorized_veth_pairs()?;
+        Ok(addresses)
+    }
+
     /// Prove the exact parent/A/B link deltas and reobserve all three active states.
     pub(crate) fn prove_exact_veth_pairs(
         &self,
         parent_baseline: &crate::network::MutationRollbackNetworkProof,
         endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
-    ) -> Result<(), NamespacePinsNetworkProofError> {
+    ) -> Result<ExactVethPairNetworkProof, NamespacePinsNetworkProofError> {
         self.verify_authorized_veth_pairs()
             .map_err(NamespacePinsNetworkProofError::Mount)?;
         let pairs = self.run_state.fixed_pairs();
@@ -515,6 +561,201 @@ impl PrivateMounts<AuthorizedVethPairs> {
         }
         self.verify_authorized_veth_pairs()
             .map_err(NamespacePinsNetworkProofError::Mount)
+            .map(|()| ExactVethPairNetworkProof {
+                parent: parent_observation,
+                endpoints: [
+                    endpoint_observations[0]
+                        .take()
+                        .unwrap_or_else(|| std::process::abort()),
+                    endpoint_observations[1]
+                        .take()
+                        .unwrap_or_else(|| std::process::abort()),
+                ],
+            })
+    }
+
+    /// Reprove byte-identical parent/A/B veth state after a bounded sub-transaction.
+    pub(crate) fn verify_exact_veth_pair_state(
+        &self,
+        proof: &ExactVethPairNetworkProof,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        proof
+            .parent
+            .verify(self)
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+        let mut reverified = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = match endpoint {
+                    NamespaceEndpoint::A => 0,
+                    NamespaceEndpoint::B => 1,
+                };
+                if reverified[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                proof.endpoints[index].verify(self)?;
+                reverified[index] = true;
+                Ok(())
+            })
+            .map_err(|error| map_veth_visit_error("reprove exact endpoint veth state", error))?;
+        if reverified != [true, true] {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
+        crate::network::verify_exact_veth_pair_observations(
+            &proof.parent,
+            [&proof.endpoints[0], &proof.endpoints[1]],
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        proof
+            .parent
+            .verify(self)
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+        self.verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+
+    /// Prove the exact parent/A/B delta for all four addressed down-veth ends.
+    pub(crate) fn prove_exact_ipv4_addresses(
+        &self,
+        addresses: &AuthorizedIpv4Addresses<'_>,
+        parent_baseline: &crate::network::MutationRollbackNetworkProof,
+        endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
+    ) -> Result<ExactIpv4AddressNetworkProof, NamespacePinsNetworkProofError> {
+        self.verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        addresses.verify().map_err(|source| {
+            NamespacePinsNetworkProofError::Mount(ipv4_address_set_error(
+                "verify fixed IPv4 address owners before observation",
+                source,
+            ))
+        })?;
+
+        let expectations = exact_ipv4_address_expectations(&self.run_state, addresses)
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+
+        let parent_observation = parent_baseline
+            .observe_exact_ipv4_address_parent(
+                self,
+                [&expectations.pairs[0], &expectations.pairs[1]],
+                [&expectations.addresses[0], &expectations.addresses[2]],
+            )
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+        let endpoint_address_expectations =
+            [&expectations.addresses[1], &expectations.addresses[3]];
+        let mut endpoint_observations = [None, None];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = match endpoint {
+                    NamespaceEndpoint::A => 0,
+                    NamespaceEndpoint::B => 1,
+                };
+                if endpoint_observations[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                endpoint_observations[index] = Some(
+                    endpoint_baselines[index].observe_exact_ipv4_address_endpoint(
+                        self,
+                        &expectations.pairs[index],
+                        endpoint_address_expectations[index],
+                    )?,
+                );
+                Ok(())
+            })
+            .map_err(|error| map_veth_visit_error("observe exact endpoint IPv4 delta", error))?;
+        let [Some(alpha), Some(omega)] = &endpoint_observations else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        };
+        crate::network::verify_exact_ipv4_address_observations(&parent_observation, [alpha, omega])
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+
+        let proof = ExactIpv4AddressNetworkProof {
+            parent: parent_observation,
+            endpoints: [
+                endpoint_observations[0]
+                    .take()
+                    .unwrap_or_else(|| std::process::abort()),
+                endpoint_observations[1]
+                    .take()
+                    .unwrap_or_else(|| std::process::abort()),
+            ],
+        };
+        self.verify_exact_ipv4_address_state(addresses, &proof)?;
+        Ok(proof)
+    }
+
+    /// Reobserve the exact active addressed state without changing ownership.
+    pub(crate) fn verify_exact_ipv4_address_state(
+        &self,
+        addresses: &AuthorizedIpv4Addresses<'_>,
+        proof: &ExactIpv4AddressNetworkProof,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        addresses.verify().map_err(|source| {
+            NamespacePinsNetworkProofError::Mount(ipv4_address_set_error(
+                "reverify fixed IPv4 address owners",
+                source,
+            ))
+        })?;
+        proof
+            .parent
+            .verify(self)
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+        let mut reverified = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = match endpoint {
+                    NamespaceEndpoint::A => 0,
+                    NamespaceEndpoint::B => 1,
+                };
+                if reverified[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                proof.endpoints[index].verify(self)?;
+                reverified[index] = true;
+                Ok(())
+            })
+            .map_err(|error| map_veth_visit_error("reverify exact endpoint IPv4 delta", error))?;
+        if reverified != [true, true] {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
+        crate::network::verify_exact_ipv4_address_observations(
+            &proof.parent,
+            [&proof.endpoints[0], &proof.endpoints[1]],
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        proof
+            .parent
+            .verify(self)
+            .map_err(NamespacePinsNetworkProofError::Network)?;
+        addresses.verify().map_err(|source| {
+            NamespacePinsNetworkProofError::Mount(ipv4_address_set_error(
+                "final reverify of fixed IPv4 address owners",
+                source,
+            ))
+        })?;
+        self.verify_authorized_veth_pairs()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+
+    /// Remove endpoint B/A then parent B/A and retain the unchanged veth owner.
+    pub(crate) fn rollback_fixed_ipv4_addresses<'pairs>(
+        &'pairs self,
+        addresses: AuthorizedIpv4Addresses<'pairs>,
+    ) -> Result<(), PrivateMountSetupError> {
+        self.verify_authorized_veth_pairs()?;
+        addresses
+            .rollback()
+            .map_err(|source| ipv4_address_set_error("roll back fixed IPv4 addresses", source))?;
+        self.verify_authorized_veth_pairs()
     }
 
     /// Delete B then A and recover the unchanged live namespace-pin owner.
@@ -1629,6 +1870,88 @@ fn namespace_pin_error(
 
 fn veth_pair_error(operation: &'static str, source: VethPairError) -> PrivateMountSetupError {
     hard_error(operation, io::Error::other(source))
+}
+
+fn ipv4_address_set_error(
+    operation: &'static str,
+    source: FixedIpv4AddressSetError,
+) -> PrivateMountSetupError {
+    hard_error(operation, io::Error::other(source))
+}
+
+fn exact_ipv4_address_expectations(
+    pairs: &AuthorizedVethPairs,
+    addresses: &AuthorizedIpv4Addresses<'_>,
+) -> Result<ExactIpv4AddressExpectations, crate::network::NetworkError> {
+    let fixed_pairs = pairs.fixed_pairs();
+    let pair_expectations = [
+        crate::network::ExpectedVethPair::new(
+            fixed_pairs[0].parent_name(),
+            fixed_pairs[0].parent_ifindex(),
+            fixed_pairs[0].peer_ifindex(),
+            fixed_pairs[0].target_namespace_identity(),
+        )?,
+        crate::network::ExpectedVethPair::new(
+            fixed_pairs[1].parent_name(),
+            fixed_pairs[1].parent_ifindex(),
+            fixed_pairs[1].peer_ifindex(),
+            fixed_pairs[1].target_namespace_identity(),
+        )?,
+    ];
+    let owners = addresses.owners();
+    if owners
+        .iter()
+        .any(|owner| owner.address().prefix_length() != 30)
+    {
+        return Err(crate::network::NetworkError::Inconsistent);
+    }
+    let parent_alpha_namespace = owners[0].namespace_identity();
+    let endpoint_alpha_namespace = owners[1].namespace_identity();
+    let parent_omega_namespace = owners[2].namespace_identity();
+    let endpoint_omega_namespace = owners[3].namespace_identity();
+    let alpha_target = fixed_pairs[0].target_namespace_identity();
+    let omega_target = fixed_pairs[1].target_namespace_identity();
+    if parent_alpha_namespace != parent_omega_namespace
+        || (
+            endpoint_alpha_namespace.device(),
+            endpoint_alpha_namespace.inode(),
+        ) != (alpha_target.device(), alpha_target.inode())
+        || (
+            endpoint_omega_namespace.device(),
+            endpoint_omega_namespace.inode(),
+        ) != (omega_target.device(), omega_target.inode())
+        || parent_alpha_namespace == endpoint_alpha_namespace
+        || parent_alpha_namespace == endpoint_omega_namespace
+        || endpoint_alpha_namespace == endpoint_omega_namespace
+    {
+        return Err(crate::network::NetworkError::Inconsistent);
+    }
+    let address_expectations = [
+        crate::network::ExpectedIpv4Address::new(
+            owners[0].interface_name(),
+            owners[0].ifindex(),
+            owners[0].address().octets(),
+        )?,
+        crate::network::ExpectedIpv4Address::new(
+            owners[1].interface_name(),
+            owners[1].ifindex(),
+            owners[1].address().octets(),
+        )?,
+        crate::network::ExpectedIpv4Address::new(
+            owners[2].interface_name(),
+            owners[2].ifindex(),
+            owners[2].address().octets(),
+        )?,
+        crate::network::ExpectedIpv4Address::new(
+            owners[3].interface_name(),
+            owners[3].ifindex(),
+            owners[3].address().octets(),
+        )?,
+    ];
+    Ok(ExactIpv4AddressExpectations {
+        pairs: pair_expectations,
+        addresses: address_expectations,
+    })
 }
 
 fn map_veth_visit_error(

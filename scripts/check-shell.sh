@@ -30,7 +30,7 @@ set -- \
     tests/integration/validate-report.sh \
     tests/netns/run-benchmarks.sh \
     tests/netns/run-topology.sh \
-    tests/netns/require-bootstrap-ready-proof.sh \
+    tests/netns/require-ipv4-address-rollback-proof.sh \
     tests/netns/test-lifecycle-contract.sh \
     tests/netns/topology.sh \
     tests/netns/lib/lifecycle-contract.sh \

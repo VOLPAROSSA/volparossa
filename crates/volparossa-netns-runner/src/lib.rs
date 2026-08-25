@@ -16,15 +16,19 @@
 //! namespaces, and publishes them as run-bound nsfs pins. It joins each visible
 //! pin for the full pristine network proof and restores its parent namespace.
 //! It creates and exactly proves two fixed down-veth pairs, each through one
-//! atomic `RTM_NEWLINK` request. It deletes B then A, proves all three namespaces
-//! pristine again, ordinarily unmounts nsfs B then A, proves the hidden slots
-//! reappeared, rolls every
+//! atomic `RTM_NEWLINK` request. It then installs and exactly proves four fixed
+//! `/30` IPv4 addresses plus their four kernel-owned local-table `/32` routes
+//! while every veth end remains down. Address rollback runs endpoint B/A then
+//! parent B/A, after which the retained veth-only states are re-proved
+//! byte-exactly. It deletes veth B then A, proves all three namespaces pristine
+//! again, ordinarily unmounts nsfs B then A, proves the hidden slots reappeared, rolls every
 //! filesystem object back, and reports one internal rollback checkpoint. The
 //! outer then independently re-proves empty private mounts before delivering
 //! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
-//! before exact PID-1 and launcher reaping. The slice creates no configured
-//! address, route, forwarding change, firewall object, packet, probe, ownership
-//! manifest, or topology readiness and cannot emit
+//! before exact PID-1 and launcher reaping. The slice activates no link and
+//! sends no explicit route request. It creates no connected, main-table,
+//! default, or explicit host route, forwarding change, firewall object, packet,
+//! probe, ownership manifest, or topology readiness and cannot emit
 //! `TOPOLOGY_READY` or acceptance evidence.
 
 #![cfg(target_os = "linux")]

@@ -53,8 +53,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// Two fixed veth pairs, live nsfs pins, and private-run backing were fully rolled back.
-    BlockedAfterVethPairsRollback,
+    /// Four fixed `/30` addresses and local routes, both veth pairs, pins, and backing rolled back.
+    BlockedAfterIpv4AddressRollback,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -63,7 +63,7 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    AuthorizedVethPairsRolledBack,
+    AuthorizedIpv4AddressesRolledBack,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -172,9 +172,13 @@ impl From<PidOneControlError> for RunnerError {
 /// proves the fixed private-run roots and empty namespace slots through retained
 /// descriptors, attaches two live nsfs network-namespace pins, proves their
 /// exact pristine network state, atomically creates two fixed down-veth pairs,
-/// proves the exact parent/A/B deltas, deletes B then A, proves all three
-/// namespaces pristine again, then rolls the pins and roots back and emits one internal
-/// rollback-complete checkpoint. The outer independently re-proves empty private
+/// proves the exact parent/A/B deltas, and installs four fixed `/30` IPv4
+/// addresses. It proves those addresses and their four kernel-owned local-table
+/// `/32` routes while every veth end remains down, rolls the addresses back in
+/// endpoint B/A then parent B/A order, and byte-exactly re-proves the retained
+/// down-veth state. It then deletes veth B followed by A, proves all three
+/// namespaces pristine again, rolls the pins and roots back, and emits one
+/// internal rollback-complete checkpoint. The outer independently re-proves empty private
 /// mounts before sending fixed TERM through the retained pidfd and requiring one
 /// affine PID-1 `signalfd` observation before exact reap. This slice does not
 /// emit `TOPOLOGY_READY`; post-`GO` EOF therefore remains cleanup-required. The
@@ -283,8 +287,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::AuthorizedVethPairsRolledBack => {
-            LifecycleOutcome::BlockedAfterVethPairsRollback
+        PidOneBarrierOutcome::AuthorizedIpv4AddressesRolledBack => {
+            LifecycleOutcome::BlockedAfterIpv4AddressRollback
         }
     };
     Ok(outcome)
@@ -428,7 +432,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::AuthorizedVethPairsRolledBack)
+        Ok(PidOneBarrierOutcome::AuthorizedIpv4AddressesRolledBack)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -608,7 +612,7 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterVethPairsRollback {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterIpv4AddressRollback {
         LifecycleEofDisposition::CleanupRequired
     } else {
         LifecycleEofDisposition::NoTopologyMutationAuthorized
@@ -964,8 +968,11 @@ fn finish_pid_one(
 /// `BOOTSTRAP_READY`, consumes the canonical affine `GO`, creates and fully
 /// proves the fixed private-run roots and empty slots, attaches two live
 /// run-bound network-namespace pins, atomically creates and proves two fixed
-/// down-veth pairs, reverses B then A, proves every namespace pristine again,
-/// reverses both pins and then every
+/// down-veth pairs, then installs and proves four fixed `/30` addresses and
+/// their four kernel-owned local-table `/32` routes while the links stay down.
+/// It rolls back endpoint B/A then parent B/A, re-proves the retained veth state
+/// byte-exactly, reverses veth B then A, proves every namespace pristine again,
+/// and reverses both pins and then every
 /// private-run creation, and reports the internal rollback checkpoint. Only
 /// after the outer independently re-proves
 /// empty private mounts does PID 1 consume pidfd-delivered TERM and report the
@@ -1170,17 +1177,11 @@ fn complete_authorized_private_run_rollback(
     veth_pairs
         .verify_authorized_veth_pairs()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    veth_pairs
-        .prove_exact_veth_pairs(&rollback_network_proof, &endpoint_baselines)
-        .map_err(|error| match error {
-            crate::mounts::NamespacePinsNetworkProofError::Mount(error) => {
-                RunnerError::PrivateMount(io::Error::other(error))
-            }
-            crate::mounts::NamespacePinsNetworkProofError::Network(_) => RunnerError::NetworkProof,
-        })?;
-    veth_pairs
-        .verify_authorized_veth_pairs()
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    complete_fixed_ipv4_address_rollback(
+        &veth_pairs,
+        &rollback_network_proof,
+        &endpoint_baselines,
+    )?;
     let namespace_pins = veth_pairs
         .rollback_fixed_veth_pairs()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
@@ -1215,6 +1216,48 @@ fn complete_authorized_private_run_rollback(
         .send(control.mutation_rollback_complete()?.as_bytes())
         .map_err(RunnerError::Channel)?;
     Ok((mounts, final_network_proof))
+}
+
+fn complete_fixed_ipv4_address_rollback(
+    veth_pairs: &crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>,
+    rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
+    endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
+) -> Result<(), RunnerError> {
+    let veth_network_proof = veth_pairs
+        .prove_exact_veth_pairs(rollback_network_proof, endpoint_baselines)
+        .map_err(map_namespace_network_proof_error)?;
+    veth_pairs
+        .verify_authorized_veth_pairs()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let ipv4_addresses = veth_pairs
+        .configure_fixed_ipv4_addresses()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    let ipv4_network_proof = veth_pairs
+        .prove_exact_ipv4_addresses(&ipv4_addresses, rollback_network_proof, endpoint_baselines)
+        .map_err(map_namespace_network_proof_error)?;
+    veth_pairs
+        .verify_exact_ipv4_address_state(&ipv4_addresses, &ipv4_network_proof)
+        .map_err(map_namespace_network_proof_error)?;
+    veth_pairs
+        .rollback_fixed_ipv4_addresses(ipv4_addresses)
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+    veth_pairs
+        .verify_exact_veth_pair_state(&veth_network_proof)
+        .map_err(map_namespace_network_proof_error)?;
+    veth_pairs
+        .verify_authorized_veth_pairs()
+        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))
+}
+
+fn map_namespace_network_proof_error(
+    error: crate::mounts::NamespacePinsNetworkProofError,
+) -> RunnerError {
+    match error {
+        crate::mounts::NamespacePinsNetworkProofError::Mount(error) => {
+            RunnerError::PrivateMount(io::Error::other(error))
+        }
+        crate::mounts::NamespacePinsNetworkProofError::Network(_) => RunnerError::NetworkProof,
+    }
 }
 
 fn verify_pid_one_pristine_state(
