@@ -425,6 +425,54 @@ held. This orchestration does not make the disconnected worker implementation pr
 The production backend still returns `Unavailable` for Prepare and transport acquisition, and the
 engine rejects client ingress as `Unavailable` before backend dispatch.
 
+### Affine asynchronous engine/backend boundary
+
+Every mutating engine transaction now retains one non-cloneable, armed `OperationOwner` outside the
+spawned backend task. The state and backend receive only non-authoritative correlation copies. An
+unexpected owner drop after PLAN is process-fatal rather than silently leaving privileged state
+ownerless. The backend future factory is invoked lazily inside the owned Tokio task, so a panic both
+before future construction and during polling becomes a join failure while the engine still owns
+exact rollback authority.
+
+The stable backend lineage binds the helper runtime, route context, initial Prepare generation and
+request ID/digest, and both Unix expiries. Activate and Commit rotate the engine operation generation
+without rotating that lineage. Each call additionally binds the exact operation sequence, current
+generation, prior phase, kind, request ID/digest, backend phase/action, and one monotonic absolute
+deadline. A completion must echo that complete binding. Substitution is ambiguous; an owned
+descriptor in a rejected or late Acquire completion is closed before exact Destroy begins.
+
+The engine deadline is deliberately only a soft ambiguity boundary. It returns a bounded ambiguous
+response without cancelling the task, then awaits task settlement without another engine timeout
+while retaining the affine owner. A production adapter must therefore enforce the same absolute
+deadline internally and reach a terminal result or transfer exact ownership to a hard-bounded
+reaper. `CleanupIncomplete` is not a definitive error: Probe and Acquire uncertainty trigger exact
+rollback, and failed absence proof leaves the lineage quarantined. Destroy accepts the stable
+lineage plus the current operation binding, and `ConfirmedAbsent` means that exact worker and its
+pins, journal authority and descriptors are gone. Runtime shutdown is correlated by runtime ID and
+deadline and starts only after every per-context Destroy and all engine cleanup state are confirmed.
+
+Fake/adversarial tests cover factory and poll panic, caller cancellation, missing state-binding
+recovery, stale-owner rejection, generation overflow, deadline and completion substitution, runtime
+shutdown correlation, wrong-binding and timed-out Acquire descriptor closure before Destroy, and
+retryable shutdown after incomplete cleanup. This establishes only the adapter boundary. The public
+production constructor still installs the unavailable backend and performs no worker or network
+mutation.
+
+Production wiring remains a separate audited change with these explicit blockers:
+
+- `WorkerCoordinator` currently publishes a one-shot `false` shutdown result that cannot later be
+  upgraded after escalation-reaper reconciliation; production shutdown needs durable, retryable
+  settlement semantics before the engine may select it.
+- The engine's five-second soft call boundary does not itself bound worker spawn, authentication or
+  internal calls, and the coordinator accepts no operation-specific absolute deadline. The adapter
+  must propagate and enforce that deadline and must never cancel-and-Destroy while the owned
+  supervisor is still Busy.
+- `CredentialedWorkerFd` intentionally exposes no affine `OwnedFd` transfer. The adapter needs an
+  audited ownership transfer (or safe duplicate/adoption in the Linux UAPI layer) plus
+  close-on-reject tests.
+- Add/Remove MPTCP endpoint operations are intentionally outside `AsyncLeaseBackend`; their typed
+  asynchronous seam and dispatch are a separate bounded extension.
+
 ## Same-runtime ambiguous Prepare reconciliation
 
 External tag 35 is `BindHelperRuntime`; its success outcome returns a non-zero, CSPRNG-generated

@@ -6,7 +6,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    future::Future,
     os::fd::OwnedFd,
+    pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -14,6 +16,7 @@ use std::{
 use rand_core::{OsRng, RngCore};
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, BindHelperRuntime, CommittedLease,
     CommittedLeaseBatch, DestroyedContext, Empty, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION,
@@ -43,7 +46,7 @@ struct EngineInner {
     cleanup_token: Zeroizing<[u8; 32]>,
     runtime_id: [u8; 32],
     trusted_agent_uid: u32,
-    backend: Arc<dyn LeaseBackend>,
+    backend: Arc<dyn AsyncLeaseBackend>,
     handles: Arc<dyn HandleSource>,
     clock: Arc<dyn Clock>,
     state: Mutex<EngineState>,
@@ -77,7 +80,7 @@ struct PrepareReconciliationRecord {
     helper_runtime_id: [u8; 32],
     prepare_request_id: [u8; 16],
     prepare_operation_digest: [u8; 32],
-    generation: u64,
+    backend_generation: u64,
     setup_expires_at_unix: u64,
     hard_expires_at_unix: u64,
     phase: PrepareReconciliationPhase,
@@ -112,7 +115,7 @@ pub(crate) struct HelperExecution {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ContextPhase {
+pub(crate) enum ContextPhase {
     Prepared,
     Activated,
     Committed,
@@ -120,7 +123,7 @@ enum ContextPhase {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OperationKind {
+pub(crate) enum OperationKind {
     Prepare,
     Activate,
     Probe,
@@ -143,8 +146,220 @@ struct OperationToken {
     kind: OperationKind,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BackendLineage {
+    pub(crate) helper_runtime_id: [u8; 32],
+    pub(crate) context_id: [u8; 16],
+    pub(crate) backend_generation: u64,
+    pub(crate) prepare_request_id: [u8; 16],
+    pub(crate) prepare_operation_digest: [u8; 32],
+    pub(crate) setup_expires_at_unix: u64,
+    pub(crate) hard_expires_at_unix: u64,
+}
+
+/// Affine engine-side authority for settling one exact planned operation.
+///
+/// The copyable token stored in `EngineState` and sent to the backend is only a binding. This
+/// owner deliberately stays in the supervisor task, so a backend task panic or join failure can
+/// never consume the engine's only rollback authority.
+#[must_use = "a planned operation owner must be committed or rolled back"]
+struct OperationOwner {
+    token: OperationToken,
+    lineage: BackendLineage,
+    call_deadline: Instant,
+    armed: bool,
+}
+
+impl OperationOwner {
+    const fn token(&self) -> OperationToken {
+        self.token
+    }
+
+    const fn lineage(&self) -> BackendLineage {
+        self.lineage
+    }
+
+    const fn call_deadline(&self) -> Instant {
+        self.call_deadline
+    }
+
+    fn settle(mut self) -> OperationToken {
+        self.armed = false;
+        self.token
+    }
+}
+
+impl Drop for OperationOwner {
+    fn drop(&mut self) {
+        if self.armed {
+            // PLAN without explicit COMMIT/rollback settlement is an ownership invariant breach.
+            // In particular, unwinding an engine panic must not leave live privileged state behind
+            // in an ownerless generation.
+            std::process::abort();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackendPhase {
+    PreparePending,
+    Prepared,
+    Activated,
+    Committed,
+    Quarantined,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackendAction {
+    Prepare,
+    Activate,
+    Probe,
+    Destroy,
+    AcquireTransportSocket,
+}
+
+/// Non-authoritative copyable identity used only to correlate a backend completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BackendBinding {
+    pub(crate) lineage: BackendLineage,
+    pub(crate) operation_sequence: u64,
+    pub(crate) request_id: [u8; 16],
+    pub(crate) request_digest: [u8; 32],
+    pub(crate) operation_generation: u64,
+    pub(crate) prior_phase: Option<ContextPhase>,
+    pub(crate) operation_kind: OperationKind,
+    pub(crate) phase: BackendPhase,
+    pub(crate) action: BackendAction,
+    pub(crate) call_deadline: Instant,
+}
+
+impl BackendBinding {
+    fn for_owner(
+        owner: &OperationOwner,
+        phase: BackendPhase,
+        action: BackendAction,
+        call_deadline: Instant,
+    ) -> Self {
+        let token = owner.token();
+        Self {
+            lineage: owner.lineage(),
+            operation_sequence: token.sequence,
+            request_id: token.request_id,
+            request_digest: token.digest,
+            operation_generation: token.generation,
+            prior_phase: token.prior_phase,
+            operation_kind: token.kind,
+            phase,
+            action,
+            call_deadline,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BackendDestroy {
+    pub(crate) context_id: [u8; 16],
+    pub(crate) backend_generation: u64,
+}
+
+/// One non-cloneable backend input. Engine rollback authority remains in `OperationOwner`.
+#[must_use = "an affine backend call must produce one correlated completion"]
+pub(crate) struct BackendRequest<T> {
+    binding: BackendBinding,
+    value: T,
+}
+
+#[must_use = "the backend completion owner must return one correlated completion"]
+pub(crate) struct BackendCompletionOwner {
+    binding: BackendBinding,
+}
+
+impl BackendCompletionOwner {
+    #[allow(dead_code, reason = "used by the sibling production adapter seam")]
+    pub(crate) const fn binding(&self) -> BackendBinding {
+        self.binding
+    }
+
+    pub(crate) fn complete<T>(self, result: Result<T, BackendError>) -> BackendCompletion<T> {
+        BackendCompletion {
+            binding: self.binding,
+            result,
+        }
+    }
+}
+
+impl<T> BackendRequest<T> {
+    pub(crate) const fn new(binding: BackendBinding, value: T) -> Self {
+        Self { binding, value }
+    }
+
+    pub(crate) fn into_parts(self) -> (BackendCompletionOwner, T) {
+        (
+            BackendCompletionOwner {
+                binding: self.binding,
+            },
+            self.value,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ConfirmedAbsent;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackendRuntimeAction {
+    QueryTransportSocket,
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BackendRuntimeBinding {
+    pub(crate) helper_runtime_id: [u8; 32],
+    pub(crate) action: BackendRuntimeAction,
+    pub(crate) call_deadline: Instant,
+}
+
+#[must_use = "a runtime backend call must produce one correlated completion"]
+pub(crate) struct BackendRuntimeRequest {
+    binding: BackendRuntimeBinding,
+}
+
+impl BackendRuntimeRequest {
+    pub(crate) const fn new(binding: BackendRuntimeBinding) -> Self {
+        Self { binding }
+    }
+
+    #[allow(dead_code, reason = "used by the sibling production adapter seam")]
+    pub(crate) const fn binding(&self) -> BackendRuntimeBinding {
+        self.binding
+    }
+
+    pub(crate) fn complete<T>(
+        self,
+        result: Result<T, BackendError>,
+    ) -> BackendRuntimeCompletion<T> {
+        BackendRuntimeCompletion {
+            binding: self.binding,
+            result,
+        }
+    }
+}
+
+pub(crate) struct BackendRuntimeCompletion<T> {
+    pub(crate) binding: BackendRuntimeBinding,
+    pub(crate) result: Result<T, BackendError>,
+}
+
+pub(crate) struct BackendCompletion<T> {
+    pub(crate) binding: BackendBinding,
+    pub(crate) result: Result<T, BackendError>,
+}
+
+pub(crate) type BackendFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
 struct ContextRecord {
     generation: u64,
+    backend_generation: u64,
     handle: [u8; HELPER_HANDLE_BYTES],
     helper_runtime_id: [u8; 32],
     prepare_request_id: [u8; 16],
@@ -164,89 +379,140 @@ struct LeaseRecord {
 }
 
 #[derive(Clone)]
-struct PreparedKernelLease {
-    path_id: u32,
-    role: i32,
-    public_key: [u8; 32],
-    public_endpoint: PublicUdpEndpoint,
-    evidence: UnderlayEvidence,
+pub(crate) struct PreparedKernelLease {
+    pub(crate) path_id: u32,
+    pub(crate) role: i32,
+    pub(crate) public_key: [u8; 32],
+    pub(crate) public_endpoint: PublicUdpEndpoint,
+    pub(crate) evidence: UnderlayEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct KernelCounters {
-    path_id: u32,
-    role: i32,
-    latest_handshake_unix: u64,
-    received_bytes: u64,
-    transmitted_bytes: u64,
+pub(crate) struct KernelCounters {
+    pub(crate) path_id: u32,
+    pub(crate) role: i32,
+    pub(crate) latest_handshake_unix: u64,
+    pub(crate) received_bytes: u64,
+    pub(crate) transmitted_bytes: u64,
 }
 
 #[allow(dead_code)] // Future real backends map these closed error classes without free-form text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BackendError {
+pub(crate) enum BackendError {
     Unavailable,
+    Capacity,
     Invalid,
     Kernel,
     CleanupIncomplete,
 }
 
-trait LeaseBackend: Send + Sync {
+/// Cancellation-safe affine boundary for a future privileged worker adapter.
+///
+/// Every returned future must enforce `binding.call_deadline` as its own absolute hard deadline.
+/// It may return `Ok` only after the exact operation is quiescent and durably settled. Definitive
+/// `Err` variants guarantee no mutation, detached work, or owned descriptor survives.
+/// `CleanupIncomplete` instead means exact-lineage resources may remain only under backend-owned
+/// quarantine/reaper authority, so the engine must issue exact rollback/destroy. Every Acquire
+/// error closes every descriptor it created, and no error may leave *unowned* detached work.
+/// Destroy success is stronger: `ConfirmedAbsent` proves that the exact stable lineage's worker is
+/// reaped and its pins, journal authority, and descriptors are absent. Dropping any future must be
+/// safe. The engine's timeout remains a soft ambiguity boundary and continues awaiting task
+/// settlement.
+///
+/// No production implementation is installed yet. A real adapter requires integration tests for
+/// all of these properties before `HelperEngine::new` may select it.
+pub(crate) trait AsyncLeaseBackend: Send + Sync {
     fn prepare(
-        &self,
-        request: &PrepareLeaseBatch,
-    ) -> Result<Vec<PreparedKernelLease>, BackendError>;
+        self: Arc<Self>,
+        request: BackendRequest<PrepareLeaseBatch>,
+    ) -> BackendFuture<BackendCompletion<Vec<PreparedKernelLease>>>;
 
-    fn activate(&self, request: &ActivateLeaseBatch) -> Result<Vec<KernelCounters>, BackendError>;
+    fn activate(
+        self: Arc<Self>,
+        request: BackendRequest<ActivateLeaseBatch>,
+    ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>>;
 
     fn probe(
-        &self,
-        request: &volparossa_routing::CommitLeaseBatch,
-    ) -> Result<Vec<KernelCounters>, BackendError>;
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::CommitLeaseBatch>,
+    ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>>;
 
-    fn destroy(&self, route_context_id: [u8; 16]) -> Result<(), BackendError>;
+    fn destroy(
+        self: Arc<Self>,
+        request: BackendRequest<BackendDestroy>,
+    ) -> BackendFuture<BackendCompletion<ConfirmedAbsent>>;
 
     fn acquire_transport_socket(
-        &self,
-        request: &AcquireTransportSocket,
-    ) -> Result<OwnedFd, BackendError>;
+        self: Arc<Self>,
+        request: BackendRequest<AcquireTransportSocket>,
+    ) -> BackendFuture<BackendCompletion<OwnedFd>>;
 
-    fn transport_socket_supported(&self) -> bool;
+    fn transport_socket_supported(
+        self: Arc<Self>,
+        request: BackendRuntimeRequest,
+    ) -> BackendFuture<BackendRuntimeCompletion<bool>>;
+
+    fn shutdown(
+        self: Arc<Self>,
+        request: BackendRuntimeRequest,
+    ) -> BackendFuture<BackendRuntimeCompletion<()>>;
 }
 
 struct UnavailableLeaseBackend;
 
-impl LeaseBackend for UnavailableLeaseBackend {
+impl AsyncLeaseBackend for UnavailableLeaseBackend {
     fn prepare(
-        &self,
-        _request: &PrepareLeaseBatch,
-    ) -> Result<Vec<PreparedKernelLease>, BackendError> {
-        Err(BackendError::Unavailable)
+        self: Arc<Self>,
+        request: BackendRequest<PrepareLeaseBatch>,
+    ) -> BackendFuture<BackendCompletion<Vec<PreparedKernelLease>>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
     }
 
-    fn activate(&self, _request: &ActivateLeaseBatch) -> Result<Vec<KernelCounters>, BackendError> {
-        Err(BackendError::Unavailable)
+    fn activate(
+        self: Arc<Self>,
+        request: BackendRequest<ActivateLeaseBatch>,
+    ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
     }
 
     fn probe(
-        &self,
-        _request: &volparossa_routing::CommitLeaseBatch,
-    ) -> Result<Vec<KernelCounters>, BackendError> {
-        Err(BackendError::Unavailable)
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::CommitLeaseBatch>,
+    ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
     }
 
-    fn destroy(&self, _route_context_id: [u8; 16]) -> Result<(), BackendError> {
-        Ok(())
+    fn destroy(
+        self: Arc<Self>,
+        request: BackendRequest<BackendDestroy>,
+    ) -> BackendFuture<BackendCompletion<ConfirmedAbsent>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Ok(ConfirmedAbsent)) })
     }
 
     fn acquire_transport_socket(
-        &self,
-        _request: &AcquireTransportSocket,
-    ) -> Result<OwnedFd, BackendError> {
-        Err(BackendError::Unavailable)
+        self: Arc<Self>,
+        request: BackendRequest<AcquireTransportSocket>,
+    ) -> BackendFuture<BackendCompletion<OwnedFd>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
     }
 
-    fn transport_socket_supported(&self) -> bool {
-        false
+    fn transport_socket_supported(
+        self: Arc<Self>,
+        request: BackendRuntimeRequest,
+    ) -> BackendFuture<BackendRuntimeCompletion<bool>> {
+        Box::pin(async move { request.complete(Ok(false)) })
+    }
+
+    fn shutdown(
+        self: Arc<Self>,
+        request: BackendRuntimeRequest,
+    ) -> BackendFuture<BackendRuntimeCompletion<()>> {
+        Box::pin(async move { request.complete(Ok(())) })
     }
 }
 
@@ -277,8 +543,8 @@ impl Clock for SystemClock {
 }
 
 enum BackendCall<T> {
-    Complete(Result<T, BackendError>),
-    TimedOut(tokio::task::JoinHandle<Result<T, BackendError>>),
+    Complete(T),
+    TimedOut(tokio::task::JoinHandle<T>),
     Ambiguous,
 }
 
@@ -289,7 +555,10 @@ struct CleanupOutcome {
 }
 
 enum ResolvedCall<T> {
-    Definite(Result<T, BackendError>),
+    Definite {
+        owner: Box<OperationOwner>,
+        result: Result<T, BackendError>,
+    },
     Ambiguous,
 }
 
@@ -316,11 +585,25 @@ impl HelperEngine {
         cleanup_token: Zeroizing<[u8; 32]>,
         trusted_agent_uid: u32,
     ) -> Self {
+        Self::new_with_backend(
+            cleanup_token,
+            trusted_agent_uid,
+            Arc::new(UnavailableLeaseBackend),
+        )
+    }
+
+    /// Install one crate-internal asynchronous backend without exposing test clocks or handles.
+    /// The public production constructor continues to select the unavailable backend.
+    pub(crate) fn new_with_backend(
+        cleanup_token: Zeroizing<[u8; 32]>,
+        trusted_agent_uid: u32,
+        backend: Arc<dyn AsyncLeaseBackend>,
+    ) -> Self {
         Self::with_protected_components_and_timeout(
             cleanup_token,
             random_runtime_id(),
             trusted_agent_uid,
-            Arc::new(UnavailableLeaseBackend),
+            backend,
             Arc::new(OsHandleSource),
             Arc::new(SystemClock),
             BACKEND_CALL_TIMEOUT,
@@ -331,7 +614,7 @@ impl HelperEngine {
     fn with_components(
         cleanup_token: [u8; 32],
         trusted_agent_uid: u32,
-        backend: Arc<dyn LeaseBackend>,
+        backend: Arc<dyn AsyncLeaseBackend>,
         handles: Arc<dyn HandleSource>,
         clock: Arc<dyn Clock>,
     ) -> Self {
@@ -349,7 +632,7 @@ impl HelperEngine {
     fn with_components_and_timeout(
         cleanup_token: [u8; 32],
         trusted_agent_uid: u32,
-        backend: Arc<dyn LeaseBackend>,
+        backend: Arc<dyn AsyncLeaseBackend>,
         handles: Arc<dyn HandleSource>,
         clock: Arc<dyn Clock>,
         backend_timeout: Duration,
@@ -369,7 +652,7 @@ impl HelperEngine {
         cleanup_token: Zeroizing<[u8; 32]>,
         runtime_id: [u8; 32],
         trusted_agent_uid: u32,
-        backend: Arc<dyn LeaseBackend>,
+        backend: Arc<dyn AsyncLeaseBackend>,
         handles: Arc<dyn HandleSource>,
         clock: Arc<dyn Clock>,
         backend_timeout: Duration,
@@ -397,10 +680,9 @@ impl HelperEngine {
     /// Execute through an owned supervisor.
     ///
     /// Once PLAN reserves state, dropping the caller cannot abort CALL or skip COMMIT/rollback.
-    /// The operation gate is intentionally held until the blocking call has actually returned.
-    /// Tokio cannot interrupt an arbitrary blocking syscall: every future production backend must
-    /// therefore enforce its own hard total deadline. This timeout is fail-closed containment, not
-    /// proof that an indefinitely blocked backend has been stopped.
+    /// The operation gate is intentionally held until the owned asynchronous backend task has
+    /// actually returned. A timeout publishes ambiguity but does not cancel or detach that task;
+    /// the supervisor retains the affine operation owner and performs exact rollback settlement.
     pub(crate) async fn execute_with_descriptor(&self, request: HelperRequest) -> HelperExecution {
         if operation_digest(&request).is_err() {
             return execution(invalid_response(&request), None);
@@ -780,13 +1062,16 @@ impl HelperEngine {
         }
     }
 
-    async fn call_backend<T, F>(&self, call: F) -> BackendCall<T>
+    async fn call_backend<T, F>(&self, deadline: Instant, call: F) -> BackendCall<T>
     where
         T: Send + 'static,
-        F: FnOnce() -> Result<T, BackendError> + Send + 'static,
+        F: FnOnce() -> BackendFuture<T> + Send + 'static,
     {
-        let mut task = tokio::task::spawn_blocking(call);
-        match tokio::time::timeout(self.inner.backend_timeout, &mut task).await {
+        // The trait method itself is invoked inside the owned task. A backend panic either while
+        // constructing its future or polling it is therefore one JoinError; the engine-side owner
+        // remains available for exact stable-lineage rollback.
+        let mut task = tokio::spawn(async move { call().await });
+        match tokio::time::timeout_at(deadline, &mut task).await {
             Ok(Ok(result)) => BackendCall::Complete(result),
             Ok(Err(_)) => BackendCall::Ambiguous,
             Err(_) => BackendCall::TimedOut(task),
@@ -795,8 +1080,9 @@ impl HelperEngine {
 
     async fn resolve_mutating_call<T>(
         &self,
-        call: BackendCall<T>,
-        token: OperationToken,
+        call: BackendCall<BackendCompletion<T>>,
+        owner: OperationOwner,
+        expected_binding: BackendBinding,
         request: &HelperRequest,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<ResolvedCall<T>>
@@ -804,9 +1090,25 @@ impl HelperEngine {
         T: Send + 'static,
     {
         match call {
-            BackendCall::Complete(result) => Some(ResolvedCall::Definite(result)),
+            BackendCall::Complete(completion) if completion.binding == expected_binding => {
+                Some(ResolvedCall::Definite {
+                    owner: Box::new(owner),
+                    result: completion.result,
+                })
+            }
+            BackendCall::Complete(completion) => {
+                // A rejected Acquire completion can own an FD. Close it before privileged cleanup
+                // starts so no stale descriptor survives across the rollback boundary.
+                drop(completion);
+                let cleanup = self.rollback_context(owner, request, sender).await;
+                if cleanup.response_sent {
+                    None
+                } else {
+                    Some(ResolvedCall::Ambiguous)
+                }
+            }
             BackendCall::Ambiguous => {
-                let cleanup = self.rollback_context(token, request, sender).await;
+                let cleanup = self.rollback_context(owner, request, sender).await;
                 if cleanup.response_sent {
                     None
                 } else {
@@ -814,12 +1116,12 @@ impl HelperEngine {
                 }
             }
             BackendCall::TimedOut(task) => {
-                let _ = self.mark_cleanup(token).await;
+                let _ = self.mark_cleanup(&owner).await;
                 self.send_ambiguous(request, sender).await;
-                if let Ok(result) = task.await {
-                    drop(result);
+                if let Ok(completion) = task.await {
+                    drop(completion);
                 }
-                let _ = self.rollback_context(token, request, sender).await;
+                let _ = self.rollback_context(owner, request, sender).await;
                 None
             }
         }
@@ -827,29 +1129,48 @@ impl HelperEngine {
 
     async fn rollback_context(
         &self,
-        token: OperationToken,
+        owner: OperationOwner,
         request: &HelperRequest,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> CleanupOutcome {
-        if !self.mark_cleanup(token).await {
+        if !self.mark_cleanup(&owner).await {
+            self.finish_cleanup(owner, false).await;
             return CleanupOutcome {
                 confirmed: false,
                 response_sent: false,
             };
         }
+        let token = owner.token();
         let backend = Arc::clone(&self.inner.backend);
         let context_id = token.context_id;
-        match self.call_backend(move || backend.destroy(context_id)).await {
-            BackendCall::Complete(result) => {
-                let confirmed = result.is_ok();
-                self.finish_cleanup(token, confirmed).await;
+        let call_deadline = Instant::now() + self.inner.backend_timeout;
+        let binding = BackendBinding::for_owner(
+            &owner,
+            BackendPhase::Quarantined,
+            BackendAction::Destroy,
+            call_deadline,
+        );
+        let call = BackendRequest::new(
+            binding,
+            BackendDestroy {
+                context_id,
+                backend_generation: owner.lineage().backend_generation,
+            },
+        );
+        match self
+            .call_backend(call_deadline, move || backend.destroy(call))
+            .await
+        {
+            BackendCall::Complete(completion) => {
+                let confirmed = completion.binding == binding && completion.result.is_ok();
+                self.finish_cleanup(owner, confirmed).await;
                 CleanupOutcome {
                     confirmed,
                     response_sent: false,
                 }
             }
             BackendCall::Ambiguous => {
-                self.finish_cleanup(token, false).await;
+                self.finish_cleanup(owner, false).await;
                 CleanupOutcome {
                     confirmed: false,
                     response_sent: false,
@@ -857,8 +1178,14 @@ impl HelperEngine {
             }
             BackendCall::TimedOut(task) => {
                 self.send_ambiguous(request, sender).await;
-                let confirmed = matches!(task.await, Ok(Ok(())));
-                self.finish_cleanup(token, confirmed).await;
+                let confirmed = matches!(
+                    task.await,
+                    Ok(BackendCompletion {
+                        binding: completed_binding,
+                        result: Ok(ConfirmedAbsent),
+                    }) if completed_binding == binding
+                );
+                self.finish_cleanup(owner, confirmed).await;
                 CleanupOutcome {
                     confirmed,
                     response_sent: true,
@@ -867,64 +1194,102 @@ impl HelperEngine {
         }
     }
 
-    async fn mark_cleanup(&self, token: OperationToken) -> bool {
+    async fn mark_cleanup(&self, owner: &OperationOwner) -> bool {
+        let token = owner.token();
+        let lineage = owner.lineage();
         let mut state = self.inner.state.lock().await;
-        match state.contexts.get_mut(&token.context_id) {
-            Some(context) if context.generation == token.generation => {
+        if state.in_flight.is_some_and(|current| current != token)
+            || !state
+                .cleanup_pending
+                .contains(&(token.context_id, token.generation))
+        {
+            return false;
+        }
+        let exact = match state.contexts.get_mut(&token.context_id) {
+            Some(context)
+                if context.generation == token.generation
+                    && context_backend_lineage(token.context_id, context) == lineage =>
+            {
                 context.phase = ContextPhase::Quarantined;
-                state
-                    .cleanup_pending
-                    .insert((token.context_id, token.generation));
                 true
             }
             Some(_) => false,
             None => {
-                state
-                    .cleanup_pending
-                    .insert((token.context_id, token.generation));
+                let exact_pending = state
+                    .prepare_reconciliations
+                    .get(&token.context_id)
+                    .is_some_and(|record| {
+                        record.backend_generation == token.generation
+                            && reconciliation_backend_lineage(token.context_id, record) == lineage
+                    });
+                if !exact_pending {
+                    return false;
+                }
                 true
             }
+        };
+        if exact {
+            // `OperationOwner` is the authority. Recover a missing copyable state binding only
+            // after exact lineage, generation, and cleanup-pending validation; never replace a
+            // different live operation.
+            state.in_flight = Some(token);
         }
+        exact
     }
 
-    async fn finish_cleanup(&self, token: OperationToken, confirmed: bool) {
+    async fn finish_cleanup(&self, owner: OperationOwner, confirmed: bool) {
+        let lineage = owner.lineage();
+        let token = owner.token();
         let mut state = self.inner.state.lock().await;
+        let exact_operation = state.in_flight == Some(token)
+            && state
+                .cleanup_pending
+                .contains(&(token.context_id, token.generation));
         let exact_generation = state.contexts.get(&token.context_id).map_or_else(
             || {
                 state
                     .prepare_reconciliations
                     .get(&token.context_id)
-                    .is_some_and(|record| record.generation == token.generation)
+                    .is_some_and(|record| {
+                        record.backend_generation == token.generation
+                            && reconciliation_backend_lineage(token.context_id, record) == lineage
+                    })
             },
-            |context| context.generation == token.generation,
+            |context| {
+                context.generation == token.generation
+                    && context_backend_lineage(token.context_id, context) == lineage
+            },
         );
         if confirmed {
-            if exact_generation {
+            if exact_operation && exact_generation {
                 state.contexts.remove(&token.context_id);
                 state
                     .cleanup_pending
                     .remove(&(token.context_id, token.generation));
                 if let Some(record) = state.prepare_reconciliations.get_mut(&token.context_id) {
-                    if record.generation == token.generation {
+                    if record.backend_generation == token.generation {
                         record.phase = PrepareReconciliationPhase::Absent;
                     }
                 }
             }
-        } else if exact_generation {
+        } else if exact_operation && exact_generation {
             if let Some(context) = state.contexts.get_mut(&token.context_id) {
                 if context.generation == token.generation {
                     context.phase = ContextPhase::Quarantined;
                 }
             }
         }
-        if state.in_flight == Some(token) {
+        if exact_operation {
             state.in_flight = None;
         }
-        if exact_generation {
+        if exact_operation && exact_generation {
             purge_context_cache(&mut state, token.context_id);
         }
+        drop(state);
+        let _ = owner.settle();
     }
 
+    #[allow(clippy::too_many_lines)] // Admission, lineage reservation, and cache commit are one audit unit.
     async fn bind_helper_runtime(
         &self,
         request: &HelperRequest,
@@ -1011,14 +1376,19 @@ impl HelperEngine {
                 None,
             );
         }
-        let generation = reserve_generation(&mut state);
+        let Some(generation) = reserve_generation(&mut state) else {
+            return execution(
+                response(request, HelperResult::Capacity, "GENERATION_CAPACITY", None),
+                None,
+            );
+        };
         state.prepare_reconciliations.insert(
             context_id,
             PrepareReconciliationRecord {
                 helper_runtime_id: self.inner.runtime_id,
                 prepare_request_id,
                 prepare_operation_digest: prepare_digest,
-                generation,
+                backend_generation: generation,
                 setup_expires_at_unix: intent.setup_expires_at_unix,
                 hard_expires_at_unix: intent.hard_expires_at_unix,
                 phase: PrepareReconciliationPhase::Intent,
@@ -1137,7 +1507,7 @@ impl HelperEngine {
                         request_id,
                         digest,
                         context_id,
-                        record.generation,
+                        record.backend_generation,
                     ) {
                         return Some(reconciliation_request_admission_error(request, error));
                     }
@@ -1166,7 +1536,7 @@ impl HelperEngine {
                         request_id,
                         digest,
                         context_id,
-                        record.generation,
+                        record.backend_generation,
                     ) {
                         return Some(reconciliation_request_admission_error(request, error));
                     }
@@ -1189,22 +1559,29 @@ impl HelperEngine {
                         request_id,
                         digest,
                         context_id,
-                        record.generation,
+                        record.backend_generation,
                     ) {
                         return Some(reconciliation_request_admission_error(request, error));
                     }
-                    let token = begin_operation(
+                    let Some(token) = begin_operation(
                         &mut state,
                         request_id,
                         digest,
                         context_id,
-                        record.generation,
+                        record.backend_generation,
                         None,
                         OperationKind::Reconcile,
-                    );
+                        reconciliation_backend_lineage(context_id, &record),
+                        Instant::now() + self.inner.backend_timeout,
+                    ) else {
+                        return Some(execution(
+                            response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                            None,
+                        ));
+                    };
                     state
                         .cleanup_pending
-                        .insert((context_id, record.generation));
+                        .insert((context_id, record.backend_generation));
                     Some(token)
                 }
                 PrepareReconciliationPhase::Owned => {
@@ -1220,7 +1597,8 @@ impl HelperEngine {
                         ));
                     };
                     let prior_phase = context.phase;
-                    let exact_context = context.generation == record.generation
+                    let exact_context = context.generation == record.backend_generation
+                        && context.backend_generation == record.backend_generation
                         && context.helper_runtime_id == runtime_id
                         && context.prepare_request_id == prepare_request_id
                         && context.prepare_operation_digest == prepare_digest
@@ -1247,19 +1625,26 @@ impl HelperEngine {
                         request_id,
                         digest,
                         context_id,
-                        record.generation,
+                        record.backend_generation,
                     ) {
                         return Some(reconciliation_request_admission_error(request, error));
                     }
-                    let token = begin_operation(
+                    let Some(token) = begin_operation(
                         &mut state,
                         request_id,
                         digest,
                         context_id,
-                        record.generation,
+                        record.backend_generation,
                         Some(prior_phase),
                         OperationKind::Reconcile,
-                    );
+                        reconciliation_backend_lineage(context_id, &record),
+                        Instant::now() + self.inner.backend_timeout,
+                    ) else {
+                        return Some(execution(
+                            response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                            None,
+                        ));
+                    };
                     state
                         .contexts
                         .get_mut(&context_id)
@@ -1267,7 +1652,7 @@ impl HelperEngine {
                         .phase = ContextPhase::Quarantined;
                     state
                         .cleanup_pending
-                        .insert((context_id, record.generation));
+                        .insert((context_id, record.backend_generation));
                     Some(token)
                 }
             }
@@ -1447,8 +1832,8 @@ impl HelperEngine {
                 reserved.insert(handle);
                 lease_handles.push(handle);
             }
-            let generation = intent.generation;
-            let token = begin_operation(
+            let generation = intent.backend_generation;
+            let Some(token) = begin_operation(
                 &mut state,
                 request_id,
                 digest,
@@ -1456,7 +1841,14 @@ impl HelperEngine {
                 generation,
                 None,
                 OperationKind::Prepare,
-            );
+                reconciliation_backend_lineage(context_id, &intent),
+                Instant::now() + self.inner.backend_timeout,
+            ) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                    None,
+                ));
+            };
             state
                 .prepare_reconciliations
                 .get_mut(&context_id)
@@ -1467,17 +1859,31 @@ impl HelperEngine {
         };
 
         let backend = Arc::clone(&self.inner.backend);
-        let backend_value = value.clone();
+        let binding = BackendBinding::for_owner(
+            &token,
+            BackendPhase::PreparePending,
+            BackendAction::Prepare,
+            token.call_deadline(),
+        );
+        let backend_value = BackendRequest::new(binding, value.clone());
         let call = self
-            .call_backend(move || backend.prepare(&backend_value))
+            .call_backend(binding.call_deadline, move || {
+                backend.prepare(backend_value)
+            })
             .await;
         let resolved = self
-            .resolve_mutating_call(call, token, request, sender)
+            .resolve_mutating_call(call, token, binding, request, sender)
             .await?;
-        let prepared = match resolved {
-            ResolvedCall::Definite(Ok(prepared)) => prepared,
-            ResolvedCall::Definite(Err(error)) => {
-                let cleanup = self.rollback_context(token, request, sender).await;
+        let (token, prepared) = match resolved {
+            ResolvedCall::Definite {
+                owner,
+                result: Ok(prepared),
+            } => (*owner, prepared),
+            ResolvedCall::Definite {
+                owner,
+                result: Err(error),
+            } => {
+                let cleanup = self.rollback_context(*owner, request, sender).await;
                 if cleanup.response_sent {
                     return None;
                 }
@@ -1507,21 +1913,22 @@ impl HelperEngine {
                 ));
             }
         };
+        let operation = token.token();
 
         let proof_valid = prepared_matches(value, &prepared);
         let commit_now = self.inner.clock.now_unix();
         let exact = {
             let state = self.inner.state.lock().await;
-            state.in_flight == Some(token)
+            state.in_flight == Some(operation)
                 && !state.contexts.contains_key(&context_id)
                 && state
                     .cleanup_pending
-                    .contains(&(context_id, token.generation))
+                    .contains(&(context_id, operation.generation))
                 && state
                     .prepare_reconciliations
                     .get(&context_id)
                     .is_some_and(|record| {
-                        record.generation == token.generation
+                        record.backend_generation == operation.generation
                             && record.phase == PrepareReconciliationPhase::Pending
                     })
                 && commit_now < value.setup_expires_at_unix
@@ -1576,16 +1983,16 @@ impl HelperEngine {
 
         let mut state = self.inner.state.lock().await;
         let final_commit_now = self.inner.clock.now_unix();
-        let still_exact = state.in_flight == Some(token)
+        let still_exact = state.in_flight == Some(operation)
             && !state.contexts.contains_key(&context_id)
             && state
                 .cleanup_pending
-                .contains(&(context_id, token.generation))
+                .contains(&(context_id, operation.generation))
             && state
                 .prepare_reconciliations
                 .get(&context_id)
                 .is_some_and(|record| {
-                    record.generation == token.generation
+                    record.backend_generation == operation.generation
                         && record.phase == PrepareReconciliationPhase::Pending
                 })
             && final_commit_now < value.setup_expires_at_unix
@@ -1609,7 +2016,8 @@ impl HelperEngine {
         state.contexts.insert(
             context_id,
             ContextRecord {
-                generation: token.generation,
+                generation: operation.generation,
+                backend_generation: token.lineage().backend_generation,
                 handle: context_handle,
                 helper_runtime_id: self.inner.runtime_id,
                 prepare_request_id: request_id,
@@ -1628,9 +2036,10 @@ impl HelperEngine {
             .phase = PrepareReconciliationPhase::Owned;
         state
             .cleanup_pending
-            .remove(&(context_id, token.generation));
+            .remove(&(context_id, operation.generation));
         state.in_flight = None;
         drop(state);
+        let _ = token.settle();
 
         Some(execution(
             response(
@@ -1660,7 +2069,7 @@ impl HelperEngine {
         let Some(context_id) = fixed::<16>(&value.route_context_id) else {
             return Some(execution(invalid_response(request), None));
         };
-        let token = {
+        let (token, next_generation) = {
             let mut state = self.inner.state.lock().await;
             let Some(context) = state.contexts.get(&context_id) else {
                 return Some(execution(
@@ -1704,7 +2113,14 @@ impl HelperEngine {
                 ));
             }
             let generation = context.generation;
-            let token = begin_operation(
+            let lineage = context_backend_lineage(context_id, context);
+            let Some(next_generation) = state.next_generation.checked_add(1) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "GENERATION_CAPACITY", None),
+                    None,
+                ));
+            };
+            let Some(token) = begin_operation(
                 &mut state,
                 request_id,
                 digest,
@@ -1712,23 +2128,45 @@ impl HelperEngine {
                 generation,
                 Some(ContextPhase::Prepared),
                 OperationKind::Activate,
-            );
+                lineage,
+                Instant::now() + self.inner.backend_timeout,
+            ) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                    None,
+                ));
+            };
+            state.next_generation = next_generation;
             state.cleanup_pending.insert((context_id, generation));
-            token
+            (token, next_generation)
         };
 
         let backend = Arc::clone(&self.inner.backend);
-        let backend_value = value.clone();
+        let binding = BackendBinding::for_owner(
+            &token,
+            BackendPhase::Prepared,
+            BackendAction::Activate,
+            token.call_deadline(),
+        );
+        let backend_value = BackendRequest::new(binding, value.clone());
         let call = self
-            .call_backend(move || backend.activate(&backend_value))
+            .call_backend(binding.call_deadline, move || {
+                backend.activate(backend_value)
+            })
             .await;
         let resolved = self
-            .resolve_mutating_call(call, token, request, sender)
+            .resolve_mutating_call(call, token, binding, request, sender)
             .await?;
-        let baselines = match resolved {
-            ResolvedCall::Definite(Ok(baselines)) => baselines,
-            ResolvedCall::Definite(Err(error)) => {
-                let cleanup = self.rollback_context(token, request, sender).await;
+        let (token, baselines) = match resolved {
+            ResolvedCall::Definite {
+                owner,
+                result: Ok(baselines),
+            } => (*owner, baselines),
+            ResolvedCall::Definite {
+                owner,
+                result: Err(error),
+            } => {
+                let cleanup = self.rollback_context(*owner, request, sender).await;
                 if cleanup.response_sent {
                     return None;
                 }
@@ -1758,11 +2196,13 @@ impl HelperEngine {
                 ));
             }
         };
+        let operation = token.token();
 
         let mut state = self.inner.state.lock().await;
-        let exact = state.in_flight == Some(token)
+        let exact = state.in_flight == Some(operation)
             && state.contexts.get(&context_id).is_some_and(|context| {
-                context.generation == token.generation
+                context.generation == operation.generation
+                    && context_backend_lineage(context_id, context) == token.lineage()
                     && context.phase == ContextPhase::Prepared
                     && activation_matches(context, &value.leases)
                     && counters_match(context, &baselines)
@@ -1787,7 +2227,6 @@ impl HelperEngine {
                 None,
             ));
         }
-        let next_generation = reserve_generation(&mut state);
         let context = state
             .contexts
             .get_mut(&context_id)
@@ -1809,9 +2248,10 @@ impl HelperEngine {
         state.prepare_reconciliations.remove(&context_id);
         state
             .cleanup_pending
-            .remove(&(context_id, token.generation));
+            .remove(&(context_id, operation.generation));
         state.in_flight = None;
         drop(state);
+        let _ = token.settle();
 
         Some(execution(
             response(
@@ -1841,7 +2281,7 @@ impl HelperEngine {
         let Some(context_id) = fixed::<16>(&value.route_context_id) else {
             return Some(execution(invalid_response(request), None));
         };
-        let token = {
+        let (token, next_generation) = {
             let mut state = self.inner.state.lock().await;
             let Some(context) = state.contexts.get(&context_id) else {
                 return Some(execution(
@@ -1875,7 +2315,14 @@ impl HelperEngine {
                 ));
             }
             let generation = context.generation;
-            let token = begin_operation(
+            let lineage = context_backend_lineage(context_id, context);
+            let Some(next_generation) = state.next_generation.checked_add(1) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "GENERATION_CAPACITY", None),
+                    None,
+                ));
+            };
+            let Some(token) = begin_operation(
                 &mut state,
                 request_id,
                 digest,
@@ -1883,23 +2330,69 @@ impl HelperEngine {
                 generation,
                 Some(ContextPhase::Activated),
                 OperationKind::Probe,
-            );
+                lineage,
+                Instant::now() + self.inner.backend_timeout,
+            ) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                    None,
+                ));
+            };
+            state.next_generation = next_generation;
             state.cleanup_pending.insert((context_id, generation));
-            token
+            (token, next_generation)
         };
 
         let backend = Arc::clone(&self.inner.backend);
-        let backend_value = value.clone();
+        let binding = BackendBinding::for_owner(
+            &token,
+            BackendPhase::Activated,
+            BackendAction::Probe,
+            token.call_deadline(),
+        );
+        let backend_value = BackendRequest::new(binding, value.clone());
         let call = self
-            .call_backend(move || backend.probe(&backend_value))
+            .call_backend(binding.call_deadline, move || backend.probe(backend_value))
             .await;
         let resolved = self
-            .resolve_mutating_call(call, token, request, sender)
+            .resolve_mutating_call(call, token, binding, request, sender)
             .await?;
-        let proofs = match resolved {
-            ResolvedCall::Definite(Ok(proofs)) => proofs,
-            ResolvedCall::Definite(Err(error)) => {
-                self.clear_operation(token).await;
+        let (token, proofs) = match resolved {
+            ResolvedCall::Definite {
+                owner,
+                result: Ok(proofs),
+            } => (*owner, proofs),
+            ResolvedCall::Definite {
+                owner,
+                result: Err(BackendError::CleanupIncomplete),
+            } => {
+                let cleanup = self.rollback_context(*owner, request, sender).await;
+                if cleanup.response_sent {
+                    return None;
+                }
+                return Some(execution(
+                    if cleanup.confirmed {
+                        backend_response(
+                            request,
+                            BackendError::CleanupIncomplete,
+                            "COMMIT_PROBE_FAILED",
+                        )
+                    } else {
+                        response(
+                            request,
+                            HelperResult::CleanupIncomplete,
+                            "CLEANUP_INCOMPLETE",
+                            None,
+                        )
+                    },
+                    None,
+                ));
+            }
+            ResolvedCall::Definite {
+                owner,
+                result: Err(error),
+            } => {
+                self.clear_operation(*owner).await;
                 return Some(execution(
                     backend_response(request, error, "COMMIT_PROBE_FAILED"),
                     None,
@@ -1917,11 +2410,13 @@ impl HelperEngine {
                 ));
             }
         };
+        let operation = token.token();
 
         let mut state = self.inner.state.lock().await;
-        let exact = state.in_flight == Some(token)
+        let exact = state.in_flight == Some(operation)
             && state.contexts.get(&context_id).is_some_and(|context| {
-                context.generation == token.generation
+                context.generation == operation.generation
+                    && context_backend_lineage(context_id, context) == token.lineage()
                     && context.phase == ContextPhase::Activated
                     && commit_matches(context, &value.leases)
             });
@@ -1969,7 +2464,6 @@ impl HelperEngine {
             ));
         }
 
-        let next_generation = reserve_generation(&mut state);
         let context = state
             .contexts
             .get_mut(&context_id)
@@ -1991,9 +2485,10 @@ impl HelperEngine {
         let context_handle = context.handle;
         state
             .cleanup_pending
-            .remove(&(context_id, token.generation));
+            .remove(&(context_id, operation.generation));
         state.in_flight = None;
         drop(state);
+        let _ = token.settle();
 
         Some(execution(
             response(
@@ -2021,18 +2516,32 @@ impl HelperEngine {
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
         let backend = Arc::clone(&self.inner.backend);
+        let query_binding = BackendRuntimeBinding {
+            helper_runtime_id: self.inner.runtime_id,
+            action: BackendRuntimeAction::QueryTransportSocket,
+            call_deadline: Instant::now() + self.inner.backend_timeout,
+        };
+        let query = BackendRuntimeRequest::new(query_binding);
         let supported = match self
-            .call_backend(move || Ok(backend.transport_socket_supported()))
+            .call_backend(query_binding.call_deadline, move || {
+                backend.transport_socket_supported(query)
+            })
             .await
         {
-            BackendCall::Complete(Ok(supported)) => supported,
-            BackendCall::Complete(Err(error)) => {
+            BackendCall::Complete(BackendRuntimeCompletion {
+                binding,
+                result: Ok(supported),
+            }) if binding == query_binding => supported,
+            BackendCall::Complete(BackendRuntimeCompletion {
+                binding,
+                result: Err(error),
+            }) if binding == query_binding => {
                 return Some(execution(
                     backend_response(request, error, "TRANSPORT_SOCKET_UNAVAILABLE"),
                     None,
                 ));
             }
-            BackendCall::Ambiguous => {
+            BackendCall::Complete(_) | BackendCall::Ambiguous => {
                 return Some(execution(
                     response(
                         request,
@@ -2097,7 +2606,8 @@ impl HelperEngine {
                 ));
             }
             let generation = context.generation;
-            let token = begin_operation(
+            let lineage = context_backend_lineage(context_id, context);
+            let Some(token) = begin_operation(
                 &mut state,
                 request_id,
                 digest,
@@ -2105,23 +2615,70 @@ impl HelperEngine {
                 generation,
                 Some(ContextPhase::Committed),
                 OperationKind::Acquire,
-            );
+                lineage,
+                Instant::now() + self.inner.backend_timeout,
+            ) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                    None,
+                ));
+            };
             state.cleanup_pending.insert((context_id, generation));
             token
         };
 
         let backend = Arc::clone(&self.inner.backend);
-        let backend_value = value.clone();
+        let binding = BackendBinding::for_owner(
+            &token,
+            BackendPhase::Committed,
+            BackendAction::AcquireTransportSocket,
+            token.call_deadline(),
+        );
+        let backend_value = BackendRequest::new(binding, value.clone());
         let call = self
-            .call_backend(move || backend.acquire_transport_socket(&backend_value))
+            .call_backend(binding.call_deadline, move || {
+                backend.acquire_transport_socket(backend_value)
+            })
             .await;
         let resolved = self
-            .resolve_mutating_call(call, token, request, sender)
+            .resolve_mutating_call(call, token, binding, request, sender)
             .await?;
-        let descriptor = match resolved {
-            ResolvedCall::Definite(Ok(descriptor)) => descriptor,
-            ResolvedCall::Definite(Err(error)) => {
-                self.clear_operation(token).await;
+        let (token, descriptor) = match resolved {
+            ResolvedCall::Definite {
+                owner,
+                result: Ok(descriptor),
+            } => (*owner, descriptor),
+            ResolvedCall::Definite {
+                owner,
+                result: Err(BackendError::CleanupIncomplete),
+            } => {
+                let cleanup = self.rollback_context(*owner, request, sender).await;
+                if cleanup.response_sent {
+                    return None;
+                }
+                return Some(execution(
+                    if cleanup.confirmed {
+                        backend_response(
+                            request,
+                            BackendError::CleanupIncomplete,
+                            "TRANSPORT_SOCKET_UNAVAILABLE",
+                        )
+                    } else {
+                        response(
+                            request,
+                            HelperResult::CleanupIncomplete,
+                            "CLEANUP_INCOMPLETE",
+                            None,
+                        )
+                    },
+                    None,
+                ));
+            }
+            ResolvedCall::Definite {
+                owner,
+                result: Err(error),
+            } => {
+                self.clear_operation(*owner).await;
                 return Some(execution(
                     backend_response(request, error, "TRANSPORT_SOCKET_UNAVAILABLE"),
                     None,
@@ -2139,11 +2696,13 @@ impl HelperEngine {
                 ));
             }
         };
+        let operation = token.token();
 
         let mut state = self.inner.state.lock().await;
-        let exact = state.in_flight == Some(token)
+        let exact = state.in_flight == Some(operation)
             && state.contexts.get(&context_id).is_some_and(|context| {
-                context.generation == token.generation
+                context.generation == operation.generation
+                    && context_backend_lineage(context_id, context) == token.lineage()
                     && context.phase == ContextPhase::Committed
                     && matches_handle(&context.handle, &value.context_handle)
                     && context.leases.contains_key(&(value.path_id, value.role))
@@ -2168,9 +2727,10 @@ impl HelperEngine {
         }
         state
             .cleanup_pending
-            .remove(&(context_id, token.generation));
+            .remove(&(context_id, operation.generation));
         state.in_flight = None;
         drop(state);
+        let _ = token.settle();
 
         let ready = TransportSocketReady {
             path_id: value.path_id,
@@ -2229,7 +2789,8 @@ impl HelperEngine {
             }
             let generation = context.generation;
             let prior_phase = context.phase;
-            let token = begin_operation(
+            let lineage = context_backend_lineage(context_id, context);
+            let Some(token) = begin_operation(
                 &mut state,
                 request_id,
                 digest,
@@ -2237,7 +2798,14 @@ impl HelperEngine {
                 generation,
                 Some(prior_phase),
                 OperationKind::Destroy,
-            );
+                lineage,
+                Instant::now() + self.inner.backend_timeout,
+            ) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                    None,
+                ));
+            };
             let context = state
                 .contexts
                 .get_mut(&context_id)
@@ -2304,7 +2872,8 @@ impl HelperEngine {
                     continue;
                 }
                 let prior_phase = context.phase;
-                let token = begin_operation(
+                let lineage = context_backend_lineage(context_id, context);
+                let Some(token) = begin_operation(
                     &mut state,
                     request_id,
                     digest,
@@ -2312,7 +2881,14 @@ impl HelperEngine {
                     generation,
                     Some(prior_phase),
                     OperationKind::Cleanup,
-                );
+                    lineage,
+                    Instant::now() + self.inner.backend_timeout,
+                ) else {
+                    return Some(execution(
+                        response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                        None,
+                    ));
+                };
                 state
                     .contexts
                     .get_mut(&context_id)
@@ -2336,7 +2912,7 @@ impl HelperEngine {
                     .prepare_reconciliations
                     .get(&context_id)
                     .is_some_and(|record| {
-                        record.generation == generation
+                        record.backend_generation == generation
                             && record.phase == PrepareReconciliationPhase::Pending
                     })
                     && !state.contexts.contains_key(&context_id)
@@ -2345,7 +2921,12 @@ impl HelperEngine {
                     complete = false;
                     continue;
                 }
-                let token = begin_operation(
+                let lineage = state
+                    .prepare_reconciliations
+                    .get(&context_id)
+                    .map(|record| reconciliation_backend_lineage(context_id, record))
+                    .expect("validated Pending reconciliation");
+                let Some(token) = begin_operation(
                     &mut state,
                     request_id,
                     digest,
@@ -2353,7 +2934,14 @@ impl HelperEngine {
                     generation,
                     None,
                     OperationKind::Cleanup,
-                );
+                    lineage,
+                    Instant::now() + self.inner.backend_timeout,
+                ) else {
+                    return Some(execution(
+                        response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                        None,
+                    ));
+                };
                 state.cleanup_pending.insert((context_id, generation));
                 token
             };
@@ -2418,13 +3006,23 @@ impl HelperEngine {
                                 (record.phase == PrepareReconciliationPhase::Pending
                                     && now >= record.setup_expires_at_unix
                                     && !state.contexts.contains_key(context_id))
-                                .then_some((*context_id, record.generation, None))
+                                .then_some((*context_id, record.backend_generation, None))
                             })
                     });
                 let Some((context_id, generation, prior_phase)) = target else {
                     return ReapOutcome::Complete;
                 };
-                let token = begin_operation(
+                let lineage = state.contexts.get(&context_id).map_or_else(
+                    || {
+                        state
+                            .prepare_reconciliations
+                            .get(&context_id)
+                            .map(|record| reconciliation_backend_lineage(context_id, record))
+                            .expect("selected Pending reconciliation")
+                    },
+                    |context| context_backend_lineage(context_id, context),
+                );
+                let Some(token) = begin_operation(
                     &mut state,
                     request_id,
                     digest,
@@ -2432,7 +3030,14 @@ impl HelperEngine {
                     generation,
                     prior_phase,
                     OperationKind::Reap,
-                );
+                    lineage,
+                    Instant::now() + self.inner.backend_timeout,
+                ) else {
+                    return ReapOutcome::Failure(Box::new(execution(
+                        response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                        None,
+                    )));
+                };
                 if let Some(context) = state.contexts.get_mut(&context_id) {
                     context.phase = ContextPhase::Quarantined;
                 }
@@ -2459,16 +3064,35 @@ impl HelperEngine {
 
     async fn destroy_generation(
         &self,
-        token: OperationToken,
+        token: OperationOwner,
         request: &HelperRequest,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> CleanupOutcome {
+        let operation = token.token();
         let safe = {
             let state = self.inner.state.lock().await;
-            state
-                .contexts
-                .get(&token.context_id)
-                .is_none_or(|context| context.generation == token.generation)
+            state.in_flight == Some(operation)
+                && state
+                    .cleanup_pending
+                    .contains(&(operation.context_id, operation.generation))
+                && state.contexts.get(&operation.context_id).map_or_else(
+                    || {
+                        state
+                            .prepare_reconciliations
+                            .get(&operation.context_id)
+                            .is_some_and(|record| {
+                                record.backend_generation == operation.generation
+                                    && reconciliation_backend_lineage(operation.context_id, record)
+                                        == token.lineage()
+                            })
+                    },
+                    |context| {
+                        context.generation == operation.generation
+                            && context.phase == ContextPhase::Quarantined
+                            && context_backend_lineage(operation.context_id, context)
+                                == token.lineage()
+                    },
+                )
         };
         if !safe {
             self.finish_cleanup(token, false).await;
@@ -2478,10 +3102,28 @@ impl HelperEngine {
             };
         }
         let backend = Arc::clone(&self.inner.backend);
-        let context_id = token.context_id;
-        match self.call_backend(move || backend.destroy(context_id)).await {
-            BackendCall::Complete(result) => {
-                let confirmed = result.is_ok();
+        let context_id = operation.context_id;
+        let binding = BackendBinding::for_owner(
+            &token,
+            BackendPhase::Quarantined,
+            BackendAction::Destroy,
+            token.call_deadline(),
+        );
+        let backend_value = BackendRequest::new(
+            binding,
+            BackendDestroy {
+                context_id,
+                backend_generation: token.lineage().backend_generation,
+            },
+        );
+        match self
+            .call_backend(binding.call_deadline, move || {
+                backend.destroy(backend_value)
+            })
+            .await
+        {
+            BackendCall::Complete(completion) => {
+                let confirmed = completion.binding == binding && completion.result.is_ok();
                 self.finish_cleanup(token, confirmed).await;
                 CleanupOutcome {
                     confirmed,
@@ -2497,7 +3139,13 @@ impl HelperEngine {
             }
             BackendCall::TimedOut(task) => {
                 self.send_ambiguous(request, sender).await;
-                let confirmed = matches!(task.await, Ok(Ok(())));
+                let confirmed = matches!(
+                    task.await,
+                    Ok(BackendCompletion {
+                        binding: completed_binding,
+                        result: Ok(ConfirmedAbsent),
+                    }) if completed_binding == binding
+                );
                 self.finish_cleanup(token, confirmed).await;
                 CleanupOutcome {
                     confirmed,
@@ -2507,14 +3155,28 @@ impl HelperEngine {
         }
     }
 
-    async fn clear_operation(&self, token: OperationToken) {
+    async fn clear_operation(&self, owner: OperationOwner) {
+        let token = owner.token();
         let mut state = self.inner.state.lock().await;
-        if state.in_flight == Some(token) {
+        let exact_lineage = state.contexts.get(&token.context_id).map_or_else(
+            || {
+                state
+                    .prepare_reconciliations
+                    .get(&token.context_id)
+                    .is_some_and(|record| {
+                        reconciliation_backend_lineage(token.context_id, record) == owner.lineage()
+                    })
+            },
+            |context| context_backend_lineage(token.context_id, context) == owner.lineage(),
+        );
+        if exact_lineage && state.in_flight == Some(token) {
             state.in_flight = None;
+            state
+                .cleanup_pending
+                .remove(&(token.context_id, token.generation));
         }
-        state
-            .cleanup_pending
-            .remove(&(token.context_id, token.generation));
+        drop(state);
+        let _ = owner.settle();
     }
 
     /// Stop and clean every context during authenticated process shutdown.
@@ -2531,6 +3193,7 @@ impl HelperEngine {
         receiver.await.unwrap_or(false)
     }
 
+    #[allow(clippy::too_many_lines)] // Both exact cleanup waves must settle before one runtime shutdown.
     async fn shutdown_serial(&self) -> bool {
         let _operation_guard = self.inner.operation_gate.lock().await;
         let identities = {
@@ -2553,7 +3216,12 @@ impl HelperEngine {
                     complete = false;
                     continue;
                 }
-                let token = begin_operation(
+                let lineage = state
+                    .contexts
+                    .get(&context_id)
+                    .map(|context| context_backend_lineage(context_id, context))
+                    .expect("validated shutdown context");
+                let Some(token) = begin_operation(
                     &mut state,
                     [0; 16],
                     [0; 32],
@@ -2561,7 +3229,12 @@ impl HelperEngine {
                     generation,
                     Some(prior_phase),
                     OperationKind::Shutdown,
-                );
+                    lineage,
+                    Instant::now() + self.inner.backend_timeout,
+                ) else {
+                    complete = false;
+                    continue;
+                };
                 state
                     .contexts
                     .get_mut(&context_id)
@@ -2571,11 +3244,36 @@ impl HelperEngine {
                 token
             };
             let backend = Arc::clone(&self.inner.backend);
-            let call = self.call_backend(move || backend.destroy(context_id)).await;
+            let binding = BackendBinding::for_owner(
+                &token,
+                BackendPhase::Quarantined,
+                BackendAction::Destroy,
+                token.call_deadline(),
+            );
+            let backend_value = BackendRequest::new(
+                binding,
+                BackendDestroy {
+                    context_id,
+                    backend_generation: token.lineage().backend_generation,
+                },
+            );
+            let call = self
+                .call_backend(binding.call_deadline, move || {
+                    backend.destroy(backend_value)
+                })
+                .await;
             let confirmed = match call {
-                BackendCall::Complete(result) => result.is_ok(),
+                BackendCall::Complete(completion) => {
+                    completion.binding == binding && completion.result.is_ok()
+                }
                 BackendCall::Ambiguous => false,
-                BackendCall::TimedOut(task) => matches!(task.await, Ok(Ok(()))),
+                BackendCall::TimedOut(task) => matches!(
+                    task.await,
+                    Ok(BackendCompletion {
+                        binding: completed_binding,
+                        result: Ok(ConfirmedAbsent),
+                    }) if completed_binding == binding
+                ),
             };
             self.finish_cleanup(token, confirmed).await;
             complete &= confirmed;
@@ -2591,7 +3289,7 @@ impl HelperEngine {
                     .prepare_reconciliations
                     .get(&context_id)
                     .is_some_and(|record| {
-                        record.generation == generation
+                        record.backend_generation == generation
                             && record.phase == PrepareReconciliationPhase::Pending
                     })
                     && !state.contexts.contains_key(&context_id)
@@ -2600,7 +3298,12 @@ impl HelperEngine {
                     complete = false;
                     continue;
                 }
-                let token = begin_operation(
+                let lineage = state
+                    .prepare_reconciliations
+                    .get(&context_id)
+                    .map(|record| reconciliation_backend_lineage(context_id, record))
+                    .expect("validated shutdown Pending reconciliation");
+                let Some(token) = begin_operation(
                     &mut state,
                     [0; 16],
                     [0; 32],
@@ -2608,22 +3311,84 @@ impl HelperEngine {
                     generation,
                     None,
                     OperationKind::Shutdown,
-                );
+                    lineage,
+                    Instant::now() + self.inner.backend_timeout,
+                ) else {
+                    complete = false;
+                    continue;
+                };
                 state.cleanup_pending.insert((context_id, generation));
                 token
             };
             let backend = Arc::clone(&self.inner.backend);
-            let call = self.call_backend(move || backend.destroy(context_id)).await;
+            let binding = BackendBinding::for_owner(
+                &token,
+                BackendPhase::Quarantined,
+                BackendAction::Destroy,
+                token.call_deadline(),
+            );
+            let backend_value = BackendRequest::new(
+                binding,
+                BackendDestroy {
+                    context_id,
+                    backend_generation: token.lineage().backend_generation,
+                },
+            );
+            let call = self
+                .call_backend(binding.call_deadline, move || {
+                    backend.destroy(backend_value)
+                })
+                .await;
             let confirmed = match call {
-                BackendCall::Complete(result) => result.is_ok(),
+                BackendCall::Complete(completion) => {
+                    completion.binding == binding && completion.result.is_ok()
+                }
                 BackendCall::Ambiguous => false,
-                BackendCall::TimedOut(task) => matches!(task.await, Ok(Ok(()))),
+                BackendCall::TimedOut(task) => matches!(
+                    task.await,
+                    Ok(BackendCompletion {
+                        binding: completed_binding,
+                        result: Ok(ConfirmedAbsent),
+                    }) if completed_binding == binding
+                ),
             };
             self.finish_cleanup(token, confirmed).await;
             complete &= confirmed;
         }
+        let engine_cleanup_complete = {
+            let state = self.inner.state.lock().await;
+            cleanup_state_complete(&state)
+        };
+        if !complete || !engine_cleanup_complete {
+            return false;
+        }
+        let backend = Arc::clone(&self.inner.backend);
+        let shutdown_binding = BackendRuntimeBinding {
+            helper_runtime_id: self.inner.runtime_id,
+            action: BackendRuntimeAction::Shutdown,
+            call_deadline: Instant::now() + self.inner.backend_timeout,
+        };
+        let shutdown_request = BackendRuntimeRequest::new(shutdown_binding);
+        let shutdown = self
+            .call_backend(shutdown_binding.call_deadline, move || {
+                backend.shutdown(shutdown_request)
+            })
+            .await;
+        let backend_stopped = match shutdown {
+            BackendCall::Complete(completion) => {
+                completion.binding == shutdown_binding && completion.result.is_ok()
+            }
+            BackendCall::Ambiguous => false,
+            BackendCall::TimedOut(task) => matches!(
+                task.await,
+                Ok(BackendRuntimeCompletion {
+                    binding,
+                    result: Ok(()),
+                }) if binding == shutdown_binding
+            ),
+        };
         let state = self.inner.state.lock().await;
-        complete && cleanup_state_complete(&state)
+        backend_stopped && cleanup_state_complete(&state)
     }
 
     fn unique_handle(
@@ -2664,11 +3429,40 @@ fn random_runtime_id() -> [u8; 32] {
     }
 }
 
-fn reserve_generation(state: &mut EngineState) -> u64 {
-    state.next_generation = state.next_generation.wrapping_add(1).max(1);
-    state.next_generation
+fn reserve_generation(state: &mut EngineState) -> Option<u64> {
+    let next = state.next_generation.checked_add(1)?;
+    state.next_generation = next;
+    Some(next)
 }
 
+const fn context_backend_lineage(context_id: [u8; 16], context: &ContextRecord) -> BackendLineage {
+    BackendLineage {
+        helper_runtime_id: context.helper_runtime_id,
+        context_id,
+        backend_generation: context.backend_generation,
+        prepare_request_id: context.prepare_request_id,
+        prepare_operation_digest: context.prepare_operation_digest,
+        setup_expires_at_unix: context.setup_expires_at_unix,
+        hard_expires_at_unix: context.hard_expires_at_unix,
+    }
+}
+
+const fn reconciliation_backend_lineage(
+    context_id: [u8; 16],
+    record: &PrepareReconciliationRecord,
+) -> BackendLineage {
+    BackendLineage {
+        helper_runtime_id: record.helper_runtime_id,
+        context_id,
+        backend_generation: record.backend_generation,
+        prepare_request_id: record.prepare_request_id,
+        prepare_operation_digest: record.prepare_operation_digest,
+        setup_expires_at_unix: record.setup_expires_at_unix,
+        hard_expires_at_unix: record.hard_expires_at_unix,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Constructs one fully bound affine owner at the PLAN boundary.
 fn begin_operation(
     state: &mut EngineState,
     request_id: [u8; 16],
@@ -2677,10 +3471,16 @@ fn begin_operation(
     generation: u64,
     prior_phase: Option<ContextPhase>,
     kind: OperationKind,
-) -> OperationToken {
-    state.next_operation = state.next_operation.wrapping_add(1).max(1);
+    lineage: BackendLineage,
+    call_deadline: Instant,
+) -> Option<OperationOwner> {
+    if state.in_flight.is_some() {
+        return None;
+    }
+    let next_operation = state.next_operation.checked_add(1)?;
+    state.next_operation = next_operation;
     let token = OperationToken {
-        sequence: state.next_operation,
+        sequence: next_operation,
         request_id,
         digest,
         context_id,
@@ -2689,7 +3489,12 @@ fn begin_operation(
         kind,
     };
     state.in_flight = Some(token);
-    token
+    Some(OperationOwner {
+        token,
+        lineage,
+        call_deadline,
+        armed: true,
+    })
 }
 
 fn prepared_matches(request: &PrepareLeaseBatch, prepared: &[PreparedKernelLease]) -> bool {
@@ -2829,7 +3634,7 @@ fn bind_reconciliation_request(
     let bound_request_id = state
         .prepare_reconciliations
         .get(&context_id)
-        .filter(|record| record.generation == generation)
+        .filter(|record| record.backend_generation == generation)
         .ok_or(ReconciliationRequestAdmissionError::EvidenceUnavailable)?
         .reconciliation_request_id;
 
@@ -2944,7 +3749,7 @@ fn orphan_pending_identities(state: &EngineState) -> Vec<([u8; 16], u64)> {
         .filter_map(|(context_id, record)| {
             (record.phase == PrepareReconciliationPhase::Pending
                 && !state.contexts.contains_key(context_id))
-            .then_some((*context_id, record.generation))
+            .then_some((*context_id, record.backend_generation))
         })
         .collect()
 }
@@ -3058,6 +3863,7 @@ fn backend_response(
 ) -> HelperResponse {
     let result = match error {
         BackendError::Unavailable => HelperResult::Unavailable,
+        BackendError::Capacity => HelperResult::Capacity,
         BackendError::Invalid => HelperResult::InvalidRequest,
         BackendError::Kernel => HelperResult::Kernel,
         BackendError::CleanupIncomplete => HelperResult::CleanupIncomplete,
@@ -3093,10 +3899,15 @@ fn response(
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Condvar, Mutex as StdMutex,
+        Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
-    use std::{io::Read, os::unix::net::UnixStream as StdUnixStream, time::Duration};
+    use std::{
+        io::Read,
+        os::unix::{net::UnixStream as StdUnixStream, process::ExitStatusExt},
+        process::Command,
+        time::Duration,
+    };
 
     use volparossa_routing::{
         CommitLeaseBatch, ContextRole, LeaseCommit, LeasePlan, PrepareIntent, PreparedLeaseBatch,
@@ -3139,129 +3950,251 @@ mod tests {
         transport_peers: StdMutex<Vec<StdUnixStream>>,
         block_prepare: AtomicBool,
         prepare_entered: AtomicBool,
-        prepare_release: (StdMutex<bool>, Condvar),
+        prepare_released: AtomicBool,
+        prepare_release: tokio::sync::Notify,
         block_destroy: AtomicBool,
         destroy_entered: AtomicBool,
-        destroy_release: (StdMutex<bool>, Condvar),
+        destroy_released: AtomicBool,
+        destroy_release: tokio::sync::Notify,
+        block_acquire: AtomicBool,
+        acquire_entered: AtomicBool,
+        acquire_released: AtomicBool,
+        acquire_release: tokio::sync::Notify,
         invalid_prepare: AtomicBool,
         fail_destroy: AtomicBool,
+        fail_prepare_capacity: AtomicBool,
+        fail_probe_cleanup: AtomicBool,
+        fail_acquire_cleanup: AtomicBool,
+        panic_prepare_factory: AtomicBool,
+        panic_prepare_poll: AtomicBool,
+        substitute_prepare_generation: AtomicBool,
+        substitute_prepare_deadline: AtomicBool,
+        substitute_acquire_generation: AtomicBool,
+        prepare_bindings: StdMutex<Vec<BackendBinding>>,
+        destroy_calls: StdMutex<Vec<(BackendBinding, BackendDestroy)>>,
+        runtime_bindings: StdMutex<Vec<BackendRuntimeBinding>>,
     }
 
     impl FakeBackend {
         fn release_prepare(&self) {
-            let (released, ready) = &self.prepare_release;
-            *released.lock().expect("prepare release lock") = true;
-            ready.notify_all();
+            self.prepare_released.store(true, Ordering::Release);
+            self.prepare_release.notify_one();
         }
 
         fn release_destroy(&self) {
-            let (released, ready) = &self.destroy_release;
-            *released.lock().expect("destroy release lock") = true;
-            ready.notify_all();
+            self.destroy_released.store(true, Ordering::Release);
+            self.destroy_release.notify_one();
+        }
+
+        fn release_acquire(&self) {
+            self.acquire_released.store(true, Ordering::Release);
+            self.acquire_release.notify_one();
         }
     }
 
-    impl LeaseBackend for FakeBackend {
+    impl AsyncLeaseBackend for FakeBackend {
         fn prepare(
-            &self,
-            request: &PrepareLeaseBatch,
-        ) -> Result<Vec<PreparedKernelLease>, BackendError> {
-            self.prepare_entered.store(true, Ordering::Release);
-            if self.block_prepare.load(Ordering::Acquire) {
-                let (released, ready) = &self.prepare_release;
-                let mut released = released.lock().map_err(|_| BackendError::Kernel)?;
-                while !*released {
-                    released = ready.wait(released).map_err(|_| BackendError::Kernel)?;
+            self: Arc<Self>,
+            request: BackendRequest<PrepareLeaseBatch>,
+        ) -> BackendFuture<BackendCompletion<Vec<PreparedKernelLease>>> {
+            assert!(
+                !self.panic_prepare_factory.load(Ordering::Acquire),
+                "injected backend future factory panic"
+            );
+            let (completion, request) = request.into_parts();
+            self.prepare_bindings
+                .lock()
+                .expect("prepare bindings")
+                .push(completion.binding());
+            Box::pin(async move {
+                self.prepare_entered.store(true, Ordering::Release);
+                assert!(
+                    !self.panic_prepare_poll.load(Ordering::Acquire),
+                    "injected backend poll panic"
+                );
+                loop {
+                    let notified = self.prepare_release.notified();
+                    if !self.block_prepare.load(Ordering::Acquire)
+                        || self.prepare_released.load(Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    notified.await;
                 }
-            }
-            let invalid = self.invalid_prepare.load(Ordering::Acquire);
-            Ok(request
-                .leases
-                .iter()
-                .map(|lease| PreparedKernelLease {
-                    path_id: lease.path_id,
-                    role: lease.role,
-                    public_key: if invalid {
-                        [0; 32]
-                    } else {
-                        [u8::try_from(lease.path_id).unwrap_or(1); 32]
-                    },
-                    public_endpoint: PublicUdpEndpoint {
-                        address: vec![8, 8, 8, 8],
-                        port: 50_000 + lease.path_id,
-                    },
-                    evidence: UnderlayEvidence::DirectAssigned,
-                })
-                .collect())
+                let invalid = self.invalid_prepare.load(Ordering::Acquire);
+                let result = request
+                    .leases
+                    .iter()
+                    .map(|lease| PreparedKernelLease {
+                        path_id: lease.path_id,
+                        role: lease.role,
+                        public_key: if invalid {
+                            [0; 32]
+                        } else {
+                            [u8::try_from(lease.path_id).unwrap_or(1); 32]
+                        },
+                        public_endpoint: PublicUdpEndpoint {
+                            address: vec![8, 8, 8, 8],
+                            port: 50_000 + lease.path_id,
+                        },
+                        evidence: UnderlayEvidence::DirectAssigned,
+                    })
+                    .collect();
+                let outcome = if self.fail_prepare_capacity.load(Ordering::Acquire) {
+                    Err(BackendError::Capacity)
+                } else {
+                    Ok(result)
+                };
+                let mut completion = completion.complete(outcome);
+                if self.substitute_prepare_generation.load(Ordering::Acquire) {
+                    completion.binding.operation_generation =
+                        completion.binding.operation_generation.saturating_add(1);
+                }
+                if self.substitute_prepare_deadline.load(Ordering::Acquire) {
+                    completion.binding.call_deadline += Duration::from_nanos(1);
+                }
+                completion
+            })
         }
 
         fn activate(
-            &self,
-            request: &ActivateLeaseBatch,
-        ) -> Result<Vec<KernelCounters>, BackendError> {
-            Ok(request
-                .leases
-                .iter()
-                .map(|lease| KernelCounters {
-                    path_id: lease.path_id,
-                    role: lease.role,
-                    latest_handshake_unix: 0,
-                    received_bytes: 10,
-                    transmitted_bytes: 20,
-                })
-                .collect())
+            self: Arc<Self>,
+            request: BackendRequest<ActivateLeaseBatch>,
+        ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
+            let (completion, request) = request.into_parts();
+            Box::pin(async move {
+                let result = request
+                    .leases
+                    .iter()
+                    .map(|lease| KernelCounters {
+                        path_id: lease.path_id,
+                        role: lease.role,
+                        latest_handshake_unix: 0,
+                        received_bytes: 10,
+                        transmitted_bytes: 20,
+                    })
+                    .collect();
+                completion.complete(Ok(result))
+            })
         }
 
-        fn probe(&self, request: &CommitLeaseBatch) -> Result<Vec<KernelCounters>, BackendError> {
-            let increment = self.proof_increment.load(Ordering::Relaxed);
-            Ok(request
-                .leases
-                .iter()
-                .map(|lease| KernelCounters {
-                    path_id: lease.path_id,
-                    role: lease.role,
-                    latest_handshake_unix: 101,
-                    received_bytes: 10 + increment,
-                    transmitted_bytes: 20 + increment,
-                })
-                .collect())
-        }
-
-        fn destroy(&self, route_context_id: [u8; 16]) -> Result<(), BackendError> {
-            self.destroyed
-                .lock()
-                .expect("destroy lock")
-                .push(route_context_id);
-            self.destroy_entered.store(true, Ordering::Release);
-            if self.block_destroy.load(Ordering::Acquire) {
-                let (released, ready) = &self.destroy_release;
-                let mut released = released.lock().map_err(|_| BackendError::Kernel)?;
-                while !*released {
-                    released = ready.wait(released).map_err(|_| BackendError::Kernel)?;
+        fn probe(
+            self: Arc<Self>,
+            request: BackendRequest<CommitLeaseBatch>,
+        ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
+            let (completion, request) = request.into_parts();
+            Box::pin(async move {
+                if self.fail_probe_cleanup.load(Ordering::Acquire) {
+                    return completion.complete(Err(BackendError::CleanupIncomplete));
                 }
-            }
-            if self.fail_destroy.load(Ordering::Acquire) {
-                Err(BackendError::CleanupIncomplete)
-            } else {
-                Ok(())
-            }
+                let increment = self.proof_increment.load(Ordering::Relaxed);
+                let result = request
+                    .leases
+                    .iter()
+                    .map(|lease| KernelCounters {
+                        path_id: lease.path_id,
+                        role: lease.role,
+                        latest_handshake_unix: 101,
+                        received_bytes: 10 + increment,
+                        transmitted_bytes: 20 + increment,
+                    })
+                    .collect();
+                completion.complete(Ok(result))
+            })
+        }
+
+        fn destroy(
+            self: Arc<Self>,
+            request: BackendRequest<BackendDestroy>,
+        ) -> BackendFuture<BackendCompletion<ConfirmedAbsent>> {
+            let (completion, request) = request.into_parts();
+            self.destroy_calls
+                .lock()
+                .expect("destroy calls")
+                .push((completion.binding(), request));
+            Box::pin(async move {
+                self.destroyed
+                    .lock()
+                    .expect("destroy lock")
+                    .push(request.context_id);
+                self.destroy_entered.store(true, Ordering::Release);
+                loop {
+                    let notified = self.destroy_release.notified();
+                    if !self.block_destroy.load(Ordering::Acquire)
+                        || self.destroy_released.load(Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    notified.await;
+                }
+                let result = if self.fail_destroy.load(Ordering::Acquire) {
+                    Err(BackendError::CleanupIncomplete)
+                } else {
+                    Ok(ConfirmedAbsent)
+                };
+                completion.complete(result)
+            })
         }
 
         fn acquire_transport_socket(
-            &self,
-            _request: &AcquireTransportSocket,
-        ) -> Result<OwnedFd, BackendError> {
-            let (worker, peer) = StdUnixStream::pair().map_err(|_| BackendError::Kernel)?;
-            self.transport_calls.fetch_add(1, Ordering::Relaxed);
-            self.transport_peers
-                .lock()
-                .map_err(|_| BackendError::Kernel)?
-                .push(peer);
-            Ok(worker.into())
+            self: Arc<Self>,
+            request: BackendRequest<AcquireTransportSocket>,
+        ) -> BackendFuture<BackendCompletion<OwnedFd>> {
+            let (completion, _request) = request.into_parts();
+            Box::pin(async move {
+                let result = if self.fail_acquire_cleanup.load(Ordering::Acquire) {
+                    Err(BackendError::CleanupIncomplete)
+                } else {
+                    StdUnixStream::pair()
+                        .map_err(|_| BackendError::Kernel)
+                        .and_then(|(worker, peer)| {
+                            self.transport_calls.fetch_add(1, Ordering::Relaxed);
+                            self.transport_peers
+                                .lock()
+                                .map_err(|_| BackendError::Kernel)?
+                                .push(peer);
+                            Ok(worker.into())
+                        })
+                };
+                self.acquire_entered.store(true, Ordering::Release);
+                loop {
+                    let notified = self.acquire_release.notified();
+                    if !self.block_acquire.load(Ordering::Acquire)
+                        || self.acquire_released.load(Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    notified.await;
+                }
+                let mut completion = completion.complete(result);
+                if self.substitute_acquire_generation.load(Ordering::Acquire) {
+                    completion.binding.operation_generation =
+                        completion.binding.operation_generation.saturating_add(1);
+                }
+                completion
+            })
         }
 
-        fn transport_socket_supported(&self) -> bool {
-            true
+        fn transport_socket_supported(
+            self: Arc<Self>,
+            request: BackendRuntimeRequest,
+        ) -> BackendFuture<BackendRuntimeCompletion<bool>> {
+            self.runtime_bindings
+                .lock()
+                .expect("runtime bindings")
+                .push(request.binding());
+            Box::pin(async move { request.complete(Ok(true)) })
+        }
+
+        fn shutdown(
+            self: Arc<Self>,
+            request: BackendRuntimeRequest,
+        ) -> BackendFuture<BackendRuntimeCompletion<()>> {
+            self.runtime_bindings
+                .lock()
+                .expect("runtime bindings")
+                .push(request.binding());
+            Box::pin(async move { request.complete(Ok(())) })
         }
     }
 
@@ -3388,10 +4321,7 @@ mod tests {
         value
     }
 
-    async fn commit_client_context(
-        engine: &HelperEngine,
-        backend: &FakeBackend,
-    ) -> PreparedLeaseBatch {
+    async fn activate_client_context(engine: &HelperEngine) -> PreparedLeaseBatch {
         let prepared = prepared(&execute_prepare(engine, prepare_request(1)).await);
         let lease = &prepared.leases[0];
         let activated = engine
@@ -3416,6 +4346,15 @@ mod tests {
             ))
             .await;
         assert_eq!(activated.result, HelperResult::Ok as i32);
+        prepared
+    }
+
+    async fn commit_client_context(
+        engine: &HelperEngine,
+        backend: &FakeBackend,
+    ) -> PreparedLeaseBatch {
+        let prepared = activate_client_context(engine).await;
+        let lease = &prepared.leases[0];
         backend.proof_increment.store(1, Ordering::Relaxed);
         let committed = engine
             .execute(request(
@@ -3705,23 +4644,6 @@ mod tests {
     }
 
     #[test]
-    fn production_transport_backend_is_explicitly_unavailable() {
-        let request = AcquireTransportSocket {
-            route_context_id: vec![7; 16],
-            context_handle: vec![8; 32],
-            path_id: 1,
-            role: WireguardRole::Client as i32,
-            descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener as i32,
-            expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
-            expected_remote: None,
-        };
-        assert!(matches!(
-            UnavailableLeaseBackend.acquire_transport_socket(&request),
-            Err(BackendError::Unavailable)
-        ));
-    }
-
-    #[test]
     fn engine_cleanup_token_uses_a_zeroizing_owner() {
         fn requires_zeroizing_array(_: &Zeroizing<[u8; 32]>) {}
 
@@ -3841,6 +4763,16 @@ mod tests {
         })
         .await
         .expect("destroy entered");
+    }
+
+    async fn wait_for_acquire_entry(backend: &FakeBackend) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !backend.acquire_entered.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Acquire entered");
     }
 
     async fn wait_for_supervisor_settlement(engine: &HelperEngine) {
@@ -3968,6 +4900,7 @@ mod tests {
         let backend = Arc::new(FakeBackend::default());
         backend.block_prepare.store(true, Ordering::Release);
         let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let started = Instant::now();
         let engine =
             fake_engine_with_timeout(Arc::clone(&backend), clock, Duration::from_millis(20));
         let executing_engine = engine.clone();
@@ -3977,6 +4910,14 @@ mod tests {
             );
 
         wait_for_prepare_entry(&backend).await;
+        let call_deadline = backend
+            .prepare_bindings
+            .lock()
+            .expect("prepare bindings")
+            .first()
+            .expect("Prepare binding")
+            .call_deadline;
+        assert!(call_deadline >= started + Duration::from_millis(20));
         let response = tokio::time::timeout(Duration::from_millis(250), execution)
             .await
             .expect("orchestration timeout response")
@@ -3990,6 +4931,643 @@ mod tests {
         assert_eq!(
             backend.destroyed.lock().expect("destroyed").as_slice(),
             &[[7; 16]]
+        );
+    }
+
+    async fn assert_prepare_panic_rolls_back(backend: Arc<FakeBackend>) {
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let response = execute_prepare(&engine, prepare_request(45)).await;
+
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(response.diagnostic_code, "BACKEND_RESULT_AMBIGUOUS");
+        let state = engine.inner.state.lock().await;
+        assert!(state.contexts.is_empty());
+        assert!(state.cleanup_pending.is_empty());
+        assert!(state.in_flight.is_none());
+        drop(state);
+        let destroy = backend.destroy_calls.lock().expect("destroy calls");
+        assert_eq!(destroy.len(), 1);
+        assert_eq!(destroy[0].0.lineage.helper_runtime_id, [0xa5; 32]);
+        assert_eq!(destroy[0].0.lineage.context_id, [7; 16]);
+        assert_eq!(destroy[0].0.lineage.prepare_request_id, [45; 16]);
+        assert_eq!(destroy[0].0.request_id, [45; 16]);
+        assert_eq!(destroy[0].0.operation_generation, 1);
+        assert_eq!(destroy[0].0.phase, BackendPhase::Quarantined);
+        assert_eq!(
+            destroy[0].1.backend_generation,
+            destroy[0].0.lineage.backend_generation
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_factory_panic_keeps_engine_owner_for_exact_rollback() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.panic_prepare_factory.store(true, Ordering::Release);
+        assert_prepare_panic_rolls_back(backend).await;
+    }
+
+    #[tokio::test]
+    async fn backend_poll_panic_keeps_engine_owner_for_exact_rollback() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.panic_prepare_poll.store(true, Ordering::Release);
+        assert_prepare_panic_rolls_back(backend).await;
+    }
+
+    #[tokio::test]
+    async fn substituted_generation_or_deadline_completion_is_never_committed() {
+        for substitute_deadline in [false, true] {
+            let backend = Arc::new(FakeBackend::default());
+            backend
+                .substitute_prepare_generation
+                .store(!substitute_deadline, Ordering::Release);
+            backend
+                .substitute_prepare_deadline
+                .store(substitute_deadline, Ordering::Release);
+            let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+            let engine = fake_engine(Arc::clone(&backend), clock);
+
+            let response = execute_prepare(&engine, prepare_request(46)).await;
+            assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+            assert_eq!(response.diagnostic_code, "BACKEND_RESULT_AMBIGUOUS");
+            let state = engine.inner.state.lock().await;
+            assert!(state.contexts.is_empty());
+            assert!(state.cleanup_pending.is_empty());
+            assert!(state.in_flight.is_none());
+            drop(state);
+            assert_eq!(
+                backend.destroy_calls.lock().expect("destroy calls").len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stable_backend_lineage_survives_engine_generation_rotation() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+        let (operation_generation, backend_generation) = {
+            let state = engine.inner.state.lock().await;
+            let context = state.contexts.get(&[7; 16]).expect("Committed context");
+            (context.generation, context.backend_generation)
+        };
+        assert_ne!(operation_generation, backend_generation);
+        let initial_lineage = backend.prepare_bindings.lock().expect("prepare bindings")[0].lineage;
+
+        let destroyed = engine
+            .execute(request(
+                47,
+                helper_request::Operation::DestroyContext(volparossa_routing::DestroyContext {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                }),
+            ))
+            .await;
+        assert_eq!(destroyed.result, HelperResult::Ok as i32);
+        let calls = backend.destroy_calls.lock().expect("destroy calls");
+        let (binding, payload) = calls.last().expect("Destroy binding");
+        assert_eq!(binding.lineage, initial_lineage);
+        assert_eq!(binding.operation_generation, operation_generation);
+        assert_eq!(binding.phase, BackendPhase::Quarantined);
+        assert_eq!(binding.operation_kind, OperationKind::Destroy);
+        assert_eq!(payload.context_id, [7; 16]);
+        assert_eq!(payload.backend_generation, backend_generation);
+    }
+
+    #[tokio::test]
+    async fn backend_capacity_is_mapped_and_confirmedly_rolled_back() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_prepare_capacity.store(true, Ordering::Release);
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+
+        let response = execute_prepare(&engine, prepare_request(48)).await;
+        assert_eq!(response.result, HelperResult::Capacity as i32);
+        assert_eq!(response.diagnostic_code, "PREPARE_FAILED");
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
+        assert_eq!(
+            backend.destroy_calls.lock().expect("destroy calls").len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_query_and_shutdown_are_runtime_and_deadline_correlated() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let before_query = Instant::now();
+        let response = engine
+            .execute(request(
+                49,
+                helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                    route_context_id: vec![7; 16],
+                    context_handle: vec![8; HELPER_HANDLE_BYTES],
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener as i32,
+                    expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                    expected_remote: None,
+                }),
+            ))
+            .await;
+        assert_eq!(response.result, HelperResult::NotFound as i32);
+        assert!(engine.shutdown_cleanup().await);
+
+        let bindings = backend.runtime_bindings.lock().expect("runtime bindings");
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].helper_runtime_id, [0xa5; 32]);
+        assert_eq!(
+            bindings[0].action,
+            BackendRuntimeAction::QueryTransportSocket
+        );
+        assert!(bindings[0].call_deadline > before_query);
+        assert_eq!(bindings[1].helper_runtime_id, [0xa5; 32]);
+        assert_eq!(bindings[1].action, BackendRuntimeAction::Shutdown);
+        assert!(bindings[1].call_deadline >= bindings[0].call_deadline);
+    }
+
+    #[test]
+    fn armed_operation_owner_drop_fixture() {
+        if std::env::var_os("VOLPAROSSA_TEST_ARMED_OWNER_ABORT").is_none() {
+            return;
+        }
+        let owner = OperationOwner {
+            token: OperationToken {
+                sequence: 1,
+                request_id: [1; 16],
+                digest: [2; 32],
+                context_id: [3; 16],
+                generation: 4,
+                prior_phase: Some(ContextPhase::Prepared),
+                kind: OperationKind::Prepare,
+            },
+            lineage: BackendLineage {
+                helper_runtime_id: [5; 32],
+                context_id: [3; 16],
+                backend_generation: 4,
+                prepare_request_id: [1; 16],
+                prepare_operation_digest: [2; 32],
+                setup_expires_at_unix: 10,
+                hard_expires_at_unix: 20,
+            },
+            call_deadline: Instant::now() + Duration::from_secs(1),
+            armed: true,
+        };
+        drop(owner);
+    }
+
+    #[test]
+    fn armed_operation_owner_drop_is_process_fatal() {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("armed_operation_owner_drop_fixture")
+            .arg("--nocapture")
+            .env("VOLPAROSSA_TEST_ARMED_OWNER_ABORT", "1")
+            .status()
+            .expect("armed-owner fixture");
+        assert_eq!(status.signal(), Some(libc::SIGABRT));
+    }
+
+    #[tokio::test]
+    async fn generation_and_operation_counter_overflow_are_fail_atomic_capacity() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        engine.inner.state.lock().await.next_generation = u64::MAX;
+        let prepare = prepare_request(83);
+        let generation_capacity = engine.execute(bind_request_for(&prepare, 84)).await;
+        assert_eq!(generation_capacity.result, HelperResult::Capacity as i32);
+        assert_eq!(generation_capacity.diagnostic_code, "GENERATION_CAPACITY");
+        {
+            let state = engine.inner.state.lock().await;
+            assert_eq!(state.next_generation, u64::MAX);
+            assert!(state.prepare_reconciliations.is_empty());
+            assert!(state.in_flight.is_none());
+        }
+
+        let second_backend = Arc::new(FakeBackend::default());
+        let second_clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let second = fake_engine(Arc::clone(&second_backend), second_clock);
+        let second_prepare = prepare_request(85);
+        assert_eq!(
+            second
+                .execute(bind_request_for(&second_prepare, 86))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+        second.inner.state.lock().await.next_operation = u64::MAX;
+        let operation_capacity = second.execute(second_prepare).await;
+        assert_eq!(operation_capacity.result, HelperResult::Capacity as i32);
+        assert_eq!(operation_capacity.diagnostic_code, "OPERATION_CAPACITY");
+        let state = second.inner.state.lock().await;
+        assert_eq!(state.next_operation, u64::MAX);
+        assert!(state.contexts.is_empty());
+        assert!(state.cleanup_pending.is_empty());
+        assert!(state.in_flight.is_none());
+        assert_eq!(
+            state
+                .prepare_reconciliations
+                .get(&[7; 16])
+                .map(|record| record.phase),
+            Some(PrepareReconciliationPhase::Intent)
+        );
+        assert!(
+            second_backend
+                .prepare_bindings
+                .lock()
+                .expect("bindings")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_same_lineage_owner_cannot_destroy_or_disturb_current_operation() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        assert_eq!(
+            execute_prepare(&engine, prepare_request(87)).await.result,
+            HelperResult::Ok as i32
+        );
+        let current_owner = {
+            let mut state = engine.inner.state.lock().await;
+            let context = state.contexts.get(&[7; 16]).expect("Prepared context");
+            let generation = context.generation;
+            let lineage = context_backend_lineage([7; 16], context);
+            let owner = begin_operation(
+                &mut state,
+                [88; 16],
+                [89; 32],
+                [7; 16],
+                generation,
+                Some(ContextPhase::Prepared),
+                OperationKind::Cleanup,
+                lineage,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("current operation");
+            state.cleanup_pending.insert(([7; 16], generation));
+            owner
+        };
+        let operation = current_owner.token();
+        let forged_owner = OperationOwner {
+            token: OperationToken {
+                sequence: operation.sequence.saturating_add(1),
+                request_id: [90; 16],
+                digest: [91; 32],
+                context_id: operation.context_id,
+                generation: operation.generation,
+                prior_phase: operation.prior_phase,
+                kind: OperationKind::Destroy,
+            },
+            lineage: current_owner.lineage(),
+            call_deadline: Instant::now() + Duration::from_secs(1),
+            armed: true,
+        };
+        let before = {
+            let state = engine.inner.state.lock().await;
+            (
+                state.contexts.get(&[7; 16]).expect("context").phase,
+                state.cache.keys().copied().collect::<BTreeSet<_>>(),
+                state.cleanup_pending.clone(),
+                state.in_flight,
+            )
+        };
+        let mut no_sender = None;
+        let outcome = engine
+            .destroy_generation(forged_owner, &prepare_request(92), &mut no_sender)
+            .await;
+        assert!(!outcome.confirmed);
+        let state = engine.inner.state.lock().await;
+        assert_eq!(
+            state.contexts.get(&[7; 16]).expect("context").phase,
+            before.0
+        );
+        assert_eq!(
+            state.cache.keys().copied().collect::<BTreeSet<_>>(),
+            before.1
+        );
+        assert_eq!(state.cleanup_pending, before.2);
+        assert_eq!(state.in_flight, before.3);
+        drop(state);
+        assert!(
+            backend
+                .destroy_calls
+                .lock()
+                .expect("destroy calls")
+                .is_empty()
+        );
+        engine.clear_operation(current_owner).await;
+    }
+
+    #[tokio::test]
+    async fn wrong_binding_acquire_closes_descriptor_before_destroy_call() {
+        let backend = Arc::new(FakeBackend::default());
+        backend
+            .substitute_acquire_generation
+            .store(true, Ordering::Release);
+        backend.block_destroy.store(true, Ordering::Release);
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+        let (expected_lineage, expected_generation) = {
+            let state = engine.inner.state.lock().await;
+            let context = state.contexts.get(&[7; 16]).expect("Committed context");
+            (
+                context_backend_lineage([7; 16], context),
+                context.generation,
+            )
+        };
+        let executing = engine.clone();
+        let acquire = tokio::spawn(async move {
+            executing
+                .execute(request(
+                    93,
+                    helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                        route_context_id: vec![7; 16],
+                        context_handle: prepared.context_handle,
+                        path_id: 1,
+                        role: WireguardRole::Client as i32,
+                        descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener
+                            as i32,
+                        expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                        expected_remote: None,
+                    }),
+                ))
+                .await
+        });
+        wait_for_destroy_entry(&backend).await;
+        let mut peer = backend
+            .transport_peers
+            .lock()
+            .expect("transport peers")
+            .pop()
+            .expect("Acquire peer");
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).expect("descriptor closed"), 0);
+        backend.release_destroy();
+        let response = acquire.await.expect("Acquire task");
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(response.diagnostic_code, "BACKEND_RESULT_AMBIGUOUS");
+        {
+            let calls = backend.destroy_calls.lock().expect("destroy calls");
+            assert_eq!(calls.len(), 1);
+            let (binding, payload) = calls[0];
+            assert_eq!(binding.lineage, expected_lineage);
+            assert_eq!(binding.operation_generation, expected_generation);
+            assert_eq!(binding.request_id, [93; 16]);
+            assert_eq!(binding.prior_phase, Some(ContextPhase::Committed));
+            assert_eq!(binding.operation_kind, OperationKind::Acquire);
+            assert_eq!(binding.phase, BackendPhase::Quarantined);
+            assert_eq!(binding.action, BackendAction::Destroy);
+            assert_eq!(payload.context_id, [7; 16]);
+            assert_eq!(
+                payload.backend_generation,
+                expected_lineage.backend_generation
+            );
+        }
+        let state = engine.inner.state.lock().await;
+        assert!(state.contexts.is_empty());
+        assert!(state.cleanup_pending.is_empty());
+        assert!(state.in_flight.is_none());
+        assert!(
+            state
+                .cache
+                .get(&[93; 16])
+                .is_some_and(|cached| cached.descriptor.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_acquire_closes_late_descriptor_before_destroy_call() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine =
+            fake_engine_with_timeout(Arc::clone(&backend), clock, Duration::from_millis(20));
+        let prepared = commit_client_context(&engine, &backend).await;
+        let (expected_lineage, expected_generation) = {
+            let state = engine.inner.state.lock().await;
+            let context = state.contexts.get(&[7; 16]).expect("Committed context");
+            (
+                context_backend_lineage([7; 16], context),
+                context.generation,
+            )
+        };
+        backend.block_acquire.store(true, Ordering::Release);
+        backend.block_destroy.store(true, Ordering::Release);
+
+        let executing = engine.clone();
+        let acquire = tokio::spawn(async move {
+            executing
+                .execute(request(
+                    94,
+                    helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                        route_context_id: vec![7; 16],
+                        context_handle: prepared.context_handle,
+                        path_id: 1,
+                        role: WireguardRole::Client as i32,
+                        descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener
+                            as i32,
+                        expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                        expected_remote: None,
+                    }),
+                ))
+                .await
+        });
+        wait_for_acquire_entry(&backend).await;
+        let response = tokio::time::timeout(Duration::from_millis(250), acquire)
+            .await
+            .expect("immediate ambiguous Acquire response")
+            .expect("Acquire task");
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(response.diagnostic_code, "BACKEND_RESULT_AMBIGUOUS");
+        {
+            let state = engine.inner.state.lock().await;
+            assert!(
+                state
+                    .cache
+                    .get(&[94; 16])
+                    .is_some_and(|cached| cached.descriptor.is_none())
+            );
+            assert_eq!(
+                state.contexts.get(&[7; 16]).map(|context| context.phase),
+                Some(ContextPhase::Quarantined)
+            );
+        }
+
+        let mut peer = backend
+            .transport_peers
+            .lock()
+            .expect("transport peers")
+            .pop()
+            .expect("late Acquire peer");
+        backend.release_acquire();
+        wait_for_destroy_entry(&backend).await;
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).expect("late descriptor closed"), 0);
+        {
+            let calls = backend.destroy_calls.lock().expect("destroy calls");
+            assert_eq!(calls.len(), 1);
+            let (binding, payload) = calls[0];
+            assert_eq!(binding.lineage, expected_lineage);
+            assert_eq!(binding.operation_generation, expected_generation);
+            assert_eq!(binding.request_id, [94; 16]);
+            assert_eq!(binding.operation_kind, OperationKind::Acquire);
+            assert_eq!(binding.phase, BackendPhase::Quarantined);
+            assert_eq!(binding.action, BackendAction::Destroy);
+            assert_eq!(payload.context_id, [7; 16]);
+            assert_eq!(
+                payload.backend_generation,
+                expected_lineage.backend_generation
+            );
+        }
+
+        backend.release_destroy();
+        wait_for_supervisor_settlement(&engine).await;
+        let state = engine.inner.state.lock().await;
+        assert!(state.contexts.is_empty());
+        assert!(state.cleanup_pending.is_empty());
+        assert!(state.in_flight.is_none());
+        assert!(
+            state
+                .cache
+                .get(&[94; 16])
+                .is_some_and(|cached| cached.descriptor.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertain_probe_error_quarantines_exact_lineage_until_destroy_is_confirmed() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = activate_client_context(&engine).await;
+        let (expected_lineage, expected_generation) = {
+            let state = engine.inner.state.lock().await;
+            let context = state.contexts.get(&[7; 16]).expect("Activated context");
+            (
+                context_backend_lineage([7; 16], context),
+                context.generation,
+            )
+        };
+        backend.fail_probe_cleanup.store(true, Ordering::Release);
+        backend.fail_destroy.store(true, Ordering::Release);
+        let lease = &prepared.leases[0];
+        let response = engine
+            .execute(request(
+                95,
+                helper_request::Operation::CommitLeaseBatch(CommitLeaseBatch {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                    leases: vec![LeaseCommit {
+                        lease_handle: lease.lease_handle.clone(),
+                        path_id: 1,
+                        role: WireguardRole::Client as i32,
+                    }],
+                }),
+            ))
+            .await;
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(response.diagnostic_code, "CLEANUP_INCOMPLETE");
+        {
+            let calls = backend.destroy_calls.lock().expect("destroy calls");
+            assert_eq!(calls.len(), 1);
+            let (binding, payload) = calls[0];
+            assert_eq!(binding.lineage, expected_lineage);
+            assert_eq!(binding.operation_generation, expected_generation);
+            assert_eq!(binding.request_id, [95; 16]);
+            assert_eq!(binding.operation_kind, OperationKind::Probe);
+            assert_eq!(binding.phase, BackendPhase::Quarantined);
+            assert_eq!(binding.action, BackendAction::Destroy);
+            assert_eq!(
+                payload.backend_generation,
+                expected_lineage.backend_generation
+            );
+        }
+        let state = engine.inner.state.lock().await;
+        assert_eq!(
+            state.contexts.get(&[7; 16]).map(|context| context.phase),
+            Some(ContextPhase::Quarantined)
+        );
+        assert!(
+            state
+                .cleanup_pending
+                .contains(&([7; 16], expected_generation))
+        );
+        assert!(state.in_flight.is_none());
+    }
+
+    #[tokio::test]
+    async fn uncertain_acquire_error_quarantines_exact_lineage_and_returns_no_descriptor() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+        let (expected_lineage, expected_generation) = {
+            let state = engine.inner.state.lock().await;
+            let context = state.contexts.get(&[7; 16]).expect("Committed context");
+            (
+                context_backend_lineage([7; 16], context),
+                context.generation,
+            )
+        };
+        backend.fail_acquire_cleanup.store(true, Ordering::Release);
+        backend.fail_destroy.store(true, Ordering::Release);
+        let response = engine
+            .execute(request(
+                96,
+                helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener as i32,
+                    expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                    expected_remote: None,
+                }),
+            ))
+            .await;
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(response.diagnostic_code, "CLEANUP_INCOMPLETE");
+        assert!(backend.transport_peers.lock().expect("peers").is_empty());
+        {
+            let calls = backend.destroy_calls.lock().expect("destroy calls");
+            assert_eq!(calls.len(), 1);
+            let (binding, payload) = calls[0];
+            assert_eq!(binding.lineage, expected_lineage);
+            assert_eq!(binding.operation_generation, expected_generation);
+            assert_eq!(binding.request_id, [96; 16]);
+            assert_eq!(binding.operation_kind, OperationKind::Acquire);
+            assert_eq!(binding.phase, BackendPhase::Quarantined);
+            assert_eq!(binding.action, BackendAction::Destroy);
+            assert_eq!(
+                payload.backend_generation,
+                expected_lineage.backend_generation
+            );
+        }
+        let state = engine.inner.state.lock().await;
+        assert_eq!(
+            state.contexts.get(&[7; 16]).map(|context| context.phase),
+            Some(ContextPhase::Quarantined)
+        );
+        assert!(
+            state
+                .cleanup_pending
+                .contains(&([7; 16], expected_generation))
+        );
+        assert!(state.in_flight.is_none());
+        assert!(
+            state
+                .cache
+                .get(&[96; 16])
+                .is_some_and(|cached| cached.descriptor.is_none())
         );
     }
 
@@ -4265,7 +5843,7 @@ mod tests {
                 .get_mut(&[7; 16])
                 .expect("Prepare intent");
             record.phase = PrepareReconciliationPhase::Pending;
-            let generation = record.generation;
+            let generation = record.backend_generation;
             state.cleanup_pending.insert(([7; 16], generation));
         }
         let cleanup = request(
@@ -4279,8 +5857,26 @@ mod tests {
             HelperResult::CleanupIncomplete as i32
         );
         assert!(!engine.shutdown_cleanup().await);
+        assert!(
+            backend
+                .runtime_bindings
+                .lock()
+                .expect("runtime bindings")
+                .is_empty(),
+            "an unconfirmed context destroy must not irreversibly fence the backend"
+        );
         backend.fail_destroy.store(false, Ordering::Release);
         assert!(engine.shutdown_cleanup().await);
+        assert_eq!(
+            backend
+                .runtime_bindings
+                .lock()
+                .expect("runtime bindings")
+                .as_slice()
+                .last()
+                .map(|binding| binding.action),
+            Some(BackendRuntimeAction::Shutdown)
+        );
         let state = engine.inner.state.lock().await;
         assert!(cleanup_state_complete(&state));
         assert_eq!(
@@ -4417,7 +6013,7 @@ mod tests {
                     .get_mut(&[7; 16])
                     .expect("Prepare intent");
                 record.phase = PrepareReconciliationPhase::Pending;
-                record.generation
+                record.backend_generation
             };
             state.cleanup_pending.insert(([7; 16], generation));
         }
@@ -4515,7 +6111,7 @@ mod tests {
             execute_prepare(&engine, prepare).await.result,
             HelperResult::Ok as i32
         );
-        let (generation, phase, handle, cache_ids, cleanup_pending) = {
+        let (generation, phase, handle, lineage, cache_ids, cleanup_pending) = {
             let mut state = engine.inner.state.lock().await;
             state.cleanup_pending.insert(([8; 16], 99));
             let context = state.contexts.get(&[7; 16]).expect("newer context");
@@ -4523,20 +6119,26 @@ mod tests {
                 context.generation,
                 context.phase,
                 context.handle,
+                context_backend_lineage([7; 16], context),
                 state.cache.keys().copied().collect::<BTreeSet<_>>(),
                 state.cleanup_pending.clone(),
             )
         };
-        let stale = OperationToken {
-            sequence: 999,
-            request_id: [0xee; 16],
-            digest: [0xdd; 32],
-            context_id: [7; 16],
-            generation: generation.saturating_sub(1),
-            prior_phase: Some(ContextPhase::Prepared),
-            kind: OperationKind::Cleanup,
+        let stale = OperationOwner {
+            token: OperationToken {
+                sequence: 999,
+                request_id: [0xee; 16],
+                digest: [0xdd; 32],
+                context_id: [7; 16],
+                generation: generation.saturating_sub(1),
+                prior_phase: Some(ContextPhase::Prepared),
+                kind: OperationKind::Cleanup,
+            },
+            lineage,
+            call_deadline: Instant::now() + Duration::from_secs(1),
+            armed: true,
         };
-        assert!(!engine.mark_cleanup(stale).await);
+        assert!(!engine.mark_cleanup(&stale).await);
         engine.finish_cleanup(stale, true).await;
 
         let current = engine.inner.state.lock().await;

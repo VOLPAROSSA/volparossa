@@ -90,6 +90,16 @@ Last updated: 2026-08-25
   secret-free canonical/CAS ownership store and a read-only startup interlock have temp-directory
   tests, but no production writer, recovery backend, restart reaper, cross-runtime tag-28 proof, or
   live root proof exists.
+- [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
+  rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
+  and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.
+  Adversarial fake-backend tests cover factory/poll panic, caller cancellation, missing-binding
+  recovery without stale-owner substitution, overflow, completion/deadline substitution,
+  `CleanupIncomplete` quarantine, shutdown correlation, and wrong/late Acquire descriptor closure
+  before exact Destroy. Production still installs only the `Unavailable` backend and performs no
+  worker or network mutation. WorkerCoordinator deadline propagation and upgradeable shutdown,
+  audited `CredentialedWorkerFd` to `OwnedFd` transfer, durable journal/reaper integration, and the
+  separate Add/Remove MPTCP endpoint seam remain required; no datapath or acceptance checkbox closes.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
   and doctor contract now require exactly the reviewed seven-capability bootstrap set
