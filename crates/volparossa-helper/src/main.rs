@@ -3,8 +3,9 @@
 use std::{ffi::OsString, process::ExitCode};
 
 use volparossa_helper::{
-    INTERNAL_NFT_FRONTEND_ARGUMENT, INTERNAL_WORKER_V3_ARGUMENT, bind_production_socket,
-    run_internal_nft_frontend, run_internal_worker_v3_entry, run_server,
+    INTERNAL_NFT_FRONTEND_ARGUMENT, INTERNAL_WORKER_V3_ARGUMENT,
+    INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT, bind_production_socket, run_internal_nft_frontend,
+    run_internal_worker_v3_entry, run_internal_worker_v3_live_proof, run_server,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,6 +13,7 @@ enum Invocation {
     Production,
     InternalNftFrontend,
     InternalWorkerV3,
+    InternalWorkerV3LiveProof,
 }
 
 fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, ()> {
@@ -22,6 +24,9 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         }
         (Some(argument), None) if argument == INTERNAL_WORKER_V3_ARGUMENT => {
             Ok(Invocation::InternalWorkerV3)
+        }
+        (Some(argument), None) if argument == INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT => {
+            Ok(Invocation::InternalWorkerV3LiveProof)
         }
         (None, None) => Ok(Invocation::Production),
         _ => Err(()),
@@ -40,6 +45,14 @@ fn main() -> ExitCode {
         }
         Ok(Invocation::InternalWorkerV3) => {
             if run_internal_worker_v3_entry() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(Invocation::InternalWorkerV3LiveProof) => {
+            if run_internal_worker_v3_live_proof() {
+                println!("VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass");
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -98,6 +111,17 @@ mod tests {
         assert_eq!(
             parse_invocation([INTERNAL_WORKER_V3_ARGUMENT.into()]),
             Ok(Invocation::InternalWorkerV3)
+        );
+        assert_eq!(
+            parse_invocation([INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT.into()]),
+            Ok(Invocation::InternalWorkerV3LiveProof)
+        );
+        assert_eq!(
+            parse_invocation([
+                INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT.into(),
+                "unexpected".into(),
+            ]),
+            Err(())
         );
     }
 }

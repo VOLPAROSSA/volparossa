@@ -66,7 +66,13 @@ Last updated: 2026-08-25
   `shadow` group. The bounded zeroizing read cannot reallocate hashes. This is still not complete isolation or
   context cleanup: disposable Debian 13 live-root proof of the identity transition, parent-signal
   and runtime-path denials, pre-filter process-tree state and unchanged host state is outstanding;
-  retirement also owns only the exact leader.
+  retirement also owns only the exact leader. A preview-first root driver now stages the real
+  component in a transient `PrivateNetwork` systemd unit with synthetic read-only account overlays,
+  a private `/run`, the exact seven-capability parent set, exact singleton staged-agent
+  supplementary-group attestation (so inherited host-root groups fail closed), confirmed leader
+  reap and privacy-safe before/after host-state digests. It has not yet run in the required
+  disposable Debian 13 VM,
+  validates neither a staged package nor the production server lifecycle, and closes no checkbox.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
@@ -89,8 +95,9 @@ Last updated: 2026-08-25
   and doctor contract now require exactly the reviewed seven-capability bootstrap set
   (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
   `CAP_SYS_ADMIN`) and
-  reject `CAP_SYS_PTRACE`; staged-package and disposable Debian 13 live-root validation remains
-  outstanding, and the final worker proof permits only `CAP_NET_ADMIN`.
+  reject `CAP_SYS_PTRACE`; the component-only transient driver exists, but staged-package and
+  disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits
+  only `CAP_NET_ADMIN`.
 - [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   but live namespace/kernel cleanup proof does not.

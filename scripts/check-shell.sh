@@ -25,6 +25,9 @@ set -- \
     scripts/check-system.sh \
     scripts/cleanup-network.sh \
     scripts/run-fuzz.sh \
+    tests/helper/lib/live-worker-proof-capture.sh \
+    tests/helper/require-live-worker-identity-proof.sh \
+    tests/helper/test-live-worker-identity-contract.sh \
     tests/integration/run.sh \
     tests/integration/test-harness.sh \
     tests/integration/validate-report.sh \

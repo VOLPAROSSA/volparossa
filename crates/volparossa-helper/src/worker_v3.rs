@@ -65,6 +65,7 @@ use crate::{
 use volparossa_linux_uapi::install_close_range_on_exec;
 
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
+pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-worker-v3-live-proof";
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -767,6 +768,46 @@ fn spawn_worker_v3(
             bootstrap_challenge: authenticated.bootstrap_challenge,
         }),
         Err(error) => Err(WorkerSpawnFailure { error, reservation }),
+    }
+}
+
+/// Runs one fixed production-image bootstrap without exposing a production engine operation.
+pub(crate) fn run_internal_worker_v3_live_proof() -> bool {
+    run_internal_worker_v3_live_proof_inner().is_ok()
+}
+
+fn run_internal_worker_v3_live_proof_inner() -> Result<(), WorkerV3Error> {
+    let effective_group = getegid().as_raw();
+    crate::worker_sandbox::validate_live_proof_parent_contract(effective_group)?;
+    let runtime = crate::runtime::prepare_production_runtime()?;
+    if runtime.agent_gid != effective_group {
+        return Err(WorkerV3Error::Authentication);
+    }
+
+    let mut registry = WorkerRegistry::new(1, 1, Duration::from_secs(30));
+    let reservation =
+        registry.reserve_generation([0x4c; 16], Duration::from_secs(30), Instant::now())?;
+    let spawned = match spawn_worker_v3(reservation) {
+        Ok(spawned) => spawned,
+        Err(WorkerSpawnFailure { error, reservation }) => {
+            registry.abandon_generation(reservation)?;
+            return Err(error);
+        }
+    };
+    let SpawnedWorker {
+        reservation,
+        process,
+        bootstrap_challenge: _bootstrap_challenge,
+    } = spawned;
+    let ready_and_pinned = process.probe_alive() && process.has_complete_kernel_pins();
+    let reaped = process.terminate_bounded(TERMINATION_TIMEOUT);
+    let released = process.retirement_released_after_confirmed_reap() && !process.probe_alive();
+    registry.abandon_generation(reservation)?;
+    drop(runtime);
+    if ready_and_pinned && reaped && released {
+        Ok(())
+    } else {
+        Err(WorkerV3Error::Ambiguous)
     }
 }
 
@@ -1513,7 +1554,6 @@ impl WorkerProcess {
         Ok(())
     }
 
-    #[cfg(test)]
     fn has_complete_kernel_pins(&self) -> bool {
         self.retirement
             .lock()
@@ -1521,6 +1561,13 @@ impl WorkerProcess {
             .as_ref()
             .and_then(|retirement| retirement.kernel_pins.as_ref())
             .is_some_and(crate::worker_sandbox::WorkerKernelPins::has_complete_pins)
+    }
+
+    fn retirement_released_after_confirmed_reap(&self) -> bool {
+        self.retirement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
     }
 
     fn take_retirement(&self) -> Option<ProcessRetirement> {
@@ -4149,12 +4196,61 @@ mod tests {
         let production_spawn_symbol = ["spawn_worker_", "v3("].concat();
         assert_eq!(
             source.matches(&production_spawn_symbol).count(),
-            1,
-            "the disconnected production spawn has one definition and no caller"
+            2,
+            "the production spawn has one definition and only the fixed live-proof caller"
         );
         assert!(source.contains("Command::new(\"/proc/self/exe\")"));
         let replaceable_path_lookup = ["current_", "exe("].concat();
         assert!(!source.contains(&replaceable_path_lookup));
+    }
+
+    #[test]
+    fn live_proof_uses_only_the_production_spawn_and_confirmed_retirement_path() {
+        let source = include_str!("worker_v3.rs");
+        let start = source
+            .find("fn run_internal_worker_v3_live_proof_inner()")
+            .expect("live proof boundary");
+        let end = source[start..]
+            .find("\npub(crate) fn run_internal_worker_v3_entry()")
+            .map(|offset| start + offset)
+            .expect("worker entry boundary");
+        let proof = &source[start..end];
+        for required in [
+            "validate_live_proof_parent_contract(effective_group)?",
+            "prepare_production_runtime()?",
+            "process.has_complete_kernel_pins()",
+            "process.terminate_bounded(TERMINATION_TIMEOUT)",
+            "process.retirement_released_after_confirmed_reap()",
+            "registry.abandon_generation(reservation)?",
+        ] {
+            assert!(
+                proof.contains(required),
+                "missing live-proof step: {required}"
+            );
+        }
+        let production_spawn = ["spawn_worker_", "v3(reservation)"].concat();
+        assert!(proof.contains(&production_spawn));
+        assert!(!proof.contains("Command::new"));
+        assert!(!proof.contains("spawn_with_command_fixture"));
+        let pinned = proof
+            .find("process.has_complete_kernel_pins()")
+            .expect("pin observation");
+        let reaped = proof
+            .find("process.terminate_bounded(TERMINATION_TIMEOUT)")
+            .expect("confirmed reap");
+        let released = proof
+            .find("process.retirement_released_after_confirmed_reap()")
+            .expect("retirement release");
+        assert!(pinned < reaped && reaped < released);
+    }
+
+    #[test]
+    fn confirmed_reap_disarms_retirement_before_success_can_be_reported() {
+        let (process, _peer, _alive) = fake_process(Duration::from_millis(10));
+        assert!(!process.retirement_released_after_confirmed_reap());
+        assert!(process.terminate_bounded(TERMINATION_TIMEOUT));
+        assert!(process.retirement_released_after_confirmed_reap());
+        assert!(!process.probe_alive());
     }
 
     #[test]

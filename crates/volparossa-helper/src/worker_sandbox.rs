@@ -21,7 +21,8 @@ use std::{
 use nix::{
     poll::{PollFd, PollFlags, poll},
     sched::{CloneFlags, unshare},
-    unistd::getppid,
+    sys::signal::kill,
+    unistd::{Pid as NixPid, getppid},
 };
 use rustix::{
     fs::{Dir, Mode, OFlags, fstat, open, openat},
@@ -47,12 +48,22 @@ const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
 const CAP_NET_ADMIN: u32 = 12;
+const CAP_NET_RAW: u32 = 13;
 const CAP_SYS_ADMIN: u32 = 21;
+const CAP_KILL_BIT: u64 = 1_u64 << CAP_KILL;
 const CAP_SETGID_BIT: u64 = 1_u64 << CAP_SETGID;
 const CAP_SETUID_BIT: u64 = 1_u64 << CAP_SETUID;
 const CAP_SETPCAP_BIT: u64 = 1_u64 << CAP_SETPCAP;
 const CAP_NET_ADMIN_BIT: u64 = 1_u64 << CAP_NET_ADMIN;
+const CAP_NET_RAW_BIT: u64 = 1_u64 << CAP_NET_RAW;
 const CAP_SYS_ADMIN_BIT: u64 = 1_u64 << CAP_SYS_ADMIN;
+const HELPER_BOOTSTRAP_CAPABILITY_BITS: u64 = CAP_KILL_BIT
+    | CAP_NET_ADMIN_BIT
+    | CAP_NET_RAW_BIT
+    | CAP_SETGID_BIT
+    | CAP_SETPCAP_BIT
+    | CAP_SETUID_BIT
+    | CAP_SYS_ADMIN_BIT;
 pub(super) const SYSTEMD_RESERVED_ID: u32 = 65_535;
 
 pub(super) type ContextId = [u8; 16];
@@ -541,10 +552,23 @@ struct ParsedProcessStatus {
     parent_pid: u32,
     uids: [u32; 4],
     gids: [u32; 4],
-    supplementary_groups_empty: bool,
+    supplementary_groups: SupplementaryGroups,
     no_new_privileges: bool,
     seccomp: LinuxSeccompState,
     capabilities: LinuxCapabilitySnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupplementaryGroups {
+    Empty,
+    Singleton(u32),
+    Multiple,
+}
+
+impl SupplementaryGroups {
+    fn is_empty(self) -> bool {
+        self == Self::Empty
+    }
 }
 
 fn parse_process_status(bytes: &[u8]) -> Result<ParsedProcessStatus, WorkerSandboxError> {
@@ -553,7 +577,7 @@ fn parse_process_status(bytes: &[u8]) -> Result<ParsedProcessStatus, WorkerSandb
     let mut parent_pid = None;
     let mut uids = None;
     let mut gids = None;
-    let mut supplementary_groups_empty = None;
+    let mut supplementary_groups = None;
     let mut no_new_privileges = None;
     let mut seccomp_mode = None;
     let mut seccomp_filters = None;
@@ -576,8 +600,8 @@ fn parse_process_status(bytes: &[u8]) -> Result<ParsedProcessStatus, WorkerSandb
             set_once(&mut gids, parse_identity_quad(value)?)?;
         } else if let Some(value) = line.strip_prefix("Groups:\t") {
             set_once(
-                &mut supplementary_groups_empty,
-                parse_supplementary_groups_empty(value)?,
+                &mut supplementary_groups,
+                parse_supplementary_groups(value)?,
             )?;
         } else if let Some(value) = line.strip_prefix("NoNewPrivs:\t") {
             let value = match value {
@@ -607,8 +631,7 @@ fn parse_process_status(bytes: &[u8]) -> Result<ParsedProcessStatus, WorkerSandb
         parent_pid: parent_pid.ok_or(WorkerSandboxError::Invalid)?,
         uids: uids.ok_or(WorkerSandboxError::Invalid)?,
         gids: gids.ok_or(WorkerSandboxError::Invalid)?,
-        supplementary_groups_empty: supplementary_groups_empty
-            .ok_or(WorkerSandboxError::Invalid)?,
+        supplementary_groups: supplementary_groups.ok_or(WorkerSandboxError::Invalid)?,
         no_new_privileges: no_new_privileges.ok_or(WorkerSandboxError::Invalid)?,
         seccomp: LinuxSeccompState::from_status(
             seccomp_mode.ok_or(WorkerSandboxError::Invalid)?,
@@ -649,7 +672,7 @@ fn parse_identity_quad(value: &str) -> Result<[u32; 4], WorkerSandboxError> {
     values.try_into().map_err(|_| WorkerSandboxError::Invalid)
 }
 
-fn parse_supplementary_groups_empty(value: &str) -> Result<bool, WorkerSandboxError> {
+fn parse_supplementary_groups(value: &str) -> Result<SupplementaryGroups, WorkerSandboxError> {
     let mut count = 0_usize;
     let mut previous = None;
     for group in value.split_ascii_whitespace() {
@@ -663,7 +686,12 @@ fn parse_supplementary_groups_empty(value: &str) -> Result<bool, WorkerSandboxEr
         }
         previous = Some(group);
     }
-    Ok(count == 0)
+    Ok(match (count, previous) {
+        (0, None) => SupplementaryGroups::Empty,
+        (1, Some(group)) => SupplementaryGroups::Singleton(group),
+        (2.., Some(_)) => SupplementaryGroups::Multiple,
+        _ => return Err(WorkerSandboxError::Invalid),
+    })
 }
 
 fn parse_capability_mask(value: &str) -> Result<u64, WorkerSandboxError> {
@@ -721,6 +749,42 @@ pub(super) fn current_thread_seccomp_state() -> Result<LinuxSeccompState, Worker
     .seccomp)
 }
 
+/// Requires the exact root/systemd privilege envelope used by the fixed live proof.
+pub(super) fn validate_live_proof_parent_contract(
+    required_group: u32,
+) -> Result<(), WorkerSandboxError> {
+    let status = parse_process_status(&read_bounded(
+        File::open("/proc/thread-self/status")?,
+        MAX_PROC_STATUS_BYTES,
+    )?)?;
+    validate_live_proof_parent_status(status, required_group)
+}
+
+fn validate_live_proof_parent_status(
+    status: ParsedProcessStatus,
+    required_group: u32,
+) -> Result<(), WorkerSandboxError> {
+    let expected_capabilities = LinuxCapabilitySnapshot {
+        inheritable: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+        permitted: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+        effective: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+        bounding: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+        ambient: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+    };
+    if status.pid != std::process::id()
+        || status.uids != [0; 4]
+        || status.gids != [required_group; 4]
+        || status.supplementary_groups != SupplementaryGroups::Singleton(required_group)
+        || !status.no_new_privileges
+        || u32::from(status.seccomp.mode) != libc::SECCOMP_MODE_FILTER
+        || status.seccomp.filter_count == 0
+        || status.capabilities != expected_capabilities
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    Ok(())
+}
+
 fn current_process_snapshot(
     parent_network_namespace: NetworkNamespaceIdentity,
 ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
@@ -735,7 +799,7 @@ fn current_process_snapshot(
     }
     let identity = exact_status_identity(status)?;
     let supplementary_groups_empty = getgroups().map_err(rustix_io)?.is_empty();
-    if supplementary_groups_empty != status.supplementary_groups_empty {
+    if supplementary_groups_empty != status.supplementary_groups.is_empty() {
         return Err(WorkerSandboxError::Mismatch);
     }
     Ok(WorkerSandboxSnapshot {
@@ -844,7 +908,7 @@ impl WorkerKernelPins {
             parent_network_namespace,
             worker_network_namespace,
             identity: exact_status_identity(status)?,
-            supplementary_groups_empty: status.supplementary_groups_empty,
+            supplementary_groups_empty: status.supplementary_groups.is_empty(),
             no_new_privileges: status.no_new_privileges,
             seccomp: status.seccomp,
             capabilities: status.capabilities,
@@ -984,7 +1048,6 @@ impl WorkerKernelPins {
         Ok((worker_network_namespace, status))
     }
 
-    #[cfg(test)]
     pub(super) fn has_complete_pins(&self) -> bool {
         self.network_namespace.is_some()
     }
@@ -1250,8 +1313,32 @@ impl PreparedWorkerSandbox {
         self,
         identity: WorkerIdentity,
     ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
-        finish_sandbox(&mut ProductionSandboxKernel, self.state, identity)
+        let snapshot = finish_sandbox(&mut ProductionSandboxKernel, self.state, identity)?;
+        prove_post_identity_denials()?;
+        Ok(snapshot)
     }
+}
+
+fn prove_post_identity_denials() -> Result<(), WorkerSandboxError> {
+    let parent = NixPid::from_raw(getppid().as_raw());
+    if !matches!(kill(parent, None), Err(nix::errno::Errno::EPERM)) {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    for path in [
+        "/run/volparossa",
+        "/run/volparossa/helper.cleanup-token",
+        "/run/volparossa/helper.sock",
+    ] {
+        match open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) {
+            Err(rustix::io::Errno::ACCESS) => {}
+            Ok(_) | Err(_) => return Err(WorkerSandboxError::Mismatch),
+        }
+    }
+    Ok(())
 }
 
 fn pre_identity_capabilities() -> CapabilitySet {
@@ -1675,10 +1762,26 @@ mod tests {
             exact_status_identity(parsed).expect("identity"),
             worker_identity()
         );
-        assert!(parsed.supplementary_groups_empty);
+        assert_eq!(parsed.supplementary_groups, SupplementaryGroups::Empty);
         assert!(parsed.no_new_privileges);
         assert_eq!(parsed.seccomp, production_snapshot().seccomp);
         assert_eq!(parsed.capabilities, production_snapshot().capabilities);
+        assert_eq!(
+            parse_supplementary_groups("777").expect("singleton group"),
+            SupplementaryGroups::Singleton(777)
+        );
+        assert_eq!(
+            parse_supplementary_groups("777 888").expect("multiple groups"),
+            SupplementaryGroups::Multiple
+        );
+        for invalid_groups in ["2 1", "1 1", "01"] {
+            assert!(parse_supplementary_groups(invalid_groups).is_err());
+        }
+        let too_many_groups = (0..=256)
+            .map(|group| group.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(parse_supplementary_groups(&too_many_groups).is_err());
 
         for changed in [
             b"Pid:\t43\n".to_vec(),
@@ -1745,6 +1848,110 @@ mod tests {
     }
 
     #[test]
+    fn live_proof_parent_contract_requires_exact_systemd_identity_groups_and_capabilities() {
+        let required_group = 777;
+        let valid = ParsedProcessStatus {
+            pid: std::process::id(),
+            parent_pid: 1,
+            uids: [0; 4],
+            gids: [required_group; 4],
+            supplementary_groups: SupplementaryGroups::Singleton(required_group),
+            no_new_privileges: true,
+            seccomp: production_seccomp_baseline(),
+            capabilities: LinuxCapabilitySnapshot {
+                inheritable: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+                permitted: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+                effective: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+                bounding: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+                ambient: HELPER_BOOTSTRAP_CAPABILITY_BITS,
+            },
+        };
+        validate_live_proof_parent_status(valid, required_group).expect("exact parent contract");
+
+        let mut invalid = Vec::new();
+        let mut changed = valid;
+        changed.uids[3] = 1;
+        invalid.push(changed);
+        let mut changed = valid;
+        changed.gids[0] = required_group + 1;
+        invalid.push(changed);
+        let mut changed = valid;
+        changed.supplementary_groups = SupplementaryGroups::Empty;
+        invalid.push(changed);
+        let mut changed = valid;
+        changed.supplementary_groups = SupplementaryGroups::Singleton(required_group + 1);
+        invalid.push(changed);
+        let mut changed = valid;
+        changed.supplementary_groups = SupplementaryGroups::Multiple;
+        invalid.push(changed);
+        let mut changed = valid;
+        changed.no_new_privileges = false;
+        invalid.push(changed);
+        let mut changed = valid;
+        changed.seccomp = LinuxSeccompState::fixture(0, 0);
+        invalid.push(changed);
+        for field in 0..5 {
+            let mut missing = valid;
+            match field {
+                0 => missing.capabilities.inheritable &= !CAP_NET_RAW_BIT,
+                1 => missing.capabilities.permitted &= !CAP_NET_RAW_BIT,
+                2 => missing.capabilities.effective &= !CAP_NET_RAW_BIT,
+                3 => missing.capabilities.bounding &= !CAP_NET_RAW_BIT,
+                4 => missing.capabilities.ambient &= !CAP_NET_RAW_BIT,
+                _ => unreachable!(),
+            }
+            invalid.push(missing);
+            let mut extra = valid;
+            match field {
+                0 => extra.capabilities.inheritable |= 1,
+                1 => extra.capabilities.permitted |= 1,
+                2 => extra.capabilities.effective |= 1,
+                3 => extra.capabilities.bounding |= 1,
+                4 => extra.capabilities.ambient |= 1,
+                _ => unreachable!(),
+            }
+            invalid.push(extra);
+        }
+        for changed in invalid {
+            assert!(validate_live_proof_parent_status(changed, required_group).is_err());
+        }
+        assert_eq!(HELPER_BOOTSTRAP_CAPABILITY_BITS, 0x20_31e0);
+    }
+
+    #[test]
+    fn production_finish_requires_real_signal_and_runtime_path_denials() {
+        let source = include_str!("worker_sandbox.rs");
+        let finish_start = source
+            .find("impl PreparedWorkerSandbox {")
+            .expect("production finish boundary");
+        let finish_end = source[finish_start..]
+            .find("\nfn pre_identity_capabilities()")
+            .map(|offset| finish_start + offset)
+            .expect("production denial boundary");
+        let finish = &source[finish_start..finish_end];
+        let applied = finish
+            .find("finish_sandbox(&mut ProductionSandboxKernel")
+            .expect("production sandbox apply");
+        let denied = finish
+            .find("prove_post_identity_denials()?")
+            .expect("post-identity denial proof");
+        assert!(applied < denied);
+        for required in [
+            "kill(parent, None)",
+            "Err(nix::errno::Errno::EPERM)",
+            "\"/run/volparossa\"",
+            "\"/run/volparossa/helper.cleanup-token\"",
+            "\"/run/volparossa/helper.sock\"",
+            "Err(rustix::io::Errno::ACCESS)",
+        ] {
+            assert!(
+                finish.contains(required),
+                "missing denial proof: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn parent_pre_identity_attestation_rejects_namespace_identity_filter_and_capability_drift() {
         let parent_namespace = NetworkNamespaceIdentity::fixture(1, 10);
         let worker_namespace = NetworkNamespaceIdentity::fixture(1, 11);
@@ -1756,7 +1963,7 @@ mod tests {
             parent_pid: 42,
             uids: [0; 4],
             gids: [required_group; 4],
-            supplementary_groups_empty: false,
+            supplementary_groups: SupplementaryGroups::Singleton(required_group),
             no_new_privileges: true,
             seccomp: parent_seccomp
                 .expected_after_worker_filter()

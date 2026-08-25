@@ -262,6 +262,52 @@ the launcher remains disconnected from the engine, and the complete account tran
 pre-filter task state, path access denials and parent-signal denial still require a disposable
 Debian 13 live-root acceptance run.
 
+### Component-only live worker proof driver
+
+`tests/helper/require-live-worker-identity-proof.sh` now provides a preview-first, execute-gated
+driver for one real `--internal-worker-v3-live-proof` invocation. Execution is restricted to root
+inside a recognised disposable Debian 13 amd64 VM with the system systemd manager. It copies the
+already-built helper into a root-only stage, creates collision-free synthetic service identities,
+binds the staged passwd, group, shadow and nsswitch files read-only, and grants the helper parent
+exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes` and
+a private temporary `/run`, so the proof cannot create a host account or reach the host network
+namespace. Success requires the exact component record only after Ready, confirmed worker reap and
+pin release. Before and after the unit, the driver compares privacy-safe digests of account files,
+mounts, resolver configuration, sysctls, links, addresses, routes, rules, nexthops, qdiscs,
+nftables, optional legacy iptables/ip6tables state and optional WireGuard state. A WireGuard dump
+is streamed through a validated private FIFO into a separately checked SHA-256 consumer and is
+never persisted or logged. Other host-network and firewall producer output exists only in validated
+mode-0600 files under the root-only temporary stage, is normalized in a separately checked step,
+and is removed with that stage; published comparison records contain only digests or explicit
+absence markers. Resolver capture accepts either a regular Debian resolver file or a symlink whose
+resolved regular target remains below `/etc` or `/run`; repeated object, target, metadata and digest
+observations reject unsafe ownership, writable path components, target replacement and other drift.
+
+The transient proof unit intentionally differs from the shipped production unit in every following
+respect:
+
+- it is a collected `Type=oneshot` with `RemainAfterExit=yes`, a 30-second runtime bound, no restart,
+  and the private proof selector instead of the production no-argument server;
+- it uses a collision-free numeric staged primary group and requests no additional
+  `SupplementaryGroups=` entries, rather than resolving the installed `volparossa` group from the
+  host account database. An empty `SupplementaryGroups=` assignment does not override groups from
+  the account database: systemd initializes them before installing the unit's synthetic account-file
+  bind mounts. The helper therefore accepts exactly one kernel supplementary group, the staged agent
+  GID; any additional group membership configured for host root blocks the proof;
+- it overlays four synthetic account files read-only, adds `PrivateNetwork=yes`, and replaces host
+  `/run` with a 16 MiB private tmpfs; the root-owned staged helper image is also bound read-only into
+  that private `/run`. Consequently it does not use the production unit's host
+  `ReadWritePaths=/run/volparossa -/run/netns` contract;
+- it captures stdout and stderr in the root-only stage, sets `TasksMax=16` and
+  `SetLoginEnvironment=no`, and omits the production config condition/environment, ordering,
+  restart and install-target semantics that are irrelevant to the one-shot internal proof.
+
+The device policy, no-new-privileges setting, exact capability sets, system-call filter,
+namespace restriction, address-family restriction and remaining applicable hardening properties
+match the shipped helper unit. The driver has not yet produced evidence from the required
+disposable VM, and it does not validate an installed/staged package or the production systemd
+service lifecycle. It is therefore not live-root, package, datapath, A14 or A15 acceptance evidence.
+
 The child still performs no link, WireGuard, route, nftables, sysctl, or socket-factory operation.
 It keeps only an in-memory context marker, accepts `Initialise` and `DestroyContext`, and returns
 `Invalid` for every network-affecting internal operation. Production `Prepare` and all network
