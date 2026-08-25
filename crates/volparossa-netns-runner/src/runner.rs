@@ -41,9 +41,10 @@ pub const BLOCKED_EXIT_CODE: u8 = 77;
 pub const INTERNAL_ERROR_EXIT_CODE: u8 = 70;
 
 const BOOTSTRAP_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
-// Admit at most two typed continuation attempts. Any authority still failing
-// after that bound, or any indeterminate authority, aborts fail-closed.
-const FORWARD_POLICY_RECOVERY_STEPS: usize = 2;
+// Admit at most three typed continuation attempts. That bound covers the
+// monotonic enabled/initial -> restored -> retired recovery chain; any
+// authority still failing after it, or any indeterminate authority, aborts.
+const FORWARD_POLICY_RECOVERY_STEPS: usize = 3;
 
 /// Honest outcome of the current bounded isolation-supervisor slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,7 +57,7 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// The fixed forward policy and endpoint routes were installed and exactly retired.
+    /// Forwarding, the fixed policy, and endpoint routes were established and exactly retired.
     BlockedAfterForwardPolicyTeardown,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
@@ -195,13 +196,15 @@ impl From<PidOneControlError> for RunnerError {
 /// `/32` routes while every veth end remains down. It then proves all four ends
 /// at IPv6 address-generation mode `none`, derives the only accepted policy
 /// expectation from canonical retained topology, and atomically installs the
-/// exact generation-two parent FORWARD policy. It activates the four ends,
-/// proves their exact carrier-up links, qdiscs, IPv4 routes, and IPv6 multicast
-/// routes, then installs and proves the two exact endpoint `/32` routes while
-/// retaining that policy. It directly deletes veth B followed by A and retains
-/// every lower owner until all three namespaces are byte-exactly equal to their
-/// retained enumerated network baselines while generation two remains exact.
-/// It then deletes only the freshly observed policy table handle, proves
+/// exact generation-two parent FORWARD policy. Behind that policy it
+/// conditionally establishes the enabled parent IPv4-forwarding record and
+/// activates the four ends. It proves their exact carrier-up links, qdiscs,
+/// IPv4 routes, and IPv6 multicast routes, then installs and proves the two
+/// exact endpoint `/32` routes while retaining that policy. It directly deletes
+/// veth B followed by A, restores the exact original forwarding record, and
+/// retains every lower owner until all three namespaces are byte-exactly equal
+/// to their retained enumerated network baselines while generation two remains
+/// exact. It then deletes only the freshly observed policy table handle, proves
 /// semantic-empty generation three, repeats the final parent/endpoint proof,
 /// and only then retires those lower owners. It rolls the pins and roots back
 /// and emits one
@@ -998,15 +1001,18 @@ fn finish_pid_one(
 /// run-bound network-namespace pins, atomically creates and proves two fixed
 /// down-veth pairs, then installs and proves four fixed `/30` addresses and
 /// their four kernel-owned local-table `/32` routes while the links stay down.
-/// It next proves an exact all-IPv6-addrgen-NONE barrier, activates all four
-/// ends, and re-proves the carrier-up links, `noqueue` qdiscs, and complete
-/// kernel-owned route side effects. It installs and exactly observes the two
-/// fixed main-table static endpoint `/32` routes while the parent stays
-/// unchanged. It then directly deletes veth B followed by A as the sole route
-/// removal and proves all three namespaces byte-exactly equal to their retained
-/// enumerated network baselines before retiring the still-armed route, address,
-/// and pair owners. It reverses both pins and every private-run creation and
-/// reports the internal rollback checkpoint. Only after the outer independently
+/// It next proves an exact all-IPv6-addrgen-NONE barrier, installs the exact
+/// generation-two parent FORWARD policy, conditionally establishes its enabled
+/// forwarding record, activates all four ends, and re-proves the carrier-up
+/// links, `noqueue` qdiscs, and complete kernel-owned route side effects. It
+/// installs and exactly observes the two fixed main-table static endpoint `/32`
+/// routes while the policy remains exact. It then directly deletes veth B
+/// followed by A as the sole route removal, restores the original forwarding
+/// record, and proves all three namespaces byte-exactly equal to their retained
+/// enumerated network baselines. Only then does it remove the policy, prove
+/// semantic emptiness, and retire the still-armed route, address, and pair
+/// owners. It reverses both pins and every private-run creation and reports the
+/// internal rollback checkpoint. Only after the outer independently
 /// re-proves empty private mounts does PID 1 consume pidfd-delivered TERM and
 /// report the affine observation over the launcher-private control channel. The
 /// final EOF is post-`GO` and therefore remains cleanup-required.
@@ -1291,6 +1297,13 @@ fn complete_fixed_forward_policy_teardown(
             return recover_failed_forward_policy_transition(failure, endpoint_baselines);
         }
     };
+    let (policy_bound, none_proof) =
+        match policy_bound.enable_ipv4_forwarding(none_proof, &endpoint_baselines) {
+            Ok(result) => result,
+            Err(failure) => {
+                return recover_failed_forward_policy_transition(failure, endpoint_baselines);
+            }
+        };
     let (activated, active_proof) =
         match policy_bound.activate_links(none_proof, &endpoint_baselines) {
             Ok(result) => result,
@@ -1371,6 +1384,16 @@ fn recover_failed_forward_policy_transition(
                 deferred_error: Some(source),
             })
         }
+        crate::mounts::FixedForwardPolicyFailureState::InitialDeleted(cleanup) => {
+            match (*cleanup).finish_initial_forward_policy_teardown(endpoint_baselines) {
+                Ok((namespace_pins, final_network_proof)) => Ok(retired_forward_policy_teardown(
+                    FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(namespace_pins)),
+                    final_network_proof,
+                    Some(source),
+                )),
+                Err(failure) => recover_failed_forward_policy_teardown(failure, Some(source)),
+            }
+        }
         crate::mounts::FixedForwardPolicyFailureState::ActiveDeleted(cleanup) => {
             match (*cleanup).finish_forward_policy_teardown(endpoint_baselines) {
                 Ok((namespace_pins, final_network_proof)) => Ok(retired_forward_policy_teardown(
@@ -1430,9 +1453,29 @@ fn continue_forward_policy_teardown(
     crate::mounts::FixedForwardPolicyTeardownFailure,
 > {
     match state {
+        crate::mounts::FixedForwardPolicyTeardownFailureState::Initial { cleanup, endpoints } => {
+            (*cleanup)
+                .finish_initial_forward_policy_teardown(*endpoints)
+                .map(|(mounts, proof)| {
+                    (
+                        FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(mounts)),
+                        proof,
+                    )
+                })
+        }
         crate::mounts::FixedForwardPolicyTeardownFailureState::Active { cleanup, endpoints } => {
             (*cleanup)
                 .finish_forward_policy_teardown(*endpoints)
+                .map(|(mounts, proof)| {
+                    (
+                        FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(mounts)),
+                        proof,
+                    )
+                })
+        }
+        crate::mounts::FixedForwardPolicyTeardownFailureState::Restored { cleanup, endpoints } => {
+            (*cleanup)
+                .finish_restored_forward_policy_teardown(*endpoints)
                 .map(|(mounts, proof)| {
                     (
                         FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(mounts)),
@@ -1451,6 +1494,11 @@ fn continue_forward_policy_teardown(
         crate::mounts::FixedForwardPolicyTeardownFailureState::ActivePristine(cleanup) => {
             (*cleanup)
                 .finish_pristine_forward_policy_teardown()
+                .map(|(mounts, proof)| (FixedForwardPolicyTeardownMounts::Pristine(mounts), proof))
+        }
+        crate::mounts::FixedForwardPolicyTeardownFailureState::RestoredPristine(cleanup) => {
+            (*cleanup)
+                .finish_restored_pristine_forward_policy_teardown()
                 .map(|(mounts, proof)| (FixedForwardPolicyTeardownMounts::Pristine(mounts), proof))
         }
         crate::mounts::FixedForwardPolicyTeardownFailureState::RetiredPristine(cleanup) => {
