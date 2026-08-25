@@ -447,37 +447,37 @@ impl PrivateMounts<AuthorizedNamespacePins> {
 impl PrivateMounts<AuthorizedVethPairs> {
     /// Reprove private mounts, both live nsfs pins, and both retained veth pairs.
     pub(crate) fn verify_authorized_veth_pairs(&self) -> Result<(), PrivateMountSetupError> {
-        self.run_state
-            .verify()
-            .map_err(|source| veth_pair_error("verify authorized veth pairs", source))?;
-        let mountinfo = self.observe_visible_private_mounts(false)?;
-        verify_authorized_namespace_mountinfo(
-            &self.baseline_mountinfo,
-            &mountinfo,
-            self.ids,
-            self.run_state.mount_ids(),
-            self.run_state.mount_point_bytes(),
-        )
-        .map_err(|source| hard_error("verify veth-backed nsfs mount table", source))?;
-        self.run_state
-            .verify()
-            .map_err(|source| veth_pair_error("reverify authorized veth pairs", source))
+        self.verify_veth_backed_state(&self.run_state)
     }
 
-    /// Install the four fixed `/30` addresses as one scoped affine transaction.
+    /// Consume both veth pairs into one owned four-address transaction.
     pub(crate) fn configure_fixed_ipv4_addresses(
-        &self,
-    ) -> Result<AuthorizedIpv4Addresses<'_>, PrivateMountSetupError> {
+        self,
+    ) -> Result<PrivateMounts<AuthorizedIpv4Addresses>, PrivateMountSetupError> {
         self.verify_authorized_veth_pairs()?;
-        let addresses = self
-            .run_state
+        let PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        } = self;
+        let run_state = run_state
             .configure_fixed_ipv4_addresses()
             .map_err(|source| ipv4_address_set_error("configure fixed IPv4 addresses", source))?;
-        addresses.verify().map_err(|source| {
-            ipv4_address_set_error("verify configured fixed IPv4 addresses", source)
-        })?;
-        self.verify_authorized_veth_pairs()?;
-        Ok(addresses)
+        let addressed = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        };
+        addressed.verify_authorized_ipv4_addresses()?;
+        Ok(addressed)
     }
 
     /// Prove the exact parent/A/B link deltas and reobserve all three active states.
@@ -617,24 +617,33 @@ impl PrivateMounts<AuthorizedVethPairs> {
         self.verify_authorized_veth_pairs()
             .map_err(NamespacePinsNetworkProofError::Mount)
     }
+}
+
+impl PrivateMounts<AuthorizedIpv4Addresses> {
+    /// Reprove the owned address set, its veth backing, and both live nsfs pins.
+    pub(crate) fn verify_authorized_ipv4_addresses(&self) -> Result<(), PrivateMountSetupError> {
+        self.run_state.verify().map_err(|source| {
+            ipv4_address_set_error("verify configured fixed IPv4 addresses", source)
+        })?;
+        self.verify_veth_backed_state(self.run_state.veth_pairs())
+    }
 
     /// Prove the exact parent/A/B delta for all four addressed down-veth ends.
     pub(crate) fn prove_exact_ipv4_addresses(
         &self,
-        addresses: &AuthorizedIpv4Addresses<'_>,
         parent_baseline: &crate::network::MutationRollbackNetworkProof,
         endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
     ) -> Result<ExactIpv4AddressNetworkProof, NamespacePinsNetworkProofError> {
-        self.verify_authorized_veth_pairs()
+        self.verify_veth_backed_state(self.run_state.veth_pairs())
             .map_err(NamespacePinsNetworkProofError::Mount)?;
-        addresses.verify().map_err(|source| {
+        self.run_state.verify().map_err(|source| {
             NamespacePinsNetworkProofError::Mount(ipv4_address_set_error(
                 "verify fixed IPv4 address owners before observation",
                 source,
             ))
         })?;
 
-        let expectations = exact_ipv4_address_expectations(&self.run_state, addresses)
+        let expectations = exact_ipv4_address_expectations(&self.run_state)
             .map_err(NamespacePinsNetworkProofError::Network)?;
 
         let parent_observation = parent_baseline
@@ -648,6 +657,7 @@ impl PrivateMounts<AuthorizedVethPairs> {
             [&expectations.addresses[1], &expectations.addresses[3]];
         let mut endpoint_observations = [None, None];
         self.run_state
+            .veth_pairs()
             .visit_network_namespaces(|endpoint| {
                 let index = match endpoint {
                     NamespaceEndpoint::A => 0,
@@ -685,19 +695,18 @@ impl PrivateMounts<AuthorizedVethPairs> {
                     .unwrap_or_else(|| std::process::abort()),
             ],
         };
-        self.verify_exact_ipv4_address_state(addresses, &proof)?;
+        self.verify_exact_ipv4_address_state(&proof)?;
         Ok(proof)
     }
 
     /// Reobserve the exact active addressed state without changing ownership.
     pub(crate) fn verify_exact_ipv4_address_state(
         &self,
-        addresses: &AuthorizedIpv4Addresses<'_>,
         proof: &ExactIpv4AddressNetworkProof,
     ) -> Result<(), NamespacePinsNetworkProofError> {
-        self.verify_authorized_veth_pairs()
+        self.verify_veth_backed_state(self.run_state.veth_pairs())
             .map_err(NamespacePinsNetworkProofError::Mount)?;
-        addresses.verify().map_err(|source| {
+        self.run_state.verify().map_err(|source| {
             NamespacePinsNetworkProofError::Mount(ipv4_address_set_error(
                 "reverify fixed IPv4 address owners",
                 source,
@@ -709,6 +718,7 @@ impl PrivateMounts<AuthorizedVethPairs> {
             .map_err(NamespacePinsNetworkProofError::Network)?;
         let mut reverified = [false, false];
         self.run_state
+            .veth_pairs()
             .visit_network_namespaces(|endpoint| {
                 let index = match endpoint {
                     NamespaceEndpoint::A => 0,
@@ -736,28 +746,48 @@ impl PrivateMounts<AuthorizedVethPairs> {
             .parent
             .verify(self)
             .map_err(NamespacePinsNetworkProofError::Network)?;
-        addresses.verify().map_err(|source| {
+        self.run_state.verify().map_err(|source| {
             NamespacePinsNetworkProofError::Mount(ipv4_address_set_error(
                 "final reverify of fixed IPv4 address owners",
                 source,
             ))
         })?;
-        self.verify_authorized_veth_pairs()
+        self.verify_veth_backed_state(self.run_state.veth_pairs())
             .map_err(NamespacePinsNetworkProofError::Mount)
     }
 
-    /// Remove endpoint B/A then parent B/A and retain the unchanged veth owner.
-    pub(crate) fn rollback_fixed_ipv4_addresses<'pairs>(
-        &'pairs self,
-        addresses: AuthorizedIpv4Addresses<'pairs>,
-    ) -> Result<(), PrivateMountSetupError> {
-        self.verify_authorized_veth_pairs()?;
-        addresses
+    /// Remove endpoint B/A then parent B/A and recover the unchanged veth owner.
+    pub(crate) fn rollback_fixed_ipv4_addresses(
+        self,
+    ) -> Result<PrivateMounts<AuthorizedVethPairs>, PrivateMountSetupError> {
+        self.verify_veth_backed_state(self.run_state.veth_pairs())?;
+        let PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        } = self;
+        let run_state = run_state
             .rollback()
             .map_err(|source| ipv4_address_set_error("roll back fixed IPv4 addresses", source))?;
-        self.verify_authorized_veth_pairs()
+        let veth_pairs = PrivateMounts {
+            root,
+            run_pin,
+            proc_pin,
+            root_mount_id,
+            ids,
+            baseline_mountinfo,
+            run_state,
+        };
+        veth_pairs.verify_authorized_veth_pairs()?;
+        Ok(veth_pairs)
     }
+}
 
+impl PrivateMounts<AuthorizedVethPairs> {
     /// Delete B then A and recover the unchanged live namespace-pin owner.
     pub(crate) fn rollback_fixed_veth_pairs(
         self,
@@ -796,6 +826,27 @@ impl<RunState> PrivateMounts<RunState> {
         &self,
     ) -> Result<Ipv4ForwardingRecordSnapshot, PrivateMountSetupError> {
         read_ipv4_forwarding_record_at(&self.proc_pin, self.ids.proc_mount_id)
+    }
+
+    fn verify_veth_backed_state(
+        &self,
+        pairs: &AuthorizedVethPairs,
+    ) -> Result<(), PrivateMountSetupError> {
+        pairs
+            .verify()
+            .map_err(|source| veth_pair_error("verify authorized veth pairs", source))?;
+        let mountinfo = self.observe_visible_private_mounts(false)?;
+        verify_authorized_namespace_mountinfo(
+            &self.baseline_mountinfo,
+            &mountinfo,
+            self.ids,
+            pairs.mount_ids(),
+            pairs.mount_point_bytes(),
+        )
+        .map_err(|source| hard_error("verify veth-backed nsfs mount table", source))?;
+        pairs
+            .verify()
+            .map_err(|source| veth_pair_error("reverify authorized veth pairs", source))
     }
 
     fn with_run_state<NextState>(self, run_state: NextState) -> PrivateMounts<NextState> {
@@ -1880,10 +1931,9 @@ fn ipv4_address_set_error(
 }
 
 fn exact_ipv4_address_expectations(
-    pairs: &AuthorizedVethPairs,
-    addresses: &AuthorizedIpv4Addresses<'_>,
+    addresses: &AuthorizedIpv4Addresses,
 ) -> Result<ExactIpv4AddressExpectations, crate::network::NetworkError> {
-    let fixed_pairs = pairs.fixed_pairs();
+    let fixed_pairs = addresses.veth_pairs().fixed_pairs();
     let pair_expectations = [
         crate::network::ExpectedVethPair::new(
             fixed_pairs[0].parent_name(),

@@ -973,7 +973,7 @@ pub(crate) struct AuthorizedNamespacePins {
 ///
 /// The veth journal is declared before the namespace owner so implicit unwind
 /// deletes B then A before either target namespace can be unmounted. The state
-/// grants only the fixed borrowed four-address sub-transaction; it grants no
+/// can be consumed only into the fixed four-address sub-transaction; it grants no
 /// link-up, explicit-route, forwarding, firewall, probe, dataplane,
 /// ownership-manifest, or topology-ready authority.
 pub(crate) struct AuthorizedVethPairs {
@@ -982,24 +982,25 @@ pub(crate) struct AuthorizedVethPairs {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-struct FixedIpv4AddressJournal<'pairs> {
-    // Address owners precede the borrowed pair authority so field teardown
-    // cannot release the borrow before reverse address cleanup is attempted.
-    parent: [Option<FixedIpv4AddressOwner<'pairs>>; ENDPOINT_COUNT],
-    endpoints: [Option<FixedIpv4AddressOwner<'pairs>>; ENDPOINT_COUNT],
-    pairs: &'pairs AuthorizedVethPairs,
+struct FixedIpv4AddressJournal {
+    parent: [Option<FixedIpv4AddressOwner>; ENDPOINT_COUNT],
+    endpoints: [Option<FixedIpv4AddressOwner>; ENDPOINT_COUNT],
     armed: bool,
 }
 
-/// Scoped affine authority for all four fixed IPv4 addresses.
+/// Affine authority for all four fixed IPv4 addresses and their veth backing.
 ///
-/// The state borrows the veth-pair owner, so the links and namespace pins
-/// cannot be consumed while any address remains live. Dropping it performs
-/// exact reverse cleanup inside B, A and then the parent namespace. It grants
-/// no link-up, explicit-route, forwarding, firewall, packet, or readiness authority.
+/// The state owns the veth-pair authority so the links and namespace pins
+/// cannot be consumed separately while any address remains live. Dropping it
+/// performs exact reverse address cleanup inside B, A and then the parent
+/// namespace before the veth backing can unwind. It grants no link-up,
+/// explicit-route, forwarding, firewall, packet, or readiness authority.
 #[must_use = "dropping an armed fixed IPv4 address set triggers fail-closed rollback"]
-pub(crate) struct AuthorizedIpv4Addresses<'pairs> {
-    journal: FixedIpv4AddressJournal<'pairs>,
+pub(crate) struct AuthorizedIpv4Addresses {
+    // The address journal precedes its backing owner so custom teardown can
+    // disarm every address before ordinary field teardown reaches the veths.
+    journal: FixedIpv4AddressJournal,
+    veth_pairs: Option<AuthorizedVethPairs>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -1359,66 +1360,88 @@ impl AuthorizedVethPairs {
             .visit_network_namespaces_reverse(visitor)
     }
 
-    /// Borrow the exact pair owner into one scoped four-address transaction.
+    /// Consume the exact pair owner into one four-address transaction.
     pub(crate) fn configure_fixed_ipv4_addresses(
-        &self,
-    ) -> Result<AuthorizedIpv4Addresses<'_>, FixedIpv4AddressSetError> {
+        self,
+    ) -> Result<AuthorizedIpv4Addresses, FixedIpv4AddressSetError> {
         self.verify().map_err(FixedIpv4AddressSetError::Veth)?;
-        let pairs = self.fixed_pairs();
-        let namespace_pins = self.namespace_pins();
-        let mut journal = FixedIpv4AddressJournal::new(self);
+        let mut authorized = AuthorizedIpv4Addresses {
+            journal: FixedIpv4AddressJournal::new(),
+            veth_pairs: Some(self),
+            _thread_bound: PhantomData,
+        };
 
         let staged = (|| {
-            journal.parent[0] = Some(
+            let parent_alpha = {
+                let veth_pairs = authorized.veth_pairs();
+                let pairs = veth_pairs.fixed_pairs();
+                let namespace_pins = veth_pairs.namespace_pins();
                 add_fixed_ipv4_address(
                     FixedIpv4Address::ParentA,
                     pairs[0],
                     &namespace_pins.parent.descriptor,
                 )
-                .map_err(FixedIpv4AddressSetError::Add)?,
-            );
-            journal.parent[1] = Some(
+                .map_err(FixedIpv4AddressSetError::Add)?
+            };
+            authorized.journal.parent[0] = Some(parent_alpha);
+            let parent_omega = {
+                let veth_pairs = authorized.veth_pairs();
+                let pairs = veth_pairs.fixed_pairs();
+                let namespace_pins = veth_pairs.namespace_pins();
                 add_fixed_ipv4_address(
                     FixedIpv4Address::ParentB,
                     pairs[1],
                     &namespace_pins.parent.descriptor,
                 )
-                .map_err(FixedIpv4AddressSetError::Add)?,
-            );
+                .map_err(FixedIpv4AddressSetError::Add)?
+            };
+            authorized.journal.parent[1] = Some(parent_omega);
+            let veth_pairs = authorized
+                .veth_pairs
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort());
+            let pairs = veth_pairs.fixed_pairs();
+            let namespace_pins = veth_pairs.namespace_pins();
             let endpoint_descriptors = [
                 &namespace_pins.mounts.entries[0].namespace.descriptor,
                 &namespace_pins.mounts.entries[1].namespace.descriptor,
             ];
-            self.visit_network_namespaces(|endpoint| {
-                let index = endpoint.index();
-                let specification = match endpoint {
-                    NamespaceEndpoint::A => FixedIpv4Address::EndpointA,
-                    NamespaceEndpoint::B => FixedIpv4Address::EndpointB,
-                };
-                journal.endpoints[index] = Some(
-                    add_fixed_ipv4_address(
-                        specification,
-                        pairs[index],
-                        endpoint_descriptors[index],
-                    )
-                    .map_err(FixedIpv4AddressSetError::Add)?,
-                );
-                Ok(())
-            })
-            .map_err(map_ipv4_visit_error)?;
+            let endpoint_addresses = &mut authorized.journal.endpoints;
+            veth_pairs
+                .visit_network_namespaces(|endpoint| {
+                    let index = endpoint.index();
+                    let specification = match endpoint {
+                        NamespaceEndpoint::A => FixedIpv4Address::EndpointA,
+                        NamespaceEndpoint::B => FixedIpv4Address::EndpointB,
+                    };
+                    endpoint_addresses[index] = Some(
+                        add_fixed_ipv4_address(
+                            specification,
+                            pairs[index],
+                            endpoint_descriptors[index],
+                        )
+                        .map_err(FixedIpv4AddressSetError::Add)?,
+                    );
+                    Ok(())
+                })
+                .map_err(map_ipv4_visit_error)?;
             Ok(())
         })();
         if let Err(error) = staged {
-            return match journal.rollback() {
+            let cleanup = {
+                let veth_pairs = authorized
+                    .veth_pairs
+                    .as_ref()
+                    .unwrap_or_else(|| std::process::abort());
+                authorized.journal.rollback(veth_pairs)
+            };
+            return match cleanup {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(cleanup),
             };
         }
-        journal.verify()?;
-        Ok(AuthorizedIpv4Addresses {
-            journal,
-            _thread_bound: PhantomData,
-        })
+        authorized.verify()?;
+        Ok(authorized)
     }
 
     /// Delete B then A, prove both absent, and recover the unchanged pin owner.
@@ -1442,25 +1465,23 @@ impl AuthorizedVethPairs {
     }
 }
 
-impl<'pairs> FixedIpv4AddressJournal<'pairs> {
-    fn new(pairs: &'pairs AuthorizedVethPairs) -> Self {
+impl FixedIpv4AddressJournal {
+    fn new() -> Self {
         Self {
             parent: [None, None],
             endpoints: [None, None],
-            pairs,
             armed: true,
         }
     }
 
-    fn verify(&self) -> Result<(), FixedIpv4AddressSetError> {
+    fn verify(&self, pairs: &AuthorizedVethPairs) -> Result<(), FixedIpv4AddressSetError> {
         if !self.armed {
             return Err(FixedIpv4AddressSetError::Unsafe(
                 "fixed IPv4 address journal is disarmed",
             ));
         }
-        self.pairs
-            .verify()
-            .map_err(FixedIpv4AddressSetError::Veth)?;
+        pairs.verify().map_err(FixedIpv4AddressSetError::Veth)?;
+        let fixed_pairs = pairs.fixed_pairs();
         let expected_parent = [FixedIpv4Address::ParentA, FixedIpv4Address::ParentB];
         let expected_endpoints = [FixedIpv4Address::EndpointA, FixedIpv4Address::EndpointB];
         for (index, expected) in expected_parent.into_iter().enumerate() {
@@ -1474,10 +1495,12 @@ impl<'pairs> FixedIpv4AddressJournal<'pairs> {
                     "fixed parent IPv4 address order changed",
                 ));
             }
-            parent.verify().map_err(FixedIpv4AddressSetError::Verify)?;
+            parent
+                .verify(fixed_pairs[index])
+                .map_err(FixedIpv4AddressSetError::Verify)?;
         }
         let mut visited = [false, false];
-        self.pairs
+        pairs
             .visit_network_namespaces(|endpoint| {
                 let index = endpoint.index();
                 let address =
@@ -1491,7 +1514,9 @@ impl<'pairs> FixedIpv4AddressJournal<'pairs> {
                         "fixed endpoint IPv4 address order changed",
                     ));
                 }
-                address.verify().map_err(FixedIpv4AddressSetError::Verify)?;
+                address
+                    .verify(fixed_pairs[index])
+                    .map_err(FixedIpv4AddressSetError::Verify)?;
                 visited[index] = true;
                 Ok(())
             })
@@ -1501,10 +1526,10 @@ impl<'pairs> FixedIpv4AddressJournal<'pairs> {
                 "fixed endpoint IPv4 address visit was incomplete",
             ));
         }
-        self.pairs.verify().map_err(FixedIpv4AddressSetError::Veth)
+        pairs.verify().map_err(FixedIpv4AddressSetError::Veth)
     }
 
-    fn owners(&self) -> [&FixedIpv4AddressOwner<'pairs>; 4] {
+    fn owners(&self) -> [&FixedIpv4AddressOwner; 4] {
         [
             self.parent[0]
                 .as_ref()
@@ -1521,16 +1546,18 @@ impl<'pairs> FixedIpv4AddressJournal<'pairs> {
         ]
     }
 
-    fn rollback(&mut self) -> Result<(), FixedIpv4AddressSetError> {
+    fn rollback(&mut self, pairs: &AuthorizedVethPairs) -> Result<(), FixedIpv4AddressSetError> {
         if !self.armed {
             return Ok(());
         }
+        pairs.verify().map_err(FixedIpv4AddressSetError::Veth)?;
+        let fixed_pairs = pairs.fixed_pairs();
         let mut first_error = None;
         let endpoint_addresses = &mut self.endpoints;
-        let visited = self.pairs.visit_network_namespaces_reverse(|endpoint| {
+        let visited = pairs.visit_network_namespaces_reverse(|endpoint| {
             let index = endpoint.index();
             if let Some(address) = endpoint_addresses[index].take() {
-                if let Err(error) = address.rollback() {
+                if let Err(error) = address.rollback(fixed_pairs[index]) {
                     first_error.get_or_insert(FixedIpv4AddressSetError::Rollback(error));
                 }
             }
@@ -1546,7 +1573,7 @@ impl<'pairs> FixedIpv4AddressJournal<'pairs> {
         }
         for index in (0..ENDPOINT_COUNT).rev() {
             if let Some(address) = self.parent[index].take() {
-                if let Err(error) = address.rollback() {
+                if let Err(error) = address.rollback(fixed_pairs[index]) {
                     first_error.get_or_insert(FixedIpv4AddressSetError::Rollback(error));
                 }
             }
@@ -1557,39 +1584,67 @@ impl<'pairs> FixedIpv4AddressJournal<'pairs> {
             ));
         }
         self.armed = false;
-        self.pairs
-            .verify()
-            .map_err(FixedIpv4AddressSetError::Veth)?;
+        pairs.verify().map_err(FixedIpv4AddressSetError::Veth)?;
         first_error.map_or(Ok(()), Err)
     }
 }
 
-impl Drop for FixedIpv4AddressJournal<'_> {
+impl Drop for FixedIpv4AddressJournal {
     fn drop(&mut self) {
         if self.armed {
-            let rollback_failed = self.rollback().is_err();
-            if rollback_failed && self.armed {
-                std::process::abort();
-            }
+            std::process::abort();
         }
     }
 }
 
-impl AuthorizedIpv4Addresses<'_> {
+impl AuthorizedIpv4Addresses {
     /// Freshly reprove all four address, namespace, interface, and veth bindings.
     pub(crate) fn verify(&self) -> Result<(), FixedIpv4AddressSetError> {
-        self.journal.verify()
+        self.journal.verify(self.veth_pairs())
     }
 
     /// Borrow the four affine owners as parent A, endpoint A, parent B, endpoint B.
-    pub(crate) fn owners(&self) -> [&FixedIpv4AddressOwner<'_>; 4] {
+    pub(crate) fn owners(&self) -> [&FixedIpv4AddressOwner; 4] {
         self.journal.owners()
     }
 
-    /// Remove endpoint B/A then parent B/A and prove every address absent.
-    pub(crate) fn rollback(mut self) -> Result<(), FixedIpv4AddressSetError> {
+    /// Borrow the exact veth authority retained behind the four addresses.
+    pub(crate) fn veth_pairs(&self) -> &AuthorizedVethPairs {
+        self.veth_pairs
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    /// Remove endpoint B/A then parent B/A and recover the intact veth owner.
+    pub(crate) fn rollback(mut self) -> Result<AuthorizedVethPairs, FixedIpv4AddressSetError> {
         self.verify()?;
-        self.journal.rollback()
+        let cleanup = {
+            let veth_pairs = self
+                .veth_pairs
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort());
+            self.journal.rollback(veth_pairs)
+        };
+        take_backing_after_cleanup(cleanup, &mut self.veth_pairs, || {
+            FixedIpv4AddressSetError::Unsafe(
+                "veth-pair owner was consumed before fixed IPv4 rollback",
+            )
+        })
+    }
+}
+
+impl Drop for AuthorizedIpv4Addresses {
+    fn drop(&mut self) {
+        if self.journal.armed {
+            let veth_pairs = self
+                .veth_pairs
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort());
+            let rollback_failed = self.journal.rollback(veth_pairs).is_err();
+            if rollback_failed && self.journal.armed {
+                std::process::abort();
+            }
+        }
     }
 }
 
@@ -1756,6 +1811,17 @@ mod tests {
     struct ModelVethPairOwner {
         events: Rc<RefCell<Vec<&'static str>>>,
         live: Rc<Cell<bool>>,
+        proof_valid: Rc<Cell<bool>>,
+    }
+
+    impl ModelVethPairOwner {
+        fn verify(&self) -> Result<(), ()> {
+            if self.live.get() && self.proof_valid.get() {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
     }
 
     impl Drop for ModelVethPairOwner {
@@ -1765,16 +1831,16 @@ mod tests {
         }
     }
 
-    struct ModelIpv4AddressOwner<'pairs> {
+    struct ModelIpv4AddressOwner {
         specification: FixedIpv4Address,
-        pairs: &'pairs ModelVethPairOwner,
+        veth_live: Rc<Cell<bool>>,
         events: Rc<RefCell<Vec<&'static str>>>,
         armed: bool,
     }
 
-    impl ModelIpv4AddressOwner<'_> {
+    impl ModelIpv4AddressOwner {
         fn rollback(mut self, current: ModelNetworkNamespace) {
-            assert!(self.pairs.live.get(), "address outlived its veth owner");
+            assert!(self.veth_live.get(), "address outlived its veth owner");
             assert_eq!(
                 current,
                 model_namespace_for(self.specification),
@@ -1787,31 +1853,31 @@ mod tests {
         }
     }
 
-    impl Drop for ModelIpv4AddressOwner<'_> {
+    impl Drop for ModelIpv4AddressOwner {
         fn drop(&mut self) {
             assert!(!self.armed, "armed model address owner was dropped");
         }
     }
 
-    struct PartialIpv4AddressJournal<'pairs> {
-        parent: [Option<ModelIpv4AddressOwner<'pairs>>; ENDPOINT_COUNT],
-        endpoints: [Option<ModelIpv4AddressOwner<'pairs>>; ENDPOINT_COUNT],
-        pairs: &'pairs ModelVethPairOwner,
+    struct PartialIpv4AddressJournal {
+        parent: [Option<ModelIpv4AddressOwner>; ENDPOINT_COUNT],
+        endpoints: [Option<ModelIpv4AddressOwner>; ENDPOINT_COUNT],
+        veth_live: Rc<Cell<bool>>,
         events: Rc<RefCell<Vec<&'static str>>>,
         current: Rc<Cell<ModelNetworkNamespace>>,
         armed: bool,
     }
 
-    impl<'pairs> PartialIpv4AddressJournal<'pairs> {
+    impl PartialIpv4AddressJournal {
         fn new(
-            pairs: &'pairs ModelVethPairOwner,
+            veth_live: Rc<Cell<bool>>,
             events: Rc<RefCell<Vec<&'static str>>>,
             current: Rc<Cell<ModelNetworkNamespace>>,
         ) -> Self {
             Self {
                 parent: [None, None],
                 endpoints: [None, None],
-                pairs,
+                veth_live,
                 events,
                 current,
                 armed: true,
@@ -1821,15 +1887,15 @@ mod tests {
         fn stage(
             &mut self,
             specification: FixedIpv4Address,
-            fail_at: FixedIpv4Address,
+            fail_at: Option<FixedIpv4Address>,
         ) -> Result<(), ()> {
-            assert!(self.pairs.live.get(), "staging lost its veth owner");
+            assert!(self.veth_live.get(), "staging lost its veth owner");
             assert_eq!(
                 self.current.get(),
                 model_namespace_for(specification),
                 "address staged in the wrong namespace"
             );
-            if specification == fail_at {
+            if fail_at == Some(specification) {
                 self.events
                     .borrow_mut()
                     .push(model_failure_event(specification));
@@ -1841,7 +1907,7 @@ mod tests {
                 .push(model_stage_event(specification));
             let owner = ModelIpv4AddressOwner {
                 specification,
-                pairs: self.pairs,
+                veth_live: Rc::clone(&self.veth_live),
                 events: Rc::clone(&self.events),
                 armed: true,
             };
@@ -1862,8 +1928,10 @@ mod tests {
             Ok(())
         }
 
-        fn rollback(&mut self) {
+        fn rollback(&mut self, pairs: &ModelVethPairOwner) -> Result<(), ()> {
             assert!(self.armed, "model journal rolled back twice");
+            assert!(Rc::ptr_eq(&self.veth_live, &pairs.live));
+            pairs.verify()?;
             let endpoints = &mut self.endpoints;
             model_visit_network_namespaces(
                 REVERSE_NAMESPACE_VISIT_ORDER,
@@ -1885,20 +1953,73 @@ mod tests {
             assert!(self.parent.iter().all(Option::is_none));
             assert!(self.endpoints.iter().all(Option::is_none));
             assert_eq!(self.current.get(), ModelNetworkNamespace::Parent);
-            assert!(
-                self.pairs.live.get(),
-                "veth owner was released during cleanup"
-            );
+            assert!(pairs.live.get(), "veth owner was released during cleanup");
             self.events
                 .borrow_mut()
                 .push("veth pair owner retained through address rollback");
             self.armed = false;
+            Ok(())
         }
     }
 
-    impl Drop for PartialIpv4AddressJournal<'_> {
+    impl Drop for PartialIpv4AddressJournal {
         fn drop(&mut self) {
             assert!(!self.armed, "armed model address journal was dropped");
+        }
+    }
+
+    struct ModelAuthorizedIpv4Addresses {
+        journal: PartialIpv4AddressJournal,
+        veth_pairs: Option<ModelVethPairOwner>,
+    }
+
+    impl ModelAuthorizedIpv4Addresses {
+        fn new(
+            veth_pairs: ModelVethPairOwner,
+            events: Rc<RefCell<Vec<&'static str>>>,
+            current: Rc<Cell<ModelNetworkNamespace>>,
+        ) -> Self {
+            Self {
+                journal: PartialIpv4AddressJournal::new(
+                    Rc::clone(&veth_pairs.live),
+                    events,
+                    current,
+                ),
+                veth_pairs: Some(veth_pairs),
+            }
+        }
+
+        fn veth_pairs(&self) -> &ModelVethPairOwner {
+            self.veth_pairs
+                .as_ref()
+                .expect("model veth owner must remain present")
+        }
+
+        fn rollback_addresses(&mut self) -> Result<(), ()> {
+            let veth_pairs = self
+                .veth_pairs
+                .as_ref()
+                .expect("model veth owner must remain present");
+            self.journal.rollback(veth_pairs)
+        }
+
+        fn rollback(mut self) -> Result<ModelVethPairOwner, ()> {
+            self.rollback_addresses()?;
+            Ok(self
+                .veth_pairs
+                .take()
+                .expect("model veth owner must be returned once"))
+        }
+    }
+
+    impl Drop for ModelAuthorizedIpv4Addresses {
+        fn drop(&mut self) {
+            if self.journal.armed {
+                assert!(
+                    self.rollback_addresses().is_ok(),
+                    "model aggregate cleanup could not prove its veth authority"
+                );
+            }
         }
     }
 
@@ -1922,41 +2043,91 @@ mod tests {
         Ok(())
     }
 
+    fn stage_complete_model_ipv4_addresses(
+        events: &Rc<RefCell<Vec<&'static str>>>,
+        current: &Rc<Cell<ModelNetworkNamespace>>,
+        live: &Rc<Cell<bool>>,
+        proof_valid: &Rc<Cell<bool>>,
+    ) -> ModelAuthorizedIpv4Addresses {
+        let pairs = ModelVethPairOwner {
+            events: Rc::clone(events),
+            live: Rc::clone(live),
+            proof_valid: Rc::clone(proof_valid),
+        };
+        let mut addresses =
+            ModelAuthorizedIpv4Addresses::new(pairs, Rc::clone(events), Rc::clone(current));
+        addresses
+            .journal
+            .stage(FixedIpv4Address::ParentA, None)
+            .expect("stage parent A");
+        addresses
+            .journal
+            .stage(FixedIpv4Address::ParentB, None)
+            .expect("stage parent B");
+        model_visit_network_namespaces(
+            FORWARD_NAMESPACE_VISIT_ORDER,
+            current,
+            events,
+            |endpoint, _current| {
+                addresses.journal.stage(
+                    match endpoint {
+                        NamespaceEndpoint::A => FixedIpv4Address::EndpointA,
+                        NamespaceEndpoint::B => FixedIpv4Address::EndpointB,
+                    },
+                    None,
+                )
+            },
+        )
+        .expect("stage endpoint addresses");
+        addresses
+    }
+
     fn run_partial_ipv4_staging(fail_at: FixedIpv4Address) -> Vec<&'static str> {
         let events = Rc::new(RefCell::new(Vec::new()));
         let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
         let live = Rc::new(Cell::new(true));
+        let proof_valid = Rc::new(Cell::new(true));
         {
             let pairs = ModelVethPairOwner {
                 events: Rc::clone(&events),
                 live: Rc::clone(&live),
+                proof_valid,
             };
             {
-                let mut journal =
-                    PartialIpv4AddressJournal::new(&pairs, Rc::clone(&events), Rc::clone(&current));
+                let mut addresses = ModelAuthorizedIpv4Addresses::new(
+                    pairs,
+                    Rc::clone(&events),
+                    Rc::clone(&current),
+                );
                 let staged = (|| {
-                    journal.stage(FixedIpv4Address::ParentA, fail_at)?;
-                    journal.stage(FixedIpv4Address::ParentB, fail_at)?;
+                    addresses
+                        .journal
+                        .stage(FixedIpv4Address::ParentA, Some(fail_at))?;
+                    addresses
+                        .journal
+                        .stage(FixedIpv4Address::ParentB, Some(fail_at))?;
                     model_visit_network_namespaces(
                         FORWARD_NAMESPACE_VISIT_ORDER,
                         &current,
                         &events,
                         |endpoint, _current| {
-                            journal.stage(
+                            addresses.journal.stage(
                                 match endpoint {
                                     NamespaceEndpoint::A => FixedIpv4Address::EndpointA,
                                     NamespaceEndpoint::B => FixedIpv4Address::EndpointB,
                                 },
-                                fail_at,
+                                Some(fail_at),
                             )
                         },
                     )
                 })();
                 assert_eq!(staged, Err(()));
                 assert_eq!(current.get(), ModelNetworkNamespace::Parent);
-                journal.rollback();
+                assert!(addresses.veth_pairs().live.get());
+                addresses
+                    .rollback_addresses()
+                    .expect("model partial address rollback");
             }
-            assert!(pairs.live.get());
         }
         assert!(!live.get());
         assert_eq!(current.get(), ModelNetworkNamespace::Parent);
@@ -2073,6 +2244,101 @@ mod tests {
                 "namespace owner dropped",
             ]
         );
+    }
+
+    #[test]
+    fn successful_ipv4_rollback_returns_the_live_veth_owner_after_reverse_cleanup() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let live = Rc::new(Cell::new(true));
+        let proof_valid = Rc::new(Cell::new(true));
+        let addresses = stage_complete_model_ipv4_addresses(&events, &current, &live, &proof_valid);
+
+        let pairs = addresses.rollback().expect("model address rollback");
+        assert!(pairs.live.get());
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        assert_eq!(
+            *events.borrow(),
+            [
+                "stage parent A",
+                "stage parent B",
+                "enter endpoint A",
+                "stage endpoint A",
+                "restore parent from endpoint A",
+                "enter endpoint B",
+                "stage endpoint B",
+                "restore parent from endpoint B",
+                "enter endpoint B",
+                "rollback endpoint B",
+                "restore parent from endpoint B",
+                "enter endpoint A",
+                "rollback endpoint A",
+                "restore parent from endpoint A",
+                "rollback parent B",
+                "rollback parent A",
+                "veth pair owner retained through address rollback",
+            ]
+        );
+        drop(pairs);
+        assert!(!live.get());
+        assert_eq!(
+            events.borrow().last().copied(),
+            Some("veth pair owner dropped")
+        );
+    }
+
+    #[test]
+    fn automatic_ipv4_aggregate_drop_cleans_addresses_before_veth_authority() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let live = Rc::new(Cell::new(true));
+        let proof_valid = Rc::new(Cell::new(true));
+        let addresses = stage_complete_model_ipv4_addresses(&events, &current, &live, &proof_valid);
+        events.borrow_mut().clear();
+
+        drop(addresses);
+
+        assert!(!live.get());
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        assert_eq!(
+            *events.borrow(),
+            [
+                "enter endpoint B",
+                "rollback endpoint B",
+                "restore parent from endpoint B",
+                "enter endpoint A",
+                "rollback endpoint A",
+                "restore parent from endpoint A",
+                "rollback parent B",
+                "rollback parent A",
+                "veth pair owner retained through address rollback",
+                "veth pair owner dropped",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_precleanup_pair_proof_retains_every_armed_authority_without_cleanup() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let live = Rc::new(Cell::new(true));
+        let proof_valid = Rc::new(Cell::new(true));
+        let mut addresses =
+            stage_complete_model_ipv4_addresses(&events, &current, &live, &proof_valid);
+        events.borrow_mut().clear();
+        proof_valid.set(false);
+
+        assert_eq!(addresses.rollback_addresses(), Err(()));
+        assert!(events.borrow().is_empty());
+        assert!(addresses.journal.armed);
+        assert!(addresses.journal.parent.iter().all(Option::is_some));
+        assert!(addresses.journal.endpoints.iter().all(Option::is_some));
+        assert!(addresses.veth_pairs().live.get());
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+
+        proof_valid.set(true);
+        drop(addresses);
+        assert!(!live.get());
     }
 
     #[test]

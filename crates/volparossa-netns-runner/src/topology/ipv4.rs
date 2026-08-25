@@ -38,7 +38,7 @@ use rustix::fs::{FsWord, Mode, OFlags, fstat, fstatfs, open};
 use thiserror::Error;
 use volparossa_linux_uapi::namespace_type;
 
-use super::veth::{FixedVethEndpoint, FixedVethPair};
+use super::veth::{FIXED_VETH_PEER_NAME, FixedVethEndpoint, FixedVethPair};
 
 const IPV4_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CURRENT_NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
@@ -288,39 +288,45 @@ impl RetainedCurrentNamespace {
     }
 }
 
-struct AddressJournal<'pair> {
-    specification: FixedIpv4Address,
-    namespace: RetainedCurrentNamespace,
+/// Immutable veth lineage copied while the supplying affine pair is freshly
+/// proved. The address owner deliberately retains no borrow of that pair: the
+/// enclosing topology typestate owns the pair authority alongside this token.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FixedVethBinding {
+    endpoint: FixedVethEndpoint,
     interface: InterfaceBinding,
-    pair: &'pair FixedVethPair,
+    mutation_namespace: Ipv4NamespaceIdentity,
+    target_namespace: Ipv4NamespaceIdentity,
 }
 
-impl AddressJournal<'_> {
-    fn verify_context(&self) -> Result<(), Ipv4OperationError> {
+struct AddressJournal {
+    specification: FixedIpv4Address,
+    namespace: RetainedCurrentNamespace,
+    veth: FixedVethBinding,
+}
+
+impl AddressJournal {
+    fn verify_context(&self, pair: &FixedVethPair) -> Result<(), Ipv4OperationError> {
         self.namespace.verify_current()?;
-        verify_pair_binding(
-            self.specification,
-            self.pair,
-            &self.namespace,
-            &self.interface,
-        )?;
-        verify_link_is_exactly_down(&self.interface)
+        verify_live_veth_binding(self.specification, pair, &self.namespace, &self.veth)
     }
 }
 
 /// Affine ownership and rollback authority for one exact fixed IPv4 address.
 ///
-/// The token borrows its veth owner, preventing the pair from being consumed
-/// before the address is rolled back. It is neither cloneable nor transferable
-/// to another thread. Dropping an armed token performs bounded exact cleanup
-/// and aborts if absence cannot be established.
+/// The token owns an immutable copy of the freshly proved fixed veth binding.
+/// The enclosing topology typestate owns the corresponding pair authority and
+/// prevents it from being consumed separately. Every proof and rollback must
+/// receive that exact live pair again. This token is neither cloneable nor
+/// transferable to another thread. Dropping an armed token without its pair
+/// authority aborts instead of attempting copied-binding-only cleanup.
 #[must_use = "dropping an armed fixed IPv4 address triggers fail-closed rollback"]
-pub(crate) struct FixedIpv4AddressOwner<'pair> {
-    journal: Option<AddressJournal<'pair>>,
+pub(crate) struct FixedIpv4AddressOwner {
+    journal: Option<AddressJournal>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-impl FixedIpv4AddressOwner<'_> {
+impl FixedIpv4AddressOwner {
     /// Fixed address represented by this owner.
     pub(crate) fn address(&self) -> FixedIpv4Address {
         self.journal().specification
@@ -328,12 +334,12 @@ impl FixedIpv4AddressOwner<'_> {
 
     /// Exact interface index pinned at installation time.
     pub(crate) fn ifindex(&self) -> u32 {
-        self.journal().interface.ifindex
+        self.journal().veth.interface.ifindex
     }
 
     /// Exact interface label pinned at installation time.
     pub(crate) fn interface_name(&self) -> &str {
-        &self.journal().interface.name
+        &self.journal().veth.interface.name
     }
 
     /// Exact namespace identity pinned at installation time.
@@ -342,8 +348,8 @@ impl FixedIpv4AddressOwner<'_> {
     }
 
     /// Reopen RTNETLINK and prove the exact address, down-link, and namespace binding.
-    pub(crate) fn verify(&self) -> Result<(), Ipv4VerifyError> {
-        require_exact_presence(self.journal()).map_err(Ipv4VerifyError)
+    pub(super) fn verify(&self, pair: &FixedVethPair) -> Result<(), Ipv4VerifyError> {
+        require_exact_presence(self.journal(), pair).map_err(Ipv4VerifyError)
     }
 
     /// Delete the freshly reverified address and prove exact absence.
@@ -351,15 +357,15 @@ impl FixedIpv4AddressOwner<'_> {
     /// If the first attempt is ambiguous, at most two fresh delete attempts and
     /// one final absence observation are used. An error is returned only when
     /// cleanup was nevertheless proved; inability to prove cleanup aborts.
-    pub(crate) fn rollback(mut self) -> Result<(), Ipv4RollbackError> {
-        let result = delete_journal_exact(self.journal());
+    pub(super) fn rollback(mut self, pair: &FixedVethPair) -> Result<(), Ipv4RollbackError> {
+        let result = delete_journal_exact(self.journal(), pair);
         match result {
             Ok(()) => {
                 self.journal = None;
                 Ok(())
             }
             Err(source) => {
-                if reconcile_journal(self.journal()).is_err() {
+                if reconcile_journal(self.journal(), pair).is_err() {
                     std::process::abort();
                 }
                 self.journal = None;
@@ -368,38 +374,57 @@ impl FixedIpv4AddressOwner<'_> {
         }
     }
 
-    fn journal(&self) -> &AddressJournal<'_> {
+    fn journal(&self) -> &AddressJournal {
         self.journal
             .as_ref()
             .unwrap_or_else(|| std::process::abort())
     }
 }
 
-impl Drop for FixedIpv4AddressOwner<'_> {
+impl Drop for FixedIpv4AddressOwner {
     fn drop(&mut self) {
-        if let Some(journal) = self.journal.as_ref() {
-            if reconcile_journal(journal).is_err() {
+        match standalone_owner_drop_action(self.journal.is_some()) {
+            StandaloneOwnerDropAction::Finish => {}
+            StandaloneOwnerDropAction::AbortWithoutMutation => {
+                // A lifetime-free owner cannot safely mutate from a copied
+                // binding. The enclosing aggregate must call `rollback` with
+                // its exact live pair before this field is dropped.
                 std::process::abort();
             }
-            self.journal = None;
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandaloneOwnerDropAction {
+    Finish,
+    AbortWithoutMutation,
+}
+
+const fn standalone_owner_drop_action(armed: bool) -> StandaloneOwnerDropAction {
+    if armed {
+        StandaloneOwnerDropAction::AbortWithoutMutation
+    } else {
+        StandaloneOwnerDropAction::Finish
     }
 }
 
 struct ProvisionalAddressGuard<'pair> {
-    journal: Option<AddressJournal<'pair>>,
+    journal: Option<AddressJournal>,
+    pair: &'pair FixedVethPair,
     armed: bool,
 }
 
 impl<'pair> ProvisionalAddressGuard<'pair> {
-    fn new(journal: AddressJournal<'pair>) -> Self {
+    fn new(journal: AddressJournal, pair: &'pair FixedVethPair) -> Self {
         Self {
             journal: Some(journal),
+            pair,
             armed: false,
         }
     }
 
-    fn journal(&self) -> &AddressJournal<'_> {
+    fn journal(&self) -> &AddressJournal {
         self.journal
             .as_ref()
             .unwrap_or_else(|| std::process::abort())
@@ -411,7 +436,7 @@ impl<'pair> ProvisionalAddressGuard<'pair> {
 
     fn reject_after_exact_absence(mut self, errno: i32) -> Ipv4AddError {
         self.armed = false;
-        if observe_presence(self.journal()).ok() != Some(AddressPresence::Absent) {
+        if observe_presence(self.journal(), self.pair).ok() != Some(AddressPresence::Absent) {
             std::process::abort();
         }
         Ipv4AddError::Rejected(errno)
@@ -420,15 +445,15 @@ impl<'pair> ProvisionalAddressGuard<'pair> {
     fn recover_ambiguous(
         mut self,
         source: Ipv4OperationError,
-    ) -> Result<FixedIpv4AddressOwner<'pair>, Ipv4AddError> {
-        match observe_presence(self.journal()) {
+    ) -> Result<FixedIpv4AddressOwner, Ipv4AddError> {
+        match observe_presence(self.journal(), self.pair) {
             Ok(AddressPresence::Exact) => Ok(self.into_owner()),
             Ok(AddressPresence::Absent) => {
                 self.armed = false;
                 Err(Ipv4AddError::PossiblyApplied(source))
             }
             Err(_) => {
-                if reconcile_journal(self.journal()).is_err() {
+                if reconcile_journal(self.journal(), self.pair).is_err() {
                     std::process::abort();
                 }
                 self.armed = false;
@@ -438,14 +463,14 @@ impl<'pair> ProvisionalAddressGuard<'pair> {
     }
 
     fn fail_readback(mut self, source: Ipv4OperationError) -> Ipv4AddError {
-        if reconcile_journal(self.journal()).is_err() {
+        if reconcile_journal(self.journal(), self.pair).is_err() {
             std::process::abort();
         }
         self.armed = false;
         Ipv4AddError::Readback(source)
     }
 
-    fn into_owner(mut self) -> FixedIpv4AddressOwner<'pair> {
+    fn into_owner(mut self) -> FixedIpv4AddressOwner {
         if !self.armed {
             std::process::abort();
         }
@@ -465,7 +490,7 @@ impl Drop for ProvisionalAddressGuard<'_> {
                 .journal
                 .as_ref()
                 .unwrap_or_else(|| std::process::abort());
-            if reconcile_journal(journal).is_err() {
+            if reconcile_journal(journal, self.pair).is_err() {
                 std::process::abort();
             }
         }
@@ -478,22 +503,21 @@ impl Drop for ProvisionalAddressGuard<'_> {
 /// network namespace currently active on this thread. The selected address
 /// determines both the required pair and side; the interface index and label
 /// are taken only from `pair`. No link-up or route request is sent.
-pub(crate) fn add_fixed_ipv4_address<'pair, Fd: AsFd>(
+pub(super) fn add_fixed_ipv4_address<Fd: AsFd>(
     specification: FixedIpv4Address,
-    pair: &'pair FixedVethPair,
+    pair: &FixedVethPair,
     current_netns: &Fd,
-) -> Result<FixedIpv4AddressOwner<'pair>, Ipv4AddError> {
+) -> Result<FixedIpv4AddressOwner, Ipv4AddError> {
     let namespace =
         RetainedCurrentNamespace::capture(current_netns).map_err(Ipv4AddError::BeforeMutation)?;
-    let interface = derive_interface_binding(specification, pair, &namespace)
+    let veth = derive_fixed_veth_binding(specification, pair, &namespace)
         .map_err(Ipv4AddError::BeforeMutation)?;
     let journal = AddressJournal {
         specification,
         namespace,
-        interface,
-        pair,
+        veth,
     };
-    require_absence(&journal).map_err(Ipv4AddError::BeforeMutation)?;
+    require_absence(&journal, pair).map_err(Ipv4AddError::BeforeMutation)?;
 
     let payload = encode_address_payload(&journal).map_err(Ipv4AddError::BeforeMutation)?;
     let deadline = Deadline::after(IPV4_OPERATION_TIMEOUT).map_err(Ipv4AddError::BeforeMutation)?;
@@ -508,7 +532,7 @@ pub(crate) fn add_fixed_ipv4_address<'pair, Fd: AsFd>(
         &payload,
     )
     .map_err(Ipv4AddError::BeforeMutation)?;
-    let mut guard = ProvisionalAddressGuard::new(journal);
+    let mut guard = ProvisionalAddressGuard::new(journal, pair);
     match send_bounded(&client.socket, &request, deadline) {
         Ok(()) => guard.mark_possibly_applied(),
         Err(SendFailure::NotSent(source)) => {
@@ -530,7 +554,7 @@ pub(crate) fn add_fixed_ipv4_address<'pair, Fd: AsFd>(
     drop(client);
     match acknowledgement {
         Ack::Rejected(errno) => Err(guard.reject_after_exact_absence(errno)),
-        Ack::Success => match observe_presence(guard.journal()) {
+        Ack::Success => match observe_presence(guard.journal(), pair) {
             Ok(AddressPresence::Exact) => Ok(guard.into_owner()),
             Ok(AddressPresence::Absent) => Err(guard.fail_readback(Ipv4OperationError::Unsafe(
                 "ACKed fixed IPv4 address is absent from exact readback",
@@ -540,24 +564,31 @@ pub(crate) fn add_fixed_ipv4_address<'pair, Fd: AsFd>(
     }
 }
 
-fn derive_interface_binding(
+fn derive_fixed_veth_binding(
     specification: FixedIpv4Address,
     pair: &FixedVethPair,
     namespace: &RetainedCurrentNamespace,
-) -> Result<InterfaceBinding, Ipv4OperationError> {
+) -> Result<FixedVethBinding, Ipv4OperationError> {
     if pair.endpoint() != specification.endpoint() {
         return Err(Ipv4OperationError::Unsafe(
             "fixed address does not belong to the supplied veth pair",
         ));
     }
-    let binding = match specification.side() {
+    let target = pair.target_namespace_identity();
+    let target_namespace = Ipv4NamespaceIdentity {
+        device: target.device(),
+        inode: target.inode(),
+    };
+    if target_namespace.device == 0 || target_namespace.inode == 0 {
+        return Err(Ipv4OperationError::Unsafe(
+            "fixed veth target namespace identity is zero",
+        ));
+    }
+    let interface = match specification.side() {
         AddressSide::Parent => {
             pair.verify()
                 .map_err(|_| Ipv4OperationError::Unsafe("fixed parent veth verification failed"))?;
-            let target = pair.target_namespace_identity();
-            if target.device() == namespace.identity.device
-                && target.inode() == namespace.identity.inode
-            {
+            if target_namespace == namespace.identity {
                 return Err(Ipv4OperationError::Unsafe(
                     "parent address is being installed in the endpoint namespace",
                 ));
@@ -568,10 +599,7 @@ fn derive_interface_binding(
             }
         }
         AddressSide::Endpoint => {
-            let target = pair.target_namespace_identity();
-            if target.device() != namespace.identity.device
-                || target.inode() != namespace.identity.inode
-            {
+            if target_namespace != namespace.identity {
                 return Err(Ipv4OperationError::Unsafe(
                     "endpoint address namespace does not match the veth target",
                 ));
@@ -582,53 +610,73 @@ fn derive_interface_binding(
             }
         }
     };
-    validate_interface_binding(&binding)?;
-    verify_link_is_exactly_down(&binding)?;
+    let binding = FixedVethBinding {
+        endpoint: pair.endpoint(),
+        interface,
+        mutation_namespace: namespace.identity,
+        target_namespace,
+    };
+    verify_copied_veth_binding(specification, namespace.identity, &binding)?;
+    verify_link_is_exactly_down(&binding.interface)?;
     Ok(binding)
 }
 
-fn verify_pair_binding(
+fn verify_live_veth_binding(
     specification: FixedIpv4Address,
     pair: &FixedVethPair,
     namespace: &RetainedCurrentNamespace,
-    expected: &InterfaceBinding,
+    retained: &FixedVethBinding,
 ) -> Result<(), Ipv4OperationError> {
-    if pair.endpoint() != specification.endpoint() {
+    let observed = derive_fixed_veth_binding(specification, pair, namespace)?;
+    require_exact_live_veth_binding(specification, namespace.identity, retained, &observed)
+}
+
+fn require_exact_live_veth_binding(
+    specification: FixedIpv4Address,
+    current_namespace: Ipv4NamespaceIdentity,
+    retained: &FixedVethBinding,
+    observed: &FixedVethBinding,
+) -> Result<(), Ipv4OperationError> {
+    verify_copied_veth_binding(specification, current_namespace, retained)?;
+    verify_copied_veth_binding(specification, current_namespace, observed)?;
+    if observed != retained {
         return Err(Ipv4OperationError::Unsafe(
-            "retained address no longer belongs to its veth pair",
-        ));
-    }
-    let observed = match specification.side() {
-        AddressSide::Parent => {
-            pair.verify().map_err(|_| {
-                Ipv4OperationError::Unsafe("retained parent veth verification failed")
-            })?;
-            InterfaceBinding {
-                ifindex: pair.parent_ifindex(),
-                name: pair.parent_name().to_owned(),
-            }
-        }
-        AddressSide::Endpoint => {
-            let target = pair.target_namespace_identity();
-            if target.device() != namespace.identity.device
-                || target.inode() != namespace.identity.inode
-            {
-                return Err(Ipv4OperationError::Unsafe(
-                    "retained endpoint namespace no longer matches the veth target",
-                ));
-            }
-            InterfaceBinding {
-                ifindex: pair.peer_ifindex(),
-                name: pair.peer_name().to_owned(),
-            }
-        }
-    };
-    if &observed != expected {
-        return Err(Ipv4OperationError::Unsafe(
-            "retained veth interface binding changed",
+            "retained address no longer matches its live veth pair",
         ));
     }
     Ok(())
+}
+
+fn verify_copied_veth_binding(
+    specification: FixedIpv4Address,
+    current_namespace: Ipv4NamespaceIdentity,
+    binding: &FixedVethBinding,
+) -> Result<(), Ipv4OperationError> {
+    if binding.endpoint != specification.endpoint()
+        || binding.mutation_namespace != current_namespace
+        || binding.target_namespace.device == 0
+        || binding.target_namespace.inode == 0
+    {
+        return Err(Ipv4OperationError::Unsafe(
+            "retained address no longer matches its copied veth binding",
+        ));
+    }
+    let namespace_matches_side = match specification.side() {
+        AddressSide::Parent => {
+            binding.mutation_namespace != binding.target_namespace
+                && binding.interface.name != FIXED_VETH_PEER_NAME
+        }
+        AddressSide::Endpoint => {
+            binding.mutation_namespace == binding.target_namespace
+                && binding.interface.name == FIXED_VETH_PEER_NAME
+        }
+    };
+    if !namespace_matches_side {
+        return Err(Ipv4OperationError::Unsafe(
+            "retained veth namespace lineage changed",
+        ));
+    }
+    validate_interface_binding(&binding.interface)
 }
 
 fn validate_interface_binding(binding: &InterfaceBinding) -> Result<(), Ipv4OperationError> {
@@ -989,11 +1037,11 @@ impl ReceiveBudget {
     }
 }
 
-fn encode_address_payload(journal: &AddressJournal<'_>) -> Result<Vec<u8>, Ipv4OperationError> {
+fn encode_address_payload(journal: &AddressJournal) -> Result<Vec<u8>, Ipv4OperationError> {
     encode_address_payload_for(
         journal.specification,
-        journal.interface.ifindex,
-        &journal.interface.name,
+        journal.veth.interface.ifindex,
+        &journal.veth.interface.name,
     )
 }
 
@@ -1317,9 +1365,12 @@ enum AddressPresence {
     Exact,
 }
 
-fn observe_presence(journal: &AddressJournal<'_>) -> Result<AddressPresence, Ipv4OperationError> {
-    journal.verify_context()?;
-    let observations = collect_interface_addresses(&journal.interface, journal.specification)?;
+fn observe_presence(
+    journal: &AddressJournal,
+    pair: &FixedVethPair,
+) -> Result<AddressPresence, Ipv4OperationError> {
+    journal.verify_context(pair)?;
+    let observations = collect_interface_addresses(&journal.veth.interface, journal.specification)?;
     match observations.as_slice() {
         [] => Ok(AddressPresence::Absent),
         [_] => Ok(AddressPresence::Exact),
@@ -1329,8 +1380,11 @@ fn observe_presence(journal: &AddressJournal<'_>) -> Result<AddressPresence, Ipv
     }
 }
 
-fn require_absence(journal: &AddressJournal<'_>) -> Result<(), Ipv4OperationError> {
-    match observe_presence(journal)? {
+fn require_absence(
+    journal: &AddressJournal,
+    pair: &FixedVethPair,
+) -> Result<(), Ipv4OperationError> {
+    match observe_presence(journal, pair)? {
         AddressPresence::Absent => Ok(()),
         AddressPresence::Exact => Err(Ipv4OperationError::Unsafe(
             "fixed IPv4 address already exists before installation",
@@ -1338,8 +1392,11 @@ fn require_absence(journal: &AddressJournal<'_>) -> Result<(), Ipv4OperationErro
     }
 }
 
-fn require_exact_presence(journal: &AddressJournal<'_>) -> Result<(), Ipv4OperationError> {
-    match observe_presence(journal)? {
+fn require_exact_presence(
+    journal: &AddressJournal,
+    pair: &FixedVethPair,
+) -> Result<(), Ipv4OperationError> {
+    match observe_presence(journal, pair)? {
         AddressPresence::Exact => Ok(()),
         AddressPresence::Absent => Err(Ipv4OperationError::Unsafe(
             "retained fixed IPv4 address is absent",
@@ -1655,8 +1712,11 @@ fn parse_dump_error(
     }
 }
 
-fn delete_journal_exact(journal: &AddressJournal<'_>) -> Result<(), Ipv4OperationError> {
-    require_exact_presence(journal)?;
+fn delete_journal_exact(
+    journal: &AddressJournal,
+    pair: &FixedVethPair,
+) -> Result<(), Ipv4OperationError> {
+    require_exact_presence(journal, pair)?;
     let payload = encode_address_payload(journal)?;
     let deadline = Deadline::after(IPV4_OPERATION_TIMEOUT)?;
     let mut client = NetlinkClient::connect(deadline)?;
@@ -1674,7 +1734,7 @@ fn delete_journal_exact(journal: &AddressJournal<'_>) -> Result<(), Ipv4Operatio
         }
     }
     drop(client);
-    match observe_presence(journal)? {
+    match observe_presence(journal, pair)? {
         AddressPresence::Absent => Ok(()),
         AddressPresence::Exact => Err(Ipv4OperationError::Unsafe(
             "deleted fixed IPv4 address remains visible",
@@ -1682,10 +1742,13 @@ fn delete_journal_exact(journal: &AddressJournal<'_>) -> Result<(), Ipv4Operatio
     }
 }
 
-fn reconcile_journal(journal: &AddressJournal<'_>) -> Result<(), Ipv4OperationError> {
+fn reconcile_journal(
+    journal: &AddressJournal,
+    pair: &FixedVethPair,
+) -> Result<(), Ipv4OperationError> {
     reconcile_observed_state(
-        || observe_presence(journal),
-        || delete_journal_exact(journal),
+        || observe_presence(journal, pair),
+        || delete_journal_exact(journal, pair),
     )
 }
 
@@ -1814,6 +1877,10 @@ mod tests {
         }
     }
 
+    const fn namespace_identity(device: u64, inode: u64) -> Ipv4NamespaceIdentity {
+        Ipv4NamespaceIdentity { device, inode }
+    }
+
     fn request(message_type: u16, flags: u16) -> Vec<u8> {
         let payload = encode_address_payload_for(FixedIpv4Address::EndpointA, IFINDEX, NAME)
             .expect("address payload");
@@ -1893,6 +1960,159 @@ mod tests {
         ] {
             assert_eq!(address.prefix_length(), 30);
         }
+    }
+
+    #[test]
+    fn copied_veth_binding_is_fixed_to_endpoint_interface_and_namespace_lineage() {
+        let parent = namespace_identity(1, 11);
+        let target = namespace_identity(1, 12);
+        let parent_binding = FixedVethBinding {
+            endpoint: FixedVethEndpoint::A,
+            interface: InterfaceBinding {
+                ifindex: IFINDEX,
+                name: "vp-fixed-a".to_owned(),
+            },
+            mutation_namespace: parent,
+            target_namespace: target,
+        };
+        verify_copied_veth_binding(FixedIpv4Address::ParentA, parent, &parent_binding)
+            .expect("exact copied parent binding");
+
+        let endpoint_binding = FixedVethBinding {
+            endpoint: FixedVethEndpoint::A,
+            interface: binding(),
+            mutation_namespace: target,
+            target_namespace: target,
+        };
+        verify_copied_veth_binding(FixedIpv4Address::EndpointA, target, &endpoint_binding)
+            .expect("exact copied endpoint binding");
+
+        let mut changed = parent_binding.clone();
+        changed.endpoint = FixedVethEndpoint::B;
+        assert!(verify_copied_veth_binding(FixedIpv4Address::ParentA, parent, &changed).is_err());
+
+        let mut changed = parent_binding.clone();
+        changed.mutation_namespace = target;
+        assert!(verify_copied_veth_binding(FixedIpv4Address::ParentA, target, &changed).is_err());
+
+        let mut changed = parent_binding.clone();
+        changed.target_namespace = namespace_identity(0, 0);
+        assert!(verify_copied_veth_binding(FixedIpv4Address::ParentA, parent, &changed).is_err());
+
+        let mut changed = parent_binding.clone();
+        changed.interface.name = FIXED_VETH_PEER_NAME.to_owned();
+        assert!(verify_copied_veth_binding(FixedIpv4Address::ParentA, parent, &changed).is_err());
+
+        let mut changed = endpoint_binding.clone();
+        changed.target_namespace = namespace_identity(1, 13);
+        assert!(verify_copied_veth_binding(FixedIpv4Address::EndpointA, target, &changed).is_err());
+
+        let mut changed = endpoint_binding.clone();
+        changed.interface.name = "vp-fixed-a".to_owned();
+        assert!(verify_copied_veth_binding(FixedIpv4Address::EndpointA, target, &changed).is_err());
+    }
+
+    #[test]
+    fn live_veth_binding_rejects_wrong_pair_interface_and_namespace_lineage() {
+        let parent = namespace_identity(1, 11);
+        let target = namespace_identity(1, 12);
+        let retained = FixedVethBinding {
+            endpoint: FixedVethEndpoint::A,
+            interface: InterfaceBinding {
+                ifindex: IFINDEX,
+                name: "vp-fixed-a".to_owned(),
+            },
+            mutation_namespace: parent,
+            target_namespace: target,
+        };
+        require_exact_live_veth_binding(FixedIpv4Address::ParentA, parent, &retained, &retained)
+            .expect("same live pair binding");
+
+        let mut wrong_pair = retained.clone();
+        wrong_pair.endpoint = FixedVethEndpoint::B;
+        assert!(
+            require_exact_live_veth_binding(
+                FixedIpv4Address::ParentA,
+                parent,
+                &retained,
+                &wrong_pair,
+            )
+            .is_err()
+        );
+
+        let mut wrong_interface = retained.clone();
+        wrong_interface.interface.ifindex += 1;
+        assert!(
+            require_exact_live_veth_binding(
+                FixedIpv4Address::ParentA,
+                parent,
+                &retained,
+                &wrong_interface,
+            )
+            .is_err()
+        );
+
+        let mut wrong_lineage = retained.clone();
+        wrong_lineage.target_namespace = namespace_identity(1, 13);
+        assert!(
+            require_exact_live_veth_binding(
+                FixedIpv4Address::ParentA,
+                parent,
+                &retained,
+                &wrong_lineage,
+            )
+            .is_err()
+        );
+
+        let retained_endpoint = FixedVethBinding {
+            endpoint: FixedVethEndpoint::A,
+            interface: binding(),
+            mutation_namespace: target,
+            target_namespace: target,
+        };
+        require_exact_live_veth_binding(
+            FixedIpv4Address::EndpointA,
+            target,
+            &retained_endpoint,
+            &retained_endpoint,
+        )
+        .expect("same live endpoint binding");
+
+        let mut wrong_endpoint_peer = retained_endpoint.clone();
+        wrong_endpoint_peer.interface.ifindex += 1;
+        assert!(
+            require_exact_live_veth_binding(
+                FixedIpv4Address::EndpointA,
+                target,
+                &retained_endpoint,
+                &wrong_endpoint_peer,
+            )
+            .is_err()
+        );
+
+        let mut wrong_endpoint_lineage = retained_endpoint.clone();
+        wrong_endpoint_lineage.target_namespace = namespace_identity(1, 13);
+        assert!(
+            require_exact_live_veth_binding(
+                FixedIpv4Address::EndpointA,
+                target,
+                &retained_endpoint,
+                &wrong_endpoint_lineage,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn standalone_owner_drop_never_authorizes_copied_only_cleanup() {
+        assert_eq!(
+            standalone_owner_drop_action(true),
+            StandaloneOwnerDropAction::AbortWithoutMutation
+        );
+        assert_eq!(
+            standalone_owner_drop_action(false),
+            StandaloneOwnerDropAction::Finish
+        );
     }
 
     #[test]
