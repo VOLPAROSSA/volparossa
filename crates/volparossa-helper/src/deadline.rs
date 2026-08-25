@@ -12,7 +12,7 @@ use std::{
 use nix::poll::{PollFd, PollFlags, poll};
 
 /// One absolute monotonic deadline which can be copied through a complete kernel transaction.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HardDeadline {
     expires_at: Instant,
 }
@@ -27,6 +27,27 @@ impl HardDeadline {
             .checked_add(duration)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "deadline overflow"))?;
         Ok(Self { expires_at })
+    }
+
+    /// Construct a deadline from one already-established monotonic instant.
+    ///
+    /// This rejects an instant which is already at or behind the current clock. Callers can
+    /// therefore copy the returned value through a transaction without silently reviving an
+    /// expired operation by creating a new relative timeout.
+    pub(crate) fn at(expires_at: Instant) -> io::Result<Self> {
+        let deadline = Self { expires_at };
+        deadline.ensure_remaining()?;
+        Ok(deadline)
+    }
+
+    /// Return the exact monotonic expiry carried by this deadline.
+    pub(crate) const fn expires_at(self) -> Instant {
+        self.expires_at
+    }
+
+    /// Return the remaining budget without extending the absolute deadline.
+    pub(crate) fn remaining(self) -> io::Result<Duration> {
+        self.remaining_at(Instant::now())
     }
 
     /// Fail before performing another I/O operation once the absolute deadline has elapsed.
@@ -59,11 +80,6 @@ impl HardDeadline {
         u16::try_from(rounded_up.clamp(1, u128::from(u16::MAX)))
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "deadline is invalid"))
     }
-
-    #[cfg(test)]
-    const fn at(expires_at: Instant) -> Self {
-        Self { expires_at }
-    }
 }
 
 /// Wait for one exact readiness class without ever resetting `deadline`.
@@ -71,6 +87,27 @@ pub(crate) fn wait_for_fd<F: AsFd>(
     descriptor: &F,
     required: PollFlags,
     deadline: HardDeadline,
+) -> io::Result<()> {
+    wait_for_fd_inner(descriptor, required, deadline, false)
+}
+
+/// Wait for readable data while permitting a simultaneous peer hangup.
+///
+/// Linux reports `POLLIN | POLLHUP` when a seqpacket peer queues its terminal record and exits.
+/// The record must still be consumed and authenticated. A bare hangup, `POLLERR`, and `POLLNVAL`
+/// remain terminal errors.
+pub(crate) fn wait_for_readable_fd<F: AsFd>(
+    descriptor: &F,
+    deadline: HardDeadline,
+) -> io::Result<()> {
+    wait_for_fd_inner(descriptor, PollFlags::POLLIN, deadline, true)
+}
+
+fn wait_for_fd_inner<F: AsFd>(
+    descriptor: &F,
+    required: PollFlags,
+    deadline: HardDeadline,
+    allow_hangup_with_readiness: bool,
 ) -> io::Result<()> {
     if required.is_empty()
         || required.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
@@ -95,9 +132,10 @@ pub(crate) fn wait_for_fd<F: AsFd>(
         let events = descriptors[0]
             .revents()
             .ok_or_else(|| io::Error::other("poll returned no readiness state"))?;
-        if events.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
-            || !events.contains(required)
-        {
+        let terminal = events.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL)
+            || (events.contains(PollFlags::POLLHUP)
+                && (!allow_hangup_with_readiness || !events.contains(required)));
+        if terminal || !events.contains(required) {
             return Err(io::Error::other("descriptor readiness is invalid"));
         }
         deadline.ensure_remaining()?;
@@ -121,7 +159,9 @@ mod tests {
     #[test]
     fn timeout_is_absolute_and_never_resets_between_steps() {
         let start = Instant::now();
-        let deadline = HardDeadline::at(start + Duration::from_secs(3));
+        let deadline = HardDeadline {
+            expires_at: start + Duration::from_secs(3),
+        };
         assert_eq!(
             deadline.poll_timeout_at(start).expect("initial budget"),
             3_000
@@ -149,7 +189,9 @@ mod tests {
 
     #[test]
     fn completion_cannot_report_success_after_expiry() {
-        let expired = HardDeadline::at(Instant::now());
+        let expired = HardDeadline {
+            expires_at: Instant::now(),
+        };
         assert_eq!(
             expired
                 .complete(7_u8)
@@ -169,7 +211,9 @@ mod tests {
         let deadline = HardDeadline::after(Duration::from_secs(1)).expect("deadline");
         wait_for_fd(&receiver, PollFlags::POLLIN, deadline).expect("readable");
 
-        let expired = HardDeadline::at(Instant::now());
+        let expired = HardDeadline {
+            expires_at: Instant::now(),
+        };
         assert_eq!(
             wait_for_fd(&receiver, PollFlags::POLLIN, expired)
                 .expect_err("expired before poll")
@@ -179,5 +223,20 @@ mod tests {
         let mut byte = [0_u8; 1];
         receiver.read_exact(&mut byte).expect("byte remains queued");
         assert_eq!(byte, *b"x");
+    }
+
+    #[test]
+    fn exact_constructor_preserves_identity_and_rejects_equality() {
+        let expires_at = Instant::now() + Duration::from_secs(1);
+        let deadline = HardDeadline::at(expires_at).expect("future absolute deadline");
+        assert_eq!(deadline.expires_at(), expires_at);
+        assert!(deadline.remaining().expect("remaining budget") <= Duration::from_secs(1));
+
+        assert_eq!(
+            HardDeadline::at(Instant::now())
+                .expect_err("equality is expired")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
     }
 }
