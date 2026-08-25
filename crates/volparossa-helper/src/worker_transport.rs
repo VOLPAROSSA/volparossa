@@ -24,7 +24,7 @@ use thiserror::Error;
 use volparossa_linux_uapi::{
     duplicate_descriptor_cloexec, mptcp_info, receive_binding_without_fd, receive_fd_with_binding,
     receive_seqpacket_without_fd, send_binding_without_fd, send_fd_with_binding,
-    send_seqpacket_without_fd,
+    send_seqpacket_without_fd, socket_network_namespace,
 };
 
 use crate::{
@@ -36,6 +36,7 @@ use crate::{
         encode_request, encode_response, internal_worker_request, transport_descriptor_binding,
         transport_descriptor_source_released_binding, validate_response_for_request,
     },
+    worker_sandbox::PinnedWorkerNetworkNamespace,
 };
 
 const WORKER_IPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -208,6 +209,8 @@ pub(crate) enum WorkerTransportError {
     Timeout,
     #[error("worker IPC or kernel socket operation failed")]
     Io(#[from] io::Error),
+    #[error("worker network-namespace proof failed")]
+    Sandbox(#[from] crate::worker_sandbox::WorkerSandboxError),
 }
 
 /// Creates a private, bounded blocking `SOCK_SEQPACKET` channel.
@@ -926,9 +929,9 @@ pub(crate) fn create_transport_socket(
 ///
 /// The descriptor cannot escape on rejection: converting it to [`Socket`] preserves its affine
 /// ownership, and every error drops that owner. This proves the parent-observed kernel socket
-/// shape only. The credentialed receive path separately requires the worker's source-release
-/// barrier before returning its descriptor. A later production adapter must additionally prove the
-/// socket's pinned network namespace before publishing success.
+/// shape and uses `SIOCGSKNS` to prove its exact still-pinned worker network namespace. The
+/// credentialed receive path separately requires the worker's source-release barrier before this
+/// validation may run.
 ///
 /// # Errors
 ///
@@ -936,6 +939,22 @@ pub(crate) fn create_transport_socket(
 /// exact domain, type, protocol, local/peer tuples, flags, listener state and error state. A
 /// connected MPTCP descriptor must additionally prove genuine negotiation without TCP fallback.
 pub(crate) fn validate_adopted_transport_socket(
+    expected_namespace: &PinnedWorkerNetworkNamespace,
+    request: &AcquireTransportSocket,
+    descriptor: OwnedFd,
+) -> Result<OwnedFd, WorkerTransportError> {
+    let expectation = transport_socket_expectation(request)?;
+    let socket = Socket::from(descriptor);
+    let observed_namespace = socket_network_namespace(&socket)?;
+    if !expected_namespace.matches_descriptor(&observed_namespace)? {
+        return Err(WorkerTransportError::Invalid);
+    }
+    validate_transport_socket(&socket, expectation)?;
+    Ok(socket.into())
+}
+
+#[cfg(test)]
+fn validate_adopted_transport_socket_shape(
     descriptor: OwnedFd,
     request: &AcquireTransportSocket,
 ) -> Result<OwnedFd, WorkerTransportError> {
@@ -1261,14 +1280,17 @@ fn errno_io(error: nix::errno::Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::{
+        env,
         io::{IoSlice, Read as _, Write as _},
         net::UdpSocket,
         os::fd::{AsRawFd as _, IntoRawFd as _, OwnedFd},
         os::unix::net::UnixStream,
+        process::{Command, Stdio},
         thread,
         time::Instant,
     };
 
+    use nix::sched::{CloneFlags, unshare};
     use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
     use prost::Message as _;
     use volparossa_linux_uapi::{
@@ -1280,6 +1302,10 @@ mod tests {
         INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, InternalSocketAddress,
         TransportSocketReady, encode_request, internal_worker_response,
     };
+    use crate::worker_sandbox::WorkerKernelPins;
+
+    const ADOPTED_SOCKET_NAMESPACE_CHILD_ENV: &str =
+        "VOLPAROSSA_ADOPTED_SOCKET_NAMESPACE_TEST_CHILD";
 
     fn address(octets: [u8; 4], port: u32) -> InternalSocketAddress {
         InternalSocketAddress {
@@ -1380,6 +1406,21 @@ mod tests {
             !target.as_deref().is_ok_and(|current| current == original),
             "rejected descriptor {raw} retained its original target {original:?}"
         );
+    }
+
+    fn unprivileged_user_namespace_policy_denied(
+        status_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> bool {
+        status_code == Some(1)
+            && stdout.is_empty()
+            && matches!(
+                stderr,
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            )
     }
 
     fn current_expected_credentials() -> ExpectedUnixCredentials {
@@ -2192,12 +2233,99 @@ mod tests {
     }
 
     #[test]
+    fn adopted_socket_namespace_proof_requires_exact_live_netns() {
+        if env::var_os(ADOPTED_SOCKET_NAMESPACE_CHILD_ENV).is_some() {
+            let original_pins = WorkerKernelPins::fixture();
+            let original_namespace = original_pins
+                .duplicate_network_namespace_pin()
+                .expect("pin first live network namespace");
+            let (socket, local) = freebound_udp();
+            let request =
+                acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+            let descriptor = validate_adopted_transport_socket(
+                &original_namespace,
+                acquire_operation(&request),
+                socket.into(),
+            )
+            .expect("adopt socket from exact first namespace");
+            drop(descriptor);
+
+            unshare(CloneFlags::CLONE_NEWNET).expect("enter second live network namespace");
+            let (wrong_namespace_socket, local) = freebound_udp();
+            let request =
+                acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+            let raw = wrong_namespace_socket.as_raw_fd();
+            let target = descriptor_target(raw);
+            assert!(matches!(
+                validate_adopted_transport_socket(
+                    &original_namespace,
+                    acquire_operation(&request),
+                    wrong_namespace_socket.into(),
+                ),
+                Err(WorkerTransportError::Invalid)
+            ));
+            assert_descriptor_closed(raw, &target);
+
+            let second_pins = WorkerKernelPins::fixture();
+            let second_namespace = second_pins
+                .duplicate_network_namespace_pin()
+                .expect("pin second live network namespace");
+            assert_ne!(
+                original_namespace.identity_for_test(),
+                second_namespace.identity_for_test()
+            );
+            let (socket, local) = freebound_udp();
+            let request =
+                acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+            drop(
+                validate_adopted_transport_socket(
+                    &second_namespace,
+                    acquire_operation(&request),
+                    socket.into(),
+                )
+                .expect("adopt socket from exact second namespace"),
+            );
+            return;
+        }
+
+        let executable = env::current_exe().expect("current helper test executable");
+        let output = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(executable)
+            .arg("--exact")
+            .arg(
+                "worker_transport::tests::adopted_socket_namespace_proof_requires_exact_live_netns",
+            )
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(ADOPTED_SOCKET_NAMESPACE_CHILD_ENV, "1")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn isolated adopted-socket namespace test");
+        if unprivileged_user_namespace_policy_denied(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ) {
+            eprintln!("skipped live adopted-socket proof: user namespaces denied by policy");
+            return;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "isolated adopted-socket proof failed\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+
+    #[test]
     fn adopted_udp_is_consumed_and_returned_only_for_the_exact_request_shape() {
         let (socket, local) = freebound_udp();
         let request =
             acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
         let descriptor =
-            validate_adopted_transport_socket(socket.into(), acquire_operation(&request))
+            validate_adopted_transport_socket_shape(socket.into(), acquire_operation(&request))
                 .expect("exact adopted UDP");
         let adopted = Socket::from(descriptor);
         assert_eq!(
@@ -2213,7 +2341,8 @@ mod tests {
         let raw = socket.as_raw_fd();
         let target = descriptor_target(raw);
         assert!(
-            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+            validate_adopted_transport_socket_shape(socket.into(), acquire_operation(&request))
+                .is_err()
         );
         assert_descriptor_closed(raw, &target);
     }
@@ -2229,7 +2358,8 @@ mod tests {
         let raw = socket.as_raw_fd();
         let target = descriptor_target(raw);
         assert!(
-            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+            validate_adopted_transport_socket_shape(socket.into(), acquire_operation(&request))
+                .is_err()
         );
         assert_descriptor_closed(raw, &target);
 
@@ -2240,7 +2370,8 @@ mod tests {
         let raw = socket.as_raw_fd();
         let target = descriptor_target(raw);
         assert!(
-            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+            validate_adopted_transport_socket_shape(socket.into(), acquire_operation(&request))
+                .is_err()
         );
         assert_descriptor_closed(raw, &target);
     }
@@ -2253,7 +2384,8 @@ mod tests {
         let raw = socket.as_raw_fd();
         let target = descriptor_target(raw);
         assert!(
-            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+            validate_adopted_transport_socket_shape(socket.into(), acquire_operation(&request))
+                .is_err()
         );
         assert_descriptor_closed(raw, &target);
     }
@@ -2285,14 +2417,15 @@ mod tests {
         let raw = tcp.as_raw_fd();
         let target = descriptor_target(raw);
         assert!(
-            validate_adopted_transport_socket(tcp.into(), acquire_operation(&request)).is_err()
+            validate_adopted_transport_socket_shape(tcp.into(), acquire_operation(&request))
+                .is_err()
         );
         assert_descriptor_closed(raw, &target);
 
         let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
         let (wrong_type, mut peer) = UnixStream::pair().expect("wrong-type descriptor pair");
         assert!(
-            validate_adopted_transport_socket(
+            validate_adopted_transport_socket_shape(
                 OwnedFd::from(wrong_type),
                 acquire_operation(&request),
             )
@@ -2314,7 +2447,8 @@ mod tests {
         let raw = socket.as_raw_fd();
         let target = descriptor_target(raw);
         assert!(
-            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+            validate_adopted_transport_socket_shape(socket.into(), acquire_operation(&request))
+                .is_err()
         );
         assert_descriptor_closed(raw, &target);
     }

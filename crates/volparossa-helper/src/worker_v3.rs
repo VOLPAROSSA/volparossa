@@ -62,7 +62,7 @@ use crate::{
         receive_credential_record_with_deadline, receive_credential_worker_request,
         receive_credential_worker_response_with_deadline, send_credential_record,
         send_credential_record_with_deadline, send_credential_worker_request_with_deadline,
-        send_credential_worker_response,
+        send_credential_worker_response, validate_adopted_transport_socket,
     },
 };
 use volparossa_linux_uapi::install_close_range_on_exec;
@@ -1936,6 +1936,29 @@ impl WorkerProcess {
         Ok(self.channel.try_clone()?)
     }
 
+    fn duplicate_network_namespace_pin(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<crate::worker_sandbox::PinnedWorkerNetworkNamespace, WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        let retirement = match self.retirement.try_lock() {
+            Ok(retirement) => retirement,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                ensure_worker_deadline(deadline)?;
+                return Err(WorkerV3Error::Ambiguous);
+            }
+        };
+        ensure_worker_deadline(deadline)?;
+        let pins = retirement
+            .as_ref()
+            .and_then(|retirement| retirement.kernel_pins.as_ref())
+            .ok_or(WorkerV3Error::Authentication)?;
+        let duplicate = pins.duplicate_network_namespace_pin()?;
+        ensure_worker_deadline(deadline)?;
+        Ok(duplicate)
+    }
+
     #[cfg(test)]
     fn fake(channel: Socket, child_pid: u32, alive: Arc<AtomicBool>) -> Self {
         Self::fake_with_termination(channel, child_pid, alive, true)
@@ -2016,7 +2039,7 @@ impl WorkerProcess {
                 alive_hint: Arc::clone(&alive),
             },
             permit: Some(acquire_retirement_permit().expect("test process retirement permit")),
-            kernel_pins: None,
+            kernel_pins: Some(crate::worker_sandbox::WorkerKernelPins::fixture()),
             armed: true,
         };
         Self {
@@ -2123,6 +2146,7 @@ struct PlannedCall {
     channel: Socket,
     liveness: WorkerLiveness,
     expected_peer: ExpectedUnixCredentials,
+    pinned_network_namespace: Option<crate::worker_sandbox::PinnedWorkerNetworkNamespace>,
 }
 
 struct CachedCall {
@@ -2454,6 +2478,39 @@ impl WorkerRegistry {
         self.commit_reserved(reservation, process, now)
     }
 
+    fn prepare_call_owners(
+        &self,
+        context_id: ContextId,
+        generation: u64,
+        request: &InternalWorkerRequest,
+        deadline: HardDeadline,
+    ) -> Result<
+        (
+            Socket,
+            Option<crate::worker_sandbox::PinnedWorkerNetworkNamespace>,
+        ),
+        WorkerV3Error,
+    > {
+        let record = self.records.get(&context_id).ok_or(WorkerV3Error::Dead)?;
+        if record.generation != generation {
+            return Err(WorkerV3Error::Stale);
+        }
+        if record.quarantined {
+            return Err(WorkerV3Error::Quarantined);
+        }
+        let process = record.process.as_ref().ok_or(WorkerV3Error::Dead)?;
+        let pinned_network_namespace = matches!(
+            request.operation.as_ref(),
+            Some(internal_worker_request::Operation::AcquireTransportSocket(
+                _
+            ))
+        )
+        .then(|| process.duplicate_network_namespace_pin(deadline))
+        .transpose()?;
+        ensure_worker_deadline(deadline)?;
+        Ok((process.clone_channel()?, pinned_network_namespace))
+    }
+
     fn plan_until(
         &mut self,
         context_id: ContextId,
@@ -2478,7 +2535,7 @@ impl WorkerRegistry {
             request_id: key.request_id,
         };
 
-        let (phase, expires_at, liveness, channel, expected_peer, in_flight) = {
+        let (phase, expires_at, liveness, expected_peer, in_flight) = {
             let record = self.records.get(&context_id).ok_or(WorkerV3Error::Dead)?;
             if record.generation != generation {
                 return Err(WorkerV3Error::Stale);
@@ -2491,7 +2548,6 @@ impl WorkerRegistry {
                 record.stable_phase,
                 record.expires_at,
                 process.liveness(),
-                process.clone_channel()?,
                 process.expected_peer,
                 record.in_flight,
             )
@@ -2529,6 +2585,9 @@ impl WorkerRegistry {
         }
 
         let (success_phase, terminal) = transition(phase, request)?;
+        let (channel, pinned_network_namespace) =
+            self.prepare_call_owners(context_id, generation, request, deadline)?;
+        ensure_worker_deadline(deadline)?;
         let in_flight = InFlight {
             key,
             prior_phase: phase,
@@ -2558,6 +2617,7 @@ impl WorkerRegistry {
             channel,
             liveness,
             expected_peer,
+            pinned_network_namespace,
         }))
     }
 
@@ -3192,18 +3252,55 @@ impl WorkerSupervisor {
         call: PlannedCall,
         request: InternalWorkerRequest,
     ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
-        let token = call.token;
+        let PlannedCall {
+            token,
+            channel,
+            liveness,
+            expected_peer,
+            pinned_network_namespace,
+        } = call;
         let deadline = token.in_flight.deadline;
         let io_request = request.clone();
         let result = tokio::task::spawn_blocking(move || {
-            send_credential_worker_request_with_deadline(&call.channel, &io_request, deadline)?;
-            let execution = receive_credential_worker_response_with_deadline(
-                &call.channel,
+            send_credential_worker_request_with_deadline(&channel, &io_request, deadline)?;
+            let mut execution = receive_credential_worker_response_with_deadline(
+                &channel,
                 &io_request,
-                call.expected_peer,
+                expected_peer,
                 deadline,
             )?;
-            let worker_alive = call.liveness.probe_alive_until(deadline)?;
+            let worker_alive = liveness.probe_alive_until(deadline)?;
+            ensure_worker_deadline(deadline)?;
+            if !worker_alive {
+                return Ok((execution, false));
+            }
+            match io_request.operation.as_ref() {
+                Some(internal_worker_request::Operation::AcquireTransportSocket(acquire))
+                    if execution.response.result == InternalWorkerResult::Ok as i32 =>
+                {
+                    let expected_namespace = pinned_network_namespace
+                        .as_ref()
+                        .ok_or(WorkerV3Error::Authentication)?;
+                    let descriptor = execution.descriptor.take().ok_or(WorkerV3Error::Invalid)?;
+                    execution.descriptor = Some(validate_adopted_transport_socket(
+                        expected_namespace,
+                        acquire,
+                        descriptor,
+                    )?);
+                }
+                Some(internal_worker_request::Operation::AcquireTransportSocket(_)) => {
+                    if pinned_network_namespace.is_none() || execution.descriptor.is_some() {
+                        return Err(WorkerV3Error::Invalid);
+                    }
+                }
+                _ => {
+                    if pinned_network_namespace.is_some() || execution.descriptor.is_some() {
+                        return Err(WorkerV3Error::Invalid);
+                    }
+                }
+            }
+            ensure_worker_deadline(deadline)?;
+            let worker_alive = liveness.probe_alive_until(deadline)?;
             ensure_worker_deadline(deadline)?;
             Ok::<_, WorkerV3Error>((execution, worker_alive))
         })
@@ -5932,6 +6029,26 @@ mod tests {
                 "registry process-operation regression: {forbidden}"
             );
         }
+
+        let duplicate_start = source
+            .find("    fn duplicate_network_namespace_pin(\n")
+            .expect("worker-process namespace-pin duplicator");
+        let duplicate_end = source[duplicate_start..]
+            .find("\n    #[cfg(test)]\n    fn fake(")
+            .map(|offset| duplicate_start + offset)
+            .expect("worker-process namespace-pin duplicator end");
+        let duplicate_source = &source[duplicate_start..duplicate_end];
+        for forbidden in [
+            "ensure_pinned_child_alive",
+            ".ensure_alive(",
+            ".probe_alive(",
+            ".probe_alive_until(",
+        ] {
+            assert!(
+                !duplicate_source.contains(forbidden),
+                "registry-locked namespace duplication must not probe the process: {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -6350,6 +6467,92 @@ mod tests {
     }
 
     #[test]
+    fn only_acquire_requires_a_worker_namespace_pin_during_planning() {
+        let now = Instant::now();
+        let context_id = [59; 16];
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, _peer, alive) = fake_process(Duration::from_secs(1));
+        process
+            .retirement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .expect("armed fake retirement")
+            .kernel_pins = None;
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), now)
+            .expect("register");
+
+        let planned = call(
+            registry
+                .plan(context_id, generation, &initialise(context_id, 44), now)
+                .expect("non-Acquire plan without network namespace pins"),
+        );
+        assert!(planned.pinned_network_namespace.is_none());
+        let token = planned.token;
+        drop(planned);
+        let detached = registry
+            .mark_ambiguous(token)
+            .expect("retire planned fixture")
+            .expect("owned fake worker");
+        stop_and_purge(&mut registry, detached);
+        assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn acquire_pin_failure_precedes_request_tombstone_and_inflight_mutation() {
+        let now = Instant::now();
+        let context_id = [60; 16];
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, peer, alive) = fake_process(Duration::from_secs(1));
+        process
+            .retirement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .expect("armed fake retirement")
+            .kernel_pins = None;
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), now)
+            .expect("register");
+        registry
+            .records
+            .get_mut(&context_id)
+            .expect("record")
+            .stable_phase = StablePhase::Committed;
+
+        assert!(matches!(
+            registry.plan(context_id, generation, &acquire(context_id, 45), now),
+            Err(WorkerV3Error::Authentication)
+        ));
+        let record = registry.records.get(&context_id).expect("unchanged record");
+        assert_eq!(record.stable_phase, StablePhase::Committed);
+        assert!(record.in_flight.is_none());
+        assert!(!record.quarantined);
+        assert!(record.process.is_some());
+        assert!(registry.tombstones.is_empty());
+        assert!(registry.tombstone_order.is_empty());
+        assert!(registry.cache.is_empty());
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            nix::sys::socket::recv(
+                peer.as_raw_fd(),
+                &mut byte,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            ),
+            Err(Errno::EAGAIN),
+            "failed pre-mutation pinning must not write the worker channel",
+        );
+
+        let detached = registry
+            .report_dead(context_id, generation)
+            .expect("quarantine fixture")
+            .expect("owned fake worker");
+        stop_and_purge(&mut registry, detached);
+        assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn fd_operation_tombstone_is_bounded_and_never_replayed() {
         let now = Instant::now();
         let context_id = [6; 16];
@@ -6369,6 +6572,7 @@ mod tests {
                 .plan(context_id, generation, &request, now)
                 .expect("Acquire plan"),
         );
+        assert!(planned.pinned_network_namespace.is_some());
         let response = acquire_response(&request);
         assert!(matches!(
             registry.finish(planned.token, &request, &response, now, true),
@@ -7735,6 +7939,53 @@ mod tests {
             0,
             "the rejected credentialed descriptor must close before returning"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_adopted_descriptor_is_closed_and_generation_is_retired() {
+        let context_id = [61; 16];
+        let request = acquire(context_id, 46);
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, peer, alive) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("register");
+        registry
+            .records
+            .get_mut(&context_id)
+            .expect("record")
+            .stable_phase = StablePhase::Committed;
+        let (sent, observer) = Socket::pair(Domain::UNIX, Type::STREAM.cloexec(), None::<Protocol>)
+            .expect("descriptor pair");
+        observer
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("observer timeout");
+        let sent: OwnedFd = sent.into();
+        let worker = thread::spawn(move || {
+            let request =
+                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let response = acquire_response(&request);
+            send_credential_worker_response(&peer, &request, &response, Some(sent))
+                .expect("invalid FD response");
+        });
+
+        let coordinator = WorkerCoordinator::new(registry);
+        assert!(matches!(
+            coordinator.execute(context_id, generation, request).await,
+            Err(WorkerV3Error::Ambiguous)
+        ));
+        worker.join().expect("worker join");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            (&observer).read(&mut byte).expect("observer EOF"),
+            0,
+            "namespace or shape rejection must consume and close the descriptor"
+        );
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(matches!(
+            coordinator.phase(context_id, generation),
+            Err(WorkerV3Error::Stale)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
