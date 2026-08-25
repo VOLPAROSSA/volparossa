@@ -2,8 +2,8 @@
 //!
 //! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], the fixed
 //! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], the fixed
-//! close-on-exec duplication in [`duplicate_descriptor_cloexec`], taking immediate RAII ownership
-//! of descriptors installed by the bounded receive helpers, the
+//! [`socket_network_namespace`] and close-on-exec duplication wrappers, taking immediate RAII
+//! ownership of descriptors installed by the bounded receive helpers, the
 //! [`install_close_range_on_exec`] process hook, the read-only
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
@@ -15,10 +15,10 @@
 //! no caller-controlled filter, action, syscall number, flag, or pointer.
 //! The PID-1 signal wrapper installs and reads back only the fixed `SIGHUP`, `SIGINT`, and
 //! `SIGTERM` emergency dispositions; its handler can only call `_exit(2)`.
-//! The nsfs wrappers use the exact Debian 13 `<linux/nsfs.h>` request values and expose no
-//! caller-controlled ioctl request or argument. A returned owning-user-namespace descriptor is
-//! placed in [`OwnedFd`] immediately, then required to be read-only, close-on-exec, and a user
-//! namespace before it is returned.
+//! The namespace wrappers use the exact Debian 13 `<linux/nsfs.h>` and `<linux/sockios.h>` request
+//! values and expose no caller-controlled ioctl request or argument. Every returned namespace
+//! descriptor is placed in [`OwnedFd`] immediately, then required to be read-only, close-on-exec,
+//! and the exact expected namespace type before it is returned.
 //! The MPTCP buffer uses the exact Debian 13 `/usr/include/linux/mptcp.h`
 //! `struct mptcp_info` layout, is fully initialized before FFI, and its returned
 //! length is checked before any field is trusted.
@@ -53,6 +53,8 @@ const MPTCP_INFO: libc::c_int = 1;
 const NS_GET_USERNS: libc::c_ulong = 0xb701;
 /// `NS_GET_NSTYPE` from the Debian 13 `<linux/nsfs.h>` UAPI.
 const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
+/// `SIOCGSKNS` from the Debian 13 `<linux/sockios.h>` UAPI.
+const SIOCGSKNS: libc::c_ulong = 0x894c;
 const MPTCP_INFO_FLAG_FALLBACK: u32 = 1 << 0;
 const MPTCP_INFO_FLAG_REMOTE_KEY_RECEIVED: u32 = 1 << 1;
 const MAX_HANDOFF_FDS: usize = 2;
@@ -195,6 +197,58 @@ pub fn owning_user_namespace<Fd: AsFd>(namespace: &Fd) -> io::Result<OwnedFd> {
     }
 
     Ok(owner)
+}
+
+/// Opens and validates the network namespace which owns a socket.
+///
+/// The fixed Linux `SIOCGSKNS` ioctl accepts no argument and borrows the source socket. It requires
+/// `CAP_NET_ADMIN` in the socket's network namespace. On success, ownership of the returned
+/// descriptor moves immediately into [`OwnedFd`], so every later validation failure closes it. The
+/// descriptor is returned only when kernel readback proves `FD_CLOEXEC`, read-only access, and
+/// namespace type `CLONE_NEWNET`.
+///
+/// # Errors
+///
+/// Returns the kernel error when the source is not a socket, the caller lacks permission, the
+/// namespace cannot be opened, or descriptor flags cannot be read. Returns `InvalidData` when the
+/// returned descriptor lacks any required invariant.
+pub fn socket_network_namespace<Fd: AsFd>(socket: &Fd) -> io::Result<OwnedFd> {
+    // SAFETY: the socket remains borrowed and live for the duration of the call. The ioctl request
+    // is the fixed, argument-free Debian 13 `SIOCGSKNS` value; no request, pointer, length, or
+    // argument is caller controlled.
+    let result = unsafe { libc::ioctl(socket.as_fd().as_raw_fd(), SIOCGSKNS) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: successful `SIOCGSKNS` returns a new descriptor owned by the caller. This is
+    // deliberately the first operation after the success check, before any fallible validation.
+    let namespace = unsafe { OwnedFd::from_raw_fd(result) };
+    validate_socket_network_namespace(namespace)
+}
+
+fn validate_socket_network_namespace(namespace: OwnedFd) -> io::Result<OwnedFd> {
+    let descriptor_flags =
+        FdFlag::from_bits_truncate(fcntl(&namespace, FcntlArg::F_GETFD).map_err(errno_io)?);
+    if !descriptor_flags.contains(FdFlag::FD_CLOEXEC) {
+        return Err(invalid_data(
+            "socket network namespace descriptor is not close-on-exec",
+        ));
+    }
+    let status_flags =
+        OFlag::from_bits_truncate(fcntl(&namespace, FcntlArg::F_GETFL).map_err(errno_io)?);
+    if status_flags & OFlag::O_ACCMODE != OFlag::O_RDONLY {
+        return Err(invalid_data(
+            "socket network namespace descriptor is not read-only",
+        ));
+    }
+    if namespace_type(&namespace)? != libc::CLONE_NEWNET {
+        return Err(invalid_data(
+            "socket network namespace descriptor has the wrong namespace type",
+        ));
+    }
+
+    Ok(namespace)
 }
 
 /// Installs an exec-time inherited-descriptor fence on a child command.
@@ -1485,7 +1539,10 @@ mod tests {
         env,
         fs::{self, File},
         io::{Read as _, Write as _},
-        os::{fd::AsRawFd as _, unix::net::UnixStream},
+        os::{
+            fd::AsRawFd as _,
+            unix::{fs::MetadataExt as _, net::UnixStream},
+        },
         process::{Command, Stdio},
     };
 
@@ -1498,6 +1555,8 @@ mod tests {
         "VOLPAROSSA_UAPI_DEFAULT_LIFECYCLE_ACTION_CHILD";
     const PID_ONE_SIGNALS_CHILD_ENV: &str = "VOLPAROSSA_UAPI_PID_ONE_SIGNALS_CHILD";
     const SIGCHLD_ACTION_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SIGCHLD_ACTION_CHILD";
+    const SOCKET_NETWORK_NAMESPACE_CHILD_ENV: &str =
+        "VOLPAROSSA_UAPI_SOCKET_NETWORK_NAMESPACE_CHILD";
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     const SECCOMP_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SECCOMP_CHILD";
 
@@ -1590,6 +1649,110 @@ mod tests {
             namespace_type(&owner).expect("query owner namespace type"),
             libc::CLONE_NEWUSER
         );
+    }
+
+    #[test]
+    fn socket_network_namespace_is_owned_read_only_cloexec_and_typed() {
+        if env::var_os(SOCKET_NETWORK_NAMESPACE_CHILD_ENV).is_some() {
+            let (mut socket, mut peer) = UnixStream::pair().expect("open isolated socket pair");
+            let namespace =
+                socket_network_namespace(&socket).expect("open socket network namespace");
+
+            let descriptor_flags = FdFlag::from_bits_truncate(
+                fcntl(&namespace, FcntlArg::F_GETFD).expect("read network namespace FD flags"),
+            );
+            assert!(descriptor_flags.contains(FdFlag::FD_CLOEXEC));
+            let status_flags = OFlag::from_bits_truncate(
+                fcntl(&namespace, FcntlArg::F_GETFL).expect("read network namespace status flags"),
+            );
+            assert_eq!(status_flags & OFlag::O_ACCMODE, OFlag::O_RDONLY);
+            assert_eq!(
+                namespace_type(&namespace).expect("query socket network namespace type"),
+                libc::CLONE_NEWNET
+            );
+
+            let returned = fs::metadata(format!("/proc/self/fd/{}", namespace.as_raw_fd()))
+                .expect("stat returned socket network namespace");
+            let current =
+                fs::metadata("/proc/self/ns/net").expect("stat current network namespace");
+            assert_eq!(
+                (returned.dev(), returned.ino()),
+                (current.dev(), current.ino())
+            );
+
+            peer.write_all(b"s").expect("write through socket peer");
+            let mut byte = [0_u8; 1];
+            socket
+                .read_exact(&mut byte)
+                .expect("source socket remains borrowed and live");
+            assert_eq!(byte, *b"s");
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        let output = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(executable)
+            .arg("--exact")
+            .arg("tests::socket_network_namespace_is_owned_read_only_cloexec_and_typed")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(SOCKET_NETWORK_NAMESPACE_CHILD_ENV, "1")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn isolated socket-network-namespace test");
+        if unprivileged_user_namespace_policy_denied(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ) {
+            eprintln!("skipped live SIOCGSKNS proof: user namespaces denied by policy");
+            return;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "isolated SIOCGSKNS proof failed\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn socket_network_namespace_rejects_non_socket_descriptor() {
+        let (pipe_read, _pipe_write) = nix::unistd::pipe().expect("open non-socket pipe");
+        assert_eq!(
+            socket_network_namespace(&pipe_read)
+                .expect_err("pipe must not expose a socket network namespace")
+                .raw_os_error(),
+            Some(libc::ENOTTY)
+        );
+    }
+
+    #[test]
+    fn socket_network_namespace_validation_rejects_wrong_namespace_type() {
+        let user_namespace = File::open("/proc/self/ns/user").expect("open current user namespace");
+        assert_eq!(
+            validate_socket_network_namespace(user_namespace.into())
+                .expect_err("user namespace must not pass as a socket network namespace")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    fn unprivileged_user_namespace_policy_denied(
+        status_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> bool {
+        status_code == Some(1)
+            && stdout.is_empty()
+            && matches!(
+                stderr,
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            )
     }
 
     #[test]
