@@ -450,24 +450,31 @@ Last updated: 2026-08-25
   ICMP echo-request tuple and places one inline counter immediately before `accept`; the second
   matches only its exact B-to-A echo reply and likewise places one inline counter immediately
   before `accept`; the third is unconditional and places one inline counter immediately before
-  `drop`. Every fresh complete active-policy observation accepts the three typed counters only when
-  each is exactly `packets=0` and `bytes=0`. The nftables writer's sole mutation surface is one
+  `drop`. Before packet authority is consumed, every fresh complete active-policy observation
+  accepts the three typed counters only when each is exactly `packets=0` and `bytes=0`. The
+  one-way fixed-ICMP counter phase cannot regain zero-counter authority. After the sole raw socket
+  closes, success requires two identical complete generation-bracketed observations with
+  request/reply/drop packets/bytes exactly `1/60`, `1/60`, and `0/0`; subsequent teardown retains
+  only counter-agnostic deletion authority. The nftables writer's sole mutation surface is one
   bounded generation-pinned atomic install and later handle-only table deletion, with strict capped ACK binding and fresh
   complete-ruleset reconciliation after every possibly sent request. Disposable namespace tests
   exercise that production writer and prove an empty generation-1 baseline, the complete exact policy at
   generation 2, and a semantically empty ruleset at generation 3 after removal. The live fixture
   also proves its inherited canonical forwarding value byte-identical; extra or altered policy
   objects, counter values, expression order, ACKs, handles, and generation lineages fail closed.
-  These exact zero-valued observations are isolated snapshots: nftables generation IDs do not bind
-  counter updates, so this slice makes no counter-stability or packet-behaviour inference between
-  observations. A separate fixed, descriptor-pinned
+  An isolated observation cannot prove counter stability or packet absence because nftables
+  generation IDs do not bind counter updates. The integrated proof instead joins one affine send
+  authority to one exact reply, two matching post-close counter observations, and exact four-veth
+  link telemetry. A separate fixed, descriptor-pinned
   proc writer can establish canonical `1\n` only in PID 1's disposable parent network namespace
   and later restore the exact retained original `0\n` or `1\n` record. It requests one bounded
   two-byte write only when the target differs; an already-enabled or already-restored record is a
   freshly verified no-op. Possibly written requests retain reconciliation authority. After a
   possibly written enable, only an exact enabled readback may advance; even a return to the
   original record is indeterminate and aborts fail closed because a transient write cannot be
-  excluded. Production sends no packet or probe and makes no packet, datapath, or acceptance claim.
+  excluded. Production sends only the fixed run-bound ICMPv4 request described below. It does not
+  claim packet absence, packet-capture privacy, a general VPN datapath, topology readiness,
+  `TOPOLOGY_READY`, A14, A15, or acceptance evidence.
   The outer accepts that actual lifecycle frame
   only after matching all three identities to its retained
   PID-1 namespace pins and repeating the live mount and signal proofs. Only then does the outer
@@ -542,20 +549,36 @@ Last updated: 2026-08-25
   configuration delta. They validate the exact `NDA_CACHEINFO` structure but exclude only its
   volatile telemetry values from equality; unknown, duplicate, malformed, non-permanent, or
   conflicting neighbour records fail closed. The generation-2 policy is freshly re-proved with all
-  three counters still exactly zero around installation. Before deleting either veth, PID 1 sends
-  explicit bounded `RTM_DELNEIGH` requests in reverse endpoint B, endpoint A, parent B, parent A
-  order, reconciles every possibly sent request to exact absence, proves the pre-neighbour routed
-  state restored, and again re-proves the zero-counter policy. It never relies on link deletion to
-  remove a neighbour. No `RTM_DELROUTE` request or encoder exists. PID 1 then directly deletes veth
-  B followed by A as the sole route-removal mechanism. It does not attempt to restore link-down or
+  three counters still exactly zero around installation. With those neighbours armed, PID 1
+  consumes zero-counter authority and opens one nonblocking close-on-exec raw ICMPv4 socket in
+  endpoint A, bound to `eth0` and `10.241.1.2`, connected to `10.241.2.2`, and enabled for
+  `IP_PKTINFO`. It issues exactly one `sendmsg`, with no retry, for one 40-byte echo request. The
+  identifier is the first two canonical run-ID ASCII bytes interpreted big-endian, the sequence is
+  one, and the payload is the full 32-byte canonical ASCII run ID. Before the absolute deadline,
+  one bounded receive must return an exact 60-byte IPv4 reply with matching source, destination,
+  receive interface, `IP_PKTINFO`, IPv4 and ICMP checksums, identifier, sequence, and full payload.
+  After socket close, two identical complete generation-bracketed observations prove the
+  request-accept, reply-accept, and terminal-drop counters at exactly `packets/bytes=1/60`, `1/60`,
+  and `0/0`. Fresh semantic parent/A/B RTNL observations prove every veth end at exactly one RX and
+  one TX packet and 74 RX and TX bytes, with every other parsed 32- and 64-bit statistic zero,
+  while routes, addresses, qdiscs, all four permanent neighbours, zero probes, and zero proxy
+  neighbours remain exact. PID 1 then sends explicit bounded `RTM_DELNEIGH` requests in reverse
+  endpoint B, endpoint A, parent B, parent A order, reconciles every possibly sent request to exact
+  absence, proves the pre-neighbour routed state restored without changing the post-echo link
+  telemetry, and re-proves the exact `1/60`, `1/60`, `0/0` counter profile. It never relies on link
+  deletion to remove a neighbour. No `RTM_DELROUTE` request or encoder exists. PID 1 then consumes
+  the joined reply/counter/telemetry proof, converts policy ownership to counter-agnostic cleanup
+  authority, and directly deletes veth B followed by A as the sole route-removal mechanism. It does
+  not attempt to restore link-down or
   EUI-64 state and does not run ordinary per-address rollback after the first possibly-sent link
   mutation. Both route owners, all four address owners, and both pair owners remain armed. After
   deleting both pairs, PID 1
-  restores the exact retained original `ip_forward` record while the generation-2 policy remains
-  active: an original `0\n` causes one bounded two-byte restore write, while an original `1\n`
+  restores the exact retained original `ip_forward` record while the structural generation-2
+  policy remains under counter-agnostic cleanup authority: an original `0\n` causes one bounded
+  two-byte restore write, while an original `1\n`
   requires no write. The retained parent and endpoint baselines then prove all three namespaces
   byte-exactly equal to the enumerated network baselines for that restored phase while the exact
-  generation-2 policy remains active. PID 1 then deletes only the freshly
+  generation-2 policy structure remains active. PID 1 then deletes only the freshly
   observed table handle in one generation-pinned atomic transaction, proves a semantically empty
   generation 3, and binds the final RTNL/proc and endpoint reproofs to that result. Only after those
   final proofs does one prevalidated infallible retirement barrier disarm the route, address, and
@@ -584,7 +607,7 @@ Last updated: 2026-08-25
   mount-UAPI operation may produce the exclusive
   `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
   options, resource failures, and failed evidence remain hard errors. The positive
-  `BlockedAfterForwardPolicyTeardown` route proves that complete read-only network baseline,
+  `BlockedAfterFixedIcmpEchoTeardown` route proves that complete read-only network baseline,
   one real pinned `BOOTSTRAP_READY`, the canonical `GO`, affine authorization consumption, the
   descriptor-relative root/slot transaction, two live pristine nsfs pins, two fixed down-veth
   pairs each created through one atomic `RTM_NEWLINK` request, their exact parent/A/B delta proof,
@@ -593,8 +616,12 @@ Last updated: 2026-08-25
   FORWARD policy installation, exact carrier-up activation of all four ends with `noqueue` and the
   complete kernel-created route set, both exact static endpoint routes and their exact parent/A/B
   observation, exactly four semantically proved permanent neighbours with zero probes and zero
-  proxy-neighbour records, their explicit canonical reverse removal back to the exact routed state,
-  direct veth B/A deletion while that policy remains exact, complete pristine reverse
+  proxy-neighbour records, one no-retry 40-byte raw ICMPv4 request from endpoint A, one exact
+  60-byte reply bound to the full canonical run ID, two identical post-close policy-counter
+  observations at request/reply/drop `1/60`, `1/60`, `0/0`, and exact one-RX/one-TX plus 74-byte
+  RX/TX telemetry on every veth end. It further proves canonical reverse neighbour removal back to
+  the exact routed state without changing that telemetry, a final exact counter-profile reproof,
+  conversion to counter-agnostic policy cleanup authority, direct veth B/A deletion, complete pristine reverse
   proof under generation 2 after exact restoration of the original parent `ip_forward` record,
   handle-only policy deletion, semantic-empty generation 3, final
   parent/endpoint reproof before route/address/pair owner retirement, the
@@ -607,9 +634,10 @@ Last updated: 2026-08-25
   policy table/chain/three-rule counted set. The parent namespace's fixed
   `ip_forward` record is conditionally changed from `0\n` to `1\n` and restored to `0\n`; an
   inherited `1\n` takes the no-write path throughout. The outer host record remains byte-identical.
-  This
-  slice creates no packet or probe evidence and makes no packet-absence or counter-stability,
-  dataplane, or topology-readiness claim. Repeated portable tests prove exact
+  This slice proves one fixed run-bound ICMPv4 echo exchange and its joined reply/counter/link
+  evidence. It makes no packet-absence, packet-capture-privacy, general VPN datapath,
+  network-topology-readiness, `TOPOLOGY_READY`, forced-crash-cleanup, A14, A15, or acceptance claim.
+  Repeated portable tests prove exact
   outer-launcher reaping, unchanged outer namespace/mount observations, and an unchanged canonical
   outer fingerprint of stable link fields,
   addresses without expiring lifetimes, IPv4/IPv6 routes and policy rules, nexthops, qdiscs without
@@ -630,7 +658,7 @@ Last updated: 2026-08-25
   control/lifecycle half-close handshake that keeps the launcher alive until the outer
   acknowledges EOF, preventing an early-`SIGCHLD` race; only the outer containment deadline bounds
   that wait. Complete live evidence for this slice requires the explicit
-  `BlockedAfterForwardPolicyTeardown` outcome. At supervised IPC boundaries, managed outer
+  `BlockedAfterFixedIcmpEchoTeardown` outcome. At supervised IPC boundaries, managed outer
   HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
   external-signal handling across every reap/report phase, general descendant reaping, forced
   parent-death/crash-chain cleanup, or A14. The production ownership and namespace modules and their
@@ -643,7 +671,8 @@ Last updated: 2026-08-25
   `PolicyBoundPrivateMounts` are active in the runtime path for the
   descriptor-relative private-root, empty-slot,
   two-pin, two-veth, four-address, counted forward-policy, conditional parent-forwarding enable/restore,
-  link-activation, endpoint-route, permanent-neighbour, deletion-only link teardown, and exact policy-retirement
+  link-activation, endpoint-route, permanent-neighbour, fixed-ICMP echo, deletion-only link teardown,
+  and exact policy-retirement
   transaction described above. A provisional
   containment guard is installed immediately after each exclusive creation. Within this fixed
   runner's one-PID-1-task and trusted-launcher scope, an inotify witness rejects delete, move, or
@@ -663,8 +692,10 @@ Last updated: 2026-08-25
   fixtures. Manifest publication remains test-only: production does not create or publish an
   ownership manifest. The runtime does construct and fully reverse two transient live nsfs pins,
   two fixed veth pairs, four fixed IPv4 addresses, four active link ends, two explicit endpoint
-  routes, four explicitly removed permanent neighbours, the exact kernel-created qdisc and route side effects, and the exact transient
-  zero-counter generation-2 nftables policy described above, but proves direct link deletion, handle-only policy
+  routes, four explicitly removed permanent neighbours, the exact kernel-created qdisc and route
+  side effects, one fixed run-bound ICMPv4 exchange with exact reply/counter/link evidence, and the
+  transient generation-2 nftables policy's affine zero-to-`1/60,1/60,0/0`-to-cleanup transition
+  described above, but proves direct link deletion, handle-only policy
   retirement, and
   ordinary unmount only within its fixed one-PID-1-task and
   trusted-launcher scope.
@@ -674,8 +705,9 @@ Last updated: 2026-08-25
   hostile mapped-same-UID actor. A production helper must provide root-owned exclusive mutation
   authority before reusing it. The link-activation, exact endpoint-route, exact permanent-neighbour,
   exact nftables-policy,
-  and fixed parent-namespace `ip_forward` writers are fixed and bounded; no general sysctl, general
-  nftables, ownership-manifest, packet, probe, or general route/neighbour mutation API exists. The only route objects
+  fixed ICMP socket path, and fixed parent-namespace `ip_forward` writer are fixed and bounded; no
+  general sysctl, general nftables, ownership-manifest, packet/probe, or general route/neighbour
+  mutation API exists. The only route objects
   admitted in this slice are the exact kernel-created local,
   connected, high-broadcast, and IPv6 multicast routes coupled to the fixed address and activation
   transaction plus the two exact static `/32` endpoint routes described above. The only ordinary
@@ -688,7 +720,7 @@ Last updated: 2026-08-25
   not forced-crash cleanup or A14, A15, or acceptance evidence. `BOOTSTRAP_READY` remains
   readiness evidence; `GO` authorizes only this bounded private-root, two-pin, two-veth,
   four-address, counted forward-policy, conditional forwarding enable/restore, link-activation,
-  endpoint-route, permanent-neighbour, and policy-teardown transaction,
+  endpoint-route, permanent-neighbour, fixed-ICMP, and policy-teardown transaction,
   and `MUTATION_ROLLBACK_COMPLETE` is an
   internal containment checkpoint rather than cleanup or acceptance evidence.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.

@@ -23,8 +23,9 @@
 //! address-generation mode `none` on all four ends. Before activating any
 //! veth, it atomically installs and proves the sole run-bound generation-two
 //! nftables policy: one `inet` table, one priority-zero `forward` base chain
-//! with policy drop, and only the exact A-to-B IPv4 ICMP echo-request and
-//! B-to-A echo-reply accept rules. It then activates every end, proves the
+//! with policy drop, the exact A-to-B IPv4 ICMP echo-request and B-to-A
+//! echo-reply accept rules, and one terminal drop rule, each with its exact
+//! inline counter. It then activates every end, proves the
 //! exact carrier-up links, `noqueue` qdiscs, absence of IPv6 addresses, and
 //! kernel-owned local, connected, high-broadcast, and IPv6 multicast routes,
 //! and exactly observes the two fixed main-table static endpoint `/32` routes.
@@ -33,11 +34,25 @@
 //! endpoint address to its endpoint MAC; endpoint entries map each fixed parent
 //! gateway to its parent MAC. Semantic parent/A/B snapshots require exactly
 //! those records, zero probes, and zero proxy neighbours while excluding only
-//! validated volatile `NDA_CACHEINFO` telemetry from equality. Generation two
-//! and all three zero counters are freshly re-proved around the transition.
-//! PID 1 explicitly removes the four neighbours in reverse endpoint B/A then
-//! parent B/A order, proves restoration of the exact routed state, and only
-//! then directly deletes veth B followed by A as the route-removal mechanism.
+//! validated volatile `NDA_CACHEINFO` telemetry from equality. With that exact
+//! state armed, endpoint A opens one nonblocking close-on-exec raw `ICMPv4`
+//! socket bound to `eth0` and `10.241.1.2`, connects it to `10.241.2.2`, and
+//! issues exactly one `sendmsg` without retry for one 40-byte echo request. Its
+//! identifier is the first two canonical run-ID ASCII bytes, its sequence is
+//! one, and its payload is the full 32-byte canonical ASCII run ID. A bounded
+//! receive requires one exact 60-byte IPv4 echo reply, including source,
+//! destination, `IP_PKTINFO`, checksums, identifier, sequence, and payload.
+//! After the socket closes, two identical complete generation-bracketed policy
+//! observations require request-accept, reply-accept, and terminal-drop
+//! packets/bytes at exactly `1/60`, `1/60`, and `0/0`. Fresh parent/A/B RTNL
+//! observations require every veth end to have exactly one RX and one TX
+//! packet and 74 RX and TX bytes, with every other parsed link statistic zero.
+//! PID 1 then explicitly removes the four neighbours in reverse endpoint B/A
+//! then parent B/A order, proves restoration of the exact routed state without
+//! changing that post-echo link telemetry, and re-proves the exact counter
+//! profile. Only then does it downgrade policy ownership to counter-agnostic
+//! cleanup authority and directly delete veth B followed by A as the
+//! route-removal mechanism.
 //! All route, address, and pair owners remain armed while the parent and both
 //! endpoints are proven exactly equal to their retained enumerated network
 //! baselines under generation two.
@@ -50,12 +65,12 @@
 //! outer then independently re-proves empty private mounts before delivering
 //! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
 //! before exact PID-1 and launcher reaping. The outer host's inherited
-//! canonical IPv4-forwarding setting remains byte-identical. The slice
-//! produces no packet, packet-absence, packet-capture, counter-stability, or
-//! probe evidence, ownership manifest, dataplane topology,
-//! `TOPOLOGY_READY`, or acceptance evidence; its exact policy and explicit
-//! endpoint routes and neighbours are configuration proof, not production route
-//! orchestration or packet-behaviour proof.
+//! canonical IPv4-forwarding setting remains byte-identical. This proves one
+//! fixed run-bound `ICMPv4` echo exchange, the exact two-accept/zero-drop counter
+//! profile, matching four-veth link telemetry, and bounded configuration
+//! teardown. It does not prove packet absence, packet-capture privacy, a
+//! general VPN datapath, an ownership manifest, network-topology readiness,
+//! `TOPOLOGY_READY`, forced-crash cleanup, A14, A15, or acceptance evidence.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
@@ -63,6 +78,7 @@
 
 mod control;
 mod evidence;
+mod icmp;
 mod ipc;
 mod isolation;
 mod mounts;

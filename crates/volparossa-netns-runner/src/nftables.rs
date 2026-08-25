@@ -8,12 +8,16 @@
 //! three. Every possibly-sent request is reconciled through a fresh bounded
 //! full-ruleset observation. Installation and packetless runtime verification
 //! accept only two counted accepts followed by one counted terminal drop with
-//! all three byte and packet counters freshly observed at zero. Deletion is
-//! deliberately counter-agnostic because counters are mutable, but still
-//! requires the exact active generation, run-bound expectation, full structure
-//! and retained table, chain and rule handles. Later packet evidence needs a
-//! separate quiescent counter protocol. This module never changes forwarding
-//! settings.
+//! all three byte and packet counters freshly observed at zero. The two accepts
+//! additionally bind fixed IPv4 version/IHL, total length and non-fragmentation,
+//! plus the exact ICMP identifier, sequence and 32-byte canonical run-ID payload.
+//! A separate affine counter phase can then consume zero-counter authority and,
+//! only after the caller has closed its packet socket, mint exact
+//! one-request/one-reply evidence from two identical complete observations.
+//! Deletion is deliberately counter-agnostic because counters are mutable, but
+//! still requires the exact active generation, run-bound expectation, full
+//! structure and retained table, chain and rule handles. This module never
+//! changes forwarding settings.
 
 use std::{
     io,
@@ -42,9 +46,9 @@ const MAX_TABLE_ATTRIBUTES: usize = 7;
 const MAX_CHAIN_ATTRIBUTES: usize = 12;
 const MAX_HOOK_ATTRIBUTES: usize = 4;
 const MAX_RULE_ATTRIBUTES: usize = 11;
-const ACCEPT_RULE_EXPRESSIONS: usize = 16;
+const ACCEPT_RULE_EXPRESSIONS: usize = 29;
 const TERMINAL_RULE_EXPRESSIONS: usize = 2;
-const ACCEPT_RULE_COUNTER_EXPRESSION: usize = 14;
+const ACCEPT_RULE_COUNTER_EXPRESSION: usize = 27;
 const TERMINAL_RULE_COUNTER_EXPRESSION: usize = 0;
 const MAX_RULE_EXPRESSIONS: usize = ACCEPT_RULE_EXPRESSIONS;
 const MAX_EXPRESSION_ATTRIBUTES: usize = 2;
@@ -140,9 +144,24 @@ const IPPROTO_ICMP: u8 = 1;
 const ICMP_ECHO_REPLY: u8 = 0;
 const ICMP_ECHO_REQUEST: u8 = 8;
 const ICMP_CODE_ZERO: u8 = 0;
+const IPV4_VERSION_IHL_OFFSET: u32 = 0;
+const IPV4_TOTAL_LENGTH_OFFSET: u32 = 2;
+const IPV4_FRAGMENT_OFFSET: u32 = 6;
 const IPV4_SOURCE_OFFSET: u32 = 12;
 const IPV4_DESTINATION_OFFSET: u32 = 16;
+const FIXED_IPV4_VERSION_IHL: u8 = 0x45;
+const FIXED_ICMP_IPV4_LENGTH: u16 = 60;
+const FIXED_IPV4_TOTAL_LENGTH: [u8; 2] = FIXED_ICMP_IPV4_LENGTH.to_be_bytes();
+const IPV4_NO_FRAGMENT_MASK: [u8; 2] = [0xbf, 0xff];
+const IPV4_NO_FRAGMENT_VALUE: [u8; 2] = [0, 0];
 const ICMP_TYPE_CODE_OFFSET: u32 = 0;
+const ICMP_IDENTIFIER_SEQUENCE_OFFSET: u32 = 4;
+const ICMP_RUN_TAG_OFFSET: u32 = 8;
+const ICMP_RUN_TAG_BYTES: usize = 32;
+const NFT_REGISTER_BYTES: usize = 16;
+const NFT_REGISTER_UAPI_BYTES: u32 = 16;
+const FIXED_ICMP_SEQUENCE: u16 = 1;
+const FIXED_ICMP_IPV4_BYTES: u64 = 60;
 const FIXED_ALPHA_ADDRESS: [u8; 4] = [10, 241, 1, 2];
 const FIXED_OMEGA_ADDRESS: [u8; 4] = [10, 241, 2, 2];
 const FORWARD_CHAIN_NAME: &[u8] = b"forward";
@@ -208,6 +227,14 @@ const NFTA_PAYLOAD_SREG: u16 = 5;
 const NFTA_PAYLOAD_CSUM_TYPE: u16 = 6;
 const NFTA_PAYLOAD_CSUM_OFFSET: u16 = 7;
 const NFTA_PAYLOAD_CSUM_FLAGS: u16 = 8;
+const NFTA_BITWISE_SREG: u16 = 1;
+const NFTA_BITWISE_DREG: u16 = 2;
+const NFTA_BITWISE_LEN: u16 = 3;
+const NFTA_BITWISE_MASK: u16 = 4;
+const NFTA_BITWISE_XOR: u16 = 5;
+const NFTA_BITWISE_OP: u16 = 6;
+const NFTA_BITWISE_DATA: u16 = 7;
+const NFT_BITWISE_MASK_XOR: u32 = 0;
 const NFTA_IMMEDIATE_DREG: u16 = 1;
 const NFTA_IMMEDIATE_DATA: u16 = 2;
 const NFTA_COUNTER_BYTES: u16 = 1;
@@ -271,11 +298,66 @@ pub(crate) struct NftablesBaseline {
 /// packet fields are the two distinct live parent-side veth ifindices; all
 /// addresses, protocol values, chain properties, verdicts and initial zero
 /// counters remain fixed.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FixedForwardPolicyExpectation {
     table_name: Vec<u8>,
     parent_ifindices: [u32; 2],
+    icmp_tag: FixedIcmpEchoTag,
     _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// The exact run-bound identity carried by the one admitted ICMP exchange.
+///
+/// The identifier is the first two ASCII bytes of the canonical run ID, the
+/// sequence is fixed at one, and the payload is all 32 ASCII bytes of that same
+/// lowercase hexadecimal run ID. Header fields are exposed as host integers;
+/// the packet and nftables encoders place them on the wire in big-endian order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FixedIcmpEchoTag {
+    identifier: u16,
+    payload: Box<[u8; ICMP_RUN_TAG_BYTES]>,
+}
+
+impl FixedIcmpEchoTag {
+    /// Derive the only ICMP identity admitted for this canonical run.
+    pub(crate) fn from_run_id(run_id: &RunId) -> Result<Self, NftablesError> {
+        let ascii: [u8; ICMP_RUN_TAG_BYTES] = run_id
+            .as_str()
+            .as_bytes()
+            .try_into()
+            .map_err(|_| NftablesError::Malformed)?;
+        let identifier = u16::from_be_bytes([ascii[0], ascii[1]]);
+        Ok(Self {
+            identifier,
+            payload: Box::new(ascii),
+        })
+    }
+
+    /// Return the run-derived ICMP echo identifier as a host integer.
+    pub(crate) const fn identifier(&self) -> u16 {
+        self.identifier
+    }
+
+    /// Return the sole admitted ICMP echo sequence as a host integer.
+    #[allow(
+        clippy::unused_self,
+        reason = "the instance method keeps the identifier, sequence and payload on one tag API"
+    )]
+    pub(crate) const fn sequence(&self) -> u16 {
+        FIXED_ICMP_SEQUENCE
+    }
+
+    /// Return the exact 32-byte canonical run-ID payload.
+    pub(crate) fn payload(&self) -> &[u8; ICMP_RUN_TAG_BYTES] {
+        self.payload.as_ref()
+    }
+
+    fn identifier_sequence_bytes(&self) -> [u8; 4] {
+        let mut bytes = [0; 4];
+        bytes[..2].copy_from_slice(&self.identifier().to_be_bytes());
+        bytes[2..].copy_from_slice(&self.sequence().to_be_bytes());
+        bytes
+    }
 }
 
 impl FixedForwardPolicyExpectation {
@@ -312,6 +394,7 @@ impl FixedForwardPolicyExpectation {
         Ok(Self {
             table_name,
             parent_ifindices,
+            icmp_tag: FixedIcmpEchoTag::from_run_id(run_id)?,
             _thread_bound: PhantomData,
         })
     }
@@ -340,7 +423,24 @@ impl FixedForwardPolicyExpectation {
             ),
             _ => std::process::abort(),
         };
-        vec![
+        Self::expected_interface_protocol_expressions(input, output)
+            .into_iter()
+            .chain(Self::expected_direction_expressions(
+                source,
+                destination,
+                icmp_type,
+            ))
+            .chain(Self::expected_ipv4_packet_shape_expressions())
+            .chain(self.expected_icmp_identity_expressions())
+            .chain([
+                ObservedExpression::Counter(ForwardPolicyCounter::ZERO),
+                ObservedExpression::ImmediateAccept,
+            ])
+            .collect()
+    }
+
+    fn expected_interface_protocol_expressions(input: u32, output: u32) -> [ObservedExpression; 8] {
+        [
             ObservedExpression::Meta {
                 destination: NFT_REG_1,
                 key: NFT_META_IIF,
@@ -377,6 +477,15 @@ impl FixedForwardPolicyExpectation {
                 operation: NFT_CMP_EQ,
                 value: vec![IPPROTO_ICMP],
             },
+        ]
+    }
+
+    fn expected_direction_expressions(
+        source: [u8; 4],
+        destination: [u8; 4],
+        icmp_type: u8,
+    ) -> [ObservedExpression; 6] {
+        [
             ObservedExpression::Payload {
                 destination: NFT_REG_1,
                 base: NFT_PAYLOAD_NETWORK_HEADER,
@@ -410,8 +519,89 @@ impl FixedForwardPolicyExpectation {
                 operation: NFT_CMP_EQ,
                 value: vec![icmp_type, ICMP_CODE_ZERO],
             },
-            ObservedExpression::Counter(ForwardPolicyCounter::ZERO),
-            ObservedExpression::ImmediateAccept,
+        ]
+    }
+
+    fn expected_ipv4_packet_shape_expressions() -> [ObservedExpression; 7] {
+        [
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_NETWORK_HEADER,
+                offset: IPV4_VERSION_IHL_OFFSET,
+                length: 1,
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: vec![FIXED_IPV4_VERSION_IHL],
+            },
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_NETWORK_HEADER,
+                offset: IPV4_TOTAL_LENGTH_OFFSET,
+                length: 2,
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: FIXED_IPV4_TOTAL_LENGTH.to_vec(),
+            },
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_NETWORK_HEADER,
+                offset: IPV4_FRAGMENT_OFFSET,
+                length: 2,
+            },
+            ObservedExpression::BitwiseMaskXor {
+                source: NFT_REG_1,
+                destination: NFT_REG_1,
+                length: 2,
+                mask: IPV4_NO_FRAGMENT_MASK.to_vec(),
+                xor: IPV4_NO_FRAGMENT_VALUE.to_vec(),
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: IPV4_NO_FRAGMENT_VALUE.to_vec(),
+            },
+        ]
+    }
+
+    fn expected_icmp_identity_expressions(&self) -> [ObservedExpression; 6] {
+        [
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_TRANSPORT_HEADER,
+                offset: ICMP_IDENTIFIER_SEQUENCE_OFFSET,
+                length: 4,
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: self.icmp_tag.identifier_sequence_bytes().to_vec(),
+            },
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_TRANSPORT_HEADER,
+                offset: ICMP_RUN_TAG_OFFSET,
+                length: NFT_REGISTER_UAPI_BYTES,
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: self.icmp_tag.payload()[..NFT_REGISTER_BYTES].to_vec(),
+            },
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_TRANSPORT_HEADER,
+                offset: ICMP_RUN_TAG_OFFSET + NFT_REGISTER_UAPI_BYTES,
+                length: NFT_REGISTER_UAPI_BYTES,
+            },
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: self.icmp_tag.payload()[NFT_REGISTER_BYTES..].to_vec(),
+            },
         ]
     }
 }
@@ -429,6 +619,58 @@ struct ActivePolicyJournal {
 #[derive(Debug, Eq, PartialEq)]
 #[must_use = "an active nftables policy must be verified or retired"]
 pub(crate) struct ActiveNftablesPolicy {
+    journal: Option<ActivePolicyJournal>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Armed affine authority after the exact zero-counter policy was consumed for
+/// the one fixed ICMP exchange.
+///
+/// The caller must enter this phase before a raw packet could be sent. It may
+/// either mint exact post-close counter evidence or irreversibly downgrade to
+/// [`ForwardPolicyCleanupAuthority`]. Dropping it while armed aborts.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "the fixed ICMP counter phase must be proved or converted to cleanup"]
+pub(crate) struct FixedIcmpCounterPhase {
+    journal: Option<ActivePolicyJournal>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Armed affine ownership of the policy after two identical exact ICMP counter
+/// observations.
+///
+/// This type retains deletion ownership; the separate proof token records that
+/// the exact success profile was observed. It can only be converted to the
+/// counter-agnostic cleanup authority, never back to zero-counter authority.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "the exact fixed ICMP policy must be converted to cleanup and retired"]
+pub(crate) struct ExactFixedIcmpNftablesPolicy {
+    journal: Option<ActivePolicyJournal>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Affine proof that two complete, generation-bracketed post-close observations
+/// agreed on the exact one-request/one-reply counter profile.
+///
+/// Retaining the complete expectation prevents equal numeric handles from an
+/// unrelated run or network namespace from satisfying later proof joins.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ExactFixedIcmpCounterProof {
+    expectation: FixedForwardPolicyExpectation,
+    generation: u32,
+    handles: PolicyHandles,
+    counters: ForwardPolicyCounters,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Deletion-only authority for a policy whose counters may have changed.
+///
+/// No API on this type can mint zero-counter or fixed-packet evidence. Its only
+/// successful transition is exact structure/handle-bound, counter-agnostic
+/// policy deletion.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "the cleanup-only forward policy authority must be retired"]
+pub(crate) struct ForwardPolicyCleanupAuthority {
     journal: Option<ActivePolicyJournal>,
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -477,6 +719,81 @@ impl ActiveNftablesPolicy {
     fn into_journal(mut self) -> ActivePolicyJournal {
         self.journal.take().unwrap_or_else(|| std::process::abort())
     }
+
+    /// Irreversibly discard zero-counter evidence authority and retain only
+    /// exact structure-and-handle-bound cleanup authority.
+    pub(crate) fn into_cleanup_authority(self) -> ForwardPolicyCleanupAuthority {
+        ForwardPolicyCleanupAuthority::from_journal(self.into_journal())
+    }
+}
+
+impl FixedIcmpCounterPhase {
+    fn from_journal(journal: ActivePolicyJournal) -> Self {
+        Self {
+            journal: Some(journal),
+            _thread_bound: PhantomData,
+        }
+    }
+
+    fn journal(&self) -> &ActivePolicyJournal {
+        self.journal
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_journal(mut self) -> ActivePolicyJournal {
+        self.journal.take().unwrap_or_else(|| std::process::abort())
+    }
+
+    /// Permanently discard packet-evidence authority while retaining safe
+    /// structure-and-handle-bound deletion authority.
+    pub(crate) fn into_cleanup_authority(self) -> ForwardPolicyCleanupAuthority {
+        ForwardPolicyCleanupAuthority::from_journal(self.into_journal())
+    }
+}
+
+impl ExactFixedIcmpNftablesPolicy {
+    fn from_journal(journal: ActivePolicyJournal) -> Self {
+        Self {
+            journal: Some(journal),
+            _thread_bound: PhantomData,
+        }
+    }
+
+    fn journal(&self) -> &ActivePolicyJournal {
+        self.journal
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_journal(mut self) -> ActivePolicyJournal {
+        self.journal.take().unwrap_or_else(|| std::process::abort())
+    }
+
+    /// Permanently discard packet-evidence authority while retaining safe
+    /// structure-and-handle-bound deletion authority.
+    pub(crate) fn into_cleanup_authority(self) -> ForwardPolicyCleanupAuthority {
+        ForwardPolicyCleanupAuthority::from_journal(self.into_journal())
+    }
+}
+
+impl ForwardPolicyCleanupAuthority {
+    fn from_journal(journal: ActivePolicyJournal) -> Self {
+        Self {
+            journal: Some(journal),
+            _thread_bound: PhantomData,
+        }
+    }
+
+    fn journal(&self) -> &ActivePolicyJournal {
+        self.journal
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_journal(mut self) -> ActivePolicyJournal {
+        self.journal.take().unwrap_or_else(|| std::process::abort())
+    }
 }
 
 impl Drop for ActiveNftablesPolicy {
@@ -486,6 +803,22 @@ impl Drop for ActiveNftablesPolicy {
         }
     }
 }
+
+macro_rules! abort_if_policy_authority_is_armed {
+    ($authority:ty) => {
+        impl Drop for $authority {
+            fn drop(&mut self) {
+                if self.journal.is_some() {
+                    std::process::abort();
+                }
+            }
+        }
+    };
+}
+
+abort_if_policy_authority_is_armed!(FixedIcmpCounterPhase);
+abort_if_policy_authority_is_armed!(ExactFixedIcmpNftablesPolicy);
+abort_if_policy_authority_is_armed!(ForwardPolicyCleanupAuthority);
 
 impl IndeterminateNftablesPolicy {
     fn after_install(
@@ -532,6 +865,15 @@ pub(crate) enum NftablesDeleteAuthority {
     /// A fresh generation-two readback proved the same active policy and handles.
     Active(ActiveNftablesPolicy),
     /// The possibly-sent transaction could not be classified safely.
+    Indeterminate(IndeterminateNftablesPolicy),
+}
+
+/// Affine authority returned when cleanup-only policy deletion does not complete.
+#[derive(Debug)]
+pub(crate) enum ForwardPolicyCleanupDeleteAuthority {
+    /// Fresh generation-two readback retained exact structure and handles.
+    Cleanup(ForwardPolicyCleanupAuthority),
+    /// The possibly-sent deletion transaction could not be classified safely.
     Indeterminate(IndeterminateNftablesPolicy),
 }
 
@@ -600,6 +942,88 @@ pub(crate) fn verify_exact_forward_policy(
     }
 }
 
+/// Consume freshly re-proved zero-counter ownership before any raw ICMP packet
+/// could be sent.
+///
+/// This is a one-way affine boundary: the returned authority can never regain
+/// zero-counter type. A definite pre-boundary verification failure returns the
+/// original active authority unchanged.
+pub(crate) fn begin_fixed_icmp_counter_phase(
+    active: ActiveNftablesPolicy,
+    deadline: Instant,
+) -> Result<FixedIcmpCounterPhase, NftablesLineageFailure<ActiveNftablesPolicy>> {
+    if let Err(source) = verify_exact_forward_policy(&active, deadline) {
+        return Err(NftablesLineageFailure {
+            source,
+            authority: active,
+        });
+    }
+    Ok(FixedIcmpCounterPhase::from_journal(active.into_journal()))
+}
+
+/// Consume packet-phase authority after the raw socket has been closed and
+/// require two identical complete exact-policy observations.
+///
+/// Each observation is independently generation-bracketed and bound to the
+/// retained expectation and handles. Both accepts must report exactly one
+/// 60-byte IPv4 packet and the terminal drop must remain exactly zero. Failure
+/// returns the still-affine packet-phase authority for explicit cleanup.
+pub(crate) fn observe_exact_fixed_icmp_counters_after_socket_close(
+    phase: FixedIcmpCounterPhase,
+    deadline: Instant,
+) -> Result<
+    (ExactFixedIcmpNftablesPolicy, ExactFixedIcmpCounterProof),
+    NftablesLineageFailure<FixedIcmpCounterPhase>,
+> {
+    let observation = match observe_identical_fixed_icmp_counter_policy(phase.journal(), deadline) {
+        Ok(observation) => observation,
+        Err(source) => {
+            return Err(NftablesLineageFailure {
+                source,
+                authority: phase,
+            });
+        }
+    };
+    let proof = ExactFixedIcmpCounterProof {
+        expectation: phase.journal().expectation.clone(),
+        generation: observation.generation,
+        handles: observation.handles,
+        counters: observation.counters,
+        _thread_bound: PhantomData,
+    };
+    Ok((
+        ExactFixedIcmpNftablesPolicy::from_journal(phase.into_journal()),
+        proof,
+    ))
+}
+
+/// Re-prove an already successful fixed ICMP policy through the same two-dump
+/// post-close protocol.
+pub(crate) fn verify_exact_fixed_icmp_nftables_policy(
+    active: &ExactFixedIcmpNftablesPolicy,
+    proof: &ExactFixedIcmpCounterProof,
+    deadline: Instant,
+) -> Result<(), NftablesError> {
+    let observed = observe_identical_fixed_icmp_counter_policy(active.journal(), deadline)?;
+    validate_fixed_icmp_counter_proof(active.journal(), proof, &observed)
+}
+
+fn validate_fixed_icmp_counter_proof(
+    journal: &ActivePolicyJournal,
+    proof: &ExactFixedIcmpCounterProof,
+    observed: &ExactPolicyObservation,
+) -> Result<(), NftablesError> {
+    if proof.expectation == journal.expectation
+        && proof.generation == observed.generation
+        && proof.handles == observed.handles
+        && proof.counters == observed.counters
+    {
+        Ok(())
+    } else {
+        Err(NftablesError::UnexpectedPolicy)
+    }
+}
+
 /// Consume active authority and delete its exact table at generation two.
 ///
 /// Mutable counter values do not participate in deletion authority. The fresh
@@ -611,6 +1035,29 @@ pub(crate) fn delete_exact_forward_policy(
     deadline: Instant,
 ) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<NftablesDeleteAuthority>> {
     delete_policy(active, Deadline(deadline))
+}
+
+/// Consume deletion-only post-packet authority and remove the same exact table.
+///
+/// Counter values are parsed strictly but deliberately do not authorize or
+/// block cleanup. The preflight and reconciliation still require generation
+/// two, the entire run-bound structure, and all retained handles.
+pub(crate) fn delete_forward_policy_cleanup(
+    cleanup: ForwardPolicyCleanupAuthority,
+    deadline: Instant,
+) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<ForwardPolicyCleanupDeleteAuthority>>
+{
+    delete_cleanup_policy(cleanup, Deadline(deadline))
+}
+
+/// Freshly re-prove cleanup ownership without assigning any packet meaning to
+/// the observed counters.
+pub(crate) fn verify_forward_policy_cleanup(
+    cleanup: &ForwardPolicyCleanupAuthority,
+    deadline: Instant,
+) -> Result<(), NftablesError> {
+    let snapshot = observe_ruleset(deadline, ACTIVE_POLICY_GENERATION)?;
+    validate_deletion_authority(cleanup.journal(), &snapshot, ACTIVE_POLICY_GENERATION)
 }
 
 /// Freshly verify semantic emptiness at the exact retired generation.
@@ -829,83 +1276,126 @@ fn encode_policy_expressions(expressions: &[ObservedExpression]) -> Result<Vec<u
     }
     let mut encoded = Vec::new();
     for expression in expressions {
-        let (name, data) = match expression {
-            ObservedExpression::Meta { destination, key } => {
-                let mut data = Vec::new();
-                encode_attribute(&mut data, NFTA_META_KEY, &key.to_be_bytes())?;
-                encode_attribute(&mut data, NFTA_META_DREG, &destination.to_be_bytes())?;
-                (b"meta".as_slice(), data)
-            }
-            ObservedExpression::Compare {
-                source,
-                operation,
-                value,
-            } => {
-                let mut nested_value = Vec::new();
-                encode_attribute(&mut nested_value, NFTA_DATA_VALUE, value)?;
-                let mut data = Vec::new();
-                encode_attribute(&mut data, NFTA_CMP_SREG, &source.to_be_bytes())?;
-                encode_attribute(&mut data, NFTA_CMP_OP, &operation.to_be_bytes())?;
-                encode_attribute(&mut data, NFTA_CMP_DATA | NLA_F_NESTED, &nested_value)?;
-                (b"cmp".as_slice(), data)
-            }
-            ObservedExpression::Payload {
-                destination,
-                base,
-                offset,
-                length,
-            } => {
-                let mut data = Vec::new();
-                encode_attribute(&mut data, NFTA_PAYLOAD_DREG, &destination.to_be_bytes())?;
-                encode_attribute(&mut data, NFTA_PAYLOAD_BASE, &base.to_be_bytes())?;
-                encode_attribute(&mut data, NFTA_PAYLOAD_OFFSET, &offset.to_be_bytes())?;
-                encode_attribute(&mut data, NFTA_PAYLOAD_LEN, &length.to_be_bytes())?;
-                (b"payload".as_slice(), data)
-            }
-            ObservedExpression::Counter(counter) => {
-                let mut data = Vec::new();
-                encode_attribute(&mut data, NFTA_COUNTER_BYTES, &counter.bytes.to_be_bytes())?;
-                encode_attribute(
-                    &mut data,
-                    NFTA_COUNTER_PACKETS,
-                    &counter.packets.to_be_bytes(),
-                )?;
-                (b"counter".as_slice(), data)
-            }
-            ObservedExpression::ImmediateAccept | ObservedExpression::ImmediateDrop => {
-                let code = if matches!(expression, ObservedExpression::ImmediateAccept) {
-                    NF_ACCEPT
-                } else {
-                    NF_DROP
-                };
-                let mut verdict = Vec::new();
-                encode_attribute(&mut verdict, NFTA_VERDICT_CODE, &code.to_be_bytes())?;
-                let mut nested_verdict = Vec::new();
-                encode_attribute(
-                    &mut nested_verdict,
-                    NFTA_DATA_VERDICT | NLA_F_NESTED,
-                    &verdict,
-                )?;
-                let mut data = Vec::new();
-                encode_attribute(
-                    &mut data,
-                    NFTA_IMMEDIATE_DREG,
-                    &NFT_REG_VERDICT.to_be_bytes(),
-                )?;
-                encode_attribute(
-                    &mut data,
-                    NFTA_IMMEDIATE_DATA | NLA_F_NESTED,
-                    &nested_verdict,
-                )?;
-                (b"immediate".as_slice(), data)
-            }
-        };
+        let (name, data) = encode_policy_expression(expression)?;
         let mut element = Vec::new();
         encode_attribute(&mut element, NFTA_EXPR_NAME, &encode_nul_string(name)?)?;
         encode_attribute(&mut element, NFTA_EXPR_DATA | NLA_F_NESTED, &data)?;
         encode_attribute(&mut encoded, NFTA_LIST_ELEM | NLA_F_NESTED, &element)?;
     }
     Ok(encoded)
+}
+
+fn encode_policy_expression(
+    expression: &ObservedExpression,
+) -> Result<(&'static [u8], Vec<u8>), NftablesError> {
+    match expression {
+        ObservedExpression::Meta { destination, key } => {
+            let mut data = Vec::new();
+            encode_attribute(&mut data, NFTA_META_KEY, &key.to_be_bytes())?;
+            encode_attribute(&mut data, NFTA_META_DREG, &destination.to_be_bytes())?;
+            Ok((b"meta", data))
+        }
+        ObservedExpression::Compare {
+            source,
+            operation,
+            value,
+        } => {
+            let mut nested_value = Vec::new();
+            encode_attribute(&mut nested_value, NFTA_DATA_VALUE, value)?;
+            let mut data = Vec::new();
+            encode_attribute(&mut data, NFTA_CMP_SREG, &source.to_be_bytes())?;
+            encode_attribute(&mut data, NFTA_CMP_OP, &operation.to_be_bytes())?;
+            encode_attribute(&mut data, NFTA_CMP_DATA | NLA_F_NESTED, &nested_value)?;
+            Ok((b"cmp", data))
+        }
+        ObservedExpression::Payload {
+            destination,
+            base,
+            offset,
+            length,
+        } => {
+            let mut data = Vec::new();
+            encode_attribute(&mut data, NFTA_PAYLOAD_DREG, &destination.to_be_bytes())?;
+            encode_attribute(&mut data, NFTA_PAYLOAD_BASE, &base.to_be_bytes())?;
+            encode_attribute(&mut data, NFTA_PAYLOAD_OFFSET, &offset.to_be_bytes())?;
+            encode_attribute(&mut data, NFTA_PAYLOAD_LEN, &length.to_be_bytes())?;
+            Ok((b"payload", data))
+        }
+        ObservedExpression::BitwiseMaskXor {
+            source,
+            destination,
+            length,
+            mask,
+            xor,
+        } => encode_bitwise_expression(*source, *destination, *length, mask, xor),
+        ObservedExpression::Counter(counter) => {
+            let mut data = Vec::new();
+            encode_attribute(&mut data, NFTA_COUNTER_BYTES, &counter.bytes.to_be_bytes())?;
+            encode_attribute(
+                &mut data,
+                NFTA_COUNTER_PACKETS,
+                &counter.packets.to_be_bytes(),
+            )?;
+            Ok((b"counter", data))
+        }
+        ObservedExpression::ImmediateAccept | ObservedExpression::ImmediateDrop => {
+            let code = if matches!(expression, ObservedExpression::ImmediateAccept) {
+                NF_ACCEPT
+            } else {
+                NF_DROP
+            };
+            encode_immediate_expression(code)
+        }
+    }
+}
+
+fn encode_bitwise_expression(
+    source: u32,
+    destination: u32,
+    length: u32,
+    mask: &[u8],
+    xor: &[u8],
+) -> Result<(&'static [u8], Vec<u8>), NftablesError> {
+    validate_bitwise_mask_xor(length, mask, xor)?;
+    let mut nested_mask = Vec::new();
+    encode_attribute(&mut nested_mask, NFTA_DATA_VALUE, mask)?;
+    let mut nested_xor = Vec::new();
+    encode_attribute(&mut nested_xor, NFTA_DATA_VALUE, xor)?;
+    let mut data = Vec::new();
+    encode_attribute(&mut data, NFTA_BITWISE_SREG, &source.to_be_bytes())?;
+    encode_attribute(&mut data, NFTA_BITWISE_DREG, &destination.to_be_bytes())?;
+    encode_attribute(&mut data, NFTA_BITWISE_LEN, &length.to_be_bytes())?;
+    encode_attribute(
+        &mut data,
+        NFTA_BITWISE_OP,
+        &NFT_BITWISE_MASK_XOR.to_be_bytes(),
+    )?;
+    encode_attribute(&mut data, NFTA_BITWISE_MASK | NLA_F_NESTED, &nested_mask)?;
+    encode_attribute(&mut data, NFTA_BITWISE_XOR | NLA_F_NESTED, &nested_xor)?;
+    Ok((b"bitwise", data))
+}
+
+fn encode_immediate_expression(code: u32) -> Result<(&'static [u8], Vec<u8>), NftablesError> {
+    let mut verdict = Vec::new();
+    encode_attribute(&mut verdict, NFTA_VERDICT_CODE, &code.to_be_bytes())?;
+    let mut nested_verdict = Vec::new();
+    encode_attribute(
+        &mut nested_verdict,
+        NFTA_DATA_VERDICT | NLA_F_NESTED,
+        &verdict,
+    )?;
+    let mut data = Vec::new();
+    encode_attribute(
+        &mut data,
+        NFTA_IMMEDIATE_DREG,
+        &NFT_REG_VERDICT.to_be_bytes(),
+    )?;
+    encode_attribute(
+        &mut data,
+        NFTA_IMMEDIATE_DATA | NLA_F_NESTED,
+        &nested_verdict,
+    )?;
+    Ok((b"immediate", data))
 }
 
 fn encode_batch_boundary_payload(generation: Option<u32>) -> Result<Vec<u8>, NftablesError> {
@@ -1196,6 +1686,13 @@ fn delete_failure(
     NftablesLineageFailure { source, authority }
 }
 
+fn cleanup_delete_failure(
+    source: NftablesError,
+    authority: ForwardPolicyCleanupDeleteAuthority,
+) -> NftablesLineageFailure<ForwardPolicyCleanupDeleteAuthority> {
+    NftablesLineageFailure { source, authority }
+}
+
 fn install_policy(
     initial: NftablesBaseline,
     expectation: FixedForwardPolicyExpectation,
@@ -1425,6 +1922,121 @@ fn reconcile_delete(
     }
 }
 
+fn delete_cleanup_policy(
+    cleanup: ForwardPolicyCleanupAuthority,
+    deadline: Deadline,
+) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<ForwardPolicyCleanupDeleteAuthority>>
+{
+    let journal = cleanup.journal();
+    let preflight = observe_ruleset(deadline.0, ACTIVE_POLICY_GENERATION).and_then(|snapshot| {
+        validate_deletion_authority(journal, &snapshot, ACTIVE_POLICY_GENERATION)
+    });
+    if let Err(source) = preflight {
+        return Err(cleanup_delete_failure(
+            source,
+            ForwardPolicyCleanupDeleteAuthority::Cleanup(cleanup),
+        ));
+    }
+    let transaction = match encode_delete_transaction(cleanup.journal()) {
+        Ok(transaction) => transaction,
+        Err(source) => {
+            return Err(cleanup_delete_failure(
+                source,
+                ForwardPolicyCleanupDeleteAuthority::Cleanup(cleanup),
+            ));
+        }
+    };
+    let client = match MutationClient::connect(deadline) {
+        Ok(client) => client,
+        Err(source) => {
+            return Err(cleanup_delete_failure(
+                source,
+                ForwardPolicyCleanupDeleteAuthority::Cleanup(cleanup),
+            ));
+        }
+    };
+    let acknowledgement_source = match client.send(&transaction, deadline) {
+        Ok(()) => client
+            .receive_acknowledgements(&transaction, deadline)
+            .err(),
+        Err(MutationSendFailure::NotSent(source)) => {
+            return Err(cleanup_delete_failure(
+                source,
+                ForwardPolicyCleanupDeleteAuthority::Cleanup(cleanup),
+            ));
+        }
+        Err(MutationSendFailure::PossiblySent(source)) => Some(source),
+    };
+    reconcile_cleanup_delete(cleanup.into_journal(), acknowledgement_source)
+}
+
+fn reconcile_cleanup_delete(
+    journal: ActivePolicyJournal,
+    mutation_source: Option<NftablesError>,
+) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<ForwardPolicyCleanupDeleteAuthority>>
+{
+    let deadline = match reconciliation_deadline() {
+        Ok(deadline) => deadline,
+        Err(source) => {
+            return Err(cleanup_delete_failure(
+                source,
+                ForwardPolicyCleanupDeleteAuthority::Indeterminate(
+                    IndeterminateNftablesPolicy::after_delete(journal),
+                ),
+            ));
+        }
+    };
+    match observe_stable_ruleset(deadline) {
+        Ok(observed)
+            if observed.generation == RETIRED_POLICY_GENERATION && observed.snapshot.is_empty() =>
+        {
+            Ok(SemanticallyEmptyNftables {
+                expectation: journal.expectation,
+                generations: [
+                    journal.initial_generation,
+                    journal.generation,
+                    observed.generation,
+                ],
+                _thread_bound: PhantomData,
+            })
+        }
+        Ok(observed) if observed.generation == ACTIVE_POLICY_GENERATION => {
+            match validate_deletion_authority(&journal, &observed.snapshot, observed.generation) {
+                Ok(()) => Err(cleanup_delete_failure(
+                    mutation_source.unwrap_or(NftablesError::UnexpectedPolicy),
+                    ForwardPolicyCleanupDeleteAuthority::Cleanup(
+                        ForwardPolicyCleanupAuthority::from_journal(journal),
+                    ),
+                )),
+                Err(source) => Err(cleanup_delete_failure(
+                    source,
+                    ForwardPolicyCleanupDeleteAuthority::Indeterminate(
+                        IndeterminateNftablesPolicy::after_delete(journal),
+                    ),
+                )),
+            }
+        }
+        Ok(observed) => Err(cleanup_delete_failure(
+            if observed.generation == ACTIVE_POLICY_GENERATION
+                || observed.generation == RETIRED_POLICY_GENERATION
+            {
+                NftablesError::UnexpectedPolicy
+            } else {
+                NftablesError::UnexpectedGeneration
+            },
+            ForwardPolicyCleanupDeleteAuthority::Indeterminate(
+                IndeterminateNftablesPolicy::after_delete(journal),
+            ),
+        )),
+        Err(source) => Err(cleanup_delete_failure(
+            source,
+            ForwardPolicyCleanupDeleteAuthority::Indeterminate(
+                IndeterminateNftablesPolicy::after_delete(journal),
+            ),
+        )),
+    }
+}
+
 fn validate_deletion_authority(
     journal: &ActivePolicyJournal,
     snapshot: &RulesetSnapshot,
@@ -1451,6 +2063,48 @@ fn validate_zero_counter_policy(
     snapshot
         .exact_policy_observation(expectation, observed_generation)?
         .into_zero_counter_observation()
+}
+
+fn observe_identical_fixed_icmp_counter_policy(
+    journal: &ActivePolicyJournal,
+    deadline: Instant,
+) -> Result<ExactPolicyObservation, NftablesError> {
+    let first = observe_bound_policy(journal, deadline)?.into_fixed_icmp_counter_observation()?;
+    let second = observe_bound_policy(journal, deadline)?.into_fixed_icmp_counter_observation()?;
+    validate_identical_fixed_icmp_counter_observations(journal, first, &second)
+}
+
+fn observe_bound_policy(
+    journal: &ActivePolicyJournal,
+    deadline: Instant,
+) -> Result<ExactPolicyObservation, NftablesError> {
+    if journal.generation != ACTIVE_POLICY_GENERATION {
+        return Err(NftablesError::UnexpectedGeneration);
+    }
+    let snapshot = observe_ruleset(deadline, ACTIVE_POLICY_GENERATION)?;
+    let observation =
+        snapshot.exact_policy_observation(&journal.expectation, ACTIVE_POLICY_GENERATION)?;
+    if observation.generation == journal.generation && observation.handles == journal.handles {
+        Ok(observation)
+    } else {
+        Err(NftablesError::UnexpectedPolicy)
+    }
+}
+
+fn validate_identical_fixed_icmp_counter_observations(
+    journal: &ActivePolicyJournal,
+    first: ExactPolicyObservation,
+    second: &ExactPolicyObservation,
+) -> Result<ExactPolicyObservation, NftablesError> {
+    if journal.generation != ACTIVE_POLICY_GENERATION
+        || first.generation != journal.generation
+        || first.handles != journal.handles
+        || *second != first
+        || first.counters != ForwardPolicyCounters::FIXED_ICMP_EXCHANGE
+    {
+        return Err(NftablesError::UnexpectedPolicy);
+    }
+    Ok(first)
 }
 
 /// Observe one stable empty nftables baseline before the supplied deadline.
@@ -1644,6 +2298,13 @@ enum ObservedExpression {
         offset: u32,
         length: u32,
     },
+    BitwiseMaskXor {
+        source: u32,
+        destination: u32,
+        length: u32,
+        mask: Vec<u8>,
+        xor: Vec<u8>,
+    },
     Counter(ForwardPolicyCounter),
     ImmediateAccept,
     ImmediateDrop,
@@ -1661,6 +2322,11 @@ impl ForwardPolicyCounter {
         bytes: 0,
         packets: 0,
     };
+
+    const FIXED_ICMP_PACKET: Self = Self {
+        bytes: FIXED_ICMP_IPV4_BYTES,
+        packets: 1,
+    };
 }
 
 /// The three typed per-rule counters retained by an exact structural observation.
@@ -1669,6 +2335,11 @@ struct ForwardPolicyCounters([ForwardPolicyCounter; 3]);
 
 impl ForwardPolicyCounters {
     const ZERO: Self = Self([ForwardPolicyCounter::ZERO; 3]);
+    const FIXED_ICMP_EXCHANGE: Self = Self([
+        ForwardPolicyCounter::FIXED_ICMP_PACKET,
+        ForwardPolicyCounter::FIXED_ICMP_PACKET,
+        ForwardPolicyCounter::ZERO,
+    ]);
 }
 
 #[derive(Default)]
@@ -1714,6 +2385,16 @@ impl ExactPolicyObservation {
             handles: self.handles,
             _thread_bound: PhantomData,
         })
+    }
+
+    fn into_fixed_icmp_counter_observation(self) -> Result<Self, NftablesError> {
+        if self.generation != ACTIVE_POLICY_GENERATION {
+            return Err(NftablesError::UnexpectedGeneration);
+        }
+        if self.counters != ForwardPolicyCounters::FIXED_ICMP_EXCHANGE {
+            return Err(NftablesError::UnexpectedPolicy);
+        }
+        Ok(self)
     }
 }
 
@@ -2660,6 +3341,7 @@ fn parse_expression(payload: &[u8]) -> Result<ObservedExpression, NftablesError>
         b"meta" => parse_meta_expression(data),
         b"cmp" => parse_compare_expression(data),
         b"payload" => parse_payload_expression(data),
+        b"bitwise" => parse_bitwise_expression(data),
         b"counter" => parse_counter_expression(data),
         b"immediate" => parse_immediate_expression(data),
         _ => Err(NftablesError::UnexpectedPolicy),
@@ -2780,6 +3462,62 @@ fn parse_payload_expression(payload: &[u8]) -> Result<ObservedExpression, Nftabl
         offset: offset.ok_or(NftablesError::Malformed)?,
         length: length.ok_or(NftablesError::Malformed)?,
     })
+}
+
+fn parse_bitwise_expression(payload: &[u8]) -> Result<ObservedExpression, NftablesError> {
+    let attributes = parse_attributes(payload, MAX_EXPRESSION_DATA_ATTRIBUTES)?;
+    let mut source = None;
+    let mut destination = None;
+    let mut length = None;
+    let mut operation = None;
+    let mut mask = None;
+    let mut xor = None;
+    for attribute in attributes {
+        match attribute.kind {
+            NFTA_BITWISE_SREG if attribute.flags == 0 => {
+                set_once(&mut source, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_BITWISE_DREG if attribute.flags == 0 => {
+                set_once(&mut destination, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_BITWISE_LEN if attribute.flags == 0 => {
+                set_once(&mut length, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_BITWISE_OP if attribute.flags == 0 => {
+                set_once(&mut operation, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_BITWISE_MASK if attribute.flags == 0 => {
+                set_once(&mut mask, parse_value_data(attribute.payload)?)?;
+            }
+            NFTA_BITWISE_XOR if attribute.flags == 0 => {
+                set_once(&mut xor, parse_value_data(attribute.payload)?)?;
+            }
+            NFTA_BITWISE_DATA => return Err(NftablesError::UnexpectedPolicy),
+            _ => return Err(NftablesError::Malformed),
+        }
+    }
+    if operation != Some(NFT_BITWISE_MASK_XOR) {
+        return Err(NftablesError::UnexpectedPolicy);
+    }
+    let length = length.ok_or(NftablesError::Malformed)?;
+    let mask = mask.ok_or(NftablesError::Malformed)?;
+    let xor = xor.ok_or(NftablesError::Malformed)?;
+    validate_bitwise_mask_xor(length, &mask, &xor)?;
+    Ok(ObservedExpression::BitwiseMaskXor {
+        source: source.ok_or(NftablesError::Malformed)?,
+        destination: destination.ok_or(NftablesError::Malformed)?,
+        length,
+        mask,
+        xor,
+    })
+}
+
+fn validate_bitwise_mask_xor(length: u32, mask: &[u8], xor: &[u8]) -> Result<(), NftablesError> {
+    let length = usize::try_from(length).map_err(|_| NftablesError::Limit)?;
+    if !(1..=16).contains(&length) || mask.len() != length || xor.len() != length {
+        return Err(NftablesError::Malformed);
+    }
+    Ok(())
 }
 
 fn parse_immediate_expression(payload: &[u8]) -> Result<ObservedExpression, NftablesError> {
@@ -4323,6 +5061,20 @@ mod tests {
                     let _guard =
                         ActiveNftablesPolicy::from_journal(test_active_journal(expectation));
                 }
+                "counter-phase" => {
+                    let _guard =
+                        FixedIcmpCounterPhase::from_journal(test_active_journal(expectation));
+                }
+                "exact-icmp" => {
+                    let _guard = ExactFixedIcmpNftablesPolicy::from_journal(test_active_journal(
+                        expectation,
+                    ));
+                }
+                "cleanup" => {
+                    let _guard = ForwardPolicyCleanupAuthority::from_journal(test_active_journal(
+                        expectation,
+                    ));
+                }
                 "indeterminate-install" => {
                     let initial = NftablesBaseline {
                         generation: INITIAL_GENERATION,
@@ -4340,7 +5092,14 @@ mod tests {
         }
 
         let executable = env::current_exe().expect("current test executable");
-        for kind in ["active", "indeterminate-install", "indeterminate-delete"] {
+        for kind in [
+            "active",
+            "counter-phase",
+            "exact-icmp",
+            "cleanup",
+            "indeterminate-install",
+            "indeterminate-delete",
+        ] {
             let output = Command::new(&executable)
                 .arg("--exact")
                 .arg(TEST_NAME)
@@ -4358,6 +5117,229 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
+        }
+    }
+
+    fn assert_fixed_ipv4_shape_expressions(expressions: &[ObservedExpression]) {
+        assert_eq!(
+            expressions[14],
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_NETWORK_HEADER,
+                offset: IPV4_VERSION_IHL_OFFSET,
+                length: 1,
+            }
+        );
+        assert_eq!(
+            expressions[15],
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: vec![FIXED_IPV4_VERSION_IHL],
+            }
+        );
+        assert_eq!(
+            expressions[16],
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_NETWORK_HEADER,
+                offset: IPV4_TOTAL_LENGTH_OFFSET,
+                length: 2,
+            }
+        );
+        assert_eq!(
+            expressions[17],
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: FIXED_IPV4_TOTAL_LENGTH.to_vec(),
+            }
+        );
+        assert_eq!(
+            expressions[18],
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_NETWORK_HEADER,
+                offset: IPV4_FRAGMENT_OFFSET,
+                length: 2,
+            }
+        );
+        assert_eq!(
+            expressions[19],
+            ObservedExpression::BitwiseMaskXor {
+                source: NFT_REG_1,
+                destination: NFT_REG_1,
+                length: 2,
+                mask: IPV4_NO_FRAGMENT_MASK.to_vec(),
+                xor: IPV4_NO_FRAGMENT_VALUE.to_vec(),
+            }
+        );
+        assert_eq!(
+            expressions[20],
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: IPV4_NO_FRAGMENT_VALUE.to_vec(),
+            }
+        );
+    }
+
+    fn assert_fixed_icmp_identity_expressions(expressions: &[ObservedExpression]) {
+        assert_eq!(
+            expressions[21],
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_TRANSPORT_HEADER,
+                offset: ICMP_IDENTIFIER_SEQUENCE_OFFSET,
+                length: 4,
+            }
+        );
+        assert_eq!(
+            expressions[22],
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: vec![b'0', b'1', 0, 1],
+            }
+        );
+        assert_eq!(
+            expressions[23],
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_TRANSPORT_HEADER,
+                offset: ICMP_RUN_TAG_OFFSET,
+                length: NFT_REGISTER_UAPI_BYTES,
+            }
+        );
+        assert_eq!(
+            expressions[24],
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: b"0123456789abcdef".to_vec(),
+            }
+        );
+        assert_eq!(
+            expressions[25],
+            ObservedExpression::Payload {
+                destination: NFT_REG_1,
+                base: NFT_PAYLOAD_TRANSPORT_HEADER,
+                offset: ICMP_RUN_TAG_OFFSET + NFT_REGISTER_UAPI_BYTES,
+                length: NFT_REGISTER_UAPI_BYTES,
+            }
+        );
+        assert_eq!(
+            expressions[26],
+            ObservedExpression::Compare {
+                source: NFT_REG_1,
+                operation: NFT_CMP_EQ,
+                value: b"0123456789abcdef".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn fixed_icmp_tag_is_canonical_ascii_and_split_on_register_boundaries() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let tag = FixedIcmpEchoTag::from_run_id(&run_id).expect("fixed ICMP tag");
+        assert_eq!(tag.identifier(), u16::from_be_bytes(*b"01"));
+        assert_eq!(tag.sequence(), 1);
+        assert_eq!(tag.payload(), b"0123456789abcdef0123456789abcdef");
+        assert_eq!(tag.identifier_sequence_bytes(), [b'0', b'1', 0, 1]);
+
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        for rule_index in 0..2 {
+            let expressions = expectation.expected_rule_expressions(rule_index);
+            assert_eq!(expressions.len(), ACCEPT_RULE_EXPRESSIONS);
+            assert_fixed_ipv4_shape_expressions(&expressions);
+            assert_fixed_icmp_identity_expressions(&expressions);
+            assert_eq!(
+                expressions[ACCEPT_RULE_COUNTER_EXPRESSION],
+                ObservedExpression::Counter(ForwardPolicyCounter::ZERO)
+            );
+            assert_eq!(
+                expressions[ACCEPT_RULE_EXPRESSIONS - 1],
+                ObservedExpression::ImmediateAccept
+            );
+        }
+
+        let other_run = RunId::parse("ff23456789abcdef0123456789abcdef").expect("other run id");
+        let other = FixedIcmpEchoTag::from_run_id(&other_run).expect("other ICMP tag");
+        assert_ne!(other.identifier(), tag.identifier());
+        assert_ne!(other.payload(), tag.payload());
+    }
+
+    #[test]
+    fn exact_policy_rejects_identifier_sequence_or_run_tag_drift() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        for expression_index in [22, 24, 26] {
+            let mut changed = test_policy_snapshot(&expectation).expect("policy snapshot");
+            let ObservedExpression::Compare { value, .. } =
+                &mut changed.rules[0].expressions[expression_index]
+            else {
+                panic!("run-bound comparison position changed");
+            };
+            value[0] ^= 1;
+            assert!(matches!(
+                changed.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+        }
+
+        let mut wrong_chunk = test_policy_snapshot(&expectation).expect("policy snapshot");
+        let ObservedExpression::Payload { offset, .. } = &mut wrong_chunk.rules[1].expressions[25]
+        else {
+            panic!("second run-tag payload position changed");
+        };
+        *offset = ICMP_RUN_TAG_OFFSET;
+        assert!(matches!(
+            wrong_chunk.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+    }
+
+    #[test]
+    fn exact_policy_rejects_ipv4_ihl_length_or_fragment_broadening() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+
+        for (expression_index, broadened_value) in [
+            (15, vec![0x46]),
+            (17, (FIXED_ICMP_IPV4_LENGTH + 1).to_be_bytes().to_vec()),
+        ] {
+            let mut broadened = test_policy_snapshot(&expectation).expect("policy snapshot");
+            let ObservedExpression::Compare { value, .. } =
+                &mut broadened.rules[0].expressions[expression_index]
+            else {
+                panic!("fixed IPv4 comparison position changed");
+            };
+            *value = broadened_value;
+            assert!(matches!(
+                broadened.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+        }
+
+        let mut fragmented = test_policy_snapshot(&expectation).expect("policy snapshot");
+        let ObservedExpression::BitwiseMaskXor { mask, .. } =
+            &mut fragmented.rules[1].expressions[19]
+        else {
+            panic!("IPv4 fragment mask position changed");
+        };
+        *mask = [0, 0].to_vec();
+        assert!(matches!(
+            fragmented.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        let mask = u16::from_be_bytes(IPV4_NO_FRAGMENT_MASK);
+        assert_eq!(0x4000_u16 & mask, 0, "DF remains an allowed variation");
+        for forbidden in [0x8000_u16, 0x2000, 0x0001, 0x1fff] {
+            assert_ne!(forbidden & mask, 0, "fragment field {forbidden:#06x}");
         }
     }
 
@@ -4546,6 +5528,143 @@ mod tests {
     }
 
     #[test]
+    fn fixed_icmp_counter_evidence_requires_two_identical_exact_profiles() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        let journal = test_active_journal(expectation);
+
+        let first = test_policy_observation_with_counters(
+            &journal.expectation,
+            ForwardPolicyCounters::FIXED_ICMP_EXCHANGE,
+        )
+        .expect("first exact ICMP observation");
+        let second = test_policy_observation_with_counters(
+            &journal.expectation,
+            ForwardPolicyCounters::FIXED_ICMP_EXCHANGE,
+        )
+        .expect("second exact ICMP observation");
+        let accepted = validate_identical_fixed_icmp_counter_observations(&journal, first, &second)
+            .expect("identical exact ICMP observations");
+        assert_eq!(accepted.generation, ACTIVE_POLICY_GENERATION);
+        assert_eq!(accepted.handles, journal.handles);
+        assert_eq!(
+            accepted.counters,
+            ForwardPolicyCounters::FIXED_ICMP_EXCHANGE
+        );
+
+        for counters in [
+            ForwardPolicyCounters([
+                ForwardPolicyCounter {
+                    bytes: FIXED_ICMP_IPV4_BYTES - 1,
+                    packets: 1,
+                },
+                ForwardPolicyCounter::FIXED_ICMP_PACKET,
+                ForwardPolicyCounter::ZERO,
+            ]),
+            ForwardPolicyCounters([
+                ForwardPolicyCounter::FIXED_ICMP_PACKET,
+                ForwardPolicyCounter {
+                    bytes: FIXED_ICMP_IPV4_BYTES,
+                    packets: 2,
+                },
+                ForwardPolicyCounter::ZERO,
+            ]),
+            ForwardPolicyCounters([
+                ForwardPolicyCounter::FIXED_ICMP_PACKET,
+                ForwardPolicyCounter::FIXED_ICMP_PACKET,
+                ForwardPolicyCounter {
+                    bytes: FIXED_ICMP_IPV4_BYTES,
+                    packets: 1,
+                },
+            ]),
+        ] {
+            let malformed = test_policy_observation_with_counters(&journal.expectation, counters)
+                .expect("structurally exact non-success counters");
+            assert!(matches!(
+                malformed.into_fixed_icmp_counter_observation(),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+        }
+
+        let first = test_policy_observation_with_counters(
+            &journal.expectation,
+            ForwardPolicyCounters::FIXED_ICMP_EXCHANGE,
+        )
+        .expect("first exact ICMP observation");
+        let mut second = test_policy_observation_with_counters(
+            &journal.expectation,
+            ForwardPolicyCounters::FIXED_ICMP_EXCHANGE,
+        )
+        .expect("second exact ICMP observation");
+        second.handles.rules[1] += 1;
+        assert!(matches!(
+            validate_identical_fixed_icmp_counter_observations(&journal, first, &second),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+    }
+
+    #[test]
+    fn fixed_icmp_counter_proof_rejects_cross_run_handle_collision() {
+        let first_run = RunId::parse("0123456789abcdef0123456789abcdef").expect("first run");
+        let first_expectation =
+            FixedForwardPolicyExpectation::for_run(&first_run, [3, 5]).expect("first expectation");
+        let first_journal = test_active_journal(first_expectation);
+        let first_observation = test_policy_observation_with_counters(
+            &first_journal.expectation,
+            ForwardPolicyCounters::FIXED_ICMP_EXCHANGE,
+        )
+        .expect("first observation");
+        let proof = ExactFixedIcmpCounterProof {
+            expectation: first_journal.expectation.clone(),
+            generation: first_observation.generation,
+            handles: first_observation.handles,
+            counters: first_observation.counters,
+            _thread_bound: PhantomData,
+        };
+        validate_fixed_icmp_counter_proof(&first_journal, &proof, &first_observation)
+            .expect("proof remains valid for its complete expectation");
+
+        let other_run = RunId::parse("fedcba9876543210fedcba9876543210").expect("other run");
+        let other_expectation =
+            FixedForwardPolicyExpectation::for_run(&other_run, [3, 5]).expect("other expectation");
+        let other_journal = test_active_journal(other_expectation);
+        let other_observation = test_policy_observation_with_counters(
+            &other_journal.expectation,
+            ForwardPolicyCounters::FIXED_ICMP_EXCHANGE,
+        )
+        .expect("same numeric handles in another run");
+        assert_eq!(first_observation.generation, other_observation.generation);
+        assert_eq!(first_observation.handles, other_observation.handles);
+        assert_eq!(first_observation.counters, other_observation.counters);
+        assert!(matches!(
+            validate_fixed_icmp_counter_proof(&other_journal, &proof, &other_observation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+    }
+
+    #[test]
+    fn every_pre_or_post_packet_authority_converts_once_to_cleanup_only() {
+        let expectation = || {
+            let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation")
+        };
+
+        let cleanup = ActiveNftablesPolicy::from_journal(test_active_journal(expectation()))
+            .into_cleanup_authority();
+        assert_eq!(cleanup.into_journal().generation, ACTIVE_POLICY_GENERATION);
+
+        let cleanup = FixedIcmpCounterPhase::from_journal(test_active_journal(expectation()))
+            .into_cleanup_authority();
+        assert_eq!(cleanup.into_journal().generation, ACTIVE_POLICY_GENERATION);
+
+        let cleanup =
+            ExactFixedIcmpNftablesPolicy::from_journal(test_active_journal(expectation()))
+                .into_cleanup_authority();
+        assert_eq!(cleanup.into_journal().generation, ACTIVE_POLICY_GENERATION);
+    }
+
+    #[test]
     fn deletion_authority_accepts_nonzero_counters_but_not_structural_drift() {
         let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
         let expectation =
@@ -4679,6 +5798,76 @@ mod tests {
         nonzero_padding[ATTRIBUTE_HEADER_LEN + 9] = 1;
         assert!(matches!(
             parse_expressions(&nonzero_padding),
+            Err(NftablesError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn bitwise_expression_parser_requires_exact_mask_xor_uapi() {
+        let nested_mask = attribute(NFTA_DATA_VALUE, &IPV4_NO_FRAGMENT_MASK);
+        let nested_xor = attribute(NFTA_DATA_VALUE, &IPV4_NO_FRAGMENT_VALUE);
+        let mut canonical = attribute(NFTA_BITWISE_SREG, &NFT_REG_1.to_be_bytes());
+        canonical.extend(attribute(NFTA_BITWISE_DREG, &NFT_REG_1.to_be_bytes()));
+        canonical.extend(attribute(NFTA_BITWISE_LEN, &2_u32.to_be_bytes()));
+        canonical.extend(attribute(
+            NFTA_BITWISE_OP,
+            &NFT_BITWISE_MASK_XOR.to_be_bytes(),
+        ));
+        canonical.extend(attribute(NFTA_BITWISE_MASK, &nested_mask));
+        canonical.extend(attribute(NFTA_BITWISE_XOR, &nested_xor));
+        assert_eq!(
+            parse_bitwise_expression(&canonical).expect("canonical bitwise expression"),
+            ObservedExpression::BitwiseMaskXor {
+                source: NFT_REG_1,
+                destination: NFT_REG_1,
+                length: 2,
+                mask: IPV4_NO_FRAGMENT_MASK.to_vec(),
+                xor: IPV4_NO_FRAGMENT_VALUE.to_vec(),
+            }
+        );
+
+        let mut missing_operation = attribute(NFTA_BITWISE_SREG, &NFT_REG_1.to_be_bytes());
+        missing_operation.extend(attribute(NFTA_BITWISE_DREG, &NFT_REG_1.to_be_bytes()));
+        missing_operation.extend(attribute(NFTA_BITWISE_LEN, &2_u32.to_be_bytes()));
+        missing_operation.extend(attribute(NFTA_BITWISE_MASK, &nested_mask));
+        missing_operation.extend(attribute(NFTA_BITWISE_XOR, &nested_xor));
+        assert!(matches!(
+            parse_bitwise_expression(&missing_operation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        let mut duplicate_mask = canonical.clone();
+        duplicate_mask.extend(attribute(NFTA_BITWISE_MASK, &nested_mask));
+        assert!(matches!(
+            parse_bitwise_expression(&duplicate_mask),
+            Err(NftablesError::Malformed)
+        ));
+
+        let mut wrong_length = attribute(NFTA_BITWISE_SREG, &NFT_REG_1.to_be_bytes());
+        wrong_length.extend(attribute(NFTA_BITWISE_DREG, &NFT_REG_1.to_be_bytes()));
+        wrong_length.extend(attribute(NFTA_BITWISE_LEN, &3_u32.to_be_bytes()));
+        wrong_length.extend(attribute(
+            NFTA_BITWISE_OP,
+            &NFT_BITWISE_MASK_XOR.to_be_bytes(),
+        ));
+        wrong_length.extend(attribute(NFTA_BITWISE_MASK, &nested_mask));
+        wrong_length.extend(attribute(NFTA_BITWISE_XOR, &nested_xor));
+        assert!(matches!(
+            parse_bitwise_expression(&wrong_length),
+            Err(NftablesError::Malformed)
+        ));
+
+        let mut flagged_mask = attribute(NFTA_BITWISE_SREG, &NFT_REG_1.to_be_bytes());
+        flagged_mask.extend(attribute(NFTA_BITWISE_DREG, &NFT_REG_1.to_be_bytes()));
+        flagged_mask.extend(attribute(NFTA_BITWISE_LEN, &2_u32.to_be_bytes()));
+        flagged_mask.extend(attribute(
+            NFTA_BITWISE_OP,
+            &NFT_BITWISE_MASK_XOR.to_be_bytes(),
+        ));
+        flagged_mask.extend(attribute(NFTA_BITWISE_MASK | NLA_F_NESTED, &nested_mask));
+        flagged_mask.extend(attribute(NFTA_BITWISE_XOR, &nested_xor));
+        assert!(matches!(
+            parse_bitwise_expression(&flagged_mask),
             Err(NftablesError::Malformed)
         ));
     }
@@ -5246,8 +6435,8 @@ mod tests {
             generation: ACTIVE_POLICY_GENERATION,
             handles: PolicyHandles {
                 table: 1,
-                chain: 2,
-                rules: [3, 4, 5],
+                chain: 1,
+                rules: [2, 3, 4],
             },
         }
     }
@@ -5276,6 +6465,22 @@ mod tests {
             chains: vec![chain],
             rules: vec![alpha, omega, terminal],
         })
+    }
+
+    fn test_policy_observation_with_counters(
+        expectation: &FixedForwardPolicyExpectation,
+        counters: ForwardPolicyCounters,
+    ) -> Result<ExactPolicyObservation, NftablesError> {
+        let mut snapshot = test_policy_snapshot(expectation)?;
+        for (rule, counter) in snapshot.rules.iter_mut().zip(counters.0) {
+            let counter_index = if rule.expressions.len() == ACCEPT_RULE_EXPRESSIONS {
+                ACCEPT_RULE_COUNTER_EXPRESSION
+            } else {
+                TERMINAL_RULE_COUNTER_EXPRESSION
+            };
+            rule.expressions[counter_index] = ObservedExpression::Counter(counter);
+        }
+        snapshot.exact_policy_observation(expectation, ACTIVE_POLICY_GENERATION)
     }
 
     fn test_table_payload(
@@ -5399,6 +6604,27 @@ mod tests {
                     data.extend(attribute(NFTA_PAYLOAD_OFFSET, &offset.to_be_bytes()));
                     data.extend(attribute(NFTA_PAYLOAD_LEN, &length.to_be_bytes()));
                     (b"payload".as_slice(), data)
+                }
+                ObservedExpression::BitwiseMaskXor {
+                    source,
+                    destination,
+                    length,
+                    mask,
+                    xor,
+                } => {
+                    validate_bitwise_mask_xor(*length, mask, xor)?;
+                    let nested_mask = attribute(NFTA_DATA_VALUE, mask);
+                    let nested_xor = attribute(NFTA_DATA_VALUE, xor);
+                    let mut data = attribute(NFTA_BITWISE_SREG, &source.to_be_bytes());
+                    data.extend(attribute(NFTA_BITWISE_DREG, &destination.to_be_bytes()));
+                    data.extend(attribute(NFTA_BITWISE_LEN, &length.to_be_bytes()));
+                    data.extend(attribute(
+                        NFTA_BITWISE_OP,
+                        &NFT_BITWISE_MASK_XOR.to_be_bytes(),
+                    ));
+                    data.extend(attribute(NFTA_BITWISE_MASK | nested, &nested_mask));
+                    data.extend(attribute(NFTA_BITWISE_XOR | nested, &nested_xor));
+                    (b"bitwise".as_slice(), data)
                 }
                 ObservedExpression::Counter(counter) => {
                     let mut data = attribute(NFTA_COUNTER_BYTES, &counter.bytes.to_be_bytes());

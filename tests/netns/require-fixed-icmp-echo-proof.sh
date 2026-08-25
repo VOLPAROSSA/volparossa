@@ -1,5 +1,5 @@
 #!/bin/sh
-# Require the fixed no-packet permanent-neighbour proof on an unprivileged Debian 13 host.
+# Require the fixed ICMPv4 echo plus rollback proof on an unprivileged Debian 13 host.
 set -eu
 
 export LC_ALL=C
@@ -8,11 +8,11 @@ export PATH
 umask 077
 
 usage() {
-    printf '%s\n' 'usage: tests/netns/require-permanent-neighbour-proof.sh' >&2
+    printf '%s\n' 'usage: tests/netns/require-fixed-icmp-echo-proof.sh' >&2
 }
 
 fail() {
-    printf '%s\n' "permanent-neighbour proof gate failed: $1" >&2
+    printf '%s\n' "fixed ICMP echo proof gate failed: $1" >&2
     exit 1
 }
 
@@ -22,7 +22,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-runner_source=$repository_root/target/permanent-neighbour-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
+runner_source=$repository_root/target/fixed-icmp-echo-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
 if [ ! -f "$runner_source" ] || [ ! -x "$runner_source" ] || [ -L "$runner_source" ]; then
     fail 'fixed workspace runner must be one executable regular file, not a symlink'
 fi
@@ -98,7 +98,7 @@ do
     fi
 done
 
-proof_tmp=$(mktemp -d /tmp/volparossa-permanent-neighbour-proof.XXXXXX)
+proof_tmp=$(mktemp -d /tmp/volparossa-fixed-icmp-echo-proof.XXXXXX)
 cleanup() {
     rm -rf -- "$proof_tmp"
 }
@@ -303,10 +303,10 @@ if [ -s "$proof_tmp/stdout" ]; then
     fail 'runner wrote unexpected standard output'
 fi
 printf '%s\n' \
-    'BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized the descriptor-relative private run, two live run-bound nsfs endpoint pins, two fixed veth pairs, four fixed /30 IPv4 addresses, an all-IPv6-addrgen-NONE barrier, and one canonically topology-bound parent FORWARD policy. Before link activation, PID 1 atomically installed and freshly proved one run-bound inet vpl_<run_id> table at generation 2, one priority-0 filter base chain at the forward hook with policy drop, and exactly three ordered rules: the A-to-B IPv4 ICMP echo-request tuple with one inline counter immediately before accept, its exact B-to-A echo reply with one inline counter immediately before accept, followed by one unconditional inline counter immediately before drop. Every fresh complete policy observation required all three typed counters to be exactly packets=0 and bytes=0. With that policy active and all four veth ends still down, PID 1 established the canonical enabled IPv4-forwarding value through one bounded two-byte write only when the retained original was disabled; an already-enabled original was freshly re-read without a write. It retained and re-proved the exact policy and enabled record through four-end activation and the two exact static endpoint /32 routes. PID 1 then installed exactly four affine NUD_PERMANENT IPv4 neighbours in canonical parent A/B then endpoint A/B order: each parent entry mapped its fixed endpoint address to the endpoint MAC, and each endpoint entry mapped its fixed parent gateway to the parent MAC. Fresh semantic parent/A/B snapshots required exactly those records, zero probes, zero proxy-neighbour records, and no other configuration delta; only validated volatile NDA_CACHEINFO telemetry was excluded from equality. The exact generation-2 policy was re-proved with all three counters still zero around that transition. Before deleting either veth, PID 1 explicitly removed the neighbours in reverse endpoint B/A then parent B/A order, proved the exact routed state restored, and again re-proved the zero-counter policy. It then directly deleted veth B followed by A. While generation 2 remained active and every route, address, and pair owner remained armed, PID 1 restored the exact original forwarding record and proved the parent and both endpoints exactly equal to their retained baselines. It then deleted only the freshly observed table handle, proved a semantically empty generation 3, repeated the final parent/endpoint proof, and only then retired those lower owners. PID 1 unmounted nsfs B then A, restored the hidden slots, reversed every private-run creation, and emitted one rollback-complete checkpoint. The outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap; its IPv4-forwarding record remained byte-identical. Exact record restoration does not claim restoration of every related namespace-local IPv4 devconf value; complete cleanup of that state follows when the disposable network namespace is destroyed after its last reference closes, which this slice does not separately observe. This proves bounded exact policy, topology, forwarding-record, and neighbour-teardown configuration only; it makes no packet, packet-absence, counter-stability, packet-capture, probe, datapath, ownership-manifest, network-topology-readiness, TOPOLOGY_READY, A14, A15, or acceptance-evidence claim.' \
+    'BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized the fixed descriptor-relative private run. PID 1 proved the exact disposable parent/A/B baselines, two run-bound nsfs pins, two fixed veth pairs and four /30 addresses; installed the topology-bound generation-2 parent FORWARD policy before link activation; conditionally enabled only the disposable parent ip_forward record; activated all four ends; installed the two exact static endpoint /32 routes; and installed four exact affine NUD_PERMANENT neighbours with zero probes and zero proxy neighbours. Only structurally valid volatile NDA_CACHEINFO telemetry was excluded from neighbour equality. With those neighbours armed, PID 1 consumed zero-counter policy authority, opened one nonblocking close-on-exec raw ICMPv4 socket inside endpoint A, bound it to eth0 and 10.241.1.2, connected it to 10.241.2.2, and issued exactly one sendmsg with no retry for one 40-byte echo request. The request used the first two canonical run-ID ASCII bytes as its big-endian identifier, sequence 1, and the full 32-byte canonical ASCII run ID as payload. Before the absolute deadline, endpoint A received one exact 60-byte IPv4 echo reply; source, destination, receive interface and IP_PKTINFO, IPv4 and ICMP checksums, identifier, sequence, and full payload all matched. The socket closed before two identical complete generation-bracketed observations proved the request-accept, reply-accept, and terminal-drop counters at exactly packets/bytes 1/60, 1/60, and 0/0. Fresh semantic RTNL observations proved every one of the four veth ends at exactly one RX and one TX packet and 74 RX and TX bytes, with all other parsed link statistics zero, while routes, addresses, qdiscs, four permanent neighbours, zero probes, and zero proxy-neighbour records remained exact. PID 1 removed the neighbours in reverse endpoint B/A then parent B/A order, proved the exact routed state restored without changing the post-echo link telemetry, and re-proved the exact 1/60, 1/60, 0/0 policy-counter profile. It then converted the policy to counter-agnostic cleanup authority, deleted veth B then A, restored the exact original parent ip_forward record, proved pristine parent/endpoints under generation 2, deleted only the observed table handle, proved semantic-empty generation 3, retired lower owners, reversed nsfs/filesystem state, emitted the rollback checkpoint, and completed exact TERM/EOF/reap. The outer host ip_forward record remained byte-identical. This proves one fixed run-bound ICMPv4 echo request/reply exchange, its exact two-accept/zero-drop counter profile, matching four-veth link telemetry, and bounded configuration teardown. It does not prove packet absence, packet-capture privacy, a general VPN datapath, an ownership manifest, network-topology readiness, TOPOLOGY_READY, forced-crash cleanup, A14, A15, or acceptance evidence.' \
     >"$proof_tmp/expected-stderr"
 if ! cmp -s "$proof_tmp/expected-stderr" "$proof_tmp/stderr"; then
-        fail 'runner did not report the permanent-neighbour teardown outcome'
+        fail 'runner did not report the exact fixed ICMP echo and teardown outcome'
 fi
 for record in \
     namespaces \
@@ -335,14 +335,14 @@ done
 # This unprivileged gate deliberately does not escalate merely to inspect the
 # host firewall.  Host nftables/legacy-firewall state and VPN-private peer/key
 # state are not authoritatively readable here.  The visible link/configuration
-# fingerprint is useful permanent-neighbour teardown evidence, but it is not A14 or A15 acceptance.
+# fingerprint is useful fixed-ICMP rollback evidence, but it is not A14 or A15 acceptance.
 
 case $proof_scope in
     vm)
-        printf '%s\n' 'Debian 13 VM permanent-neighbour configuration-fingerprint gate passed (no packet claim; not A14/A15)'
+        printf '%s\n' 'Debian 13 VM fixed ICMP echo plus rollback gate passed (one exact run-bound request/reply; policy counters 1/60,1/60,0/0; outer configuration fingerprint unchanged; no packet-absence, TOPOLOGY_READY, A14/A15 or acceptance claim)'
         ;;
     additional-bare-metal-local)
-        printf '%s\n' 'additional bare-metal local permanent-neighbour configuration-fingerprint gate passed (no packet claim; not A14/A15)'
+        printf '%s\n' 'additional bare-metal local fixed ICMP echo plus rollback gate passed (one exact run-bound request/reply; policy counters 1/60,1/60,0/0; outer configuration fingerprint unchanged; no packet-absence, TOPOLOGY_READY, A14/A15 or acceptance claim)'
         ;;
-    *) fail 'permanent-neighbour proof scope was not classified' ;;
+    *) fail 'fixed ICMP echo proof scope was not classified' ;;
 esac

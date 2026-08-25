@@ -151,7 +151,9 @@ const VETH_LINK_IFMAP_BYTES: usize = 32;
 const VETH_STATS_SEEN: u8 = 1 << 0;
 const VETH_STATS64_SEEN: u8 = 1 << 1;
 const VETH_IFMAP_SEEN: u8 = 1 << 2;
-const VETH_ZEROED_STRUCTS_SEEN: u8 = VETH_STATS_SEEN | VETH_STATS64_SEEN | VETH_IFMAP_SEEN;
+const VETH_REQUIRED_STRUCTS_SEEN: u8 = VETH_STATS_SEEN | VETH_STATS64_SEEN | VETH_IFMAP_SEEN;
+const FIXED_ICMP_ECHO_PACKETS: u64 = 1;
+const FIXED_ICMP_ECHO_ETHERNET_BYTES: u64 = crate::icmp::ETHERNET_ECHO_FRAME_BYTES;
 const VETH_MIN_MTU: u32 = 68;
 const VETH_MAX_MTU: u32 = 65_535;
 const VETH_GSO_MAX_SEGMENTS: u32 = 65_535;
@@ -781,6 +783,23 @@ impl AllLinksUp {
         FixedLinkRetirement::Deleted(self.take_core().delete_into_proof())
     }
 
+    /// Consume the activated state after the one fixed ICMP echo proof.
+    ///
+    /// This is the sole lifecycle entry point whose pre-delete readbacks admit
+    /// the exact one-packet/74-byte RX and TX statistics profile. Ordinary
+    /// retirement remains strictly bound to zero statistics.
+    pub(crate) fn into_fixed_icmp_echo_retirement(mut self) -> FixedLinkRetirement {
+        FixedLinkRetirement::Deleted(self.take_core().delete_fixed_icmp_echo_into_proof())
+    }
+
+    /// Consume the activated state after a fixed ICMP send might have occurred.
+    ///
+    /// Each RX/TX direction must be coherently untouched (`0/0`) or carry the
+    /// sole allowed echo frame (`1/74`). No other counters are admitted.
+    pub(crate) fn into_fixed_icmp_cleanup_retirement(mut self) -> FixedLinkRetirement {
+        FixedLinkRetirement::Deleted(self.take_core().delete_fixed_icmp_cleanup_into_proof())
+    }
+
     fn core(&self) -> &JournalCore {
         self.core.as_ref().unwrap_or_else(|| std::process::abort())
     }
@@ -1355,10 +1374,28 @@ impl JournalCore {
     }
 
     fn delete_into_proof(mut self) -> PendingFixedPairAbsenceProof {
+        self.delete_into_proof_with_statistics(RequiredLinkStatistics::Zero)
+    }
+
+    fn delete_fixed_icmp_echo_into_proof(mut self) -> PendingFixedPairAbsenceProof {
+        self.delete_into_proof_with_statistics(RequiredLinkStatistics::FixedIcmpEcho)
+    }
+
+    fn delete_fixed_icmp_cleanup_into_proof(mut self) -> PendingFixedPairAbsenceProof {
+        self.delete_into_proof_with_statistics(RequiredLinkStatistics::FixedIcmpCleanup)
+    }
+
+    fn delete_into_proof_with_statistics(
+        &mut self,
+        required_statistics: RequiredLinkStatistics,
+    ) -> PendingFixedPairAbsenceProof {
         if !self.mutation_possible {
             std::process::abort();
         }
-        if self.ensure_deleted().is_err() {
+        if self
+            .ensure_deleted_with_statistics(required_statistics)
+            .is_err()
+        {
             std::process::abort();
         }
         let proof = PendingFixedPairAbsenceProof {
@@ -1373,9 +1410,16 @@ impl JournalCore {
     }
 
     fn ensure_deleted(&mut self) -> Result<(), FixedLinkOperationError> {
+        self.ensure_deleted_with_statistics(RequiredLinkStatistics::Zero)
+    }
+
+    fn ensure_deleted_with_statistics(
+        &mut self,
+        required_statistics: RequiredLinkStatistics,
+    ) -> Result<(), FixedLinkOperationError> {
         self.parent.make_current()?;
         for index in (0..2).rev() {
-            self.reconcile_pair_deletion(index)?;
+            self.reconcile_pair_deletion(index, required_statistics)?;
         }
         for pair in self.pairs.iter().rev() {
             require_link_absent(
@@ -1388,7 +1432,11 @@ impl JournalCore {
         Ok(())
     }
 
-    fn reconcile_pair_deletion(&self, pair_index: usize) -> Result<(), FixedLinkOperationError> {
+    fn reconcile_pair_deletion(
+        &self,
+        pair_index: usize,
+        required_statistics: RequiredLinkStatistics,
+    ) -> Result<(), FixedLinkOperationError> {
         let pair = &self.pairs[pair_index];
         let parent_end = if pair_index == 0 {
             FixedLinkEnd::ParentA
@@ -1397,7 +1445,9 @@ impl JournalCore {
         };
         let allowed = deletion_profiles(self.stages[parent_end.index()]);
         for _ in 0..MAX_RECONCILIATION_DELETE_ATTEMPTS {
-            let Some(observed) = observe_link_by_ifindex(pair.parent_ifindex)? else {
+            let Some(observed) =
+                observe_link_by_ifindex_with_statistics(pair.parent_ifindex, required_statistics)?
+            else {
                 require_link_absent(
                     pair.parent_ifindex,
                     &pair.parent_name,
@@ -1420,7 +1470,9 @@ impl JournalCore {
             let request = encode_delete_link_request(sequence, pair.parent_ifindex)?;
             let _ = transact_ack(&client.socket, client.local_port, &request, deadline);
             drop(client);
-            if observe_link_by_ifindex(pair.parent_ifindex)?.is_none() {
+            if observe_link_by_ifindex_with_statistics(pair.parent_ifindex, required_statistics)?
+                .is_none()
+            {
                 require_link_absent(
                     pair.parent_ifindex,
                     &pair.parent_name,
@@ -1429,7 +1481,7 @@ impl JournalCore {
                 return Ok(());
             }
         }
-        match observe_link_by_ifindex(pair.parent_ifindex)? {
+        match observe_link_by_ifindex_with_statistics(pair.parent_ifindex, required_statistics)? {
             None => require_link_absent(
                 pair.parent_ifindex,
                 &pair.parent_name,
@@ -1621,6 +1673,18 @@ enum ObservedProfile {
     UpCarrierNone,
 }
 
+/// Statistics profile admitted by one exact link readback path.
+///
+/// The two fixed-ICMP variants are private to explicitly named post-send
+/// retirement transitions. All ordinary activation, reconciliation, rollback,
+/// and drop paths continue to select `Zero`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequiredLinkStatistics {
+    Zero,
+    FixedIcmpEcho,
+    FixedIcmpCleanup,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedLink {
     ifindex: u32,
@@ -1655,7 +1719,9 @@ struct LinkAttributes<'a> {
     allmulti: Option<u32>,
     protocol_down: Option<u8>,
     addrgen_mode: Option<u8>,
-    zeroed_structs_seen: u8,
+    fixed_icmp_cleanup_statistics32: Option<[bool; 2]>,
+    fixed_icmp_cleanup_statistics64: Option<[bool; 2]>,
+    required_structs_seen: u8,
     link_info_seen: bool,
     xdp_seen: bool,
 }
@@ -1688,8 +1754,15 @@ fn require_expected_link(
 }
 
 fn observe_link_by_ifindex(ifindex: u32) -> Result<Option<ObservedLink>, FixedLinkOperationError> {
+    observe_link_by_ifindex_with_statistics(ifindex, RequiredLinkStatistics::Zero)
+}
+
+fn observe_link_by_ifindex_with_statistics(
+    ifindex: u32,
+    required_statistics: RequiredLinkStatistics,
+) -> Result<Option<ObservedLink>, FixedLinkOperationError> {
     let payload = encode_get_link_payload(ifindex)?;
-    query_one_link(&payload, "query fixed link by ifindex")
+    query_one_link_with_statistics(&payload, "query fixed link by ifindex", required_statistics)
 }
 
 fn observe_link_by_name(name: &str) -> Result<Option<ObservedLink>, FixedLinkOperationError> {
@@ -1700,6 +1773,14 @@ fn observe_link_by_name(name: &str) -> Result<Option<ObservedLink>, FixedLinkOpe
 fn query_one_link(
     payload: &[u8],
     operation: &'static str,
+) -> Result<Option<ObservedLink>, FixedLinkOperationError> {
+    query_one_link_with_statistics(payload, operation, RequiredLinkStatistics::Zero)
+}
+
+fn query_one_link_with_statistics(
+    payload: &[u8],
+    operation: &'static str,
+    required_statistics: RequiredLinkStatistics,
 ) -> Result<Option<ObservedLink>, FixedLinkOperationError> {
     let deadline = Deadline::after(LINK_OPERATION_TIMEOUT)?;
     let mut client = NetlinkClient::connect(deadline)?;
@@ -1717,7 +1798,17 @@ fn query_one_link(
             )),
         };
     }
-    parse_link_reply(&reply, client.local_port, sequence).map(Some)
+    match required_statistics {
+        RequiredLinkStatistics::Zero => {
+            parse_link_reply(&reply, client.local_port, sequence).map(Some)
+        }
+        RequiredLinkStatistics::FixedIcmpEcho => {
+            parse_fixed_icmp_echo_link_reply(&reply, client.local_port, sequence).map(Some)
+        }
+        RequiredLinkStatistics::FixedIcmpCleanup => {
+            parse_fixed_icmp_cleanup_link_reply(&reply, client.local_port, sequence).map(Some)
+        }
+    }
 }
 
 fn require_link_absent(
@@ -1738,6 +1829,41 @@ fn parse_link_reply(
     reply: &NetlinkReply,
     local_port: u32,
     sequence: u32,
+) -> Result<ObservedLink, FixedLinkOperationError> {
+    parse_link_reply_with_statistics(reply, local_port, sequence, RequiredLinkStatistics::Zero)
+}
+
+fn parse_fixed_icmp_echo_link_reply(
+    reply: &NetlinkReply,
+    local_port: u32,
+    sequence: u32,
+) -> Result<ObservedLink, FixedLinkOperationError> {
+    parse_link_reply_with_statistics(
+        reply,
+        local_port,
+        sequence,
+        RequiredLinkStatistics::FixedIcmpEcho,
+    )
+}
+
+fn parse_fixed_icmp_cleanup_link_reply(
+    reply: &NetlinkReply,
+    local_port: u32,
+    sequence: u32,
+) -> Result<ObservedLink, FixedLinkOperationError> {
+    parse_link_reply_with_statistics(
+        reply,
+        local_port,
+        sequence,
+        RequiredLinkStatistics::FixedIcmpCleanup,
+    )
+}
+
+fn parse_link_reply_with_statistics(
+    reply: &NetlinkReply,
+    local_port: u32,
+    sequence: u32,
+    required_statistics: RequiredLinkStatistics,
 ) -> Result<ObservedLink, FixedLinkOperationError> {
     if reply.sender != SocketAddr::new(0, 0) {
         return Err(FixedLinkOperationError::Unsafe(
@@ -1773,7 +1899,8 @@ fn parse_link_reply(
     }
     let ifindex = u32::try_from(raw_ifindex).map_err(|_| FixedLinkOperationError::Limit)?;
     let flags = read_u32(info, 8)?;
-    let attributes = parse_link_attributes(&frame[NLMSG_HEADER_LEN + IFINFO_LEN..])?;
+    let attributes =
+        parse_link_attributes(&frame[NLMSG_HEADER_LEN + IFINFO_LEN..], required_statistics)?;
     let name = parse_interface_name(attributes.name.ok_or(FixedLinkOperationError::Unsafe(
         "fixed link lacks IFLA_IFNAME",
     ))?)?;
@@ -1795,7 +1922,8 @@ fn parse_link_reply(
         || attributes.promiscuity != Some(0)
         || attributes.allmulti != Some(0)
         || attributes.protocol_down != Some(0)
-        || attributes.zeroed_structs_seen != VETH_ZEROED_STRUCTS_SEEN
+        || attributes.required_structs_seen != VETH_REQUIRED_STRUCTS_SEEN
+        || !required_link_statistics_match(&attributes, required_statistics)
         || !attributes.link_info_seen
         || !attributes.xdp_seen
     {
@@ -1853,6 +1981,23 @@ fn carrier_telemetry_matches(attributes: &LinkAttributes<'_>, profile: ObservedP
     }
 }
 
+fn required_link_statistics_match(
+    attributes: &LinkAttributes<'_>,
+    required_statistics: RequiredLinkStatistics,
+) -> bool {
+    match required_statistics {
+        RequiredLinkStatistics::Zero | RequiredLinkStatistics::FixedIcmpEcho => {
+            attributes.fixed_icmp_cleanup_statistics32.is_none()
+                && attributes.fixed_icmp_cleanup_statistics64.is_none()
+        }
+        RequiredLinkStatistics::FixedIcmpCleanup => {
+            attributes.fixed_icmp_cleanup_statistics32.is_some()
+                && attributes.fixed_icmp_cleanup_statistics32
+                    == attributes.fixed_icmp_cleanup_statistics64
+        }
+    }
+}
+
 fn classify_profile(
     flags: u32,
     attributes: &LinkAttributes<'_>,
@@ -1897,7 +2042,10 @@ fn classify_profile(
     }
 }
 
-fn parse_link_attributes(bytes: &[u8]) -> Result<LinkAttributes<'_>, FixedLinkOperationError> {
+fn parse_link_attributes(
+    bytes: &[u8],
+    required_statistics: RequiredLinkStatistics,
+) -> Result<LinkAttributes<'_>, FixedLinkOperationError> {
     let mut result = LinkAttributes::default();
     let mut seen = [false; MAX_DEBIAN13_LINK_ATTRIBUTE + 1];
     for attribute in parse_attributes(bytes)? {
@@ -1908,7 +2056,7 @@ fn parse_link_attributes(bytes: &[u8]) -> Result<LinkAttributes<'_>, FixedLinkOp
             ));
         }
         seen[index] = true;
-        apply_link_attribute(&mut result, attribute)?;
+        apply_link_attribute(&mut result, attribute, required_statistics)?;
     }
     Ok(result)
 }
@@ -1916,6 +2064,7 @@ fn parse_link_attributes(bytes: &[u8]) -> Result<LinkAttributes<'_>, FixedLinkOp
 fn apply_link_attribute<'a>(
     result: &mut LinkAttributes<'a>,
     attribute: Attribute<'a>,
+    required_statistics: RequiredLinkStatistics,
 ) -> Result<(), FixedLinkOperationError> {
     match attribute.kind {
         IFLA_ADDRESS => set_once(
@@ -2003,13 +2152,14 @@ fn apply_link_attribute<'a>(
         IFLA_MASTER | IFLA_IFALIAS | IFLA_ALT_IFNAME => Err(FixedLinkOperationError::Unsafe(
             "fixed link acquired a forbidden relationship or alias",
         )),
-        _ => apply_link_telemetry_attribute(result, attribute),
+        _ => apply_link_telemetry_attribute(result, attribute, required_statistics),
     }
 }
 
 fn apply_link_telemetry_attribute(
     result: &mut LinkAttributes<'_>,
     attribute: Attribute<'_>,
+    required_statistics: RequiredLinkStatistics,
 ) -> Result<(), FixedLinkOperationError> {
     match attribute.kind {
         IFLA_CARRIER_CHANGES => set_once(
@@ -2024,39 +2174,138 @@ fn apply_link_telemetry_attribute(
             &mut result.carrier_down_count,
             read_exact_u32(attribute.unflagged_payload()?)?,
         ),
-        IFLA_STATS => {
-            verify_zeroed_telemetry(result, attribute, VETH_LINK_STATS_BYTES, VETH_STATS_SEEN)
-        }
-        IFLA_STATS64 => verify_zeroed_telemetry(
+        IFLA_STATS => verify_required_telemetry(
+            result,
+            attribute,
+            VETH_LINK_STATS_BYTES,
+            VETH_STATS_SEEN,
+            required_statistics,
+        ),
+        IFLA_STATS64 => verify_required_telemetry(
             result,
             attribute,
             VETH_LINK_STATS64_BYTES,
             VETH_STATS64_SEEN,
+            required_statistics,
         ),
-        IFLA_MAP => {
-            verify_zeroed_telemetry(result, attribute, VETH_LINK_IFMAP_BYTES, VETH_IFMAP_SEEN)
-        }
+        IFLA_MAP => verify_required_telemetry(
+            result,
+            attribute,
+            VETH_LINK_IFMAP_BYTES,
+            VETH_IFMAP_SEEN,
+            RequiredLinkStatistics::Zero,
+        ),
         _ => verify_known_telemetry(attribute),
     }
 }
 
-fn verify_zeroed_telemetry(
+fn verify_required_telemetry(
     result: &mut LinkAttributes<'_>,
     attribute: Attribute<'_>,
     exact_length: usize,
     marker: u8,
+    required_statistics: RequiredLinkStatistics,
 ) -> Result<(), FixedLinkOperationError> {
     let payload = attribute.unflagged_payload()?;
-    if payload.len() != exact_length
-        || payload.iter().any(|byte| *byte != 0)
-        || result.zeroed_structs_seen & marker != 0
-    {
+    if payload.len() != exact_length || result.required_structs_seen & marker != 0 {
         return Err(FixedLinkOperationError::Unsafe(
-            "fixed link statistics or ifmap telemetry is not exact zero",
+            "fixed link statistics or ifmap telemetry has the wrong shape",
         ));
     }
-    result.zeroed_structs_seen |= marker;
+    let exact = match (required_statistics, marker) {
+        (RequiredLinkStatistics::Zero, _) => payload.iter().all(|byte| *byte == 0),
+        (RequiredLinkStatistics::FixedIcmpEcho, VETH_STATS_SEEN) => {
+            fixed_icmp_echo_statistics32_match(payload)?
+        }
+        (RequiredLinkStatistics::FixedIcmpEcho, VETH_STATS64_SEEN) => {
+            fixed_icmp_echo_statistics64_match(payload)?
+        }
+        (RequiredLinkStatistics::FixedIcmpCleanup, VETH_STATS_SEEN) => {
+            result.fixed_icmp_cleanup_statistics32 =
+                Some(fixed_icmp_cleanup_statistics32(payload)?);
+            true
+        }
+        (RequiredLinkStatistics::FixedIcmpCleanup, VETH_STATS64_SEEN) => {
+            result.fixed_icmp_cleanup_statistics64 =
+                Some(fixed_icmp_cleanup_statistics64(payload)?);
+            true
+        }
+        (RequiredLinkStatistics::FixedIcmpEcho | RequiredLinkStatistics::FixedIcmpCleanup, _) => {
+            false
+        }
+    };
+    if !exact {
+        return Err(FixedLinkOperationError::Unsafe(
+            "fixed link statistics or ifmap telemetry does not match the required lifecycle",
+        ));
+    }
+    result.required_structs_seen |= marker;
     Ok(())
+}
+
+fn fixed_icmp_echo_statistics32_match(payload: &[u8]) -> Result<bool, FixedLinkOperationError> {
+    for index in 0..(VETH_LINK_STATS_BYTES / size_of::<u32>()) {
+        if u64::from(read_u32(payload, index * size_of::<u32>())?)
+            != fixed_icmp_echo_statistic(index)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn fixed_icmp_echo_statistics64_match(payload: &[u8]) -> Result<bool, FixedLinkOperationError> {
+    for index in 0..(VETH_LINK_STATS64_BYTES / size_of::<u64>()) {
+        if read_u64(payload, index * size_of::<u64>())? != fixed_icmp_echo_statistic(index) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn fixed_icmp_cleanup_statistics32(payload: &[u8]) -> Result<[bool; 2], FixedLinkOperationError> {
+    let mut statistics = [0_u64; VETH_LINK_STATS_BYTES / size_of::<u32>()];
+    for (index, value) in statistics.iter_mut().enumerate() {
+        *value = u64::from(read_u32(payload, index * size_of::<u32>())?);
+    }
+    fixed_icmp_cleanup_directions(&statistics)
+}
+
+fn fixed_icmp_cleanup_statistics64(payload: &[u8]) -> Result<[bool; 2], FixedLinkOperationError> {
+    let mut statistics = [0_u64; VETH_LINK_STATS64_BYTES / size_of::<u64>()];
+    for (index, value) in statistics.iter_mut().enumerate() {
+        *value = read_u64(payload, index * size_of::<u64>())?;
+    }
+    fixed_icmp_cleanup_directions(&statistics)
+}
+
+fn fixed_icmp_cleanup_directions(statistics: &[u64]) -> Result<[bool; 2], FixedLinkOperationError> {
+    if statistics.len() < 4 || statistics[4..].iter().any(|value| *value != 0) {
+        return Err(FixedLinkOperationError::Unsafe(
+            "fixed ICMP cleanup link statistics contain another counter",
+        ));
+    }
+    let mut directions = [false; 2];
+    for (direction, (packet_index, byte_index)) in [(0, 2), (1, 3)].into_iter().enumerate() {
+        directions[direction] = match (statistics[packet_index], statistics[byte_index]) {
+            (0, 0) => false,
+            (FIXED_ICMP_ECHO_PACKETS, FIXED_ICMP_ECHO_ETHERNET_BYTES) => true,
+            _ => {
+                return Err(FixedLinkOperationError::Unsafe(
+                    "fixed ICMP cleanup link statistics are incoherent",
+                ));
+            }
+        };
+    }
+    Ok(directions)
+}
+
+const fn fixed_icmp_echo_statistic(index: usize) -> u64 {
+    match index {
+        0 | 1 => FIXED_ICMP_ECHO_PACKETS,
+        2 | 3 => FIXED_ICMP_ECHO_ETHERNET_BYTES,
+        _ => 0,
+    }
 }
 
 fn verify_known_telemetry(attribute: Attribute<'_>) -> Result<(), FixedLinkOperationError> {
@@ -2811,6 +3060,18 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, FixedLinkOperationError>
     Ok(u32::from_ne_bytes(value))
 }
 
+fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, FixedLinkOperationError> {
+    let end = offset
+        .checked_add(8)
+        .ok_or(FixedLinkOperationError::Limit)?;
+    let value = bytes
+        .get(offset..end)
+        .ok_or(FixedLinkOperationError::Unsafe("truncated netlink u64"))?
+        .try_into()
+        .map_err(|_| FixedLinkOperationError::Unsafe("invalid netlink u64"))?;
+    Ok(u64::from_ne_bytes(value))
+}
+
 fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, FixedLinkOperationError> {
     let end = offset
         .checked_add(4)
@@ -3220,6 +3481,155 @@ mod tests {
         assert_eq!(target.payload.len(), replacement.len());
         let offset = target.payload.as_ptr() as usize - reply.bytes.as_ptr() as usize;
         reply.bytes[offset..offset + replacement.len()].copy_from_slice(replacement);
+    }
+
+    fn fixed_icmp_echo_statistics32_payload() -> Vec<u8> {
+        (0..(VETH_LINK_STATS_BYTES / size_of::<u32>()))
+            .flat_map(|index| {
+                u32::try_from(fixed_icmp_echo_statistic(index))
+                    .expect("fixed echo statistic fits u32")
+                    .to_ne_bytes()
+            })
+            .collect()
+    }
+
+    fn fixed_icmp_echo_statistics64_payload() -> Vec<u8> {
+        (0..(VETH_LINK_STATS64_BYTES / size_of::<u64>()))
+            .flat_map(|index| fixed_icmp_echo_statistic(index).to_ne_bytes())
+            .collect()
+    }
+
+    fn replace_link_statistics(reply: &mut NetlinkReply, statistics32: &[u8], statistics64: &[u8]) {
+        replace_first_attribute_payload(reply, IFLA_STATS, statistics32);
+        replace_first_attribute_payload(reply, IFLA_STATS64, statistics64);
+    }
+
+    fn fixed_icmp_echo_link_reply() -> NetlinkReply {
+        let mut reply = link_reply(ObservedProfile::UpCarrierNone);
+        replace_link_statistics(
+            &mut reply,
+            &fixed_icmp_echo_statistics32_payload(),
+            &fixed_icmp_echo_statistics64_payload(),
+        );
+        reply
+    }
+
+    fn set_statistics32(payload: &mut [u8], index: usize, value: u32) {
+        let start = index * size_of::<u32>();
+        payload[start..start + size_of::<u32>()].copy_from_slice(&value.to_ne_bytes());
+    }
+
+    fn set_statistics64(payload: &mut [u8], index: usize, value: u64) {
+        let start = index * size_of::<u64>();
+        payload[start..start + size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
+    }
+
+    fn fixed_icmp_cleanup_link_reply(
+        receive: Option<(u64, u64)>,
+        transmit: Option<(u64, u64)>,
+    ) -> NetlinkReply {
+        let mut reply = link_reply(ObservedProfile::UpCarrierNone);
+        let mut statistics32 = vec![0; VETH_LINK_STATS_BYTES];
+        let mut statistics64 = vec![0; VETH_LINK_STATS64_BYTES];
+        for (direction, values) in [receive, transmit].into_iter().enumerate() {
+            if let Some((packets, bytes)) = values {
+                set_statistics32(
+                    &mut statistics32,
+                    direction,
+                    u32::try_from(packets).expect("test packet count fits u32"),
+                );
+                set_statistics32(
+                    &mut statistics32,
+                    direction + 2,
+                    u32::try_from(bytes).expect("test byte count fits u32"),
+                );
+                set_statistics64(&mut statistics64, direction, packets);
+                set_statistics64(&mut statistics64, direction + 2, bytes);
+            }
+        }
+        replace_link_statistics(&mut reply, &statistics32, &statistics64);
+        reply
+    }
+
+    #[test]
+    fn ordinary_retirement_profile_rejects_post_echo_statistics() {
+        let reply = fixed_icmp_echo_link_reply();
+        assert!(parse_link_reply(&reply, TEST_PORT, TEST_SEQUENCE).is_err());
+    }
+
+    #[test]
+    fn fixed_icmp_echo_retirement_profile_accepts_only_exact_statistics() {
+        let exact = fixed_icmp_echo_link_reply();
+        let observed = parse_fixed_icmp_echo_link_reply(&exact, TEST_PORT, TEST_SEQUENCE)
+            .expect("exact fixed ICMP echo link profile");
+        assert_eq!(observed.profile, ObservedProfile::UpCarrierNone);
+
+        let zero = link_reply(ObservedProfile::UpCarrierNone);
+        assert!(parse_fixed_icmp_echo_link_reply(&zero, TEST_PORT, TEST_SEQUENCE).is_err());
+
+        let mut overcount = fixed_icmp_echo_link_reply();
+        let mut overcount32 = fixed_icmp_echo_statistics32_payload();
+        let mut overcount64 = fixed_icmp_echo_statistics64_payload();
+        overcount32[..size_of::<u32>()].copy_from_slice(&2_u32.to_ne_bytes());
+        overcount64[..size_of::<u64>()].copy_from_slice(&2_u64.to_ne_bytes());
+        replace_link_statistics(&mut overcount, &overcount32, &overcount64);
+        assert!(parse_fixed_icmp_echo_link_reply(&overcount, TEST_PORT, TEST_SEQUENCE).is_err());
+
+        let mut impossible = fixed_icmp_echo_link_reply();
+        let mut impossible32 = fixed_icmp_echo_statistics32_payload();
+        let mut impossible64 = fixed_icmp_echo_statistics64_payload();
+        impossible32[2 * size_of::<u32>()..3 * size_of::<u32>()]
+            .copy_from_slice(&0_u32.to_ne_bytes());
+        impossible64[2 * size_of::<u64>()..3 * size_of::<u64>()]
+            .copy_from_slice(&0_u64.to_ne_bytes());
+        replace_link_statistics(&mut impossible, &impossible32, &impossible64);
+        assert!(parse_fixed_icmp_echo_link_reply(&impossible, TEST_PORT, TEST_SEQUENCE).is_err());
+    }
+
+    #[test]
+    fn fixed_icmp_cleanup_profile_is_bounded_and_cross_width_consistent() {
+        for accepted in [
+            fixed_icmp_cleanup_link_reply(None, None),
+            fixed_icmp_cleanup_link_reply(
+                Some((FIXED_ICMP_ECHO_PACKETS, FIXED_ICMP_ECHO_ETHERNET_BYTES)),
+                None,
+            ),
+            fixed_icmp_cleanup_link_reply(
+                None,
+                Some((FIXED_ICMP_ECHO_PACKETS, FIXED_ICMP_ECHO_ETHERNET_BYTES)),
+            ),
+            fixed_icmp_echo_link_reply(),
+        ] {
+            parse_fixed_icmp_cleanup_link_reply(&accepted, TEST_PORT, TEST_SEQUENCE)
+                .expect("bounded possible-send cleanup profile");
+        }
+
+        let overcount = fixed_icmp_cleanup_link_reply(Some((2, 148)), None);
+        assert!(parse_fixed_icmp_cleanup_link_reply(&overcount, TEST_PORT, TEST_SEQUENCE).is_err());
+
+        let impossible = fixed_icmp_cleanup_link_reply(Some((1, 0)), None);
+        assert!(
+            parse_fixed_icmp_cleanup_link_reply(&impossible, TEST_PORT, TEST_SEQUENCE).is_err()
+        );
+
+        let mut inconsistent = fixed_icmp_cleanup_link_reply(
+            Some((FIXED_ICMP_ECHO_PACKETS, FIXED_ICMP_ECHO_ETHERNET_BYTES)),
+            None,
+        );
+        replace_first_attribute_payload(&mut inconsistent, IFLA_STATS, &[0; VETH_LINK_STATS_BYTES]);
+        assert!(
+            parse_fixed_icmp_cleanup_link_reply(&inconsistent, TEST_PORT, TEST_SEQUENCE).is_err()
+        );
+
+        let mut other_counter = fixed_icmp_cleanup_link_reply(None, None);
+        let mut statistics32 = vec![0; VETH_LINK_STATS_BYTES];
+        let mut statistics64 = vec![0; VETH_LINK_STATS64_BYTES];
+        set_statistics32(&mut statistics32, 4, 1);
+        set_statistics64(&mut statistics64, 4, 1);
+        replace_link_statistics(&mut other_counter, &statistics32, &statistics64);
+        assert!(
+            parse_fixed_icmp_cleanup_link_reply(&other_counter, TEST_PORT, TEST_SEQUENCE).is_err()
+        );
     }
 
     #[test]
