@@ -83,7 +83,10 @@ Last updated: 2026-08-25
 - [ ] Dormant helper tags 35/28 register one exact runtime-global Prepare intent and reconcile only
   an expired same-runtime lineage. HelperClient uses one authenticated stream and one absolute
   five-second budget for each Bind-plus-operation sequence; post-Prepare-write failures transfer
-  exact authority to the owned route-ticket supervisor. The crate-private Prepare method has no other
+  exact authority to the owned route-ticket supervisor. Tag 35 now requires the context role and a
+  canonical, role-complete closed lease plan projected from the same canonically ordered Prepare;
+  the engine rejects any plan substitution before that Prepare's Pending/backend dispatch, and the dormant journal
+  has an exact fallible conversion to its existing `ClosedPlan`. The crate-private Prepare method has no other
   production call site; polling it standalone in future code would not be cancellation-safe. Runtime
   mismatch and missing evidence quarantine, target-only cleanup never removes
   Activated/Committed state, and exact retries re-evaluate a capped 1024-entry runtime-lifetime

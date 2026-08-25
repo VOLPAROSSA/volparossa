@@ -3241,6 +3241,7 @@ mod tests {
         prepared_mptcp_accepted_addrs: Option<u32>,
         prepared_mptcp_subflows: Option<u32>,
         prepared_lease_count: Option<usize>,
+        prepared_lease_identities: Option<Vec<(u32, i32)>>,
     }
 
     #[derive(Default)]
@@ -3276,6 +3277,14 @@ mod tests {
                 .lock()
                 .expect("fake state")
                 .selected_paths
+                .clone()
+        }
+
+        fn prepared_lease_identities(&self) -> Option<Vec<(u32, i32)>> {
+            self.state
+                .lock()
+                .expect("fake state")
+                .prepared_lease_identities
                 .clone()
         }
     }
@@ -3341,6 +3350,13 @@ mod tests {
                 state.prepared_mptcp_accepted_addrs = Some(request.mptcp_accepted_addrs);
                 state.prepared_mptcp_subflows = Some(request.mptcp_subflows);
                 state.prepared_lease_count = Some(request.leases.len());
+                state.prepared_lease_identities = Some(
+                    request
+                        .leases
+                        .iter()
+                        .map(|lease| (lease.path_id, lease.role))
+                        .collect(),
+                );
                 (
                     state.block_prepare,
                     state.prepare_delay_ms,
@@ -6004,6 +6020,36 @@ mod tests {
                 1
             );
         }
+        assert!(matches!(
+            established.teardown().await,
+            RetirementOutcome::Destroyed { .. }
+        ));
+        fixture
+            .manager
+            .shutdown()
+            .await
+            .expect("clean manager shutdown");
+    }
+
+    #[tokio::test]
+    async fn noncontiguous_selection_reaches_prepare_in_canonical_identity_order() {
+        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let handle = fixture
+            .manager
+            .spawn(fixture.transaction, fixture.transport, fixture.clock);
+        let established = handle.wait().await.expect("established route");
+
+        assert_eq!(fixture.shared.selected_paths(), [2, 5, 8]);
+        assert_eq!(
+            fixture.shared.prepared_lease_identities(),
+            Some(vec![
+                (2, WireguardRole::Client as i32),
+                (5, WireguardRole::Client as i32),
+                (8, WireguardRole::Client as i32),
+            ]),
+            "the actual LocalRouteBackend Prepare call must preserve canonical identity order"
+        );
+
         assert!(matches!(
             established.teardown().await,
             RetirementOutcome::Destroyed { .. }

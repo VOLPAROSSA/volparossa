@@ -18,12 +18,12 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, BindHelperRuntime, CommittedLease,
-    CommittedLeaseBatch, DestroyedContext, Empty, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION,
-    HelperRequest, HelperResponse, HelperResult, HelperRuntime, LeaseActivation, PrepareLeaseBatch,
-    PreparedLease, PreparedLeaseBatch, PublicUdpEndpoint, ReconcileExpiredPrepare,
-    ReconciledExpiredPrepare, TransportSocketReady, UnderlayEvidence, helper_request,
-    helper_response, operation_digest,
+    AcquireTransportSocket, ActivateLeaseBatch, BindHelperRuntime, ClosedPreparePlan,
+    CommittedLease, CommittedLeaseBatch, ContextRole, DestroyedContext, Empty, HELPER_HANDLE_BYTES,
+    HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult, HelperRuntime,
+    LeaseActivation, LeasePlan, PrepareLeaseBatch, PreparedLease, PreparedLeaseBatch,
+    PublicUdpEndpoint, ReconcileExpiredPrepare, ReconciledExpiredPrepare, TransportSocketReady,
+    UnderlayEvidence, WireguardRole, helper_request, helper_response, operation_digest,
 };
 use zeroize::Zeroizing;
 
@@ -31,6 +31,7 @@ const MAX_CONTEXTS: usize = 64;
 const MAX_CACHED_REQUESTS: usize = 1_024;
 const MAX_PREPARE_RECONCILIATIONS: usize = 1_024;
 const MAX_RECONCILIATION_REQUEST_IDS: usize = 1_024;
+const MAX_CLOSED_PREPARE_IDENTITIES: usize = 16;
 const SETUP_TTL_SECONDS: u64 = 30;
 const HARD_TTL_SECONDS: u64 = 15 * 60;
 const RESPONSE_CACHE_SECONDS: u64 = 30;
@@ -83,8 +84,77 @@ struct PrepareReconciliationRecord {
     backend_generation: u64,
     setup_expires_at_unix: u64,
     hard_expires_at_unix: u64,
+    closed_plan: ClosedPreparePlanBinding,
     phase: PrepareReconciliationPhase,
     reconciliation_request_id: Option<[u8; 16]>,
+}
+
+/// Fixed-size, non-secret copy of the canonical recovery topology bound by tag 35.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClosedPreparePlanBinding {
+    context_role: u8,
+    lease_count: u8,
+    identities: [(u8, u8); MAX_CLOSED_PREPARE_IDENTITIES],
+}
+
+impl ClosedPreparePlanBinding {
+    fn from_closed_plan(value: &ClosedPreparePlan) -> Option<Self> {
+        Self::from_parts(value.context_role, &value.leases)
+    }
+
+    fn from_prepare(value: &PrepareLeaseBatch) -> Option<Self> {
+        Self::from_parts(value.role, &value.leases)
+    }
+
+    fn from_parts(context_role: i32, leases: &[LeasePlan]) -> Option<Self> {
+        let context = ContextRole::try_from(context_role).ok()?;
+        if context == ContextRole::Unspecified
+            || leases.is_empty()
+            || leases.len() > MAX_CLOSED_PREPARE_IDENTITIES
+        {
+            return None;
+        }
+        let mut identities = [(0, 0); MAX_CLOSED_PREPARE_IDENTITIES];
+        let mut roles_by_path = [0_u8; 9];
+        let mut previous = None;
+        for (position, lease) in leases.iter().enumerate() {
+            let path_id = u8::try_from(lease.path_id).ok()?;
+            if !(1..=8).contains(&path_id)
+                || previous.is_some_and(|prior| prior >= (lease.path_id, lease.role))
+            {
+                return None;
+            }
+            let role = WireguardRole::try_from(lease.role).ok()?;
+            let role_bit = match (context, role) {
+                (ContextRole::Client, WireguardRole::Client) => 1,
+                (ContextRole::Relay, WireguardRole::RelayClient) => 2,
+                (ContextRole::Relay, WireguardRole::RelayExit) => 4,
+                (ContextRole::Exit, WireguardRole::Exit) => 8,
+                _ => return None,
+            };
+            roles_by_path[usize::from(path_id)] |= role_bit;
+            identities[position] = (path_id, u8::try_from(lease.role).ok()?);
+            previous = Some((lease.path_id, lease.role));
+        }
+        let expected_roles = match context {
+            ContextRole::Client => 1,
+            ContextRole::Relay => 2 | 4,
+            ContextRole::Exit => 8,
+            ContextRole::Unspecified => return None,
+        };
+        if roles_by_path
+            .iter()
+            .skip(1)
+            .any(|roles| *roles != 0 && *roles != expected_roles)
+        {
+            return None;
+        }
+        Some(Self {
+            context_role: u8::try_from(context_role).ok()?,
+            lease_count: u8::try_from(leases.len()).ok()?,
+            identities,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -820,6 +890,13 @@ impl HelperEngine {
                     let same_digest = cached.digest.ct_eq(&digest).unwrap_u8() == 1;
                     let cached_failure = cached.response.result != HelperResult::Ok as i32;
                     let exact_live_lineage = value.prepare_intent.as_ref().is_some_and(|intent| {
+                        let Some(closed_plan) = intent
+                            .closed_plan
+                            .as_ref()
+                            .and_then(ClosedPreparePlanBinding::from_closed_plan)
+                        else {
+                            return false;
+                        };
                         let identity = (
                             fixed::<16>(&intent.route_context_id),
                             fixed::<16>(&intent.prepare_request_id),
@@ -841,7 +918,8 @@ impl HelperEngine {
                                     prepare_digest,
                                     intent.setup_expires_at_unix,
                                     intent.hard_expires_at_unix,
-                                ) && record.phase == PrepareReconciliationPhase::Intent
+                                ) && record.closed_plan == closed_plan
+                                    && record.phase == PrepareReconciliationPhase::Intent
                             })
                     });
                     return Some(if same_digest && (cached_failure || exact_live_lineage) {
@@ -1316,6 +1394,13 @@ impl HelperEngine {
         ) else {
             return execution(invalid_response(request), None);
         };
+        let Some(closed_plan) = intent
+            .closed_plan
+            .as_ref()
+            .and_then(ClosedPreparePlanBinding::from_closed_plan)
+        else {
+            return execution(invalid_response(request), None);
+        };
 
         let mut state = self.inner.state.lock().await;
         if state.contexts.contains_key(&context_id) {
@@ -1350,6 +1435,7 @@ impl HelperEngine {
                 && record.prepare_operation_digest == prepare_digest
                 && record.setup_expires_at_unix == intent.setup_expires_at_unix
                 && record.hard_expires_at_unix == intent.hard_expires_at_unix
+                && record.closed_plan == closed_plan
                 && record.phase == PrepareReconciliationPhase::Intent;
             return if exact {
                 helper_runtime_execution(request, self.inner.runtime_id)
@@ -1391,6 +1477,7 @@ impl HelperEngine {
                 backend_generation: generation,
                 setup_expires_at_unix: intent.setup_expires_at_unix,
                 hard_expires_at_unix: intent.hard_expires_at_unix,
+                closed_plan,
                 phase: PrepareReconciliationPhase::Intent,
                 reconciliation_request_id: None,
             },
@@ -1737,6 +1824,9 @@ impl HelperEngine {
         let Some(context_id) = fixed::<16>(&value.route_context_id) else {
             return Some(execution(invalid_response(request), None));
         };
+        let Some(closed_plan) = ClosedPreparePlanBinding::from_prepare(value) else {
+            return Some(execution(invalid_response(request), None));
+        };
 
         let (token, context_handle, lease_handles) = {
             let mut state = self.inner.state.lock().await;
@@ -1784,7 +1874,8 @@ impl HelperEngine {
                 digest,
                 value.setup_expires_at_unix,
                 value.hard_expires_at_unix,
-            ) || intent.phase != PrepareReconciliationPhase::Intent
+            ) || intent.closed_plan != closed_plan
+                || intent.phase != PrepareReconciliationPhase::Intent
             {
                 return Some(execution(
                     response(
@@ -4241,6 +4332,10 @@ mod tests {
                         .to_vec(),
                     setup_expires_at_unix: value.setup_expires_at_unix,
                     hard_expires_at_unix: value.hard_expires_at_unix,
+                    closed_plan: Some(ClosedPreparePlan {
+                        context_role: value.role,
+                        leases: value.leases.clone(),
+                    }),
                 }),
             }),
         )
@@ -4483,6 +4578,270 @@ mod tests {
         assert_eq!(first.result, HelperResult::Unavailable as i32);
         assert!(first.outcome.is_none());
         assert!(engine.inner.state.lock().await.contexts.is_empty());
+    }
+
+    #[test]
+    fn closed_plan_and_prepare_bindings_match_for_every_context_shape() {
+        let maximal_relay = (1..=8)
+            .flat_map(|path_id| {
+                [WireguardRole::RelayClient, WireguardRole::RelayExit]
+                    .into_iter()
+                    .map(move |role| LeasePlan {
+                        path_id,
+                        role: role as i32,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let cases = [
+            (
+                "client",
+                ContextRole::Client,
+                vec![LeasePlan {
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                }],
+            ),
+            (
+                "relay",
+                ContextRole::Relay,
+                vec![
+                    LeasePlan {
+                        path_id: 1,
+                        role: WireguardRole::RelayClient as i32,
+                    },
+                    LeasePlan {
+                        path_id: 1,
+                        role: WireguardRole::RelayExit as i32,
+                    },
+                ],
+            ),
+            (
+                "exit",
+                ContextRole::Exit,
+                vec![LeasePlan {
+                    path_id: 1,
+                    role: WireguardRole::Exit as i32,
+                }],
+            ),
+            ("maximal relay", ContextRole::Relay, maximal_relay),
+        ];
+
+        for (label, context_role, leases) in cases {
+            let prepare = PrepareLeaseBatch {
+                route_context_id: vec![7; 16],
+                role: context_role as i32,
+                mptcp_accepted_addrs: 4,
+                mptcp_subflows: 4,
+                leases: leases.clone(),
+                setup_expires_at_unix: 120,
+                hard_expires_at_unix: 900,
+            };
+            let closed_plan = ClosedPreparePlan {
+                context_role: context_role as i32,
+                leases,
+            };
+            let from_prepare = ClosedPreparePlanBinding::from_prepare(&prepare)
+                .unwrap_or_else(|| panic!("valid {label} Prepare binding"));
+            let from_closed_plan = ClosedPreparePlanBinding::from_closed_plan(&closed_plan)
+                .unwrap_or_else(|| panic!("valid {label} closed-plan binding"));
+
+            assert_eq!(from_closed_plan, from_prepare, "{label}");
+            assert_eq!(
+                usize::from(from_closed_plan.lease_count),
+                closed_plan.leases.len(),
+                "{label} identity count"
+            );
+        }
+    }
+
+    async fn assert_equal_cardinality_plan_substitution_rejected(
+        prepare_b: HelperRequest,
+        plan_a: ClosedPreparePlan,
+        bind_request_id: u8,
+    ) {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let context_id: [u8; 16] = prepare_b
+            .operation
+            .as_ref()
+            .and_then(|operation| match operation {
+                helper_request::Operation::PrepareLeaseBatch(value) => {
+                    value.route_context_id.as_slice().try_into().ok()
+                }
+                _ => None,
+            })
+            .expect("Prepare B context ID");
+        let mut bind_a_digest_b = bind_request_for(&prepare_b, bind_request_id);
+        let Some(helper_request::Operation::BindHelperRuntime(BindHelperRuntime {
+            prepare_intent: Some(intent),
+        })) = bind_a_digest_b.operation.as_mut()
+        else {
+            panic!("Bind A/digest B");
+        };
+        let plan_b = intent.closed_plan.replace(plan_a).expect("closed plan B");
+        assert_eq!(
+            intent
+                .closed_plan
+                .as_ref()
+                .expect("closed plan A")
+                .leases
+                .len(),
+            plan_b.leases.len(),
+            "the adversarial plans must have equal cardinality"
+        );
+        assert_ne!(intent.closed_plan.as_ref(), Some(&plan_b));
+        assert!(operation_digest(&bind_a_digest_b).is_ok());
+        assert_eq!(
+            engine.execute(bind_a_digest_b).await.result,
+            HelperResult::Ok as i32
+        );
+
+        let (record_before, next_generation_before, next_operation_before) = {
+            let state = engine.inner.state.lock().await;
+            (
+                *state
+                    .prepare_reconciliations
+                    .get(&context_id)
+                    .expect("retained plan A"),
+                state.next_generation,
+                state.next_operation,
+            )
+        };
+        let rejected = engine.execute(prepare_b).await;
+        assert_eq!(rejected.result, HelperResult::AlreadyExists as i32);
+        assert_eq!(rejected.diagnostic_code, "PREPARE_INTENT_CONFLICT");
+        assert!(
+            backend
+                .prepare_bindings
+                .lock()
+                .expect("prepare bindings")
+                .is_empty()
+        );
+        assert!(!backend.prepare_entered.load(Ordering::Acquire));
+        assert!(
+            backend
+                .destroy_calls
+                .lock()
+                .expect("destroy calls")
+                .is_empty()
+        );
+        assert!(
+            backend
+                .runtime_bindings
+                .lock()
+                .expect("runtime bindings")
+                .is_empty()
+        );
+        let state = engine.inner.state.lock().await;
+        assert!(state.contexts.is_empty());
+        assert!(state.in_flight.is_none());
+        assert!(state.cleanup_pending.is_empty());
+        assert_eq!(state.next_generation, next_generation_before);
+        assert_eq!(state.next_operation, next_operation_before);
+        assert!(
+            state.prepare_reconciliations.get(&context_id).copied() == Some(record_before),
+            "the rejected Prepare must not change its retained target authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_cardinality_path_plan_a_cannot_authorize_prepare_and_digest_b() {
+        let mut prepare_b = prepare_request(81);
+        let Some(helper_request::Operation::PrepareLeaseBatch(value_b)) =
+            prepare_b.operation.as_mut()
+        else {
+            panic!("Prepare B");
+        };
+        value_b.leases[0].path_id = 2;
+        let plan_a = ClosedPreparePlan {
+            context_role: ContextRole::Client as i32,
+            leases: vec![LeasePlan {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+            }],
+        };
+
+        assert_equal_cardinality_plan_substitution_rejected(prepare_b, plan_a, 82).await;
+    }
+
+    #[tokio::test]
+    async fn equal_cardinality_context_role_plan_a_cannot_authorize_prepare_and_digest_b() {
+        let mut prepare_b = prepare_request(83);
+        let Some(helper_request::Operation::PrepareLeaseBatch(value_b)) =
+            prepare_b.operation.as_mut()
+        else {
+            panic!("Prepare B");
+        };
+        value_b.role = ContextRole::Exit as i32;
+        value_b.leases[0].role = WireguardRole::Exit as i32;
+        let plan_a = ClosedPreparePlan {
+            context_role: ContextRole::Client as i32,
+            leases: vec![LeasePlan {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+            }],
+        };
+
+        assert_equal_cardinality_plan_substitution_rejected(prepare_b, plan_a, 84).await;
+    }
+
+    #[tokio::test]
+    async fn retained_prepare_identity_rejects_a_new_bind_with_substituted_plan() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let mut prepare_b = prepare_request(83);
+        let Some(helper_request::Operation::PrepareLeaseBatch(value_b)) =
+            prepare_b.operation.as_mut()
+        else {
+            panic!("Prepare B");
+        };
+        value_b.leases[0].path_id = 2;
+        assert_eq!(
+            engine
+                .execute(bind_request_for(&prepare_b, 84))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+
+        let mut substituted = bind_request_for(&prepare_b, 85);
+        let Some(helper_request::Operation::BindHelperRuntime(BindHelperRuntime {
+            prepare_intent: Some(intent),
+        })) = substituted.operation.as_mut()
+        else {
+            panic!("substituted Bind");
+        };
+        let closed_plan = intent.closed_plan.as_mut().expect("closed plan");
+        closed_plan.leases[0].path_id = 1;
+        assert!(operation_digest(&substituted).is_ok());
+        let rejected = engine.execute(substituted).await;
+        assert_eq!(rejected.result, HelperResult::AlreadyExists as i32);
+        assert_eq!(rejected.diagnostic_code, "CONTEXT_RECONCILIATION_RETAINED");
+        assert!(
+            backend
+                .prepare_bindings
+                .lock()
+                .expect("prepare bindings")
+                .is_empty()
+        );
+        assert!(!backend.prepare_entered.load(Ordering::Acquire));
+        assert!(
+            backend
+                .destroy_calls
+                .lock()
+                .expect("destroy calls")
+                .is_empty()
+        );
+        let state = engine.inner.state.lock().await;
+        let retained = state
+            .prepare_reconciliations
+            .get(&[7; 16])
+            .expect("retained plan B");
+        assert_eq!(retained.phase, PrepareReconciliationPhase::Intent);
+        assert_eq!(retained.closed_plan.lease_count, 1);
+        assert_eq!(retained.closed_plan.identities[0], (2, 1));
     }
 
     #[tokio::test]

@@ -371,6 +371,17 @@ pub struct PrepareLeaseBatch {
     pub hard_expires_at_unix: u64,
 }
 
+/// Minimal canonical topology needed to recover one possibly dispatched Prepare.
+#[derive(Clone, PartialEq, Message)]
+pub struct ClosedPreparePlan {
+    /// Exact context purpose from the prepared request.
+    #[prost(enumeration = "ContextRole", tag = "1")]
+    pub context_role: i32,
+    /// Canonically ordered, role-complete path identities from the prepared request.
+    #[prost(message, repeated, tag = "2")]
+    pub leases: Vec<LeasePlan>,
+}
+
 /// Exact non-network, non-privileged-mutation intent for a Prepare not yet dispatched.
 #[derive(Clone, PartialEq, Message)]
 pub struct PrepareIntent {
@@ -389,6 +400,9 @@ pub struct PrepareIntent {
     /// Exact hard expiry from the prepared request.
     #[prost(uint64, tag = "5")]
     pub hard_expires_at_unix: u64,
+    /// Closed, canonical recovery plan from the prepared request.
+    #[prost(message, optional, tag = "6")]
+    pub closed_plan: Option<ClosedPreparePlan>,
 }
 
 /// Read this runtime identity and optionally register one exact Prepare intent in this runtime.
@@ -1259,7 +1273,12 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                     &intent.prepare_operation_digest,
                     intent.setup_expires_at_unix,
                     intent.hard_expires_at_unix,
-                )
+                )?;
+                let closed_plan = intent
+                    .closed_plan
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("missing closed Prepare plan"))?;
+                validate_closed_prepare_plan(closed_plan.context_role, &closed_plan.leases)
             })
         }
         Operation::CleanupOwned(operation) if operation.cleanup_token.len() == 32 => Ok(()),
@@ -1269,10 +1288,7 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
 
 fn validate_prepare(value: &PrepareLeaseBatch) -> Result<(), HelperProtocolError> {
     context(&value.route_context_id)?;
-    let role = ContextRole::try_from(value.role)
-        .map_err(|_| HelperProtocolError::Invalid("context role"))?;
-    if role == ContextRole::Unspecified
-        || value.mptcp_accepted_addrs > MAX_HELPER_PATHS
+    if value.mptcp_accepted_addrs > MAX_HELPER_PATHS
         || value.mptcp_subflows == 0
         || value.mptcp_subflows > MAX_HELPER_PATHS
         || value.setup_expires_at_unix == 0
@@ -1280,11 +1296,29 @@ fn validate_prepare(value: &PrepareLeaseBatch) -> Result<(), HelperProtocolError
     {
         return Err(HelperProtocolError::Invalid("prepare bounds"));
     }
-    validate_identity_set(&value.leases, |lease| {
+    validate_closed_prepare_plan(value.role, &value.leases)
+}
+
+fn validate_closed_prepare_plan(
+    context_role: i32,
+    leases: &[LeasePlan],
+) -> Result<(), HelperProtocolError> {
+    let context_role = ContextRole::try_from(context_role)
+        .map_err(|_| HelperProtocolError::Invalid("context role"))?;
+    if context_role == ContextRole::Unspecified {
+        return Err(HelperProtocolError::Invalid("context role"));
+    }
+    validate_identity_set(leases, |lease| {
         path_role(lease.path_id, lease.role)?;
         Ok((lease.path_id, lease.role))
     })?;
-    validate_role_cardinality(role, &value.leases)
+    if leases
+        .windows(2)
+        .any(|pair| (pair[0].path_id, pair[0].role) >= (pair[1].path_id, pair[1].role))
+    {
+        return Err(HelperProtocolError::Invalid("non-canonical lease order"));
+    }
+    validate_role_cardinality(context_role, leases)
 }
 
 fn validate_role_cardinality(
@@ -1993,6 +2027,39 @@ mod tests {
     }
 
     #[test]
+    fn prepare_lease_batch_requires_canonical_identity_order() {
+        let reversed_paths = prepare(
+            ContextRole::Client,
+            vec![
+                plan(2, WireguardRole::Client),
+                plan(1, WireguardRole::Client),
+            ],
+        );
+        assert!(encode_request(&reversed_paths).is_err());
+        assert!(decode_request(&reversed_paths.encode_to_vec()).is_err());
+
+        let reversed_relay_roles = prepare(
+            ContextRole::Relay,
+            vec![
+                plan(1, WireguardRole::RelayExit),
+                plan(1, WireguardRole::RelayClient),
+            ],
+        );
+        assert!(encode_request(&reversed_relay_roles).is_err());
+        assert!(decode_request(&reversed_relay_roles.encode_to_vec()).is_err());
+
+        let duplicate = prepare(
+            ContextRole::Client,
+            vec![
+                plan(1, WireguardRole::Client),
+                plan(1, WireguardRole::Client),
+            ],
+        );
+        assert!(encode_request(&duplicate).is_err());
+        assert!(decode_request(&duplicate.encode_to_vec()).is_err());
+    }
+
+    #[test]
     fn external_wire_has_no_private_key_or_free_overlay_fields() {
         let value = prepare(ContextRole::Client, vec![plan(1, WireguardRole::Client)]);
         let encoded = encode_request(&value).expect("encode");
@@ -2319,6 +2386,10 @@ mod tests {
             prepare_operation_digest: operation_digest(&request).expect("Prepare digest").to_vec(),
             setup_expires_at_unix: 120,
             hard_expires_at_unix: 900,
+            closed_plan: Some(ClosedPreparePlan {
+                context_role: ContextRole::Client as i32,
+                leases: vec![plan(1, WireguardRole::Client)],
+            }),
         }
     }
 
@@ -2468,6 +2539,18 @@ mod tests {
     #[test]
     fn runtime_bind_tags_are_exact_for_intent_and_query() {
         let intent = valid_prepare_intent();
+        let closed_plan = intent.closed_plan.as_ref().expect("closed Prepare plan");
+        let closed_plan_wire = closed_plan.encode_to_vec();
+        assert_eq!(closed_plan_wire.get(..2), Some([0x08, 0x01].as_slice()));
+        assert!(
+            closed_plan_wire
+                .windows(2)
+                .any(|window| window == [0x12, 0x04])
+        );
+        let intent_wire = intent.encode_to_vec();
+        let closed_plan_field = length_delimited_field(&[0x32], &closed_plan_wire);
+        assert!(intent_wire.ends_with(&closed_plan_field));
+
         let bind = bind_runtime_request(35, Some(intent));
         let bind_bytes = bind.encode_to_vec();
         assert!(bind_bytes.windows(2).any(|window| window == [0x9a, 0x02]));
@@ -2477,6 +2560,91 @@ mod tests {
         assert_eq!(
             decode_request(&query.encode_to_vec()).expect("canonical query"),
             query
+        );
+    }
+
+    #[test]
+    fn closed_prepare_plan_is_required_canonical_and_role_complete() {
+        let valid = valid_prepare_intent();
+
+        let mut missing = valid.clone();
+        missing.closed_plan = None;
+        assert_bind_intent_rejected(&missing);
+
+        let mut reversed = valid.clone();
+        reversed.closed_plan = Some(ClosedPreparePlan {
+            context_role: ContextRole::Client as i32,
+            leases: vec![
+                plan(2, WireguardRole::Client),
+                plan(1, WireguardRole::Client),
+            ],
+        });
+        assert_bind_intent_rejected(&reversed);
+
+        let mut duplicate = valid.clone();
+        duplicate.closed_plan = Some(ClosedPreparePlan {
+            context_role: ContextRole::Client as i32,
+            leases: vec![
+                plan(1, WireguardRole::Client),
+                plan(1, WireguardRole::Client),
+            ],
+        });
+        assert_bind_intent_rejected(&duplicate);
+
+        let mut cross_role = valid.clone();
+        cross_role.closed_plan = Some(ClosedPreparePlan {
+            context_role: ContextRole::Client as i32,
+            leases: vec![plan(1, WireguardRole::Exit)],
+        });
+        assert_bind_intent_rejected(&cross_role);
+
+        let mut incomplete = valid;
+        incomplete.closed_plan = Some(ClosedPreparePlan {
+            context_role: ContextRole::Relay as i32,
+            leases: vec![plan(1, WireguardRole::RelayClient)],
+        });
+        assert_bind_intent_rejected(&incomplete);
+    }
+
+    #[test]
+    fn bind_operation_digest_commits_every_closed_prepare_plan_identity() {
+        let original = bind_runtime_request(35, Some(valid_prepare_intent()));
+        let original_digest = operation_digest(&original).expect("original Bind digest");
+
+        let mut expanded = original.clone();
+        let Some(helper_request::Operation::BindHelperRuntime(bind)) = expanded.operation.as_mut()
+        else {
+            panic!("Bind");
+        };
+        bind.prepare_intent
+            .as_mut()
+            .expect("Prepare intent")
+            .closed_plan
+            .as_mut()
+            .expect("closed Prepare plan")
+            .leases
+            .push(plan(2, WireguardRole::Client));
+        let expanded_digest = operation_digest(&expanded).expect("expanded Bind digest");
+        assert_ne!(expanded_digest, original_digest);
+
+        let mut changed_role = original;
+        let Some(helper_request::Operation::BindHelperRuntime(bind)) =
+            changed_role.operation.as_mut()
+        else {
+            panic!("Bind");
+        };
+        let closed_plan = bind
+            .prepare_intent
+            .as_mut()
+            .expect("Prepare intent")
+            .closed_plan
+            .as_mut()
+            .expect("closed Prepare plan");
+        closed_plan.context_role = ContextRole::Exit as i32;
+        closed_plan.leases[0].role = WireguardRole::Exit as i32;
+        assert_ne!(
+            operation_digest(&changed_role).expect("changed-role Bind digest"),
+            original_digest
         );
     }
 
@@ -2640,10 +2808,25 @@ mod tests {
         unknown_bind.extend_from_slice(&[0x10, 0x01]);
         let mut duplicate_bind = bind_payload;
         duplicate_bind.extend_from_slice(&length_delimited_field(&[0x0a], &intent_wire));
+        let closed_plan_wire = intent
+            .closed_plan
+            .as_ref()
+            .expect("closed Prepare plan")
+            .encode_to_vec();
         let mut unknown_intent = intent_wire.clone();
-        unknown_intent.extend_from_slice(&[0x30, 0x01]);
+        unknown_intent.extend_from_slice(&[0x38, 0x01]);
+        let mut duplicate_closed_plan = intent_wire.clone();
+        duplicate_closed_plan
+            .extend_from_slice(&length_delimited_field(&[0x32], &closed_plan_wire));
         let mut duplicate_intent = intent_wire;
         duplicate_intent.extend_from_slice(&[0x20, 0x78]);
+        let mut unknown_closed_plan = closed_plan_wire;
+        unknown_closed_plan.extend_from_slice(&[0x18, 0x01]);
+        let mut without_closed_plan = intent.clone();
+        without_closed_plan.closed_plan = None;
+        let mut nested_unknown_intent = without_closed_plan.encode_to_vec();
+        nested_unknown_intent
+            .extend_from_slice(&length_delimited_field(&[0x32], &unknown_closed_plan));
         let mut no_setup = intent;
         no_setup.setup_expires_at_unix = 0;
         let mut overlong_setup = no_setup.encode_to_vec();
@@ -2655,6 +2838,8 @@ mod tests {
             duplicate_bind,
             length_delimited_field(&[0x0a], &unknown_intent),
             length_delimited_field(&[0x0a], &duplicate_intent),
+            length_delimited_field(&[0x0a], &duplicate_closed_plan),
+            length_delimited_field(&[0x0a], &nested_unknown_intent),
             length_delimited_field(&[0x0a], &overlong_setup),
         ] {
             let wire = raw_request_with_operation(35, &TAG_35, &payload);

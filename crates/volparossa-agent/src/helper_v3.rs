@@ -25,10 +25,10 @@ use volparossa_linux_uapi::{
 use volparossa_routing::{
     AcquireIngressSocket, AcquireTransportSocket,
     ActivateClientIngress as ActivateClientIngressRequest, ActivateLeaseBatch, ActivatedLeaseBatch,
-    AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, CommitLeaseBatch, CommittedLeaseBatch,
-    DestroyClientIngress as DestroyClientIngressRequest, DestroyContext, DestroyedContext, Empty,
-    HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult, HelperRuntime,
-    IngressAddressFamily as WireIngressSocketFamily, IngressSocketAddress,
+    AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, ClosedPreparePlan, CommitLeaseBatch,
+    CommittedLeaseBatch, DestroyClientIngress as DestroyClientIngressRequest, DestroyContext,
+    DestroyedContext, Empty, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
+    HelperRuntime, IngressAddressFamily as WireIngressSocketFamily, IngressSocketAddress,
     IngressSocketKind as WireIngressSocketKind, IngressSocketReady, IngressSocketReceipt,
     PrepareClientIngress as PrepareClientIngressRequest, PrepareIntent, PrepareLeaseBatch,
     PreparedClientIngress as PreparedClientIngressResponse, PreparedIngressSocket,
@@ -410,6 +410,13 @@ enum PrepareDispatchState {
     Dispatched(PrepareReconciliationAuthority),
 }
 
+fn closed_plan_from_prepare(value: &PrepareLeaseBatch) -> ClosedPreparePlan {
+    ClosedPreparePlan {
+        context_role: value.role,
+        leases: value.leases.clone(),
+    }
+}
+
 /// Strict unprivileged client for helper version 3.
 #[derive(Clone, Debug)]
 pub struct HelperClient {
@@ -472,6 +479,10 @@ impl HelperClient {
                 .map_err(HelperClientError::Protocol)
                 .map_err(PrepareLeaseBatchFailure::Definitive)?,
         );
+        // `encode_request` above has validated the role-complete canonical lease order. Project
+        // the durable closed plan only from that same immutable batch; there is no second topology
+        // input which could diverge from the subsequently dispatched Prepare.
+        let closed_plan = closed_plan_from_prepare(&value);
         let route_context_id =
             value.route_context_id.as_slice().try_into().map_err(|_| {
                 PrepareLeaseBatchFailure::Definitive(HelperClientError::Correlation)
@@ -490,6 +501,7 @@ impl HelperClient {
                         prepare_operation_digest: prepare_digest.to_vec(),
                         setup_expires_at_unix: value.setup_expires_at_unix,
                         hard_expires_at_unix: value.hard_expires_at_unix,
+                        closed_plan: Some(closed_plan),
                     }),
                 },
             )),
@@ -1569,6 +1581,11 @@ mod tests {
         );
         assert_eq!(intent.setup_expires_at_unix, value.setup_expires_at_unix);
         assert_eq!(intent.hard_expires_at_unix, value.hard_expires_at_unix);
+        assert_eq!(
+            intent.closed_plan.as_ref(),
+            Some(&closed_plan_from_prepare(value)),
+            "Bind must carry the exact role and canonical lease sequence dispatched by Prepare"
+        );
 
         let prepare_response = HelperResponse {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -1597,6 +1614,62 @@ mod tests {
             setup_expires_at_unix: 120,
             hard_expires_at_unix: 900,
         }
+    }
+
+    #[test]
+    fn closed_prepare_plan_preserves_role_and_every_canonical_lease_identity() {
+        let value = PrepareLeaseBatch {
+            route_context_id: vec![7; 16],
+            role: ContextRole::Relay as i32,
+            mptcp_accepted_addrs: 4,
+            mptcp_subflows: 4,
+            leases: vec![
+                LeasePlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayClient as i32,
+                },
+                LeasePlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayExit as i32,
+                },
+                LeasePlan {
+                    path_id: 2,
+                    role: WireguardRole::RelayClient as i32,
+                },
+                LeasePlan {
+                    path_id: 2,
+                    role: WireguardRole::RelayExit as i32,
+                },
+            ],
+            setup_expires_at_unix: 120,
+            hard_expires_at_unix: 900,
+        };
+        let prepare = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: vec![0xb1; 16],
+            operation: Some(helper_request::Operation::PrepareLeaseBatch(value.clone())),
+        };
+        encode_request(&prepare).expect("canonical relay Prepare");
+
+        let plan = closed_plan_from_prepare(&value);
+        assert_eq!(plan.context_role, value.role);
+        assert_eq!(plan.leases, value.leases);
+
+        let mut wrong_context_role = value.clone();
+        wrong_context_role.role = ContextRole::Client as i32;
+        assert_ne!(plan, closed_plan_from_prepare(&wrong_context_role));
+
+        let mut missing_lease = value.clone();
+        missing_lease.leases.pop();
+        assert_ne!(plan, closed_plan_from_prepare(&missing_lease));
+
+        let mut reordered = value.clone();
+        reordered.leases.swap(0, 1);
+        assert_ne!(plan, closed_plan_from_prepare(&reordered));
+
+        let mut substituted_identity = value;
+        substituted_identity.leases[2].path_id = 3;
+        assert_ne!(plan, closed_plan_from_prepare(&substituted_identity));
     }
 
     async fn write_test_response(

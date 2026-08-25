@@ -222,6 +222,47 @@ impl ClosedPlan {
             paths,
         })
     }
+
+    /// Convert the externally validated recovery plan without silently canonicalising it.
+    ///
+    /// The durable intent must commit the same canonical identity order that appeared on tag 35.
+    /// Accepting a permutation here and sorting it would give the journal a different semantic
+    /// boundary from the helper protocol.
+    fn try_from_wire(value: &volparossa_routing::ClosedPreparePlan) -> Result<Self, JournalError> {
+        if !(1..=MAX_LEASE_IDENTITIES).contains(&value.leases.len()) {
+            return Err(JournalError::InvalidRecord);
+        }
+        let context_role = match volparossa_routing::ContextRole::try_from(value.context_role)
+            .map_err(|_| JournalError::InvalidRecord)?
+        {
+            volparossa_routing::ContextRole::Client => ContextRole::Client,
+            volparossa_routing::ContextRole::Relay => ContextRole::Relay,
+            volparossa_routing::ContextRole::Exit => ContextRole::Exit,
+            volparossa_routing::ContextRole::Unspecified => {
+                return Err(JournalError::InvalidRecord);
+            }
+        };
+        let mut paths = Vec::with_capacity(value.leases.len());
+        for lease in &value.leases {
+            let path_id = u8::try_from(lease.path_id).map_err(|_| JournalError::InvalidRecord)?;
+            let role = match volparossa_routing::WireguardRole::try_from(lease.role)
+                .map_err(|_| JournalError::InvalidRecord)?
+            {
+                volparossa_routing::WireguardRole::Client => WireguardRole::Client,
+                volparossa_routing::WireguardRole::RelayClient => WireguardRole::RelayClient,
+                volparossa_routing::WireguardRole::RelayExit => WireguardRole::RelayExit,
+                volparossa_routing::WireguardRole::Exit => WireguardRole::Exit,
+                volparossa_routing::WireguardRole::Unspecified => {
+                    return Err(JournalError::InvalidRecord);
+                }
+            };
+            paths.push(PathPlan { path_id, role });
+        }
+        if paths.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(JournalError::InvalidRecord);
+        }
+        Self::new(context_role, paths)
+    }
 }
 
 impl fmt::Debug for ClosedPlan {
@@ -2048,6 +2089,88 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn wire_closed_plan_converts_exactly_without_normalising_a_permutation() {
+        let wire = volparossa_routing::ClosedPreparePlan {
+            context_role: volparossa_routing::ContextRole::Relay as i32,
+            leases: vec![
+                volparossa_routing::LeasePlan {
+                    path_id: 1,
+                    role: volparossa_routing::WireguardRole::RelayClient as i32,
+                },
+                volparossa_routing::LeasePlan {
+                    path_id: 1,
+                    role: volparossa_routing::WireguardRole::RelayExit as i32,
+                },
+                volparossa_routing::LeasePlan {
+                    path_id: 2,
+                    role: volparossa_routing::WireguardRole::RelayClient as i32,
+                },
+                volparossa_routing::LeasePlan {
+                    path_id: 2,
+                    role: volparossa_routing::WireguardRole::RelayExit as i32,
+                },
+            ],
+        };
+        let converted = ClosedPlan::try_from_wire(&wire).expect("canonical wire plan");
+        assert_eq!(converted.context_role, ContextRole::Relay);
+        assert_eq!(converted.paths.len(), wire.leases.len());
+        for (path, lease) in converted.paths.iter().zip(&wire.leases) {
+            assert_eq!(u32::from(path.path_id), lease.path_id);
+            assert_eq!(i32::from(path.role as u8), lease.role);
+        }
+
+        let mut permuted = wire;
+        permuted.leases.swap(0, 1);
+        assert!(matches!(
+            ClosedPlan::try_from_wire(&permuted),
+            Err(JournalError::InvalidRecord)
+        ));
+
+        let invalid_cases = [
+            volparossa_routing::ClosedPreparePlan {
+                context_role: volparossa_routing::ContextRole::Client as i32,
+                leases: Vec::new(),
+            },
+            volparossa_routing::ClosedPreparePlan {
+                context_role: volparossa_routing::ContextRole::Client as i32,
+                leases: (1..=17)
+                    .map(|path_id| volparossa_routing::LeasePlan {
+                        path_id,
+                        role: volparossa_routing::WireguardRole::Client as i32,
+                    })
+                    .collect(),
+            },
+            volparossa_routing::ClosedPreparePlan {
+                context_role: volparossa_routing::ContextRole::Client as i32,
+                leases: vec![volparossa_routing::LeasePlan {
+                    path_id: 256,
+                    role: volparossa_routing::WireguardRole::Client as i32,
+                }],
+            },
+            volparossa_routing::ClosedPreparePlan {
+                context_role: volparossa_routing::ContextRole::Client as i32,
+                leases: vec![volparossa_routing::LeasePlan {
+                    path_id: 1,
+                    role: 99,
+                }],
+            },
+            volparossa_routing::ClosedPreparePlan {
+                context_role: volparossa_routing::ContextRole::Client as i32,
+                leases: vec![volparossa_routing::LeasePlan {
+                    path_id: 1,
+                    role: volparossa_routing::WireguardRole::Exit as i32,
+                }],
+            },
+        ];
+        for invalid in invalid_cases {
+            assert!(matches!(
+                ClosedPlan::try_from_wire(&invalid),
+                Err(JournalError::InvalidRecord)
+            ));
+        }
     }
 
     #[test]
