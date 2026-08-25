@@ -49,18 +49,19 @@ test-package-licenses:
 test-netns:
     ./tests/netns/run-topology.sh --preview --only all
 
-test-netns-link-activation-teardown-proof:
+test-netns-endpoint-route-teardown-proof:
     cargo build --locked --target x86_64-unknown-linux-gnu \
-        --target-dir target/link-activation-teardown-proof -p volparossa-netns-runner
+        --target-dir target/endpoint-route-teardown-proof -p volparossa-netns-runner
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
-        ./tests/netns/require-link-activation-teardown-proof.sh
+        ./tests/netns/require-endpoint-route-teardown-proof.sh
 
-# Backwards-compatible names for the now-stronger link-activation teardown proof.
-test-netns-ipv4-address-rollback-proof: test-netns-link-activation-teardown-proof
-test-netns-veth-rollback-proof: test-netns-link-activation-teardown-proof
-test-netns-live-nsfs-proof: test-netns-link-activation-teardown-proof
-test-netns-authorized-private-run-proof: test-netns-link-activation-teardown-proof
-test-netns-bootstrap-ready-proof: test-netns-link-activation-teardown-proof
+# Backwards-compatible names for the now-stronger endpoint-route teardown proof.
+test-netns-link-activation-teardown-proof: test-netns-endpoint-route-teardown-proof
+test-netns-ipv4-address-rollback-proof: test-netns-endpoint-route-teardown-proof
+test-netns-veth-rollback-proof: test-netns-endpoint-route-teardown-proof
+test-netns-live-nsfs-proof: test-netns-endpoint-route-teardown-proof
+test-netns-authorized-private-run-proof: test-netns-endpoint-route-teardown-proof
+test-netns-bootstrap-ready-proof: test-netns-endpoint-route-teardown-proof
 
 test-mptcp:
     ./tests/netns/run-topology.sh --preview --only mptcp

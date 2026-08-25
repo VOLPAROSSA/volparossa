@@ -484,15 +484,25 @@ Last updated: 2026-08-25
   connected `/30`, four high-broadcast `/32`, and four local-table IPv6 `ff00::/8` multicast
   routes. The bounded read-only observer retains those exact requirements while tolerating only
   temporary stable kernel snapshots during route convergence inside the same two-second absolute
-  deadline. No `RTM_NEWROUTE` request is sent; these routes are kernel side effects of the fixed
-  addresses and activated links rather than production route orchestration. After fresh exact
-  active-state reproof, PID 1 directly deletes veth B followed by A. It does not attempt to restore
-  link-down or EUI-64 state and does not run ordinary per-address rollback after the first
-  possibly-sent link mutation. All four address owners and both pair owners remain armed while the
-  retained parent and endpoint baselines prove all three namespaces byte-exactly equal to the
-  retained enumerated network baselines. Only
-  after that external proof does one prevalidated infallible retirement barrier disarm the lower
-  owners. PID 1 then ensures every detached-clone and transient visible-pin
+  deadline. Those routes remain kernel side effects of the fixed addresses and activated links.
+  After fresh exact active-state reproof, PID 1 installs exactly two endpoint routes through bounded
+  raw `RTM_NEWROUTE` requests: endpoint A `10.241.2.2/32 via 10.241.1.1 dev eth0` and endpoint B
+  `10.241.1.2/32 via 10.241.2.1 dev eth0`. Each request uses
+  `NLM_F_REQUEST|NLM_F_ACK|NLM_F_CREATE|NLM_F_EXCL` and an exact `AF_INET` `/32`, main-table,
+  `RTPROT_STATIC`, universe-scope, unicast, flags-zero route header with attributes exactly
+  `RTA_TABLE=254`, `RTA_DST`, `RTA_GATEWAY`, and `RTA_OIF`. The plan derives its namespace,
+  destination, gateway, interface index, and both-pair lineage from retained authority. A fresh
+  dump proves the parent equal to its active baseline and each endpoint equal except for its one
+  authorized route; a non-exact sibling or any extra object fails closed. Route authority remains
+  deletion-bound after a possibly sent request, including lost or ambiguous ACK/readback. No
+  `RTM_DELROUTE` request or encoder exists. PID 1 directly deletes veth B followed by A as the sole
+  route-removal mechanism. It does not attempt to restore link-down or EUI-64 state and does not run
+  ordinary per-address rollback after the first possibly-sent link mutation. Both route owners,
+  all four address owners, and both pair owners remain armed while the retained parent and endpoint
+  baselines prove all three namespaces byte-exactly equal to the retained enumerated network
+  baselines. Only after that external proof does one prevalidated infallible retirement barrier
+  disarm the route, address, and pair owners. PID 1 then ensures every detached-clone and transient
+  visible-pin
   descriptor is closed before ordinarily unmounting nsfs B and then A with `UMOUNT_NOFOLLOW`,
   proves the hidden empty slots and exact original mountinfo baseline are restored, and removes
   every owned mount and link plus every transaction-retained descriptor reference. Namespace
@@ -512,19 +522,21 @@ Last updated: 2026-08-25
   mount-UAPI operation may produce the exclusive
   `BlockedAtPrivateMountSetup` policy result; all malformed state, unsupported APIs, invalid
   options, resource failures, and failed evidence remain hard errors. The positive
-  `BlockedAfterLinkActivationTeardown` route proves that complete read-only network baseline,
+  `BlockedAfterEndpointRouteTeardown` route proves that complete read-only network baseline,
   one real pinned `BOOTSTRAP_READY`, the canonical `GO`, affine authorization consumption, the
   descriptor-relative root/slot transaction, two live pristine nsfs pins, two fixed down-veth
   pairs each created through one atomic `RTM_NEWLINK` request, their exact parent/A/B delta proof,
   the four fixed `/30` IPv4 addresses and exactly four kernel-created local-table `/32` routes while
   all ends remain down, the separate all-addrgen-NONE barrier, exact carrier-up activation of all
-  four ends with `noqueue` and the complete kernel-created route set, direct veth B/A deletion,
-  complete pristine reverse proof before lower-owner retirement, the internal rollback checkpoint,
+  four ends with `noqueue` and the complete kernel-created route set, both exact static endpoint
+  routes and their exact parent/A/B observation, direct veth B/A deletion as the only route-removal
+  mechanism, complete pristine reverse proof before route/address/pair owner retirement, the
+  internal rollback checkpoint,
   the post-rollback empty-`/run` proof, the TERM/EOF/signal chain, and exact PID-1 exit/reap. The only
   transient topology is the two otherwise-pristine network namespace objects, their kernel-default
   loopback/rules, their nsfs mounts, two fixed veth pairs, four fixed IPv4 addresses, four active
-  link ends, four `noqueue` qdiscs, twelve associated IPv4 routes, and four IPv6 multicast routes.
-  No explicit route or forwarding-setting request is sent and no nftables mutation is made. This
+  link ends, four `noqueue` qdiscs, fourteen associated IPv4 routes, and four IPv6 multicast routes.
+  No forwarding-setting request or nftables mutation is made. This
   slice creates no packet-capture or probe evidence and makes no packet-absence, dataplane, or
   topology-readiness claim. Repeated portable tests prove exact
   outer-launcher reaping, unchanged outer namespace/mount observations, and an unchanged canonical
@@ -547,15 +559,17 @@ Last updated: 2026-08-25
   control/lifecycle half-close handshake that keeps the launcher alive until the outer
   acknowledges EOF, preventing an early-`SIGCHLD` race; only the outer containment deadline bounds
   that wait. Complete live evidence for this slice requires the explicit
-  `BlockedAfterLinkActivationTeardown` outcome. At supervised IPC boundaries, managed outer
+  `BlockedAfterEndpointRouteTeardown` outcome. At supervised IPC boundaries, managed outer
   HUP/INT/TERM prioritizes bounded exact-launcher containment; the live gate does not yet prove
   external-signal handling across every reap/report phase, general descendant reaping, forced
   parent-death/crash-chain cleanup, or A14. The production ownership and namespace modules and their
   affine `PristineRun`/`AuthorizedPrivateRun`/`AuthorizedNamespacePins`/`AuthorizedVethPairs` and
   borrowed `AuthorizedIpv4Addresses`, `AuthorizedIpv4AddrgenNone`,
-  `AuthorizedActivatedTopology`, and `AuthorizedDeletedTopology` typestates are active in the runtime path for the
+  `AuthorizedActivatedTopology`, `AuthorizedEndpointRoutes`, and `AuthorizedDeletedTopology`
+  typestates are active in the runtime path for the
   descriptor-relative private-root, empty-slot,
-  two-pin, two-veth, four-address, link-activation, and deletion-only teardown transaction
+  two-pin, two-veth, four-address, link-activation, endpoint-route, and deletion-only teardown
+  transaction
   described above. A provisional
   containment guard is installed immediately after each exclusive creation. Within this fixed
   runner's one-PID-1-task and trusted-launcher scope, an inotify witness rejects delete, move, or
@@ -574,25 +588,27 @@ Last updated: 2026-08-25
   pinning, failpoints, and reverse identity-scoped unlink of its own synthetic regular-file
   fixtures. Manifest publication remains test-only: production does not create or publish an
   ownership manifest. The runtime does construct and fully reverse two transient live nsfs pins,
-  two fixed veth pairs, four fixed IPv4 addresses, four active link ends, and the exact
-  kernel-created qdisc and route side effects described above, but proves direct deletion and
+  two fixed veth pairs, four fixed IPv4 addresses, four active link ends, two explicit endpoint
+  routes, and the exact kernel-created qdisc and route side effects described above, but proves
+  direct deletion and
   ordinary unmount only within its fixed one-PID-1-task and
   trusted-launcher scope.
   Cleanup uses the retained parent directory through a descriptor-rooted
   `/proc/thread-self/fd/<fd>/<leaf>` path, with an identity verification before ordinary unmount;
   the intervening path lookup means this is not a race-free unmount proof against an excluded
   hostile mapped-same-UID actor. A production helper must provide root-owned exclusive mutation
-  authority before reusing it. The link-activation writer is fixed and bounded; no explicit-route,
-  forwarding, nftables, ownership-manifest, packet, or probe mutation API exists. The only route
-  objects admitted in this slice are the exact kernel-created local, connected, high-broadcast,
-  and IPv6 multicast routes coupled to the fixed address and activation transaction. The slice
+  authority before reusing it. The link-activation and exact endpoint-route writers are fixed and
+  bounded; no forwarding, nftables, ownership-manifest, packet, probe, or route-deletion mutation
+  API exists. The only route objects admitted in this slice are the exact kernel-created local,
+  connected, high-broadcast, and IPv6 multicast routes coupled to the fixed address and activation
+  transaction plus the two exact static `/32` endpoint routes described above. The slice
   still has no general
   root-filesystem or supplementary-group isolation,
   `TOPOLOGY_READY`, `STOP`, `FINISHED`, configured dataplane-topology mutation, crash-cleanup evidence,
   acceptance report, or A01-A15 result. In particular, the deletion-only fixed-link teardown is
   not forced-crash cleanup or A14, A15, or acceptance evidence. `BOOTSTRAP_READY` remains
   readiness evidence; `GO` authorizes only this bounded private-root, two-pin, two-veth,
-  four-address, and link-activation teardown transaction,
+  four-address, link-activation, and endpoint-route teardown transaction,
   and `MUTATION_ROLLBACK_COMPLETE` is an
   internal containment checkpoint rather than cleanup or acceptance evidence.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.
