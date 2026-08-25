@@ -8,6 +8,8 @@
 
 #![allow(dead_code)] // Dormant v3 store; production uses only read-only ownership interlocks.
 
+mod actor;
+
 use rand_core::{OsRng, RngCore};
 use rustix::{
     fs::{
@@ -987,7 +989,7 @@ enum RecoveryAttemptError<ExecutorError> {
 struct OwnershipJournal {
     config: JournalConfig,
     parent_directory: File,
-    _runtime_lock: File,
+    runtime_lock: File,
     snapshot: JournalSnapshot,
     poisoned: bool,
 }
@@ -1000,6 +1002,18 @@ impl OwnershipJournal {
     fn open(config: JournalConfig) -> Result<Self, JournalError> {
         config.validate()?;
         let parent_directory = open_verified_parent(&config)?;
+        Self::open_with_verified_parent(config, parent_directory)
+    }
+
+    /// Completes journal startup through one already verified directory object. Callers that need
+    /// to latch that object before any lock creation or stale-next cleanup must never reopen the
+    /// parent path between verification and this constructor.
+    fn open_with_verified_parent(
+        config: JournalConfig,
+        parent_directory: File,
+    ) -> Result<Self, JournalError> {
+        config.validate()?;
+        verify_parent_descriptor(&config, &parent_directory)?;
         let runtime_lock = open_runtime_lock(&config, &parent_directory)?;
         cleanup_stale_next(&config, &parent_directory)?;
         let snapshot = match load_snapshot(&config, &parent_directory)? {
@@ -1009,7 +1023,7 @@ impl OwnershipJournal {
         Ok(Self {
             config,
             parent_directory,
-            _runtime_lock: runtime_lock,
+            runtime_lock,
             snapshot,
             poisoned: false,
         })
@@ -1046,6 +1060,35 @@ impl OwnershipJournal {
         };
         if !exact {
             return Err(JournalError::RevisionConflict);
+        }
+        Ok(())
+    }
+
+    /// Re-establishes that a persistence failure classified as pre-rename left this runtime's
+    /// complete authority boundary unchanged before another mutation may be attempted.
+    ///
+    /// This is deliberately stricter than `ensure_durable_matches`: the retained parent and lock
+    /// descriptors must still name the exact secure directory entries, this runtime must still
+    /// own the exclusive lock, no temporary journal entry may exist, and the durable main entry
+    /// must decode to the exact in-memory snapshot. The check never repairs or removes anything.
+    /// Any inability to prove the complete state poisons this journal permanently.
+    fn confirm_retry_safe_after_definite_failure(&mut self) -> Result<(), JournalError> {
+        self.ensure_usable()?;
+        let verified = (|| {
+            verify_parent_descriptor(&self.config, &self.parent_directory)?;
+            verify_runtime_lock_held(&self.config, &self.parent_directory, &self.runtime_lock)?;
+            verify_next_absent(&self.config, &self.parent_directory)?;
+            self.ensure_durable_matches()?;
+
+            // Bracket the durable read so a replaced parent or lock entry is not accepted merely
+            // because the retained directory descriptor still points at the former directory.
+            verify_parent_descriptor(&self.config, &self.parent_directory)?;
+            verify_runtime_lock_entry(&self.config, &self.parent_directory, &self.runtime_lock)?;
+            verify_next_absent(&self.config, &self.parent_directory)
+        })();
+        if verified.is_err() {
+            self.poisoned = true;
+            return Err(JournalError::Poisoned);
         }
         Ok(())
     }
@@ -1380,6 +1423,65 @@ fn open_runtime_lock(
         Err(error) => return Err(JournalError::Io(rustix_io(error))),
     }
     Ok(lock)
+}
+
+fn verify_runtime_lock_entry(
+    config: &JournalConfig,
+    parent_directory: &File,
+    runtime_lock: &File,
+) -> Result<(), JournalError> {
+    let lock_name = child_name(&config.lock_path)?;
+    verify_open_regular_file(runtime_lock, config)?;
+    verify_child_entry(parent_directory, lock_name, runtime_lock)
+}
+
+fn verify_runtime_lock_held(
+    config: &JournalConfig,
+    parent_directory: &File,
+    runtime_lock: &File,
+) -> Result<(), JournalError> {
+    verify_runtime_lock_entry(config, parent_directory, runtime_lock)?;
+    let lock_name = child_name(&config.lock_path)?;
+    let contender_descriptor = match openat(
+        parent_directory,
+        lock_name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(Errno::LOOP) => return Err(JournalError::UnsafeMetadata),
+        Err(error) => return Err(JournalError::Io(rustix_io(error))),
+    };
+    let contender = File::from(contender_descriptor);
+    verify_open_regular_file(&contender, config)?;
+    verify_child_entry(parent_directory, lock_name, &contender)?;
+
+    match flock(&contender, FlockOperation::NonBlockingLockShared) {
+        Err(Errno::WOULDBLOCK) => {}
+        Err(error) => return Err(JournalError::Io(rustix_io(error))),
+        Ok(()) => {
+            // A shared contender can succeed only if the retained descriptor lost or downgraded
+            // its exclusive lock. Release the diagnostic lock immediately; the caller poisons the
+            // journal and must never try to repair or continue this runtime.
+            flock(&contender, FlockOperation::Unlock)
+                .map_err(|error| JournalError::Io(rustix_io(error)))?;
+            return Err(JournalError::LockHeld);
+        }
+    }
+
+    // Distinguish our retained exclusive lock from a conflicting lock acquired through a
+    // different open-file description. Reasserting the same exclusive lock is idempotent.
+    flock(runtime_lock, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|error| JournalError::Io(rustix_io(error)))
+}
+
+fn verify_next_absent(config: &JournalConfig, parent_directory: &File) -> Result<(), JournalError> {
+    let next_name = child_name(&config.next_path)?;
+    match statat(parent_directory, next_name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(()),
+        Err(error) => Err(JournalError::Io(rustix_io(error))),
+        Ok(_) => Err(JournalError::RevisionConflict),
+    }
 }
 
 fn load_snapshot(
@@ -2554,6 +2656,18 @@ mod tests {
         next
     }
 
+    fn assert_retry_healthcheck_poisoned(journal: &mut OwnershipJournal) {
+        assert!(matches!(
+            journal.confirm_retry_safe_after_definite_failure(),
+            Err(JournalError::Poisoned)
+        ));
+        assert!(matches!(journal.snapshot(), Err(JournalError::Poisoned)));
+        assert!(matches!(
+            journal.confirm_retry_safe_after_definite_failure(),
+            Err(JournalError::Poisoned)
+        ));
+    }
+
     #[test]
     fn secure_metadata_runtime_lock_and_stale_next_are_enforced() {
         let directory = tempdir().expect("temporary directory");
@@ -3201,6 +3315,179 @@ mod tests {
             );
             assert!(!config.next_path.exists());
         }
+    }
+
+    #[test]
+    fn clean_pre_rename_failure_is_confirmed_retry_safe_and_retry_writes_once() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        let before = fs::read(&config.journal_path).expect("durable bytes before failure");
+        let next = next_with_binding(&journal, inserted, binding(4));
+        let mut observer = FailingObserver {
+            steps: vec![PersistStep::AfterWrite],
+        };
+        assert!(matches!(
+            journal.compare_and_swap_observed(1, next, &mut observer),
+            Err(JournalError::Io(_))
+        ));
+
+        journal
+            .confirm_retry_safe_after_definite_failure()
+            .expect("complete authority boundary remains retry-safe");
+        assert_eq!(
+            journal
+                .bind_reconcile(1, inserted.ownership_id, inserted.generation, binding(4))
+                .expect("single retry commits"),
+            2
+        );
+        let committed = fs::read(&config.journal_path).expect("committed retry bytes");
+        assert_ne!(committed, before);
+        assert_eq!(
+            journal
+                .bind_reconcile(2, inserted.ownership_id, inserted.generation, binding(4))
+                .expect("exact retry is read-only"),
+            2
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after exact retry"),
+            committed
+        );
+        assert!(!config.next_path.exists());
+    }
+
+    #[test]
+    fn retry_healthcheck_rejects_next_entry_without_removing_it_and_poison_is_sticky() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        fs::write(&config.next_path, b"foreign next entry").expect("next fixture");
+        fs::set_permissions(
+            &config.next_path,
+            fs::Permissions::from_mode(JOURNAL_FILE_MODE),
+        )
+        .expect("next fixture mode");
+
+        assert_retry_healthcheck_poisoned(&mut journal);
+        assert_eq!(
+            fs::read(&config.next_path).expect("healthcheck leaves next untouched"),
+            b"foreign next entry"
+        );
+    }
+
+    #[test]
+    fn retry_healthcheck_rejects_parent_substitution_without_creating_entries() {
+        let directory = tempdir().expect("temporary directory");
+        let parent = directory.path().join("runtime");
+        let moved_parent = directory.path().join("retained-runtime");
+        fs::create_dir(&parent).expect("runtime parent");
+        let config = test_config(&parent);
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        fs::rename(&parent, &moved_parent).expect("move retained parent");
+        fs::create_dir(&parent).expect("substituted parent");
+        fs::set_permissions(
+            &parent,
+            fs::Permissions::from_mode(config.expected_parent_mode),
+        )
+        .expect("substituted parent mode");
+
+        assert_retry_healthcheck_poisoned(&mut journal);
+        assert_eq!(
+            fs::read_dir(&parent)
+                .expect("substituted parent remains readable")
+                .count(),
+            0
+        );
+        assert!(moved_parent.join("helper.ownership-v3").exists());
+        assert!(moved_parent.join("helper.ownership-v3.lock").exists());
+    }
+
+    #[test]
+    fn retry_healthcheck_rejects_lock_substitution_or_lost_exclusive_lock() {
+        let substituted_directory = tempdir().expect("substitution directory");
+        let substituted_config = test_config(substituted_directory.path());
+        let mut substituted =
+            OwnershipJournal::open(substituted_config.clone()).expect("new journal");
+        let retained_lock = substituted_directory.path().join("retained-lock");
+        fs::rename(&substituted_config.lock_path, &retained_lock)
+            .expect("move retained lock entry");
+        fs::write(&substituted_config.lock_path, b"").expect("replacement lock entry");
+        fs::set_permissions(
+            &substituted_config.lock_path,
+            fs::Permissions::from_mode(JOURNAL_FILE_MODE),
+        )
+        .expect("replacement lock mode");
+
+        assert_retry_healthcheck_poisoned(&mut substituted);
+        assert!(retained_lock.exists());
+        assert!(substituted_config.lock_path.exists());
+
+        let unlocked_directory = tempdir().expect("unlocked directory");
+        let unlocked_config = test_config(unlocked_directory.path());
+        let mut unlocked = OwnershipJournal::open(unlocked_config).expect("new journal");
+        flock(&unlocked.runtime_lock, FlockOperation::Unlock).expect("release fixture lock");
+        assert_retry_healthcheck_poisoned(&mut unlocked);
+    }
+
+    #[test]
+    fn retry_healthcheck_rejects_main_substitution_or_readability_loss_without_repair() {
+        let substituted_directory = tempdir().expect("substitution directory");
+        let substituted_config = test_config(substituted_directory.path());
+        let mut substituted =
+            OwnershipJournal::open(substituted_config.clone()).expect("new journal");
+        substituted
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        let mut replacement = substituted.snapshot().expect("snapshot").clone();
+        replacement.revision = 2;
+        let replacement_path = substituted_directory.path().join("replacement-main");
+        let replacement_bytes = replacement.encode().expect("replacement encoding");
+        fs::write(&replacement_path, &replacement_bytes).expect("replacement main");
+        fs::set_permissions(
+            &replacement_path,
+            fs::Permissions::from_mode(JOURNAL_FILE_MODE),
+        )
+        .expect("replacement main mode");
+        fs::rename(&replacement_path, &substituted_config.journal_path)
+            .expect("substitute main entry");
+
+        assert_retry_healthcheck_poisoned(&mut substituted);
+        assert_eq!(
+            fs::read(&substituted_config.journal_path)
+                .expect("healthcheck leaves substituted main untouched"),
+            replacement_bytes
+        );
+
+        let unreadable_directory = tempdir().expect("unreadable directory");
+        let unreadable_config = test_config(unreadable_directory.path());
+        let mut unreadable =
+            OwnershipJournal::open(unreadable_config.clone()).expect("new journal");
+        unreadable
+            .insert_intent(0, intent(5, 6))
+            .expect("durable intent");
+        fs::set_permissions(
+            &unreadable_config.journal_path,
+            fs::Permissions::from_mode(0o000),
+        )
+        .expect("remove main readability");
+
+        assert_retry_healthcheck_poisoned(&mut unreadable);
+        assert_eq!(
+            fs::metadata(&unreadable_config.journal_path)
+                .expect("unreadable main remains")
+                .mode()
+                & 0o7777,
+            0
+        );
     }
 
     #[test]
