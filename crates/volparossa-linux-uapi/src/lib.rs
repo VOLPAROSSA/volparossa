@@ -8,7 +8,7 @@
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
 //! [`install_pid_one_lifecycle_signal_handlers`] and
 //! [`verify_pid_one_lifecycle_signal_handlers`] signal-action calls, and
-//! [`install_worker_no_descendants_filter`].
+//! [`install_worker_confinement_filter`].
 //! The process hook performs exactly one async-signal-safe `close_range(2)` syscall between
 //! `fork` and `exec`. The seccomp wrapper installs one fixed amd64 classic-BPF program and accepts
 //! no caller-controlled filter, action, syscall number, flag, or pointer.
@@ -81,7 +81,7 @@ const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-const WORKER_NO_DESCENDANTS_FILTER_LENGTH: usize = 12;
+const WORKER_CONFINEMENT_FILTER_LENGTH: usize = 14;
 
 /// Returns the Linux clone flag identifying an nsfs namespace descriptor.
 ///
@@ -393,13 +393,13 @@ const fn signal_bit(signal: libc::c_int) -> u64 {
     1_u64 << ((signal as u32) - 1)
 }
 
-/// Installs the fixed amd64 worker filter that prevents creation of descendants.
+/// Installs the fixed amd64 worker filter that prevents descendants and namespace changes.
 ///
 /// The caller must already have installed `PR_SET_NO_NEW_PRIVS`. One filter is applied to every
 /// current thread with `SECCOMP_FILTER_FLAG_TSYNC`; the only denied cases are an unexpected audit
-/// architecture, the x32 syscall ABI, and `clone(2)`, `clone3(2)`, `fork(2)`, or `vfork(2)`. Those
-/// cases return `EPERM`; all other syscalls are allowed. The fixed filter remains active across an
-/// `execve(2)`.
+/// architecture, the x32 syscall ABI, `clone(2)`, `clone3(2)`, `fork(2)`, `vfork(2)`, `setns(2)`,
+/// or `unshare(2)`. Those cases return `EPERM`; all other syscalls are allowed. The fixed filter
+/// remains active across an `execve(2)`.
 ///
 /// This API intentionally exposes no way to supply filter instructions or installation flags.
 /// It is supported only on the Debian 13 amd64 production target and fails closed elsewhere.
@@ -409,10 +409,10 @@ const fn signal_bit(signal: libc::c_int) -> u64 {
 /// Returns the kernel error when seccomp installation fails. A positive thread ID returned by a
 /// failed `TSYNC` operation is also an error, because that means the filter did not reach every
 /// current thread.
-pub fn install_worker_no_descendants_filter() -> io::Result<()> {
+pub fn install_worker_confinement_filter() -> io::Result<()> {
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     {
-        let mut instructions = worker_no_descendants_filter();
+        let mut instructions = worker_confinement_filter();
         let mut program = libc::sock_fprog {
             len: u16::try_from(instructions.len()).expect("fixed seccomp program length fits u16"),
             filter: instructions.as_mut_ptr(),
@@ -443,7 +443,7 @@ pub fn install_worker_no_descendants_filter() -> io::Result<()> {
 }
 
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-fn worker_no_descendants_filter() -> [libc::sock_filter; WORKER_NO_DESCENDANTS_FILTER_LENGTH] {
+fn worker_confinement_filter() -> [libc::sock_filter; WORKER_CONFINEMENT_FILTER_LENGTH] {
     let load_word_absolute = classic_bpf_code(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS);
     let jump_equal = classic_bpf_code(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K);
     let jump_bits_set = classic_bpf_code(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K);
@@ -458,10 +458,12 @@ fn worker_no_descendants_filter() -> [libc::sock_filter; WORKER_NO_DESCENDANTS_F
         bpf_statement(load_word_absolute, SECCOMP_DATA_SYSCALL_OFFSET),
         bpf_jump(jump_bits_set, X32_SYSCALL_BIT, 0, 1),
         bpf_statement(return_constant, denied),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_clone), 4, 0),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_clone3), 3, 0),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_fork), 2, 0),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_vfork), 1, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_clone), 6, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_clone3), 5, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_fork), 4, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_vfork), 3, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_setns), 2, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_unshare), 1, 0),
         bpf_statement(return_constant, libc::SECCOMP_RET_ALLOW),
         bpf_statement(return_constant, denied),
     ]
@@ -1802,7 +1804,7 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     #[test]
-    fn worker_no_descendants_filter_has_exact_fixed_program() {
+    fn worker_confinement_filter_has_exact_fixed_program() {
         let load_word_absolute = classic_bpf_code(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS);
         let jump_equal = classic_bpf_code(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K);
         let jump_bits_set = classic_bpf_code(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K);
@@ -1810,7 +1812,7 @@ mod tests {
         let denied = libc::SECCOMP_RET_ERRNO
             | (u32::try_from(libc::EPERM).expect("Linux EPERM is positive")
                 & libc::SECCOMP_RET_DATA);
-        let actual = worker_no_descendants_filter().map(|instruction| {
+        let actual = worker_confinement_filter().map(|instruction| {
             (
                 instruction.code,
                 instruction.jt,
@@ -1828,10 +1830,12 @@ mod tests {
                 (load_word_absolute, 0, 0, SECCOMP_DATA_SYSCALL_OFFSET),
                 (jump_bits_set, 0, 1, X32_SYSCALL_BIT),
                 (return_constant, 0, 0, denied),
-                (jump_equal, 4, 0, syscall_number(libc::SYS_clone)),
-                (jump_equal, 3, 0, syscall_number(libc::SYS_clone3)),
-                (jump_equal, 2, 0, syscall_number(libc::SYS_fork)),
-                (jump_equal, 1, 0, syscall_number(libc::SYS_vfork)),
+                (jump_equal, 6, 0, syscall_number(libc::SYS_clone)),
+                (jump_equal, 5, 0, syscall_number(libc::SYS_clone3)),
+                (jump_equal, 4, 0, syscall_number(libc::SYS_fork)),
+                (jump_equal, 3, 0, syscall_number(libc::SYS_vfork)),
+                (jump_equal, 2, 0, syscall_number(libc::SYS_setns)),
+                (jump_equal, 1, 0, syscall_number(libc::SYS_unshare)),
                 (return_constant, 0, 0, libc::SECCOMP_RET_ALLOW),
                 (return_constant, 0, 0, denied),
             ]
@@ -1855,7 +1859,7 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     #[test]
-    fn worker_no_descendants_filter_denies_every_fixed_branch() {
+    fn worker_confinement_filter_denies_every_fixed_branch() {
         let denied = libc::SECCOMP_RET_ERRNO
             | (u32::try_from(libc::EPERM).expect("Linux EPERM is positive")
                 & libc::SECCOMP_RET_DATA);
@@ -1864,6 +1868,8 @@ mod tests {
             libc::SYS_clone3,
             libc::SYS_fork,
             libc::SYS_vfork,
+            libc::SYS_setns,
+            libc::SYS_unshare,
         ] {
             assert_eq!(
                 evaluate_worker_filter(AUDIT_ARCH_X86_64, syscall_number(syscall)),
@@ -1905,7 +1911,7 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     #[test]
-    fn worker_no_descendants_filter_is_unprivileged_and_enforced() {
+    fn worker_confinement_filter_is_unprivileged_and_enforced() {
         if env::var_os(SECCOMP_CHILD_ENV).is_some() {
             // SAFETY: this isolated subprocess sets the monotonic no-new-privileges bit on itself;
             // all arguments are the fixed values required by prctl(2).
@@ -1913,7 +1919,7 @@ mod tests {
             assert_eq!(no_new_privileges, 0, "set no-new-privileges");
             let (before_mode, before_filters) = current_seccomp_state();
 
-            install_worker_no_descendants_filter().expect("install fixed worker seccomp filter");
+            install_worker_confinement_filter().expect("install fixed worker seccomp filter");
 
             let (after_mode, after_filters) = current_seccomp_state();
             assert!(matches!(before_mode, 0 | libc::SECCOMP_MODE_FILTER));
@@ -1922,7 +1928,13 @@ mod tests {
                 after_filters,
                 before_filters.checked_add(1).expect("filter count")
             );
-            for syscall in [libc::SYS_clone, libc::SYS_clone3, libc::SYS_fork] {
+            for syscall in [
+                libc::SYS_clone,
+                libc::SYS_clone3,
+                libc::SYS_fork,
+                libc::SYS_setns,
+                libc::SYS_unshare,
+            ] {
                 assert_raw_syscall_is_eperm(syscall);
             }
             assert_raw_syscall_is_eperm(libc::c_long::from(
@@ -1940,7 +1952,7 @@ mod tests {
         let mut command = Command::new("/proc/self/exe");
         command
             .arg("--exact")
-            .arg("tests::worker_no_descendants_filter_is_unprivileged_and_enforced")
+            .arg("tests::worker_confinement_filter_is_unprivileged_and_enforced")
             .arg("--test-threads=1")
             .arg("--nocapture")
             .env(SECCOMP_CHILD_ENV, "1")
@@ -1952,7 +1964,7 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     fn evaluate_worker_filter(arch: u32, syscall: u32) -> u32 {
-        let instructions = worker_no_descendants_filter();
+        let instructions = worker_confinement_filter();
         let load_word_absolute = classic_bpf_code(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS);
         let jump_equal = classic_bpf_code(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K);
         let jump_bits_set = classic_bpf_code(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K);

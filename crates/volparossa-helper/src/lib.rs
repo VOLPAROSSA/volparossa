@@ -3,10 +3,9 @@
 //! Production requests arrive over a fixed root-owned Unix socket and are authenticated with
 //! Linux peer credentials. The v3 production lease backend currently fails closed with
 //! `Unavailable` and spawns no worker. The private worker entry can now bootstrap and prove narrow
-//! network-namespace, capability, descriptor, and credential confinement, but that lifecycle,
-//! kernel preparation, and transaction-wide cleanup are not yet connected to the engine. It is not
-//! full worker isolation: the effective-UID-0 child retains same-UID signal authority over the
-//! parent and access to root-owned runtime socket/token paths; leader retirement does not own
+//! network-namespace, capability, descriptor, credential and dedicated non-root identity
+//! confinement, but that lifecycle, kernel preparation, transaction-wide cleanup and disposable
+//! live-root proof are not yet connected to the engine. Leader retirement still does not own
 //! descendants.
 
 #![cfg(target_os = "linux")]
@@ -40,7 +39,7 @@ mod worker_v3;
 pub use engine::HelperEngine;
 #[doc(hidden)]
 pub use relay_fence::{INTERNAL_NFT_FRONTEND_ARGUMENT, run_internal_nft_frontend};
-pub use runtime::{AGENT_ACCOUNT, RUNTIME_DIRECTORY, SOCKET_PATH, TOKEN_PATH};
+pub use runtime::{AGENT_ACCOUNT, RUNTIME_DIRECTORY, SOCKET_PATH, TOKEN_PATH, WORKER_ACCOUNT};
 pub use server::{AllowedPeer, ServerError, bind_production_socket, run_server};
 
 /// Fixed private child-process selector; it is not an agent-facing helper operation.

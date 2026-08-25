@@ -1,13 +1,14 @@
 //! Applied route-worker sandbox and independently observed bootstrap evidence.
 //!
-//! The production child enters a fresh network namespace, installs no-new-privileges, installs one
-//! fixed seccomp filter that denies creation of descendants, reduces every capability set to
-//! exactly `CAP_NET_ADMIN`, and reads the final state back before it can authenticate a request.
-//! The parent pins both a pidfd and one `/proc/<pid>` directory, opens the child's network namespace
-//! relative to that directory, reads bounded status fields, and attests the exact descriptor set
-//! `{1, 2, 3}`. A child statement is accepted only when it equals that independently observed
-//! state. Test applicators are compiled only under `cfg(test)`; production has no environment or
-//! runtime switch that can select one.
+//! The production child first enters a fresh network namespace and then pauses at an affine
+//! bootstrap barrier after setting no-new-privileges and installing one fixed seccomp filter that
+//! denies descendant creation and every later namespace transition. While the child is still root,
+//! the parent pins that namespace and attests the filter, exact descriptor set and single task. Only
+//! after the pin acknowledgement may the child clear all supplementary groups, irreversibly assume
+//! its dedicated uid/gid and reduce every capability set to exactly `CAP_NET_ADMIN`. The child and
+//! parent both read the final identity and sandbox state back before the first authenticated request.
+//! Test applicators are compiled only under `cfg(test)`; production has no environment or runtime
+//! switch that can select one.
 
 use std::{
     collections::BTreeSet,
@@ -24,29 +25,79 @@ use nix::{
 };
 use rustix::{
     fs::{Dir, Mode, OFlags, fstat, open, openat},
-    process::{Pid, PidfdFlags, pidfd_open},
+    process::{Pid, PidfdFlags, getgroups, pidfd_open},
     thread::{
-        CapabilitySet, CapabilitySets, capabilities, clear_ambient_capability_set,
-        remove_capability_from_bounding_set, set_capabilities, set_no_new_privs,
+        CapabilitySet, CapabilitySets, Gid, Uid, capabilities, clear_ambient_capability_set,
+        get_keep_capabilities, remove_capability_from_bounding_set, set_capabilities,
+        set_keep_capabilities, set_no_new_privs, set_thread_groups, set_thread_res_gid,
+        set_thread_res_uid,
     },
 };
 use thiserror::Error;
-use volparossa_linux_uapi::install_worker_no_descendants_filter;
+use volparossa_linux_uapi::install_worker_confinement_filter;
 
-const SANDBOX_PROOF_DOMAIN: &[u8; 32] = b"volparossa/worker-sandbox/v4\0\0\0\0";
-const SANDBOX_PROOF_VERSION: u32 = 4;
+const SANDBOX_PROOF_DOMAIN: &[u8; 32] = b"volparossa/worker-sandbox/v5\0\0\0\0";
+const SANDBOX_PROOF_VERSION: u32 = 5;
 const MAX_DESCRIPTOR_AUDIT: usize = 4_096;
 const MAX_PROC_STATUS_BYTES: usize = 64 * 1024;
 const MAX_CAP_LAST_CAP_BYTES: usize = 4;
 const WORKER_CHANNEL_DESCRIPTOR: i32 = 3;
+const CAP_KILL: u32 = 5;
+const CAP_SETGID: u32 = 6;
+const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
 const CAP_NET_ADMIN: u32 = 12;
 const CAP_SYS_ADMIN: u32 = 21;
+const CAP_SETGID_BIT: u64 = 1_u64 << CAP_SETGID;
+const CAP_SETUID_BIT: u64 = 1_u64 << CAP_SETUID;
 const CAP_SETPCAP_BIT: u64 = 1_u64 << CAP_SETPCAP;
 const CAP_NET_ADMIN_BIT: u64 = 1_u64 << CAP_NET_ADMIN;
 const CAP_SYS_ADMIN_BIT: u64 = 1_u64 << CAP_SYS_ADMIN;
+pub(super) const SYSTEMD_RESERVED_ID: u32 = 65_535;
 
 pub(super) type ContextId = [u8; 16];
+
+/// Dedicated non-root identity selected by the privileged parent for one route worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WorkerIdentity {
+    uid: u32,
+    gid: u32,
+}
+
+impl WorkerIdentity {
+    pub(super) fn new(uid: u32, gid: u32) -> Result<Self, WorkerSandboxError> {
+        if uid == 0
+            || gid == 0
+            || uid == SYSTEMD_RESERVED_ID
+            || gid == SYSTEMD_RESERVED_ID
+            || uid == u32::MAX
+            || gid == u32::MAX
+        {
+            return Err(WorkerSandboxError::Invalid);
+        }
+        Ok(Self { uid, gid })
+    }
+
+    pub(super) const fn uid(self) -> u32 {
+        self.uid
+    }
+
+    pub(super) const fn gid(self) -> u32 {
+        self.gid
+    }
+
+    #[cfg(test)]
+    pub(super) const fn fixture(uid: u32, gid: u32) -> Self {
+        assert!(
+            uid != SYSTEMD_RESERVED_ID
+                && gid != SYSTEMD_RESERVED_ID
+                && uid != u32::MAX
+                && gid != u32::MAX,
+            "worker fixture uses a systemd or kernel-reserved identity"
+        );
+        Self { uid, gid }
+    }
+}
 
 #[derive(Debug, Error)]
 pub(super) enum WorkerSandboxError {
@@ -174,6 +225,8 @@ impl LinuxSeccompState {
 pub(super) struct WorkerSandboxSnapshot {
     parent_network_namespace: NetworkNamespaceIdentity,
     worker_network_namespace: NetworkNamespaceIdentity,
+    identity: WorkerIdentity,
+    supplementary_groups_empty: bool,
     no_new_privileges: bool,
     seccomp: LinuxSeccompState,
     capabilities: LinuxCapabilitySnapshot,
@@ -184,6 +237,8 @@ impl WorkerSandboxSnapshot {
     pub(super) const fn fixture(
         parent_network_namespace: NetworkNamespaceIdentity,
         worker_network_namespace: NetworkNamespaceIdentity,
+        identity: WorkerIdentity,
+        supplementary_groups_empty: bool,
         no_new_privileges: bool,
         seccomp: LinuxSeccompState,
         capabilities: LinuxCapabilitySnapshot,
@@ -191,6 +246,8 @@ impl WorkerSandboxSnapshot {
         Self {
             parent_network_namespace,
             worker_network_namespace,
+            identity,
+            supplementary_groups_empty,
             no_new_privileges,
             seccomp,
             capabilities,
@@ -206,23 +263,26 @@ impl WorkerSandboxSnapshot {
 /// Exact state every production route-context child must prove before its first request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct WorkerSandboxPlan {
-    required_capabilities: LinuxCapabilitySnapshot,
-    required_seccomp: LinuxSeccompState,
+    identity: WorkerIdentity,
+    capabilities: LinuxCapabilitySnapshot,
+    seccomp: LinuxSeccompState,
 }
 
 impl WorkerSandboxPlan {
     pub(super) fn production(
         baseline_seccomp: LinuxSeccompState,
+        identity: WorkerIdentity,
     ) -> Result<Self, WorkerSandboxError> {
         Ok(Self {
-            required_capabilities: LinuxCapabilitySnapshot {
+            identity,
+            capabilities: LinuxCapabilitySnapshot {
                 inheritable: 0,
                 permitted: CAP_NET_ADMIN_BIT,
                 effective: CAP_NET_ADMIN_BIT,
                 bounding: CAP_NET_ADMIN_BIT,
                 ambient: 0,
             },
-            required_seccomp: baseline_seccomp.expected_after_worker_filter()?,
+            seccomp: baseline_seccomp.expected_after_worker_filter()?,
         })
     }
 
@@ -233,9 +293,11 @@ impl WorkerSandboxPlan {
             return Err(WorkerSandboxError::Invalid);
         }
         if snapshot.parent_network_namespace == snapshot.worker_network_namespace
+            || snapshot.identity != self.identity
+            || !snapshot.supplementary_groups_empty
             || !snapshot.no_new_privileges
-            || snapshot.seccomp != self.required_seccomp
-            || snapshot.capabilities != self.required_capabilities
+            || snapshot.seccomp != self.seccomp
+            || snapshot.capabilities != self.capabilities
         {
             return Err(WorkerSandboxError::Mismatch);
         }
@@ -255,7 +317,7 @@ pub(super) struct SandboxProofRecord {
 }
 
 impl SandboxProofRecord {
-    pub(super) const LENGTH: usize = 180;
+    pub(super) const LENGTH: usize = 192;
 
     pub(super) const fn new(
         context_id: ContextId,
@@ -306,9 +368,12 @@ impl SandboxProofRecord {
             .copy_from_slice(&self.snapshot.worker_network_namespace.device.to_be_bytes());
         encoded[124..132]
             .copy_from_slice(&self.snapshot.worker_network_namespace.inode.to_be_bytes());
-        encoded[132] = u8::from(self.snapshot.no_new_privileges);
-        encoded[133] = self.snapshot.seccomp.mode;
-        encoded[134..138].copy_from_slice(&self.snapshot.seccomp.filter_count.to_be_bytes());
+        encoded[132..136].copy_from_slice(&self.snapshot.identity.uid.to_be_bytes());
+        encoded[136..140].copy_from_slice(&self.snapshot.identity.gid.to_be_bytes());
+        encoded[140] = u8::from(self.snapshot.supplementary_groups_empty);
+        encoded[141] = u8::from(self.snapshot.no_new_privileges);
+        encoded[142] = self.snapshot.seccomp.mode;
+        encoded[144..148].copy_from_slice(&self.snapshot.seccomp.filter_count.to_be_bytes());
         for (offset, value) in [
             self.snapshot.capabilities.inheritable,
             self.snapshot.capabilities.permitted,
@@ -319,7 +384,7 @@ impl SandboxProofRecord {
         .into_iter()
         .enumerate()
         {
-            let start = 140 + offset * 8;
+            let start = 152 + offset * 8;
             encoded[start..start + 8].copy_from_slice(&value.to_be_bytes());
         }
         encoded
@@ -328,12 +393,18 @@ impl SandboxProofRecord {
     pub(super) fn decode(encoded: &[u8]) -> Result<Self, WorkerSandboxError> {
         if encoded.len() != Self::LENGTH
             || encoded.get(0..32) != Some(SANDBOX_PROOF_DOMAIN.as_slice())
-            || encoded.get(138..140) != Some([0_u8; 2].as_slice())
+            || encoded.get(143..144) != Some([0_u8; 1].as_slice())
+            || encoded.get(148..152) != Some([0_u8; 4].as_slice())
             || u32::from_be_bytes(read_array(encoded, 32)?) != SANDBOX_PROOF_VERSION
         {
             return Err(WorkerSandboxError::Invalid);
         }
-        let no_new_privileges = match encoded[132] {
+        let supplementary_groups_empty = match encoded[140] {
+            0 => false,
+            1 => true,
+            _ => return Err(WorkerSandboxError::Invalid),
+        };
+        let no_new_privileges = match encoded[141] {
             0 => false,
             1 => true,
             _ => return Err(WorkerSandboxError::Invalid),
@@ -353,17 +424,22 @@ impl SandboxProofRecord {
                     device: u64::from_be_bytes(read_array(encoded, 116)?),
                     inode: u64::from_be_bytes(read_array(encoded, 124)?),
                 },
+                identity: WorkerIdentity::new(
+                    u32::from_be_bytes(read_array(encoded, 132)?),
+                    u32::from_be_bytes(read_array(encoded, 136)?),
+                )?,
+                supplementary_groups_empty,
                 no_new_privileges,
                 seccomp: LinuxSeccompState::from_status(
-                    u32::from(encoded[133]),
-                    u32::from_be_bytes(read_array(encoded, 134)?),
+                    u32::from(encoded[142]),
+                    u32::from_be_bytes(read_array(encoded, 144)?),
                 )?,
                 capabilities: LinuxCapabilitySnapshot {
-                    inheritable: u64::from_be_bytes(read_array(encoded, 140)?),
-                    permitted: u64::from_be_bytes(read_array(encoded, 148)?),
-                    effective: u64::from_be_bytes(read_array(encoded, 156)?),
-                    bounding: u64::from_be_bytes(read_array(encoded, 164)?),
-                    ambient: u64::from_be_bytes(read_array(encoded, 172)?),
+                    inheritable: u64::from_be_bytes(read_array(encoded, 152)?),
+                    permitted: u64::from_be_bytes(read_array(encoded, 160)?),
+                    effective: u64::from_be_bytes(read_array(encoded, 168)?),
+                    bounding: u64::from_be_bytes(read_array(encoded, 176)?),
+                    ambient: u64::from_be_bytes(read_array(encoded, 184)?),
                 },
             },
         };
@@ -463,6 +539,9 @@ fn read_array<const LENGTH: usize>(
 struct ParsedProcessStatus {
     pid: u32,
     parent_pid: u32,
+    uids: [u32; 4],
+    gids: [u32; 4],
+    supplementary_groups_empty: bool,
     no_new_privileges: bool,
     seccomp: LinuxSeccompState,
     capabilities: LinuxCapabilitySnapshot,
@@ -472,6 +551,9 @@ fn parse_process_status(bytes: &[u8]) -> Result<ParsedProcessStatus, WorkerSandb
     let text = std::str::from_utf8(bytes).map_err(|_| WorkerSandboxError::Invalid)?;
     let mut pid = None;
     let mut parent_pid = None;
+    let mut uids = None;
+    let mut gids = None;
+    let mut supplementary_groups_empty = None;
     let mut no_new_privileges = None;
     let mut seccomp_mode = None;
     let mut seccomp_filters = None;
@@ -488,6 +570,15 @@ fn parse_process_status(bytes: &[u8]) -> Result<ParsedProcessStatus, WorkerSandb
             set_once(&mut pid, parse_decimal_u32(value)?)?;
         } else if let Some(value) = line.strip_prefix("PPid:\t") {
             set_once(&mut parent_pid, parse_decimal_u32(value)?)?;
+        } else if let Some(value) = line.strip_prefix("Uid:\t") {
+            set_once(&mut uids, parse_identity_quad(value)?)?;
+        } else if let Some(value) = line.strip_prefix("Gid:\t") {
+            set_once(&mut gids, parse_identity_quad(value)?)?;
+        } else if let Some(value) = line.strip_prefix("Groups:\t") {
+            set_once(
+                &mut supplementary_groups_empty,
+                parse_supplementary_groups_empty(value)?,
+            )?;
         } else if let Some(value) = line.strip_prefix("NoNewPrivs:\t") {
             let value = match value {
                 "0" => false,
@@ -514,6 +605,10 @@ fn parse_process_status(bytes: &[u8]) -> Result<ParsedProcessStatus, WorkerSandb
     Ok(ParsedProcessStatus {
         pid: pid.ok_or(WorkerSandboxError::Invalid)?,
         parent_pid: parent_pid.ok_or(WorkerSandboxError::Invalid)?,
+        uids: uids.ok_or(WorkerSandboxError::Invalid)?,
+        gids: gids.ok_or(WorkerSandboxError::Invalid)?,
+        supplementary_groups_empty: supplementary_groups_empty
+            .ok_or(WorkerSandboxError::Invalid)?,
         no_new_privileges: no_new_privileges.ok_or(WorkerSandboxError::Invalid)?,
         seccomp: LinuxSeccompState::from_status(
             seccomp_mode.ok_or(WorkerSandboxError::Invalid)?,
@@ -544,6 +639,31 @@ fn parse_decimal_u32(value: &str) -> Result<u32, WorkerSandboxError> {
         return Err(WorkerSandboxError::Invalid);
     }
     value.parse().map_err(|_| WorkerSandboxError::Invalid)
+}
+
+fn parse_identity_quad(value: &str) -> Result<[u32; 4], WorkerSandboxError> {
+    let values = value
+        .split_ascii_whitespace()
+        .map(parse_decimal_u32)
+        .collect::<Result<Vec<_>, _>>()?;
+    values.try_into().map_err(|_| WorkerSandboxError::Invalid)
+}
+
+fn parse_supplementary_groups_empty(value: &str) -> Result<bool, WorkerSandboxError> {
+    let mut count = 0_usize;
+    let mut previous = None;
+    for group in value.split_ascii_whitespace() {
+        count = count.checked_add(1).ok_or(WorkerSandboxError::Invalid)?;
+        if count > 256 {
+            return Err(WorkerSandboxError::Invalid);
+        }
+        let group = parse_decimal_u32(group)?;
+        if previous.is_some_and(|previous| previous >= group) {
+            return Err(WorkerSandboxError::Invalid);
+        }
+        previous = Some(group);
+    }
+    Ok(count == 0)
 }
 
 fn parse_capability_mask(value: &str) -> Result<u64, WorkerSandboxError> {
@@ -613,13 +733,31 @@ fn current_process_snapshot(
     if status.pid != std::process::id() || status.parent_pid != parent_pid {
         return Err(WorkerSandboxError::Mismatch);
     }
+    let identity = exact_status_identity(status)?;
+    let supplementary_groups_empty = getgroups().map_err(rustix_io)?.is_empty();
+    if supplementary_groups_empty != status.supplementary_groups_empty {
+        return Err(WorkerSandboxError::Mismatch);
+    }
     Ok(WorkerSandboxSnapshot {
         parent_network_namespace,
         worker_network_namespace,
+        identity,
+        supplementary_groups_empty,
         no_new_privileges: status.no_new_privileges,
         seccomp: status.seccomp,
         capabilities: status.capabilities,
     })
+}
+
+fn exact_status_identity(
+    status: ParsedProcessStatus,
+) -> Result<WorkerIdentity, WorkerSandboxError> {
+    if status.uids.iter().any(|uid| *uid != status.uids[0])
+        || status.gids.iter().any(|gid| *gid != status.gids[0])
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    WorkerIdentity::new(status.uids[0], status.gids[0])
 }
 
 /// Kernel pins created immediately after spawn and retained until confirmed reap.
@@ -630,6 +768,7 @@ pub(super) struct WorkerKernelPins {
     pidfd: OwnedFd,
     process_directory: OwnedFd,
     network_namespace: Option<OwnedFd>,
+    final_descriptor_directory: Option<OwnedFd>,
 }
 
 impl WorkerKernelPins {
@@ -646,23 +785,66 @@ impl WorkerKernelPins {
             pidfd,
             process_directory,
             network_namespace: None,
+            final_descriptor_directory: None,
         })
     }
 
+    /// Attests and pins the child's fresh namespace before the child drops root identity.
+    pub(super) fn pin_network_namespace_before_identity_drop(
+        &mut self,
+        parent_network_namespace: NetworkNamespaceIdentity,
+        parent_seccomp: LinuxSeccompState,
+        required_group: u32,
+        parent_pid: u32,
+        child_pid: u32,
+    ) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
+        if !parent_network_namespace.is_valid()
+            || self.network_namespace.is_some()
+            || self.final_descriptor_directory.is_some()
+        {
+            return Err(WorkerSandboxError::Invalid);
+        }
+        self.ensure_alive()?;
+        let (worker_network_namespace, status) =
+            self.observe_and_pin_common(parent_pid, child_pid, true)?;
+        validate_pre_identity_state(
+            parent_network_namespace,
+            worker_network_namespace,
+            parent_seccomp,
+            required_group,
+            status,
+        )?;
+        self.ensure_alive()?;
+        Ok(worker_network_namespace)
+    }
+
+    /// Observes final state through the process and namespace descriptors pinned before uid drop.
     pub(super) fn observe_and_pin(
         &mut self,
         parent_network_namespace: NetworkNamespaceIdentity,
         parent_seccomp: LinuxSeccompState,
         parent_pid: u32,
         child_pid: u32,
+        identity: WorkerIdentity,
     ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
-        let plan = WorkerSandboxPlan::production(parent_seccomp)?;
+        let plan = WorkerSandboxPlan::production(parent_seccomp, identity)?;
         self.ensure_alive()?;
-        let (worker_network_namespace, status) =
-            self.observe_common(parent_pid, child_pid, true)?;
+        let network_namespace = self
+            .network_namespace
+            .as_ref()
+            .ok_or(WorkerSandboxError::Invalid)?;
+        let worker_network_namespace = namespace_identity(network_namespace)?;
+        let descriptor_directory = self
+            .final_descriptor_directory
+            .take()
+            .ok_or(WorkerSandboxError::Invalid)?;
+        validate_exact_worker_descriptors(read_numeric_directory(descriptor_directory)?)?;
+        let status = self.observe_status(parent_pid, child_pid)?;
         let snapshot = WorkerSandboxSnapshot {
             parent_network_namespace,
             worker_network_namespace,
+            identity: exact_status_identity(status)?,
+            supplementary_groups_empty: status.supplementary_groups_empty,
             no_new_privileges: status.no_new_privileges,
             seccomp: status.seccomp,
             capabilities: status.capabilities,
@@ -673,6 +855,22 @@ impl WorkerKernelPins {
     }
 
     #[cfg(test)]
+    pub(super) fn pin_network_namespace_before_identity_drop_fixture(
+        &mut self,
+        parent_pid: u32,
+        child_pid: u32,
+    ) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
+        if self.network_namespace.is_some() || self.final_descriptor_directory.is_some() {
+            return Err(WorkerSandboxError::Invalid);
+        }
+        self.ensure_alive()?;
+        let (worker_network_namespace, _) =
+            self.observe_and_pin_common(parent_pid, child_pid, false)?;
+        self.ensure_alive()?;
+        Ok(worker_network_namespace)
+    }
+
+    #[cfg(test)]
     pub(super) fn observe_and_pin_fixture(
         &mut self,
         parent_pid: u32,
@@ -680,12 +878,17 @@ impl WorkerKernelPins {
         fixture: WorkerSandboxSnapshot,
         parent_seccomp: LinuxSeccompState,
     ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
-        let plan = WorkerSandboxPlan::production(parent_seccomp)?;
+        let plan = WorkerSandboxPlan::production(parent_seccomp, fixture.identity)?;
         self.ensure_alive()?;
-        // Rust's test harness owns a coordinator thread in addition to the exact test thread.
-        // This cfg(test)-only observer still anchors and bounds the task view and requires the
-        // process leader; production always takes the exact-single-task branch above.
-        let _ = self.observe_common(parent_pid, child_pid, false)?;
+        if self.network_namespace.is_none() {
+            return Err(WorkerSandboxError::Invalid);
+        }
+        let descriptor_directory = self
+            .final_descriptor_directory
+            .take()
+            .ok_or(WorkerSandboxError::Invalid)?;
+        validate_exact_worker_descriptors(read_numeric_directory(descriptor_directory)?)?;
+        let _ = self.observe_status(parent_pid, child_pid)?;
         plan.verify(fixture)?;
         self.ensure_alive()?;
         Ok(fixture)
@@ -704,15 +907,11 @@ impl WorkerKernelPins {
         Ok(())
     }
 
-    fn observe_common(
-        &mut self,
+    fn observe_status(
+        &self,
         parent_pid: u32,
         child_pid: u32,
-        require_single_task: bool,
-    ) -> Result<(NetworkNamespaceIdentity, ParsedProcessStatus), WorkerSandboxError> {
-        if self.network_namespace.is_some() {
-            return Err(WorkerSandboxError::Invalid);
-        }
+    ) -> Result<ParsedProcessStatus, WorkerSandboxError> {
         let status_descriptor = openat(
             &self.process_directory,
             "status",
@@ -727,6 +926,19 @@ impl WorkerKernelPins {
         if status.pid != child_pid || status.parent_pid != parent_pid {
             return Err(WorkerSandboxError::Mismatch);
         }
+        Ok(status)
+    }
+
+    fn observe_and_pin_common(
+        &mut self,
+        parent_pid: u32,
+        child_pid: u32,
+        require_single_task: bool,
+    ) -> Result<(NetworkNamespaceIdentity, ParsedProcessStatus), WorkerSandboxError> {
+        if self.network_namespace.is_some() || self.final_descriptor_directory.is_some() {
+            return Err(WorkerSandboxError::Invalid);
+        }
+        let status = self.observe_status(parent_pid, child_pid)?;
 
         let descriptor_directory = openat(
             &self.process_directory,
@@ -736,6 +948,15 @@ impl WorkerKernelPins {
         )
         .map_err(rustix_io)?;
         validate_exact_worker_descriptors(read_numeric_directory(descriptor_directory)?)?;
+        self.final_descriptor_directory = Some(
+            openat(
+                &self.process_directory,
+                "fd",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(rustix_io)?,
+        );
 
         let task_directory = openat(
             &self.process_directory,
@@ -780,6 +1001,7 @@ impl WorkerKernelPins {
                     .expect("fake network namespace")
                     .into(),
             ),
+            final_descriptor_directory: None,
         }
     }
 }
@@ -834,12 +1056,21 @@ fn validate_exact_worker_descriptors(descriptors: Vec<u32>) -> Result<(), Worker
 trait SandboxKernel {
     fn initial_capabilities(&mut self) -> Result<CapabilitySets, WorkerSandboxError>;
     fn unshare_network(&mut self) -> Result<(), WorkerSandboxError>;
+    fn observe_network_namespace(&mut self)
+    -> Result<NetworkNamespaceIdentity, WorkerSandboxError>;
     fn install_no_new_privileges(&mut self) -> Result<(), WorkerSandboxError>;
     fn observe_initial_seccomp(&mut self) -> Result<LinuxSeccompState, WorkerSandboxError>;
     fn install_process_tree_filter(&mut self) -> Result<(), WorkerSandboxError>;
     fn clear_ambient(&mut self) -> Result<(), WorkerSandboxError>;
     fn last_capability(&mut self) -> Result<u32, WorkerSandboxError>;
     fn drop_bounding(&mut self, capability: u32) -> Result<(), WorkerSandboxError>;
+    fn set_pre_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError>;
+    fn clear_supplementary_groups(&mut self) -> Result<(), WorkerSandboxError>;
+    fn set_keep_capabilities_enabled(&mut self, enabled: bool) -> Result<(), WorkerSandboxError>;
+    fn set_res_gid(&mut self, gid: u32) -> Result<(), WorkerSandboxError>;
+    fn set_res_uid(&mut self, uid: u32) -> Result<(), WorkerSandboxError>;
+    fn set_post_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError>;
+    fn keep_capabilities_enabled(&mut self) -> Result<bool, WorkerSandboxError>;
     fn set_exact_capabilities(&mut self) -> Result<(), WorkerSandboxError>;
     fn observe_final(
         &mut self,
@@ -860,6 +1091,12 @@ impl SandboxKernel for ProductionSandboxKernel {
             .map_err(Into::into)
     }
 
+    fn observe_network_namespace(
+        &mut self,
+    ) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
+        current_network_namespace_identity()
+    }
+
     fn install_no_new_privileges(&mut self) -> Result<(), WorkerSandboxError> {
         set_no_new_privs(true)
             .map_err(rustix_io)
@@ -871,7 +1108,7 @@ impl SandboxKernel for ProductionSandboxKernel {
     }
 
     fn install_process_tree_filter(&mut self) -> Result<(), WorkerSandboxError> {
-        install_worker_no_descendants_filter().map_err(Into::into)
+        install_worker_confinement_filter().map_err(Into::into)
     }
 
     fn clear_ambient(&mut self) -> Result<(), WorkerSandboxError> {
@@ -903,6 +1140,69 @@ impl SandboxKernel for ProductionSandboxKernel {
             .map_err(Into::into)
     }
 
+    fn set_pre_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
+        let capabilities = CapabilitySet::SETGID
+            | CapabilitySet::SETUID
+            | CapabilitySet::SETPCAP
+            | CapabilitySet::NET_ADMIN;
+        set_capabilities(
+            None,
+            CapabilitySets {
+                effective: capabilities,
+                permitted: capabilities,
+                inheritable: CapabilitySet::empty(),
+            },
+        )
+        .map_err(rustix_io)
+        .map_err(Into::into)
+    }
+
+    fn clear_supplementary_groups(&mut self) -> Result<(), WorkerSandboxError> {
+        set_thread_groups(&[])
+            .map_err(rustix_io)
+            .map_err(Into::into)
+    }
+
+    fn set_keep_capabilities_enabled(&mut self, enabled: bool) -> Result<(), WorkerSandboxError> {
+        set_keep_capabilities(enabled)
+            .map_err(rustix_io)
+            .map_err(Into::into)
+    }
+
+    fn set_res_gid(&mut self, gid: u32) -> Result<(), WorkerSandboxError> {
+        let gid = Gid::from_raw(gid);
+        set_thread_res_gid(gid, gid, gid)
+            .map_err(rustix_io)
+            .map_err(Into::into)
+    }
+
+    fn set_res_uid(&mut self, uid: u32) -> Result<(), WorkerSandboxError> {
+        let uid = Uid::from_raw(uid);
+        set_thread_res_uid(uid, uid, uid)
+            .map_err(rustix_io)
+            .map_err(Into::into)
+    }
+
+    fn set_post_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
+        let transition = CapabilitySet::NET_ADMIN | CapabilitySet::SETPCAP;
+        set_capabilities(
+            None,
+            CapabilitySets {
+                effective: transition,
+                permitted: transition,
+                inheritable: CapabilitySet::empty(),
+            },
+        )
+        .map_err(rustix_io)
+        .map_err(Into::into)
+    }
+
+    fn keep_capabilities_enabled(&mut self) -> Result<bool, WorkerSandboxError> {
+        get_keep_capabilities()
+            .map_err(rustix_io)
+            .map_err(Into::into)
+    }
+
     fn set_exact_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
         set_capabilities(
             None,
@@ -924,30 +1224,112 @@ impl SandboxKernel for ProductionSandboxKernel {
     }
 }
 
-pub(super) fn apply_production_sandbox(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreparedWorkerSandboxState {
     parent_network_namespace: NetworkNamespaceIdentity,
-) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
-    apply_sandbox(&mut ProductionSandboxKernel, parent_network_namespace)
+    worker_network_namespace: NetworkNamespaceIdentity,
+    baseline_seccomp: LinuxSeccompState,
 }
 
-fn apply_sandbox<K: SandboxKernel>(
-    kernel: &mut K,
+/// Affine child-side token proving NEWNET and monotonic confinement completed before identity drop.
+pub(super) struct PreparedWorkerSandbox {
+    state: PreparedWorkerSandboxState,
+}
+
+pub(super) fn begin_production_sandbox(
     parent_network_namespace: NetworkNamespaceIdentity,
-) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
-    let initial = kernel.initial_capabilities()?;
-    let required_bootstrap =
-        CapabilitySet::NET_ADMIN | CapabilitySet::SETPCAP | CapabilitySet::SYS_ADMIN;
-    if !initial.effective.contains(required_bootstrap)
-        || !initial.permitted.contains(required_bootstrap)
+) -> Result<PreparedWorkerSandbox, WorkerSandboxError> {
+    Ok(PreparedWorkerSandbox {
+        state: begin_sandbox(&mut ProductionSandboxKernel, parent_network_namespace)?,
+    })
+}
+
+impl PreparedWorkerSandbox {
+    /// Consumes the pre-identity phase after the parent acknowledges its namespace pin.
+    pub(super) fn finish(
+        self,
+        identity: WorkerIdentity,
+    ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
+        finish_sandbox(&mut ProductionSandboxKernel, self.state, identity)
+    }
+}
+
+fn pre_identity_capabilities() -> CapabilitySet {
+    CapabilitySet::SETGID
+        | CapabilitySet::SETUID
+        | CapabilitySet::SETPCAP
+        | CapabilitySet::NET_ADMIN
+}
+
+fn bootstrap_capabilities() -> CapabilitySet {
+    pre_identity_capabilities() | CapabilitySet::KILL | CapabilitySet::SYS_ADMIN
+}
+
+fn validate_pre_identity_state(
+    parent_network_namespace: NetworkNamespaceIdentity,
+    worker_network_namespace: NetworkNamespaceIdentity,
+    parent_seccomp: LinuxSeccompState,
+    required_group: u32,
+    status: ParsedProcessStatus,
+) -> Result<(), WorkerSandboxError> {
+    let expected_capabilities = LinuxCapabilitySnapshot {
+        inheritable: 0,
+        permitted: pre_identity_capabilities().bits(),
+        effective: pre_identity_capabilities().bits(),
+        bounding: CAP_NET_ADMIN_BIT | CAP_SETPCAP_BIT,
+        ambient: 0,
+    };
+    let required_seccomp = parent_seccomp.expected_after_worker_filter()?;
+    if !parent_network_namespace.is_valid()
+        || !worker_network_namespace.is_valid()
+        || worker_network_namespace == parent_network_namespace
+        || status.uids != [0; 4]
+        || status.gids != [required_group; 4]
+        || !status.no_new_privileges
+        || status.seccomp != required_seccomp
+        || status.capabilities != expected_capabilities
     {
         return Err(WorkerSandboxError::Mismatch);
     }
+    Ok(())
+}
 
+fn verify_bootstrap_capabilities(capabilities: CapabilitySets) -> Result<(), WorkerSandboxError> {
+    let required = bootstrap_capabilities();
+    if !capabilities.effective.contains(required) || !capabilities.permitted.contains(required) {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    Ok(())
+}
+
+fn verify_pre_identity_capabilities(
+    capabilities: CapabilitySets,
+) -> Result<(), WorkerSandboxError> {
+    let expected = pre_identity_capabilities();
+    if capabilities.effective != expected
+        || capabilities.permitted != expected
+        || !capabilities.inheritable.is_empty()
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    Ok(())
+}
+
+fn begin_sandbox<K: SandboxKernel>(
+    kernel: &mut K,
+    parent_network_namespace: NetworkNamespaceIdentity,
+) -> Result<PreparedWorkerSandboxState, WorkerSandboxError> {
+    if !parent_network_namespace.is_valid() {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    verify_bootstrap_capabilities(kernel.initial_capabilities()?)?;
     kernel.unshare_network()?;
-    kernel.install_no_new_privileges()?;
+    let worker_network_namespace = kernel.observe_network_namespace()?;
+    if !worker_network_namespace.is_valid() || worker_network_namespace == parent_network_namespace
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
     let baseline_seccomp = kernel.observe_initial_seccomp()?;
-    let plan = WorkerSandboxPlan::production(baseline_seccomp)?;
-    kernel.install_process_tree_filter()?;
     kernel.clear_ambient()?;
     let last_capability = kernel.last_capability()?;
     for capability in 0..=last_capability {
@@ -955,11 +1337,41 @@ fn apply_sandbox<K: SandboxKernel>(
             kernel.drop_bounding(capability)?;
         }
     }
+    kernel.set_pre_identity_capabilities()?;
+    verify_pre_identity_capabilities(kernel.initial_capabilities()?)?;
+    kernel.install_no_new_privileges()?;
+    kernel.install_process_tree_filter()?;
+    Ok(PreparedWorkerSandboxState {
+        parent_network_namespace,
+        worker_network_namespace,
+        baseline_seccomp,
+    })
+}
+
+fn finish_sandbox<K: SandboxKernel>(
+    kernel: &mut K,
+    prepared: PreparedWorkerSandboxState,
+    identity: WorkerIdentity,
+) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
+    verify_pre_identity_capabilities(kernel.initial_capabilities()?)?;
+    if kernel.observe_network_namespace()? != prepared.worker_network_namespace {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    let plan = WorkerSandboxPlan::production(prepared.baseline_seccomp, identity)?;
+    kernel.clear_supplementary_groups()?;
+    kernel.set_keep_capabilities_enabled(true)?;
+    kernel.set_res_gid(identity.gid)?;
+    kernel.set_res_uid(identity.uid)?;
+    kernel.set_post_identity_capabilities()?;
+    kernel.set_keep_capabilities_enabled(false)?;
+    if kernel.keep_capabilities_enabled()? {
+        return Err(WorkerSandboxError::Mismatch);
+    }
     // CAP_SETPCAP is deliberately the final bounding-set removal. It remains effective until the
     // subsequent capset atomically reduces effective/permitted to CAP_NET_ADMIN.
     kernel.drop_bounding(CAP_SETPCAP)?;
     kernel.set_exact_capabilities()?;
-    let snapshot = kernel.observe_final(parent_network_namespace)?;
+    let snapshot = kernel.observe_final(prepared.parent_network_namespace)?;
     plan.verify(snapshot)?;
     Ok(snapshot)
 }
@@ -1039,6 +1451,10 @@ pub(super) fn validate_post_exec_descriptor_allowlist(
 mod tests {
     use super::*;
 
+    fn worker_identity() -> WorkerIdentity {
+        WorkerIdentity::fixture(987, 988)
+    }
+
     fn production_seccomp_baseline() -> LinuxSeccompState {
         LinuxSeccompState::fixture(
             u8::try_from(libc::SECCOMP_MODE_FILTER).expect("seccomp mode fits u8"),
@@ -1050,6 +1466,8 @@ mod tests {
         WorkerSandboxSnapshot::fixture(
             NetworkNamespaceIdentity::fixture(1, 10),
             NetworkNamespaceIdentity::fixture(1, 11),
+            worker_identity(),
+            true,
             true,
             LinuxSeccompState::fixture(
                 u8::try_from(libc::SECCOMP_MODE_FILTER).expect("seccomp mode fits u8"),
@@ -1071,12 +1489,19 @@ mod tests {
 
     #[test]
     fn production_plan_requires_newnet_nnp_seccomp_and_exact_capabilities() {
-        let plan = WorkerSandboxPlan::production(production_seccomp_baseline()).expect("plan");
+        let plan = WorkerSandboxPlan::production(production_seccomp_baseline(), worker_identity())
+            .expect("plan");
         let valid = production_snapshot();
         assert!(plan.verify(valid).is_ok());
 
         let mut invalid = valid;
         invalid.worker_network_namespace = invalid.parent_network_namespace;
+        assert!(plan.verify(invalid).is_err());
+        let mut invalid = valid;
+        invalid.identity = WorkerIdentity::fixture(989, 988);
+        assert!(plan.verify(invalid).is_err());
+        let mut invalid = valid;
+        invalid.supplementary_groups_empty = false;
         assert!(plan.verify(invalid).is_err());
         let mut invalid = valid;
         invalid.no_new_privileges = false;
@@ -1096,13 +1521,13 @@ mod tests {
             LinuxSeccompState::fixture(2, 0),
             LinuxSeccompState::fixture(2, u32::MAX),
         ] {
-            assert!(WorkerSandboxPlan::production(invalid_baseline).is_err());
+            assert!(WorkerSandboxPlan::production(invalid_baseline, worker_identity()).is_err());
         }
 
         let zero_baseline = LinuxSeccompState::fixture(0, 0);
         let mut first_filter = valid;
         first_filter.seccomp = LinuxSeccompState::fixture(2, 1);
-        WorkerSandboxPlan::production(zero_baseline)
+        WorkerSandboxPlan::production(zero_baseline, worker_identity())
             .expect("unfiltered baseline accepts one worker filter")
             .verify(first_filter)
             .expect("0/0 baseline must become filter mode 2/count 1");
@@ -1141,23 +1566,27 @@ mod tests {
     fn proof_is_canonical_and_one_expectation_binds_every_bootstrap_field() {
         let proof = proof();
         let encoded = proof.encode();
-        assert_eq!(SandboxProofRecord::LENGTH, 180);
+        assert_eq!(SandboxProofRecord::LENGTH, 192);
         assert_eq!(&encoded[0..32], SANDBOX_PROOF_DOMAIN);
-        assert_eq!(&encoded[32..36], &4_u32.to_be_bytes());
+        assert_eq!(&encoded[32..36], &SANDBOX_PROOF_VERSION.to_be_bytes());
         assert_eq!(&encoded[36..52], &[7; 16]);
         assert_eq!(&encoded[52..60], &9_u64.to_be_bytes());
         assert_eq!(&encoded[60..92], &[11; 32]);
         assert_eq!(&encoded[92..96], &42_u32.to_be_bytes());
         assert_eq!(&encoded[96..100], &43_u32.to_be_bytes());
-        assert_eq!(encoded[132], 1);
-        assert_eq!(encoded[133], 2);
-        assert_eq!(&encoded[134..138], &4_u32.to_be_bytes());
-        assert_eq!(&encoded[138..140], &[0, 0]);
-        assert_eq!(&encoded[140..148], &0_u64.to_be_bytes());
-        assert_eq!(&encoded[148..156], &CAP_NET_ADMIN_BIT.to_be_bytes());
-        assert_eq!(&encoded[156..164], &CAP_NET_ADMIN_BIT.to_be_bytes());
-        assert_eq!(&encoded[164..172], &CAP_NET_ADMIN_BIT.to_be_bytes());
-        assert_eq!(&encoded[172..180], &0_u64.to_be_bytes());
+        assert_eq!(&encoded[132..136], &worker_identity().uid.to_be_bytes());
+        assert_eq!(&encoded[136..140], &worker_identity().gid.to_be_bytes());
+        assert_eq!(encoded[140], 1);
+        assert_eq!(encoded[141], 1);
+        assert_eq!(encoded[142], 2);
+        assert_eq!(encoded[143], 0);
+        assert_eq!(&encoded[144..148], &4_u32.to_be_bytes());
+        assert_eq!(&encoded[148..152], &[0; 4]);
+        assert_eq!(&encoded[152..160], &0_u64.to_be_bytes());
+        assert_eq!(&encoded[160..168], &CAP_NET_ADMIN_BIT.to_be_bytes());
+        assert_eq!(&encoded[168..176], &CAP_NET_ADMIN_BIT.to_be_bytes());
+        assert_eq!(&encoded[176..184], &CAP_NET_ADMIN_BIT.to_be_bytes());
+        assert_eq!(&encoded[184..192], &0_u64.to_be_bytes());
         assert_eq!(
             SandboxProofRecord::decode(&encoded).expect("canonical"),
             proof
@@ -1172,13 +1601,14 @@ mod tests {
         )
         .verify_once(
             &encoded,
-            WorkerSandboxPlan::production(production_seccomp_baseline()).expect("plan"),
+            WorkerSandboxPlan::production(production_seccomp_baseline(), worker_identity())
+                .expect("plan"),
         )
         .expect("exact fake proof");
 
         for index in [
-            0, 32, 36, 52, 60, 92, 96, 100, 108, 116, 124, 132, 133, 134, 138, 139, 140, 148, 156,
-            164, 172,
+            0, 32, 36, 52, 60, 92, 96, 100, 108, 116, 124, 132, 136, 140, 141, 142, 143, 144, 148,
+            152, 160, 168, 176, 184,
         ] {
             let mut changed = encoded;
             changed[index] ^= 1;
@@ -1194,16 +1624,25 @@ mod tests {
                 expectation
                     .verify_once(
                         &changed,
-                        WorkerSandboxPlan::production(production_seccomp_baseline()).expect("plan"),
+                        WorkerSandboxPlan::production(
+                            production_seccomp_baseline(),
+                            worker_identity(),
+                        )
+                        .expect("plan"),
                     )
                     .is_err()
             );
         }
         assert!(SandboxProofRecord::decode(&encoded[..encoded.len() - 1]).is_err());
-        let mut retired_v3 = encoded;
-        retired_v3[27] = b'3';
-        retired_v3[32..36].copy_from_slice(&3_u32.to_be_bytes());
-        assert!(SandboxProofRecord::decode(&retired_v3).is_err());
+        let mut retired_v4 = encoded;
+        retired_v4[27] = b'4';
+        retired_v4[32..36].copy_from_slice(&4_u32.to_be_bytes());
+        assert!(SandboxProofRecord::decode(&retired_v4).is_err());
+        for range in [132..136, 136..140] {
+            let mut reserved = encoded;
+            reserved[range].copy_from_slice(&SYSTEMD_RESERVED_ID.to_be_bytes());
+            assert!(SandboxProofRecord::decode(&reserved).is_err());
+        }
     }
 
     fn status() -> Vec<u8> {
@@ -1211,6 +1650,9 @@ mod tests {
             "Name:\tworker\n",
             "Pid:\t43\n",
             "PPid:\t42\n",
+            "Uid:\t987\t987\t987\t987\n",
+            "Gid:\t988\t988\t988\t988\n",
+            "Groups:\t\n",
             "CapInh:\t0000000000000000\n",
             "CapPrm:\t0000000000001000\n",
             "CapEff:\t0000000000001000\n",
@@ -1229,18 +1671,27 @@ mod tests {
         let parsed = parse_process_status(&status()).expect("strict status");
         assert_eq!(parsed.pid, 43);
         assert_eq!(parsed.parent_pid, 42);
+        assert_eq!(
+            exact_status_identity(parsed).expect("identity"),
+            worker_identity()
+        );
+        assert!(parsed.supplementary_groups_empty);
         assert!(parsed.no_new_privileges);
         assert_eq!(parsed.seccomp, production_snapshot().seccomp);
         assert_eq!(parsed.capabilities, production_snapshot().capabilities);
 
         for changed in [
             b"Pid:\t43\n".to_vec(),
+            [status(), b"Uid:\t987\t987\t987\t987\n".to_vec()].concat(),
             [status(), b"CapEff:\t0000000000001000\n".to_vec()].concat(),
             [status(), b"Seccomp:\t2\n".to_vec()].concat(),
             [status(), b"Seccomp_filters:\t4\n".to_vec()].concat(),
             status().replace_ascii(b"Seccomp:\t2\n", b""),
             status().replace_ascii(b"Seccomp_filters:\t4\n", b""),
             status().replace_ascii(b"NoNewPrivs:\t1", b"NoNewPrivs:\t2"),
+            status().replace_ascii(b"Uid:\t987\t987\t987\t987", b"Uid:\t987\t987\t987"),
+            status().replace_ascii(b"Gid:\t988\t988\t988\t988", b"Gid:\t988\t988\t988\t0988"),
+            status().replace_ascii(b"Groups:\t", b"Groups:\t2 1"),
             status().replace_ascii(b"Seccomp:\t2", b"Seccomp:\t0"),
             status().replace_ascii(b"Seccomp:\t2", b"Seccomp:\t4294967296"),
             status().replace_ascii(b"Seccomp:\t2", b"Seccomp:\t02"),
@@ -1293,17 +1744,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parent_pre_identity_attestation_rejects_namespace_identity_filter_and_capability_drift() {
+        let parent_namespace = NetworkNamespaceIdentity::fixture(1, 10);
+        let worker_namespace = NetworkNamespaceIdentity::fixture(1, 11);
+        let parent_seccomp = production_seccomp_baseline();
+        let required_group = 777;
+        let transition = pre_identity_capabilities().bits();
+        let valid = ParsedProcessStatus {
+            pid: 43,
+            parent_pid: 42,
+            uids: [0; 4],
+            gids: [required_group; 4],
+            supplementary_groups_empty: false,
+            no_new_privileges: true,
+            seccomp: parent_seccomp
+                .expected_after_worker_filter()
+                .expect("worker filter state"),
+            capabilities: LinuxCapabilitySnapshot {
+                inheritable: 0,
+                permitted: transition,
+                effective: transition,
+                bounding: CAP_NET_ADMIN_BIT | CAP_SETPCAP_BIT,
+                ambient: 0,
+            },
+        };
+        assert!(
+            validate_pre_identity_state(
+                parent_namespace,
+                worker_namespace,
+                parent_seccomp,
+                required_group,
+                valid,
+            )
+            .is_ok()
+        );
+
+        let mut invalid_states = Vec::new();
+        let mut invalid = valid;
+        invalid.uids[3] = 1;
+        invalid_states.push(invalid);
+        let mut invalid = valid;
+        invalid.gids[2] = required_group + 1;
+        invalid_states.push(invalid);
+        let mut invalid = valid;
+        invalid.no_new_privileges = false;
+        invalid_states.push(invalid);
+        let mut invalid = valid;
+        invalid.seccomp = parent_seccomp;
+        invalid_states.push(invalid);
+        for capability in [
+            CAP_SETGID_BIT,
+            CAP_SETUID_BIT,
+            CAP_SETPCAP_BIT,
+            CAP_NET_ADMIN_BIT,
+        ] {
+            let mut missing_effective = valid;
+            missing_effective.capabilities.effective &= !capability;
+            invalid_states.push(missing_effective);
+            let mut missing_permitted = valid;
+            missing_permitted.capabilities.permitted &= !capability;
+            invalid_states.push(missing_permitted);
+        }
+        for field in 0..5 {
+            let mut extra = valid;
+            match field {
+                0 => extra.capabilities.inheritable |= CAP_SYS_ADMIN_BIT,
+                1 => extra.capabilities.permitted |= CAP_SYS_ADMIN_BIT,
+                2 => extra.capabilities.effective |= CAP_SYS_ADMIN_BIT,
+                3 => extra.capabilities.bounding |= CAP_SYS_ADMIN_BIT,
+                4 => extra.capabilities.ambient |= CAP_SYS_ADMIN_BIT,
+                _ => unreachable!(),
+            }
+            invalid_states.push(extra);
+        }
+        for invalid in invalid_states {
+            assert!(
+                validate_pre_identity_state(
+                    parent_namespace,
+                    worker_namespace,
+                    parent_seccomp,
+                    required_group,
+                    invalid,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_pre_identity_state(
+                parent_namespace,
+                parent_namespace,
+                parent_seccomp,
+                required_group,
+                valid,
+            )
+            .is_err()
+        );
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Step {
-        Initial,
+        Capabilities,
         Unshare,
-        NoNewPrivileges,
+        ObserveNamespace,
         ObserveInitialSeccomp,
-        InstallProcessTreeFilter,
         ClearAmbient,
         LastCapability,
         Drop(u32),
+        SetPreIdentityCapabilities,
+        ClearGroups,
+        SetKeepCapabilities(bool),
+        SetGid(u32),
+        SetUid(u32),
+        SetPostIdentityCapabilities,
+        ObserveKeepCapabilities,
         SetExact,
+        NoNewPrivileges,
+        InstallProcessTreeFilter,
         Observe,
     }
 
@@ -1311,12 +1868,13 @@ mod tests {
         steps: Vec<Step>,
         fail_at: Option<Step>,
         initial: CapabilitySets,
+        network_namespace: NetworkNamespaceIdentity,
+        keep_capabilities: bool,
     }
 
     impl FakeKernel {
         fn production() -> Self {
-            let required =
-                CapabilitySet::NET_ADMIN | CapabilitySet::SETPCAP | CapabilitySet::SYS_ADMIN;
+            let required = bootstrap_capabilities();
             Self {
                 steps: Vec::new(),
                 fail_at: None,
@@ -1325,6 +1883,8 @@ mod tests {
                     permitted: required,
                     inheritable: CapabilitySet::empty(),
                 },
+                network_namespace: production_snapshot().worker_network_namespace,
+                keep_capabilities: false,
             }
         }
 
@@ -1341,12 +1901,19 @@ mod tests {
 
     impl SandboxKernel for FakeKernel {
         fn initial_capabilities(&mut self) -> Result<CapabilitySets, WorkerSandboxError> {
-            self.record(Step::Initial)?;
+            self.record(Step::Capabilities)?;
             Ok(self.initial)
         }
 
         fn unshare_network(&mut self) -> Result<(), WorkerSandboxError> {
             self.record(Step::Unshare)
+        }
+
+        fn observe_network_namespace(
+            &mut self,
+        ) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
+            self.record(Step::ObserveNamespace)?;
+            Ok(self.network_namespace)
         }
 
         fn install_no_new_privileges(&mut self) -> Result<(), WorkerSandboxError> {
@@ -1375,6 +1942,45 @@ mod tests {
             self.record(Step::Drop(capability))
         }
 
+        fn set_pre_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
+            self.record(Step::SetPreIdentityCapabilities)?;
+            let capabilities = pre_identity_capabilities();
+            self.initial = CapabilitySets {
+                effective: capabilities,
+                permitted: capabilities,
+                inheritable: CapabilitySet::empty(),
+            };
+            Ok(())
+        }
+
+        fn clear_supplementary_groups(&mut self) -> Result<(), WorkerSandboxError> {
+            self.record(Step::ClearGroups)
+        }
+
+        fn set_keep_capabilities_enabled(
+            &mut self,
+            enabled: bool,
+        ) -> Result<(), WorkerSandboxError> {
+            self.record(Step::SetKeepCapabilities(enabled))
+        }
+
+        fn set_res_gid(&mut self, gid: u32) -> Result<(), WorkerSandboxError> {
+            self.record(Step::SetGid(gid))
+        }
+
+        fn set_res_uid(&mut self, uid: u32) -> Result<(), WorkerSandboxError> {
+            self.record(Step::SetUid(uid))
+        }
+
+        fn set_post_identity_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
+            self.record(Step::SetPostIdentityCapabilities)
+        }
+
+        fn keep_capabilities_enabled(&mut self) -> Result<bool, WorkerSandboxError> {
+            self.record(Step::ObserveKeepCapabilities)?;
+            Ok(self.keep_capabilities)
+        }
+
         fn set_exact_capabilities(&mut self) -> Result<(), WorkerSandboxError> {
             self.record(Step::SetExact)
         }
@@ -1389,22 +1995,74 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_syscall_order_drops_setpcap_last_and_reads_back_exact_state() {
+    fn sandbox_phases_are_affine_and_confinement_precedes_identity_drop() {
         let mut kernel = FakeKernel::production();
-        let snapshot = apply_sandbox(&mut kernel, production_snapshot().parent_network_namespace)
-            .expect("fake sandbox");
-        assert_eq!(snapshot, production_snapshot());
-        assert_eq!(kernel.steps.first(), Some(&Step::Initial));
+        let prepared = begin_sandbox(&mut kernel, production_snapshot().parent_network_namespace)
+            .expect("prepared fake sandbox");
         assert_eq!(
-            &kernel.steps[1..7],
-            &[
+            &kernel.steps[..6],
+            [
+                Step::Capabilities,
                 Step::Unshare,
-                Step::NoNewPrivileges,
+                Step::ObserveNamespace,
                 Step::ObserveInitialSeccomp,
-                Step::InstallProcessTreeFilter,
                 Step::ClearAmbient,
                 Step::LastCapability,
             ]
+        );
+        let set_pre = kernel
+            .steps
+            .iter()
+            .position(|step| *step == Step::SetPreIdentityCapabilities)
+            .expect("pre-identity capset");
+        assert_eq!(kernel.steps[set_pre + 1], Step::Capabilities);
+        assert_eq!(kernel.steps[set_pre + 2], Step::NoNewPrivileges);
+        assert_eq!(kernel.steps[set_pre + 3], Step::InstallProcessTreeFilter);
+        assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_NET_ADMIN)));
+        assert!(!kernel.steps[..set_pre].contains(&Step::Drop(CAP_SETPCAP)));
+        assert!(kernel.steps[..set_pre].contains(&Step::Drop(CAP_KILL)));
+        assert!(!kernel.initial.effective.contains(CapabilitySet::KILL));
+        assert!(!kernel.initial.permitted.contains(CapabilitySet::KILL));
+        let begin_steps = kernel.steps.len();
+        let snapshot = finish_sandbox(&mut kernel, prepared, worker_identity())
+            .expect("finished fake sandbox");
+        assert_eq!(snapshot, production_snapshot());
+        assert_eq!(
+            &kernel.steps[begin_steps..begin_steps + 3],
+            &[
+                Step::Capabilities,
+                Step::ObserveNamespace,
+                Step::ClearGroups,
+            ]
+        );
+        let clear_groups = kernel
+            .steps
+            .iter()
+            .position(|step| *step == Step::ClearGroups)
+            .expect("groups cleared");
+        assert_eq!(
+            kernel.steps[clear_groups + 1],
+            Step::SetKeepCapabilities(true)
+        );
+        assert_eq!(
+            kernel.steps[clear_groups + 2],
+            Step::SetGid(worker_identity().gid)
+        );
+        assert_eq!(
+            kernel.steps[clear_groups + 3],
+            Step::SetUid(worker_identity().uid)
+        );
+        assert_eq!(
+            kernel.steps[clear_groups + 4],
+            Step::SetPostIdentityCapabilities
+        );
+        assert_eq!(
+            kernel.steps[clear_groups + 5],
+            Step::SetKeepCapabilities(false)
+        );
+        assert_eq!(
+            kernel.steps[clear_groups + 6],
+            Step::ObserveKeepCapabilities
         );
         let set_exact = kernel
             .steps
@@ -1413,42 +2071,152 @@ mod tests {
             .expect("capset step");
         assert_eq!(kernel.steps[set_exact - 1], Step::Drop(CAP_SETPCAP));
         assert_eq!(kernel.steps[set_exact + 1], Step::Observe);
+        let filter = kernel
+            .steps
+            .iter()
+            .position(|step| *step == Step::InstallProcessTreeFilter)
+            .expect("confinement filter");
+        assert!(filter < clear_groups);
         assert!(!kernel.steps[..set_exact - 1].contains(&Step::Drop(CAP_NET_ADMIN)));
     }
 
     #[test]
-    fn sandbox_application_stops_at_every_injected_failure() {
+    fn sandbox_begin_stops_at_every_injected_failure() {
         for fail_at in [
-            Step::Initial,
+            Step::Capabilities,
             Step::Unshare,
-            Step::NoNewPrivileges,
+            Step::ObserveNamespace,
             Step::ObserveInitialSeccomp,
-            Step::InstallProcessTreeFilter,
             Step::ClearAmbient,
             Step::LastCapability,
             Step::Drop(0),
-            Step::Drop(CAP_SETPCAP),
-            Step::SetExact,
-            Step::Observe,
+            Step::SetPreIdentityCapabilities,
+            Step::NoNewPrivileges,
+            Step::InstallProcessTreeFilter,
         ] {
             let mut kernel = FakeKernel::production();
             kernel.fail_at = Some(fail_at);
             assert!(
-                apply_sandbox(&mut kernel, production_snapshot().parent_network_namespace).is_err()
+                begin_sandbox(&mut kernel, production_snapshot().parent_network_namespace,)
+                    .is_err()
             );
             assert_eq!(kernel.steps.last(), Some(&fail_at));
         }
     }
 
     #[test]
+    fn sandbox_finish_stops_at_every_injected_failure() {
+        for fail_at in [
+            Step::Capabilities,
+            Step::ObserveNamespace,
+            Step::ClearGroups,
+            Step::SetKeepCapabilities(true),
+            Step::SetGid(worker_identity().gid),
+            Step::SetUid(worker_identity().uid),
+            Step::SetPostIdentityCapabilities,
+            Step::SetKeepCapabilities(false),
+            Step::ObserveKeepCapabilities,
+            Step::Drop(CAP_SETPCAP),
+            Step::SetExact,
+            Step::Observe,
+        ] {
+            let mut kernel = FakeKernel::production();
+            let prepared =
+                begin_sandbox(&mut kernel, production_snapshot().parent_network_namespace)
+                    .expect("prepared fake sandbox");
+            kernel.steps.clear();
+            kernel.fail_at = Some(fail_at);
+            assert!(finish_sandbox(&mut kernel, prepared, worker_identity()).is_err());
+            assert_eq!(kernel.steps.last(), Some(&fail_at));
+        }
+    }
+
+    #[test]
+    fn sandbox_finish_rejects_post_barrier_namespace_capability_and_keepcaps_drift() {
+        let parent_namespace = production_snapshot().parent_network_namespace;
+
+        let mut changed_namespace = FakeKernel::production();
+        let prepared = begin_sandbox(&mut changed_namespace, parent_namespace).expect("begin");
+        changed_namespace.network_namespace = NetworkNamespaceIdentity::fixture(1, 12);
+        assert!(finish_sandbox(&mut changed_namespace, prepared, worker_identity()).is_err());
+
+        for capability in [
+            CapabilitySet::SETGID,
+            CapabilitySet::SETUID,
+            CapabilitySet::SETPCAP,
+            CapabilitySet::NET_ADMIN,
+        ] {
+            for permitted in [false, true] {
+                let mut kernel = FakeKernel::production();
+                let prepared = begin_sandbox(&mut kernel, parent_namespace).expect("begin");
+                if permitted {
+                    kernel.initial.permitted.remove(capability);
+                } else {
+                    kernel.initial.effective.remove(capability);
+                }
+                assert!(finish_sandbox(&mut kernel, prepared, worker_identity()).is_err());
+            }
+        }
+
+        let mut kept = FakeKernel::production();
+        let prepared = begin_sandbox(&mut kept, parent_namespace).expect("begin");
+        kept.keep_capabilities = true;
+        assert!(finish_sandbox(&mut kept, prepared, worker_identity()).is_err());
+        assert_eq!(kept.steps.last(), Some(&Step::ObserveKeepCapabilities));
+    }
+
+    #[test]
     fn missing_bootstrap_capability_fails_before_unshare() {
-        let mut kernel = FakeKernel::production();
-        kernel.initial.effective.remove(CapabilitySet::SETPCAP);
-        assert!(
-            apply_sandbox(&mut kernel, production_snapshot().parent_network_namespace).is_err()
-        );
-        assert_eq!(kernel.steps, vec![Step::Initial]);
+        for capability in [
+            CapabilitySet::KILL,
+            CapabilitySet::SETGID,
+            CapabilitySet::SETUID,
+            CapabilitySet::SETPCAP,
+            CapabilitySet::NET_ADMIN,
+            CapabilitySet::SYS_ADMIN,
+        ] {
+            for permitted in [false, true] {
+                let mut kernel = FakeKernel::production();
+                if permitted {
+                    kernel.initial.permitted.remove(capability);
+                } else {
+                    kernel.initial.effective.remove(capability);
+                }
+                assert!(
+                    begin_sandbox(&mut kernel, production_snapshot().parent_network_namespace,)
+                        .is_err()
+                );
+                assert_eq!(kernel.steps, vec![Step::Capabilities]);
+            }
+        }
+        assert_eq!(CapabilitySet::KILL.bits(), 1_u64 << 5);
+        assert_eq!(CAP_SETGID_BIT, 1_u64 << 6);
+        assert_eq!(CAP_SETUID_BIT, 1_u64 << 7);
         assert_eq!(CAP_SETPCAP_BIT, 1_u64 << 8);
         assert_eq!(CAP_SYS_ADMIN_BIT, 1_u64 << 21);
+    }
+
+    #[test]
+    fn worker_identity_rejects_root_and_reserved_values() {
+        assert_eq!(
+            WorkerIdentity::new(worker_identity().uid, worker_identity().gid).expect("identity"),
+            worker_identity()
+        );
+        for (uid, gid) in [
+            (0, 1),
+            (1, 0),
+            (SYSTEMD_RESERVED_ID, 1),
+            (1, SYSTEMD_RESERVED_ID),
+            (u32::MAX, 1),
+            (1, u32::MAX),
+        ] {
+            assert!(WorkerIdentity::new(uid, gid).is_err());
+        }
+        assert!(
+            std::panic::catch_unwind(|| WorkerIdentity::fixture(SYSTEMD_RESERVED_ID, 1)).is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| WorkerIdentity::fixture(1, SYSTEMD_RESERVED_ID)).is_err()
+        );
     }
 }

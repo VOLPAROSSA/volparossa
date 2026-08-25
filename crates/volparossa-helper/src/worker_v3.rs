@@ -3,14 +3,14 @@
 //! This module is deliberately disconnected from the production helper engine. It proves a
 //! fail-closed child lifecycle and cancellation-safe plan/call/commit discipline without making
 //! route network changes. The disconnected production entry applies and proves narrow NEWNET,
-//! capability, descriptor, credential and post-install clone/fork confinement before the parent
-//! could register it; this is not full worker isolation because the effective-UID-0 child retains
-//! same-UID signal authority over its parent and access to root-owned runtime paths. Retirement owns
-//! only the exact leader, and this bootstrap does not independently attest descendant absence before
-//! filter installation. The child still implements only in-memory initialise/destroy.
+//! capability, descriptor, credential, dedicated non-root identity and post-install clone/fork
+//! confinement before the parent could register it. Retirement owns only the exact leader, and this
+//! bootstrap does not independently attest descendant absence before filter installation. The child
+//! still implements only in-memory initialise/destroy.
 
 use std::{
     collections::{HashMap, VecDeque},
+    fs,
     future::Future,
     io,
     os::fd::{AsRawFd, OwnedFd},
@@ -79,6 +79,12 @@ static WORKER_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 type ContextId = [u8; 16];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InitialProcessIdentity {
+    uid: u32,
+    gid: u32,
+}
+
 #[derive(Debug, Error)]
 enum WorkerV3Error {
     #[error("worker authentication failed")]
@@ -115,9 +121,11 @@ enum WorkerV3Error {
 #[repr(u8)]
 enum HandshakeKind {
     ParentHello = 1,
-    ChildHello = 2,
-    SandboxAccepted = 3,
-    SandboxReady = 4,
+    NamespaceReady = 2,
+    NamespacePinned = 3,
+    ChildHello = 4,
+    SandboxAccepted = 5,
+    SandboxReady = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,10 +137,12 @@ struct HandshakeRecord {
     parent_pid: u32,
     child_pid: u32,
     proof_hash: [u8; 32],
+    worker_uid: u32,
+    worker_gid: u32,
 }
 
 impl HandshakeRecord {
-    const LENGTH: usize = 112;
+    const LENGTH: usize = 120;
 
     fn encode(self) -> [u8; Self::LENGTH] {
         let mut encoded = [0_u8; Self::LENGTH];
@@ -145,6 +155,8 @@ impl HandshakeRecord {
         encoded[72..76].copy_from_slice(&self.parent_pid.to_be_bytes());
         encoded[76..80].copy_from_slice(&self.child_pid.to_be_bytes());
         encoded[80..112].copy_from_slice(&self.proof_hash);
+        encoded[112..116].copy_from_slice(&self.worker_uid.to_be_bytes());
+        encoded[116..120].copy_from_slice(&self.worker_gid.to_be_bytes());
         encoded
     }
 
@@ -161,9 +173,11 @@ impl HandshakeRecord {
         }
         let kind = match encoded[12] {
             1 => HandshakeKind::ParentHello,
-            2 => HandshakeKind::ChildHello,
-            3 => HandshakeKind::SandboxAccepted,
-            4 => HandshakeKind::SandboxReady,
+            2 => HandshakeKind::NamespaceReady,
+            3 => HandshakeKind::NamespacePinned,
+            4 => HandshakeKind::ChildHello,
+            5 => HandshakeKind::SandboxAccepted,
+            6 => HandshakeKind::SandboxReady,
             _ => return Err(WorkerV3Error::Authentication),
         };
         let record = Self {
@@ -174,15 +188,22 @@ impl HandshakeRecord {
             parent_pid: u32::from_be_bytes(read_array(encoded, 72)?),
             child_pid: u32::from_be_bytes(read_array(encoded, 76)?),
             proof_hash: read_array(encoded, 80)?,
+            worker_uid: u32::from_be_bytes(read_array(encoded, 112)?),
+            worker_gid: u32::from_be_bytes(read_array(encoded, 116)?),
         };
         if record.context_id.iter().all(|byte| *byte == 0)
             || record.generation == 0
             || record.challenge.iter().all(|byte| *byte == 0)
             || record.parent_pid <= 1
             || record.child_pid == 0
+            || crate::worker_sandbox::WorkerIdentity::new(record.worker_uid, record.worker_gid)
+                .is_err()
             || (matches!(
                 record.kind,
-                HandshakeKind::ParentHello | HandshakeKind::ChildHello
+                HandshakeKind::ParentHello
+                    | HandshakeKind::NamespaceReady
+                    | HandshakeKind::NamespacePinned
+                    | HandshakeKind::ChildHello
             ) && record.proof_hash != [0; 32])
             || (matches!(
                 record.kind,
@@ -192,6 +213,20 @@ impl HandshakeRecord {
             return Err(WorkerV3Error::Authentication);
         }
         Ok(record)
+    }
+
+    fn namespace_ready(self) -> Self {
+        Self {
+            kind: HandshakeKind::NamespaceReady,
+            ..self
+        }
+    }
+
+    fn namespace_pinned(self) -> Self {
+        Self {
+            kind: HandshakeKind::NamespacePinned,
+            ..self
+        }
     }
 
     fn child_reply(self) -> Self {
@@ -255,6 +290,23 @@ fn validate_connected_socket(socket: &Socket) -> Result<(), WorkerV3Error> {
     Ok(())
 }
 
+fn validate_child_descriptor_contract(channel: &Socket) -> Result<(), WorkerV3Error> {
+    validate_post_exec_descriptor_allowlist(&[
+        libc::STDOUT_FILENO,
+        libc::STDERR_FILENO,
+        channel.as_raw_fd(),
+    ])
+    .map_err(|_| WorkerV3Error::Authentication)?;
+    for descriptor in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        if fs::read_link(format!("/proc/self/fd/{descriptor}"))?
+            != std::path::Path::new("/dev/null")
+        {
+            return Err(WorkerV3Error::Authentication);
+        }
+    }
+    validate_connected_socket(channel)
+}
+
 fn configure_channel(socket: &Socket, timeout: Duration) -> Result<(), WorkerV3Error> {
     socket.set_read_timeout(Some(timeout))?;
     socket.set_write_timeout(Some(timeout))?;
@@ -302,11 +354,39 @@ impl SandboxObservationMode {
 }
 
 impl CapturedSandboxObservation {
+    fn pin_network_namespace_before_identity_drop(
+        self,
+        pins: &mut crate::worker_sandbox::WorkerKernelPins,
+        required_group: u32,
+        parent_pid: u32,
+        child_pid: u32,
+    ) -> Result<(), WorkerV3Error> {
+        match self.mode {
+            SandboxObservationMode::Production {
+                parent_network_namespace,
+            } => {
+                pins.pin_network_namespace_before_identity_drop(
+                    parent_network_namespace,
+                    self.parent_seccomp_baseline,
+                    required_group,
+                    parent_pid,
+                    child_pid,
+                )?;
+            }
+            #[cfg(test)]
+            SandboxObservationMode::Fixture(_) => {
+                pins.pin_network_namespace_before_identity_drop_fixture(parent_pid, child_pid)?;
+            }
+        }
+        Ok(())
+    }
+
     fn observe(
         self,
         pins: &mut crate::worker_sandbox::WorkerKernelPins,
         parent_pid: u32,
         child_pid: u32,
+        identity: crate::worker_sandbox::WorkerIdentity,
     ) -> Result<crate::worker_sandbox::WorkerSandboxSnapshot, WorkerV3Error> {
         match self.mode {
             SandboxObservationMode::Production {
@@ -316,6 +396,7 @@ impl CapturedSandboxObservation {
                 self.parent_seccomp_baseline,
                 parent_pid,
                 child_pid,
+                identity,
             )?),
             #[cfg(test)]
             SandboxObservationMode::Fixture(snapshot) => Ok(pins.observe_and_pin_fixture(
@@ -342,8 +423,8 @@ fn spawn_after_seccomp_baseline(
 fn parent_handshake(
     process: &WorkerProcess,
     sandbox_observation: CapturedSandboxObservation,
-    required_user: u32,
-    required_group: u32,
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
     context_id: ContextId,
     generation: u64,
     challenge: [u8; 32],
@@ -357,10 +438,39 @@ fn parent_handshake(
         parent_pid,
         child_pid: process.child_pid,
         proof_hash: [0; 32],
+        worker_uid: worker_identity.uid(),
+        worker_gid: worker_identity.gid(),
     };
     send_credential_record(&process.channel, &hello.encode())?;
-    let expected = ExpectedUnixCredentials::new(process.child_pid, required_user, required_group)?;
-    let encoded = receive_credential_record(&process.channel, HandshakeRecord::LENGTH, expected)?;
+    let expected_before_drop =
+        ExpectedUnixCredentials::new(process.child_pid, parent_identity.uid, parent_identity.gid)?;
+    let encoded = receive_credential_record(
+        &process.channel,
+        HandshakeRecord::LENGTH,
+        expected_before_drop,
+    )?;
+    if HandshakeRecord::decode(&encoded)? != hello.namespace_ready() || !process.probe_alive() {
+        return Err(WorkerV3Error::Authentication);
+    }
+    process.pin_worker_network_namespace_before_identity_drop(
+        sandbox_observation,
+        parent_identity.gid,
+        parent_pid,
+        process.child_pid,
+    )?;
+    process.ensure_pinned_child_alive()?;
+    send_credential_record(&process.channel, &hello.namespace_pinned().encode())?;
+
+    let expected_after_drop = ExpectedUnixCredentials::new(
+        process.child_pid,
+        worker_identity.uid(),
+        worker_identity.gid(),
+    )?;
+    let encoded = receive_credential_record(
+        &process.channel,
+        HandshakeRecord::LENGTH,
+        expected_after_drop,
+    )?;
     if HandshakeRecord::decode(&encoded)? != hello.child_reply() || !process.probe_alive() {
         return Err(WorkerV3Error::Authentication);
     }
@@ -368,12 +478,16 @@ fn parent_handshake(
     let proof = receive_credential_record(
         &process.channel,
         crate::worker_sandbox::SandboxProofRecord::LENGTH,
-        expected,
+        expected_after_drop,
     )?;
     // Receipt of the credential-bound proof is the child's post-apply completion barrier.
     // Only now may the parent independently sample and pin the final per-thread kernel state.
-    let observed =
-        process.observe_and_pin_sandbox(sandbox_observation, parent_pid, process.child_pid)?;
+    let observed = process.observe_and_pin_sandbox(
+        sandbox_observation,
+        parent_pid,
+        process.child_pid,
+        worker_identity,
+    )?;
     crate::worker_sandbox::SandboxProofExpectation::new(
         context_id,
         generation,
@@ -386,6 +500,7 @@ fn parent_handshake(
         &proof,
         crate::worker_sandbox::WorkerSandboxPlan::production(
             sandbox_observation.parent_seccomp_baseline,
+            worker_identity,
         )?,
     )?;
     let proof_hash = *blake3::hash(&proof).as_bytes();
@@ -395,7 +510,11 @@ fn parent_handshake(
     process.ensure_pinned_child_alive()?;
     let accepted = hello.sandbox_accepted(proof_hash);
     send_credential_record(&process.channel, &accepted.encode())?;
-    let encoded = receive_credential_record(&process.channel, HandshakeRecord::LENGTH, expected)?;
+    let encoded = receive_credential_record(
+        &process.channel,
+        HandshakeRecord::LENGTH,
+        expected_after_drop,
+    )?;
     if HandshakeRecord::decode(&encoded)? != accepted.sandbox_ready() {
         return Err(WorkerV3Error::Authentication);
     }
@@ -431,8 +550,8 @@ fn finish_launch_failure(process: WorkerProcess, error: WorkerV3Error) -> Worker
 
 fn spawn_with_command(
     command: Command,
-    required_user: u32,
-    required_group: u32,
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
     context_id: ContextId,
     generation: u64,
     retained_environment: Option<(&str, &str)>,
@@ -440,8 +559,8 @@ fn spawn_with_command(
     let parent_network_namespace = crate::worker_sandbox::current_network_namespace_identity()?;
     spawn_with_command_mode(
         command,
-        required_user,
-        required_group,
+        parent_identity,
+        worker_identity,
         context_id,
         generation,
         retained_environment,
@@ -454,8 +573,8 @@ fn spawn_with_command(
 #[cfg(test)]
 fn spawn_with_command_fixture(
     command: Command,
-    required_user: u32,
-    required_group: u32,
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
     context_id: ContextId,
     generation: u64,
     retained_environment: Option<(&str, &str)>,
@@ -463,8 +582,8 @@ fn spawn_with_command_fixture(
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
     spawn_with_command_mode(
         command,
-        required_user,
-        required_group,
+        parent_identity,
+        worker_identity,
         context_id,
         generation,
         retained_environment,
@@ -474,15 +593,15 @@ fn spawn_with_command_fixture(
 
 fn spawn_with_command_mode(
     command: Command,
-    required_user: u32,
-    required_group: u32,
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
     context_id: ContextId,
     generation: u64,
     retained_environment: Option<(&str, &str)>,
     observation_mode: SandboxObservationMode,
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
-    if geteuid().as_raw() != required_user
-        || getegid().as_raw() != required_group
+    if geteuid().as_raw() != parent_identity.uid
+        || getegid().as_raw() != parent_identity.gid
         || context_id.iter().all(|byte| *byte == 0)
         || generation == 0
     {
@@ -493,8 +612,8 @@ fn spawn_with_command_mode(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     spawn_with_command_locked(
         command,
-        required_user,
-        required_group,
+        parent_identity,
+        worker_identity,
         context_id,
         generation,
         retained_environment,
@@ -505,8 +624,8 @@ fn spawn_with_command_mode(
 /// Spawns only while the caller holds `WORKER_SPAWN_LOCK`.
 fn spawn_with_command_locked(
     mut command: Command,
-    required_user: u32,
-    required_group: u32,
+    parent_identity: InitialProcessIdentity,
+    worker_identity: crate::worker_sandbox::WorkerIdentity,
     context_id: ContextId,
     generation: u64,
     retained_environment: Option<(&str, &str)>,
@@ -554,25 +673,26 @@ fn spawn_with_command_locked(
             ));
         }
     };
-    let expected_peer = match ExpectedUnixCredentials::new(child_pid, required_user, required_group)
-    {
-        Ok(expected_peer) => expected_peer,
-        Err(error) => {
-            let retirement = ProcessRetirement {
-                liveness: WorkerLiveness {
-                    lifetime,
-                    alive_hint,
-                },
-                permit: Some(retirement_permit),
-                kernel_pins: Some(kernel_pins),
-                armed: true,
-            };
-            return Err(finish_unconstructed_launch_failure(
-                retirement,
-                error.into(),
-            ));
-        }
-    };
+    let expected_peer =
+        match ExpectedUnixCredentials::new(child_pid, worker_identity.uid(), worker_identity.gid())
+        {
+            Ok(expected_peer) => expected_peer,
+            Err(error) => {
+                let retirement = ProcessRetirement {
+                    liveness: WorkerLiveness {
+                        lifetime,
+                        alive_hint,
+                    },
+                    permit: Some(retirement_permit),
+                    kernel_pins: Some(kernel_pins),
+                    armed: true,
+                };
+                return Err(finish_unconstructed_launch_failure(
+                    retirement,
+                    error.into(),
+                ));
+            }
+        };
     let retirement = ProcessRetirement {
         liveness: WorkerLiveness {
             lifetime: Arc::clone(&lifetime),
@@ -597,8 +717,8 @@ fn spawn_with_command_locked(
     if let Err(error) = parent_handshake(
         &process,
         observation,
-        required_user,
-        required_group,
+        parent_identity,
+        worker_identity,
         context_id,
         generation,
         challenge,
@@ -625,10 +745,16 @@ fn spawn_worker_v3(
         // and parent/child image skew across package updates.
         let mut command = Command::new("/proc/self/exe");
         command.arg(INTERNAL_WORKER_V3_ARGUMENT);
+        let account = crate::runtime::pinned_production_worker_identity()?;
+        let worker_identity =
+            crate::worker_sandbox::WorkerIdentity::new(account.uid(), account.gid())?;
         spawn_with_command(
             command,
-            0,
-            getegid().as_raw(),
+            InitialProcessIdentity {
+                uid: 0,
+                gid: getegid().as_raw(),
+            },
+            worker_identity,
             reservation.context_id,
             reservation.generation,
             None,
@@ -649,11 +775,16 @@ pub(crate) fn run_internal_worker_v3_entry() -> bool {
 }
 
 fn run_child(required_user: u32, required_group: u32) -> Result<(), WorkerV3Error> {
-    run_child_with_sandbox(required_user, required_group, |parent_network_namespace| {
-        Ok(crate::worker_sandbox::apply_production_sandbox(
-            parent_network_namespace,
-        )?)
-    })
+    run_child_with_sandbox(
+        required_user,
+        required_group,
+        |parent_network_namespace| {
+            Ok(crate::worker_sandbox::begin_production_sandbox(
+                parent_network_namespace,
+            )?)
+        },
+        |prepared, identity| Ok(prepared.finish(identity)?),
+    )
 }
 
 #[cfg(test)]
@@ -662,21 +793,26 @@ fn run_child_with_fixture_sandbox(
     required_group: u32,
     snapshot: crate::worker_sandbox::WorkerSandboxSnapshot,
 ) -> Result<(), WorkerV3Error> {
-    run_child_with_sandbox(required_user, required_group, move |_| Ok(snapshot))
+    run_child_with_sandbox(
+        required_user,
+        required_group,
+        |_| Ok(()),
+        move |(), _| Ok(snapshot),
+    )
 }
 
-fn run_child_with_sandbox<F>(
+fn prepare_child_channel(
     required_user: u32,
-    required_group: u32,
-    apply_sandbox: F,
-) -> Result<(), WorkerV3Error>
-where
-    F: FnOnce(
+) -> Result<
+    (
+        Socket,
+        i32,
+        u32,
         crate::worker_sandbox::NetworkNamespaceIdentity,
-    ) -> Result<crate::worker_sandbox::WorkerSandboxSnapshot, WorkerV3Error>,
-{
+    ),
+    WorkerV3Error,
+> {
     let initial_parent = getppid().as_raw();
-    let child_pid = getpid().as_raw();
     validate_parent_snapshot(
         initial_parent,
         getppid().as_raw(),
@@ -701,26 +837,37 @@ where
     }
     close(libc::STDIN_FILENO).map_err(nix_io)?;
     let channel = Socket::from(inherited);
-    validate_post_exec_descriptor_allowlist(&[
-        libc::STDOUT_FILENO,
-        libc::STDERR_FILENO,
-        channel.as_raw_fd(),
-    ])
-    .map_err(|_| WorkerV3Error::Authentication)?;
-    validate_connected_socket(&channel)?;
-    let parent_network_namespace = crate::worker_sandbox::current_network_namespace_identity()?;
-    let sandbox_snapshot = apply_sandbox(parent_network_namespace)?;
-    validate_post_exec_descriptor_allowlist(&[
-        libc::STDOUT_FILENO,
-        libc::STDERR_FILENO,
-        channel.as_raw_fd(),
-    ])
-    .map_err(|_| WorkerV3Error::Authentication)?;
+    validate_child_descriptor_contract(&channel)?;
+    let child_pid = u32::try_from(getpid().as_raw()).map_err(|_| WorkerV3Error::Authentication)?;
+    Ok((
+        channel,
+        initial_parent,
+        child_pid,
+        crate::worker_sandbox::current_network_namespace_identity()?,
+    ))
+}
+
+fn run_child_with_sandbox<P, B, F>(
+    required_user: u32,
+    required_group: u32,
+    begin_sandbox: B,
+    finish_sandbox: F,
+) -> Result<(), WorkerV3Error>
+where
+    B: FnOnce(crate::worker_sandbox::NetworkNamespaceIdentity) -> Result<P, WorkerV3Error>,
+    F: FnOnce(
+        P,
+        crate::worker_sandbox::WorkerIdentity,
+    ) -> Result<crate::worker_sandbox::WorkerSandboxSnapshot, WorkerV3Error>,
+{
+    let (channel, initial_parent, child_pid, parent_network_namespace) =
+        prepare_child_channel(required_user)?;
+    let prepared_sandbox = begin_sandbox(parent_network_namespace)?;
+    validate_child_descriptor_contract(&channel)?;
     enable_passcred_receiver(&channel)?;
     configure_channel(&channel, HANDSHAKE_TIMEOUT)?;
 
     let parent_pid = u32::try_from(initial_parent).map_err(|_| WorkerV3Error::Authentication)?;
-    let child_pid = u32::try_from(child_pid).map_err(|_| WorkerV3Error::Authentication)?;
     let expected_parent = ExpectedUnixCredentials::new(parent_pid, required_user, required_group)?;
     let encoded = receive_credential_record(&channel, HandshakeRecord::LENGTH, expected_parent)?;
     let hello = HandshakeRecord::decode(&encoded)?;
@@ -730,6 +877,31 @@ where
     {
         return Err(WorkerV3Error::Authentication);
     }
+    let worker_identity =
+        crate::worker_sandbox::WorkerIdentity::new(hello.worker_uid, hello.worker_gid)?;
+    send_credential_record(&channel, &hello.namespace_ready().encode())?;
+    let encoded = receive_credential_record(&channel, HandshakeRecord::LENGTH, expected_parent)?;
+    if HandshakeRecord::decode(&encoded)? != hello.namespace_pinned() {
+        return Err(WorkerV3Error::Authentication);
+    }
+
+    let sandbox_snapshot = finish_sandbox(prepared_sandbox, worker_identity)?;
+    // Linux clears PR_SET_PDEATHSIG during a credential transition. Restore it before the child
+    // performs any post-drop IPC, then recheck both the signal and exact parent relationship.
+    prctl::set_pdeathsig(Some(Signal::SIGKILL)).map_err(nix_io)?;
+    if prctl::get_pdeathsig().map_err(nix_io)? != Some(Signal::SIGKILL) {
+        return Err(WorkerV3Error::Authentication);
+    }
+    validate_parent_snapshot(
+        initial_parent,
+        getppid().as_raw(),
+        geteuid().as_raw(),
+        worker_identity.uid(),
+    )?;
+    if getegid().as_raw() != worker_identity.gid() {
+        return Err(WorkerV3Error::Authentication);
+    }
+    validate_child_descriptor_contract(&channel)?;
     send_credential_record(&channel, &hello.child_reply().encode())?;
     let proof = crate::worker_sandbox::SandboxProofRecord::new(
         hello.context_id,
@@ -750,14 +922,19 @@ where
     if HandshakeRecord::decode(&encoded)? != accepted {
         return Err(WorkerV3Error::Authentication);
     }
-    send_credential_record(&channel, &accepted.sandbox_ready().encode())?;
     validate_parent_snapshot(
         initial_parent,
         getppid().as_raw(),
         geteuid().as_raw(),
-        required_user,
+        worker_identity.uid(),
     )?;
+    if getegid().as_raw() != worker_identity.gid()
+        || prctl::get_pdeathsig().map_err(nix_io)? != Some(Signal::SIGKILL)
+    {
+        return Err(WorkerV3Error::Authentication);
+    }
     configure_channel(&channel, CHANNEL_TIMEOUT)?;
+    send_credential_record(&channel, &accepted.sandbox_ready().encode())?;
     child_loop(&channel, expected_parent, hello.context_id)
 }
 
@@ -867,10 +1044,64 @@ enum WorkerLifetime {
     Child(Mutex<Option<Child>>),
     #[cfg(test)]
     Fake {
-        termination_results: Mutex<VecDeque<bool>>,
-        default_result: bool,
+        termination_results: Mutex<VecDeque<TerminationOutcome>>,
+        default_result: TerminationOutcome,
         attempts: Arc<AtomicUsize>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChildWaitObservation {
+    Reaped,
+    Running,
+    Fatal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminationOutcome {
+    Reaped,
+    TimedOut,
+    Fatal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetirementEscalationAction {
+    Complete,
+    Requeue,
+    Abort,
+}
+
+fn classify_child_wait(
+    result: &io::Result<Option<std::process::ExitStatus>>,
+) -> ChildWaitObservation {
+    match result {
+        Ok(Some(_)) => ChildWaitObservation::Reaped,
+        Ok(None) => ChildWaitObservation::Running,
+        Err(_) => ChildWaitObservation::Fatal,
+    }
+}
+
+const fn outcome_after_kill_error(observation: ChildWaitObservation) -> TerminationOutcome {
+    match observation {
+        ChildWaitObservation::Reaped => TerminationOutcome::Reaped,
+        ChildWaitObservation::Running | ChildWaitObservation::Fatal => TerminationOutcome::Fatal,
+    }
+}
+
+const fn retirement_escalation_action(outcome: TerminationOutcome) -> RetirementEscalationAction {
+    match outcome {
+        TerminationOutcome::Reaped => RetirementEscalationAction::Complete,
+        TerminationOutcome::TimedOut => RetirementEscalationAction::Requeue,
+        TerminationOutcome::Fatal => RetirementEscalationAction::Abort,
+    }
+}
+
+fn enforce_termination_outcome(outcome: TerminationOutcome) -> bool {
+    match outcome {
+        TerminationOutcome::Reaped => true,
+        TerminationOutcome::TimedOut => false,
+        TerminationOutcome::Fatal => std::process::abort(),
+    }
 }
 
 #[must_use = "a worker process must be registered or explicitly retired"]
@@ -892,10 +1123,11 @@ struct WorkerLiveness {
 
 /// Linear retirement ownership for the exact worker leader only.
 ///
-/// Before Accepted, the production bootstrap installs the structurally fixed seccomp filter and
-/// proves that filter mode/count increased by one. The filter monotonically returns `EPERM` for
-/// later `clone`, `clone3`, `fork`, and `vfork` calls, including after exec. This does not
-/// independently attest descendant absence before filter installation.
+/// Before the namespace-pin acknowledgement, the production bootstrap installs the structurally
+/// fixed seccomp filter and proves that filter mode/count increased by one. The filter monotonically
+/// returns `EPERM` for later `clone`, `clone3`, `fork`, `vfork`, `setns`, and `unshare` calls,
+/// including after exec. This does not independently attest descendant absence before filter
+/// installation.
 #[must_use = "process retirement ownership must be confirmed or transferred to the reaper"]
 struct ProcessRetirement {
     liveness: WorkerLiveness,
@@ -905,12 +1137,16 @@ struct ProcessRetirement {
 }
 
 impl ProcessRetirement {
-    fn terminate_bounded(&mut self, timeout: Duration) -> bool {
-        let confirmed = self.liveness.terminate_bounded(timeout);
-        if confirmed {
+    fn termination_outcome(&mut self, timeout: Duration) -> TerminationOutcome {
+        let outcome = self.liveness.termination_outcome(timeout);
+        if outcome == TerminationOutcome::Reaped {
             self.confirm_reaped();
         }
-        confirmed
+        outcome
+    }
+
+    fn terminate_bounded(&mut self, timeout: Duration) -> bool {
+        enforce_termination_outcome(self.termination_outcome(timeout))
     }
 
     fn confirm_reaped(&mut self) {
@@ -1019,9 +1255,14 @@ impl RetirementEscalation {
                 };
                 retirement
             };
-            if !retirement.terminate_bounded(TERMINATION_TIMEOUT) {
-                thread::sleep(TERMINATION_POLL_INTERVAL);
-                self.enqueue(retirement);
+            match retirement_escalation_action(retirement.termination_outcome(TERMINATION_TIMEOUT))
+            {
+                RetirementEscalationAction::Complete => {}
+                RetirementEscalationAction::Requeue => {
+                    thread::sleep(TERMINATION_POLL_INTERVAL);
+                    self.enqueue(retirement);
+                }
+                RetirementEscalationAction::Abort => std::process::abort(),
             }
         }
     }
@@ -1092,69 +1333,81 @@ impl WorkerLiveness {
         if !self.known_alive() {
             return false;
         }
-        let alive = match self.lifetime.as_ref() {
-            WorkerLifetime::Child(child) => child
-                .lock()
-                .ok()
-                .and_then(|mut child| {
-                    let process = child.as_mut()?;
-                    process.try_wait().ok().map(|status| status.is_none())
-                })
-                .unwrap_or(false),
+        match self.lifetime.as_ref() {
+            WorkerLifetime::Child(child) => {
+                let Ok(mut child) = child.lock() else {
+                    return false;
+                };
+                let Some(process) = child.as_mut() else {
+                    self.alive_hint.store(false, Ordering::SeqCst);
+                    return false;
+                };
+                match classify_child_wait(&process.try_wait()) {
+                    ChildWaitObservation::Reaped => {
+                        *child = None;
+                        self.alive_hint.store(false, Ordering::SeqCst);
+                        false
+                    }
+                    ChildWaitObservation::Running => true,
+                    ChildWaitObservation::Fatal => false,
+                }
+            }
             #[cfg(test)]
             WorkerLifetime::Fake { .. } => self.known_alive(),
-        };
-        if !alive {
-            self.alive_hint.store(false, Ordering::SeqCst);
         }
-        alive
     }
 
     /// Requests termination and proves reaping within one fixed bound.
     ///
     /// This is called only for an unregistered launch failure or after the owning process
     /// record is detached from the registry.
-    fn terminate_bounded(&self, timeout: Duration) -> bool {
+    fn termination_outcome(&self, timeout: Duration) -> TerminationOutcome {
         match self.lifetime.as_ref() {
             WorkerLifetime::Child(child) => {
                 let Ok(mut child) = child.lock() else {
-                    self.alive_hint.store(false, Ordering::SeqCst);
-                    return false;
+                    return TerminationOutcome::Fatal;
                 };
                 let Some(process) = child.as_mut() else {
                     self.alive_hint.store(false, Ordering::SeqCst);
-                    return true;
+                    return TerminationOutcome::Reaped;
                 };
-                if matches!(process.try_wait(), Ok(Some(_))) {
-                    *child = None;
-                    self.alive_hint.store(false, Ordering::SeqCst);
-                    return true;
+                match classify_child_wait(&process.try_wait()) {
+                    ChildWaitObservation::Reaped => {
+                        *child = None;
+                        self.alive_hint.store(false, Ordering::SeqCst);
+                        return TerminationOutcome::Reaped;
+                    }
+                    ChildWaitObservation::Running => {}
+                    ChildWaitObservation::Fatal => return TerminationOutcome::Fatal,
                 }
-                let _ = process.kill();
+
+                if process.kill().is_err() {
+                    let outcome =
+                        outcome_after_kill_error(classify_child_wait(&process.try_wait()));
+                    if outcome == TerminationOutcome::Reaped {
+                        *child = None;
+                        self.alive_hint.store(false, Ordering::SeqCst);
+                    }
+                    return outcome;
+                }
                 let Some(deadline) = Instant::now().checked_add(timeout) else {
-                    self.alive_hint.store(false, Ordering::SeqCst);
-                    return false;
+                    return TerminationOutcome::Fatal;
                 };
                 loop {
-                    match process.try_wait() {
-                        Ok(Some(_)) => {
+                    match classify_child_wait(&process.try_wait()) {
+                        ChildWaitObservation::Reaped => {
                             *child = None;
                             self.alive_hint.store(false, Ordering::SeqCst);
-                            return true;
+                            return TerminationOutcome::Reaped;
                         }
-                        Ok(None) => {}
-                        Err(_) => {
-                            self.alive_hint.store(false, Ordering::SeqCst);
-                            return false;
-                        }
+                        ChildWaitObservation::Running => {}
+                        ChildWaitObservation::Fatal => return TerminationOutcome::Fatal,
                     }
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        self.alive_hint.store(false, Ordering::SeqCst);
-                        return false;
+                        return TerminationOutcome::TimedOut;
                     };
                     if remaining.is_zero() {
-                        self.alive_hint.store(false, Ordering::SeqCst);
-                        return false;
+                        return TerminationOutcome::TimedOut;
                     }
                     thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
                 }
@@ -1165,18 +1418,22 @@ impl WorkerLiveness {
                 default_result,
                 attempts,
             } => {
-                let confirmed = termination_results
+                let outcome = termination_results
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front()
                     .unwrap_or(*default_result);
-                if confirmed {
+                if outcome == TerminationOutcome::Reaped {
                     self.alive_hint.store(false, Ordering::SeqCst);
                 }
                 attempts.fetch_add(1, Ordering::SeqCst);
-                confirmed
+                outcome
             }
         }
+    }
+
+    fn terminate_bounded(&self, timeout: Duration) -> bool {
+        enforce_termination_outcome(self.termination_outcome(timeout))
     }
 }
 
@@ -1200,11 +1457,36 @@ impl WorkerProcess {
         confirmed
     }
 
+    fn pin_worker_network_namespace_before_identity_drop(
+        &self,
+        sandbox_observation: CapturedSandboxObservation,
+        required_group: u32,
+        parent_pid: u32,
+        child_pid: u32,
+    ) -> Result<(), WorkerV3Error> {
+        let mut retirement = self
+            .retirement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let retirement = retirement.as_mut().ok_or(WorkerV3Error::Authentication)?;
+        let pins = retirement
+            .kernel_pins
+            .as_mut()
+            .ok_or(WorkerV3Error::Authentication)?;
+        sandbox_observation.pin_network_namespace_before_identity_drop(
+            pins,
+            required_group,
+            parent_pid,
+            child_pid,
+        )
+    }
+
     fn observe_and_pin_sandbox(
         &self,
         sandbox_observation: CapturedSandboxObservation,
         parent_pid: u32,
         child_pid: u32,
+        identity: crate::worker_sandbox::WorkerIdentity,
     ) -> Result<crate::worker_sandbox::WorkerSandboxSnapshot, WorkerV3Error> {
         let mut retirement = self
             .retirement
@@ -1215,7 +1497,7 @@ impl WorkerProcess {
             .kernel_pins
             .as_mut()
             .ok_or(WorkerV3Error::Authentication)?;
-        sandbox_observation.observe(pins, parent_pid, child_pid)
+        sandbox_observation.observe(pins, parent_pid, child_pid, identity)
     }
 
     fn ensure_pinned_child_alive(&self) -> Result<(), WorkerV3Error> {
@@ -1296,8 +1578,23 @@ impl WorkerProcess {
         attempts: Arc<AtomicUsize>,
     ) -> Self {
         let lifetime = Arc::new(WorkerLifetime::Fake {
-            termination_results: Mutex::new(termination_results),
-            default_result,
+            termination_results: Mutex::new(
+                termination_results
+                    .into_iter()
+                    .map(|confirmed| {
+                        if confirmed {
+                            TerminationOutcome::Reaped
+                        } else {
+                            TerminationOutcome::TimedOut
+                        }
+                    })
+                    .collect(),
+            ),
+            default_result: if default_result {
+                TerminationOutcome::Reaped
+            } else {
+                TerminationOutcome::TimedOut
+            },
             attempts,
         });
         let retirement = ProcessRetirement {
@@ -3140,6 +3437,7 @@ mod tests {
     use std::{
         env, fs,
         io::Read,
+        os::unix::process::ExitStatusExt,
         process,
         sync::atomic::{AtomicBool, Ordering},
         thread,
@@ -3157,7 +3455,7 @@ mod tests {
         },
         worker_sandbox::{
             LinuxCapabilitySnapshot, LinuxSeccompState, NetworkNamespaceIdentity,
-            SandboxProofRecord, WorkerSandboxSnapshot,
+            SandboxProofRecord, WorkerIdentity, WorkerSandboxSnapshot,
         },
         worker_transport::{
             private_credential_worker_channel, receive_credential_worker_request,
@@ -3171,6 +3469,17 @@ mod tests {
     fn current_credentials() -> ExpectedUnixCredentials {
         ExpectedUnixCredentials::new(process::id(), geteuid().as_raw(), getegid().as_raw())
             .expect("current credentials")
+    }
+
+    fn current_worker_identity() -> WorkerIdentity {
+        WorkerIdentity::fixture(geteuid().as_raw(), getegid().as_raw())
+    }
+
+    fn current_initial_identity() -> InitialProcessIdentity {
+        InitialProcessIdentity {
+            uid: geteuid().as_raw(),
+            gid: getegid().as_raw(),
+        }
     }
 
     fn request(
@@ -3363,8 +3672,8 @@ mod tests {
         let started = Instant::now();
         let result = spawn_with_command_locked(
             child_command(mode),
-            geteuid().as_raw(),
-            getegid().as_raw(),
+            current_initial_identity(),
+            current_worker_identity(),
             context_id,
             generation,
             Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
@@ -3395,8 +3704,8 @@ mod tests {
     ) -> Result<AuthenticatedWorker, WorkerV3Error> {
         spawn_with_command_fixture(
             child_command(mode),
-            geteuid().as_raw(),
-            getegid().as_raw(),
+            current_initial_identity(),
+            current_worker_identity(),
             context_id,
             generation,
             Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
@@ -3410,8 +3719,8 @@ mod tests {
     ) -> Result<SpawnedWorker, WorkerSpawnFailure> {
         let result = spawn_with_command_fixture(
             child_command(mode),
-            geteuid().as_raw(),
-            getegid().as_raw(),
+            current_initial_identity(),
+            current_worker_identity(),
             reservation.context_id,
             reservation.generation,
             Some((CHILD_FIXTURE_ENVIRONMENT, mode)),
@@ -3444,9 +3753,15 @@ mod tests {
         let expected =
             ExpectedUnixCredentials::new(parent_pid, geteuid().as_raw(), getegid().as_raw())?;
         let encoded = receive_credential_record(&channel, HandshakeRecord::LENGTH, expected)?;
-        let mut hello = HandshakeRecord::decode(&encoded)?;
-        hello.challenge[0] ^= 1;
-        send_credential_record(&channel, &hello.child_reply().encode())?;
+        let hello = HandshakeRecord::decode(&encoded)?;
+        send_credential_record(&channel, &hello.namespace_ready().encode())?;
+        let encoded = receive_credential_record(&channel, HandshakeRecord::LENGTH, expected)?;
+        if HandshakeRecord::decode(&encoded)? != hello.namespace_pinned() {
+            return Err(WorkerV3Error::Authentication);
+        }
+        let mut wrong_hello = hello;
+        wrong_hello.challenge[0] ^= 1;
+        send_credential_record(&channel, &wrong_hello.child_reply().encode())?;
         Ok(())
     }
 
@@ -3460,6 +3775,8 @@ mod tests {
         WorkerSandboxSnapshot::fixture(
             NetworkNamespaceIdentity::fixture(1, 10),
             NetworkNamespaceIdentity::fixture(1, 11),
+            current_worker_identity(),
+            true,
             true,
             LinuxSeccompState::fixture(
                 u8::try_from(libc::SECCOMP_MODE_FILTER).expect("seccomp mode fits u8"),
@@ -3469,7 +3786,10 @@ mod tests {
         )
     }
 
-    fn proof_completion_fixture(send_wrong_ready: bool) -> Result<(), WorkerV3Error> {
+    fn proof_completion_fixture(
+        send_wrong_ready: bool,
+        retain_post_pin_descriptor: bool,
+    ) -> Result<(), WorkerV3Error> {
         let channel = inherited_fixture_channel()?;
         let parent_pid =
             u32::try_from(getppid().as_raw()).map_err(|_| WorkerV3Error::Authentication)?;
@@ -3486,6 +3806,15 @@ mod tests {
         {
             return Err(WorkerV3Error::Authentication);
         }
+        send_credential_record(&channel, &hello.namespace_ready().encode())?;
+        let encoded =
+            receive_credential_record(&channel, HandshakeRecord::LENGTH, expected_parent)?;
+        if HandshakeRecord::decode(&encoded)? != hello.namespace_pinned() {
+            return Err(WorkerV3Error::Authentication);
+        }
+        let _post_pin_descriptor = retain_post_pin_descriptor
+            .then(|| fs::File::open("/dev/null"))
+            .transpose()?;
         send_credential_record(&channel, &hello.child_reply().encode())?;
         let proof = SandboxProofRecord::fixture(
             hello.context_id,
@@ -3497,7 +3826,7 @@ mod tests {
         );
         let proof = proof.encode();
         send_credential_record(&channel, &proof)?;
-        if !send_wrong_ready {
+        if !send_wrong_ready && !retain_post_pin_descriptor {
             return Ok(());
         }
         let encoded =
@@ -3506,9 +3835,14 @@ mod tests {
         if accepted != hello.sandbox_accepted(*blake3::hash(&proof).as_bytes()) {
             return Err(WorkerV3Error::Authentication);
         }
-        let mut wrong_ready = accepted.sandbox_ready();
-        wrong_ready.proof_hash[0] ^= 1;
-        send_credential_record(&channel, &wrong_ready.encode())?;
+        let mut ready = accepted.sandbox_ready();
+        if send_wrong_ready {
+            ready.proof_hash[0] ^= 1;
+        }
+        send_credential_record(&channel, &ready.encode())?;
+        if retain_post_pin_descriptor {
+            thread::sleep(Duration::from_secs(30));
+        }
         Ok(())
     }
 
@@ -3537,8 +3871,8 @@ mod tests {
         fcntl(&sentinel, FcntlArg::F_SETFD(FdFlag::empty())).expect("make sentinel inheritable");
         let result = spawn_with_command_locked(
             child_command("connect"),
-            geteuid().as_raw(),
-            getegid().as_raw(),
+            current_initial_identity(),
+            current_worker_identity(),
             [15; 16],
             1,
             Some((CHILD_FIXTURE_ENVIRONMENT, "connect")),
@@ -3576,8 +3910,9 @@ mod tests {
             }
             Some("wrong-challenge") => wrong_challenge_fixture().is_err(),
             Some("credential-sender") => credential_sender_fixture().is_err(),
-            Some("wrong-ready") => proof_completion_fixture(true).is_err(),
-            Some("exit-after-proof") => proof_completion_fixture(false).is_err(),
+            Some("wrong-ready") => proof_completion_fixture(true, false).is_err(),
+            Some("exit-after-proof") => proof_completion_fixture(false, false).is_err(),
+            Some("extra-fd-after-pin") => proof_completion_fixture(false, true).is_err(),
             Some("extra-fd-connect") => {
                 let _normalised_fd_three =
                     fs::File::open("/dev/null").expect("occupied child fd three");
@@ -3690,11 +4025,18 @@ mod tests {
             parent_pid: 42,
             child_pid: 43,
             proof_hash: [0; 32],
+            worker_uid: 1_001,
+            worker_gid: 1_002,
         };
         let encoded = record.encode();
         assert_eq!(
             HandshakeRecord::decode(&encoded).expect("canonical"),
             record
+        );
+        assert_eq!(record.namespace_ready().kind, HandshakeKind::NamespaceReady);
+        assert_eq!(
+            record.namespace_pinned().kind,
+            HandshakeKind::NamespacePinned
         );
         assert_eq!(record.child_reply().kind, HandshakeKind::ChildHello);
         let accepted = record.sandbox_accepted([13; 32]);
@@ -3713,7 +4055,7 @@ mod tests {
             changed[index] ^= 0xff;
             invalid.push(changed);
         }
-        for range in [16..32, 32..40, 40..72, 72..76, 76..80] {
+        for range in [16..32, 32..40, 40..72, 72..76, 76..80, 112..116, 116..120] {
             let mut changed = encoded.to_vec();
             changed[range].fill(0);
             invalid.push(changed);
@@ -3727,7 +4069,13 @@ mod tests {
         for encoded in invalid {
             assert!(HandshakeRecord::decode(&encoded).is_err());
         }
-        for index in [16, 32, 40, 72, 76] {
+        for range in [112..116, 116..120] {
+            let mut reserved = encoded;
+            reserved[range]
+                .copy_from_slice(&crate::worker_sandbox::SYSTEMD_RESERVED_ID.to_be_bytes());
+            assert!(HandshakeRecord::decode(&reserved).is_err());
+        }
+        for index in [16, 32, 40, 72, 76, 112, 116] {
             let mut changed = encoded;
             changed[index] ^= 1;
             assert_ne!(
@@ -3751,10 +4099,12 @@ mod tests {
             parent_pid: 42,
             child_pid: 43,
             proof_hash: [0; 32],
+            worker_uid: 1_001,
+            worker_gid: 1_002,
         };
         let accepted = hello.sandbox_accepted([13; 32]);
         for expected in [accepted, accepted.sandbox_ready()] {
-            for index in [12, 16, 32, 40, 72, 76, 80] {
+            for index in [12, 16, 32, 40, 72, 76, 80, 112, 116] {
                 let mut mutated = expected.encode();
                 mutated[index] ^= 1;
                 match HandshakeRecord::decode(&mutated) {
@@ -3913,6 +4263,18 @@ mod tests {
     }
 
     #[test]
+    fn final_parent_descriptor_audit_rejects_a_post_pin_open() {
+        match spawn_fixture("extra-fd-after-pin", [35; 16], 1) {
+            Err(WorkerV3Error::Authentication | WorkerV3Error::Sandbox(_)) => {}
+            Err(error) => panic!("unexpected post-pin descriptor error: {error}"),
+            Ok(process) => {
+                assert!(process.terminate_bounded(TERMINATION_TIMEOUT));
+                panic!("post-pin descriptor escaped final parent audit");
+            }
+        }
+    }
+
+    #[test]
     fn sandbox_proof_is_observed_pinned_and_ready_before_spawn_returns() {
         let context_id = [31; 16];
         let generation = 7;
@@ -3939,6 +4301,8 @@ mod tests {
         let invalid_observation = WorkerSandboxSnapshot::fixture(
             NetworkNamespaceIdentity::fixture(1, 10),
             NetworkNamespaceIdentity::fixture(1, 11),
+            current_worker_identity(),
+            true,
             false,
             LinuxSeccompState::fixture(
                 u8::try_from(libc::SECCOMP_MODE_FILTER).expect("seccomp mode fits u8"),
@@ -3982,6 +4346,87 @@ mod tests {
             .rfind("child_loop(&channel")
             .expect("child-loop entry");
         assert!(proof < accepted && accepted < ready && ready < loop_entry);
+    }
+
+    #[test]
+    fn source_pins_newnet_before_identity_drop_and_rebinds_parent_death_signal() {
+        let source = include_str!("worker_v3.rs");
+        let child_start = source
+            .find("fn run_child_with_sandbox")
+            .expect("child bootstrap");
+        let child_end = source[child_start..]
+            .find("\nfn child_loop(")
+            .map(|offset| child_start + offset)
+            .expect("child loop boundary");
+        let child = &source[child_start..child_end];
+        let begin = child
+            .find("begin_sandbox(parent_network_namespace)?")
+            .expect("child NEWNET begin");
+        let namespace_ready = child
+            .find("hello.namespace_ready().encode()")
+            .expect("child namespace-ready barrier");
+        let namespace_pinned = child
+            .find("hello.namespace_pinned()")
+            .expect("child namespace-pin acknowledgement");
+        let finish = child
+            .find("finish_sandbox(prepared_sandbox, worker_identity)?")
+            .expect("child identity drop");
+        let pdeath_restore = child[finish..]
+            .find("prctl::set_pdeathsig(Some(Signal::SIGKILL))")
+            .map(|offset| finish + offset)
+            .expect("post-drop parent-death signal restore");
+        let pdeath_readback = child[pdeath_restore..]
+            .find("prctl::get_pdeathsig()")
+            .map(|offset| pdeath_restore + offset)
+            .expect("post-drop parent-death signal readback");
+        let child_hello = child
+            .find("hello.child_reply().encode()")
+            .expect("post-drop child hello");
+        assert!(
+            begin < namespace_ready
+                && namespace_ready < namespace_pinned
+                && namespace_pinned < finish
+                && finish < pdeath_restore
+                && pdeath_restore < pdeath_readback
+                && pdeath_readback < child_hello
+        );
+
+        let parent_start = source
+            .find("fn parent_handshake(")
+            .expect("parent handshake");
+        let parent_end = source[parent_start..]
+            .find("\nfn finish_unconstructed_launch_failure(")
+            .map(|offset| parent_start + offset)
+            .expect("parent handshake boundary");
+        let parent = &source[parent_start..parent_end];
+        let ready_receive = parent
+            .find("hello.namespace_ready()")
+            .expect("parent namespace-ready verification");
+        let pin = parent
+            .find("process.pin_worker_network_namespace_before_identity_drop(")
+            .expect("parent namespace pin");
+        let pin_ack = parent
+            .find("hello.namespace_pinned().encode()")
+            .expect("parent namespace-pin acknowledgement");
+        let final_credentials = parent
+            .find("let expected_after_drop = ExpectedUnixCredentials::new(")
+            .expect("parent final worker credentials");
+        let child_hello_receive = parent[final_credentials..]
+            .find("hello.child_reply()")
+            .map(|offset| final_credentials + offset)
+            .expect("parent post-drop child hello");
+        assert!(
+            ready_receive < pin
+                && pin < pin_ack
+                && pin_ack < final_credentials
+                && final_credentials < child_hello_receive
+        );
+        let before_pin = &parent[..pin];
+        assert_eq!(before_pin.matches("expected_before_drop").count(), 2);
+        assert!(!before_pin.contains("expected_after_drop"));
+        let after_pin_ack = &parent[pin_ack..];
+        assert!(!after_pin_ack.contains("expected_before_drop"));
+        assert_eq!(after_pin_ack.matches("expected_after_drop").count(), 4);
     }
 
     #[test]
@@ -4713,7 +5158,7 @@ mod tests {
                 liveness: WorkerLiveness {
                     lifetime: Arc::new(WorkerLifetime::Fake {
                         termination_results: Mutex::new(VecDeque::new()),
-                        default_result: true,
+                        default_result: TerminationOutcome::Reaped,
                         attempts: Arc::new(AtomicUsize::new(0)),
                     }),
                     alive_hint,
@@ -4875,14 +5320,58 @@ mod tests {
     }
 
     #[test]
+    fn termination_errors_are_fatal_and_only_timeouts_are_requeueable() {
+        assert_eq!(
+            classify_child_wait(&Ok(Some(process::ExitStatus::from_raw(0)))),
+            ChildWaitObservation::Reaped
+        );
+        assert_eq!(
+            classify_child_wait(&Ok(None)),
+            ChildWaitObservation::Running
+        );
+        assert_eq!(
+            classify_child_wait(&Err(io::Error::other("injected wait failure"))),
+            ChildWaitObservation::Fatal
+        );
+        assert_eq!(
+            outcome_after_kill_error(ChildWaitObservation::Reaped),
+            TerminationOutcome::Reaped,
+            "the one post-kill-error wait closes the already-dead race"
+        );
+        for observation in [ChildWaitObservation::Running, ChildWaitObservation::Fatal] {
+            assert_eq!(
+                outcome_after_kill_error(observation),
+                TerminationOutcome::Fatal,
+                "a kill error without confirmed reap is process-fatal"
+            );
+        }
+        assert_eq!(
+            retirement_escalation_action(TerminationOutcome::Reaped),
+            RetirementEscalationAction::Complete
+        );
+        assert_eq!(
+            retirement_escalation_action(TerminationOutcome::TimedOut),
+            RetirementEscalationAction::Requeue
+        );
+        assert_eq!(
+            retirement_escalation_action(TerminationOutcome::Fatal),
+            RetirementEscalationAction::Abort
+        );
+    }
+
+    #[test]
     fn kernel_pins_survive_uncertainty_and_drop_only_after_confirmed_reap() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let alive_hint = Arc::new(AtomicBool::new(true));
         let mut retirement = ProcessRetirement {
             liveness: WorkerLiveness {
                 lifetime: Arc::new(WorkerLifetime::Fake {
-                    termination_results: Mutex::new(VecDeque::from([false, true])),
-                    default_result: true,
+                    termination_results: Mutex::new(VecDeque::from([
+                        TerminationOutcome::TimedOut,
+                        TerminationOutcome::Fatal,
+                        TerminationOutcome::Reaped,
+                    ])),
+                    default_result: TerminationOutcome::Reaped,
                     attempts: Arc::clone(&attempts),
                 }),
                 alive_hint,
@@ -4893,6 +5382,19 @@ mod tests {
         };
         assert!(!retirement.terminate_bounded(TERMINATION_TIMEOUT));
         assert!(retirement.armed);
+        assert!(retirement.liveness.known_alive());
+        assert!(
+            retirement
+                .kernel_pins
+                .as_ref()
+                .is_some_and(crate::worker_sandbox::WorkerKernelPins::has_complete_pins)
+        );
+        assert_eq!(
+            retirement.termination_outcome(TERMINATION_TIMEOUT),
+            TerminationOutcome::Fatal
+        );
+        assert!(retirement.armed);
+        assert!(retirement.liveness.known_alive());
         assert!(
             retirement
                 .kernel_pins
@@ -4902,7 +5404,7 @@ mod tests {
         assert!(retirement.terminate_bounded(TERMINATION_TIMEOUT));
         assert!(!retirement.armed);
         assert!(retirement.kernel_pins.is_none());
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -4912,8 +5414,8 @@ mod tests {
         let retirement = ProcessRetirement {
             liveness: WorkerLiveness {
                 lifetime: Arc::new(WorkerLifetime::Fake {
-                    termination_results: Mutex::new(VecDeque::from([true])),
-                    default_result: true,
+                    termination_results: Mutex::new(VecDeque::from([TerminationOutcome::Reaped])),
+                    default_result: TerminationOutcome::Reaped,
                     attempts: Arc::new(AtomicUsize::new(0)),
                 }),
                 alive_hint: Arc::new(AtomicBool::new(true)),

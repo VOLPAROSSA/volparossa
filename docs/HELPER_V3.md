@@ -153,35 +153,61 @@ reads `Seccomp` and `Seccomp_filters` from `/proc/thread-self/status` immediatel
 After exec, the child closes raw descriptor 3 if present, atomically duplicates stdin with
 `fcntl_dupfd_cloexec` using minimum 3, requires the returned descriptor to be exactly 3 and closes
 stdin. Its bounded self-audit then requires exactly descriptors `{1, 2, 3}`. Before authentication,
-the production-only applicator captures the parent network-namespace identity, validates its
-bootstrap `CAP_NET_ADMIN`, `CAP_SETPCAP` and `CAP_SYS_ADMIN` authority, enters a new network
-namespace and sets `NoNewPrivs`. It then reads its inherited seccomp baseline and installs one fixed
-amd64 classic-BPF program with `SECCOMP_FILTER_FLAG_TSYNC`, before ambient or bounding-capability
-reduction. A kernel error or positive unsynchronised-thread ID aborts bootstrap. The filter returns
-`EPERM` for the x32 ABI, an unexpected audit architecture and `clone`, `clone3`, `fork` or `vfork`,
-and allows other syscalls. Seccomp restrictions are monotonic and remain across exec. Ambient
-capabilities are then cleared and bounding capabilities are
-dropped through the kernel's bounded `cap_last_cap`, with `CAP_SETPCAP` dropped last; final
-inheritable and ambient sets are empty and permitted, effective and bounding sets contain exactly
-`CAP_NET_ADMIN`. Exact PID, PPID, capability and `NoNewPrivs` readback, seccomp filter mode with
-exactly the inherited count plus one, and a changed network namespace are required before the child
-sends its sandbox proof. The fake applicator and relaxed test observer exist only under `cfg(test)`;
-release code has no environment or runtime selector that can substitute them.
+stdout and stderr must resolve to `/dev/null`, while descriptor 3 must remain the exact connected,
+CLOEXEC Unix seqpacket channel. The production-only applicator then captures the parent
+network-namespace identity, validates its
+bootstrap `CAP_KILL`, `CAP_SETGID`, `CAP_SETUID`, `CAP_SETPCAP`, `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`
+authority,
+and enters a new network namespace. It immediately clears ambient capabilities, reduces the
+bounding set to `CAP_NET_ADMIN | CAP_SETPCAP`, and reduces permitted/effective capabilities to
+exactly `CAP_SETGID | CAP_SETUID | CAP_SETPCAP | CAP_NET_ADMIN`; `CAP_KILL`, `CAP_SYS_ADMIN`,
+`CAP_NET_RAW` and all other surplus authority are therefore gone before any handshake record is
+processed. It then
+sets `NoNewPrivs` and installs one fixed amd64 classic-BPF program with
+`SECCOMP_FILTER_FLAG_TSYNC`. A kernel error or positive unsynchronised-thread ID aborts bootstrap.
+The filter returns `EPERM` for the x32 ABI, an unexpected audit architecture, `clone`, `clone3`,
+`fork`, `vfork`, `setns` and `unshare`; all other syscalls are allowed. It then stops at an affine
+pre-identity barrier. The parent requires a
+credential-bound `NamespaceReady` from the still-root child, observes exactly one task and
+descriptors `{1, 2, 3}`, proves the fresh namespace, transition capabilities, NNP and exactly one
+filter beyond the inherited baseline, and pins `ns/net` before returning `NamespacePinned`.
+
+Only after that acknowledgement does the child require ambient capabilities to remain empty, clear
+all supplementary groups, reduce its bounding set, enable keep-caps, and set all
+real/effective/saved GIDs and UIDs to
+the startup-pinned `volparossa-worker` identity. It immediately reduces permitted/effective
+capabilities to `CAP_NET_ADMIN | CAP_SETPCAP`, disables and verifies keep-caps, removes
+`CAP_SETPCAP` from the bounding set last, and reduces permitted/effective capabilities to exactly
+`CAP_NET_ADMIN`. The pre-barrier seccomp restrictions are monotonic, remain across the identity
+transition and exec, and make the pinned network-namespace membership immutable. Final inheritable
+and ambient sets are empty; exact PID, PPID, four-way UID/GID, empty groups, capability and
+`NoNewPrivs` readback, seccomp filter mode with exactly the inherited count plus one, and the
+unchanged pinned network namespace are required before the child sends its sandbox proof.
+Because Linux clears `PR_SET_PDEATHSIG` during credential changes, the child restores and reads back
+`SIGKILL` and revalidates its original parent before any post-drop IPC. The fake applicator and
+relaxed test observer exist only under `cfg(test)`; release code has no environment or runtime
+selector that can substitute them.
 
 The first parent record canonically binds the internal magic and version, route context, generation,
-challenge, original parent PID and exact `Child::id`. The child accepts it only with exact
-kernel-provided PID/UID/GID credentials and echoes the same binding. Its subsequent canonical proof
-is the post-apply completion barrier: only after receiving it does the parent independently observe
-the final state through the one anchored `/proc/<pid>` directory descriptor acquired immediately
-after spawn. The hard-incompatible sandbox-proof record is version 4; its unchanged 180-byte layout
-now binds seccomp mode and filter count in five formerly reserved bytes and retains two canonical
-zero bytes. Bounded parsing requires the expected PID/PPID, exact capability and `NoNewPrivs`
-values, filter mode 2 with exactly the parent's pre-spawn count plus one, exactly one task equal to
-the child PID, and exactly descriptors `{1, 2, 3}`. `/proc` exposes mode and count, not filter
-instructions; exact filter content is instead structurally fixed by the reopened `/proc/self/exe`
-image and the no-input UAPI wrapper. The parent pins that directory, a pidfd and the observed
-`ns/net` descriptor, checks pidfd liveness before and after observation, verifies every proof field
-and hashes the exact proof bytes. It then sends
+challenge, original parent PID, exact `Child::id`, and the startup-pinned worker UID/GID. The child
+accepts it only with exact kernel-provided root-parent PID/UID/GID credentials. The staged
+`NamespaceReady` record must still carry the root child's exact kernel credentials; after the
+parent's namespace pin and `NamespacePinned` acknowledgement, `ChildHello`, the proof, Ready and
+all operational records must carry the dedicated worker credentials. Every transition record
+echoes the complete binding.
+
+The subsequent canonical proof is the post-apply completion barrier: only after receiving it does
+the parent independently observe final status through the one anchored `/proc/<pid>` directory
+descriptor acquired immediately after spawn and the `ns/net` descriptor pinned before identity
+drop. The hard-incompatible sandbox-proof record is version 5 with a 192-byte layout that additionally
+binds exact UID/GID and empty supplementary groups. Bounded parsing requires the expected PID/PPID,
+identity, group, capability and `NoNewPrivs` values and filter mode 2 with exactly the parent's
+pre-spawn count plus one. `/proc` exposes mode and count, not filter instructions; exact filter
+content is instead structurally fixed by the reopened `/proc/self/exe` image and the no-input UAPI
+wrapper. The parent keeps the anchored directory, pidfd and pre-drop `ns/net` pin, checks pidfd
+liveness before and after every phase, and retains a pre-drop-opened `/proc/<pid>/fd` directory for
+an independent exact `{1, 2, 3}` re-enumeration after the proof. It verifies every proof field and
+hashes the exact proof bytes. It then sends
 `SandboxAccepted(proof_hash)`; the child must verify every field before returning an exact
 `SandboxReady(proof_hash)`. The parent repeats liveness checks after Ready, and no child loop or
 successful spawn return is reachable earlier.
@@ -189,26 +215,52 @@ successful spawn return is reachable earlier.
 The pidfd, anchored proc descriptor and network-namespace pin move into `ProcessRetirement` before
 Accepted. Every later timeout, authentication failure, uncertain termination, process drop and
 reaper transfer preserves their linear ownership.
-Tests cover syscall order and injected failure at every applicator step, strict status/fd/task/proof
-parsers, canonical version-4 offsets, every fixed BPF branch and amd64 UAPI layout, real
-unprivileged filter installation, proof-before-observation ordering, mutated Accepted/Ready fields,
-parent mismatch, death after proof, descriptor leakage, pin retention, and the strong
-proof-to-Accepted-to-Ready sequence. The single-task check occurs after the filter is installed and
-before Accepted; the observed worker leader therefore receives `EPERM` for every later
-`clone`/`clone3`/`fork`/`vfork` attempt, including post-Ready. This proof does not independently
-enumerate or attest descendants that might have been created before filter installation. The pins
-are released only after confirmed leader reap.
+Tests cover syscall order and injected failure at every applicator step, strict
+status/fd/task/proof parsers, canonical version-5 offsets, every fixed BPF branch and amd64 UAPI
+layout, real unprivileged filter installation, the namespace-pin-before-identity-drop order,
+the parent-death-signal restoration source order and readback path, proof-before-final-observation ordering, mutated
+Accepted/Ready fields, parent mismatch, death after proof, descriptor leakage, pin retention, and
+rejection of a descriptor opened after the pin, and the strong proof-to-Accepted-to-Ready sequence.
+The final child identity/parent/PDEATHSIG check and channel timeout transition occur before Ready.
+The exact single-task check occurs after the
+confinement filter and before identity drop. The worker leader receives `EPERM` for every later
+`clone`/`clone3`/`fork`/`vfork`/`setns`/`unshare` attempt, including post-Ready; therefore neither
+the proven single-task state nor pinned network-namespace membership can change afterwards. The
+fixed child image contains no descendant-creation step or untrusted input before filter
+installation, but the parent does not independently enumerate descendants from that earlier
+pre-filter interval. The pins are released only after confirmed leader reap.
 
-This proves narrow network-namespace, capability, descriptor and credential confinement only. The
-worker still runs with effective UID 0, so same-UID signals and the root-writable `/run/volparossa`
-directory are not isolated from it. After wiring, such a child could signal the helper parent,
-read/replace the token, or unlink `helper.sock` and bind an impersonating Unix socket; NEWNET does
-not isolate pathname `AF_UNIX` sockets. Production wiring is therefore blocked on a dedicated
-worker identity or equivalently narrow broker design that excludes parent signalling and
-runtime-directory/socket/token
-access, credential attestation for that identity, explicit approval for the additional launcher
-authority, and disposable live-root tests that include the prefilter process-tree state. The shipped
-unit and doctor expectations deliberately remain unchanged and do not grant `CAP_SETPCAP`.
+This proves the code-level network-namespace, capability, descriptor, credential and dedicated
+identity bootstrap. The package declares a fully locked `volparossa-worker` account with its own
+group and no `volparossa` membership. Before any NSS lookup, startup safely reads bounded,
+single-link root:root `/etc/nsswitch.conf`, `/etc/passwd` and `/etc/group` files and rejects metadata
+drift during each read. The account databases may use only `files` or `files systemd`, in that
+order; an optional `initgroups` rule has the same restriction. Agent, operator, worker and `shadow`
+names and numeric IDs must be unique local records. Name and numeric NSS lookups must both reproduce
+every local field, and `getgrouplist` must reproduce exactly the local service memberships. Thus an
+external NSS principal, alternate local name using a service ID, or group alias cannot be pinned.
+Startup then pins the numeric worker identity, rejects root, the systemd/Linux reserved IDs `65535`
+and `4294967295`, the agent UID/GID, non-`/nonexistent` home, non-nologin shell and any supplementary
+membership. The agent and
+worker may not belong to the live `shadow` group. One drift-checked, fixed-capacity zeroizing shadow
+snapshot must contain unique entries for both identities. The agent password must start with `!`;
+the worker password must also start with `!` and its account-expiry field must be
+exactly `1`, matching Debian 13's account-wide `systemd-sysusers u!` lock. It reads both entries from a
+bounded regular root-owned `/etc/shadow` file with one link, owner-read access, no execute,
+group-write or world bits, and group-read access only for the resolved live `shadow` group. Neither
+service identity can mutate that file. A present POSIX access ACL, or an ACL state that cannot be
+attested as explicitly absent, is rejected fail closed. The read buffer cannot reallocate old password hashes. This closes the
+pre-existing-account collision that idempotent `systemd-sysusers` cannot repair. The shipped helper
+unit and doctor contract now grant and require the reviewed seven-capability bootstrap set. Its
+`CAP_KILL` authority is retained by the root parent so it can retire the dedicated-UID worker, but
+the child drops it before the namespace-pin barrier and proves a final `CAP_NET_ADMIN`-only state.
+The contract rejects `CAP_SYS_PTRACE` and adds only the individual `seccomp` syscall to the existing systemd syscall
+groups so the fixed child filter can be installed without allowing all of `@sandbox`. After the drop, the worker's
+distinct UID/GID plus exact `CAP_NET_ADMIN` set excludes same-UID signalling of the root parent and
+access through the root:`volparossa` runtime-directory mode. This is not yet a production claim:
+the launcher remains disconnected from the engine, and the complete account transition,
+pre-filter task state, path access denials and parent-signal denial still require a disposable
+Debian 13 live-root acceptance run.
 
 The child still performs no link, WireGuard, route, nftables, sysctl, or socket-factory operation.
 It keeps only an in-memory context marker, accepts `Initialise` and `DestroyContext`, and returns
@@ -247,9 +299,12 @@ process without unwinding an owner. Failure to start the reaper is remembered an
 later launch before a child exists; unexpected reaper-thread return or panic is likewise
 process-fatal.
 
-Each supervisor or reaper process attempt is bounded to 250 ms. On uncertainty, the detached reaper
-waits 5 ms and queues the same owner for another bounded round; no request or shutdown waiter follows
-that retry loop. Shutdown therefore completes `false` after its own bounded attempt instead of
+Each supervisor or reaper process attempt is bounded to 250 ms. A clean timeout leaves the live hint,
+retirement ownership and namespace pins intact; the detached reaper waits 5 ms and queues that same
+owner for another bounded round. A signal error gets one immediate wait race-check: an already reaped
+child succeeds, while a still-running child or any wait error is process-fatal. Fatal outcomes abort
+without unwinding or requeueing the armed owner. No request or shutdown waiter follows the timeout
+retry loop. Shutdown therefore completes `false` after its own bounded attempt instead of
 waiting indefinitely for background confirmation. The retry record may remain in memory for the
 helper lifetime when the operating system never confirms reap. This queue and its permits are not
 durable across a helper crash. The dormant v3 store does not change that because no production
@@ -463,12 +518,14 @@ No host networking was executed for this slice. Before `Prepare`, `Activate`, `C
 acquisition, client ingress, or datapath operation can be called complete, all of the following
 remain:
 
-- choose and prove a dedicated worker UID/GID transition or equivalently narrow broker; the current
-  effective-UID-0 child can signal the parent and access the root-writable runtime directory,
-  including token replacement and Unix-socket unlink/rebind impersonation;
-- obtain explicit approval before adding `CAP_SETPCAP` launcher authority to the helper unit and
-  doctor contract, and prove the complete bootstrap in a disposable live-root environment; neither
-  the shipped unit nor doctor expectation is changed by this disconnected slice;
+- run the complete dedicated `volparossa-worker` UID/GID transition in a disposable Debian 13
+  live-root environment and prove exact post-drop credentials/groups/capabilities, parent-signal
+  denial, runtime token/socket path denial, pre-filter single-task state, namespace pin lifetime and
+  unchanged host state; portable tests and package inspection do not substitute for this gate;
+- validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
+  Debian package under the same acceptance environment, including the generated local
+  passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
+  absent and the final worker must retain only `CAP_NET_ADMIN`;
 - connect the authenticated worker-v3 launcher and generation registry to creation of the anonymous
   namespace only as part of an atomic underlay-snapshot, capability-reduction,
   independently observed sandbox-proof, birth-link, WireGuard-prepare and rollback transaction; the
