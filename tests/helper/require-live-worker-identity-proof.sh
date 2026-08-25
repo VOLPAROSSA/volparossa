@@ -600,6 +600,7 @@ systemd-run \
     --property=Group="$agent_gid" \
     --property=SupplementaryGroups= \
     --property=UMask=0077 \
+    --property=LimitCORE=0 \
     --property=NoNewPrivileges=yes \
     --property="CapabilityBoundingSet=$capabilities" \
     --property="AmbientCapabilities=$capabilities" \

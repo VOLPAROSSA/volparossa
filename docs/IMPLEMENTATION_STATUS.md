@@ -53,7 +53,10 @@ Last updated: 2026-08-25
   filter mode plus exactly one filter beyond its pre-spawn thread baseline; exact BPF content is
   structurally bound by the current executable's fixed UAPI rather than claimed from `/proc`.
   `clone`, `clone3`, `fork`, `vfork`, `setns` and `unshare` monotonically return `EPERM` before the
-  namespace-pin barrier, including post-Ready and across exec. It has no production caller and
+  namespace-pin barrier, including post-Ready and across exec. After the parent has independently
+  observed the final sandbox and sent Accepted, the child disables and reads back `PR_SET_DUMPABLE`
+  before Ready or any operational request; the fixed service and transient live-proof driver also
+  set `LimitCORE=0`. It has no production caller and
   production deliberately returns
   `Unavailable`. The package declares a locked, group-isolated `volparossa-worker`, pins its numeric
   identity at startup, and first binds unique local passwd/group names and numeric IDs to exact
@@ -116,6 +119,13 @@ Last updated: 2026-08-25
   before its own deadline, while runtime/task cancellation fails closed and cannot upgrade.
   Terminal unresolved settlement atomically drains captured owners and immediately escalates any
   later owner instead of leaving it stranded.
+  Successful internal Prepare, Activate, Probe and MPTCP endpoint responses must preserve exact
+  request order and identity; engine Prepare proof also rejects duplicate public keys or public
+  endpoints before affine handles can be paired. A worker `CleanupIncomplete` result now
+  quarantines and detaches that exact generation instead of caching an apparently stable failure.
+  The inactive kernel layer preflights a complete batch as fresh, DOWN, exact-name/alias/kind
+  WireGuard links before key/address mutation, and has exact-owned delete plus absence proof. The
+  alias is not yet bound to durable journal ownership, so these primitives remain disconnected.
   Production still installs only the `Unavailable` backend and performs no worker or network
   mutation. Production adapter wiring, durable journal/reaper integration, and the separate
   Add/Remove MPTCP endpoint seam remain required; no datapath or acceptance checkbox closes.
@@ -124,7 +134,9 @@ Last updated: 2026-08-25
   and doctor contract now require exactly the reviewed seven-capability bootstrap set
   (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
   `CAP_SYS_ADMIN`) and
-  reject `CAP_SYS_PTRACE`; the component-only transient driver exists, but staged-package and
+  reject `CAP_SYS_PTRACE`; they also require `LimitCORE=0`, while the child independently disables
+  process dumpability after parent attestation and before Ready. The component-only transient driver
+  exists, but staged-package and
   disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits
   only `CAP_NET_ADMIN`.
 - [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine

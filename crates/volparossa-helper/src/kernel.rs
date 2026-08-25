@@ -164,12 +164,16 @@ impl BirthNamespaceKernel {
         {
             Ok(()) => self
                 .route
-                .link_index(interface, deadline)
+                .exact_owned_wireguard_link_index(interface, &ownership_alias, deadline)
                 .map_err(|_| BirthLinkError::CleanupIncomplete)?,
             Err(error) if error.is_errno(libc::EEXIST) => {
                 return Err(BirthLinkError::Conflict);
             }
-            Err(create_error) => match self.route.link_index(interface, deadline) {
+            Err(create_error) => match self.route.exact_owned_wireguard_link_index(
+                interface,
+                &ownership_alias,
+                deadline,
+            ) {
                 Ok(index) => index,
                 Err(error) if error.is_errno(libc::ENODEV) => {
                     return Err(BirthLinkError::Kernel(create_error));
@@ -185,10 +189,14 @@ impl BirthNamespaceKernel {
             Ok(()) => Ok(()),
             Err(move_error) => match self.route.link_index(interface, deadline) {
                 Err(error) if error.is_errno(libc::ENODEV) => Ok(()),
-                Ok(parent_index) => {
+                Ok(_) => {
                     if self
                         .route
-                        .delete_owned_link(parent_index, interface, deadline)
+                        .delete_named_exact_owned_wireguard_link(
+                            interface,
+                            &ownership_alias,
+                            deadline,
+                        )
                         .is_ok()
                     {
                         Err(BirthLinkError::Kernel(move_error))
@@ -201,13 +209,14 @@ impl BirthNamespaceKernel {
         }
     }
 
-    /// Delete a crash-stranded `WireGuard` link only when its exact ownership marker matches.
+    /// Delete a crash-stranded `WireGuard` link only when its deterministic v3 marker and kind
+    /// match. Production callers must separately hold durable journal authority.
     pub(crate) fn delete_owned_wireguard(
         &mut self,
         specification: &WireguardLeaseSpec,
         deadline: HardDeadline,
     ) -> Result<(), KernelError> {
-        self.route.delete_named_owned_link(
+        self.route.delete_named_exact_owned_wireguard_link(
             specification.interface(),
             &specification.ownership_alias(),
             deadline,
@@ -224,6 +233,41 @@ fn safe_birth_interface_name(name: &str) -> bool {
         && bytes[4..]
             .iter()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn prove_exact_owned_wireguard_link(
+    expected_name: &str,
+    expected_alias: &str,
+    details: &LinkDetails,
+) -> Result<(), KernelError> {
+    if !safe_birth_interface_name(expected_name)
+        || expected_alias != format!("volparossa:wireguard:v3:{expected_name}")
+        || details.name.as_deref() != Some(expected_name)
+        || details.alias.as_deref() != Some(expected_alias)
+        || details.kind.as_deref() != Some(WG_GENL_NAME)
+    {
+        return Err(KernelError::Invalid);
+    }
+    Ok(())
+}
+
+fn prove_fresh_wireguard_state(
+    expected_name: &str,
+    details: &LinkDetails,
+    state: &WireguardDeviceState,
+) -> Result<(), KernelError> {
+    let up = u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)?;
+    if details.flags & up != 0
+        || state.ifindex != details.index
+        || state.interface_name != expected_name
+        || state.public_key != [0; 32]
+        || state.listen_port != 0
+        || state.firewall_mark != 0
+        || !state.peers.is_empty()
+    {
+        return Err(KernelError::Invalid);
+    }
+    Ok(())
 }
 
 /// Exact kernel evidence returned only after a v3 no-peer device is UP and read back.
@@ -302,6 +346,84 @@ impl NamespaceKernel {
         )
     }
 
+    /// Prove that every planned worker lease is an exact, freshly moved `WireGuard` link.
+    ///
+    /// The complete batch is inspected before callers perform any key, address, link-state, or
+    /// listen-port mutation. Duplicate derived interfaces, an unavailable `WireGuard` family,
+    /// a deterministic v3 marker/kind mismatch, or any non-fresh device state fails closed. The
+    /// marker is not a substitute for the production ownership journal and restart reaper.
+    pub(crate) fn preflight_exact_owned_wireguard_v3(
+        &mut self,
+        specifications: &[WireguardLeaseSpec],
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        if specifications.is_empty() {
+            return Err(KernelError::Invalid);
+        }
+        if self.wireguard.is_none() {
+            return Err(KernelError::Unsupported);
+        }
+        for (position, specification) in specifications.iter().enumerate() {
+            let interface = specification.interface();
+            if !safe_birth_interface_name(interface)
+                || specifications[..position]
+                    .iter()
+                    .any(|previous| previous.interface() == interface)
+            {
+                return Err(KernelError::Invalid);
+            }
+            let alias = specification.ownership_alias();
+            let details = self
+                .route
+                .exact_owned_wireguard_link_details(interface, &alias, deadline)?;
+            let wireguard = self.wireguard.as_mut().ok_or(KernelError::Unsupported)?;
+            let state = wireguard_probe::probe_device(
+                &mut wireguard.netlink,
+                wireguard.family_id,
+                interface,
+                deadline,
+            )?;
+            prove_fresh_wireguard_state(interface, &details, &state)?;
+        }
+        deadline.ensure_remaining()?;
+        Ok(())
+    }
+
+    /// Delete one namespace-local link only after exact name, deterministic v3 alias, and kind
+    /// proof.
+    ///
+    /// An already absent link is success. A link with the derived name but a different alias or
+    /// kind is never deleted, and absence is proven again before success is returned. Production
+    /// callers must additionally hold durable journal authority for this deterministic marker.
+    pub(crate) fn delete_exact_owned_wireguard_v3(
+        &mut self,
+        specification: &WireguardLeaseSpec,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let interface = specification.interface();
+        if !safe_birth_interface_name(interface) {
+            return Err(KernelError::Invalid);
+        }
+        self.route.delete_named_exact_owned_wireguard_link(
+            interface,
+            &specification.ownership_alias(),
+            deadline,
+        )
+    }
+
+    /// Prove that no link remains under one exact helper-derived interface name.
+    pub(crate) fn prove_wireguard_absent_v3(
+        &mut self,
+        specification: &WireguardLeaseSpec,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let interface = specification.interface();
+        if !safe_birth_interface_name(interface) {
+            return Err(KernelError::Invalid);
+        }
+        self.route.prove_link_absent(interface, deadline)
+    }
+
     /// Configure one freshly moved v3 device with a worker-local key and no peers, bring it UP,
     /// and return only exact correlated kernel proof.
     ///
@@ -324,7 +446,9 @@ impl NamespaceKernel {
             return Err(KernelError::Invalid);
         }
         let alias = specification.ownership_alias();
-        let index = self.route.owned_link_index(interface, &alias, deadline)?;
+        let index = self
+            .route
+            .exact_owned_wireguard_link_index(interface, &alias, deadline)?;
         let local = specification.local_address();
         self.route
             .add_raw_address(index, &local.octets(), 128, deadline)?;
@@ -338,10 +462,11 @@ impl NamespaceKernel {
             .ok_or(KernelError::Unsupported)?
             .set_ephemeral_listen_port_v3(interface, deadline)?;
 
-        let (proved_index, proved_alias, flags) =
-            self.route.link_details_with_flags(interface, deadline)?;
-        let up = flags & u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)? != 0;
-        if proved_index != index || proved_alias.as_deref() != Some(alias.as_str()) || !up {
+        let proved = self
+            .route
+            .exact_owned_wireguard_link_details(interface, &alias, deadline)?;
+        let up = proved.flags & u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)? != 0;
+        if proved.index != index || !up {
             return Err(KernelError::Malformed);
         }
         let wireguard = self.wireguard.as_mut().ok_or(KernelError::Unsupported)?;
@@ -414,10 +539,13 @@ impl NamespaceKernel {
         }
         let interface = specification.interface();
         let alias = specification.ownership_alias();
-        let (index, proved_alias, flags) =
-            self.route.link_details_with_flags(interface, deadline)?;
+        let details = self
+            .route
+            .exact_owned_wireguard_link_details(interface, &alias, deadline)?;
+        let index = details.index;
+        let flags = details.flags;
         let up = flags & u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)? != 0;
-        if proved_alias.as_deref() != Some(alias.as_str()) || !up {
+        if !up {
             return Err(KernelError::Malformed);
         }
         let wireguard = self.wireguard.as_mut().ok_or(KernelError::Unsupported)?;
@@ -467,13 +595,26 @@ impl NamespaceKernel {
         if !safe_birth_interface_name(interface) {
             return Err(KernelError::Invalid);
         }
-        self.route.link_index(interface, deadline)
+        self.route.exact_owned_wireguard_link_index(
+            interface,
+            &specification.ownership_alias(),
+            deadline,
+        )
     }
 }
 
 struct NetlinkReply {
     message: Zeroizing<Vec<u8>>,
     sender: SocketAddr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinkDetails {
+    index: u32,
+    name: Option<String>,
+    alias: Option<String>,
+    kind: Option<String>,
+    flags: u32,
 }
 
 struct NetlinkClient {
@@ -636,31 +777,51 @@ impl NetlinkClient {
         }
     }
 
-    fn delete_named_owned_link(
+    fn delete_named_exact_owned_wireguard_link(
         &mut self,
         name: &str,
         alias: &str,
         deadline: HardDeadline,
     ) -> Result<(), KernelError> {
-        let index = match self.owned_link_index(name, alias, deadline) {
+        let index = match self.exact_owned_wireguard_link_index(name, alias, deadline) {
             Ok(index) => index,
             Err(error) if error.is_errno(libc::ENODEV) => return Ok(()),
             Err(error) => return Err(error),
         };
-        self.delete_owned_link(index, name, deadline)
+        self.delete_owned_link(index, name, deadline)?;
+        self.prove_link_absent(name, deadline)
     }
 
-    fn owned_link_index(
+    fn exact_owned_wireguard_link_index(
         &mut self,
         name: &str,
         expected_alias: &str,
         deadline: HardDeadline,
     ) -> Result<u32, KernelError> {
-        let (index, alias) = self.link_details(name, deadline)?;
-        if alias.as_deref() != Some(expected_alias) {
-            return Err(KernelError::Invalid);
+        self.exact_owned_wireguard_link_details(name, expected_alias, deadline)
+            .map(|details| details.index)
+    }
+
+    fn exact_owned_wireguard_link_details(
+        &mut self,
+        name: &str,
+        expected_alias: &str,
+        deadline: HardDeadline,
+    ) -> Result<LinkDetails, KernelError> {
+        let details = self.link_details_full(name, deadline)?;
+        prove_exact_owned_wireguard_link(name, expected_alias, &details)?;
+        Ok(details)
+    }
+
+    fn prove_link_absent(&mut self, name: &str, deadline: HardDeadline) -> Result<(), KernelError> {
+        match self.link_details_full(name, deadline) {
+            Err(error) if error.is_errno(libc::ENODEV) => {
+                deadline.ensure_remaining()?;
+                Ok(())
+            }
+            Ok(_) => Err(KernelError::Invalid),
+            Err(error) => Err(error),
         }
-        Ok(index)
     }
 
     fn link_index(&mut self, name: &str, deadline: HardDeadline) -> Result<u32, KernelError> {
@@ -672,15 +833,15 @@ impl NetlinkClient {
         name: &str,
         deadline: HardDeadline,
     ) -> Result<(u32, Option<String>), KernelError> {
-        let (index, alias, _) = self.link_details_with_flags(name, deadline)?;
-        Ok((index, alias))
+        let details = self.link_details_full(name, deadline)?;
+        Ok((details.index, details.alias))
     }
 
-    fn link_details_with_flags(
+    fn link_details_full(
         &mut self,
         name: &str,
         deadline: HardDeadline,
-    ) -> Result<(u32, Option<String>, u32), KernelError> {
+    ) -> Result<LinkDetails, KernelError> {
         let mut payload = interface_info(0, 0, 0)?;
         push_string_attribute(&mut payload, IFLA_IFNAME, name)?;
         let (response, sequence) = self.request_reply(RTM_GETLINK, &payload, deadline)?;
@@ -695,27 +856,12 @@ impl NetlinkClient {
             return Err(KernelError::Malformed);
         }
         validate_kernel_header(frame, sequence, RTM_NEWLINK)?;
-        if frame.len() < 32 {
+        let details = parse_link_details_frame(frame)?;
+        if details.name.as_deref() != Some(name) {
             return Err(KernelError::Malformed);
         }
-        let index = i32::from_ne_bytes(
-            frame[20..24]
-                .try_into()
-                .map_err(|_| KernelError::Malformed)?,
-        );
-        let index = u32::try_from(index).map_err(|_| KernelError::Malformed)?;
-        let flags = u32::from_ne_bytes(
-            frame[24..28]
-                .try_into()
-                .map_err(|_| KernelError::Malformed)?,
-        );
-        let alias = attributes(&frame[32..])?
-            .into_iter()
-            .find_map(|(kind, value)| (kind & NLA_TYPE_MASK == IFLA_IFALIAS).then_some(value))
-            .map(parse_string_attribute)
-            .transpose()?;
         deadline.ensure_remaining()?;
-        Ok((index, alias, flags))
+        Ok(details)
     }
 
     fn set_link_state(
@@ -1059,6 +1205,70 @@ fn parse_string_attribute(value: &[u8]) -> Result<String, KernelError> {
         .map_err(|_| KernelError::Malformed)
 }
 
+fn parse_link_details_frame(frame: &[u8]) -> Result<LinkDetails, KernelError> {
+    if frame.len() < NLMSG_HEADER_LEN + 16 {
+        return Err(KernelError::Malformed);
+    }
+    let signed_index = i32::from_ne_bytes(
+        frame[20..24]
+            .try_into()
+            .map_err(|_| KernelError::Malformed)?,
+    );
+    let index = u32::try_from(signed_index).map_err(|_| KernelError::Malformed)?;
+    if index == 0 {
+        return Err(KernelError::Malformed);
+    }
+    let flags = u32::from_ne_bytes(
+        frame[24..28]
+            .try_into()
+            .map_err(|_| KernelError::Malformed)?,
+    );
+    let mut name = None;
+    let mut alias = None;
+    let mut kind = None;
+    let mut link_info_seen = false;
+    for (raw_kind, value) in attributes(&frame[NLMSG_HEADER_LEN + 16..])? {
+        match raw_kind & NLA_TYPE_MASK {
+            IFLA_IFNAME => {
+                if raw_kind != IFLA_IFNAME || name.is_some() {
+                    return Err(KernelError::Malformed);
+                }
+                name = Some(parse_string_attribute(value)?);
+            }
+            IFLA_IFALIAS => {
+                if raw_kind != IFLA_IFALIAS || alias.is_some() {
+                    return Err(KernelError::Malformed);
+                }
+                alias = Some(parse_string_attribute(value)?);
+            }
+            IFLA_LINKINFO => {
+                if (raw_kind != IFLA_LINKINFO && raw_kind != (IFLA_LINKINFO | NLA_F_NESTED))
+                    || link_info_seen
+                {
+                    return Err(KernelError::Malformed);
+                }
+                link_info_seen = true;
+                for (nested_kind, nested_value) in attributes(value)? {
+                    if nested_kind & NLA_TYPE_MASK == IFLA_INFO_KIND {
+                        if nested_kind != IFLA_INFO_KIND || kind.is_some() {
+                            return Err(KernelError::Malformed);
+                        }
+                        kind = Some(parse_string_attribute(nested_value)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(LinkDetails {
+        index,
+        name,
+        alias,
+        kind,
+        flags,
+    })
+}
+
 fn push_string_attribute(buffer: &mut Vec<u8>, kind: u16, value: &str) -> Result<(), KernelError> {
     if value.is_empty() || value.len() > 64 || value.as_bytes().contains(&0) {
         return Err(KernelError::Invalid);
@@ -1288,6 +1498,16 @@ mod tests {
         }
     }
 
+    fn link_details_frame(name: &str, alias: &str, kind: &str, flags: u32) -> Vec<u8> {
+        let mut link_info = Vec::new();
+        push_string_attribute(&mut link_info, IFLA_INFO_KIND, kind).expect("kind");
+        let mut payload = interface_info(17, flags, 0).expect("interface info");
+        push_string_attribute(&mut payload, IFLA_IFNAME, name).expect("name");
+        push_string_attribute(&mut payload, IFLA_IFALIAS, alias).expect("alias");
+        push_attribute(&mut payload, IFLA_LINKINFO | NLA_F_NESTED, &link_info).expect("link info");
+        build_netlink_message(RTM_NEWLINK, 0, TEST_SEQUENCE, &payload).expect("link response")
+    }
+
     #[test]
     fn netlink_messages_are_bounded_and_length_consistent() {
         let payload = interface_info(0, 0, 0).expect("interface info");
@@ -1462,6 +1682,95 @@ mod tests {
         assert!(encode_move_link_to_namespace(0, 23).is_err());
         assert!(encode_move_link_to_namespace(17, -1).is_err());
         assert!(encode_create_wireguard_link("request-controlled", "invalid").is_err());
+    }
+
+    #[test]
+    fn link_identity_proof_requires_exact_name_alias_and_wireguard_kind() {
+        let specification = WireguardLeaseSpec::derive(
+            [7; 16],
+            ContextRole::Client,
+            1,
+            WireguardRole::Client as i32,
+        )
+        .expect("lease specification");
+        let name = specification.interface();
+        let alias = specification.ownership_alias();
+        let details = parse_link_details_frame(&link_details_frame(name, &alias, WG_GENL_NAME, 0))
+            .expect("exact details");
+        assert!(prove_exact_owned_wireguard_link(name, &alias, &details).is_ok());
+
+        let wrong_kind = parse_link_details_frame(&link_details_frame(name, &alias, "dummy", 0))
+            .expect("details");
+        assert!(prove_exact_owned_wireguard_link(name, &alias, &wrong_kind).is_err());
+
+        let wrong_alias = parse_link_details_frame(&link_details_frame(
+            name,
+            "volparossa:wireguard:v3:vpc1ffffffff",
+            WG_GENL_NAME,
+            0,
+        ))
+        .expect("details");
+        assert!(prove_exact_owned_wireguard_link(name, &alias, &wrong_alias).is_err());
+
+        let mut duplicate_alias = link_details_frame(name, &alias, WG_GENL_NAME, 0);
+        let length =
+            usize::try_from(read_u32(&duplicate_alias, 0).expect("length")).expect("length fits");
+        push_string_attribute(&mut duplicate_alias, IFLA_IFALIAS, &alias).expect("duplicate");
+        let new_length = u32::try_from(duplicate_alias.len()).expect("bounded");
+        duplicate_alias[0..4].copy_from_slice(&new_length.to_ne_bytes());
+        assert!(duplicate_alias.len() > length);
+        assert!(parse_link_details_frame(&duplicate_alias).is_err());
+    }
+
+    #[test]
+    fn fresh_wireguard_proof_rejects_every_mutated_state_class() {
+        let name = "vpc1deadbeef";
+        let details = LinkDetails {
+            index: 17,
+            name: Some(name.to_owned()),
+            alias: Some(format!("volparossa:wireguard:v3:{name}")),
+            kind: Some(WG_GENL_NAME.to_owned()),
+            flags: 0,
+        };
+        let state = WireguardDeviceState {
+            ifindex: 17,
+            interface_name: name.to_owned(),
+            public_key: [0; 32],
+            listen_port: 0,
+            firewall_mark: 0,
+            peers: Vec::new(),
+        };
+        assert!(prove_fresh_wireguard_state(name, &details, &state).is_ok());
+
+        let mut changed_details = details.clone();
+        changed_details.flags = u32::try_from(libc::IFF_UP).expect("UP flag");
+        assert!(prove_fresh_wireguard_state(name, &changed_details, &state).is_err());
+
+        let mut changed = state.clone();
+        changed.public_key = [1; 32];
+        assert!(prove_fresh_wireguard_state(name, &details, &changed).is_err());
+        changed = state.clone();
+        changed.listen_port = 51_820;
+        assert!(prove_fresh_wireguard_state(name, &details, &changed).is_err());
+        changed = state.clone();
+        changed.firewall_mark = 7;
+        assert!(prove_fresh_wireguard_state(name, &details, &changed).is_err());
+        changed = state.clone();
+        changed.ifindex = 18;
+        assert!(prove_fresh_wireguard_state(name, &details, &changed).is_err());
+        changed = state.clone();
+        changed.peers.push(wireguard_probe::WireguardPeerState {
+            public_key: [2; 32],
+            endpoint: "198.51.100.7:51820".parse().expect("endpoint"),
+            persistent_keepalive_seconds: 0,
+            last_handshake_seconds: 0,
+            last_handshake_nanoseconds: 0,
+            received_bytes: 0,
+            transmitted_bytes: 0,
+            allowed_ips: Vec::new(),
+            protocol_version: None,
+        });
+        assert!(prove_fresh_wireguard_state(name, &details, &changed).is_err());
     }
 
     #[test]

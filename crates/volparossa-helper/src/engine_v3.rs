@@ -3501,21 +3501,22 @@ fn prepared_matches(request: &PrepareLeaseBatch, prepared: &[PreparedKernelLease
     if request.leases.len() != prepared.len() {
         return false;
     }
-    let requested = request
-        .leases
-        .iter()
-        .map(|lease| (lease.path_id, lease.role))
-        .collect::<BTreeSet<_>>();
-    let mut actual = BTreeSet::new();
-    for lease in prepared {
+    let mut public_keys = BTreeSet::new();
+    let mut public_endpoints = BTreeSet::new();
+    for (requested, lease) in request.leases.iter().zip(prepared) {
         if lease.public_key.iter().all(|byte| *byte == 0)
             || lease.evidence != UnderlayEvidence::DirectAssigned
-            || !actual.insert((lease.path_id, lease.role))
+            || (requested.path_id, requested.role) != (lease.path_id, lease.role)
+            || !public_keys.insert(lease.public_key)
+            || !public_endpoints.insert((
+                lease.public_endpoint.address.clone(),
+                lease.public_endpoint.port,
+            ))
         {
             return false;
         }
     }
-    requested == actual
+    true
 }
 
 fn activation_matches(context: &ContextRecord, leases: &[LeaseActivation]) -> bool {
@@ -4893,6 +4894,37 @@ mod tests {
             backend.destroyed.lock().expect("destroyed").as_slice(),
             &[[7; 16]]
         );
+    }
+
+    #[test]
+    fn prepare_proof_order_keys_and_public_endpoints_are_affinely_unique() {
+        let prepare = prepare_request(43);
+        let Some(helper_request::Operation::PrepareLeaseBatch(mut request)) = prepare.operation
+        else {
+            panic!("Prepare request")
+        };
+        let mut second = request.leases[0].clone();
+        second.path_id = 2;
+        request.leases.push(second);
+        let lease = |path_id, key, port| PreparedKernelLease {
+            path_id,
+            role: WireguardRole::Client as i32,
+            public_key: [key; 32],
+            public_endpoint: PublicUdpEndpoint {
+                address: vec![8, 8, 8, 8],
+                port,
+            },
+            evidence: UnderlayEvidence::DirectAssigned,
+        };
+        let valid = [lease(1, 1, 51_821), lease(2, 2, 51_822)];
+        assert!(prepared_matches(&request, &valid));
+
+        let reordered = [valid[1].clone(), valid[0].clone()];
+        assert!(!prepared_matches(&request, &reordered));
+        let duplicate_key = [lease(1, 1, 51_821), lease(2, 1, 51_822)];
+        assert!(!prepared_matches(&request, &duplicate_key));
+        let duplicate_endpoint = [lease(1, 1, 51_821), lease(2, 2, 51_821)];
+        assert!(!prepared_matches(&request, &duplicate_endpoint));
     }
 
     #[tokio::test]

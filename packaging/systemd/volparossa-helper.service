@@ -18,6 +18,7 @@ Restart=on-failure
 RestartSec=3s
 TimeoutStartSec=30s
 TimeoutStopSec=45s
+LimitCORE=0
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN

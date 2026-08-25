@@ -304,6 +304,7 @@ for required_contract in \
     '--property=PrivateNetwork=yes' \
     '--property=PrivateMounts=yes' \
     '--property=NoNewPrivileges=yes' \
+    '--property=LimitCORE=0' \
     '--property="CapabilityBoundingSet=$capabilities"' \
     '--property="AmbientCapabilities=$capabilities"' \
     '--property="BindReadOnlyPaths=$helper_bind $account_binds"' \
