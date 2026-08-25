@@ -1,13 +1,20 @@
-//! Bounded read-only observation of fixed nftables lineage states.
+//! Bounded observation and mutation of one fixed nftables policy lineage.
 //!
-//! The collector sends only fixed `GETGEN` and all-family table, chain, rule,
-//! set, object and flowtable dumps over `NETLINK_NETFILTER`. It preserves the
-//! original initial-empty generation-one observer. A test-only foundation also
-//! proves one caller-scoped run-bound `inet` policy at generation two followed
-//! by a semantic-empty generation three. No production mutation encoder or API
-//! is present in this module.
+//! The collector sends fixed `GETGEN` and all-family table, chain, rule, set,
+//! object and flowtable dumps over `NETLINK_NETFILTER`. The writer can perform
+//! only two generation-pinned atomic transactions: install the run-bound
+//! `inet` forward policy from generation one to two, then delete its exact
+//! observed table handle from generation two to semantic-empty generation
+//! three. Every possibly-sent request is reconciled through a fresh bounded
+//! full-ruleset observation. This module never changes forwarding settings.
 
-use std::{io, marker::PhantomData, os::fd::AsFd, rc::Rc, time::Instant};
+use std::{
+    io,
+    marker::PhantomData,
+    os::fd::AsFd,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_NETFILTER};
 use nix::{
@@ -15,8 +22,9 @@ use nix::{
     poll::{PollFd, PollFlags, PollTimeout, poll},
 };
 use thiserror::Error;
-#[cfg(test)]
 use volparossa_test_support::RunId;
+
+use crate::topology::namespaces::FixedForwardPolicyBinding;
 
 const MAX_DATAGRAM_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 512 * 1024;
@@ -41,6 +49,13 @@ const MAX_COUNTER_BYTES: usize = 64;
 const MAX_OBSERVED_TABLES: usize = 2;
 const MAX_OBSERVED_CHAINS: usize = 2;
 const MAX_OBSERVED_RULES: usize = 3;
+const MAX_MUTATION_BATCH_BYTES: usize = 4 * 1024;
+const MAX_MUTATION_MESSAGES: usize = 6;
+const MAX_MUTATION_ACK_BYTES: usize = 4 * 1024;
+const MAX_MUTATION_ACK_DATAGRAMS: usize = 6;
+const MAX_MUTATION_ACK_FRAMES: usize = 6;
+const MUTATION_TIMEOUT: Duration = Duration::from_secs(2);
+const RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 const NLMSG_HEADER_LEN: usize = 16;
 const NFGENMSG_LEN: usize = 4;
@@ -49,17 +64,13 @@ const REQUEST_LEN: usize = NLMSG_HEADER_LEN + NFGENMSG_LEN;
 
 const NLM_F_REQUEST: u16 = 0x0001;
 const NLM_F_MULTI: u16 = 0x0002;
-#[cfg(test)]
 const NLM_F_ACK: u16 = 0x0004;
 const NLM_F_ROOT: u16 = 0x0100;
 const NLM_F_MATCH: u16 = 0x0200;
 const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
 const NLM_F_APPEND: u16 = 0x0800;
-#[cfg(test)]
 const NLM_F_EXCL: u16 = 0x0200;
-#[cfg(test)]
 const NLM_F_CREATE: u16 = 0x0400;
-#[cfg(test)]
 const NLM_F_CAPPED: u16 = 0x0100;
 
 const NLMSG_ERROR: u16 = 2;
@@ -69,7 +80,6 @@ const NLMSG_OVERRUN: u16 = 4;
 const NFNL_SUBSYS_NFTABLES: u16 = 10;
 const NFT_MSG_NEWTABLE: u16 = NFNL_SUBSYS_NFTABLES << 8;
 const NFT_MSG_GETTABLE: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 1;
-#[cfg(test)]
 const NFT_MSG_DELTABLE: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 2;
 const NFT_MSG_NEWCHAIN: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 3;
 const NFT_MSG_GETCHAIN: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 4;
@@ -84,9 +94,7 @@ const NFT_MSG_GETOBJ: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 19;
 const NFT_MSG_NEWFLOWTABLE: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 22;
 const NFT_MSG_GETFLOWTABLE: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 23;
 
-#[cfg(test)]
 const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
-#[cfg(test)]
 const NFNL_MSG_BATCH_END: u16 = 0x11;
 
 const AF_UNSPEC: u8 = 0;
@@ -98,59 +106,34 @@ const NFPROTO_BRIDGE: u8 = 7;
 const NFPROTO_IPV6: u8 = 10;
 const NFNETLINK_V0: u8 = 0;
 const INITIAL_GENERATION: u32 = 1;
-#[cfg(test)]
 const ACTIVE_POLICY_GENERATION: u32 = 2;
-#[cfg(test)]
 const RETIRED_POLICY_GENERATION: u32 = 3;
-#[cfg(test)]
 const MAX_KERNEL_IFINDEX: u32 = 0x7fff_ffff;
 
-#[cfg(test)]
 const NF_INET_FORWARD: u32 = 2;
-#[cfg(test)]
 const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
-#[cfg(test)]
 const NFT_CHAIN_BASE: u32 = 1;
 const NFT_CHAIN_FLAGS: u32 = 0x0007;
 const NFT_REG_VERDICT: u32 = 0;
-#[cfg(test)]
 const NFT_REG_1: u32 = 1;
-#[cfg(test)]
 const NFT_META_IIF: u32 = 4;
-#[cfg(test)]
 const NFT_META_OIF: u32 = 5;
-#[cfg(test)]
 const NFT_META_NFPROTO: u32 = 15;
-#[cfg(test)]
 const NFT_META_L4PROTO: u32 = 16;
-#[cfg(test)]
 const NFT_PAYLOAD_NETWORK_HEADER: u32 = 1;
-#[cfg(test)]
 const NFT_PAYLOAD_TRANSPORT_HEADER: u32 = 2;
-#[cfg(test)]
 const NFT_CMP_EQ: u32 = 0;
-#[cfg(test)]
 const IPPROTO_ICMP: u8 = 1;
-#[cfg(test)]
 const ICMP_ECHO_REPLY: u8 = 0;
-#[cfg(test)]
 const ICMP_ECHO_REQUEST: u8 = 8;
-#[cfg(test)]
 const ICMP_CODE_ZERO: u8 = 0;
-#[cfg(test)]
 const IPV4_SOURCE_OFFSET: u32 = 12;
-#[cfg(test)]
 const IPV4_DESTINATION_OFFSET: u32 = 16;
-#[cfg(test)]
 const ICMP_TYPE_CODE_OFFSET: u32 = 0;
-#[cfg(test)]
 const FIXED_ALPHA_ADDRESS: [u8; 4] = [10, 241, 1, 2];
-#[cfg(test)]
 const FIXED_OMEGA_ADDRESS: [u8; 4] = [10, 241, 2, 2];
-#[cfg(test)]
 const FORWARD_CHAIN_NAME: &[u8] = b"forward";
-#[cfg(test)]
 const FILTER_CHAIN_TYPE: &[u8] = b"filter";
 
 const NLA_F_NESTED: u16 = 1 << 15;
@@ -221,7 +204,6 @@ const NFTA_VERDICT_CODE: u16 = 1;
 const NFTA_VERDICT_CHAIN: u16 = 2;
 const NFTA_VERDICT_CHAIN_ID: u16 = 3;
 
-#[cfg(test)]
 const NFNL_BATCH_GENID: u16 = 1;
 
 const NFTA_GEN_ID: u16 = 1;
@@ -253,7 +235,6 @@ pub(crate) enum NftablesError {
     #[error("nftables state does not equal the expected policy lineage state")]
     UnexpectedPolicy,
     /// A stable ruleset generation was not the exact successor required by the lineage.
-    #[cfg(test)]
     #[error("nftables generation is not the expected policy-lineage successor")]
     UnexpectedGeneration,
 }
@@ -275,20 +256,29 @@ pub(crate) struct NftablesBaseline {
 /// packet fields are the two distinct live parent-side veth ifindices; all
 /// addresses, protocol values, chain properties and verdicts remain fixed.
 #[derive(Debug, Eq, PartialEq)]
-#[cfg(test)]
 pub(crate) struct FixedForwardPolicyExpectation {
     table_name: Vec<u8>,
     parent_ifindices: [u32; 2],
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-#[cfg(test)]
 impl FixedForwardPolicyExpectation {
-    /// Derive and validate the exact policy expectation for one lifecycle run.
+    /// Derive the exact policy expectation from canonical retained topology.
+    pub(crate) fn from_binding(binding: &FixedForwardPolicyBinding) -> Result<Self, NftablesError> {
+        Self::from_parts(binding.run_id(), binding.parent_ifindices())
+    }
+
+    /// Construct a deliberately caller-selected expectation for parser and
+    /// mutation fault-injection tests.
+    #[cfg(test)]
     pub(crate) fn for_run(
         run_id: &RunId,
         parent_ifindices: [u32; 2],
     ) -> Result<Self, NftablesError> {
+        Self::from_parts(run_id, parent_ifindices)
+    }
+
+    fn from_parts(run_id: &RunId, parent_ifindices: [u32; 2]) -> Result<Self, NftablesError> {
         if parent_ifindices[0] <= 1
             || parent_ifindices[1] <= 1
             || parent_ifindices[0] == parent_ifindices[1]
@@ -405,29 +395,125 @@ impl FixedForwardPolicyExpectation {
 
 /// Exact observed active-policy state bound to the initial generation-one proof.
 #[derive(Debug, Eq, PartialEq)]
-#[cfg(test)]
-pub(crate) struct ActiveNftablesPolicy {
+struct ActivePolicyJournal {
     expectation: FixedForwardPolicyExpectation,
     initial_generation: u32,
     generation: u32,
-    table_handle: u64,
-    chain_handle: u64,
-    rule_handles: [u64; 2],
+    handles: PolicyHandles,
+}
+
+/// Armed affine ownership of the exact active policy.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "an active nftables policy must be verified or retired"]
+pub(crate) struct ActiveNftablesPolicy {
+    journal: Option<ActivePolicyJournal>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
 /// Exact semantic-empty successor after deleting the observed policy table.
 #[derive(Debug, Eq, PartialEq)]
-#[cfg(test)]
 pub(crate) struct SemanticallyEmptyNftables {
     expectation: FixedForwardPolicyExpectation,
     generations: [u32; 3],
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+#[derive(Debug)]
+enum IndeterminatePolicyState {
+    Install {
+        _initial: NftablesBaseline,
+        _expectation: FixedForwardPolicyExpectation,
+    },
+    Delete {
+        _journal: ActivePolicyJournal,
+    },
+}
+
+/// Armed fail-closed authority after a possibly-sent mutation could not be reconciled.
+#[derive(Debug)]
+#[must_use = "indeterminate nftables authority cannot be discarded safely"]
+pub(crate) struct IndeterminateNftablesPolicy {
+    state: Option<IndeterminatePolicyState>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl ActiveNftablesPolicy {
+    fn from_journal(journal: ActivePolicyJournal) -> Self {
+        Self {
+            journal: Some(journal),
+            _thread_bound: PhantomData,
+        }
+    }
+
+    fn journal(&self) -> &ActivePolicyJournal {
+        self.journal
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_journal(mut self) -> ActivePolicyJournal {
+        self.journal.take().unwrap_or_else(|| std::process::abort())
+    }
+}
+
+impl Drop for ActiveNftablesPolicy {
+    fn drop(&mut self) {
+        if self.journal.is_some() {
+            std::process::abort();
+        }
+    }
+}
+
+impl IndeterminateNftablesPolicy {
+    fn after_install(
+        initial: NftablesBaseline,
+        expectation: FixedForwardPolicyExpectation,
+    ) -> Self {
+        Self {
+            state: Some(IndeterminatePolicyState::Install {
+                _initial: initial,
+                _expectation: expectation,
+            }),
+            _thread_bound: PhantomData,
+        }
+    }
+
+    fn after_delete(journal: ActivePolicyJournal) -> Self {
+        Self {
+            state: Some(IndeterminatePolicyState::Delete { _journal: journal }),
+            _thread_bound: PhantomData,
+        }
+    }
+}
+
+impl Drop for IndeterminateNftablesPolicy {
+    fn drop(&mut self) {
+        if self.state.is_some() {
+            std::process::abort();
+        }
+    }
+}
+
+/// Affine authority returned when policy installation does not complete.
+#[derive(Debug)]
+pub(crate) enum NftablesInstallAuthority {
+    /// A fresh generation-one empty observation proved that nothing was installed.
+    Initial(NftablesBaseline, FixedForwardPolicyExpectation),
+    /// The possibly-sent transaction could not be classified safely.
+    Indeterminate(IndeterminateNftablesPolicy),
+}
+
+/// Affine authority returned when exact policy deletion does not complete.
+#[derive(Debug)]
+pub(crate) enum NftablesDeleteAuthority {
+    /// A fresh generation-two readback proved the same active policy and handles.
+    Active(ActiveNftablesPolicy),
+    /// The possibly-sent transaction could not be classified safely.
+    Indeterminate(IndeterminateNftablesPolicy),
+}
+
 /// An observation failure that returns its still-affine lineage authority.
 #[derive(Debug)]
-#[cfg(test)]
 pub(crate) struct NftablesLineageFailure<Authority> {
     /// The bounded observation failure.
     pub(crate) source: NftablesError,
@@ -435,7 +521,6 @@ pub(crate) struct NftablesLineageFailure<Authority> {
     pub(crate) authority: Authority,
 }
 
-#[cfg(test)]
 impl<Authority> NftablesLineageFailure<Authority> {
     /// Recover both the failure and the unique authority that was not consumed.
     pub(crate) fn into_parts(self) -> (NftablesError, Authority) {
@@ -443,60 +528,847 @@ impl<Authority> NftablesLineageFailure<Authority> {
     }
 }
 
-/// Consume generation-one lineage and observe exactly its active successor.
-#[cfg(test)]
-pub(crate) fn observe_exact_forward_policy(
-    initial: NftablesBaseline,
-    expectation: FixedForwardPolicyExpectation,
+/// Return one bounded absolute mutation deadline for higher-level typestates.
+pub(crate) fn mutation_deadline() -> Result<Instant, NftablesError> {
+    Instant::now()
+        .checked_add(MUTATION_TIMEOUT)
+        .ok_or(NftablesError::Limit)
+}
+
+/// Freshly verify the same stable generation-one empty ruleset.
+pub(crate) fn verify_empty_nftables(
+    expected: &NftablesBaseline,
     deadline: Instant,
-) -> Result<ActiveNftablesPolicy, NftablesLineageFailure<NftablesBaseline>> {
-    match observe_ruleset(deadline, ACTIVE_POLICY_GENERATION) {
-        Ok(snapshot) => match snapshot.exact_policy_handles(&expectation) {
-            Ok(handles) => Ok(ActiveNftablesPolicy {
-                expectation,
-                initial_generation: initial.generation,
-                generation: ACTIVE_POLICY_GENERATION,
-                table_handle: handles.table,
-                chain_handle: handles.chain,
-                rule_handles: handles.rules,
-                _thread_bound: PhantomData,
-            }),
-            Err(source) => Err(NftablesLineageFailure {
-                source,
-                authority: initial,
-            }),
-        },
-        Err(source) => Err(NftablesLineageFailure {
-            source,
-            authority: initial,
-        }),
+) -> Result<(), NftablesError> {
+    let observed = observe_empty_nftables(deadline)?;
+    if &observed == expected {
+        Ok(())
+    } else {
+        Err(NftablesError::Inconsistent)
     }
 }
 
-/// Consume active-policy lineage and observe exactly its semantic-empty successor.
-#[cfg(test)]
-pub(crate) fn observe_semantically_empty_after_forward_policy(
+/// Consume generation-one lineage, install the exact policy, and prove generation two.
+pub(crate) fn install_exact_forward_policy(
+    initial: NftablesBaseline,
+    expectation: FixedForwardPolicyExpectation,
+    deadline: Instant,
+) -> Result<ActiveNftablesPolicy, NftablesLineageFailure<NftablesInstallAuthority>> {
+    install_policy(initial, expectation, Deadline(deadline))
+}
+
+/// Freshly verify generation two, the full exact policy, and its retained handles.
+pub(crate) fn verify_exact_forward_policy(
+    active: &ActiveNftablesPolicy,
+    deadline: Instant,
+) -> Result<(), NftablesError> {
+    let journal = active.journal();
+    let snapshot = observe_ruleset(deadline, ACTIVE_POLICY_GENERATION)?;
+    let handles = snapshot.exact_policy_handles(&journal.expectation)?;
+    if handles == journal.handles {
+        Ok(())
+    } else {
+        Err(NftablesError::UnexpectedPolicy)
+    }
+}
+
+/// Consume active authority, delete its exact table handle, and prove semantic-empty generation three.
+pub(crate) fn delete_exact_forward_policy(
     active: ActiveNftablesPolicy,
     deadline: Instant,
-) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<ActiveNftablesPolicy>> {
-    match observe_ruleset(deadline, RETIRED_POLICY_GENERATION) {
-        Ok(snapshot) if snapshot.is_empty() => Ok(SemanticallyEmptyNftables {
-            expectation: active.expectation,
-            generations: [
-                active.initial_generation,
-                active.generation,
-                RETIRED_POLICY_GENERATION,
-            ],
-            _thread_bound: PhantomData,
-        }),
-        Ok(_) => Err(NftablesLineageFailure {
-            source: NftablesError::UnexpectedPolicy,
-            authority: active,
-        }),
-        Err(source) => Err(NftablesLineageFailure {
+) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<NftablesDeleteAuthority>> {
+    delete_policy(active, Deadline(deadline))
+}
+
+/// Freshly verify semantic emptiness at the exact retired generation.
+pub(crate) fn verify_semantically_empty_after_forward_policy(
+    retired: &SemanticallyEmptyNftables,
+    deadline: Instant,
+) -> Result<(), NftablesError> {
+    if retired.generations
+        != [
+            INITIAL_GENERATION,
+            ACTIVE_POLICY_GENERATION,
+            RETIRED_POLICY_GENERATION,
+        ]
+    {
+        return Err(NftablesError::UnexpectedGeneration);
+    }
+    let snapshot = observe_ruleset(deadline, RETIRED_POLICY_GENERATION)?;
+    if snapshot.is_empty() {
+        Ok(())
+    } else {
+        Err(NftablesError::UnexpectedPolicy)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MutationRequest {
+    header: [u8; NLMSG_HEADER_LEN],
+    acknowledgement_required: bool,
+}
+
+struct MutationTransaction {
+    bytes: Vec<u8>,
+    requests: Vec<MutationRequest>,
+}
+
+impl MutationTransaction {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            requests: Vec::new(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        message_type: u16,
+        flags: u16,
+        sequence: u32,
+        payload: &[u8],
+    ) -> Result<(), NftablesError> {
+        if self.requests.len() >= MAX_MUTATION_MESSAGES {
+            return Err(NftablesError::Limit);
+        }
+        let message = encode_mutation_message(message_type, flags, sequence, payload)?;
+        if self
+            .bytes
+            .len()
+            .checked_add(message.len())
+            .is_none_or(|length| length > MAX_MUTATION_BATCH_BYTES)
+        {
+            return Err(NftablesError::Limit);
+        }
+        let header = message[..NLMSG_HEADER_LEN]
+            .try_into()
+            .map_err(|_| NftablesError::Malformed)?;
+        self.requests.push(MutationRequest {
+            header,
+            acknowledgement_required: flags & NLM_F_ACK != 0,
+        });
+        self.bytes.extend(message);
+        Ok(())
+    }
+
+    fn finish(self, messages: usize, acknowledgements: usize) -> Result<Self, NftablesError> {
+        if self.requests.len() != messages
+            || self
+                .requests
+                .iter()
+                .filter(|request| request.acknowledgement_required)
+                .count()
+                != acknowledgements
+            || self.bytes.is_empty()
+            || self.bytes.len() > MAX_MUTATION_BATCH_BYTES
+        {
+            return Err(NftablesError::Malformed);
+        }
+        Ok(self)
+    }
+}
+
+fn encode_install_transaction(
+    expectation: &FixedForwardPolicyExpectation,
+) -> Result<MutationTransaction, NftablesError> {
+    let mut transaction = MutationTransaction::new();
+    transaction.push(
+        NFNL_MSG_BATCH_BEGIN,
+        NLM_F_REQUEST,
+        1,
+        &encode_batch_boundary_payload(Some(INITIAL_GENERATION))?,
+    )?;
+
+    let mut table = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut table,
+        NFTA_TABLE_NAME,
+        &encode_nul_string(&expectation.table_name)?,
+    )?;
+    encode_attribute(&mut table, NFTA_TABLE_FLAGS, &0_u32.to_be_bytes())?;
+    transaction.push(
+        NFT_MSG_NEWTABLE,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        2,
+        &table,
+    )?;
+
+    let mut hook = Vec::new();
+    encode_attribute(&mut hook, NFTA_HOOK_HOOKNUM, &NF_INET_FORWARD.to_be_bytes())?;
+    encode_attribute(&mut hook, NFTA_HOOK_PRIORITY, &0_i32.to_be_bytes())?;
+    let mut chain = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut chain,
+        NFTA_CHAIN_TABLE,
+        &encode_nul_string(&expectation.table_name)?,
+    )?;
+    encode_attribute(
+        &mut chain,
+        NFTA_CHAIN_NAME,
+        &encode_nul_string(FORWARD_CHAIN_NAME)?,
+    )?;
+    encode_attribute(
+        &mut chain,
+        NFTA_CHAIN_TYPE,
+        &encode_nul_string(FILTER_CHAIN_TYPE)?,
+    )?;
+    encode_attribute(&mut chain, NFTA_CHAIN_HOOK | NLA_F_NESTED, &hook)?;
+    encode_attribute(&mut chain, NFTA_CHAIN_POLICY, &NF_DROP.to_be_bytes())?;
+    transaction.push(
+        NFT_MSG_NEWCHAIN,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        3,
+        &chain,
+    )?;
+
+    for (sequence, rule_index) in [(4, 0), (5, 1)] {
+        let mut rule = encode_request_nfgen(NFPROTO_INET, 0);
+        encode_attribute(
+            &mut rule,
+            NFTA_RULE_TABLE,
+            &encode_nul_string(&expectation.table_name)?,
+        )?;
+        encode_attribute(
+            &mut rule,
+            NFTA_RULE_CHAIN,
+            &encode_nul_string(FORWARD_CHAIN_NAME)?,
+        )?;
+        encode_attribute(
+            &mut rule,
+            NFTA_RULE_EXPRESSIONS | NLA_F_NESTED,
+            &encode_policy_expressions(&expectation.expected_rule_expressions(rule_index))?,
+        )?;
+        transaction.push(
+            NFT_MSG_NEWRULE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
+            sequence,
+            &rule,
+        )?;
+    }
+
+    transaction.push(
+        NFNL_MSG_BATCH_END,
+        NLM_F_REQUEST,
+        6,
+        &encode_batch_boundary_payload(None)?,
+    )?;
+    transaction.finish(6, 4)
+}
+
+fn encode_delete_transaction(
+    journal: &ActivePolicyJournal,
+) -> Result<MutationTransaction, NftablesError> {
+    if journal.initial_generation != INITIAL_GENERATION
+        || journal.generation != ACTIVE_POLICY_GENERATION
+        || journal.handles.table == 0
+    {
+        return Err(NftablesError::UnexpectedPolicy);
+    }
+    let mut transaction = MutationTransaction::new();
+    transaction.push(
+        NFNL_MSG_BATCH_BEGIN,
+        NLM_F_REQUEST,
+        1,
+        &encode_batch_boundary_payload(Some(ACTIVE_POLICY_GENERATION))?,
+    )?;
+    let mut delete = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut delete,
+        NFTA_TABLE_HANDLE,
+        &journal.handles.table.to_be_bytes(),
+    )?;
+    transaction.push(NFT_MSG_DELTABLE, NLM_F_REQUEST | NLM_F_ACK, 2, &delete)?;
+    transaction.push(
+        NFNL_MSG_BATCH_END,
+        NLM_F_REQUEST,
+        3,
+        &encode_batch_boundary_payload(None)?,
+    )?;
+    transaction.finish(3, 1)
+}
+
+fn encode_policy_expressions(expressions: &[ObservedExpression]) -> Result<Vec<u8>, NftablesError> {
+    if expressions.len() != MAX_RULE_EXPRESSIONS {
+        return Err(NftablesError::Malformed);
+    }
+    let mut encoded = Vec::new();
+    for expression in expressions {
+        let (name, data) = match expression {
+            ObservedExpression::Meta { destination, key } => {
+                let mut data = Vec::new();
+                encode_attribute(&mut data, NFTA_META_KEY, &key.to_be_bytes())?;
+                encode_attribute(&mut data, NFTA_META_DREG, &destination.to_be_bytes())?;
+                (b"meta".as_slice(), data)
+            }
+            ObservedExpression::Compare {
+                source,
+                operation,
+                value,
+            } => {
+                let mut nested_value = Vec::new();
+                encode_attribute(&mut nested_value, NFTA_DATA_VALUE, value)?;
+                let mut data = Vec::new();
+                encode_attribute(&mut data, NFTA_CMP_SREG, &source.to_be_bytes())?;
+                encode_attribute(&mut data, NFTA_CMP_OP, &operation.to_be_bytes())?;
+                encode_attribute(&mut data, NFTA_CMP_DATA | NLA_F_NESTED, &nested_value)?;
+                (b"cmp".as_slice(), data)
+            }
+            ObservedExpression::Payload {
+                destination,
+                base,
+                offset,
+                length,
+            } => {
+                let mut data = Vec::new();
+                encode_attribute(&mut data, NFTA_PAYLOAD_DREG, &destination.to_be_bytes())?;
+                encode_attribute(&mut data, NFTA_PAYLOAD_BASE, &base.to_be_bytes())?;
+                encode_attribute(&mut data, NFTA_PAYLOAD_OFFSET, &offset.to_be_bytes())?;
+                encode_attribute(&mut data, NFTA_PAYLOAD_LEN, &length.to_be_bytes())?;
+                (b"payload".as_slice(), data)
+            }
+            ObservedExpression::ImmediateAccept => {
+                let mut verdict = Vec::new();
+                encode_attribute(&mut verdict, NFTA_VERDICT_CODE, &NF_ACCEPT.to_be_bytes())?;
+                let mut nested_verdict = Vec::new();
+                encode_attribute(
+                    &mut nested_verdict,
+                    NFTA_DATA_VERDICT | NLA_F_NESTED,
+                    &verdict,
+                )?;
+                let mut data = Vec::new();
+                encode_attribute(
+                    &mut data,
+                    NFTA_IMMEDIATE_DREG,
+                    &NFT_REG_VERDICT.to_be_bytes(),
+                )?;
+                encode_attribute(
+                    &mut data,
+                    NFTA_IMMEDIATE_DATA | NLA_F_NESTED,
+                    &nested_verdict,
+                )?;
+                (b"immediate".as_slice(), data)
+            }
+        };
+        let mut element = Vec::new();
+        encode_attribute(&mut element, NFTA_EXPR_NAME, &encode_nul_string(name)?)?;
+        encode_attribute(&mut element, NFTA_EXPR_DATA | NLA_F_NESTED, &data)?;
+        encode_attribute(&mut encoded, NFTA_LIST_ELEM | NLA_F_NESTED, &element)?;
+    }
+    Ok(encoded)
+}
+
+fn encode_batch_boundary_payload(generation: Option<u32>) -> Result<Vec<u8>, NftablesError> {
+    let mut payload = encode_request_nfgen(AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
+    if let Some(generation) = generation {
+        encode_attribute(&mut payload, NFNL_BATCH_GENID, &generation.to_be_bytes())?;
+    }
+    Ok(payload)
+}
+
+fn encode_request_nfgen(family: u8, resource_id: u16) -> Vec<u8> {
+    let mut payload = vec![family, NFNETLINK_V0];
+    payload.extend(resource_id.to_be_bytes());
+    payload
+}
+
+fn encode_attribute(output: &mut Vec<u8>, kind: u16, payload: &[u8]) -> Result<(), NftablesError> {
+    if kind & NLA_TYPE_MASK == 0 {
+        return Err(NftablesError::Malformed);
+    }
+    let length = ATTRIBUTE_HEADER_LEN
+        .checked_add(payload.len())
+        .ok_or(NftablesError::Limit)?;
+    let encoded_length = u16::try_from(length).map_err(|_| NftablesError::Limit)?;
+    let aligned = align4(length)?;
+    let new_length = output
+        .len()
+        .checked_add(aligned)
+        .ok_or(NftablesError::Limit)?;
+    if new_length > MAX_MUTATION_BATCH_BYTES {
+        return Err(NftablesError::Limit);
+    }
+    output.extend(encoded_length.to_ne_bytes());
+    output.extend(kind.to_ne_bytes());
+    output.extend(payload);
+    output.resize(new_length, 0);
+    Ok(())
+}
+
+fn encode_nul_string(value: &[u8]) -> Result<Vec<u8>, NftablesError> {
+    if value.is_empty() || value.contains(&0) || value.len() >= MAX_TABLE_NAME_BYTES {
+        return Err(NftablesError::Malformed);
+    }
+    let mut encoded = Vec::with_capacity(value.len() + 1);
+    encoded.extend_from_slice(value);
+    encoded.push(0);
+    Ok(encoded)
+}
+
+fn encode_mutation_message(
+    message_type: u16,
+    flags: u16,
+    sequence: u32,
+    payload: &[u8],
+) -> Result<Vec<u8>, NftablesError> {
+    if sequence == 0 || flags & NLM_F_REQUEST == 0 {
+        return Err(NftablesError::Malformed);
+    }
+    let length = NLMSG_HEADER_LEN
+        .checked_add(payload.len())
+        .ok_or(NftablesError::Limit)?;
+    let aligned = align4(length)?;
+    if aligned > MAX_MUTATION_BATCH_BYTES {
+        return Err(NftablesError::Limit);
+    }
+    let mut message = Vec::with_capacity(aligned);
+    message.extend(
+        u32::try_from(length)
+            .map_err(|_| NftablesError::Limit)?
+            .to_ne_bytes(),
+    );
+    message.extend(message_type.to_ne_bytes());
+    message.extend(flags.to_ne_bytes());
+    message.extend(sequence.to_ne_bytes());
+    message.extend(0_u32.to_ne_bytes());
+    message.extend(payload);
+    message.resize(aligned, 0);
+    Ok(message)
+}
+
+struct MutationClient {
+    socket: Socket,
+    local_port: u32,
+}
+
+enum MutationSendFailure {
+    NotSent(NftablesError),
+    PossiblySent(NftablesError),
+}
+
+struct MutationAckState<'a> {
+    local_port: u32,
+    requests: &'a [MutationRequest],
+    acknowledged: Vec<bool>,
+}
+
+impl MutationClient {
+    fn connect(deadline: Deadline) -> Result<Self, NftablesError> {
+        deadline.ensure_unexpired()?;
+        let mut socket = Socket::new(NETLINK_NETFILTER)?;
+        socket.set_netlink_get_strict_chk(true)?;
+        socket.set_cap_ack(true)?;
+        if !socket.get_cap_ack()? {
+            return Err(NftablesError::Malformed);
+        }
+        socket.set_non_blocking(true)?;
+        let address = socket.bind_auto()?;
+        if address.port_number() == 0 || address.multicast_groups() != 0 {
+            return Err(NftablesError::Malformed);
+        }
+        socket.connect(&SocketAddr::new(0, 0))?;
+        deadline.ensure_unexpired()?;
+        Ok(Self {
+            socket,
+            local_port: address.port_number(),
+        })
+    }
+
+    fn send(
+        &self,
+        transaction: &MutationTransaction,
+        deadline: Deadline,
+    ) -> Result<(), MutationSendFailure> {
+        if transaction.bytes.is_empty()
+            || transaction.bytes.len() > MAX_MUTATION_BATCH_BYTES
+            || transaction.requests.is_empty()
+            || transaction.requests.len() > MAX_MUTATION_MESSAGES
+        {
+            return Err(MutationSendFailure::NotSent(NftablesError::Limit));
+        }
+        loop {
+            if let Err(error) = deadline.ensure_unexpired() {
+                return Err(MutationSendFailure::NotSent(error));
+            }
+            match self.socket.send(&transaction.bytes, 0) {
+                Ok(written) if written == transaction.bytes.len() => {
+                    return deadline
+                        .ensure_unexpired()
+                        .map_err(MutationSendFailure::PossiblySent);
+                }
+                Ok(_) => {
+                    return Err(MutationSendFailure::PossiblySent(
+                        io::Error::new(io::ErrorKind::WriteZero, "short netlink transaction")
+                            .into(),
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(error) = wait_for_socket(&self.socket, PollFlags::POLLOUT, deadline)
+                    {
+                        return Err(MutationSendFailure::NotSent(error));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    return Err(MutationSendFailure::NotSent(error.into()));
+                }
+            }
+        }
+    }
+
+    fn receive_acknowledgements(
+        &self,
+        transaction: &MutationTransaction,
+        deadline: Deadline,
+    ) -> Result<(), NftablesError> {
+        let acknowledgement_count = transaction
+            .requests
+            .iter()
+            .filter(|request| request.acknowledgement_required)
+            .count();
+        if acknowledgement_count == 0 || acknowledgement_count > MAX_MUTATION_ACK_FRAMES {
+            return Err(NftablesError::Limit);
+        }
+        let mut state = MutationAckState::new(self.local_port, &transaction.requests);
+        let mut budget = CollectionBudget {
+            bytes: 0,
+            datagrams: 0,
+            frames: 0,
+            max_bytes: MAX_MUTATION_ACK_BYTES,
+            max_datagrams: MAX_MUTATION_ACK_DATAGRAMS,
+            max_frames: MAX_MUTATION_ACK_FRAMES,
+        };
+        while !state.is_complete() {
+            let (bytes, sender) = receive_bounded(&self.socket, deadline, &budget)?;
+            state.ingest(sender, &bytes, &mut budget)?;
+        }
+        deadline.ensure_unexpired()?;
+        state.finish()
+    }
+}
+
+impl<'a> MutationAckState<'a> {
+    fn new(local_port: u32, requests: &'a [MutationRequest]) -> Self {
+        Self {
+            local_port,
+            requests,
+            acknowledged: vec![false; requests.len()],
+        }
+    }
+
+    fn ingest(
+        &mut self,
+        sender: SocketAddr,
+        bytes: &[u8],
+        budget: &mut CollectionBudget,
+    ) -> Result<(), NftablesError> {
+        if sender != SocketAddr::new(0, 0) || self.is_complete() {
+            return Err(NftablesError::Malformed);
+        }
+        walk_datagram(bytes, budget, |frame| self.ingest_frame(frame))
+    }
+
+    fn ingest_frame(&mut self, frame: &[u8]) -> Result<(), NftablesError> {
+        if frame.len() != NLMSG_HEADER_LEN + 4 + NLMSG_HEADER_LEN
+            || read_ne_u16(frame, 4)? != NLMSG_ERROR
+            || read_ne_u16(frame, 6)? != NLM_F_CAPPED
+            || read_ne_u32(frame, 12)? != self.local_port
+        {
+            return Err(NftablesError::Malformed);
+        }
+        let sequence = read_ne_u32(frame, 8)?;
+        let embedded = &frame[NLMSG_HEADER_LEN + 4..];
+        let Some(index) = self.requests.iter().position(|request| {
+            read_ne_u32(&request.header, 8).is_ok_and(|value| value == sequence)
+                && embedded == request.header
+        }) else {
+            return Err(NftablesError::Malformed);
+        };
+        let errno = read_ne_i32(frame, NLMSG_HEADER_LEN)?;
+        if errno < 0 {
+            return Err(NftablesError::Kernel(errno.saturating_abs()));
+        }
+        if errno != 0
+            || !self.requests[index].acknowledgement_required
+            || self.acknowledged[index]
+            || self.next_acknowledgement() != Some(index)
+        {
+            return Err(NftablesError::Malformed);
+        }
+        self.acknowledged[index] = true;
+        Ok(())
+    }
+
+    fn next_acknowledgement(&self) -> Option<usize> {
+        self.requests
+            .iter()
+            .enumerate()
+            .find_map(|(index, request)| {
+                (request.acknowledgement_required && !self.acknowledged[index]).then_some(index)
+            })
+    }
+
+    fn is_complete(&self) -> bool {
+        self.next_acknowledgement().is_none()
+    }
+
+    fn finish(self) -> Result<(), NftablesError> {
+        if self
+            .requests
+            .iter()
+            .enumerate()
+            .all(|(index, request)| self.acknowledged[index] == request.acknowledgement_required)
+        {
+            Ok(())
+        } else {
+            Err(NftablesError::Malformed)
+        }
+    }
+}
+
+fn reconciliation_deadline() -> Result<Instant, NftablesError> {
+    Instant::now()
+        .checked_add(RECONCILIATION_TIMEOUT)
+        .ok_or(NftablesError::Limit)
+}
+
+fn install_failure(
+    source: NftablesError,
+    authority: NftablesInstallAuthority,
+) -> NftablesLineageFailure<NftablesInstallAuthority> {
+    NftablesLineageFailure { source, authority }
+}
+
+fn delete_failure(
+    source: NftablesError,
+    authority: NftablesDeleteAuthority,
+) -> NftablesLineageFailure<NftablesDeleteAuthority> {
+    NftablesLineageFailure { source, authority }
+}
+
+fn install_policy(
+    initial: NftablesBaseline,
+    expectation: FixedForwardPolicyExpectation,
+    deadline: Deadline,
+) -> Result<ActiveNftablesPolicy, NftablesLineageFailure<NftablesInstallAuthority>> {
+    if initial.generation != INITIAL_GENERATION {
+        return Err(install_failure(
+            NftablesError::UnexpectedGeneration,
+            NftablesInstallAuthority::Initial(initial, expectation),
+        ));
+    }
+    if let Err(source) = verify_empty_nftables(&initial, deadline.0) {
+        return Err(install_failure(
             source,
-            authority: active,
-        }),
+            NftablesInstallAuthority::Initial(initial, expectation),
+        ));
+    }
+    let transaction = match encode_install_transaction(&expectation) {
+        Ok(transaction) => transaction,
+        Err(source) => {
+            return Err(install_failure(
+                source,
+                NftablesInstallAuthority::Initial(initial, expectation),
+            ));
+        }
+    };
+    let client = match MutationClient::connect(deadline) {
+        Ok(client) => client,
+        Err(source) => {
+            return Err(install_failure(
+                source,
+                NftablesInstallAuthority::Initial(initial, expectation),
+            ));
+        }
+    };
+    let acknowledgement_source = match client.send(&transaction, deadline) {
+        Ok(()) => client
+            .receive_acknowledgements(&transaction, deadline)
+            .err(),
+        Err(MutationSendFailure::NotSent(source)) => {
+            return Err(install_failure(
+                source,
+                NftablesInstallAuthority::Initial(initial, expectation),
+            ));
+        }
+        Err(MutationSendFailure::PossiblySent(source)) => Some(source),
+    };
+    reconcile_install(initial, expectation, acknowledgement_source)
+}
+
+fn reconcile_install(
+    initial: NftablesBaseline,
+    expectation: FixedForwardPolicyExpectation,
+    mutation_source: Option<NftablesError>,
+) -> Result<ActiveNftablesPolicy, NftablesLineageFailure<NftablesInstallAuthority>> {
+    let deadline = match reconciliation_deadline() {
+        Ok(deadline) => deadline,
+        Err(source) => {
+            return Err(install_failure(
+                source,
+                NftablesInstallAuthority::Indeterminate(
+                    IndeterminateNftablesPolicy::after_install(initial, expectation),
+                ),
+            ));
+        }
+    };
+    match observe_stable_ruleset(deadline) {
+        Ok(observed)
+            if observed.generation == INITIAL_GENERATION && observed.snapshot.is_empty() =>
+        {
+            Err(install_failure(
+                mutation_source.unwrap_or(NftablesError::UnexpectedPolicy),
+                NftablesInstallAuthority::Initial(initial, expectation),
+            ))
+        }
+        Ok(observed) if observed.generation == ACTIVE_POLICY_GENERATION => {
+            match observed.snapshot.exact_policy_handles(&expectation) {
+                Ok(handles) => Ok(ActiveNftablesPolicy::from_journal(ActivePolicyJournal {
+                    expectation,
+                    initial_generation: initial.generation,
+                    generation: observed.generation,
+                    handles,
+                })),
+                Err(source) => Err(install_failure(
+                    source,
+                    NftablesInstallAuthority::Indeterminate(
+                        IndeterminateNftablesPolicy::after_install(initial, expectation),
+                    ),
+                )),
+            }
+        }
+        Ok(observed) => Err(install_failure(
+            if observed.generation == INITIAL_GENERATION
+                || observed.generation == ACTIVE_POLICY_GENERATION
+            {
+                NftablesError::UnexpectedPolicy
+            } else {
+                NftablesError::UnexpectedGeneration
+            },
+            NftablesInstallAuthority::Indeterminate(IndeterminateNftablesPolicy::after_install(
+                initial,
+                expectation,
+            )),
+        )),
+        Err(source) => Err(install_failure(
+            source,
+            NftablesInstallAuthority::Indeterminate(IndeterminateNftablesPolicy::after_install(
+                initial,
+                expectation,
+            )),
+        )),
+    }
+}
+
+fn delete_policy(
+    active: ActiveNftablesPolicy,
+    deadline: Deadline,
+) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<NftablesDeleteAuthority>> {
+    if let Err(source) = verify_exact_forward_policy(&active, deadline.0) {
+        return Err(delete_failure(
+            source,
+            NftablesDeleteAuthority::Active(active),
+        ));
+    }
+    let transaction = match encode_delete_transaction(active.journal()) {
+        Ok(transaction) => transaction,
+        Err(source) => {
+            return Err(delete_failure(
+                source,
+                NftablesDeleteAuthority::Active(active),
+            ));
+        }
+    };
+    let client = match MutationClient::connect(deadline) {
+        Ok(client) => client,
+        Err(source) => {
+            return Err(delete_failure(
+                source,
+                NftablesDeleteAuthority::Active(active),
+            ));
+        }
+    };
+    let acknowledgement_source = match client.send(&transaction, deadline) {
+        Ok(()) => client
+            .receive_acknowledgements(&transaction, deadline)
+            .err(),
+        Err(MutationSendFailure::NotSent(source)) => {
+            return Err(delete_failure(
+                source,
+                NftablesDeleteAuthority::Active(active),
+            ));
+        }
+        Err(MutationSendFailure::PossiblySent(source)) => Some(source),
+    };
+    reconcile_delete(active.into_journal(), acknowledgement_source)
+}
+
+fn reconcile_delete(
+    journal: ActivePolicyJournal,
+    mutation_source: Option<NftablesError>,
+) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<NftablesDeleteAuthority>> {
+    let deadline = match reconciliation_deadline() {
+        Ok(deadline) => deadline,
+        Err(source) => {
+            return Err(delete_failure(
+                source,
+                NftablesDeleteAuthority::Indeterminate(IndeterminateNftablesPolicy::after_delete(
+                    journal,
+                )),
+            ));
+        }
+    };
+    match observe_stable_ruleset(deadline) {
+        Ok(observed)
+            if observed.generation == RETIRED_POLICY_GENERATION && observed.snapshot.is_empty() =>
+        {
+            Ok(SemanticallyEmptyNftables {
+                expectation: journal.expectation,
+                generations: [
+                    journal.initial_generation,
+                    journal.generation,
+                    observed.generation,
+                ],
+                _thread_bound: PhantomData,
+            })
+        }
+        Ok(observed) if observed.generation == ACTIVE_POLICY_GENERATION => {
+            match observed.snapshot.exact_policy_handles(&journal.expectation) {
+                Ok(handles) if handles == journal.handles => Err(delete_failure(
+                    mutation_source.unwrap_or(NftablesError::UnexpectedPolicy),
+                    NftablesDeleteAuthority::Active(ActiveNftablesPolicy::from_journal(journal)),
+                )),
+                Ok(_) => Err(delete_failure(
+                    NftablesError::UnexpectedPolicy,
+                    NftablesDeleteAuthority::Indeterminate(
+                        IndeterminateNftablesPolicy::after_delete(journal),
+                    ),
+                )),
+                Err(source) => Err(delete_failure(
+                    source,
+                    NftablesDeleteAuthority::Indeterminate(
+                        IndeterminateNftablesPolicy::after_delete(journal),
+                    ),
+                )),
+            }
+        }
+        Ok(observed) => Err(delete_failure(
+            if observed.generation == ACTIVE_POLICY_GENERATION
+                || observed.generation == RETIRED_POLICY_GENERATION
+            {
+                NftablesError::UnexpectedPolicy
+            } else {
+                NftablesError::UnexpectedGeneration
+            },
+            NftablesDeleteAuthority::Indeterminate(IndeterminateNftablesPolicy::after_delete(
+                journal,
+            )),
+        )),
+        Err(source) => Err(delete_failure(
+            source,
+            NftablesDeleteAuthority::Indeterminate(IndeterminateNftablesPolicy::after_delete(
+                journal,
+            )),
+        )),
     }
 }
 
@@ -626,8 +1498,8 @@ impl ObjectKind {
 
     const fn reply_flags(self) -> u16 {
         match self {
-            Self::Rule => NLM_F_MULTI | NLM_F_APPEND,
-            Self::Table | Self::Chain | Self::Set | Self::Object | Self::Flowtable => NLM_F_MULTI,
+            Self::Rule | Self::Object | Self::Flowtable => NLM_F_MULTI | NLM_F_APPEND,
+            Self::Table | Self::Chain | Self::Set => NLM_F_MULTI,
         }
     }
 }
@@ -701,8 +1573,7 @@ struct RulesetSnapshot {
     rules: Vec<RuleRecord>,
 }
 
-#[derive(Clone, Copy)]
-#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PolicyHandles {
     table: u64,
     chain: u64,
@@ -752,7 +1623,6 @@ impl RulesetSnapshot {
         self.tables.is_empty() && self.chains.is_empty() && self.rules.is_empty()
     }
 
-    #[cfg(test)]
     fn exact_policy_handles(
         &self,
         expectation: &FixedForwardPolicyExpectation,
@@ -1171,24 +2041,38 @@ impl NetfilterCollector {
     }
 }
 
-#[cfg(test)]
-fn observe_ruleset(
-    deadline: Instant,
-    expected_generation: u32,
-) -> Result<RulesetSnapshot, NftablesError> {
+struct StableRuleset {
+    generation: u32,
+    snapshot: RulesetSnapshot,
+}
+
+fn observe_stable_ruleset(deadline: Instant) -> Result<StableRuleset, NftablesError> {
     let deadline = Deadline(deadline);
     deadline.ensure_unexpired()?;
     let mut collector = NetfilterCollector::connect(deadline)?;
     let mut budget = CollectionBudget::production();
     let before = collector.collect_generation(deadline, &mut budget)?;
-    if before != expected_generation {
-        return Err(NftablesError::UnexpectedGeneration);
-    }
-    let snapshot = collector.collect_ruleset(expected_generation, deadline, &mut budget)?;
+    let snapshot = collector.collect_ruleset(before, deadline, &mut budget)?;
     let after = collector.collect_generation(deadline, &mut budget)?;
     deadline.ensure_unexpired()?;
-    validate_ruleset_generation(before, after, expected_generation)?;
-    Ok(snapshot)
+    if before != after {
+        return Err(NftablesError::Inconsistent);
+    }
+    Ok(StableRuleset {
+        generation: before,
+        snapshot,
+    })
+}
+
+fn observe_ruleset(
+    deadline: Instant,
+    expected_generation: u32,
+) -> Result<RulesetSnapshot, NftablesError> {
+    let observed = observe_stable_ruleset(deadline)?;
+    if observed.generation != expected_generation {
+        return Err(NftablesError::UnexpectedGeneration);
+    }
+    Ok(observed.snapshot)
 }
 
 #[cfg(test)]
@@ -2067,6 +2951,7 @@ fn timeout_error() -> io::Error {
 mod tests {
     use std::{
         env, fs,
+        os::unix::process::ExitStatusExt,
         process::Command,
         time::{Duration, Instant},
     };
@@ -2077,68 +2962,9 @@ mod tests {
 
     const LIVE_COLLECTOR_CHILD_ENV: &str = "VOLPAROSSA_NFTABLES_COLLECTOR_CHILD";
     const LIVE_POLICY_CHILD_ENV: &str = "VOLPAROSSA_NFTABLES_POLICY_CHILD";
+    const DROP_GUARD_CHILD_ENV: &str = "VOLPAROSSA_NFTABLES_DROP_GUARD_CHILD";
     const TEST_SEQUENCE: u32 = 7;
     const TEST_PORT: u32 = 41;
-    const MAX_TEST_MUTATION_BATCH_BYTES: usize = 4 * 1024;
-
-    struct TestMutator {
-        socket: Socket,
-        local_port: u32,
-    }
-
-    impl TestMutator {
-        fn connect(deadline: Deadline) -> Result<Self, NftablesError> {
-            deadline.ensure_unexpired()?;
-            let mut socket = Socket::new(NETLINK_NETFILTER)?;
-            socket.set_netlink_get_strict_chk(true)?;
-            socket.set_cap_ack(true)?;
-            if !socket.get_cap_ack()? {
-                return Err(NftablesError::Malformed);
-            }
-            socket.set_non_blocking(true)?;
-            let address = socket.bind_auto()?;
-            if address.port_number() == 0 || address.multicast_groups() != 0 {
-                return Err(NftablesError::Malformed);
-            }
-            socket.connect(&SocketAddr::new(0, 0))?;
-            deadline.ensure_unexpired()?;
-            Ok(Self {
-                socket,
-                local_port: address.port_number(),
-            })
-        }
-
-        fn send_transaction(
-            &self,
-            batch: &[u8],
-            expected_ack_headers: &[[u8; NLMSG_HEADER_LEN]],
-            deadline: Deadline,
-        ) -> Result<(), NftablesError> {
-            if batch.len() > MAX_TEST_MUTATION_BATCH_BYTES || expected_ack_headers.is_empty() {
-                return Err(NftablesError::Limit);
-            }
-            send_bounded(&self.socket, batch, deadline)?;
-            let mut seen = vec![false; expected_ack_headers.len()];
-            let mut budget = CollectionBudget {
-                bytes: 0,
-                datagrams: 0,
-                frames: 0,
-                max_bytes: MAX_TEST_MUTATION_BATCH_BYTES,
-                max_datagrams: expected_ack_headers.len(),
-                max_frames: expected_ack_headers.len(),
-            };
-            while seen.iter().any(|value| !value) {
-                let (bytes, sender) = receive_bounded(&self.socket, deadline, &budget)?;
-                if sender != SocketAddr::new(0, 0) {
-                    return Err(NftablesError::Malformed);
-                }
-                walk_datagram(&bytes, &mut budget, |frame| {
-                    parse_test_mutation_ack(frame, self.local_port, expected_ack_headers, &mut seen)
-                })?;
-            }
-            deadline.ensure_unexpired()
-        }
-    }
 
     #[test]
     fn fixed_requests_have_exact_headers_and_no_attributes() {
@@ -2780,7 +3606,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_observer_roundtrips_raw_test_transaction_in_disposable_namespace() {
+    fn production_policy_writer_roundtrips_in_disposable_namespace() {
         if env::var_os(LIVE_POLICY_CHILD_ENV).is_some() {
             unshare(CloneFlags::CLONE_NEWNET)
                 .expect("create a second disposable network namespace before mutation");
@@ -2790,36 +3616,50 @@ mod tests {
                 matches!(initial_forwarding.as_slice(), b"0\n" | b"1\n"),
                 "forwarding setting was not canonical"
             );
-            let deadline = Instant::now()
-                .checked_add(Duration::from_secs(5))
-                .expect("test deadline");
-            let baseline = observe_empty_nftables(deadline).expect("generation-one baseline");
+            let baseline = observe_empty_nftables(mutation_deadline().expect("baseline deadline"))
+                .expect("generation-one baseline");
             let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
             let expectation = FixedForwardPolicyExpectation::for_run(&run_id, [2, 3])
                 .expect("fixed policy expectation");
-            test_install_forward_policy(&expectation, Deadline(deadline))
-                .expect("raw policy install transaction");
-            let active = observe_exact_forward_policy(baseline, expectation, deadline)
-                .unwrap_or_else(|failure| {
-                    let (source, _baseline) = failure.into_parts();
-                    panic!("active policy proof: {source:?}");
-                });
-            assert_eq!(active.initial_generation, INITIAL_GENERATION);
-            assert_eq!(active.generation, ACTIVE_POLICY_GENERATION);
-            assert_ne!(active.table_handle, 0);
-            assert_ne!(active.chain_handle, 0);
-            assert_ne!(active.rule_handles[0], active.rule_handles[1]);
+            let active = install_exact_forward_policy(
+                baseline,
+                expectation,
+                mutation_deadline().expect("install deadline"),
+            )
+            .unwrap_or_else(|failure| {
+                let (source, authority) = failure.into_parts();
+                std::mem::forget(authority);
+                panic!("active policy proof: {source:?}");
+            });
+            assert_eq!(active.journal().initial_generation, INITIAL_GENERATION);
+            assert_eq!(active.journal().generation, ACTIVE_POLICY_GENERATION);
+            assert_ne!(active.journal().handles.table, 0);
+            assert_ne!(active.journal().handles.chain, 0);
+            assert_ne!(
+                active.journal().handles.rules[0],
+                active.journal().handles.rules[1]
+            );
+            verify_exact_forward_policy(
+                &active,
+                mutation_deadline().expect("active verification deadline"),
+            )
+            .expect("fresh exact active-policy verification");
             assert_eq!(
                 fs::read("/proc/sys/net/ipv4/ip_forward").expect("read forwarding with policy"),
                 initial_forwarding
             );
-            test_delete_forward_policy(&active, Deadline(deadline))
-                .expect("raw exact-table delete transaction");
-            let empty = observe_semantically_empty_after_forward_policy(active, deadline)
-                .unwrap_or_else(|failure| {
-                    let (source, _active) = failure.into_parts();
-                    panic!("semantic-empty proof: {source:?}");
-                });
+            let empty =
+                delete_exact_forward_policy(active, mutation_deadline().expect("delete deadline"))
+                    .unwrap_or_else(|failure| {
+                        let (source, authority) = failure.into_parts();
+                        std::mem::forget(authority);
+                        panic!("semantic-empty proof: {source:?}");
+                    });
+            verify_semantically_empty_after_forward_policy(
+                &empty,
+                mutation_deadline().expect("retired verification deadline"),
+            )
+            .expect("fresh semantic-empty verification");
             assert_eq!(
                 empty.generations,
                 [
@@ -2844,9 +3684,7 @@ mod tests {
             .args(["--user", "--map-root-user", "--net"])
             .arg(executable)
             .arg("--exact")
-            .arg(
-                "nftables::tests::policy_observer_roundtrips_raw_test_transaction_in_disposable_namespace",
-            )
+            .arg("nftables::tests::production_policy_writer_roundtrips_in_disposable_namespace")
             .arg("--test-threads=1")
             .arg("--nocapture")
             .env(LIVE_POLICY_CHILD_ENV, "1")
@@ -2890,6 +3728,419 @@ mod tests {
                 FixedForwardPolicyExpectation::for_run(&run_id, ifindices),
                 Err(NftablesError::Malformed)
             ));
+        }
+    }
+
+    #[test]
+    fn production_install_transaction_is_fixed_bounded_and_generation_pinned() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        let transaction = encode_install_transaction(&expectation).expect("install transaction");
+        let frames = split_test_netlink_frames(&transaction.bytes).expect("transaction frames");
+
+        assert!(transaction.bytes.len() <= MAX_MUTATION_BATCH_BYTES);
+        assert_eq!(frames.len(), 6);
+        assert_eq!(transaction.requests.len(), 6);
+        assert_eq!(
+            transaction
+                .requests
+                .iter()
+                .filter(|request| request.acknowledgement_required)
+                .count(),
+            4
+        );
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(
+                transaction.requests[index].header,
+                frame[..NLMSG_HEADER_LEN]
+            );
+            assert_eq!(
+                read_ne_u32(frame, 8).expect("sequence"),
+                u32::try_from(index + 1).expect("test sequence")
+            );
+            assert_eq!(read_ne_u32(frame, 12).expect("kernel destination"), 0);
+        }
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| read_ne_u16(frame, 4).expect("message type"))
+                .collect::<Vec<_>>(),
+            [
+                NFNL_MSG_BATCH_BEGIN,
+                NFT_MSG_NEWTABLE,
+                NFT_MSG_NEWCHAIN,
+                NFT_MSG_NEWRULE,
+                NFT_MSG_NEWRULE,
+                NFNL_MSG_BATCH_END,
+            ]
+        );
+        assert_eq!(
+            read_ne_u16(frames[0], 6).expect("begin flags"),
+            NLM_F_REQUEST
+        );
+        assert_eq!(
+            read_ne_u16(frames[1], 6).expect("table flags"),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+        );
+        assert_eq!(
+            read_ne_u16(frames[2], 6).expect("chain flags"),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+        );
+        for rule in &frames[3..=4] {
+            assert_eq!(
+                read_ne_u16(rule, 6).expect("rule flags"),
+                NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND
+            );
+        }
+        assert_eq!(read_ne_u16(frames[5], 6).expect("end flags"), NLM_F_REQUEST);
+
+        let (begin_header, begin_attributes) =
+            split_nfgenmsg(&frames[0][NLMSG_HEADER_LEN..]).expect("begin nfgenmsg");
+        assert_eq!(begin_header.family, AF_UNSPEC);
+        assert_eq!(begin_header.version, NFNETLINK_V0);
+        assert_eq!(begin_header.resource_id, NFNL_SUBSYS_NFTABLES);
+        let begin_attributes = parse_attributes(begin_attributes, 1).expect("generation pin");
+        assert_eq!(begin_attributes.len(), 1);
+        assert_eq!(begin_attributes[0].kind, NFNL_BATCH_GENID);
+        assert_eq!(begin_attributes[0].flags, 0);
+        assert_eq!(
+            read_exact_be_u32(begin_attributes[0].payload).expect("generation"),
+            INITIAL_GENERATION
+        );
+
+        let (end_header, end_attributes) =
+            split_nfgenmsg(&frames[5][NLMSG_HEADER_LEN..]).expect("end nfgenmsg");
+        assert_eq!(end_header.family, AF_UNSPEC);
+        assert_eq!(end_header.version, NFNETLINK_V0);
+        assert_eq!(end_header.resource_id, NFNL_SUBSYS_NFTABLES);
+        assert!(end_attributes.is_empty());
+    }
+
+    #[test]
+    fn production_delete_transaction_is_handle_only_and_generation_pinned() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        let table_handle = 0x0102_0304_0506_0708;
+        let journal = ActivePolicyJournal {
+            expectation,
+            initial_generation: INITIAL_GENERATION,
+            generation: ACTIVE_POLICY_GENERATION,
+            handles: PolicyHandles {
+                table: table_handle,
+                chain: 2,
+                rules: [3, 4],
+            },
+        };
+        let transaction = encode_delete_transaction(&journal).expect("delete transaction");
+        let frames = split_test_netlink_frames(&transaction.bytes).expect("transaction frames");
+
+        assert_eq!(frames.len(), 3);
+        assert_eq!(transaction.requests.len(), 3);
+        assert_eq!(
+            read_ne_u16(frames[0], 4).expect("begin"),
+            NFNL_MSG_BATCH_BEGIN
+        );
+        assert_eq!(read_ne_u16(frames[1], 4).expect("delete"), NFT_MSG_DELTABLE);
+        assert_eq!(read_ne_u16(frames[2], 4).expect("end"), NFNL_MSG_BATCH_END);
+        let (_, begin_attributes) =
+            split_nfgenmsg(&frames[0][NLMSG_HEADER_LEN..]).expect("begin nfgenmsg");
+        let begin_attributes = parse_attributes(begin_attributes, 1).expect("generation pin");
+        assert_eq!(begin_attributes.len(), 1);
+        assert_eq!(begin_attributes[0].kind, NFNL_BATCH_GENID);
+        assert_eq!(
+            read_exact_be_u32(begin_attributes[0].payload).expect("generation"),
+            ACTIVE_POLICY_GENERATION
+        );
+
+        let (delete_header, delete_attributes) =
+            split_nfgenmsg(&frames[1][NLMSG_HEADER_LEN..]).expect("delete nfgenmsg");
+        assert_eq!(delete_header.family, NFPROTO_INET);
+        assert_eq!(delete_header.version, NFNETLINK_V0);
+        assert_eq!(delete_header.resource_id, 0);
+        let delete_attributes = parse_attributes(delete_attributes, 1).expect("delete attributes");
+        assert_eq!(delete_attributes.len(), 1);
+        assert_eq!(delete_attributes[0].kind, NFTA_TABLE_HANDLE);
+        assert_eq!(delete_attributes[0].flags, 0);
+        assert_eq!(
+            read_exact_be_u64(delete_attributes[0].payload).expect("table handle"),
+            table_handle
+        );
+        assert_ne!(delete_attributes[0].kind, NFTA_TABLE_NAME);
+    }
+
+    #[test]
+    fn mutation_acknowledgements_are_exact_bound_ordered_and_capped() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        let transaction = encode_install_transaction(&expectation).expect("install transaction");
+        let required = transaction
+            .requests
+            .iter()
+            .enumerate()
+            .filter_map(|(index, request)| request.acknowledgement_required.then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(required, [1, 2, 3, 4]);
+
+        let mut state = MutationAckState::new(TEST_PORT, &transaction.requests);
+        let mut budget = test_mutation_ack_budget();
+        for index in required.iter().copied() {
+            state
+                .ingest(
+                    SocketAddr::new(0, 0),
+                    &test_capped_ack(&transaction.requests[index].header, TEST_PORT, 0),
+                    &mut budget,
+                )
+                .expect("ordered exact acknowledgement");
+        }
+        assert!(state.is_complete());
+        state.finish().expect("all acknowledgements");
+
+        let mut out_of_order = MutationAckState::new(TEST_PORT, &transaction.requests);
+        assert!(matches!(
+            out_of_order.ingest(
+                SocketAddr::new(0, 0),
+                &test_capped_ack(&transaction.requests[2].header, TEST_PORT, 0),
+                &mut test_mutation_ack_budget(),
+            ),
+            Err(NftablesError::Malformed)
+        ));
+
+        let mut positive_begin = MutationAckState::new(TEST_PORT, &transaction.requests);
+        assert!(matches!(
+            positive_begin.ingest(
+                SocketAddr::new(0, 0),
+                &test_capped_ack(&transaction.requests[0].header, TEST_PORT, 0),
+                &mut test_mutation_ack_budget(),
+            ),
+            Err(NftablesError::Malformed)
+        ));
+
+        let mut negative_begin = MutationAckState::new(TEST_PORT, &transaction.requests);
+        assert!(matches!(
+            negative_begin.ingest(
+                SocketAddr::new(0, 0),
+                &test_capped_ack(&transaction.requests[0].header, TEST_PORT, -16),
+                &mut test_mutation_ack_budget(),
+            ),
+            Err(NftablesError::Kernel(16))
+        ));
+
+        let mut tampered = test_capped_ack(&transaction.requests[1].header, TEST_PORT, 0);
+        tampered[NLMSG_HEADER_LEN + 4 + 4] ^= 1;
+        let mut tampered_state = MutationAckState::new(TEST_PORT, &transaction.requests);
+        assert!(matches!(
+            tampered_state.ingest(
+                SocketAddr::new(0, 0),
+                &tampered,
+                &mut test_mutation_ack_budget(),
+            ),
+            Err(NftablesError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn mutation_ack_envelope_rejects_every_ambiguity_and_budget_overrun() {
+        const NLM_F_ACK_TLVS: u16 = 0x0200;
+
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        let transaction = encode_install_transaction(&expectation).expect("install transaction");
+        let request = transaction.requests[1];
+        let canonical = test_capped_ack(&request.header, TEST_PORT, 0);
+
+        let mut wrong_port = canonical.clone();
+        wrong_port[12..16].copy_from_slice(&(TEST_PORT + 1).to_ne_bytes());
+        let mut wrong_sequence = canonical.clone();
+        wrong_sequence[8..12].copy_from_slice(&99_u32.to_ne_bytes());
+        let mut wrong_flags = canonical.clone();
+        wrong_flags[6..8].copy_from_slice(&0_u16.to_ne_bytes());
+        let mut wrong_embedded_header = canonical.clone();
+        wrong_embedded_header[NLMSG_HEADER_LEN + 4 + 4] ^= 1;
+        let mut unknown_exact_pair = canonical.clone();
+        unknown_exact_pair[8..12].copy_from_slice(&99_u32.to_ne_bytes());
+        unknown_exact_pair[NLMSG_HEADER_LEN + 4 + 8..NLMSG_HEADER_LEN + 4 + 12]
+            .copy_from_slice(&99_u32.to_ne_bytes());
+        let mut with_ack_tlv = canonical.clone();
+        with_ack_tlv.extend(attribute(1, &[]));
+        let with_ack_tlv_length = u32::try_from(with_ack_tlv.len()).expect("test ACK length");
+        with_ack_tlv[0..4].copy_from_slice(&with_ack_tlv_length.to_ne_bytes());
+        with_ack_tlv[6..8].copy_from_slice(&(NLM_F_CAPPED | NLM_F_ACK_TLVS).to_ne_bytes());
+        let mut trailing_datagram_bytes = canonical.clone();
+        trailing_datagram_bytes.extend([0; 4]);
+
+        for (case, sender, frame) in [
+            (
+                "non-kernel sender",
+                SocketAddr::new(1, 0),
+                canonical.clone(),
+            ),
+            ("wrong destination port", SocketAddr::new(0, 0), wrong_port),
+            (
+                "wrong outer sequence",
+                SocketAddr::new(0, 0),
+                wrong_sequence,
+            ),
+            ("wrong flags", SocketAddr::new(0, 0), wrong_flags),
+            (
+                "mismatched embedded header",
+                SocketAddr::new(0, 0),
+                wrong_embedded_header,
+            ),
+            (
+                "unknown extra acknowledgement",
+                SocketAddr::new(0, 0),
+                unknown_exact_pair,
+            ),
+            ("ACK TLV", SocketAddr::new(0, 0), with_ack_tlv),
+            (
+                "trailing datagram bytes",
+                SocketAddr::new(0, 0),
+                trailing_datagram_bytes,
+            ),
+        ] {
+            let mut state = MutationAckState::new(TEST_PORT, &transaction.requests);
+            assert!(
+                matches!(
+                    state.ingest(sender, &frame, &mut test_mutation_ack_budget()),
+                    Err(NftablesError::Malformed)
+                ),
+                "ambiguous ACK case was accepted: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_ack_state_rejects_duplicates_gaps_extras_and_budget_overruns() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        let transaction = encode_install_transaction(&expectation).expect("install transaction");
+        let canonical = test_capped_ack(&transaction.requests[1].header, TEST_PORT, 0);
+
+        let mut duplicate = MutationAckState::new(TEST_PORT, &transaction.requests);
+        duplicate
+            .ingest(
+                SocketAddr::new(0, 0),
+                &canonical,
+                &mut test_mutation_ack_budget(),
+            )
+            .expect("first exact ACK");
+        assert!(matches!(
+            duplicate.ingest(
+                SocketAddr::new(0, 0),
+                &canonical,
+                &mut test_mutation_ack_budget(),
+            ),
+            Err(NftablesError::Malformed)
+        ));
+
+        let mut missing = MutationAckState::new(TEST_PORT, &transaction.requests);
+        for index in [1, 2, 3] {
+            missing
+                .ingest(
+                    SocketAddr::new(0, 0),
+                    &test_capped_ack(&transaction.requests[index].header, TEST_PORT, 0),
+                    &mut test_mutation_ack_budget(),
+                )
+                .expect("partial ordered ACKs");
+        }
+        assert!(matches!(missing.finish(), Err(NftablesError::Malformed)));
+
+        let mut complete = MutationAckState::new(TEST_PORT, &transaction.requests);
+        for index in [1, 2, 3, 4] {
+            complete
+                .ingest(
+                    SocketAddr::new(0, 0),
+                    &test_capped_ack(&transaction.requests[index].header, TEST_PORT, 0),
+                    &mut test_mutation_ack_budget(),
+                )
+                .expect("complete ordered ACKs");
+        }
+        assert!(matches!(
+            complete.ingest(
+                SocketAddr::new(0, 0),
+                &canonical,
+                &mut test_mutation_ack_budget(),
+            ),
+            Err(NftablesError::Malformed)
+        ));
+
+        let mut byte_budget = test_mutation_ack_budget();
+        byte_budget.max_bytes = canonical.len() - 1;
+        let mut state = MutationAckState::new(TEST_PORT, &transaction.requests);
+        assert!(matches!(
+            state.ingest(SocketAddr::new(0, 0), &canonical, &mut byte_budget),
+            Err(NftablesError::Limit)
+        ));
+        let mut datagram_budget = test_mutation_ack_budget();
+        datagram_budget.max_datagrams = 0;
+        let mut state = MutationAckState::new(TEST_PORT, &transaction.requests);
+        assert!(matches!(
+            state.ingest(SocketAddr::new(0, 0), &canonical, &mut datagram_budget,),
+            Err(NftablesError::Limit)
+        ));
+        let mut frame_budget = test_mutation_ack_budget();
+        frame_budget.max_frames = 0;
+        let mut state = MutationAckState::new(TEST_PORT, &transaction.requests);
+        assert!(matches!(
+            state.ingest(SocketAddr::new(0, 0), &canonical, &mut frame_budget),
+            Err(NftablesError::Limit)
+        ));
+    }
+
+    #[test]
+    fn active_and_indeterminate_authority_drop_guards_abort() {
+        const TEST_NAME: &str =
+            "nftables::tests::active_and_indeterminate_authority_drop_guards_abort";
+
+        if let Ok(kind) = env::var(DROP_GUARD_CHILD_ENV) {
+            let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+            let expectation =
+                FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+            match kind.as_str() {
+                "active" => {
+                    let _guard =
+                        ActiveNftablesPolicy::from_journal(test_active_journal(expectation));
+                }
+                "indeterminate-install" => {
+                    let initial = NftablesBaseline {
+                        generation: INITIAL_GENERATION,
+                        _thread_bound: PhantomData,
+                    };
+                    let _guard = IndeterminateNftablesPolicy::after_install(initial, expectation);
+                }
+                "indeterminate-delete" => {
+                    let _guard =
+                        IndeterminateNftablesPolicy::after_delete(test_active_journal(expectation));
+                }
+                _ => panic!("unknown drop-guard child case"),
+            }
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        for kind in ["active", "indeterminate-install", "indeterminate-delete"] {
+            let output = Command::new(&executable)
+                .arg("--exact")
+                .arg(TEST_NAME)
+                .arg("--test-threads=1")
+                .arg("--nocapture")
+                .env(DROP_GUARD_CHILD_ENV, kind)
+                .env("LC_ALL", "C")
+                .output()
+                .expect("spawn drop-guard child");
+            assert_eq!(
+                output.status.signal(),
+                Some(libc::SIGABRT),
+                "{kind} guard did not abort: status={:?} stdout={:?} stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
     }
 
@@ -2975,7 +4226,11 @@ mod tests {
         let dump = encode_test_dump_expressions(&expressions).expect("dump expressions");
         assert_eq!(parse_expressions(&dump).expect("parsed dump"), expressions);
 
-        let outbound = encode_test_expressions(&expressions).expect("outbound expressions");
+        let outbound = encode_policy_expressions(&expressions).expect("production expressions");
+        assert_eq!(
+            outbound,
+            encode_test_expressions(&expressions).expect("independent outbound fixture")
+        );
         assert!(matches!(
             parse_expressions(&outbound),
             Err(NftablesError::Malformed)
@@ -3013,7 +4268,10 @@ mod tests {
                 NLM_F_REQUEST | NLM_F_DUMP
             );
             assert_eq!(&request[NLMSG_HEADER_LEN..], &[0; NFGENMSG_LEN]);
-            let expected_reply_flags = if kind == ObjectKind::Rule {
+            let expected_reply_flags = if matches!(
+                kind,
+                ObjectKind::Rule | ObjectKind::Object | ObjectKind::Flowtable
+            ) {
                 NLM_F_MULTI | NLM_F_APPEND
             } else {
                 NLM_F_MULTI
@@ -3024,6 +4282,63 @@ mod tests {
             encode_object_dump_request(ObjectKind::Table, 0),
             Err(NftablesError::Malformed)
         ));
+    }
+
+    #[test]
+    fn object_and_flowtable_dumps_require_kernel_append_flag() {
+        for kind in [ObjectKind::Object, ObjectKind::Flowtable] {
+            let request =
+                encode_object_dump_request(kind, TEST_SEQUENCE).expect("object dump request");
+            let payload = nfgenmsg(NFPROTO_INET, ACTIVE_POLICY_GENERATION);
+
+            let mut canonical_snapshot = RulesetSnapshot::default();
+            let mut canonical = ObjectDumpState::new(
+                kind,
+                TEST_SEQUENCE,
+                TEST_PORT,
+                ACTIVE_POLICY_GENERATION,
+                request,
+                &mut canonical_snapshot,
+            );
+            assert!(matches!(
+                canonical.ingest(
+                    SocketAddr::new(0, 0),
+                    &netlink_frame(
+                        kind.reply_type(),
+                        NLM_F_MULTI | NLM_F_APPEND,
+                        TEST_SEQUENCE,
+                        TEST_PORT,
+                        &payload,
+                    ),
+                    &mut CollectionBudget::production(),
+                ),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+
+            let mut rejected_snapshot = RulesetSnapshot::default();
+            let mut rejected = ObjectDumpState::new(
+                kind,
+                TEST_SEQUENCE,
+                TEST_PORT,
+                ACTIVE_POLICY_GENERATION,
+                request,
+                &mut rejected_snapshot,
+            );
+            assert!(matches!(
+                rejected.ingest(
+                    SocketAddr::new(0, 0),
+                    &netlink_frame(
+                        kind.reply_type(),
+                        NLM_F_MULTI,
+                        TEST_SEQUENCE,
+                        TEST_PORT,
+                        &payload,
+                    ),
+                    &mut CollectionBudget::production(),
+                ),
+                Err(NftablesError::Malformed)
+            ));
+        }
     }
 
     #[test]
@@ -3369,6 +4684,66 @@ mod tests {
         bytes
     }
 
+    fn split_test_netlink_frames(bytes: &[u8]) -> Result<Vec<&[u8]>, NftablesError> {
+        let mut frames = Vec::new();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let remaining = &bytes[offset..];
+            let length = usize::try_from(read_ne_u32(remaining, 0)?)
+                .map_err(|_| NftablesError::Malformed)?;
+            let aligned = align4(length)?;
+            if length < NLMSG_HEADER_LEN || aligned > remaining.len() {
+                return Err(NftablesError::Malformed);
+            }
+            if remaining[length..aligned].iter().any(|byte| *byte != 0) {
+                return Err(NftablesError::Malformed);
+            }
+            frames.push(&remaining[..length]);
+            offset = offset.checked_add(aligned).ok_or(NftablesError::Limit)?;
+        }
+        Ok(frames)
+    }
+
+    fn test_capped_ack(
+        request_header: &[u8; NLMSG_HEADER_LEN],
+        local_port: u32,
+        errno: i32,
+    ) -> Vec<u8> {
+        let mut payload = errno.to_ne_bytes().to_vec();
+        payload.extend(request_header);
+        netlink_frame(
+            NLMSG_ERROR,
+            NLM_F_CAPPED,
+            read_ne_u32(request_header, 8).expect("request sequence"),
+            local_port,
+            &payload,
+        )
+    }
+
+    fn test_mutation_ack_budget() -> CollectionBudget {
+        CollectionBudget {
+            bytes: 0,
+            datagrams: 0,
+            frames: 0,
+            max_bytes: MAX_MUTATION_ACK_BYTES,
+            max_datagrams: MAX_MUTATION_ACK_DATAGRAMS,
+            max_frames: MAX_MUTATION_ACK_FRAMES,
+        }
+    }
+
+    fn test_active_journal(expectation: FixedForwardPolicyExpectation) -> ActivePolicyJournal {
+        ActivePolicyJournal {
+            expectation,
+            initial_generation: INITIAL_GENERATION,
+            generation: ACTIVE_POLICY_GENERATION,
+            handles: PolicyHandles {
+                table: 1,
+                chain: 2,
+                rules: [3, 4],
+            },
+        }
+    }
+
     fn test_policy_snapshot(
         expectation: &FixedForwardPolicyExpectation,
     ) -> Result<RulesetSnapshot, NftablesError> {
@@ -3457,126 +4832,6 @@ mod tests {
         Ok(payload)
     }
 
-    fn test_install_forward_policy(
-        expectation: &FixedForwardPolicyExpectation,
-        deadline: Deadline,
-    ) -> Result<(), NftablesError> {
-        let mut sequence = 100_u32;
-        let mut batch = Vec::new();
-        let mut acknowledgements = Vec::new();
-        batch.extend(test_batch_boundary(
-            NFNL_MSG_BATCH_BEGIN,
-            sequence,
-            Some(INITIAL_GENERATION),
-        )?);
-        sequence = sequence.checked_add(1).ok_or(NftablesError::Limit)?;
-
-        let mut table_payload = test_request_nfgen(NFPROTO_INET, 0);
-        table_payload.extend(attribute(
-            NFTA_TABLE_NAME,
-            &nul_terminated(&expectation.table_name)?,
-        ));
-        table_payload.extend(attribute(NFTA_TABLE_FLAGS, &0_u32.to_be_bytes()));
-        push_test_mutation(
-            &mut batch,
-            &mut acknowledgements,
-            NFT_MSG_NEWTABLE,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-            sequence,
-            &table_payload,
-        )?;
-        sequence = sequence.checked_add(1).ok_or(NftablesError::Limit)?;
-
-        let mut hook = Vec::new();
-        hook.extend(attribute(NFTA_HOOK_HOOKNUM, &NF_INET_FORWARD.to_be_bytes()));
-        hook.extend(attribute(NFTA_HOOK_PRIORITY, &0_i32.to_be_bytes()));
-        let mut chain_payload = test_request_nfgen(NFPROTO_INET, 0);
-        chain_payload.extend(attribute(
-            NFTA_CHAIN_TABLE,
-            &nul_terminated(&expectation.table_name)?,
-        ));
-        chain_payload.extend(attribute(
-            NFTA_CHAIN_NAME,
-            &nul_terminated(FORWARD_CHAIN_NAME)?,
-        ));
-        chain_payload.extend(attribute(
-            NFTA_CHAIN_TYPE,
-            &nul_terminated(FILTER_CHAIN_TYPE)?,
-        ));
-        chain_payload.extend(attribute(NFTA_CHAIN_HOOK | NLA_F_NESTED, &hook));
-        chain_payload.extend(attribute(NFTA_CHAIN_POLICY, &NF_DROP.to_be_bytes()));
-        push_test_mutation(
-            &mut batch,
-            &mut acknowledgements,
-            NFT_MSG_NEWCHAIN,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-            sequence,
-            &chain_payload,
-        )?;
-        sequence = sequence.checked_add(1).ok_or(NftablesError::Limit)?;
-
-        for rule_index in 0..2 {
-            let mut rule_payload = test_request_nfgen(NFPROTO_INET, 0);
-            rule_payload.extend(attribute(
-                NFTA_RULE_TABLE,
-                &nul_terminated(&expectation.table_name)?,
-            ));
-            rule_payload.extend(attribute(
-                NFTA_RULE_CHAIN,
-                &nul_terminated(FORWARD_CHAIN_NAME)?,
-            ));
-            rule_payload.extend(attribute(
-                NFTA_RULE_EXPRESSIONS | NLA_F_NESTED,
-                &encode_test_expressions(&expectation.expected_rule_expressions(rule_index))?,
-            ));
-            push_test_mutation(
-                &mut batch,
-                &mut acknowledgements,
-                NFT_MSG_NEWRULE,
-                NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
-                sequence,
-                &rule_payload,
-            )?;
-            sequence = sequence.checked_add(1).ok_or(NftablesError::Limit)?;
-        }
-        batch.extend(test_batch_boundary(NFNL_MSG_BATCH_END, sequence, None)?);
-        TestMutator::connect(deadline)?.send_transaction(&batch, &acknowledgements, deadline)
-    }
-
-    fn test_delete_forward_policy(
-        active: &ActiveNftablesPolicy,
-        deadline: Deadline,
-    ) -> Result<(), NftablesError> {
-        let begin_sequence = 200_u32;
-        let delete_sequence = 201_u32;
-        let end_sequence = 202_u32;
-        let mut payload = test_request_nfgen(NFPROTO_INET, 0);
-        payload.extend(attribute(
-            NFTA_TABLE_NAME,
-            &nul_terminated(&active.expectation.table_name)?,
-        ));
-        payload.extend(attribute(
-            NFTA_TABLE_HANDLE,
-            &active.table_handle.to_be_bytes(),
-        ));
-        let mut batch = test_batch_boundary(
-            NFNL_MSG_BATCH_BEGIN,
-            begin_sequence,
-            Some(ACTIVE_POLICY_GENERATION),
-        )?;
-        let mut acknowledgements = Vec::new();
-        push_test_mutation(
-            &mut batch,
-            &mut acknowledgements,
-            NFT_MSG_DELTABLE,
-            NLM_F_REQUEST | NLM_F_ACK,
-            delete_sequence,
-            &payload,
-        )?;
-        batch.extend(test_batch_boundary(NFNL_MSG_BATCH_END, end_sequence, None)?);
-        TestMutator::connect(deadline)?.send_transaction(&batch, &acknowledgements, deadline)
-    }
-
     fn encode_test_expressions(
         expressions: &[ObservedExpression],
     ) -> Result<Vec<u8>, NftablesError> {
@@ -3643,105 +4898,6 @@ mod tests {
             encoded.extend(attribute(NFTA_LIST_ELEM | nested, &element));
         }
         Ok(encoded)
-    }
-
-    fn push_test_mutation(
-        batch: &mut Vec<u8>,
-        acknowledgements: &mut Vec<[u8; NLMSG_HEADER_LEN]>,
-        message_type: u16,
-        flags: u16,
-        sequence: u32,
-        payload: &[u8],
-    ) -> Result<(), NftablesError> {
-        let message = test_mutation_message(message_type, flags, sequence, payload)?;
-        acknowledgements.push(
-            message[..NLMSG_HEADER_LEN]
-                .try_into()
-                .map_err(|_| NftablesError::Malformed)?,
-        );
-        batch.extend(message);
-        Ok(())
-    }
-
-    fn test_batch_boundary(
-        message_type: u16,
-        sequence: u32,
-        generation: Option<u32>,
-    ) -> Result<Vec<u8>, NftablesError> {
-        let mut payload = test_request_nfgen(AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
-        if let Some(generation) = generation {
-            payload.extend(attribute(NFNL_BATCH_GENID, &generation.to_be_bytes()));
-        }
-        test_mutation_message(message_type, NLM_F_REQUEST, sequence, &payload)
-    }
-
-    fn test_request_nfgen(family: u8, resource_id: u16) -> Vec<u8> {
-        let mut payload = vec![family, NFNETLINK_V0];
-        payload.extend(resource_id.to_be_bytes());
-        payload
-    }
-
-    fn test_mutation_message(
-        message_type: u16,
-        flags: u16,
-        sequence: u32,
-        payload: &[u8],
-    ) -> Result<Vec<u8>, NftablesError> {
-        if sequence == 0 {
-            return Err(NftablesError::Malformed);
-        }
-        let length = NLMSG_HEADER_LEN
-            .checked_add(payload.len())
-            .ok_or(NftablesError::Limit)?;
-        let aligned = align4(length)?;
-        let mut message = Vec::with_capacity(aligned);
-        message.extend(
-            u32::try_from(length)
-                .map_err(|_| NftablesError::Limit)?
-                .to_ne_bytes(),
-        );
-        message.extend(message_type.to_ne_bytes());
-        message.extend(flags.to_ne_bytes());
-        message.extend(sequence.to_ne_bytes());
-        message.extend(0_u32.to_ne_bytes());
-        message.extend(payload);
-        message.resize(aligned, 0);
-        Ok(message)
-    }
-
-    fn parse_test_mutation_ack(
-        frame: &[u8],
-        local_port: u32,
-        expected_headers: &[[u8; NLMSG_HEADER_LEN]],
-        seen: &mut [bool],
-    ) -> Result<(), NftablesError> {
-        if read_ne_u16(frame, 4)? != NLMSG_ERROR
-            || read_ne_u16(frame, 6)? != NLM_F_CAPPED
-            || read_ne_u32(frame, 12)? != local_port
-            || frame.len() != NLMSG_HEADER_LEN + 4 + NLMSG_HEADER_LEN
-        {
-            return Err(NftablesError::Malformed);
-        }
-        let sequence = read_ne_u32(frame, 8)?;
-        let Some(index) = expected_headers
-            .iter()
-            .position(|header| read_ne_u32(header, 8).is_ok_and(|value| value == sequence))
-        else {
-            return Err(NftablesError::Malformed);
-        };
-        if seen.get(index).copied() != Some(false)
-            || frame[NLMSG_HEADER_LEN + 4..] != expected_headers[index]
-        {
-            return Err(NftablesError::Malformed);
-        }
-        match read_ne_i32(frame, NLMSG_HEADER_LEN)? {
-            0 => {
-                seen[index] = true;
-                Ok(())
-            }
-            errno if errno < 0 => Err(NftablesError::Kernel(errno.saturating_abs())),
-            _ => Err(NftablesError::Malformed),
-        }
     }
 
     fn nul_terminated(value: &[u8]) -> Result<Vec<u8>, NftablesError> {

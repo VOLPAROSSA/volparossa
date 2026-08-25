@@ -41,6 +41,9 @@ pub const BLOCKED_EXIT_CODE: u8 = 77;
 pub const INTERNAL_ERROR_EXIT_CODE: u8 = 70;
 
 const BOOTSTRAP_RECORD_TIMEOUT: Duration = Duration::from_secs(2);
+// Admit at most two typed continuation attempts. Any authority still failing
+// after that bound, or any indeterminate authority, aborts fail-closed.
+const FORWARD_POLICY_RECOVERY_STEPS: usize = 2;
 
 /// Honest outcome of the current bounded isolation-supervisor slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,8 +56,8 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// Two exact endpoint routes were installed, link-bound deleted, and proven pristine.
-    BlockedAfterEndpointRouteTeardown,
+    /// The fixed forward policy and endpoint routes were installed and exactly retired.
+    BlockedAfterForwardPolicyTeardown,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
 }
@@ -63,12 +66,18 @@ pub enum LifecycleOutcome {
 enum PidOneBarrierOutcome {
     PidOneProofUnavailable,
     PrivateMountsUnavailable,
-    AuthorizedEndpointRoutesTornDown,
+    AuthorizedForwardPolicyTornDown,
 }
 
-enum FixedEndpointRouteTeardownMounts {
+enum FixedForwardPolicyTeardownMounts {
     NamespacePins(Box<crate::mounts::PrivateMounts<crate::topology::AuthorizedNamespacePins>>),
     Pristine(crate::mounts::PrivateMounts),
+}
+
+struct FixedForwardPolicyTeardown {
+    mounts: FixedForwardPolicyTeardownMounts,
+    final_network_proof: Option<crate::network::FinalNetworkProof>,
+    deferred_error: Option<crate::mounts::FixedForwardPolicyError>,
 }
 
 /// Failure of the fixed process supervisor or one of its invariants.
@@ -104,9 +113,9 @@ pub enum RunnerError {
     /// One fixed private-mount operation or its direct kernel proof failed.
     #[error("private-mount setup or proof failed: {0}")]
     PrivateMount(#[source] io::Error),
-    /// The fixed endpoint-route or deletion-only teardown transaction failed.
-    #[error("fixed endpoint-route installation or teardown failed: {0}")]
-    EndpointRoute(#[source] io::Error),
+    /// The fixed endpoint-route and forward-policy transaction failed.
+    #[error("fixed forward-policy installation or teardown failed: {0}")]
+    ForwardPolicy(#[source] io::Error),
     /// Fixed managed-signal setup, observation, or quiescence proof failed.
     #[error("fixed signal supervision failed: {0}")]
     SignalSupervision(#[source] io::Error),
@@ -184,12 +193,18 @@ impl From<PidOneControlError> for RunnerError {
 /// proves the exact parent/A/B deltas, and installs four fixed `/30` IPv4
 /// addresses. It proves those addresses and their four kernel-owned local-table
 /// `/32` routes while every veth end remains down. It then proves all four ends
-/// at IPv6 address-generation mode `none`, activates them, and proves their
-/// exact carrier-up links, qdiscs, IPv4 routes, and IPv6 multicast routes. It
-/// directly deletes veth B followed by A and retains every lower owner until
-/// all three namespaces are byte-exactly equal to their retained enumerated
-/// network baselines. It then retires those
-/// owners, rolls the pins and roots back, and emits one
+/// at IPv6 address-generation mode `none`, derives the only accepted policy
+/// expectation from canonical retained topology, and atomically installs the
+/// exact generation-two parent FORWARD policy. It activates the four ends,
+/// proves their exact carrier-up links, qdiscs, IPv4 routes, and IPv6 multicast
+/// routes, then installs and proves the two exact endpoint `/32` routes while
+/// retaining that policy. It directly deletes veth B followed by A and retains
+/// every lower owner until all three namespaces are byte-exactly equal to their
+/// retained enumerated network baselines while generation two remains exact.
+/// It then deletes only the freshly observed policy table handle, proves
+/// semantic-empty generation three, repeats the final parent/endpoint proof,
+/// and only then retires those lower owners. It rolls the pins and roots back
+/// and emits one
 /// internal rollback-complete checkpoint. The outer independently re-proves empty private
 /// mounts before sending fixed TERM through the retained pidfd and requiring one
 /// affine PID-1 `signalfd` observation before exact reap. This slice does not
@@ -299,8 +314,8 @@ fn continue_fixed_lifecycle(
         PidOneBarrierOutcome::PrivateMountsUnavailable => {
             LifecycleOutcome::BlockedAtPrivateMountSetup
         }
-        PidOneBarrierOutcome::AuthorizedEndpointRoutesTornDown => {
-            LifecycleOutcome::BlockedAfterEndpointRouteTeardown
+        PidOneBarrierOutcome::AuthorizedForwardPolicyTornDown => {
+            LifecycleOutcome::BlockedAfterForwardPolicyTeardown
         }
     };
     Ok(outcome)
@@ -444,7 +459,7 @@ fn complete_pid_one_barrier(
         .map_err(RunnerError::KernelProof)?;
     if mounts_verified {
         finish_bootstrap_control(signal_supervisor, child)?;
-        Ok(PidOneBarrierOutcome::AuthorizedEndpointRoutesTornDown)
+        Ok(PidOneBarrierOutcome::AuthorizedForwardPolicyTornDown)
     } else {
         expect_bootstrap_control_eof(signal_supervisor, child)?;
         Ok(PidOneBarrierOutcome::PrivateMountsUnavailable)
@@ -624,7 +639,7 @@ fn finish_blocked_run(
         }
         return Err(error);
     }
-    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterEndpointRouteTeardown {
+    let expected_eof = if outcome == LifecycleOutcome::BlockedAfterForwardPolicyTeardown {
         LifecycleEofDisposition::CleanupRequired
     } else {
         LifecycleEofDisposition::NoTopologyMutationAuthorized
@@ -1160,14 +1175,15 @@ fn complete_authorized_private_run_rollback(
 ) -> Result<
     (
         crate::mounts::PrivateMounts,
-        crate::network::PreGoNetworkProof,
+        crate::network::FinalNetworkProof,
     ),
     RunnerError,
 > {
     verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
-    let rollback_network_proof = proof
+    let authorized_network_mutation = proof
         .authorize_mutation(&mounts)
         .map_err(|_| RunnerError::NetworkProof)?;
+    let (rollback_network_proof, initial_nftables) = authorized_network_mutation.into_parts();
     let authorized_mounts = mounts
         .authorize_private_run(authorization)
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
@@ -1194,13 +1210,14 @@ fn complete_authorized_private_run_rollback(
     veth_pairs
         .verify_authorized_veth_pairs()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    let (teardown_mounts, deferred_topology_error) = complete_fixed_endpoint_route_teardown(
+    let teardown = complete_fixed_forward_policy_teardown(
         veth_pairs,
-        &rollback_network_proof,
+        rollback_network_proof,
+        initial_nftables,
         endpoint_baselines,
     )?;
-    let mounts = match teardown_mounts {
-        FixedEndpointRouteTeardownMounts::NamespacePins(namespace_pins) => {
+    let mounts = match teardown.mounts {
+        FixedForwardPolicyTeardownMounts::NamespacePins(namespace_pins) => {
             let namespace_pins = *namespace_pins;
             namespace_pins
                 .verify_authorized_namespace_pins()
@@ -1215,17 +1232,20 @@ fn complete_authorized_private_run_rollback(
                 .rollback_private_run()
                 .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?
         }
-        FixedEndpointRouteTeardownMounts::Pristine(mounts) => mounts,
+        FixedForwardPolicyTeardownMounts::Pristine(mounts) => mounts,
     };
-    rollback_network_proof
-        .verify_rollback(&mounts)
-        .map_err(|_| RunnerError::NetworkProof)?;
-    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
-    if let Some(source) = deferred_topology_error {
-        return Err(RunnerError::EndpointRoute(io::Error::other(source)));
+    if let Some(final_network_proof) = teardown.final_network_proof.as_ref() {
+        final_network_proof
+            .verify(&mounts)
+            .map_err(|_| RunnerError::NetworkProof)?;
     }
-    let final_network_proof = crate::network::prove_pre_go_network_baseline(&mounts)
-        .map_err(|_| RunnerError::NetworkProof)?;
+    verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
+    if let Some(source) = teardown.deferred_error {
+        return Err(RunnerError::ForwardPolicy(io::Error::other(source)));
+    }
+    let final_network_proof = teardown
+        .final_network_proof
+        .ok_or(RunnerError::NetworkProof)?;
     verify_pid_one_pristine_state(&mounts, provision, signal_supervisor)?;
     bootstrap_channel
         .send(control.mutation_rollback_complete()?.as_bytes())
@@ -1233,19 +1253,14 @@ fn complete_authorized_private_run_rollback(
     Ok((mounts, final_network_proof))
 }
 
-fn complete_fixed_endpoint_route_teardown(
+fn complete_fixed_forward_policy_teardown(
     veth_pairs: crate::mounts::PrivateMounts<crate::topology::AuthorizedVethPairs>,
-    rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
+    rollback_network_proof: crate::network::MutationRollbackNetworkProof,
+    initial_nftables: crate::nftables::NftablesBaseline,
     endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
-) -> Result<
-    (
-        FixedEndpointRouteTeardownMounts,
-        Option<crate::mounts::PrivateMountLinkActivationError>,
-    ),
-    RunnerError,
-> {
+) -> Result<FixedForwardPolicyTeardown, RunnerError> {
     veth_pairs
-        .prove_exact_veth_pairs(rollback_network_proof, &endpoint_baselines)
+        .prove_exact_veth_pairs(&rollback_network_proof, &endpoint_baselines)
         .map_err(map_namespace_network_proof_error)?;
     veth_pairs
         .verify_authorized_veth_pairs()
@@ -1254,75 +1269,218 @@ fn complete_fixed_endpoint_route_teardown(
         .configure_fixed_ipv4_addresses()
         .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
     let (all_none, none_proof) = match ipv4_addresses
-        .disable_ipv6_address_generation(rollback_network_proof, &endpoint_baselines)
+        .disable_ipv6_address_generation(&rollback_network_proof, &endpoint_baselines)
     {
         Ok(result) => result,
         Err(failure) => {
-            return recover_failed_topology_transition(
+            return recover_failed_pre_policy_transition(
                 failure,
                 rollback_network_proof,
+                initial_nftables,
                 endpoint_baselines,
             );
+        }
+    };
+    let policy_bound = match all_none.install_fixed_forward_policy(
+        &none_proof,
+        rollback_network_proof,
+        initial_nftables,
+    ) {
+        Ok(policy_bound) => policy_bound,
+        Err(failure) => {
+            return recover_failed_forward_policy_transition(failure, endpoint_baselines);
         }
     };
     let (activated, active_proof) =
-        match all_none.activate_links(&none_proof, rollback_network_proof, &endpoint_baselines) {
+        match policy_bound.activate_links(none_proof, &endpoint_baselines) {
             Ok(result) => result,
             Err(failure) => {
-                return recover_failed_topology_transition(
-                    failure,
-                    rollback_network_proof,
-                    endpoint_baselines,
-                );
+                return recover_failed_forward_policy_transition(failure, endpoint_baselines);
             }
         };
-    let (routed, _routed_proof) = match activated.install_endpoint_routes(active_proof) {
+    let (routed, routed_proof) = match activated.install_endpoint_routes(active_proof) {
         Ok(result) => result,
         Err(failure) => {
-            return recover_failed_topology_transition(
-                failure,
-                rollback_network_proof,
-                endpoint_baselines,
-            );
+            return recover_failed_forward_policy_transition(failure, endpoint_baselines);
         }
     };
-    let deleted = routed.begin_retirement();
-    let namespace_pins = deleted
-        .finish_after_pristine_network_proof(rollback_network_proof, endpoint_baselines)
-        .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-    Ok((
-        FixedEndpointRouteTeardownMounts::NamespacePins(Box::new(namespace_pins)),
-        None,
-    ))
+    let deleted = match routed.begin_retirement(routed_proof) {
+        Ok(deleted) => deleted,
+        Err(failure) => {
+            return recover_failed_forward_policy_transition(failure, endpoint_baselines);
+        }
+    };
+    match deleted.finish_forward_policy_teardown(endpoint_baselines) {
+        Ok((namespace_pins, final_network_proof)) => Ok(retired_forward_policy_teardown(
+            FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(namespace_pins)),
+            final_network_proof,
+            None,
+        )),
+        Err(failure) => recover_failed_forward_policy_teardown(failure, None),
+    }
 }
 
-fn recover_failed_topology_transition(
+fn recover_failed_pre_policy_transition(
     failure: crate::mounts::PrivateMountLinkActivationFailure,
-    rollback_network_proof: &crate::network::MutationRollbackNetworkProof,
+    rollback_network_proof: crate::network::MutationRollbackNetworkProof,
+    initial_nftables: crate::nftables::NftablesBaseline,
     endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
-) -> Result<
-    (
-        FixedEndpointRouteTeardownMounts,
-        Option<crate::mounts::PrivateMountLinkActivationError>,
-    ),
-    RunnerError,
-> {
+) -> Result<FixedForwardPolicyTeardown, RunnerError> {
     let (source, state) = failure.into_parts();
     let mounts = match state {
         crate::mounts::PrivateMountLinkFailureState::Pristine(mounts) => {
             mounts
                 .verify()
                 .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-            FixedEndpointRouteTeardownMounts::Pristine(mounts)
+            rollback_network_proof
+                .verify_pristine_with_initial_nftables(&mounts, &initial_nftables)
+                .map_err(|_| RunnerError::NetworkProof)?;
+            FixedForwardPolicyTeardownMounts::Pristine(mounts)
         }
         crate::mounts::PrivateMountLinkFailureState::Deleted(mounts) => {
             let namespace_pins = (*mounts)
-                .finish_after_pristine_network_proof(rollback_network_proof, endpoint_baselines)
+                .finish_after_initial_network_proof(
+                    rollback_network_proof,
+                    initial_nftables,
+                    endpoint_baselines,
+                )
                 .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
-            FixedEndpointRouteTeardownMounts::NamespacePins(Box::new(namespace_pins))
+            FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(namespace_pins))
         }
     };
-    Ok((mounts, Some(source)))
+    Ok(FixedForwardPolicyTeardown {
+        mounts,
+        final_network_proof: None,
+        deferred_error: Some(crate::mounts::FixedForwardPolicyError::Topology(source)),
+    })
+}
+
+fn recover_failed_forward_policy_transition(
+    failure: crate::mounts::FixedForwardPolicyFailure,
+    endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
+) -> Result<FixedForwardPolicyTeardown, RunnerError> {
+    let (source, state) = failure.into_parts();
+    match state {
+        crate::mounts::FixedForwardPolicyFailureState::Initial(cleanup) => {
+            let namespace_pins = (*cleanup)
+                .finish(endpoint_baselines)
+                .map_err(|error| RunnerError::PrivateMount(io::Error::other(error)))?;
+            Ok(FixedForwardPolicyTeardown {
+                mounts: FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(namespace_pins)),
+                final_network_proof: None,
+                deferred_error: Some(source),
+            })
+        }
+        crate::mounts::FixedForwardPolicyFailureState::ActiveDeleted(cleanup) => {
+            match (*cleanup).finish_forward_policy_teardown(endpoint_baselines) {
+                Ok((namespace_pins, final_network_proof)) => Ok(retired_forward_policy_teardown(
+                    FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(namespace_pins)),
+                    final_network_proof,
+                    Some(source),
+                )),
+                Err(failure) => recover_failed_forward_policy_teardown(failure, Some(source)),
+            }
+        }
+        crate::mounts::FixedForwardPolicyFailureState::ActivePristine(cleanup) => {
+            match (*cleanup).finish_pristine_forward_policy_teardown() {
+                Ok((mounts, final_network_proof)) => Ok(retired_forward_policy_teardown(
+                    FixedForwardPolicyTeardownMounts::Pristine(mounts),
+                    final_network_proof,
+                    Some(source),
+                )),
+                Err(failure) => recover_failed_forward_policy_teardown(failure, Some(source)),
+            }
+        }
+        crate::mounts::FixedForwardPolicyFailureState::Indeterminate(cleanup) => {
+            (*cleanup).abort_fail_closed()
+        }
+    }
+}
+
+fn recover_failed_forward_policy_teardown(
+    mut failure: crate::mounts::FixedForwardPolicyTeardownFailure,
+    mut deferred_error: Option<crate::mounts::FixedForwardPolicyError>,
+) -> Result<FixedForwardPolicyTeardown, RunnerError> {
+    for _ in 0..FORWARD_POLICY_RECOVERY_STEPS {
+        let (cleanup_error, state) = failure.into_parts();
+        if deferred_error.is_none() {
+            deferred_error = Some(cleanup_error);
+        }
+        match continue_forward_policy_teardown(state) {
+            Ok((mounts, final_network_proof)) => {
+                return Ok(retired_forward_policy_teardown(
+                    mounts,
+                    final_network_proof,
+                    deferred_error,
+                ));
+            }
+            Err(next) => failure = next,
+        }
+    }
+    std::process::abort()
+}
+
+fn continue_forward_policy_teardown(
+    state: crate::mounts::FixedForwardPolicyTeardownFailureState,
+) -> Result<
+    (
+        FixedForwardPolicyTeardownMounts,
+        crate::network::FinalNetworkProof,
+    ),
+    crate::mounts::FixedForwardPolicyTeardownFailure,
+> {
+    match state {
+        crate::mounts::FixedForwardPolicyTeardownFailureState::Active { cleanup, endpoints } => {
+            (*cleanup)
+                .finish_forward_policy_teardown(*endpoints)
+                .map(|(mounts, proof)| {
+                    (
+                        FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(mounts)),
+                        proof,
+                    )
+                })
+        }
+        crate::mounts::FixedForwardPolicyTeardownFailureState::Retired { cleanup, endpoints } => {
+            (*cleanup).finish(*endpoints).map(|(mounts, proof)| {
+                (
+                    FixedForwardPolicyTeardownMounts::NamespacePins(Box::new(mounts)),
+                    proof,
+                )
+            })
+        }
+        crate::mounts::FixedForwardPolicyTeardownFailureState::ActivePristine(cleanup) => {
+            (*cleanup)
+                .finish_pristine_forward_policy_teardown()
+                .map(|(mounts, proof)| (FixedForwardPolicyTeardownMounts::Pristine(mounts), proof))
+        }
+        crate::mounts::FixedForwardPolicyTeardownFailureState::RetiredPristine(cleanup) => {
+            (*cleanup)
+                .finish()
+                .map(|(mounts, proof)| (FixedForwardPolicyTeardownMounts::Pristine(mounts), proof))
+        }
+        crate::mounts::FixedForwardPolicyTeardownFailureState::Indeterminate {
+            cleanup,
+            endpoints,
+        } => {
+            drop(endpoints);
+            (*cleanup).abort_fail_closed()
+        }
+        crate::mounts::FixedForwardPolicyTeardownFailureState::IndeterminatePristine(cleanup) => {
+            (*cleanup).abort_fail_closed()
+        }
+    }
+}
+
+fn retired_forward_policy_teardown(
+    mounts: FixedForwardPolicyTeardownMounts,
+    final_network_proof: crate::network::FinalNetworkProof,
+    deferred_error: Option<crate::mounts::FixedForwardPolicyError>,
+) -> FixedForwardPolicyTeardown {
+    FixedForwardPolicyTeardown {
+        mounts,
+        final_network_proof: Some(final_network_proof),
+        deferred_error,
+    }
 }
 
 fn map_namespace_network_proof_error(

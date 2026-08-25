@@ -23,11 +23,22 @@ use rustix::{
 use thiserror::Error;
 use volparossa_test_support::MutationAuthorization;
 
+use crate::network::{
+    FinalNetworkProof as PolicyFinalNetworkProof,
+    MutationRollbackNetworkProof as PolicyRollbackProof, NetworkError as PolicyNetworkError,
+    PristineNetworkNamespaceObservation as EndpointNetworkBaseline,
+};
+use crate::nftables::{
+    ActiveNftablesPolicy, FixedForwardPolicyExpectation, IndeterminateNftablesPolicy,
+    NftablesBaseline, NftablesDeleteAuthority, NftablesError, NftablesInstallAuthority,
+    SemanticallyEmptyNftables, delete_exact_forward_policy, install_exact_forward_policy,
+    mutation_deadline, verify_empty_nftables, verify_exact_forward_policy,
+};
 use crate::topology::namespaces::{
     AuthorizedActivatedTopology, AuthorizedDeletedTopology, AuthorizedEndpointRoutes,
     AuthorizedIpv4AddrgenNone, FixedEndpointRouteFailure, FixedEndpointRouteSetError,
-    FixedEndpointRouteVisitError, FixedLinkActivationError, FixedLinkActivationFailure,
-    FixedTopologyVisitError,
+    FixedEndpointRouteVisitError, FixedForwardPolicyBinding, FixedLinkActivationError,
+    FixedLinkActivationFailure, FixedTopologyVisitError,
 };
 use crate::topology::{
     AuthorizedIpv4Addresses, AuthorizedNamespacePins, AuthorizedVethPairs,
@@ -254,6 +265,299 @@ impl PrivateMountLinkActivationFailure {
             backing,
             deleted,
         )
+    }
+}
+
+/// Failure source for the parent-namespace forward-policy lifecycle.
+#[derive(Debug, Error)]
+pub(crate) enum FixedForwardPolicyError {
+    /// The exact nftables generation or fixed policy could not be established.
+    #[error("fixed forward policy failed: {0}")]
+    Nftables(#[source] NftablesError),
+    /// A lower topology transition or its exact parent/A/B proof failed.
+    #[error("fixed forward topology failed: {0}")]
+    Topology(#[source] PrivateMountLinkActivationError),
+    /// The final composite RTNL/proc/nftables lineage proof failed.
+    #[error("fixed forward network lineage failed: {0}")]
+    Network(#[source] PolicyNetworkError),
+    /// The original failure is retained when cleanup-authority reproof also fails.
+    #[error("{transition}; retained policy cleanup authority also failed: {cleanup}")]
+    CleanupReproof {
+        /// Original fixed-policy or topology failure.
+        #[source]
+        transition: Box<FixedForwardPolicyError>,
+        /// Independent failure while re-proving retained mounts/topology.
+        cleanup: PrivateMountSetupError,
+    },
+}
+
+/// Generation-one authority retained after policy installation did not start.
+#[must_use = "initial policy cleanup retains the only lower-owner retirement authority"]
+pub(crate) struct InitialForwardPolicyCleanup {
+    mounts: PrivateMounts<AuthorizedDeletedTopology>,
+    rollback: PolicyRollbackProof,
+    nftables: NftablesBaseline,
+}
+
+/// Armed authority retained when a possibly-sent nftables mutation cannot be classified.
+#[must_use = "indeterminate policy cleanup must remain armed and fail closed"]
+pub(crate) struct IndeterminateForwardPolicyCleanup {
+    mounts: PrivateMounts<AuthorizedDeletedTopology>,
+    rollback: PolicyRollbackProof,
+    nftables: IndeterminateNftablesPolicy,
+    binding: FixedForwardPolicyBinding,
+}
+
+/// Indeterminate policy authority after lower ordinary unwind already restored pristine mounts.
+#[must_use = "indeterminate policy cleanup must remain armed and fail closed"]
+pub(crate) struct IndeterminatePristineForwardPolicyCleanup {
+    mounts: PrivateMounts<PristineRun>,
+    rollback: PolicyRollbackProof,
+    nftables: IndeterminateNftablesPolicy,
+    binding: FixedForwardPolicyBinding,
+}
+
+/// Exact generation-two policy coupled to one topology and parent rollback lineage.
+#[must_use = "an active policy-bound topology must be retired through its typed lifecycle"]
+pub(crate) struct PolicyBoundPrivateMounts<RunState> {
+    mounts: PrivateMounts<RunState>,
+    policy: ActiveNftablesPolicy,
+    rollback: PolicyRollbackProof,
+    binding: FixedForwardPolicyBinding,
+}
+
+/// Recoverable authority after an all-NONE, activation, or route transition failed.
+pub(crate) enum FixedForwardPolicyFailureState {
+    /// Nothing was installed; B then A were deleted under the original empty ruleset.
+    Initial(Box<InitialForwardPolicyCleanup>),
+    /// The exact active policy remains armed over a deleted topology.
+    ActiveDeleted(Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>>),
+    /// Lower ordinary unwind completed before any link mutation, while policy retirement remains.
+    ActivePristine(Box<PolicyBoundPrivateMounts<PristineRun>>),
+    /// A possibly-sent nftables transaction remains deliberately indeterminate and armed.
+    Indeterminate(Box<IndeterminateForwardPolicyCleanup>),
+}
+
+/// Affine transition failure which always returns its cleanup authority.
+#[must_use = "failed policy transition retains mandatory cleanup authority"]
+pub(crate) struct FixedForwardPolicyFailure {
+    source: FixedForwardPolicyError,
+    state: FixedForwardPolicyFailureState,
+}
+
+impl std::fmt::Debug for FixedForwardPolicyFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FixedForwardPolicyFailure")
+            .field("source", &self.source)
+            .field("state", &self.state.kind())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FixedForwardPolicyFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for FixedForwardPolicyFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl FixedForwardPolicyFailureState {
+    const fn kind(&self) -> &'static str {
+        match self {
+            Self::Initial(_) => "initial",
+            Self::ActiveDeleted(_) => "active-deleted",
+            Self::ActivePristine(_) => "active-pristine",
+            Self::Indeterminate(cleanup) => {
+                let _ = cleanup;
+                "indeterminate"
+            }
+        }
+    }
+}
+
+impl FixedForwardPolicyFailure {
+    /// Recover both the bounded failure and every affine cleanup authority.
+    pub(crate) fn into_parts(self) -> (FixedForwardPolicyError, FixedForwardPolicyFailureState) {
+        (self.source, self.state)
+    }
+
+    fn initial(source: FixedForwardPolicyError, cleanup: InitialForwardPolicyCleanup) -> Self {
+        Self {
+            source,
+            state: FixedForwardPolicyFailureState::Initial(Box::new(cleanup)),
+        }
+    }
+
+    fn active_deleted(
+        source: FixedForwardPolicyError,
+        cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology>,
+    ) -> Self {
+        Self {
+            source,
+            state: FixedForwardPolicyFailureState::ActiveDeleted(Box::new(cleanup)),
+        }
+    }
+
+    fn active_pristine(
+        source: FixedForwardPolicyError,
+        cleanup: PolicyBoundPrivateMounts<PristineRun>,
+    ) -> Self {
+        Self {
+            source,
+            state: FixedForwardPolicyFailureState::ActivePristine(Box::new(cleanup)),
+        }
+    }
+
+    fn indeterminate(
+        source: FixedForwardPolicyError,
+        cleanup: IndeterminateForwardPolicyCleanup,
+    ) -> Self {
+        Self {
+            source,
+            state: FixedForwardPolicyFailureState::Indeterminate(Box::new(cleanup)),
+        }
+    }
+}
+
+enum RetiredParentNetworkAuthority {
+    Pending(PolicyRollbackProof, SemanticallyEmptyNftables),
+    Final(PolicyFinalNetworkProof),
+}
+
+/// Deleted topology retained after the exact policy table reached generation three.
+#[must_use = "retired policy mounts still retain armed lower topology owners"]
+pub(crate) struct RetiredForwardPolicyCleanup {
+    mounts: PrivateMounts<AuthorizedDeletedTopology>,
+    parent: RetiredParentNetworkAuthority,
+    binding: FixedForwardPolicyBinding,
+}
+
+/// Pristine mount owner retained while generation-three parent proof is completed.
+#[must_use = "retired policy lineage must be completed before ordinary mount reuse"]
+pub(crate) struct RetiredPristineForwardPolicyCleanup {
+    mounts: PrivateMounts<PristineRun>,
+    parent: RetiredParentNetworkAuthority,
+}
+
+/// Authority returned by a recoverable deleted-topology teardown failure.
+pub(crate) enum FixedForwardPolicyTeardownFailureState {
+    /// Generation two remains active and can be reverified and deleted again.
+    Active {
+        /// Active deleted topology and exact policy authority.
+        cleanup: Box<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>>,
+        /// Still-affine endpoint baseline observations.
+        endpoints: Box<[EndpointNetworkBaseline; 2]>,
+    },
+    /// Generation three is semantic-empty; only final proof and owner retirement remain.
+    Retired {
+        /// Deleted topology plus pending or completed parent lineage proof.
+        cleanup: Box<RetiredForwardPolicyCleanup>,
+        /// Still-affine endpoint baseline observations.
+        endpoints: Box<[EndpointNetworkBaseline; 2]>,
+    },
+    /// Policy deletion became indeterminate and therefore remains fail-closed armed.
+    Indeterminate {
+        /// Indeterminate deleted-topology cleanup authority.
+        cleanup: Box<IndeterminateForwardPolicyCleanup>,
+        /// Still-affine endpoint baseline observations.
+        endpoints: Box<[EndpointNetworkBaseline; 2]>,
+    },
+    /// Lower ordinary unwind is pristine, but generation two is still active.
+    ActivePristine(Box<PolicyBoundPrivateMounts<PristineRun>>),
+    /// Lower ordinary unwind is pristine and generation three awaits final proof.
+    RetiredPristine(Box<RetiredPristineForwardPolicyCleanup>),
+    /// Lower ordinary unwind is pristine, but DELTABLE authority is indeterminate.
+    IndeterminatePristine(Box<IndeterminatePristineForwardPolicyCleanup>),
+}
+
+/// Failure after topology deletion which returns policy and endpoint authority.
+#[must_use = "failed policy teardown retains mandatory cleanup authority"]
+pub(crate) struct FixedForwardPolicyTeardownFailure {
+    source: FixedForwardPolicyError,
+    state: FixedForwardPolicyTeardownFailureState,
+}
+
+impl std::fmt::Debug for FixedForwardPolicyTeardownFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match &self.state {
+            FixedForwardPolicyTeardownFailureState::Active { .. } => "active",
+            FixedForwardPolicyTeardownFailureState::Retired { .. } => "retired",
+            FixedForwardPolicyTeardownFailureState::Indeterminate { cleanup, endpoints } => {
+                let _ = (cleanup, endpoints);
+                "indeterminate"
+            }
+            FixedForwardPolicyTeardownFailureState::ActivePristine(_) => "active-pristine",
+            FixedForwardPolicyTeardownFailureState::RetiredPristine(_) => "retired-pristine",
+            FixedForwardPolicyTeardownFailureState::IndeterminatePristine(cleanup) => {
+                let _ = cleanup;
+                "indeterminate-pristine"
+            }
+        };
+        formatter
+            .debug_struct("FixedForwardPolicyTeardownFailure")
+            .field("source", &self.source)
+            .field("state", &kind)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FixedForwardPolicyTeardownFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for FixedForwardPolicyTeardownFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl FixedForwardPolicyTeardownFailure {
+    /// Recover the error and every active, retired, or indeterminate authority.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        FixedForwardPolicyError,
+        FixedForwardPolicyTeardownFailureState,
+    ) {
+        (self.source, self.state)
+    }
+}
+
+impl IndeterminateForwardPolicyCleanup {
+    /// Consume every opaque authority and deliberately terminate fail closed.
+    pub(crate) fn abort_fail_closed(self) -> ! {
+        let Self {
+            mounts,
+            rollback,
+            nftables,
+            binding,
+        } = self;
+        std::mem::forget((mounts, rollback, binding));
+        drop(nftables);
+        std::process::abort()
+    }
+}
+
+impl IndeterminatePristineForwardPolicyCleanup {
+    /// Consume every opaque authority and deliberately terminate fail closed.
+    pub(crate) fn abort_fail_closed(self) -> ! {
+        let Self {
+            mounts,
+            rollback,
+            nftables,
+            binding,
+        } = self;
+        std::mem::forget((mounts, rollback, binding));
+        drop(nftables);
+        std::process::abort()
     }
 }
 
@@ -986,6 +1290,83 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
     }
 }
 
+impl PolicyBoundPrivateMounts<AuthorizedIpv4AddrgenNone> {
+    /// Consume the all-NONE proof and activate all four ends only while the
+    /// exact generation-two policy remains freshly observed before and after.
+    pub(crate) fn activate_links(
+        self,
+        none_proof: ExactIpv4AddrgenNoneNetworkProof,
+        endpoint_baselines: &[EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PolicyBoundPrivateMounts<AuthorizedActivatedTopology>,
+            ExactActivatedIpv4NetworkProof,
+        ),
+        FixedForwardPolicyFailure,
+    > {
+        if let Err(source) = self.verify_active_policy() {
+            return Err(self.into_deleted_failure(source));
+        }
+        if let Err(source) = self
+            .mounts
+            .verify_exact_ipv4_addrgen_none_state(&none_proof)
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source))
+            })
+        {
+            return Err(self.into_deleted_failure(source));
+        }
+
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (mounts, active_proof) =
+            match mounts.activate_links_without_policy(none_proof, &rollback, endpoint_baselines) {
+                Ok(result) => result,
+                Err(failure) => {
+                    return Err(policy_failure_from_topology(
+                        failure, policy, rollback, binding,
+                    ));
+                }
+            };
+        let active = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        if let Err(source) = active.verify_active_policy() {
+            return Err(active.into_deleted_failure(source));
+        }
+        Ok((active, active_proof))
+    }
+
+    fn into_deleted_failure(self, source: FixedForwardPolicyError) -> FixedForwardPolicyFailure {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (backing, all_none) = mounts.into_backing_and_run_state();
+        let mounts = backing.with_run_state(all_none.begin_retirement());
+        let source =
+            retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+        FixedForwardPolicyFailure::active_deleted(
+            source,
+            PolicyBoundPrivateMounts {
+                mounts,
+                policy,
+                rollback,
+                binding,
+            },
+        )
+    }
+}
+
 impl PrivateMounts<AuthorizedActivatedTopology> {
     /// Reprove the all-UP owner, both nsfs attachments, and their exact visible
     /// mount-table records without invoking any lower rollback parser.
@@ -1142,17 +1523,47 @@ impl PrivateMounts<AuthorizedDeletedTopology> {
     /// terminal: dropping the still-armed deleted topology aborts fail-closed.
     /// The returned error path begins only after infallible owner retirement,
     /// when the recovered namespace-pin mount authority is reverified.
-    pub(crate) fn finish_after_pristine_network_proof(
+    pub(crate) fn finish_after_initial_network_proof(
         self,
-        parent_baseline: &crate::network::MutationRollbackNetworkProof,
-        endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
+        parent_baseline: PolicyRollbackProof,
+        nftables: NftablesBaseline,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
     ) -> Result<PrivateMounts<AuthorizedNamespacePins>, PrivateMountSetupError> {
         self.verify_authorized_deleted_topology()?;
         self.run_state
-            .visit_parent_network_namespace(|| parent_baseline.verify_pristine_state(&self))
+            .visit_parent_network_namespace(|| {
+                parent_baseline.verify_pristine_with_initial_nftables(&self, &nftables)
+            })
             .map_err(|error| {
-                topology_network_visit_error("verify deleted topology pristine parent state", error)
+                topology_network_visit_error(
+                    "verify deleted topology pristine generation-one parent state",
+                    error,
+                )
             })?;
+
+        let mut visited = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if visited[index] {
+                    return Err(PolicyNetworkError::Inconsistent);
+                }
+                endpoint_baselines[index].verify_pristine_state(&self)?;
+                visited[index] = true;
+                Ok(())
+            })
+            .map_err(|error| {
+                topology_network_visit_error(
+                    "preverify deleted topology pristine endpoint states",
+                    error,
+                )
+            })?;
+        if visited != [true, true] {
+            return Err(network_proof_setup_error(
+                "preverify deleted topology pristine endpoint visit",
+                PolicyNetworkError::Inconsistent,
+            ));
+        }
 
         let mut endpoint_baselines = endpoint_baselines.map(Some);
         self.run_state
@@ -1176,14 +1587,17 @@ impl PrivateMounts<AuthorizedDeletedTopology> {
         }
 
         self.run_state
-            .visit_parent_network_namespace(|| parent_baseline.verify_pristine_state(&self))
+            .visit_parent_network_namespace(|| {
+                parent_baseline.verify_pristine_with_initial_nftables(&self, &nftables)
+            })
             .map_err(|error| {
                 topology_network_visit_error(
-                    "reverify deleted topology pristine parent state",
+                    "reverify deleted topology pristine generation-one parent state",
                     error,
                 )
             })?;
         self.verify_authorized_deleted_topology()?;
+        drop((parent_baseline, nftables));
         let proof = PristineNetworkRetirementProof { _private: () };
         let (backing, deleted) = self.into_backing_and_run_state();
         let pins = deleted.finish_after_pristine_network_proof(proof);
@@ -1242,11 +1656,190 @@ impl PrivateMounts<AuthorizedIpv4Addresses> {
 }
 
 impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
-    /// Consume the exact all-NONE proof into four link-UP operations and an
-    /// exact active parent/A/B barrier.
-    pub(crate) fn activate_links(
+    /// Install and prove the sole exact parent FORWARD drop policy while all
+    /// four fixed veth ends remain freshly proven down with addrgenmode NONE.
+    pub(crate) fn install_fixed_forward_policy(
         self,
         none_proof: &ExactIpv4AddrgenNoneNetworkProof,
+        rollback: PolicyRollbackProof,
+        initial: NftablesBaseline,
+    ) -> Result<PolicyBoundPrivateMounts<AuthorizedIpv4AddrgenNone>, FixedForwardPolicyFailure>
+    {
+        if let Err(source) = self.verify_exact_ipv4_addrgen_none_state(none_proof) {
+            return Err(self.into_initial_policy_failure(
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source)),
+                rollback,
+                initial,
+            ));
+        }
+        let binding = match self.run_state.fixed_forward_policy_binding() {
+            Ok(binding) => binding,
+            Err(source) => {
+                return Err(self.into_initial_policy_failure(
+                    FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Activation(
+                        source,
+                    )),
+                    rollback,
+                    initial,
+                ));
+            }
+        };
+        let parent_ifindices = binding.parent_ifindices();
+        let retained_parent_ifindices = binding
+            .pair_identities()
+            .each_ref()
+            .map(crate::topology::namespaces::DeletedVethPairIdentity::parent_ifindex);
+        if retained_parent_ifindices != parent_ifindices {
+            return Err(self.into_initial_policy_failure(
+                policy_binding_error(),
+                rollback,
+                initial,
+            ));
+        }
+        let expectation = match FixedForwardPolicyExpectation::from_binding(&binding) {
+            Ok(expectation) => expectation,
+            Err(source) => {
+                return Err(self.into_initial_policy_failure(
+                    FixedForwardPolicyError::Nftables(source),
+                    rollback,
+                    initial,
+                ));
+            }
+        };
+        let deadline = match mutation_deadline() {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(self.into_initial_policy_failure(
+                    FixedForwardPolicyError::Nftables(source),
+                    rollback,
+                    initial,
+                ));
+            }
+        };
+        if let Err(source) = verify_empty_nftables(&initial, deadline) {
+            return Err(self.into_initial_policy_failure(
+                FixedForwardPolicyError::Nftables(source),
+                rollback,
+                initial,
+            ));
+        }
+        let policy = match install_exact_forward_policy(initial, expectation, deadline) {
+            Ok(policy) => policy,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                return match authority {
+                    NftablesInstallAuthority::Initial(initial, expectation) => {
+                        // A fresh generation-one readback proves that the
+                        // transaction did not install anything. The returned
+                        // expectation carries no cleanup authority; the
+                        // independently retained topology binding remains
+                        // canonical for any later attempt.
+                        drop(expectation);
+                        Err(self.into_initial_policy_failure(
+                            FixedForwardPolicyError::Nftables(source),
+                            rollback,
+                            initial,
+                        ))
+                    }
+                    NftablesInstallAuthority::Indeterminate(nftables) => Err(self
+                        .into_indeterminate_policy_failure(
+                            FixedForwardPolicyError::Nftables(source),
+                            rollback,
+                            nftables,
+                            binding,
+                        )),
+                };
+            }
+        };
+        let mounts =
+            Self::finish_policy_install_reproof(self, none_proof, policy, rollback, binding)?;
+        Ok(mounts)
+    }
+
+    fn finish_policy_install_reproof(
+        self,
+        none_proof: &ExactIpv4AddrgenNoneNetworkProof,
+        policy: ActiveNftablesPolicy,
+        rollback: PolicyRollbackProof,
+        binding: FixedForwardPolicyBinding,
+    ) -> Result<PolicyBoundPrivateMounts<AuthorizedIpv4AddrgenNone>, FixedForwardPolicyFailure>
+    {
+        let cleanup = PolicyBoundPrivateMounts {
+            mounts: self,
+            policy,
+            rollback,
+            binding,
+        };
+        if let Err(source) = cleanup.verify_active_policy() {
+            return Err(cleanup.into_deleted_failure(source));
+        }
+        if let Err(source) = cleanup
+            .mounts
+            .verify_exact_ipv4_addrgen_none_state(none_proof)
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source))
+            })
+        {
+            return Err(cleanup.into_deleted_failure(source));
+        }
+        match cleanup.mounts.run_state.fixed_forward_policy_binding() {
+            Ok(observed) if observed == cleanup.binding => Ok(cleanup),
+            Ok(_) => Err(cleanup.into_deleted_failure(policy_binding_error())),
+            Err(source) => Err(
+                cleanup.into_deleted_failure(FixedForwardPolicyError::Topology(
+                    PrivateMountLinkActivationError::Activation(source),
+                )),
+            ),
+        }
+    }
+
+    fn into_initial_policy_failure(
+        self,
+        source: FixedForwardPolicyError,
+        rollback: PolicyRollbackProof,
+        nftables: NftablesBaseline,
+    ) -> FixedForwardPolicyFailure {
+        let (backing, all_none) = self.into_backing_and_run_state();
+        let mounts = backing.with_run_state(all_none.begin_retirement());
+        let source =
+            retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+        FixedForwardPolicyFailure::initial(
+            source,
+            InitialForwardPolicyCleanup {
+                mounts,
+                rollback,
+                nftables,
+            },
+        )
+    }
+
+    fn into_indeterminate_policy_failure(
+        self,
+        source: FixedForwardPolicyError,
+        rollback: PolicyRollbackProof,
+        nftables: IndeterminateNftablesPolicy,
+        binding: FixedForwardPolicyBinding,
+    ) -> FixedForwardPolicyFailure {
+        let (backing, all_none) = self.into_backing_and_run_state();
+        let mounts = backing.with_run_state(all_none.begin_retirement());
+        let source =
+            retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+        FixedForwardPolicyFailure::indeterminate(
+            source,
+            IndeterminateForwardPolicyCleanup {
+                mounts,
+                rollback,
+                nftables,
+                binding,
+            },
+        )
+    }
+
+    /// Consume the exact all-NONE proof into four link-UP operations and an
+    /// exact active parent/A/B barrier.
+    fn activate_links_without_policy(
+        self,
+        none_proof: ExactIpv4AddrgenNoneNetworkProof,
         parent_baseline: &crate::network::MutationRollbackNetworkProof,
         endpoint_baselines: &[crate::network::PristineNetworkNamespaceObservation; 2],
     ) -> Result<
@@ -1256,9 +1849,10 @@ impl PrivateMounts<AuthorizedIpv4AddrgenNone> {
         ),
         PrivateMountLinkActivationFailure,
     > {
-        if let Err(source) = self.verify_exact_ipv4_addrgen_none_state(none_proof) {
+        if let Err(source) = self.verify_exact_ipv4_addrgen_none_state(&none_proof) {
             return Err(self.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)));
         }
+        drop(none_proof);
         let (backing, all_none) = self.into_backing_and_run_state();
         let activated = match all_none.activate_links() {
             Ok(activated) => activated,
@@ -1297,7 +1891,7 @@ impl PrivateMounts<AuthorizedActivatedTopology> {
     /// Consume the exact active observations, install route A then B, and
     /// independently prove an unchanged parent plus one exact route in each
     /// retained endpoint namespace.
-    pub(crate) fn install_endpoint_routes(
+    fn install_endpoint_routes_without_policy(
         self,
         active_proof: ExactActivatedIpv4NetworkProof,
     ) -> Result<
@@ -1365,6 +1959,71 @@ impl PrivateMounts<AuthorizedActivatedTopology> {
             source,
             backing,
             activated.begin_retirement(),
+        )
+    }
+}
+
+impl PolicyBoundPrivateMounts<AuthorizedActivatedTopology> {
+    /// Install the fixed A then B endpoint routes while generation two stays exact.
+    pub(crate) fn install_endpoint_routes(
+        self,
+        active_proof: ExactActivatedIpv4NetworkProof,
+    ) -> Result<
+        (
+            PolicyBoundPrivateMounts<AuthorizedEndpointRoutes>,
+            ExactIpv4EndpointRouteNetworkProof,
+        ),
+        FixedForwardPolicyFailure,
+    > {
+        if let Err(source) = self.verify_active_policy() {
+            return Err(self.into_deleted_failure(source));
+        }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (mounts, routed_proof) =
+            match mounts.install_endpoint_routes_without_policy(active_proof) {
+                Ok(result) => result,
+                Err(failure) => {
+                    return Err(policy_failure_from_topology(
+                        failure, policy, rollback, binding,
+                    ));
+                }
+            };
+        let routed = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        if let Err(source) = routed.verify_active_policy() {
+            return Err(routed.into_deleted_failure(source));
+        }
+        Ok((routed, routed_proof))
+    }
+
+    fn into_deleted_failure(self, source: FixedForwardPolicyError) -> FixedForwardPolicyFailure {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (backing, activated) = mounts.into_backing_and_run_state();
+        let mounts = backing.with_run_state(activated.begin_retirement());
+        let source =
+            retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+        FixedForwardPolicyFailure::active_deleted(
+            source,
+            PolicyBoundPrivateMounts {
+                mounts,
+                policy,
+                rollback,
+                binding,
+            },
         )
     }
 }
@@ -1478,7 +2137,7 @@ impl PrivateMounts<AuthorizedEndpointRoutes> {
 
     /// Directly delete pair B then A and retain route/address/pair authorities
     /// until the existing pristine parent/A/B proof authorizes retirement.
-    pub(crate) fn begin_retirement(self) -> PrivateMounts<AuthorizedDeletedTopology> {
+    fn begin_retirement_without_policy(self) -> PrivateMounts<AuthorizedDeletedTopology> {
         let (backing, routed) = self.into_backing_and_run_state();
         let mounts = backing.with_run_state(routed.begin_retirement());
         if mounts.verify_authorized_deleted_topology().is_err() {
@@ -1497,6 +2156,660 @@ impl PrivateMounts<AuthorizedEndpointRoutes> {
             backing,
             routed.begin_retirement(),
         )
+    }
+}
+
+impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes> {
+    /// Consume the routed proof, delete pair B then A while the exact policy
+    /// stays armed, and return only deleted-topology generation-two authority.
+    pub(crate) fn begin_retirement(
+        self,
+        routed_proof: ExactIpv4EndpointRouteNetworkProof,
+    ) -> Result<PolicyBoundPrivateMounts<AuthorizedDeletedTopology>, FixedForwardPolicyFailure>
+    {
+        if let Err(source) = self.verify_active_policy() {
+            return Err(self.into_deleted_failure(source));
+        }
+        if let Err(source) = self
+            .mounts
+            .verify_exact_ipv4_endpoint_route_state(&routed_proof)
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Proof(source))
+            })
+        {
+            return Err(self.into_deleted_failure(source));
+        }
+        drop(routed_proof);
+
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let mounts = mounts.begin_retirement_without_policy();
+        let deleted = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        match deleted.verify_deleted_active_policy_state() {
+            Ok(()) => Ok(deleted),
+            Err(source) => Err(FixedForwardPolicyFailure::active_deleted(source, deleted)),
+        }
+    }
+
+    fn into_deleted_failure(self, source: FixedForwardPolicyError) -> FixedForwardPolicyFailure {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let mounts = mounts.begin_retirement_without_policy();
+        let source =
+            retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+        FixedForwardPolicyFailure::active_deleted(
+            source,
+            PolicyBoundPrivateMounts {
+                mounts,
+                policy,
+                rollback,
+                binding,
+            },
+        )
+    }
+}
+
+impl PolicyBoundPrivateMounts<AuthorizedDeletedTopology> {
+    fn verify_deleted_active_policy_state(&self) -> Result<(), FixedForwardPolicyError> {
+        self.mounts
+            .verify_authorized_deleted_topology()
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+            })?;
+        let observed = self
+            .mounts
+            .run_state
+            .fixed_forward_policy_binding()
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(
+                    namespace_pin_error("verify deleted forward-policy binding", source),
+                ))
+            })?;
+        if observed != self.binding {
+            return Err(policy_binding_error());
+        }
+        self.verify_active_policy()?;
+        self.mounts
+            .verify_authorized_deleted_topology()
+            .map_err(|source| {
+                FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+            })
+    }
+
+    fn verify_generation_two_pristine_barrier(
+        &self,
+        endpoint_baselines: &[EndpointNetworkBaseline; 2],
+    ) -> Result<(), FixedForwardPolicyError> {
+        self.verify_deleted_active_policy_state()?;
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_active_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "verify deleted topology pristine generation-two parent state",
+                    error,
+                )
+            })?;
+
+        verify_deleted_endpoint_baselines(&self.mounts, endpoint_baselines)?;
+
+        self.mounts
+            .run_state
+            .visit_parent_network_namespace(|| {
+                self.rollback
+                    .verify_pristine_with_active_policy(&self.mounts, &self.policy)
+            })
+            .map_err(|error| {
+                fixed_policy_network_visit_error(
+                    "reverify deleted topology pristine generation-two parent state",
+                    error,
+                )
+            })?;
+        self.verify_deleted_active_policy_state()
+    }
+
+    /// Prove parent and both endpoints pristine under generation two, then
+    /// delete only the observed exact policy table and finish generation three.
+    pub(crate) fn finish_forward_policy_teardown(
+        self,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedNamespacePins>,
+            PolicyFinalNetworkProof,
+        ),
+        FixedForwardPolicyTeardownFailure,
+    > {
+        if let Err(source) = self.verify_generation_two_pristine_barrier(&endpoint_baselines) {
+            return Err(active_deleted_teardown_failure(
+                source,
+                self,
+                endpoint_baselines,
+            ));
+        }
+        let deadline = match mutation_deadline() {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(active_deleted_teardown_failure(
+                    FixedForwardPolicyError::Nftables(source),
+                    self,
+                    endpoint_baselines,
+                ));
+            }
+        };
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let nftables = match delete_exact_forward_policy(policy, deadline) {
+            Ok(nftables) => nftables,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                return match authority {
+                    NftablesDeleteAuthority::Active(policy) => {
+                        Err(active_deleted_teardown_failure(
+                            FixedForwardPolicyError::Nftables(source),
+                            PolicyBoundPrivateMounts {
+                                mounts,
+                                policy,
+                                rollback,
+                                binding,
+                            },
+                            endpoint_baselines,
+                        ))
+                    }
+                    NftablesDeleteAuthority::Indeterminate(nftables) => {
+                        Err(indeterminate_deleted_teardown_failure(
+                            FixedForwardPolicyError::Nftables(source),
+                            IndeterminateForwardPolicyCleanup {
+                                mounts,
+                                rollback,
+                                nftables,
+                                binding,
+                            },
+                            endpoint_baselines,
+                        ))
+                    }
+                };
+            }
+        };
+        RetiredForwardPolicyCleanup {
+            mounts,
+            parent: RetiredParentNetworkAuthority::Pending(rollback, nftables),
+            binding,
+        }
+        .finish(endpoint_baselines)
+    }
+}
+
+impl InitialForwardPolicyCleanup {
+    /// Consume generation-one parent/endpoint proofs and retire all lower owners.
+    pub(crate) fn finish(
+        self,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
+    ) -> Result<PrivateMounts<AuthorizedNamespacePins>, PrivateMountSetupError> {
+        self.mounts.finish_after_initial_network_proof(
+            self.rollback,
+            self.nftables,
+            endpoint_baselines,
+        )
+    }
+}
+
+impl RetiredForwardPolicyCleanup {
+    /// Retry the generation-three proof, then consume endpoint observations and
+    /// disarm lower route/address/pair owners only after every final reproof.
+    pub(crate) fn finish(
+        self,
+        endpoint_baselines: [EndpointNetworkBaseline; 2],
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedNamespacePins>,
+            PolicyFinalNetworkProof,
+        ),
+        FixedForwardPolicyTeardownFailure,
+    > {
+        if let Err(source) = verify_retired_deleted_state(&self) {
+            return Err(retired_deleted_teardown_failure(
+                source,
+                self,
+                endpoint_baselines,
+            ));
+        }
+        if let Err(source) = verify_deleted_endpoint_baselines(&self.mounts, &endpoint_baselines) {
+            return Err(retired_deleted_teardown_failure(
+                source,
+                self,
+                endpoint_baselines,
+            ));
+        }
+
+        let Self {
+            mounts,
+            parent,
+            binding,
+        } = self;
+        let final_proof = match parent {
+            RetiredParentNetworkAuthority::Pending(rollback, nftables) => {
+                match rollback.finish_after_semantically_empty(&mounts, nftables) {
+                    Ok(final_proof) => final_proof,
+                    Err(failure) => {
+                        let (source, authority) = failure.into_parts();
+                        let (rollback, nftables) = *authority;
+                        return Err(retired_deleted_teardown_failure(
+                            FixedForwardPolicyError::Network(source),
+                            RetiredForwardPolicyCleanup {
+                                mounts,
+                                parent: RetiredParentNetworkAuthority::Pending(rollback, nftables),
+                                binding,
+                            },
+                            endpoint_baselines,
+                        ));
+                    }
+                }
+            }
+            RetiredParentNetworkAuthority::Final(final_proof) => final_proof,
+        };
+
+        if let Err(source) = verify_final_parent_state(&mounts, &final_proof) {
+            return Err(retired_deleted_teardown_failure(
+                source,
+                RetiredForwardPolicyCleanup {
+                    mounts,
+                    parent: RetiredParentNetworkAuthority::Final(final_proof),
+                    binding,
+                },
+                endpoint_baselines,
+            ));
+        }
+        if let Err(source) = verify_deleted_endpoint_baselines(&mounts, &endpoint_baselines) {
+            return Err(retired_deleted_teardown_failure(
+                source,
+                RetiredForwardPolicyCleanup {
+                    mounts,
+                    parent: RetiredParentNetworkAuthority::Final(final_proof),
+                    binding,
+                },
+                endpoint_baselines,
+            ));
+        }
+
+        consume_deleted_endpoint_baselines_or_abort(&mounts, endpoint_baselines);
+        if verify_final_parent_state(&mounts, &final_proof).is_err()
+            || mounts.verify_authorized_deleted_topology().is_err()
+        {
+            std::process::abort();
+        }
+        let proof = PristineNetworkRetirementProof { _private: () };
+        let (backing, deleted) = mounts.into_backing_and_run_state();
+        let pins = deleted.finish_after_pristine_network_proof(proof);
+        let mounts = backing.with_run_state(pins);
+        if mounts.verify_authorized_namespace_pins().is_err() {
+            std::process::abort();
+        }
+        Ok((mounts, final_proof))
+    }
+}
+
+impl PolicyBoundPrivateMounts<PristineRun> {
+    /// Retire the exact active policy after lower ordinary unwind already
+    /// restored pristine mounts before any link mutation crossed its boundary.
+    pub(crate) fn finish_pristine_forward_policy_teardown(
+        self,
+    ) -> Result<
+        (PrivateMounts<PristineRun>, PolicyFinalNetworkProof),
+        FixedForwardPolicyTeardownFailure,
+    > {
+        if let Err(source) = self.verify_pristine_generation_two_state() {
+            return Err(FixedForwardPolicyTeardownFailure {
+                source,
+                state: FixedForwardPolicyTeardownFailureState::ActivePristine(Box::new(self)),
+            });
+        }
+        let deadline = match mutation_deadline() {
+            Ok(deadline) => deadline,
+            Err(source) => {
+                return Err(FixedForwardPolicyTeardownFailure {
+                    source: FixedForwardPolicyError::Nftables(source),
+                    state: FixedForwardPolicyTeardownFailureState::ActivePristine(Box::new(self)),
+                });
+            }
+        };
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let nftables = match delete_exact_forward_policy(policy, deadline) {
+            Ok(nftables) => nftables,
+            Err(failure) => {
+                let (source, authority) = failure.into_parts();
+                return match authority {
+                    NftablesDeleteAuthority::Active(policy) => {
+                        Err(FixedForwardPolicyTeardownFailure {
+                            source: FixedForwardPolicyError::Nftables(source),
+                            state: FixedForwardPolicyTeardownFailureState::ActivePristine(
+                                Box::new(PolicyBoundPrivateMounts {
+                                    mounts,
+                                    policy,
+                                    rollback,
+                                    binding,
+                                }),
+                            ),
+                        })
+                    }
+                    NftablesDeleteAuthority::Indeterminate(nftables) => {
+                        Err(FixedForwardPolicyTeardownFailure {
+                            source: FixedForwardPolicyError::Nftables(source),
+                            state: FixedForwardPolicyTeardownFailureState::IndeterminatePristine(
+                                Box::new(IndeterminatePristineForwardPolicyCleanup {
+                                    mounts,
+                                    rollback,
+                                    nftables,
+                                    binding,
+                                }),
+                            ),
+                        })
+                    }
+                };
+            }
+        };
+        RetiredPristineForwardPolicyCleanup {
+            mounts,
+            parent: RetiredParentNetworkAuthority::Pending(rollback, nftables),
+        }
+        .finish()
+    }
+
+    fn verify_pristine_generation_two_state(&self) -> Result<(), FixedForwardPolicyError> {
+        self.mounts.verify().map_err(|source| {
+            FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+        })?;
+        self.rollback
+            .verify_pristine_with_active_policy(&self.mounts, &self.policy)
+            .map_err(FixedForwardPolicyError::Network)?;
+        self.verify_active_policy()?;
+        self.mounts.verify().map_err(|source| {
+            FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+        })
+    }
+}
+
+impl RetiredPristineForwardPolicyCleanup {
+    /// Retry generation-three parent proof after ordinary lower unwind.
+    pub(crate) fn finish(
+        self,
+    ) -> Result<
+        (PrivateMounts<PristineRun>, PolicyFinalNetworkProof),
+        FixedForwardPolicyTeardownFailure,
+    > {
+        if let Err(source) = self.mounts.verify() {
+            return Err(FixedForwardPolicyTeardownFailure {
+                source: FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(
+                    source,
+                )),
+                state: FixedForwardPolicyTeardownFailureState::RetiredPristine(Box::new(self)),
+            });
+        }
+        let Self { mounts, parent } = self;
+        let final_proof = match parent {
+            RetiredParentNetworkAuthority::Pending(rollback, nftables) => {
+                match rollback.finish_after_semantically_empty(&mounts, nftables) {
+                    Ok(final_proof) => final_proof,
+                    Err(failure) => {
+                        let (source, authority) = failure.into_parts();
+                        let (rollback, nftables) = *authority;
+                        return Err(FixedForwardPolicyTeardownFailure {
+                            source: FixedForwardPolicyError::Network(source),
+                            state: FixedForwardPolicyTeardownFailureState::RetiredPristine(
+                                Box::new(RetiredPristineForwardPolicyCleanup {
+                                    mounts,
+                                    parent: RetiredParentNetworkAuthority::Pending(
+                                        rollback, nftables,
+                                    ),
+                                }),
+                            ),
+                        });
+                    }
+                }
+            }
+            RetiredParentNetworkAuthority::Final(final_proof) => final_proof,
+        };
+        if let Err(source) = final_proof.verify(&mounts) {
+            return Err(FixedForwardPolicyTeardownFailure {
+                source: FixedForwardPolicyError::Network(source),
+                state: FixedForwardPolicyTeardownFailureState::RetiredPristine(Box::new(
+                    RetiredPristineForwardPolicyCleanup {
+                        mounts,
+                        parent: RetiredParentNetworkAuthority::Final(final_proof),
+                    },
+                )),
+            });
+        }
+        if mounts.verify().is_err() {
+            std::process::abort();
+        }
+        Ok((mounts, final_proof))
+    }
+}
+
+impl<RunState> PolicyBoundPrivateMounts<RunState> {
+    fn verify_active_policy(&self) -> Result<(), FixedForwardPolicyError> {
+        let deadline = mutation_deadline().map_err(FixedForwardPolicyError::Nftables)?;
+        verify_exact_forward_policy(&self.policy, deadline)
+            .map_err(FixedForwardPolicyError::Nftables)
+    }
+}
+
+fn policy_failure_from_topology(
+    failure: PrivateMountLinkActivationFailure,
+    policy: ActiveNftablesPolicy,
+    rollback: PolicyRollbackProof,
+    binding: FixedForwardPolicyBinding,
+) -> FixedForwardPolicyFailure {
+    let (source, state) = failure.into_parts();
+    let source = FixedForwardPolicyError::Topology(source);
+    match state {
+        PrivateMountLinkFailureState::Pristine(mounts) => {
+            FixedForwardPolicyFailure::active_pristine(
+                source,
+                PolicyBoundPrivateMounts {
+                    mounts,
+                    policy,
+                    rollback,
+                    binding,
+                },
+            )
+        }
+        PrivateMountLinkFailureState::Deleted(mounts) => FixedForwardPolicyFailure::active_deleted(
+            source,
+            PolicyBoundPrivateMounts {
+                mounts: *mounts,
+                policy,
+                rollback,
+                binding,
+            },
+        ),
+    }
+}
+
+fn retain_policy_cleanup_reproof(
+    source: FixedForwardPolicyError,
+    cleanup: Result<(), PrivateMountSetupError>,
+) -> FixedForwardPolicyError {
+    match cleanup {
+        Ok(()) => source,
+        Err(cleanup) => FixedForwardPolicyError::CleanupReproof {
+            transition: Box::new(source),
+            cleanup,
+        },
+    }
+}
+
+fn policy_binding_error() -> FixedForwardPolicyError {
+    FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(hard_error(
+        "verify fixed forward-policy topology binding",
+        io::Error::other("fixed forward-policy topology binding changed"),
+    )))
+}
+
+fn fixed_policy_network_visit_error(
+    operation: &'static str,
+    error: FixedTopologyVisitError<PolicyNetworkError>,
+) -> FixedForwardPolicyError {
+    FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(
+        topology_network_visit_error(operation, error),
+    ))
+}
+
+fn verify_deleted_endpoint_baselines(
+    mounts: &PrivateMounts<AuthorizedDeletedTopology>,
+    endpoint_baselines: &[EndpointNetworkBaseline; 2],
+) -> Result<(), FixedForwardPolicyError> {
+    let mut visited = [false, false];
+    mounts
+        .run_state
+        .visit_network_namespaces(|endpoint| {
+            let index = endpoint_index(endpoint);
+            if visited[index] {
+                return Err(PolicyNetworkError::Inconsistent);
+            }
+            endpoint_baselines[index].verify_pristine_state(mounts)?;
+            visited[index] = true;
+            Ok(())
+        })
+        .map_err(|error| {
+            fixed_policy_network_visit_error(
+                "verify deleted topology pristine endpoint state",
+                error,
+            )
+        })?;
+    if visited != [true, true] {
+        return Err(FixedForwardPolicyError::Network(
+            PolicyNetworkError::Inconsistent,
+        ));
+    }
+    Ok(())
+}
+
+fn consume_deleted_endpoint_baselines_or_abort(
+    mounts: &PrivateMounts<AuthorizedDeletedTopology>,
+    endpoint_baselines: [EndpointNetworkBaseline; 2],
+) {
+    let mut endpoint_baselines = endpoint_baselines.map(Some);
+    let consumed = mounts.run_state.visit_network_namespaces(|endpoint| {
+        endpoint_baselines[endpoint_index(endpoint)]
+            .take()
+            .ok_or(PolicyNetworkError::Inconsistent)?
+            .verify_pristine_rollback(mounts)
+    });
+    if consumed.is_err() || endpoint_baselines.iter().any(Option::is_some) {
+        std::process::abort();
+    }
+}
+
+fn verify_retired_deleted_state(
+    cleanup: &RetiredForwardPolicyCleanup,
+) -> Result<(), FixedForwardPolicyError> {
+    cleanup
+        .mounts
+        .verify_authorized_deleted_topology()
+        .map_err(|source| {
+            FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+        })?;
+    let observed = cleanup
+        .mounts
+        .run_state
+        .fixed_forward_policy_binding()
+        .map_err(|source| {
+            FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(
+                namespace_pin_error("verify retired forward-policy binding", source),
+            ))
+        })?;
+    if observed != cleanup.binding {
+        return Err(policy_binding_error());
+    }
+    cleanup
+        .mounts
+        .verify_authorized_deleted_topology()
+        .map_err(|source| {
+            FixedForwardPolicyError::Topology(PrivateMountLinkActivationError::Mount(source))
+        })
+}
+
+fn verify_final_parent_state(
+    mounts: &PrivateMounts<AuthorizedDeletedTopology>,
+    final_proof: &PolicyFinalNetworkProof,
+) -> Result<(), FixedForwardPolicyError> {
+    mounts
+        .run_state
+        .visit_parent_network_namespace(|| final_proof.verify(mounts))
+        .map_err(|error| {
+            fixed_policy_network_visit_error(
+                "verify deleted topology final generation-three parent state",
+                error,
+            )
+        })
+}
+
+fn active_deleted_teardown_failure(
+    source: FixedForwardPolicyError,
+    cleanup: PolicyBoundPrivateMounts<AuthorizedDeletedTopology>,
+    endpoints: [EndpointNetworkBaseline; 2],
+) -> FixedForwardPolicyTeardownFailure {
+    FixedForwardPolicyTeardownFailure {
+        source,
+        state: FixedForwardPolicyTeardownFailureState::Active {
+            cleanup: Box::new(cleanup),
+            endpoints: Box::new(endpoints),
+        },
+    }
+}
+
+fn retired_deleted_teardown_failure(
+    source: FixedForwardPolicyError,
+    cleanup: RetiredForwardPolicyCleanup,
+    endpoints: [EndpointNetworkBaseline; 2],
+) -> FixedForwardPolicyTeardownFailure {
+    FixedForwardPolicyTeardownFailure {
+        source,
+        state: FixedForwardPolicyTeardownFailureState::Retired {
+            cleanup: Box::new(cleanup),
+            endpoints: Box::new(endpoints),
+        },
+    }
+}
+
+fn indeterminate_deleted_teardown_failure(
+    source: FixedForwardPolicyError,
+    cleanup: IndeterminateForwardPolicyCleanup,
+    endpoints: [EndpointNetworkBaseline; 2],
+) -> FixedForwardPolicyTeardownFailure {
+    FixedForwardPolicyTeardownFailure {
+        source,
+        state: FixedForwardPolicyTeardownFailureState::Indeterminate {
+            cleanup: Box::new(cleanup),
+            endpoints: Box::new(endpoints),
+        },
     }
 }
 
@@ -3239,25 +4552,20 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn routed_mount_typestate_can_only_finish_through_deleted_proof(
-        active: PrivateMounts<AuthorizedActivatedTopology>,
+    fn routed_mount_typestate_can_only_finish_through_policy_bound_deleted_proof(
+        active: PolicyBoundPrivateMounts<AuthorizedActivatedTopology>,
         active_proof: ExactActivatedIpv4NetworkProof,
-        parent_baseline: &crate::network::MutationRollbackNetworkProof,
         endpoint_baselines: [crate::network::PristineNetworkNamespaceObservation; 2],
-    ) -> Result<PrivateMounts<AuthorizedNamespacePins>, PrivateMountLinkActivationFailure> {
-        let (routed, routed_proof) = active.install_endpoint_routes(active_proof)?;
-        if routed.verify_authorized_endpoint_routes().is_err()
-            || routed
-                .verify_exact_ipv4_endpoint_route_state(&routed_proof)
-                .is_err()
-        {
-            std::process::abort();
-        }
-        let deleted = routed.begin_retirement();
-        match deleted.finish_after_pristine_network_proof(parent_baseline, endpoint_baselines) {
-            Ok(pins) => Ok(pins),
-            Err(_) => std::process::abort(),
-        }
+    ) {
+        let (routed, routed_proof) = active
+            .install_endpoint_routes(active_proof)
+            .unwrap_or_else(|_| std::process::abort());
+        let deleted = routed
+            .begin_retirement(routed_proof)
+            .unwrap_or_else(|_| std::process::abort());
+        let _ = deleted
+            .finish_forward_policy_teardown(endpoint_baselines)
+            .unwrap_or_else(|_| std::process::abort());
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

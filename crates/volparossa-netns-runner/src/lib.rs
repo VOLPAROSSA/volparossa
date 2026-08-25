@@ -20,25 +20,32 @@
 //! atomic `RTM_NEWLINK` request. It then installs and exactly proves four fixed
 //! `/30` IPv4 addresses plus their four kernel-owned local-table `/32` routes
 //! while every veth end remains down. It separately sets and proves IPv6
-//! address-generation mode `none` on all four ends, activates every end, and
-//! proves the exact carrier-up links, `noqueue` qdiscs, absence of IPv6
-//! addresses, and kernel-owned local, connected, high-broadcast, and IPv6
-//! multicast routes. It then installs and exactly observes the two fixed
-//! main-table static endpoint `/32` routes through bounded raw `RTM_NEWROUTE`
-//! requests while the parent remains unchanged. It directly deletes veth B
-//! followed by A as the only route-removal mechanism. All route, address, and
-//! pair owners remain armed until the parent and both endpoints are proven
-//! byte-exactly equal to their retained enumerated network baselines; only then
-//! are those affine owners retired. PID 1 ordinarily unmounts nsfs B then A,
-//! proves the hidden slots reappeared, rolls every filesystem object back, and
-//! reports one internal rollback checkpoint. The
+//! address-generation mode `none` on all four ends. Before activating any
+//! veth, it atomically installs and proves the sole run-bound generation-two
+//! nftables policy: one `inet` table, one priority-zero `forward` base chain
+//! with policy drop, and only the exact A-to-B IPv4 ICMP echo-request and
+//! B-to-A echo-reply accept rules. It then activates every end, proves the
+//! exact carrier-up links, `noqueue` qdiscs, absence of IPv6 addresses, and
+//! kernel-owned local, connected, high-broadcast, and IPv6 multicast routes,
+//! and exactly observes the two fixed main-table static endpoint `/32` routes.
+//! That policy remains exact while PID 1 directly deletes veth B followed by A
+//! as the only route-removal mechanism. All route, address, and pair owners
+//! remain armed while the parent and both endpoints are proven byte-exactly
+//! equal to their retained enumerated network baselines under generation two.
+//! PID 1 deletes only the freshly observed table handle, proves a semantically
+//! empty generation three, and repeats the final parent/endpoint proof. Only
+//! then are those affine lower owners retired. It ordinarily unmounts nsfs B
+//! then A, proves the hidden
+//! slots reappeared, rolls every filesystem object back, and reports one
+//! internal rollback checkpoint. The
 //! outer then independently re-proves empty private mounts before delivering
 //! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
-//! before exact PID-1 and launcher reaping. The slice sends no
-//! forwarding-setting request and makes no firewall mutation. It produces no
-//! packet-capture or probe evidence, ownership manifest, dataplane topology,
-//! `TOPOLOGY_READY`, or acceptance evidence; its explicit endpoint routes are
-//! configuration proof, not production route orchestration.
+//! before exact PID-1 and launcher reaping. The slice never writes the
+//! inherited canonical IPv4-forwarding setting. It produces no packet-capture
+//! or probe evidence, ownership manifest, dataplane topology,
+//! `TOPOLOGY_READY`, or acceptance evidence; its exact policy and explicit
+//! endpoint routes are configuration proof, not production route
+//! orchestration or packet-behaviour proof.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
