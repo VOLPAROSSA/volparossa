@@ -394,11 +394,20 @@ contain a success value.
 For route preparation, the agent constructs the complete canonical `PrepareLeaseBatch` request,
 request ID, digest, and frame before contacting the helper. It then sends
 `BindHelperRuntime(Some(PrepareIntent))` and, only after a correlated `HelperRuntime` success, the
-prebuilt Prepare on the same `SO_PEERCRED`-validated Unix stream. One absolute five-second client
+prebuilt Prepare on the same `SO_PEERCRED`-validated Unix stream. The intent contains the exact
+context role and a required, strictly ordered, role-complete `(path_id, WireGuard role)` recovery
+plan in addition to the request identity, digest and expiries. The Prepare lease set follows the
+same canonical order, so a permutation cannot acquire a second encoding or be silently normalised
+at the future journal boundary. One absolute five-second client
 deadline covers connect, credential validation, both writes, and both responses; it is never reset
 between frames. Intent registration is runtime-global helper state, not a server-enforced binding to
 that connection. Same-stream use is the HelperClient invariant that prevents a pathname/socket swap
 between registration and dispatch.
+
+This pre-alpha protocol-v3 refinement is deployed lockstep with the packaged agent and helper. It
+does not provide a mixed-version rolling-upgrade path: an old agent omits required tag 6, a new agent
+sends a field an old helper cannot canonically accept, and formerly accepted permuted lease sets are
+now invalid. Every mixed combination therefore fails closed before Prepare dispatch.
 
 A Bind failure is definitive for privileged/network mutation because it can leave only an inert
 in-memory intent. Immediately before the first Prepare-frame write future is polled, the client arms
@@ -473,7 +482,9 @@ worker lifecycle owns committed lease state and invokes the factory. The exact p
 namespace transport blocker and remaining live-kernel work are recorded in
 [Privileged helper protocol v3](HELPER_V3.md).
 
-Tags 35 and 28 therefore provide only dormant same-process ambiguity containment. No production
+Tags 35 and 28 therefore provide only dormant same-process ambiguity containment. Tag 35's closed
+plan is now directly convertible to the dormant journal's canonical `ClosedPlan`, but no production
+writer consumes it. No production
 route-manager caller reaches this transaction. A boot-scoped, secret-free canonical/CAS ownership
 store exists as a temp-directory-tested dormant primitive, and production startup refuses any of
 its exact main/lock/next objects before touching the token or socket. No production writer,

@@ -27,9 +27,14 @@ The v3 route-context lifecycle is:
 
 Before step 1, the HelperClient constructs the exact canonical Prepare frame, request ID, and digest.
 It sends tag-35 `BindHelperRuntime(Some(PrepareIntent))`, validates the non-secret per-process runtime
-ID, and sends that prebuilt Prepare on the same `SO_PEERCRED`-validated Unix stream. The helper stores
-the intent in runtime-global state; the server does not bind it to that connection. Same-stream use is
-therefore a client-side socket-swap defence, not a server-side session authorization rule.
+ID, and sends that prebuilt Prepare on the same `SO_PEERCRED`-validated Unix stream. The intent also
+contains a required closed recovery plan: the exact context role and strictly ordered,
+role-complete `(path_id, WireGuard role)` identities projected from that same Prepare. Prepare itself
+requires the same canonical identity order. The helper stores the complete binding in runtime-global
+state and requires an exact plan match before that target can enter `Pending` or invoke its Prepare
+backend call; unrelated global expiry housekeeping may run before target admission. The server does
+not bind the intent to that connection. Same-stream use is therefore a client-side socket-swap
+defence, not a server-side session authorization rule.
 
 Role cardinality is exact for every path: client has one client endpoint, relay has one client-facing
 and one exit-facing endpoint, and exit has one exit endpoint. Path identifiers are 1 through 8.
@@ -92,7 +97,9 @@ The v3 module contains a boot-scoped, secret-free, canonical and length-bounded 
 exact `Intent`, `MayOwnPrepare`, and `Absent` ownership records. Its fixed lock, atomic
 file-fsync/rename/directory-fsync transaction, typed recovery anchor, and trusted
 non-cryptographic exact-echo absence-proof interface have temp-directory tests. No production
-writer, startup reaper, recovery backend, or engine integration uses that store. A missing journal
+writer, startup reaper, recovery backend, or engine integration uses that store. The required tag-35
+closed plan has a fallible exact conversion into the store's existing `ClosedPlan`; this removes the
+wire/schema mismatch but performs no journal I/O and grants no mutation authority. A missing journal
 is therefore not proof that stale kernel
 state is absent, and the interlock cannot issue a cross-runtime tag-28 receipt. The current `doctor`
 has no helper-v3 crash-ownership readiness check, so its other successful checks must not be
@@ -553,8 +560,9 @@ Production wiring remains a separate audited change with these explicit blockers
 
 External tag 35 is `BindHelperRuntime`; its success outcome returns a non-zero, CSPRNG-generated
 32-byte ID fixed for one helper process. With `prepare_intent = Some`, it also records the exact
-route-context ID, original Prepare request ID and canonical digest, setup expiry, hard expiry, and a
-monotonic generation. Registration performs no backend or network call, is serialized under the
+route-context ID, original Prepare request ID and canonical digest, setup expiry, hard expiry,
+context role, canonical role-complete lease identity set, and a monotonic generation. Registration
+performs no backend or network call, is serialized under the
 engine operation gate, and is capped together with retained reconciliation records at 1024. It is
 runtime-global rather than attached to the socket that carried tag 35.
 

@@ -298,7 +298,9 @@ deliberately returns `Unavailable`, and the production manager does not call the
 transaction. A dormant boot-scoped,
 secret-free canonical/CAS ownership store exists and any exact main/lock/next object blocks helper
 startup before token/socket mutation, but no production writer, recovery backend, restart reaper,
-or cross-runtime tag-28 proof uses it; journal absence is not cleanup proof. Client ingress is also
+or cross-runtime tag-28 proof uses it. Tag 35 now carries the exact canonical closed Prepare plan
+needed by that store, but the conversion is dormant and performs no journal write; journal absence
+is not cleanup proof. Client ingress is also
 blocked. Consequently
 no production path can reach finalize, `Activate`, or `Commit`, and kernel configuration,
 Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. See
