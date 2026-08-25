@@ -446,22 +446,29 @@ Last updated: 2026-08-25
   GET requests may cause ordinary kernel module loading but create no firewall object. A strict
   production raw-`NFNETLINK` writer and observer implement the exact lifecycle policy: one
   run-derived `inet vpl_<run_id>` table, one priority-0 `filter` base chain named `forward` with a
-  drop policy, and only the exact endpoint-A-to-B IPv4 ICMP echo-request tuple plus its exact
-  B-to-A echo reply. The nftables writer's sole mutation surface is one bounded generation-pinned
-  atomic install and later handle-only table deletion, with strict capped ACK binding and fresh
+  drop policy, and exactly three ordered rules. The first matches only the endpoint-A-to-B IPv4
+  ICMP echo-request tuple and places one inline counter immediately before `accept`; the second
+  matches only its exact B-to-A echo reply and likewise places one inline counter immediately
+  before `accept`; the third is unconditional and places one inline counter immediately before
+  `drop`. Every fresh complete active-policy observation accepts the three typed counters only when
+  each is exactly `packets=0` and `bytes=0`. The nftables writer's sole mutation surface is one
+  bounded generation-pinned atomic install and later handle-only table deletion, with strict capped ACK binding and fresh
   complete-ruleset reconciliation after every possibly sent request. Disposable namespace tests
   exercise that production writer and prove an empty generation-1 baseline, the complete exact policy at
   generation 2, and a semantically empty ruleset at generation 3 after removal. The live fixture
   also proves its inherited canonical forwarding value byte-identical; extra or altered policy
-  objects, ACKs, handles, and generation lineages fail closed. A separate fixed, descriptor-pinned
+  objects, counter values, expression order, ACKs, handles, and generation lineages fail closed.
+  These exact zero-valued observations are isolated snapshots: nftables generation IDs do not bind
+  counter updates, so this slice makes no counter-stability or packet-behaviour inference between
+  observations. A separate fixed, descriptor-pinned
   proc writer can establish canonical `1\n` only in PID 1's disposable parent network namespace
   and later restore the exact retained original `0\n` or `1\n` record. It requests one bounded
   two-byte write only when the target differs; an already-enabled or already-restored record is a
   freshly verified no-op. Possibly written requests retain reconciliation authority. After a
   possibly written enable, only an exact enabled readback may advance; even a return to the
   original record is indeterminate and aborts fail closed because a transient write cannot be
-  excluded. Production sends no packet or probe and makes no datapath or acceptance claim. The outer accepts
-  that actual lifecycle frame
+  excluded. Production sends no packet or probe and makes no packet, datapath, or acceptance claim.
+  The outer accepts that actual lifecycle frame
   only after matching all three identities to its retained
   PID-1 namespace pins and repeating the live mount and signal proofs. Only then does the outer
   send one canonical `GO`. PID 1 consumes the resulting affine `MutationAuthorization` and
@@ -577,12 +584,12 @@ Last updated: 2026-08-25
   transient topology is the two otherwise-pristine network namespace objects, their kernel-default
   loopback/rules, their nsfs mounts, two fixed veth pairs, four fixed IPv4 addresses, four active
   link ends, four `noqueue` qdiscs, fourteen associated IPv4 routes, four IPv6 multicast routes, and
-  the one transient exact `inet` policy table/chain/two-rule set. The parent namespace's fixed
+  the one transient exact `inet` policy table/chain/three-rule counted set. The parent namespace's fixed
   `ip_forward` record is conditionally changed from `0\n` to `1\n` and restored to `0\n`; an
   inherited `1\n` takes the no-write path throughout. The outer host record remains byte-identical.
   This
-  slice creates no packet-capture or probe evidence and makes no packet-absence, dataplane, or
-  topology-readiness claim. Repeated portable tests prove exact
+  slice creates no packet-capture or probe evidence and makes no packet-absence, counter-stability,
+  dataplane, or topology-readiness claim. Repeated portable tests prove exact
   outer-launcher reaping, unchanged outer namespace/mount observations, and an unchanged canonical
   outer fingerprint of stable link fields,
   addresses without expiring lifetimes, IPv4/IPv6 routes and policy rules, nexthops, qdiscs without
@@ -614,7 +621,7 @@ Last updated: 2026-08-25
   indeterminate IPv4-forwarding authorities, and
   `PolicyBoundPrivateMounts` are active in the runtime path for the
   descriptor-relative private-root, empty-slot,
-  two-pin, two-veth, four-address, forward-policy, conditional parent-forwarding enable/restore,
+  two-pin, two-veth, four-address, counted forward-policy, conditional parent-forwarding enable/restore,
   link-activation, endpoint-route, deletion-only link teardown, and exact policy-retirement
   transaction described above. A provisional
   containment guard is installed immediately after each exclusive creation. Within this fixed
@@ -636,7 +643,7 @@ Last updated: 2026-08-25
   ownership manifest. The runtime does construct and fully reverse two transient live nsfs pins,
   two fixed veth pairs, four fixed IPv4 addresses, four active link ends, two explicit endpoint
   routes, the exact kernel-created qdisc and route side effects, and the exact transient
-  generation-2 nftables policy described above, but proves direct link deletion, handle-only policy
+  zero-counter generation-2 nftables policy described above, but proves direct link deletion, handle-only policy
   retirement, and
   ordinary unmount only within its fixed one-PID-1-task and
   trusted-launcher scope.
@@ -656,7 +663,7 @@ Last updated: 2026-08-25
   acceptance report, or A01-A15 result. In particular, the deletion-only fixed-link teardown is
   not forced-crash cleanup or A14, A15, or acceptance evidence. `BOOTSTRAP_READY` remains
   readiness evidence; `GO` authorizes only this bounded private-root, two-pin, two-veth,
-  four-address, forward-policy, conditional forwarding enable/restore, link-activation,
+  four-address, counted forward-policy, conditional forwarding enable/restore, link-activation,
   endpoint-route, and policy-teardown transaction,
   and `MUTATION_ROLLBACK_COMPLETE` is an
   internal containment checkpoint rather than cleanup or acceptance evidence.

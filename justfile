@@ -49,14 +49,15 @@ test-package-licenses:
 test-netns:
     ./tests/netns/run-topology.sh --preview --only all
 
-test-netns-ipv4-forwarding-runtime-proof:
+test-netns-counted-forward-policy-proof:
     cargo build --locked --target x86_64-unknown-linux-gnu \
-        --target-dir target/ipv4-forwarding-runtime-proof -p volparossa-netns-runner
+        --target-dir target/counted-forward-policy-proof -p volparossa-netns-runner
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
         ./tests/netns/require-endpoint-route-teardown-proof.sh
 
-# Backwards-compatible names for the now-stronger IPv4-forwarding runtime proof.
-test-netns-forward-policy-teardown-proof: test-netns-ipv4-forwarding-runtime-proof
+# Backwards-compatible names for the now-stronger no-packet counted-policy proof.
+test-netns-ipv4-forwarding-runtime-proof: test-netns-counted-forward-policy-proof
+test-netns-forward-policy-teardown-proof: test-netns-counted-forward-policy-proof
 test-netns-endpoint-route-teardown-proof: test-netns-forward-policy-teardown-proof
 test-netns-link-activation-teardown-proof: test-netns-forward-policy-teardown-proof
 test-netns-ipv4-address-rollback-proof: test-netns-forward-policy-teardown-proof
