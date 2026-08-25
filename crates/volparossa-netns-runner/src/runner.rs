@@ -173,8 +173,9 @@ impl From<PidOneControlError> for RunnerError {
 /// private `/run` and `/proc` filesystems. PID 1 measures them locally; the outer
 /// independently binds their visible mount IDs, filesystem properties, and procfs
 /// PID view to its retained kernel pins. PID 1 proves the pristine RTNL baseline,
-/// pins a stable canonical IPv4-forwarding record, proves zero nftables tables
-/// bracketed by unchanged generation 1, and emits one canonical
+/// pins a stable canonical IPv4-forwarding record, proves empty nftables
+/// table/chain/rule/set/object/flowtable dumps bracketed by unchanged generation
+/// 1, and emits one canonical
 /// `BOOTSTRAP_READY` bound to those pins. Only then does the outer issue the
 /// sole canonical `GO`. PID 1 consumes its affine authorization, creates and
 /// proves the fixed private-run roots and empty namespace slots through retained
@@ -974,8 +975,9 @@ fn finish_pid_one(
 /// parent-death signal. Only after the outer pins it may it install and directly
 /// verify recursive private propagation, bounded `/run`, and PID-bound `/proc`.
 /// It then arms the fixed handler/mask/`signalfd` set, proves the pristine RTNL
-/// baseline, a stable canonical IPv4-forwarding record, and zero nftables tables
-/// bracketed by unchanged generation 1. It then emits exactly one canonical
+/// baseline, a stable canonical IPv4-forwarding record, and empty nftables
+/// table/chain/rule/set/object/flowtable dumps bracketed by unchanged generation
+/// 1. It then emits exactly one canonical
 /// `BOOTSTRAP_READY`, consumes the canonical affine `GO`, creates and fully
 /// proves the fixed private-run roots and empty slots, attaches two live
 /// run-bound network-namespace pins, atomically creates and proves two fixed
