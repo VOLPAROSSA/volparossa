@@ -181,9 +181,9 @@ the parent-death chain established before network-topology mutation. The outer i
 compares the three namespace identities with
 its original host identities. Only then may it send the affine `GO` authorization. The current
 early slice reaches that barrier and permits only one bounded private-`/run` root-and-slot,
-two-transient-nsfs-pin, two-veth, four-address, and link-activation transaction with exact
-deletion-only teardown; it does not claim that the remaining configured topology lifecycle is
-implemented.
+two-transient-nsfs-pin, two-veth, four-address, link-activation, and exact endpoint-route
+transaction with deletion-only teardown; it does not claim that the remaining configured topology
+lifecycle is implemented.
 `TOPOLOGY_READY` attests to the run ID, fixed topology-specification digest, exact two run-bound
 namespace identities, and the completed probe, all directly observed by that worker. The outer then
 sends `STOP`; `FINISHED` must bind the SHA-256 of the exact `TOPOLOGY_READY` bytes and report
@@ -204,9 +204,10 @@ evidence yet.
 The test-only `volparossa-netns-runner` now owns an initial, deliberately early post-`GO`
 containment slice. Its only transient topology is two otherwise-pristine network namespaces, their
 kernel-default loopback/rules, their nsfs mounts, two fixed veth pairs, four fixed `/30` IPv4
-addresses, four active link ends, and the exact kernel-created qdisc and route side effects. The
-runner sends no explicit route or forwarding-setting request and makes no nftables mutation. It
-produces no packet-capture, probe, dataplane, or topology-readiness evidence. It re-executes only
+addresses, four active link ends, two exact static `/32` endpoint routes, and the exact
+kernel-created qdisc and route side effects. The runner sends no forwarding-setting request and
+makes no nftables mutation. It produces no packet-capture, probe, dataplane, or topology-readiness
+evidence. It re-executes only
 `/proc/self/exe`,
 once as the fixed launcher and once as namespace PID 1, with a distinct private selector for each role. It
 clears both child environments, fences unrelated inherited descriptors, and uses three separate
@@ -314,14 +315,23 @@ barrier. It next activates all four ends with separate link-up requests. Exact c
 observations require carrier-up `noqueue` links, no IPv6 addresses, four local `/32`, four
 connected `/30`, four high-broadcast `/32`, and four local-table IPv6 `ff00::/8` multicast routes.
 Only temporary stable kernel snapshots may be retried inside the same two-second absolute
-deadline; the final verifier remains exact. The runner sends no `RTM_NEWROUTE`: these admitted
-routes are kernel side effects rather than production route orchestration. PID 1 freshly
-reverifies the complete active state and directly deletes veth B followed by A. Once a link request
-may have been sent, teardown never tries to restore link-down/EUI-64 state and never runs ordinary
-per-address rollback. Every lower address and pair owner remains armed until retained parent/A/B
+deadline; the final verifier remains exact. Those admitted routes remain kernel side effects.
+PID 1 freshly reverifies the complete active state and sends exactly two bounded raw
+`RTM_NEWROUTE` requests: endpoint A `10.241.2.2/32 via 10.241.1.1 dev eth0` and endpoint B
+`10.241.1.2/32 via 10.241.2.1 dev eth0`. Both use
+`NLM_F_REQUEST|NLM_F_ACK|NLM_F_CREATE|NLM_F_EXCL`; the route header is exactly `AF_INET` `/32`,
+main, `RTPROT_STATIC`, universe, unicast, flags zero, and the attributes are exactly
+`RTA_TABLE=254`, `RTA_DST`, `RTA_GATEWAY`, and `RTA_OIF`. Retained namespace and pair authority
+canonically supplies every value. Exact parent/A/B observations require an unchanged parent and
+exactly the corresponding authorized route in each endpoint. A non-exact sibling or extra object
+fails closed, and any possibly sent request retains deletion-bound authority even after an
+ambiguous ACK/readback. No `RTM_DELROUTE` request or encoder exists. PID 1 directly deletes veth B
+followed by A as the sole route-removal mechanism. Once a link request may have been sent, teardown
+never tries to restore link-down/EUI-64 state and never runs ordinary per-address rollback. Both
+route owners and every lower address and pair owner remain armed until retained parent/A/B
 baselines prove all three namespaces byte-exactly equal to the retained enumerated network
-baselines. A prevalidated infallible retirement
-barrier disarms those owners only after that external proof.
+baselines. A prevalidated infallible retirement barrier disarms those owners only after that
+external proof.
 It ensures every detached-clone and transient visible-pin
 descriptor is closed before ordinarily unmounting nsfs B then A with `UMOUNT_NOFOLLOW`, proves the
 hidden empty slots and original mountinfo baseline are restored, and then rolls back slot B, slot A,
@@ -364,7 +374,7 @@ empty. Qdisc records are enumerated so an ingress/`clsact` hook cannot hide behi
 slice admits no non-baseline qdisc on which they could attach. Other netconf, address-label,
 neighbour-table parameter, conntrack, ipset,
 NFQUEUE/NFLOG, legacy-xtables, and independent-hook state is outside it. A read-only GET may cause
-ordinary kernel module loading, but the runner has no writer or nftables mutation API. A later
+ordinary kernel module loading, but the runner has no forwarding-setting or nftables mutation API. A later
 topology driver must either pin every setting it relies on or extend this proof before `GO`.
 
 The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
@@ -383,7 +393,7 @@ launcher cannot time itself out before acknowledgement. If the outer PID-1 pin i
 unavailable after spawn, the launcher sends one run-bound `ABORT_BEFORE_PRIVATE_MOUNTS` record to
 PID 1, proves lifecycle EOF, and reaps it without issuing a mount instruction. A generic green CI
 job may therefore prove only fail-closed behaviour; the complete positive path requires the
-explicit `BlockedAfterLinkActivationTeardown` outcome on the Debian 13 acceptance host:
+explicit `BlockedAfterEndpointRouteTeardown` outcome on the Debian 13 acceptance host:
 
 The portable unit suite runs the live RTNL and read-only NFNETLINK collectors plus adversarial
 wire/parser and RTNL link/object cases when unprivileged user/network namespaces are available.
@@ -394,12 +404,14 @@ fixed `/30` address on a down veth, proves its exact address record and kernel-c
 Another disposable round trip sets addrgen mode `none`, activates both ends, retains the exact
 carrier/qdisc/address/route requirements through bounded convergence, directly deletes the pair,
 and requires byte-exact parent and endpoint restoration.
+The exact endpoint-route cases prove canonical request encoding, strict route decoding,
+both-pair/namespace lineage, fail-closed sibling classification, and deletion-bound ownership.
 These portable cases treat only the exact util-linux `EPERM` forms for an unavailable `unshare` or
 UID/GID-map write as an environmental skip; every other spawn, child, parser, or proof failure
 remains fatal. Such a skip is not readiness evidence and cannot replace the dedicated gate.
 
 ```sh
-just test-netns-link-activation-teardown-proof
+just test-netns-endpoint-route-teardown-proof
 ```
 
 That opt-in gate requires an unprivileged Debian 13 amd64 host with unprivileged user namespaces
@@ -420,7 +432,8 @@ A14, A15, or acceptance evidence. A container on an Ubuntu runner does not suppl
 Debian-host kernel evidence, and a privileged container would test a different privilege boundary.
 The gate executes a private, owner-only copy of the fixed-target build artifact.
 
-The earlier `just test-netns-ipv4-address-rollback-proof`,
+The earlier `just test-netns-link-activation-teardown-proof`,
+`just test-netns-ipv4-address-rollback-proof`,
 `just test-netns-veth-rollback-proof`, `just test-netns-live-nsfs-proof`,
 `just test-netns-authorized-private-run-proof`, and `just test-netns-bootstrap-ready-proof` recipes
 remain compatibility entry points, but the command above names the deepest currently implemented
@@ -439,21 +452,22 @@ or A14 evidence. The current positive `--run` path requires post-`GO` EOF to cla
 `CleanupRequired`, proves repeated exact PID-1 and outer-launcher reaping plus unchanged outer
 namespace, mount-table, canonical link/address/route/rule/nexthop/qdisc, IPv4 `ip_forward`, IPv6
 `all/default` forwarding, and resolver-file observations, and honestly returns
-`BlockedAfterLinkActivationTeardown`/77. That outcome additionally proves the complete
+`BlockedAfterEndpointRouteTeardown`/77. That outcome additionally proves the complete
 private-mount barrier, exact RTNL state, descriptor-pinned IPv4-forwarding baseline, zero nftables
 tables bracketed by unchanged generation 1, one real pinned `BOOTSTRAP_READY`, canonical `GO`,
 affine `MutationAuthorization`, the descriptor-relative root/slot transaction, two live pristine
 nsfs pins, and two exactly proven down-veth pairs, each created through one atomic `RTM_NEWLINK`
 request. It also proves the four fixed `/30` addresses and exactly four kernel-created local-table
 `/32` routes while every veth end remains down, the all-addrgen-NONE barrier, exact carrier-up
-activation and kernel-owned qdisc/route side effects, direct veth B/A deletion, and exact
-parent/endpoint restoration before lower-owner retirement, followed by the nsfs ordinary reverse
-unmount, internal `MUTATION_ROLLBACK_COMPLETE` checkpoint, independent empty-`/run` verification,
-and fixed pidfd-to-PID1-signalfd TERM observation described above. It sends no explicit route
-request and creates no manifest or forwarding/nftables mutation. It produces no packet-absence,
-probe, datapath, general crash-cleanup, A14, A15, or acceptance evidence. At supervised
-IPC boundaries,
-managed outer HUP/INT/TERM events take
+activation and kernel-owned qdisc/route side effects, both exact static endpoint routes and their
+strict parent/A/B observation, direct veth B/A deletion as the sole route-removal mechanism, and
+exact parent/endpoint restoration before route/address/pair owner retirement, followed by the nsfs
+ordinary reverse unmount, internal `MUTATION_ROLLBACK_COMPLETE` checkpoint, independent
+empty-`/run` verification,
+and fixed pidfd-to-PID1-signalfd TERM observation described above. It sends no forwarding request
+and creates no manifest or nftables mutation. It produces no packet-absence, probe, datapath,
+general crash-cleanup, A14, A15, or acceptance evidence. At supervised IPC boundaries, managed
+outer HUP/INT/TERM events take
 priority over pending protocol records and trigger bounded exact-launcher containment. The live
 gate does not yet prove external-signal handling throughout every reap/report phase, a forced
 parent-death/crash chain, a general descendant reaper, or A14 cleanup. Command/environment shims
@@ -461,8 +475,8 @@ prove that the runner invokes no namespace or networking utility. It still has n
 root-filesystem or supplementary-group isolation, `TOPOLOGY_READY`, `STOP`, `FINISHED`, configured
 dataplane-topology mutation, crash-cleanup evidence, acceptance report, or A01-A15 result.
 `BOOTSTRAP_READY` remains readiness evidence; this `GO` authorizes only the bounded private-root,
-two-pin, two-veth, four-address, link-activation teardown transaction, and the rollback checkpoint
-is not A14 cleanup or acceptance evidence.
+two-pin, two-veth, four-address, link-activation, and endpoint-route teardown transaction, and the
+rollback checkpoint is not A14 cleanup or acceptance evidence.
 The dedicated-host proof also does not claim hostile same-UID sender provenance from the
 `signalfd_siginfo` metadata; it proves that the retained pidfd send is followed by the exact
 quiescent TERM observation within this fixed supervisor.

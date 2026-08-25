@@ -35,6 +35,11 @@ use super::{
         PendingFixedPairAbsenceProof,
     },
     ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError, NamespacePinTarget},
+    route::{
+        FixedEndpointRouteOwner, FixedEndpointRoutePlan, FixedEndpointRouteRetirement,
+        FixedRouteInstallError, FixedRouteOperationError, FixedRoutePlanError,
+        FixedRouteVerifyError,
+    },
     veth::{
         FixedVethEndpoint, FixedVethPair, VethCreateError, VethRollbackError, VethVerifyError,
         create_fixed_veth_pair,
@@ -156,6 +161,78 @@ pub(crate) enum FixedLinkActivationError {
     /// Entering, proving, or restoring one retained endpoint namespace failed.
     #[error("fixed link activation namespace binding failed: {0}")]
     Namespace(#[from] NamespacePinError),
+}
+
+/// Failure to install or reprove the exact A/B endpoint-route set.
+#[derive(Debug, Error)]
+pub(crate) enum FixedEndpointRouteSetError {
+    /// The activated topology failed its final preflight or postflight proof.
+    #[error("fixed endpoint-route active-topology binding failed: {0}")]
+    Activated(#[source] FixedLinkActivationError),
+    /// Entering or restoring one retained endpoint namespace failed.
+    #[error("fixed endpoint-route namespace binding failed: {0}")]
+    Namespace(#[from] NamespacePinError),
+    /// The retained active lineage could not derive the sole fixed route.
+    #[error("fixed endpoint-route plan failed: {0}")]
+    Plan(#[source] FixedRoutePlanError),
+    /// Installation failed before any route request could reach the kernel.
+    #[error("fixed endpoint-route installation failed before mutation: {0}")]
+    InstallBeforeMutation(#[source] FixedRouteOperationError),
+    /// An exclusive route request was rejected and freshly reconciled absent.
+    #[error("fixed endpoint-route installation was rejected with errno {0}")]
+    InstallRejected(i32),
+    /// A route request crossed its deletion-only boundary.
+    #[error("fixed endpoint-route installation crossed its deletion-only boundary: {0}")]
+    InstallDeletionBound(#[source] FixedRouteOperationError),
+    /// Fresh readback no longer matched one retained route owner.
+    #[error("fixed endpoint-route verification failed: {0}")]
+    Verify(#[source] FixedRouteVerifyError),
+    /// The fixed route set, visit order, or affine owner set was incomplete.
+    #[error("fixed endpoint-route set proof failed: {0}")]
+    Unsafe(&'static str),
+}
+
+/// Affine failed route transition preserving deletion-bound cleanup authority.
+#[must_use = "a failed endpoint-route transition retains mandatory cleanup authority"]
+pub(crate) struct FixedEndpointRouteFailure {
+    source: FixedEndpointRouteSetError,
+    deleted: Box<AuthorizedDeletedTopology>,
+}
+
+impl std::fmt::Debug for FixedEndpointRouteFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FixedEndpointRouteFailure")
+            .field("source", &self.source)
+            .field("deleted", &true)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FixedEndpointRouteFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for FixedEndpointRouteFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl FixedEndpointRouteFailure {
+    /// Recover the original failure and the still-armed deleted topology.
+    pub(crate) fn into_parts(self) -> (FixedEndpointRouteSetError, AuthorizedDeletedTopology) {
+        (self.source, *self.deleted)
+    }
+
+    fn deleted(source: FixedEndpointRouteSetError, deleted: AuthorizedDeletedTopology) -> Self {
+        Self {
+            source,
+            deleted: Box::new(deleted),
+        }
+    }
 }
 
 /// Affine failed-transition result preserving any mandatory deleted topology.
@@ -1114,15 +1191,30 @@ pub(crate) struct AuthorizedActivatedTopology {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+/// Affine authority for both exact endpoint routes over the activated links.
+///
+/// Route A and then route B were derived solely from retained link, pair,
+/// address, and namespace lineage and freshly read back. There is no route
+/// deletion API: this state can proceed only to direct B/A pair deletion and
+/// full pristine-network retirement.
+#[must_use = "the routed topology must begin deletion-only retirement"]
+pub(crate) struct AuthorizedEndpointRoutes {
+    activated: Option<AuthorizedActivatedTopology>,
+    routes: [Option<FixedEndpointRouteOwner>; ENDPOINT_COUNT],
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
 /// Intermediate authority after direct B/A pair deletion and raw lineage proof.
 ///
-/// All four address owners and both pair owners remain armed. Only the higher
-/// private-mount owner can compare its retained parent and endpoint baselines;
-/// it must do so before calling `finish_after_pristine_network_proof`.
+/// Zero, one, or two route-retirement owners, all four address owners, and both
+/// pair owners remain armed. Only the higher private-mount owner can compare
+/// its retained parent and endpoint baselines; it must do so before calling
+/// `finish_after_pristine_network_proof`.
 #[must_use = "deleted topology still requires the full pristine-network barrier"]
 pub(crate) struct AuthorizedDeletedTopology {
     addressed: Option<AuthorizedIpv4Addresses>,
     absence: Option<FixedPairAbsenceProof>,
+    route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -1491,6 +1583,12 @@ impl AuthorizedVethPairs {
     /// Borrow the fixed pair owners in canonical A, B order.
     pub(crate) fn fixed_pairs(&self) -> [&FixedVethPair; ENDPOINT_COUNT] {
         [&self.veths.entries[0], &self.veths.entries[1]]
+    }
+
+    fn endpoint_namespace_descriptor(&self, endpoint: NamespaceEndpoint) -> &OwnedFd {
+        &self.namespace_pins().mounts.entries[endpoint.index()]
+            .namespace
+            .descriptor
     }
 
     /// Return the exact visible nsfs mount IDs in canonical A, B order.
@@ -1987,7 +2085,7 @@ impl AuthorizedIpv4AddrgenNone {
             .unwrap_or_else(|| std::process::abort());
         match links.into_retirement() {
             FixedLinkRetirement::Deleted(pending) => {
-                complete_raw_link_retirement(addressed, pending)
+                complete_raw_link_retirement(addressed, pending, [None, None])
             }
             FixedLinkRetirement::Untouched => std::process::abort(),
         }
@@ -2122,20 +2220,104 @@ impl AuthorizedActivatedTopology {
         visit_link_state_endpoints(self, Self::verify, visitor)
     }
 
+    /// Install route A and then route B while visiting only their exact
+    /// retained endpoint namespaces.
+    ///
+    /// Every route field is derived inside the low-level UAPI from the
+    /// all-links-up authority, both pair lineages, the local endpoint-address
+    /// owner, and the current retained namespace descriptor. Any failure
+    /// consumes this active state into direct B/A pair deletion; route
+    /// authority that crossed the possibly-sent boundary remains armed there.
+    pub(crate) fn install_endpoint_routes(
+        self,
+    ) -> Result<AuthorizedEndpointRoutes, FixedEndpointRouteFailure> {
+        if let Err(source) = self.verify() {
+            return Err(self.into_endpoint_route_failure(
+                FixedEndpointRouteSetError::Activated(source),
+                [None, None],
+            ));
+        }
+
+        let mut route_owners: [Option<FixedEndpointRouteOwner>; ENDPOINT_COUNT] = [None, None];
+        let mut route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT] =
+            [None, None];
+        let installed = {
+            let addressed = self.addressed();
+            let links = self.links();
+            let pairs = addressed.veth_pairs().fixed_pairs();
+            let owners = addressed.owners();
+            addressed.veth_pairs().visit_network_namespaces(|endpoint| {
+                let index = endpoint.index();
+                if route_owners[index].is_some() || route_retirements[index].is_some() {
+                    return Err(FixedEndpointRouteSetError::Unsafe(
+                        "fixed endpoint-route namespace visit was duplicated",
+                    ));
+                }
+                let descriptor = addressed
+                    .veth_pairs()
+                    .endpoint_namespace_descriptor(endpoint);
+                let plan = FixedEndpointRoutePlan::derive(
+                    links,
+                    descriptor,
+                    pairs[index],
+                    pairs[1 - index],
+                    owners[(index * 2) + 1],
+                )
+                .map_err(FixedEndpointRouteSetError::Plan)?;
+                match plan.install() {
+                    Ok(route) => {
+                        route_owners[index] = Some(route);
+                        Ok(())
+                    }
+                    Err(FixedRouteInstallError::BeforeMutation(source)) => {
+                        Err(FixedEndpointRouteSetError::InstallBeforeMutation(source))
+                    }
+                    Err(FixedRouteInstallError::Rejected(errno)) => {
+                        Err(FixedEndpointRouteSetError::InstallRejected(errno))
+                    }
+                    Err(FixedRouteInstallError::DeletionBound { source, authority }) => {
+                        route_retirements[index] = Some(*authority);
+                        Err(FixedEndpointRouteSetError::InstallDeletionBound(source))
+                    }
+                }
+            })
+        };
+        if let Err(error) = installed {
+            let source = match error {
+                NamespaceVisitError::Namespace(source) => {
+                    FixedEndpointRouteSetError::Namespace(source)
+                }
+                NamespaceVisitError::Visitor(source) => source,
+            };
+            route_retirements = merge_route_retirements(route_owners, route_retirements);
+            return Err(self.into_endpoint_route_failure(source, route_retirements));
+        }
+        if route_owners.iter().any(Option::is_none) || route_retirements.iter().any(Option::is_some)
+        {
+            route_retirements = merge_route_retirements(route_owners, route_retirements);
+            return Err(self.into_endpoint_route_failure(
+                FixedEndpointRouteSetError::Unsafe(
+                    "fixed endpoint-route namespace visit was incomplete",
+                ),
+                route_retirements,
+            ));
+        }
+
+        let routed = AuthorizedEndpointRoutes {
+            activated: Some(self),
+            routes: route_owners,
+            _thread_bound: PhantomData,
+        };
+        match routed.verify() {
+            Ok(()) => Ok(routed),
+            Err(source) => Err(routed.into_failure(source)),
+        }
+    }
+
     /// Delete pair B then A and retain every lower owner through the external
     /// full pristine-network proof barrier.
-    pub(crate) fn begin_retirement(mut self) -> AuthorizedDeletedTopology {
-        let links = self.links.take().unwrap_or_else(|| std::process::abort());
-        let addressed = self
-            .addressed
-            .take()
-            .unwrap_or_else(|| std::process::abort());
-        match links.into_retirement() {
-            FixedLinkRetirement::Deleted(pending) => {
-                complete_raw_link_retirement(addressed, pending)
-            }
-            FixedLinkRetirement::Untouched => std::process::abort(),
-        }
+    pub(crate) fn begin_retirement(self) -> AuthorizedDeletedTopology {
+        self.into_deleted_topology([None, None])
     }
 
     fn addressed(&self) -> &AuthorizedIpv4Addresses {
@@ -2156,6 +2338,225 @@ impl AuthorizedActivatedTopology {
             .unwrap_or_else(|| std::process::abort());
         failure_after_retirement(source, addressed, links.into_retirement())
     }
+
+    fn into_endpoint_route_failure(
+        mut self,
+        source: FixedEndpointRouteSetError,
+        route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
+    ) -> FixedEndpointRouteFailure {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let deleted = match links.into_retirement() {
+            FixedLinkRetirement::Deleted(pending) => {
+                complete_raw_link_retirement(addressed, pending, route_retirements)
+            }
+            FixedLinkRetirement::Untouched => std::process::abort(),
+        };
+        FixedEndpointRouteFailure::deleted(source, deleted)
+    }
+
+    fn into_deleted_topology(
+        mut self,
+        route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
+    ) -> AuthorizedDeletedTopology {
+        let links = self.links.take().unwrap_or_else(|| std::process::abort());
+        let addressed = self
+            .addressed
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        match links.into_retirement() {
+            FixedLinkRetirement::Deleted(pending) => {
+                complete_raw_link_retirement(addressed, pending, route_retirements)
+            }
+            FixedLinkRetirement::Untouched => std::process::abort(),
+        }
+    }
+}
+
+impl AuthorizedEndpointRoutes {
+    /// Reprove the complete active link authority and both installed route
+    /// owners in canonical A/B namespace order.
+    pub(crate) fn verify(&self) -> Result<(), FixedEndpointRouteSetError> {
+        self.activated()
+            .verify()
+            .map_err(FixedEndpointRouteSetError::Activated)?;
+        let mut visited = [false, false];
+        self.activated()
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint.index();
+                let route =
+                    self.routes[index]
+                        .as_ref()
+                        .ok_or(FixedEndpointRouteSetError::Unsafe(
+                            "fixed endpoint-route owner is missing",
+                        ))?;
+                let expected_endpoint = match endpoint {
+                    NamespaceEndpoint::A => FixedVethEndpoint::A,
+                    NamespaceEndpoint::B => FixedVethEndpoint::B,
+                };
+                if visited[index] || route.endpoint() != expected_endpoint {
+                    return Err(FixedEndpointRouteSetError::Unsafe(
+                        "fixed endpoint-route owner order changed",
+                    ));
+                }
+                route.verify().map_err(FixedEndpointRouteSetError::Verify)?;
+                visited[index] = true;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                FixedTopologyVisitError::Topology(source) => {
+                    FixedEndpointRouteSetError::Activated(source)
+                }
+                FixedTopologyVisitError::Namespace(source) => {
+                    FixedEndpointRouteSetError::Namespace(source)
+                }
+                FixedTopologyVisitError::Visitor(source) => source,
+            })?;
+        if visited != [true, true] {
+            return Err(FixedEndpointRouteSetError::Unsafe(
+                "fixed endpoint-route verification visit was incomplete",
+            ));
+        }
+        self.activated()
+            .verify()
+            .map_err(FixedEndpointRouteSetError::Activated)
+    }
+
+    pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
+        self.activated().mount_ids()
+    }
+
+    pub(crate) fn mount_point_bytes(&self) -> [&[u8]; ENDPOINT_COUNT] {
+        self.activated().mount_point_bytes()
+    }
+
+    pub(crate) fn visit_parent_network_namespace<Visitor, Output, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<Output, FixedEndpointRouteVisitError<VisitorError>>
+    where
+        Visitor: FnOnce() -> Result<Output, VisitorError>,
+    {
+        visit_endpoint_route_state_parent(self, visitor)
+    }
+
+    pub(crate) fn visit_network_namespaces<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), FixedEndpointRouteVisitError<VisitorError>>
+    where
+        Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+    {
+        visit_endpoint_route_state_endpoints(self, visitor)
+    }
+
+    /// Delete pair B then A and retain both route owners, all address owners,
+    /// and both pair owners through the external pristine-network proof.
+    pub(crate) fn begin_retirement(mut self) -> AuthorizedDeletedTopology {
+        let activated = self
+            .activated
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let routes = take_route_retirements(&mut self.routes);
+        activated.into_deleted_topology(routes)
+    }
+
+    fn activated(&self) -> &AuthorizedActivatedTopology {
+        self.activated
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_failure(mut self, source: FixedEndpointRouteSetError) -> FixedEndpointRouteFailure {
+        let activated = self
+            .activated
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let routes = take_route_retirements(&mut self.routes);
+        FixedEndpointRouteFailure::deleted(source, activated.into_deleted_topology(routes))
+    }
+}
+
+/// Failure from a scoped parent or endpoint visit through routed typestate.
+#[derive(Debug)]
+pub(crate) enum FixedEndpointRouteVisitError<VisitorError> {
+    /// The retained routed typestate failed its pre- or post-visit proof.
+    Topology(FixedEndpointRouteSetError),
+    /// Entering or restoring a retained endpoint namespace failed.
+    Namespace(NamespacePinError),
+    /// The scoped caller operation failed after exact restoration.
+    Visitor(VisitorError),
+}
+
+fn visit_endpoint_route_state_parent<Visitor, Output, VisitorError>(
+    state: &AuthorizedEndpointRoutes,
+    visitor: Visitor,
+) -> Result<Output, FixedEndpointRouteVisitError<VisitorError>>
+where
+    Visitor: FnOnce() -> Result<Output, VisitorError>,
+{
+    state
+        .verify()
+        .map_err(FixedEndpointRouteVisitError::Topology)?;
+    let visited = visitor();
+    state
+        .verify()
+        .map_err(FixedEndpointRouteVisitError::Topology)?;
+    visited.map_err(FixedEndpointRouteVisitError::Visitor)
+}
+
+fn visit_endpoint_route_state_endpoints<Visitor, VisitorError>(
+    state: &AuthorizedEndpointRoutes,
+    visitor: Visitor,
+) -> Result<(), FixedEndpointRouteVisitError<VisitorError>>
+where
+    Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+{
+    state
+        .verify()
+        .map_err(FixedEndpointRouteVisitError::Topology)?;
+    let visited = state
+        .activated()
+        .addressed()
+        .veth_pairs()
+        .namespace_pins()
+        .visit_network_namespaces(visitor)
+        .map_err(|error| match error {
+            NamespaceVisitError::Namespace(source) => {
+                FixedEndpointRouteVisitError::Namespace(source)
+            }
+            NamespaceVisitError::Visitor(source) => FixedEndpointRouteVisitError::Visitor(source),
+        });
+    state
+        .verify()
+        .map_err(FixedEndpointRouteVisitError::Topology)?;
+    visited
+}
+
+fn take_route_retirements(
+    routes: &mut [Option<FixedEndpointRouteOwner>; ENDPOINT_COUNT],
+) -> [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT] {
+    routes
+        .each_mut()
+        .map(|route| route.take().map(FixedEndpointRouteOwner::into_retirement))
+}
+
+fn merge_route_retirements(
+    routes: [Option<FixedEndpointRouteOwner>; ENDPOINT_COUNT],
+    mut retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
+) -> [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT] {
+    for (index, route) in routes.into_iter().enumerate() {
+        if let Some(route) = route {
+            if retirements[index].is_some() {
+                std::process::abort();
+            }
+            retirements[index] = Some(route.into_retirement());
+        }
+    }
+    retirements
 }
 
 trait RetainedLinkState {
@@ -2275,16 +2676,22 @@ impl AuthorizedDeletedTopology {
 
     /// Release lower affine owners only after consuming the unforgeable affine
     /// token minted by the higher layer's external parent/A/B pristine-network
-    /// proof. All six absence-proof validations precede the first infallible
-    /// journal disarm.
+    /// proof. Every retained route, address, and pair is prevalidated before
+    /// the first infallible journal disarm.
+    #[allow(clippy::needless_pass_by_value)] // consuming this affine token is the disarm boundary
     pub(crate) fn finish_after_pristine_network_proof(
         mut self,
-        _pristine_network_proof: crate::mounts::PristineNetworkRetirementProof,
+        pristine_network_proof: crate::mounts::PristineNetworkRetirementProof,
     ) -> AuthorizedNamespacePins {
         let proof = self
             .absence
             .as_ref()
             .unwrap_or_else(|| std::process::abort());
+        let route_prevalidated = self.route_retirements.iter().flatten().all(|route| {
+            route
+                .prevalidate_pair_absence_retirement(proof, &pristine_network_proof)
+                .is_ok()
+        });
         let addressed = self
             .addressed
             .as_mut()
@@ -2299,10 +2706,15 @@ impl AuthorizedDeletedTopology {
             .fixed_pairs()
             .into_iter()
             .all(|pair| pair.prevalidate_pair_absence_retirement(proof).is_ok());
-        if !address_prevalidated || !pair_prevalidated {
+        if !route_prevalidated || !address_prevalidated || !pair_prevalidated {
             std::process::abort();
         }
 
+        for index in (0..ENDPOINT_COUNT).rev() {
+            if let Some(route) = self.route_retirements[index].take() {
+                route.retire_after_validated_pair_absence(proof, &pristine_network_proof);
+            }
+        }
         for index in (0..ENDPOINT_COUNT).rev() {
             addressed.journal.endpoints[index]
                 .take()
@@ -2367,7 +2779,7 @@ fn failure_after_retirement(
         }
         FixedLinkRetirement::Deleted(pending) => FixedLinkActivationFailure::deleted(
             source,
-            complete_raw_link_retirement(addressed, pending),
+            complete_raw_link_retirement(addressed, pending, [None, None]),
         ),
     }
 }
@@ -2375,6 +2787,7 @@ fn failure_after_retirement(
 fn complete_raw_link_retirement(
     addressed: AuthorizedIpv4Addresses,
     mut pending: PendingFixedPairAbsenceProof,
+    route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
 ) -> AuthorizedDeletedTopology {
     let mut endpoint_proved = false;
     for _ in 0..RAW_LINK_RETIREMENT_PROOF_ATTEMPTS {
@@ -2408,6 +2821,7 @@ fn complete_raw_link_retirement(
     AuthorizedDeletedTopology {
         addressed: Some(addressed),
         absence: Some(pending.finish()),
+        route_retirements,
         _thread_bound: PhantomData,
     }
 }
@@ -2457,9 +2871,28 @@ impl Drop for AuthorizedActivatedTopology {
     }
 }
 
+impl Drop for AuthorizedEndpointRoutes {
+    fn drop(&mut self) {
+        match self.activated.take() {
+            None => {
+                if self.routes.iter().any(Option::is_some) {
+                    std::process::abort();
+                }
+            }
+            Some(activated) => {
+                let routes = take_route_retirements(&mut self.routes);
+                drop(activated.into_deleted_topology(routes));
+            }
+        }
+    }
+}
+
 impl Drop for AuthorizedDeletedTopology {
     fn drop(&mut self) {
-        if self.addressed.is_some() || self.absence.is_some() {
+        if self.addressed.is_some()
+            || self.absence.is_some()
+            || self.route_retirements.iter().any(Option::is_some)
+        {
             // The higher mount/network layer did not authorize affine release.
             // Abort before either armed lower Drop field can execute.
             std::process::abort();
@@ -2471,7 +2904,11 @@ fn drop_activation_state(addressed: AuthorizedIpv4Addresses, retirement: FixedLi
     match retirement {
         FixedLinkRetirement::Untouched => drop(addressed),
         FixedLinkRetirement::Deleted(pending) => {
-            drop(complete_raw_link_retirement(addressed, pending));
+            drop(complete_raw_link_retirement(
+                addressed,
+                pending,
+                [None, None],
+            ));
         }
     }
 }
@@ -3537,6 +3974,8 @@ mod tests {
             assert_eq!(self.current.get(), ModelNetworkNamespace::Parent);
             Ok(ModelDeletedTopology {
                 addressed: self.addressed.take(),
+                route_retirements: [false; ENDPOINT_COUNT],
+                route_lineage_valid: [true; ENDPOINT_COUNT],
             })
         }
     }
@@ -3560,6 +3999,8 @@ mod tests {
 
     struct ModelDeletedTopology {
         addressed: Option<ModelActivationAddressedAuthority>,
+        route_retirements: [bool; ENDPOINT_COUNT],
+        route_lineage_valid: [bool; ENDPOINT_COUNT],
     }
 
     impl std::fmt::Debug for ModelDeletedTopology {
@@ -3567,6 +4008,8 @@ mod tests {
             formatter
                 .debug_struct("ModelDeletedTopology")
                 .field("addressed", &self.addressed.is_some())
+                .field("route_retirements", &self.route_retirements)
+                .field("route_lineage_valid", &self.route_lineage_valid)
                 .finish()
         }
     }
@@ -3581,6 +4024,11 @@ mod tests {
                 .as_ref()
                 .expect("deleted topology must retain its addressed owner");
             if !proof_valid
+                || self
+                    .route_retirements
+                    .iter()
+                    .zip(self.route_lineage_valid)
+                    .any(|(armed, valid)| *armed && !valid)
                 || addressed.address_lineage_valid != [true; 4]
                 || addressed.pair_lineage_valid != [true; ENDPOINT_COUNT]
             {
@@ -3591,6 +4039,16 @@ mod tests {
                 .as_mut()
                 .expect("deleted topology must retain its addressed owner");
             addressed.events.borrow_mut().push("prove pristine network");
+            for endpoint in REVERSE_NAMESPACE_VISIT_ORDER {
+                let index = endpoint.index();
+                if self.route_retirements[index] {
+                    self.route_retirements[index] = false;
+                    addressed.events.borrow_mut().push(match endpoint {
+                        NamespaceEndpoint::A => "retire route A",
+                        NamespaceEndpoint::B => "retire route B",
+                    });
+                }
+            }
             let pins = addressed.disarm_after_absence();
             drop(
                 self.addressed
@@ -3761,6 +4219,81 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ModelRouteFailure {
+        BeforeMutation,
+        Rejected,
+        DeletionBound,
+    }
+
+    struct ModelRoutedTopology {
+        activated: Option<ModelActivatedTopology>,
+        route_owners: [bool; ENDPOINT_COUNT],
+    }
+
+    impl ModelRoutedTopology {
+        fn begin_retirement(mut self) -> ModelDeletedTopology {
+            let mut deleted = self
+                .activated
+                .take()
+                .expect("model routed topology must retain active authority")
+                .begin_retirement();
+            deleted.route_retirements = self.route_owners;
+            self.route_owners = [false; ENDPOINT_COUNT];
+            deleted
+        }
+    }
+
+    impl Drop for ModelRoutedTopology {
+        fn drop(&mut self) {
+            if let Some(activated) = self.activated.take() {
+                let mut deleted = activated.begin_retirement();
+                deleted.route_retirements = self.route_owners;
+                self.route_owners = [false; ENDPOINT_COUNT];
+                drop(deleted);
+            }
+        }
+    }
+
+    fn model_install_endpoint_routes(
+        activated: ModelActivatedTopology,
+        fail_at: Option<(NamespaceEndpoint, ModelRouteFailure)>,
+    ) -> Result<ModelRoutedTopology, (ModelRouteFailure, ModelDeletedTopology)> {
+        let mut route_authorities = [false; ENDPOINT_COUNT];
+        for endpoint in FORWARD_NAMESPACE_VISIT_ORDER {
+            let index = endpoint.index();
+            let events = &activated
+                .core
+                .as_ref()
+                .expect("model activated authority")
+                .events;
+            events.borrow_mut().push(model_enter_event(endpoint));
+            events.borrow_mut().push(match endpoint {
+                NamespaceEndpoint::A => "install route A",
+                NamespaceEndpoint::B => "install route B",
+            });
+            let failure = fail_at
+                .filter(|(failed_endpoint, _)| *failed_endpoint == endpoint)
+                .map(|(_, failure)| failure);
+            if !matches!(
+                failure,
+                Some(ModelRouteFailure::BeforeMutation | ModelRouteFailure::Rejected)
+            ) {
+                route_authorities[index] = true;
+            }
+            events.borrow_mut().push(model_restore_event(endpoint));
+            if let Some(failure) = failure {
+                let mut deleted = activated.begin_retirement();
+                deleted.route_retirements = route_authorities;
+                return Err((failure, deleted));
+            }
+        }
+        Ok(ModelRoutedTopology {
+            activated: Some(activated),
+            route_owners: route_authorities,
+        })
+    }
+
     fn model_stage_all_none(
         provisional: &mut ModelProvisionalActivation,
         fail_at: Option<(usize, ModelLinkFailure)>,
@@ -3842,6 +4375,113 @@ mod tests {
             "release namespace pins",
             "namespace pins dropped",
         ]));
+    }
+
+    #[test]
+    fn every_route_failure_preserves_exact_authority_through_direct_pair_deletion() {
+        for endpoint in FORWARD_NAMESPACE_VISIT_ORDER {
+            for failure in [
+                ModelRouteFailure::BeforeMutation,
+                ModelRouteFailure::Rejected,
+                ModelRouteFailure::DeletionBound,
+            ] {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+                let activated = model_complete_activation(&events, &current);
+                events.borrow_mut().clear();
+                let (observed, mut deleted) =
+                    match model_install_endpoint_routes(activated, Some((endpoint, failure))) {
+                        Ok(_) => panic!("model route failure was accepted"),
+                        Err(failure) => failure,
+                    };
+                assert_eq!(observed, failure);
+                let expected = match (endpoint, failure) {
+                    (NamespaceEndpoint::A, ModelRouteFailure::DeletionBound) => [true, false],
+                    (NamespaceEndpoint::A, _) => [false, false],
+                    (NamespaceEndpoint::B, ModelRouteFailure::DeletionBound) => [true, true],
+                    (NamespaceEndpoint::B, _) => [true, false],
+                };
+                assert_eq!(deleted.route_retirements, expected);
+                assert_model_raw_retirement(&events.borrow());
+                assert!(
+                    !events
+                        .borrow()
+                        .iter()
+                        .any(|event| event.contains("rollback"))
+                );
+
+                let pins = deleted
+                    .finish_after_pristine_network_proof(true)
+                    .expect("finish model route-failure retirement");
+                let observed = events.borrow();
+                let route_b = observed.iter().position(|event| *event == "retire route B");
+                let route_a = observed.iter().position(|event| *event == "retire route A");
+                if expected[1] {
+                    assert!(route_b.is_some());
+                } else {
+                    assert!(route_b.is_none());
+                }
+                if expected[0] {
+                    let route_a = route_a.expect("route A retirement");
+                    if let Some(route_b) = route_b {
+                        assert!(route_b < route_a);
+                    }
+                    let first_address = observed
+                        .iter()
+                        .position(|event| *event == "disarm endpoint B address")
+                        .expect("address retirement");
+                    assert!(route_a < first_address);
+                } else {
+                    assert!(route_a.is_none());
+                }
+                drop(observed);
+                drop(pins);
+                assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+            }
+        }
+    }
+
+    #[test]
+    fn routed_retirement_prevalidates_all_routes_before_disarming_any_owner() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let activated = model_complete_activation(&events, &current);
+        let routed = model_install_endpoint_routes(activated, None).expect("model routed topology");
+        events.borrow_mut().clear();
+        let mut deleted = routed.begin_retirement();
+        deleted.route_lineage_valid[1] = false;
+        let events_before = events.borrow().len();
+
+        assert!(deleted.finish_after_pristine_network_proof(true).is_err());
+        assert_eq!(deleted.route_retirements, [true, true]);
+        let addressed = deleted
+            .addressed
+            .as_ref()
+            .expect("retained addressed authority");
+        assert_eq!(addressed.addresses_armed, [true; 4]);
+        assert_eq!(addressed.pairs_armed, [true; ENDPOINT_COUNT]);
+        assert_eq!(events.borrow().len(), events_before);
+
+        deleted.route_lineage_valid = [true; ENDPOINT_COUNT];
+        let pins = deleted
+            .finish_after_pristine_network_proof(true)
+            .expect("valid routed retirement");
+        let observed = events.borrow();
+        let route_b = observed
+            .iter()
+            .position(|event| *event == "retire route B")
+            .expect("route B retirement");
+        let route_a = observed
+            .iter()
+            .position(|event| *event == "retire route A")
+            .expect("route A retirement");
+        let first_address = observed
+            .iter()
+            .position(|event| *event == "disarm endpoint B address")
+            .expect("address retirement");
+        assert!(route_b < route_a && route_a < first_address);
+        drop(observed);
+        drop(pins);
     }
 
     #[test]

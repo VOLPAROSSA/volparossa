@@ -165,6 +165,7 @@ const IFA_CACHEINFO_LEN: usize = 16;
 
 const RTA_DST: u16 = 1;
 const RTA_OIF: u16 = 4;
+const RTA_GATEWAY: u16 = 5;
 const RTA_PRIORITY: u16 = 6;
 const RTA_PREFSRC: u16 = 7;
 const RTA_CACHEINFO: u16 = 12;
@@ -240,6 +241,7 @@ const RT_TABLE_DEFAULT: u32 = 253;
 const RT_TABLE_MAIN: u32 = 254;
 const RT_TABLE_LOCAL: u32 = 255;
 const RTPROT_KERNEL: u8 = 2;
+const RTPROT_STATIC: u8 = 4;
 const RT_SCOPE_UNIVERSE: u8 = 0;
 const RT_SCOPE_LINK: u8 = 253;
 const RT_SCOPE_HOST: u8 = 254;
@@ -286,6 +288,12 @@ pub(crate) enum NetworkError {
     /// A caller supplied an impossible or ambiguous fixed-IPv4 expectation.
     #[error("fixed-IPv4 observation expectation was invalid")]
     InvalidIpv4Expectation,
+    /// A caller supplied an endpoint route outside the fixed A/B route set.
+    #[error("fixed endpoint IPv4 route expectation was invalid")]
+    InvalidIpv4RouteExpectation,
+    /// The expected destination existed with non-exact route semantics.
+    #[error("fixed endpoint IPv4 route destination had a conflicting route")]
+    ConflictingIpv4EndpointRoute,
     /// The fixed private-proc observation failed.
     #[error("network proof could not read the fixed private proc record")]
     PrivateProc(#[source] PrivateMountSetupError),
@@ -437,6 +445,48 @@ pub(crate) struct ExactActivatedIpv4ParentObservation {
 pub(crate) struct ExactActivatedIpv4EndpointObservation {
     active: PreGoNetworkBaseline,
     link: VethLinkObservation,
+    address: ExpectedIpv4Address,
+    namespace: NetworkNamespaceIdentity,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Fixed endpoint route identity derived from an exact activated observation.
+///
+/// The namespace identity is part of the expectation, so equal numeric `eth0`
+/// indices in A and B are not interchangeable. This value owns no route and
+/// grants no mutation authority. Its route is an IPv4 main-table `/32`,
+/// `RTPROT_STATIC`, universe-scope unicast with exactly `RTA_TABLE`, `RTA_DST`,
+/// `RTA_GATEWAY`, and `RTA_OIF`; metrics, sources, multipath, and unknown
+/// attributes are rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExpectedIpv4EndpointRoute {
+    namespace: NetworkNamespaceIdentity,
+    ifindex: u32,
+    local_address: [u8; 4],
+    destination: [u8; 4],
+    gateway: [u8; 4],
+}
+
+/// Exact proof that the parent retained its complete activated snapshot while
+/// endpoint routes were configured elsewhere.
+///
+/// This is configuration evidence only. It does not observe packets, prove
+/// forwarding, establish a datapath, or establish readiness.
+pub(crate) struct ExactIpv4EndpointRouteParentObservation {
+    active: PreGoNetworkBaseline,
+    links: [VethLinkObservation; 2],
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Exact proof of one activated endpoint plus its one fixed explicit route.
+///
+/// This is configuration evidence only. It does not observe packets, prove
+/// forwarding, establish a datapath, or establish readiness.
+pub(crate) struct ExactIpv4EndpointRouteEndpointObservation {
+    active: PreGoNetworkBaseline,
+    link: VethLinkObservation,
+    address: ExpectedIpv4Address,
+    route: ExpectedIpv4EndpointRoute,
     namespace: NetworkNamespaceIdentity,
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -515,6 +565,24 @@ impl ExpectedIpv4Address {
             ifindex,
             address,
         })
+    }
+}
+
+#[cfg(test)]
+impl ExpectedIpv4EndpointRoute {
+    /// Namespace-local output interface retained from the activated endpoint.
+    pub(crate) const fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+
+    /// The fixed remote endpoint `/32` destination.
+    pub(crate) const fn destination(&self) -> [u8; 4] {
+        self.destination
+    }
+
+    /// The fixed same-subnet parent-side gateway.
+    pub(crate) const fn gateway(&self) -> [u8; 4] {
+        self.gateway
     }
 }
 
@@ -764,6 +832,7 @@ impl PristineNetworkNamespaceObservation {
         Ok(ExactActivatedIpv4EndpointObservation {
             active,
             link,
+            address: expected_address.clone(),
             namespace: self.namespace,
             _thread_bound: PhantomData,
         })
@@ -854,10 +923,82 @@ impl ExactActivatedIpv4ParentObservation {
     ) -> Result<(), NetworkError> {
         require_current_stable_baseline(mounts, &self.active)
     }
+
+    /// Consume the activated observation after re-proving that the parent has
+    /// no route-state delta at the endpoint-route barrier.
+    pub(crate) fn observe_exact_ipv4_endpoint_route_parent<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<ExactIpv4EndpointRouteParentObservation, NetworkError> {
+        require_current_stable_baseline(mounts, &self.active)?;
+        Ok(ExactIpv4EndpointRouteParentObservation {
+            active: self.active,
+            links: self.links,
+            _thread_bound: PhantomData,
+        })
+    }
 }
 
 impl ExactActivatedIpv4EndpointObservation {
     /// Reobserve and require byte-exact equality with the retained active state.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_stable_baseline(mounts, &self.active)?;
+        require_current_network_namespace(self.namespace)
+    }
+
+    /// Derive the only fixed explicit route admitted for this exact endpoint.
+    pub(crate) fn expected_ipv4_endpoint_route(
+        &self,
+    ) -> Result<ExpectedIpv4EndpointRoute, NetworkError> {
+        expected_ipv4_endpoint_route(&self.link.identity, &self.address, self.namespace)
+    }
+
+    /// Consume the activated observation after proving its one exact explicit
+    /// peer-endpoint route and no other state delta.
+    pub(crate) fn observe_exact_ipv4_endpoint_route_endpoint<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        expected: &ExpectedIpv4EndpointRoute,
+    ) -> Result<ExactIpv4EndpointRouteEndpointObservation, NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_ipv4_endpoint_route_expectation(
+            expected,
+            &self.link.identity,
+            &self.address,
+            self.namespace,
+        )?;
+        let (active, ()) = collect_exact_stable_network_delta(mounts, |active| {
+            require_current_network_namespace(self.namespace)?;
+            verify_exact_endpoint_ipv4_route_delta(&self.active, active, expected)
+        })?;
+        require_current_network_namespace(self.namespace)?;
+        Ok(ExactIpv4EndpointRouteEndpointObservation {
+            active,
+            link: self.link,
+            address: self.address,
+            route: expected.clone(),
+            namespace: self.namespace,
+            _thread_bound: PhantomData,
+        })
+    }
+}
+
+impl ExactIpv4EndpointRouteParentObservation {
+    /// Reobserve and require exact equality with the retained activated parent.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_stable_baseline(mounts, &self.active)
+    }
+}
+
+impl ExactIpv4EndpointRouteEndpointObservation {
+    /// Reobserve and require exact equality with the retained routed endpoint.
     pub(crate) fn verify<RunState>(
         &self,
         mounts: &PrivateMounts<RunState>,
@@ -920,6 +1061,31 @@ pub(crate) fn verify_exact_activated_ipv4_observations(
         [&endpoints[0].link, &endpoints[1].link],
         [endpoints[0].namespace, endpoints[1].namespace],
     )
+}
+
+/// Cross-check the unchanged parent and both routed endpoints against retained
+/// A/B namespace lineage.
+///
+/// This proves only the enumerated link/address/route configuration. It makes
+/// no forwarding, packet, datapath, or readiness claim.
+pub(crate) fn verify_exact_ipv4_endpoint_route_observations(
+    parent: &ExactIpv4EndpointRouteParentObservation,
+    endpoints: [&ExactIpv4EndpointRouteEndpointObservation; 2],
+) -> Result<(), NetworkError> {
+    verify_veth_observation_relations(
+        &parent.links,
+        [&endpoints[0].link, &endpoints[1].link],
+        [endpoints[0].namespace, endpoints[1].namespace],
+    )?;
+    for endpoint in endpoints {
+        require_ipv4_endpoint_route_expectation(
+            &endpoint.route,
+            &endpoint.link.identity,
+            &endpoint.address,
+            endpoint.namespace,
+        )?;
+    }
+    Ok(())
 }
 
 fn verify_veth_observation_relations(
@@ -1664,6 +1830,45 @@ fn fixed_endpoint_ipv4(pair: &ExpectedVethPair) -> Result<[u8; 4], NetworkError>
     fixed_pair_subnet(pair).map(|subnet| [10, 241, subnet, 2])
 }
 
+fn expected_ipv4_endpoint_route(
+    pair: &ExpectedVethPair,
+    address: &ExpectedIpv4Address,
+    namespace: NetworkNamespaceIdentity,
+) -> Result<ExpectedIpv4EndpointRoute, NetworkError> {
+    if namespace != pair.target_namespace
+        || validate_endpoint_ipv4_expectation(pair, address).is_err()
+    {
+        return Err(NetworkError::InvalidIpv4RouteExpectation);
+    }
+    let subnet = fixed_pair_subnet(pair).map_err(|_| NetworkError::InvalidIpv4RouteExpectation)?;
+    let remote_subnet = match subnet {
+        1 => 2,
+        2 => 1,
+        _ => return Err(NetworkError::InvalidIpv4RouteExpectation),
+    };
+    Ok(ExpectedIpv4EndpointRoute {
+        namespace,
+        ifindex: address.ifindex,
+        local_address: address.address,
+        destination: [10, 241, remote_subnet, 2],
+        gateway: [10, 241, subnet, 1],
+    })
+}
+
+fn require_ipv4_endpoint_route_expectation(
+    expected: &ExpectedIpv4EndpointRoute,
+    pair: &ExpectedVethPair,
+    address: &ExpectedIpv4Address,
+    namespace: NetworkNamespaceIdentity,
+) -> Result<(), NetworkError> {
+    let canonical = expected_ipv4_endpoint_route(pair, address, namespace)?;
+    if *expected == canonical {
+        Ok(())
+    } else {
+        Err(NetworkError::InvalidIpv4RouteExpectation)
+    }
+}
+
 fn fixed_pair_subnet(pair: &ExpectedVethPair) -> Result<u8, NetworkError> {
     let name = pair.parent_name.as_slice();
     if name.len() != 11
@@ -1881,6 +2086,94 @@ fn verify_exact_endpoint_activated_ipv4_snapshot_delta(
     Ok(link)
 }
 
+fn verify_exact_endpoint_ipv4_route_delta(
+    activated: &PreGoNetworkBaseline,
+    routed: &PreGoNetworkBaseline,
+    expected: &ExpectedIpv4EndpointRoute,
+) -> Result<(), NetworkError> {
+    if routed.ipv4_forwarding != activated.ipv4_forwarding || routed.nftables != activated.nftables
+    {
+        return Err(NetworkError::Inconsistent);
+    }
+    verify_exact_endpoint_ipv4_route_snapshot_delta(&activated.rtnl, &routed.rtnl, expected)
+}
+
+fn verify_exact_endpoint_ipv4_route_snapshot_delta(
+    activated: &NetworkSnapshot,
+    routed: &NetworkSnapshot,
+    expected: &ExpectedIpv4EndpointRoute,
+) -> Result<(), NetworkError> {
+    if routed.links != activated.links
+        || routed.qdiscs != activated.qdiscs
+        || routed.addresses != activated.addresses
+        || routed.neighbours != activated.neighbours
+        || routed.proxy_neighbours != activated.proxy_neighbours
+        || routed.nexthops != activated.nexthops
+        || routed.rules_v4 != activated.rules_v4
+        || routed.rules_v6 != activated.rules_v6
+    {
+        return Err(NetworkError::Inconsistent);
+    }
+    let added_routes =
+        require_route_additions_preserve_baseline(&activated.routes, &routed.routes)?;
+    let mut destination_routes = added_routes
+        .iter()
+        .filter(|route| route_has_ipv4_destination(route, expected.destination));
+    let destination_route = destination_routes.next();
+    if destination_routes.next().is_some() {
+        return Err(NetworkError::ConflictingIpv4EndpointRoute);
+    }
+    let Some(destination_route) = destination_route else {
+        if added_routes.is_empty() {
+            return Err(NetworkError::NotPristine);
+        }
+        return Err(NetworkError::Inconsistent);
+    };
+    if added_routes.len() != 1 {
+        return Err(NetworkError::Inconsistent);
+    }
+    let Ok(actual) = decode_fixed_ipv4_endpoint_route(destination_route) else {
+        return Err(NetworkError::ConflictingIpv4EndpointRoute);
+    };
+    let expected = FixedIpv4EndpointRouteRecord {
+        ifindex: expected.ifindex,
+        destination: expected.destination,
+        gateway: expected.gateway,
+    };
+    if actual == expected {
+        Ok(())
+    } else if actual.destination == expected.destination {
+        Err(NetworkError::ConflictingIpv4EndpointRoute)
+    } else {
+        Err(NetworkError::NotPristine)
+    }
+}
+
+fn route_has_ipv4_destination(payload: &[u8], expected: [u8; 4]) -> bool {
+    payload.len() >= RTMSG_LEN
+        && payload[0] == AF_INET
+        && payload[1] == 32
+        && parse_attributes(&payload[RTMSG_LEN..]).is_ok_and(|attributes| {
+            attributes.iter().any(|attribute| {
+                attribute.kind == RTA_DST && attribute.flags == 0 && attribute.payload == expected
+            })
+        })
+}
+
+fn require_route_additions_preserve_baseline(
+    activated: &[Vec<u8>],
+    routed: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>, NetworkError> {
+    let mut additions = routed.to_vec();
+    for retained in activated {
+        let Some(index) = additions.iter().position(|candidate| candidate == retained) else {
+            return Err(NetworkError::Inconsistent);
+        };
+        additions.remove(index);
+    }
+    Ok(additions)
+}
+
 fn verify_exact_parent_veth_links_only(
     pristine: &NetworkSnapshot,
     active: &NetworkSnapshot,
@@ -2072,6 +2365,13 @@ struct FixedIpv4AddressRecord {
 struct FixedIpv4LocalRouteRecord {
     ifindex: u32,
     address: [u8; 4],
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct FixedIpv4EndpointRouteRecord {
+    ifindex: u32,
+    destination: [u8; 4],
+    gateway: [u8; 4],
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2314,6 +2614,46 @@ fn decode_fixed_ipv4_local_route(
         return Err(NetworkError::NotPristine);
     }
     Ok(FixedIpv4LocalRouteRecord { ifindex, address })
+}
+
+fn decode_fixed_ipv4_endpoint_route(
+    payload: &[u8],
+) -> Result<FixedIpv4EndpointRouteRecord, NetworkError> {
+    if payload.len() < RTMSG_LEN
+        || payload[0] != AF_INET
+        || payload[1] != 32
+        || payload[2] != 0
+        || payload[3] != 0
+        || u32::from(payload[4]) != RT_TABLE_MAIN
+        || payload[5] != RTPROT_STATIC
+        || payload[6] != RT_SCOPE_UNIVERSE
+        || payload[7] != RTN_UNICAST
+        || read_u32(payload, 8)? != 0
+    {
+        return Err(NetworkError::NotPristine);
+    }
+    let mut destination = None;
+    let mut gateway = None;
+    let mut output_interface = None;
+    let mut table = None;
+    for attribute in parse_attributes(&payload[RTMSG_LEN..])? {
+        let value = attribute.unflagged_payload()?;
+        match attribute.kind {
+            RTA_DST => set_once(&mut destination, read_exact_ipv4(value)?)?,
+            RTA_GATEWAY => set_once(&mut gateway, read_exact_ipv4(value)?)?,
+            RTA_OIF => set_once(&mut output_interface, read_exact_u32(value)?)?,
+            RTA_TABLE => set_once(&mut table, read_exact_u32(value)?)?,
+            _ => return Err(NetworkError::NotPristine),
+        }
+    }
+    if table != Some(RT_TABLE_MAIN) {
+        return Err(NetworkError::NotPristine);
+    }
+    Ok(FixedIpv4EndpointRouteRecord {
+        ifindex: required_route_ifindex(output_interface)?,
+        destination: destination.ok_or(NetworkError::NotPristine)?,
+        gateway: gateway.ok_or(NetworkError::NotPristine)?,
+    })
 }
 
 fn decode_noqueue_qdisc(payload: &[u8]) -> Result<NoqueueQdiscRecord, NetworkError> {
@@ -4195,6 +4535,285 @@ mod tests {
     }
 
     #[test]
+    fn fixed_endpoint_route_expectations_bind_namespace_lineage() {
+        let pair_a = expected_pair("vpa01234567", 2, 2, 11);
+        let pair_b = expected_pair("vpb01234567", 3, 2, 12);
+        let address_a = expected_ipv4("eth0", 2, [10, 241, 1, 2]);
+        let address_b = expected_ipv4("eth0", 2, [10, 241, 2, 2]);
+        let route_a =
+            expected_ipv4_endpoint_route(&pair_a, &address_a, test_namespace_identity(11))
+                .expect("fixed A route");
+        let route_b =
+            expected_ipv4_endpoint_route(&pair_b, &address_b, test_namespace_identity(12))
+                .expect("fixed B route");
+
+        assert_eq!(route_a.ifindex(), route_b.ifindex());
+        assert_eq!(route_a.destination(), [10, 241, 2, 2]);
+        assert_eq!(route_a.gateway(), [10, 241, 1, 1]);
+        assert_eq!(route_b.destination(), [10, 241, 1, 2]);
+        assert_eq!(route_b.gateway(), [10, 241, 2, 1]);
+        assert_ne!(route_a, route_b);
+
+        let mut swapped_namespace = route_a.clone();
+        swapped_namespace.namespace = route_b.namespace;
+        assert!(matches!(
+            require_ipv4_endpoint_route_expectation(
+                &swapped_namespace,
+                &pair_a,
+                &address_a,
+                test_namespace_identity(11),
+            ),
+            Err(NetworkError::InvalidIpv4RouteExpectation)
+        ));
+        assert!(matches!(
+            expected_ipv4_endpoint_route(&pair_a, &address_a, test_namespace_identity(12)),
+            Err(NetworkError::InvalidIpv4RouteExpectation)
+        ));
+    }
+
+    #[test]
+    fn exact_fixed_endpoint_route_deltas_are_accepted() {
+        let (_pristine_a, pair_a, address_a, active_a) = valid_activated_endpoint_fixture();
+        let expected_a =
+            expected_ipv4_endpoint_route(&pair_a, &address_a, test_namespace_identity(11))
+                .expect("fixed A route");
+        let mut routed_a = active_a.clone();
+        routed_a.routes.push(ipv4_endpoint_route_payload(
+            expected_a.ifindex(),
+            expected_a.destination(),
+            expected_a.gateway(),
+        ));
+        verify_exact_endpoint_ipv4_route_snapshot_delta(&active_a, &routed_a, &expected_a)
+            .expect("exact routed A delta");
+
+        let active_b = pristine_snapshot();
+        let pair_b = expected_pair("vpb01234567", 3, 2, 12);
+        let address_b = expected_ipv4("eth0", 2, [10, 241, 2, 2]);
+        let mut activated_b = active_b.clone();
+        activated_b.links.push(veth_link_payload_with_profile(
+            VETH_ENDPOINT_NAME,
+            pair_b.endpoint_ifindex,
+            pair_b.parent_ifindex,
+            0,
+            [0x06, 1, 2, 3, 4, 5],
+            VethLinkProfile::ActivatedAddrgenNone,
+        ));
+        add_activated_ipv4_fixture(&mut activated_b, &address_b);
+        let expected_b =
+            expected_ipv4_endpoint_route(&pair_b, &address_b, test_namespace_identity(12))
+                .expect("fixed B route");
+        let mut routed_b = activated_b.clone();
+        routed_b.routes.push(ipv4_endpoint_route_payload(
+            expected_b.ifindex(),
+            expected_b.destination(),
+            expected_b.gateway(),
+        ));
+        verify_exact_endpoint_ipv4_route_snapshot_delta(&activated_b, &routed_b, &expected_b)
+            .expect("exact routed B delta");
+    }
+
+    #[test]
+    fn same_destination_nonexact_route_is_reported_as_conflicting() {
+        let (_pristine, pair, address, active) = valid_activated_endpoint_fixture();
+        let expected = expected_ipv4_endpoint_route(&pair, &address, test_namespace_identity(11))
+            .expect("fixed route");
+        let mut routed = active.clone();
+        routed.routes.push(ipv4_endpoint_route_payload(
+            expected.ifindex(),
+            expected.destination(),
+            [10, 241, 1, 2],
+        ));
+        assert!(matches!(
+            verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &routed, &expected),
+            Err(NetworkError::ConflictingIpv4EndpointRoute)
+        ));
+
+        let mut wrong_destination = active.clone();
+        wrong_destination.routes.push(ipv4_endpoint_route_payload(
+            expected.ifindex(),
+            [10, 241, 2, 1],
+            expected.gateway(),
+        ));
+        assert!(matches!(
+            verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &wrong_destination, &expected,),
+            Err(NetworkError::Inconsistent)
+        ));
+    }
+
+    #[test]
+    fn fixed_endpoint_route_delta_rejects_header_and_attribute_ambiguity() {
+        let (_pristine, pair, address, active) = valid_activated_endpoint_fixture();
+        let expected = expected_ipv4_endpoint_route(&pair, &address, test_namespace_identity(11))
+            .expect("fixed route");
+        let valid_route = ipv4_endpoint_route_payload(
+            expected.ifindex(),
+            expected.destination(),
+            expected.gateway(),
+        );
+        let mut variants = Vec::new();
+        for (offset, replacement) in [
+            (0, AF_INET6),
+            (1, 31),
+            (2, 1),
+            (3, 1),
+            (4, u8::try_from(RT_TABLE_LOCAL).expect("local table byte")),
+            (5, RTPROT_KERNEL),
+            (6, RT_SCOPE_LINK),
+            (7, RTN_LOCAL),
+            (8, 1),
+        ] {
+            let mut route = valid_route.clone();
+            route[offset] = replacement;
+            variants.push(route);
+        }
+        for kind in [RTA_DST, RTA_GATEWAY, RTA_OIF, RTA_TABLE] {
+            variants.push(without_record_attribute(&valid_route, RTMSG_LEN, kind));
+        }
+        variants.push(replace_record_attribute(
+            &valid_route,
+            RTMSG_LEN,
+            RTA_DST,
+            &[10, 241, 2, 1],
+        ));
+        variants.push(replace_record_attribute(
+            &valid_route,
+            RTMSG_LEN,
+            RTA_GATEWAY,
+            &[10, 241, 1, 2],
+        ));
+        variants.push(replace_record_attribute(
+            &valid_route,
+            RTMSG_LEN,
+            RTA_OIF,
+            &3_u32.to_ne_bytes(),
+        ));
+        variants.push(replace_record_attribute(
+            &valid_route,
+            RTMSG_LEN,
+            RTA_TABLE,
+            &RT_TABLE_LOCAL.to_ne_bytes(),
+        ));
+        for (kind, value) in [
+            (RTA_PRIORITY, 7_u32.to_ne_bytes().to_vec()),
+            (RTA_PREFSRC, [10, 241, 1, 2].to_vec()),
+            (RTA_TABLE, RT_TABLE_MAIN.to_ne_bytes().to_vec()),
+            (9, vec![0; 8]),
+            (99, vec![1]),
+        ] {
+            let mut route = valid_route.clone();
+            route.extend(attribute(kind, &value));
+            variants.push(route);
+        }
+        let mut duplicate_destination = valid_route.clone();
+        duplicate_destination.extend(attribute(RTA_DST, &expected.destination()));
+        variants.push(duplicate_destination);
+        let mut flagged_destination = valid_route.clone();
+        flagged_destination = replace_record_attribute_with_raw_kind(
+            &flagged_destination,
+            RTMSG_LEN,
+            RTA_DST,
+            RTA_DST | NLA_F_NESTED,
+            &expected.destination(),
+        );
+        variants.push(flagged_destination);
+
+        for route in variants {
+            let mut routed = active.clone();
+            routed.routes.push(route);
+            assert!(
+                verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &routed, &expected)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_endpoint_route_delta_rejects_every_extra_or_changed_object() {
+        let (_pristine, pair, address, active) = valid_activated_endpoint_fixture();
+        let expected = expected_ipv4_endpoint_route(&pair, &address, test_namespace_identity(11))
+            .expect("fixed route");
+        let mut routed = active.clone();
+        routed.routes.push(ipv4_endpoint_route_payload(
+            expected.ifindex(),
+            expected.destination(),
+            expected.gateway(),
+        ));
+
+        assert!(matches!(
+            verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &active, &expected),
+            Err(NetworkError::NotPristine)
+        ));
+        let mut second_route = routed.clone();
+        second_route.routes.push(ipv4_endpoint_route_payload(
+            expected.ifindex(),
+            [10, 241, 2, 1],
+            expected.gateway(),
+        ));
+        assert!(matches!(
+            verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &second_route, &expected),
+            Err(NetworkError::Inconsistent)
+        ));
+        let mut same_destination_sibling = routed.clone();
+        same_destination_sibling
+            .routes
+            .push(ipv4_endpoint_route_payload(
+                expected.ifindex(),
+                expected.destination(),
+                [10, 241, 1, 2],
+            ));
+        let sibling_additions = require_route_additions_preserve_baseline(
+            &active.routes,
+            &same_destination_sibling.routes,
+        )
+        .expect("baseline-preserving sibling additions");
+        assert_eq!(sibling_additions.len(), 2);
+        assert!(
+            sibling_additions
+                .iter()
+                .all(|route| route_has_ipv4_destination(route, expected.destination())),
+            "both sibling fixtures must target the expected destination",
+        );
+        let sibling_result = verify_exact_endpoint_ipv4_route_snapshot_delta(
+            &active,
+            &same_destination_sibling,
+            &expected,
+        );
+        assert!(
+            matches!(
+                sibling_result,
+                Err(NetworkError::ConflictingIpv4EndpointRoute)
+            ),
+            "same-destination sibling result: {sibling_result:?}",
+        );
+        let mut changed_baseline_route = routed.clone();
+        changed_baseline_route
+            .routes
+            .iter_mut()
+            .find(|route| route[0] == AF_INET && route[7] == RTN_BROADCAST)
+            .expect("broadcast route")[6] = RT_SCOPE_UNIVERSE;
+        assert!(matches!(
+            verify_exact_endpoint_ipv4_route_snapshot_delta(
+                &active,
+                &changed_baseline_route,
+                &expected,
+            ),
+            Err(NetworkError::Inconsistent)
+        ));
+        let mut changed_link = routed.clone();
+        changed_link.links[1][8] ^= 1;
+        assert!(matches!(
+            verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &changed_link, &expected),
+            Err(NetworkError::Inconsistent)
+        ));
+        let mut neighbour = routed;
+        neighbour.neighbours.push(vec![0; NDMSG_LEN]);
+        assert!(matches!(
+            verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &neighbour, &expected),
+            Err(NetworkError::Inconsistent)
+        ));
+    }
+
+    #[test]
     fn addrgen_none_barrier_rejects_every_state_or_object_substitution() {
         let pristine = pristine_snapshot();
         let pair = expected_pair("vpa01234567", 2, 2, 11);
@@ -5597,7 +6216,7 @@ mod tests {
 
             let active_parent_deadline =
                 Deadline::after(NETWORK_PROOF_TIMEOUT).expect("active parent deadline");
-            let (_active_parent, active_parent_links) = retry_exact_observation_before(
+            let (active_parent, active_parent_links) = retry_exact_observation_before(
                 active_parent_deadline,
                 || collect_converged_snapshot_before(active_parent_deadline),
                 |active| {
@@ -5623,7 +6242,7 @@ mod tests {
             });
             let active_endpoint_deadlines = [(); 2]
                 .map(|()| Deadline::after(NETWORK_PROOF_TIMEOUT).expect("endpoint deadline"));
-            let (_active_endpoint_a, active_a) = retry_exact_observation_before(
+            let (active_endpoint_a, active_a) = retry_exact_observation_before(
                 active_endpoint_deadlines[0],
                 || {
                     collect_converged_snapshot_in_network_namespace(
@@ -5642,7 +6261,7 @@ mod tests {
                 },
             )
             .expect("live endpoint A converged active proof");
-            let (_active_endpoint_b, active_b) = retry_exact_observation_before(
+            let (active_endpoint_b, active_b) = retry_exact_observation_before(
                 active_endpoint_deadlines[1],
                 || {
                     collect_converged_snapshot_in_network_namespace(
@@ -5667,6 +6286,91 @@ mod tests {
                 endpoint_identities,
             )
             .expect("live four-end activation relations");
+
+            let expected_routes = [
+                expected_ipv4_endpoint_route(
+                    &pairs[0],
+                    &endpoint_addresses[0],
+                    endpoint_identities[0],
+                )
+                .expect("fixed endpoint A route"),
+                expected_ipv4_endpoint_route(
+                    &pairs[1],
+                    &endpoint_addresses[1],
+                    endpoint_identities[1],
+                )
+                .expect("fixed endpoint B route"),
+            ];
+            run_ip_in(
+                target_pids[0],
+                &[
+                    "route",
+                    "add",
+                    "10.241.2.2/32",
+                    "via",
+                    "10.241.1.1",
+                    "dev",
+                    "eth0",
+                    "table",
+                    "main",
+                    "protocol",
+                    "static",
+                    "scope",
+                    "global",
+                ],
+            );
+            run_ip_in(
+                target_pids[1],
+                &[
+                    "route",
+                    "add",
+                    "10.241.1.2/32",
+                    "via",
+                    "10.241.2.1",
+                    "dev",
+                    "eth0",
+                    "table",
+                    "main",
+                    "protocol",
+                    "static",
+                    "scope",
+                    "global",
+                ],
+            );
+
+            assert_eq!(
+                collect_consistent_snapshot_before(
+                    Deadline::after(NETWORK_PROOF_TIMEOUT)
+                        .expect("routed parent equality deadline"),
+                )
+                .expect("stable routed parent observation"),
+                active_parent,
+                "endpoint route creation must not change the parent snapshot",
+            );
+            for (index, activated) in [active_endpoint_a, active_endpoint_b].iter().enumerate() {
+                let deadline =
+                    Deadline::after(NETWORK_PROOF_TIMEOUT).expect("routed endpoint deadline");
+                retry_exact_observation_before(
+                    deadline,
+                    || {
+                        collect_converged_snapshot_in_network_namespace(
+                            &endpoint_descriptors[index],
+                            &parent_descriptor,
+                            deadline,
+                        )
+                    },
+                    |routed| {
+                        verify_exact_endpoint_ipv4_route_snapshot_delta(
+                            activated,
+                            routed,
+                            &expected_routes[index],
+                        )
+                    },
+                )
+                .unwrap_or_else(|error| {
+                    panic!("live endpoint {index} exact route rejected: {error:?}")
+                });
+            }
 
             run_ip(&["link", "delete", "dev", "vpb01234567"]);
             assert_eq!(
@@ -6114,6 +6818,29 @@ mod tests {
         payload
     }
 
+    fn ipv4_endpoint_route_payload(
+        ifindex: u32,
+        destination: [u8; 4],
+        gateway: [u8; 4],
+    ) -> Vec<u8> {
+        let mut payload = vec![
+            AF_INET,
+            32,
+            0,
+            0,
+            u8::try_from(RT_TABLE_MAIN).expect("main table byte"),
+            RTPROT_STATIC,
+            RT_SCOPE_UNIVERSE,
+            RTN_UNICAST,
+        ];
+        payload.extend_from_slice(&0_u32.to_ne_bytes());
+        payload.extend(attribute(RTA_TABLE, &RT_TABLE_MAIN.to_ne_bytes()));
+        payload.extend(attribute(RTA_DST, &destination));
+        payload.extend(attribute(RTA_GATEWAY, &gateway));
+        payload.extend(attribute(RTA_OIF, &ifindex.to_ne_bytes()));
+        payload
+    }
+
     fn ipv4_connected_route_payload(ifindex: u32, address: [u8; 4]) -> Vec<u8> {
         let mut network = address;
         network[3] = 0;
@@ -6460,6 +7187,48 @@ mod tests {
                 assert!(!replaced, "fixture attribute must be unique");
                 replaced = true;
                 rebuilt.extend(attribute(kind, replacement));
+            } else {
+                rebuilt.extend(attribute(
+                    attribute_value.kind | attribute_value.flags,
+                    attribute_value.payload,
+                ));
+            }
+        }
+        assert!(replaced, "fixture attribute must exist");
+        rebuilt
+    }
+
+    fn without_record_attribute(payload: &[u8], header_length: usize, kind: u16) -> Vec<u8> {
+        rebuild_record_attribute(payload, header_length, kind, None)
+    }
+
+    fn replace_record_attribute_with_raw_kind(
+        payload: &[u8],
+        header_length: usize,
+        kind: u16,
+        raw_kind: u16,
+        replacement: &[u8],
+    ) -> Vec<u8> {
+        rebuild_record_attribute(payload, header_length, kind, Some((raw_kind, replacement)))
+    }
+
+    fn rebuild_record_attribute(
+        payload: &[u8],
+        header_length: usize,
+        kind: u16,
+        replacement: Option<(u16, &[u8])>,
+    ) -> Vec<u8> {
+        let mut rebuilt = payload[..header_length].to_vec();
+        let mut replaced = false;
+        for attribute_value in
+            parse_attributes(&payload[header_length..]).expect("valid fixture attributes")
+        {
+            if attribute_value.kind == kind {
+                assert!(!replaced, "fixture attribute must be unique");
+                replaced = true;
+                if let Some((raw_kind, replacement)) = replacement {
+                    rebuilt.extend(attribute(raw_kind, replacement));
+                }
             } else {
                 rebuilt.extend(attribute(
                     attribute_value.kind | attribute_value.flags,
