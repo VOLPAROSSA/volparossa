@@ -35,6 +35,8 @@ use thiserror::Error;
 use volparossa_linux_uapi::{namespace_type, owning_user_namespace};
 use volparossa_test_support::RunId;
 
+use super::link::FixedPairAbsenceProof;
+
 const VETH_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CURRENT_NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
 const NSFS_MAGIC: FsWord = 0x6e73_6673;
@@ -179,6 +181,11 @@ pub(crate) struct VethVerifyError(#[source] VethOperationError);
 #[error("fixed veth rollback required reconciliation; exact absence was restored")]
 pub(crate) struct VethRollbackError(#[source] VethOperationError);
 
+/// Failure to bind a deleted-topology proof to one retained pair owner.
+#[derive(Debug, Error)]
+#[error("fixed veth post-delete retirement proof did not match the retained owner")]
+pub(crate) struct VethRetirementError(#[source] VethOperationError);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VethSpecification {
     endpoint: FixedVethEndpoint,
@@ -232,6 +239,11 @@ impl VethTargetNamespaceIdentity {
     /// Namespace inode number.
     pub(crate) const fn inode(self) -> u64 {
         self.inode
+    }
+
+    #[cfg(test)]
+    pub(super) const fn from_test_parts(device: u64, inode: u64) -> Self {
+        Self { device, inode }
     }
 }
 
@@ -385,6 +397,49 @@ impl FixedVethPair {
         }
     }
 
+    /// Fallibly bind this owner to the exact full-pair absence proof without
+    /// consuming or disarming it. The aggregate validates both pair owners and
+    /// all four address owners before starting infallible retirement.
+    pub(super) fn prevalidate_pair_absence_retirement(
+        &self,
+        proof: &FixedPairAbsenceProof,
+    ) -> Result<(), VethRetirementError> {
+        let journal = self.journal();
+        journal.target.verify().map_err(VethRetirementError)?;
+        let observed = journal.expected().map_err(VethRetirementError)?;
+        if !proof.validates_veth_pair(
+            journal.specification.endpoint,
+            &journal.specification.parent_name,
+            observed.parent_ifindex,
+            observed.peer_ifindex,
+            observed.peer_netnsid,
+            journal.target.identity,
+        ) {
+            return Err(VethRetirementError(VethOperationError::Unsafe(
+                "pair-absence proof does not bind the retained fixed veth pair",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Infallibly disarm after the enclosing aggregate prevalidated all six
+    /// backing owners against the same exact absence proof.
+    pub(super) fn retire_after_validated_pair_absence(mut self, proof: &FixedPairAbsenceProof) {
+        let journal = self.journal();
+        let observed = journal.expected().unwrap_or_else(|_| std::process::abort());
+        if !proof.validates_veth_pair(
+            journal.specification.endpoint,
+            &journal.specification.parent_name,
+            observed.parent_ifindex,
+            observed.peer_ifindex,
+            observed.peer_netnsid,
+            journal.target.identity,
+        ) {
+            std::process::abort();
+        }
+        self.journal = None;
+    }
+
     fn journal(&self) -> &MutationJournal {
         self.journal
             .as_ref()
@@ -401,7 +456,10 @@ impl FixedVethPair {
 impl Drop for FixedVethPair {
     fn drop(&mut self) {
         if let Some(journal) = self.journal.as_ref() {
-            if reconcile_journal(journal).is_err() {
+            // An unexpectedly absent or post-UP pair must not be silently
+            // accepted as standalone cleanup. Only a bound
+            // `FixedPairAbsenceProof` may retire externally deleted authority.
+            if verify_journal(journal).is_err() || reconcile_journal(journal).is_err() {
                 std::process::abort();
             }
             self.journal = None;
