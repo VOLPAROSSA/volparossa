@@ -6,7 +6,12 @@
 //! `inet` forward policy from generation one to two, then delete its exact
 //! observed table handle from generation two to semantic-empty generation
 //! three. Every possibly-sent request is reconciled through a fresh bounded
-//! full-ruleset observation. This module never changes forwarding settings.
+//! full-ruleset observation. The active authority in this packetless slice
+//! recognizes only two counted accepts followed by one counted terminal drop,
+//! with all three byte and packet counters freshly observed at zero. Ruleset
+//! generation brackets stabilize object structure, not mutable counter values;
+//! later packet evidence therefore needs a separate quiescent counter protocol.
+//! This module never changes forwarding settings.
 
 use std::{
     io,
@@ -35,9 +40,12 @@ const MAX_TABLE_ATTRIBUTES: usize = 7;
 const MAX_CHAIN_ATTRIBUTES: usize = 12;
 const MAX_HOOK_ATTRIBUTES: usize = 4;
 const MAX_RULE_ATTRIBUTES: usize = 11;
-const MAX_RULE_EXPRESSIONS: usize = 15;
+const ACCEPT_RULE_EXPRESSIONS: usize = 16;
+const TERMINAL_RULE_EXPRESSIONS: usize = 2;
+const MAX_RULE_EXPRESSIONS: usize = ACCEPT_RULE_EXPRESSIONS;
 const MAX_EXPRESSION_ATTRIBUTES: usize = 2;
 const MAX_EXPRESSION_DATA_ATTRIBUTES: usize = 8;
+const MAX_COUNTER_ATTRIBUTES: usize = 4;
 const MAX_DATA_ATTRIBUTES: usize = 2;
 const MAX_VERDICT_ATTRIBUTES: usize = 3;
 const MAX_PROCESS_NAME_BYTES: usize = 16;
@@ -50,10 +58,10 @@ const MAX_OBSERVED_TABLES: usize = 2;
 const MAX_OBSERVED_CHAINS: usize = 2;
 const MAX_OBSERVED_RULES: usize = 3;
 const MAX_MUTATION_BATCH_BYTES: usize = 4 * 1024;
-const MAX_MUTATION_MESSAGES: usize = 6;
+const MAX_MUTATION_MESSAGES: usize = 7;
 const MAX_MUTATION_ACK_BYTES: usize = 4 * 1024;
-const MAX_MUTATION_ACK_DATAGRAMS: usize = 6;
-const MAX_MUTATION_ACK_FRAMES: usize = 6;
+const MAX_MUTATION_ACK_DATAGRAMS: usize = 5;
+const MAX_MUTATION_ACK_FRAMES: usize = 5;
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(2);
 const RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -198,6 +206,9 @@ const NFTA_PAYLOAD_CSUM_OFFSET: u16 = 7;
 const NFTA_PAYLOAD_CSUM_FLAGS: u16 = 8;
 const NFTA_IMMEDIATE_DREG: u16 = 1;
 const NFTA_IMMEDIATE_DATA: u16 = 2;
+const NFTA_COUNTER_BYTES: u16 = 1;
+const NFTA_COUNTER_PACKETS: u16 = 2;
+const NFTA_COUNTER_PAD: u16 = 3;
 const NFTA_DATA_VALUE: u16 = 1;
 const NFTA_DATA_VERDICT: u16 = 2;
 const NFTA_VERDICT_CODE: u16 = 1;
@@ -254,7 +265,8 @@ pub(crate) struct NftablesBaseline {
 ///
 /// The table name is derived from a canonical [`RunId`]. The only variable
 /// packet fields are the two distinct live parent-side veth ifindices; all
-/// addresses, protocol values, chain properties and verdicts remain fixed.
+/// addresses, protocol values, chain properties, verdicts and initial zero
+/// counters remain fixed.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct FixedForwardPolicyExpectation {
     table_name: Vec<u8>,
@@ -301,6 +313,12 @@ impl FixedForwardPolicyExpectation {
     }
 
     fn expected_rule_expressions(&self, index: usize) -> Vec<ObservedExpression> {
+        if index == 2 {
+            return vec![
+                ObservedExpression::Counter(ForwardPolicyCounter::ZERO),
+                ObservedExpression::ImmediateDrop,
+            ];
+        }
         let (input, output, source, destination, icmp_type) = match index {
             0 => (
                 self.parent_ifindices[0],
@@ -388,6 +406,7 @@ impl FixedForwardPolicyExpectation {
                 operation: NFT_CMP_EQ,
                 value: vec![icmp_type, ICMP_CODE_ZERO],
             },
+            ObservedExpression::Counter(ForwardPolicyCounter::ZERO),
             ObservedExpression::ImmediateAccept,
         ]
     }
@@ -557,7 +576,11 @@ pub(crate) fn install_exact_forward_policy(
     install_policy(initial, expectation, Deadline(deadline))
 }
 
-/// Freshly verify generation two, the full exact policy, and its retained handles.
+/// Freshly verify generation two, the full exact zero-counter policy, and its retained handles.
+///
+/// The generation bracket does not make counter values immutable. This
+/// packetless lifecycle accepts the authority only when the single bounded
+/// dump itself reports every counter at zero.
 pub(crate) fn verify_exact_forward_policy(
     active: &ActiveNftablesPolicy,
     deadline: Instant,
@@ -721,7 +744,7 @@ fn encode_install_transaction(
         &chain,
     )?;
 
-    for (sequence, rule_index) in [(4, 0), (5, 1)] {
+    for (sequence, rule_index) in [(4, 0), (5, 1), (6, 2)] {
         let mut rule = encode_request_nfgen(NFPROTO_INET, 0);
         encode_attribute(
             &mut rule,
@@ -749,10 +772,10 @@ fn encode_install_transaction(
     transaction.push(
         NFNL_MSG_BATCH_END,
         NLM_F_REQUEST,
-        6,
+        7,
         &encode_batch_boundary_payload(None)?,
     )?;
-    transaction.finish(6, 4)
+    transaction.finish(7, 5)
 }
 
 fn encode_delete_transaction(
@@ -788,7 +811,10 @@ fn encode_delete_transaction(
 }
 
 fn encode_policy_expressions(expressions: &[ObservedExpression]) -> Result<Vec<u8>, NftablesError> {
-    if expressions.len() != MAX_RULE_EXPRESSIONS {
+    if !matches!(
+        expressions.len(),
+        ACCEPT_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
+    ) {
         return Err(NftablesError::Malformed);
     }
     let mut encoded = Vec::new();
@@ -826,9 +852,24 @@ fn encode_policy_expressions(expressions: &[ObservedExpression]) -> Result<Vec<u
                 encode_attribute(&mut data, NFTA_PAYLOAD_LEN, &length.to_be_bytes())?;
                 (b"payload".as_slice(), data)
             }
-            ObservedExpression::ImmediateAccept => {
+            ObservedExpression::Counter(counter) => {
+                let mut data = Vec::new();
+                encode_attribute(&mut data, NFTA_COUNTER_BYTES, &counter.bytes.to_be_bytes())?;
+                encode_attribute(
+                    &mut data,
+                    NFTA_COUNTER_PACKETS,
+                    &counter.packets.to_be_bytes(),
+                )?;
+                (b"counter".as_slice(), data)
+            }
+            ObservedExpression::ImmediateAccept | ObservedExpression::ImmediateDrop => {
+                let code = if matches!(expression, ObservedExpression::ImmediateAccept) {
+                    NF_ACCEPT
+                } else {
+                    NF_DROP
+                };
                 let mut verdict = Vec::new();
-                encode_attribute(&mut verdict, NFTA_VERDICT_CODE, &NF_ACCEPT.to_be_bytes())?;
+                encode_attribute(&mut verdict, NFTA_VERDICT_CODE, &code.to_be_bytes())?;
                 let mut nested_verdict = Vec::new();
                 encode_attribute(
                     &mut nested_verdict,
@@ -1563,7 +1604,23 @@ enum ObservedExpression {
         offset: u32,
         length: u32,
     },
+    Counter(ForwardPolicyCounter),
     ImmediateAccept,
+    ImmediateDrop,
+}
+
+/// Fixed-width kernel counter values observed on one policy rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ForwardPolicyCounter {
+    bytes: u64,
+    packets: u64,
+}
+
+impl ForwardPolicyCounter {
+    const ZERO: Self = Self {
+        bytes: 0,
+        packets: 0,
+    };
 }
 
 #[derive(Default)]
@@ -1577,7 +1634,7 @@ struct RulesetSnapshot {
 struct PolicyHandles {
     table: u64,
     chain: u64,
-    rules: [u64; 2],
+    rules: [u64; 3],
 }
 
 impl RulesetSnapshot {
@@ -1652,7 +1709,7 @@ impl RulesetSnapshot {
             || chain.hook_number != NF_INET_FORWARD
             || chain.hook_priority != 0
             || chain.policy != NF_DROP
-            || chain.use_count != 2
+            || chain.use_count != 3
             || chain.chain_type != FILTER_CHAIN_TYPE
             || chain.flags != NFT_CHAIN_BASE
             || chain.counters.is_some()
@@ -1663,33 +1720,43 @@ impl RulesetSnapshot {
             return Err(NftablesError::UnexpectedPolicy);
         }
 
-        let [alpha, omega] = self.rules.as_slice() else {
+        let [alpha, omega, terminal] = self.rules.as_slice() else {
             return Err(NftablesError::UnexpectedPolicy);
         };
         if alpha.family != NFPROTO_INET
             || omega.family != NFPROTO_INET
+            || terminal.family != NFPROTO_INET
             || alpha.table != expectation.table_name
             || omega.table != expectation.table_name
+            || terminal.table != expectation.table_name
             || alpha.chain != FORWARD_CHAIN_NAME
             || omega.chain != FORWARD_CHAIN_NAME
+            || terminal.chain != FORWARD_CHAIN_NAME
             || alpha.handle == 0
             || omega.handle == 0
+            || terminal.handle == 0
             || alpha.handle == omega.handle
+            || alpha.handle == terminal.handle
+            || omega.handle == terminal.handle
             || alpha.position.is_some()
             || omega.position != Some(alpha.handle)
+            || terminal.position != Some(omega.handle)
             || alpha.userdata.is_some()
             || omega.userdata.is_some()
+            || terminal.userdata.is_some()
             || alpha.pad
             || omega.pad
+            || terminal.pad
             || alpha.expressions != expectation.expected_rule_expressions(0)
             || omega.expressions != expectation.expected_rule_expressions(1)
+            || terminal.expressions != expectation.expected_rule_expressions(2)
         {
             return Err(NftablesError::UnexpectedPolicy);
         }
         Ok(PolicyHandles {
             table: table.handle,
             chain: chain.handle,
-            rules: [alpha.handle, omega.handle],
+            rules: [alpha.handle, omega.handle, terminal.handle],
         })
     }
 }
@@ -2443,10 +2510,13 @@ fn parse_rule_payload(
 
 fn parse_expressions(payload: &[u8]) -> Result<Vec<ObservedExpression>, NftablesError> {
     let elements = parse_attributes(payload, MAX_RULE_EXPRESSIONS)?;
-    if elements.len() != MAX_RULE_EXPRESSIONS {
+    if !matches!(
+        elements.len(),
+        ACCEPT_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
+    ) {
         return Err(NftablesError::UnexpectedPolicy);
     }
-    let mut expressions = Vec::with_capacity(MAX_RULE_EXPRESSIONS);
+    let mut expressions = Vec::with_capacity(elements.len());
     for element in elements {
         if element.kind != NFTA_LIST_ELEM || element.flags != 0 {
             return Err(NftablesError::Malformed);
@@ -2479,9 +2549,42 @@ fn parse_expression(payload: &[u8]) -> Result<ObservedExpression, NftablesError>
         b"meta" => parse_meta_expression(data),
         b"cmp" => parse_compare_expression(data),
         b"payload" => parse_payload_expression(data),
+        b"counter" => parse_counter_expression(data),
         b"immediate" => parse_immediate_expression(data),
         _ => Err(NftablesError::UnexpectedPolicy),
     }
+}
+
+fn parse_counter_expression(payload: &[u8]) -> Result<ObservedExpression, NftablesError> {
+    let attributes = parse_attributes(payload, MAX_COUNTER_ATTRIBUTES)?;
+    let mut index = 0;
+    let bytes = parse_counter_value(&attributes, &mut index, NFTA_COUNTER_BYTES)?;
+    let packets = parse_counter_value(&attributes, &mut index, NFTA_COUNTER_PACKETS)?;
+    if index != attributes.len() {
+        return Err(NftablesError::Malformed);
+    }
+    Ok(ObservedExpression::Counter(ForwardPolicyCounter {
+        bytes,
+        packets,
+    }))
+}
+
+fn parse_counter_value(
+    attributes: &[Attribute<'_>],
+    index: &mut usize,
+    expected_kind: u16,
+) -> Result<u64, NftablesError> {
+    if attributes.get(*index).is_some_and(|attribute| {
+        attribute.kind == NFTA_COUNTER_PAD && attribute.flags == 0 && attribute.payload.is_empty()
+    }) {
+        *index = index.checked_add(1).ok_or(NftablesError::Limit)?;
+    }
+    let attribute = attributes.get(*index).ok_or(NftablesError::Malformed)?;
+    if attribute.kind != expected_kind || attribute.flags != 0 {
+        return Err(NftablesError::Malformed);
+    }
+    *index = index.checked_add(1).ok_or(NftablesError::Limit)?;
+    read_exact_be_u64(attribute.payload)
 }
 
 fn parse_meta_expression(payload: &[u8]) -> Result<ObservedExpression, NftablesError> {
@@ -2586,10 +2689,14 @@ fn parse_immediate_expression(payload: &[u8]) -> Result<ObservedExpression, Nfta
             _ => return Err(NftablesError::Malformed),
         }
     }
-    if destination != Some(NFT_REG_VERDICT) || verdict != Some(NF_ACCEPT) {
+    if destination != Some(NFT_REG_VERDICT) {
         return Err(NftablesError::UnexpectedPolicy);
     }
-    Ok(ObservedExpression::ImmediateAccept)
+    match verdict {
+        Some(NF_ACCEPT) => Ok(ObservedExpression::ImmediateAccept),
+        Some(NF_DROP) => Ok(ObservedExpression::ImmediateDrop),
+        _ => Err(NftablesError::UnexpectedPolicy),
+    }
 }
 
 fn parse_value_data(payload: &[u8]) -> Result<Vec<u8>, NftablesError> {
@@ -3635,10 +3742,8 @@ mod tests {
             assert_eq!(active.journal().generation, ACTIVE_POLICY_GENERATION);
             assert_ne!(active.journal().handles.table, 0);
             assert_ne!(active.journal().handles.chain, 0);
-            assert_ne!(
-                active.journal().handles.rules[0],
-                active.journal().handles.rules[1]
-            );
+            let [alpha, omega, terminal] = active.journal().handles.rules;
+            assert!(alpha != omega && alpha != terminal && omega != terminal);
             verify_exact_forward_policy(
                 &active,
                 mutation_deadline().expect("active verification deadline"),
@@ -3740,15 +3845,15 @@ mod tests {
         let frames = split_test_netlink_frames(&transaction.bytes).expect("transaction frames");
 
         assert!(transaction.bytes.len() <= MAX_MUTATION_BATCH_BYTES);
-        assert_eq!(frames.len(), 6);
-        assert_eq!(transaction.requests.len(), 6);
+        assert_eq!(frames.len(), 7);
+        assert_eq!(transaction.requests.len(), 7);
         assert_eq!(
             transaction
                 .requests
                 .iter()
                 .filter(|request| request.acknowledgement_required)
                 .count(),
-            4
+            5
         );
         for (index, frame) in frames.iter().enumerate() {
             assert_eq!(
@@ -3772,6 +3877,7 @@ mod tests {
                 NFT_MSG_NEWCHAIN,
                 NFT_MSG_NEWRULE,
                 NFT_MSG_NEWRULE,
+                NFT_MSG_NEWRULE,
                 NFNL_MSG_BATCH_END,
             ]
         );
@@ -3787,13 +3893,13 @@ mod tests {
             read_ne_u16(frames[2], 6).expect("chain flags"),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
         );
-        for rule in &frames[3..=4] {
+        for rule in &frames[3..=5] {
             assert_eq!(
                 read_ne_u16(rule, 6).expect("rule flags"),
                 NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND
             );
         }
-        assert_eq!(read_ne_u16(frames[5], 6).expect("end flags"), NLM_F_REQUEST);
+        assert_eq!(read_ne_u16(frames[6], 6).expect("end flags"), NLM_F_REQUEST);
 
         let (begin_header, begin_attributes) =
             split_nfgenmsg(&frames[0][NLMSG_HEADER_LEN..]).expect("begin nfgenmsg");
@@ -3810,7 +3916,7 @@ mod tests {
         );
 
         let (end_header, end_attributes) =
-            split_nfgenmsg(&frames[5][NLMSG_HEADER_LEN..]).expect("end nfgenmsg");
+            split_nfgenmsg(&frames[6][NLMSG_HEADER_LEN..]).expect("end nfgenmsg");
         assert_eq!(end_header.family, AF_UNSPEC);
         assert_eq!(end_header.version, NFNETLINK_V0);
         assert_eq!(end_header.resource_id, NFNL_SUBSYS_NFTABLES);
@@ -3830,7 +3936,7 @@ mod tests {
             handles: PolicyHandles {
                 table: table_handle,
                 chain: 2,
-                rules: [3, 4],
+                rules: [3, 4, 5],
             },
         };
         let transaction = encode_delete_transaction(&journal).expect("delete transaction");
@@ -3882,7 +3988,7 @@ mod tests {
             .enumerate()
             .filter_map(|(index, request)| request.acknowledgement_required.then_some(index))
             .collect::<Vec<_>>();
-        assert_eq!(required, [1, 2, 3, 4]);
+        assert_eq!(required, [1, 2, 3, 4, 5]);
 
         let mut state = MutationAckState::new(TEST_PORT, &transaction.requests);
         let mut budget = test_mutation_ack_budget();
@@ -4039,7 +4145,7 @@ mod tests {
         ));
 
         let mut missing = MutationAckState::new(TEST_PORT, &transaction.requests);
-        for index in [1, 2, 3] {
+        for index in [1, 2, 3, 4] {
             missing
                 .ingest(
                     SocketAddr::new(0, 0),
@@ -4051,7 +4157,7 @@ mod tests {
         assert!(matches!(missing.finish(), Err(NftablesError::Malformed)));
 
         let mut complete = MutationAckState::new(TEST_PORT, &transaction.requests);
-        for index in [1, 2, 3, 4] {
+        for index in [1, 2, 3, 4, 5] {
             complete
                 .ingest(
                     SocketAddr::new(0, 0),
@@ -4155,7 +4261,7 @@ mod tests {
             .expect("exact policy");
         assert_eq!(handles.table, 1);
         assert_eq!(handles.chain, 1);
-        assert_eq!(handles.rules, [2, 3]);
+        assert_eq!(handles.rules, [2, 3, 4]);
 
         let mut wrong_nfproto = test_policy_snapshot(&expectation).expect("policy snapshot");
         let ObservedExpression::Compare { value, .. } = &mut wrong_nfproto.rules[0].expressions[5]
@@ -4218,6 +4324,86 @@ mod tests {
     }
 
     #[test]
+    fn exact_initial_policy_requires_zero_ordered_counters_and_terminal_drop() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+
+        let mutations = [(0, 14, 64, 1), (2, 0, u64::MAX, u64::MAX)];
+        for (rule, expression, bytes, packets) in mutations {
+            let mut nonzero = test_policy_snapshot(&expectation).expect("policy snapshot");
+            nonzero.rules[rule].expressions[expression] =
+                ObservedExpression::Counter(ForwardPolicyCounter { bytes, packets });
+            assert!(matches!(
+                nonzero.exact_policy_handles(&expectation),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+        }
+
+        let mut verdict_before_counter =
+            test_policy_snapshot(&expectation).expect("policy snapshot");
+        verdict_before_counter.rules[1].expressions.swap(14, 15);
+        assert!(matches!(
+            verdict_before_counter.exact_policy_handles(&expectation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        let mut broadened_terminal = test_policy_snapshot(&expectation).expect("policy snapshot");
+        broadened_terminal.rules[2].expressions[1] = ObservedExpression::ImmediateAccept;
+        assert!(matches!(
+            broadened_terminal.exact_policy_handles(&expectation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        let mut missing_terminal = test_policy_snapshot(&expectation).expect("policy snapshot");
+        missing_terminal.rules.pop();
+        assert!(matches!(
+            missing_terminal.exact_policy_handles(&expectation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        let mut wrong_terminal_position =
+            test_policy_snapshot(&expectation).expect("policy snapshot");
+        wrong_terminal_position.rules[2].position = Some(2);
+        assert!(matches!(
+            wrong_terminal_position.exact_policy_handles(&expectation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        let mut duplicate_handle = test_policy_snapshot(&expectation).expect("policy snapshot");
+        duplicate_handle.rules[2].handle = duplicate_handle.rules[1].handle;
+        assert!(matches!(
+            duplicate_handle.exact_policy_handles(&expectation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        for use_count in [2, 4] {
+            let mut wrong_use_count = test_policy_snapshot(&expectation).expect("policy snapshot");
+            wrong_use_count.chains[0].use_count = use_count;
+            assert!(matches!(
+                wrong_use_count.exact_policy_handles(&expectation),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+        }
+
+        let mut chain_counter = test_policy_snapshot(&expectation).expect("policy snapshot");
+        chain_counter.chains[0].counters = Some(Vec::new());
+        assert!(matches!(
+            chain_counter.exact_policy_handles(&expectation),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        for rule in 0..3 {
+            let mut zero_handle = test_policy_snapshot(&expectation).expect("policy snapshot");
+            zero_handle.rules[rule].handle = 0;
+            assert!(matches!(
+                zero_handle.exact_policy_handles(&expectation),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+        }
+    }
+
+    #[test]
     fn policy_expression_parser_is_byte_exact_and_bounded() {
         let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
         let expectation =
@@ -4235,6 +4421,18 @@ mod tests {
             parse_expressions(&outbound),
             Err(NftablesError::Malformed)
         ));
+
+        let terminal = expectation.expected_rule_expressions(2);
+        let terminal_dump =
+            encode_test_dump_expressions(&terminal).expect("terminal dump expressions");
+        assert_eq!(
+            parse_expressions(&terminal_dump).expect("parsed terminal dump"),
+            terminal
+        );
+        assert_eq!(
+            encode_policy_expressions(&terminal).expect("production terminal expressions"),
+            encode_test_expressions(&terminal).expect("independent terminal fixture")
+        );
 
         let mut shortened = dump.clone();
         let mut offset = 0;
@@ -4256,6 +4454,89 @@ mod tests {
             parse_expressions(&nonzero_padding),
             Err(NftablesError::Malformed)
         ));
+    }
+
+    #[test]
+    fn counter_expression_parser_is_typed_ordered_and_bounded() {
+        let mut canonical = attribute(NFTA_COUNTER_BYTES, &u64::MAX.to_be_bytes());
+        canonical.extend(attribute(NFTA_COUNTER_PACKETS, &7_u64.to_be_bytes()));
+        assert_eq!(
+            parse_counter_expression(&canonical).expect("typed counter"),
+            ObservedExpression::Counter(ForwardPolicyCounter {
+                bytes: u64::MAX,
+                packets: 7,
+            })
+        );
+
+        let mut padded = attribute(NFTA_COUNTER_PAD, &[]);
+        padded.extend(attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes()));
+        padded.extend(attribute(NFTA_COUNTER_PAD, &[]));
+        padded.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+        assert_eq!(
+            parse_counter_expression(&padded).expect("aligned zero counter"),
+            ObservedExpression::Counter(ForwardPolicyCounter::ZERO)
+        );
+
+        let mut second_value_padded = attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes());
+        second_value_padded.extend(attribute(NFTA_COUNTER_PAD, &[]));
+        second_value_padded.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+        assert_eq!(
+            parse_counter_expression(&second_value_padded)
+                .expect("second aligned zero counter value"),
+            ObservedExpression::Counter(ForwardPolicyCounter::ZERO)
+        );
+
+        let malformed = [
+            attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes()),
+            {
+                let mut duplicate = attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes());
+                duplicate.extend(attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes()));
+                duplicate.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+                duplicate
+            },
+            {
+                let mut reversed = attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes());
+                reversed.extend(attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes()));
+                reversed
+            },
+            {
+                let mut short = attribute(NFTA_COUNTER_BYTES, &0_u32.to_be_bytes());
+                short.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+                short
+            },
+            {
+                let mut nonempty_pad = attribute(NFTA_COUNTER_PAD, &[0]);
+                nonempty_pad.extend(attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes()));
+                nonempty_pad.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+                nonempty_pad
+            },
+            {
+                let mut trailing_pad = attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes());
+                trailing_pad.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+                trailing_pad.extend(attribute(NFTA_COUNTER_PAD, &[]));
+                trailing_pad
+            },
+            {
+                let mut flagged = attribute(
+                    NFTA_COUNTER_BYTES | NLA_F_NET_BYTEORDER,
+                    &0_u64.to_be_bytes(),
+                );
+                flagged.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+                flagged
+            },
+            {
+                let mut unknown = attribute(NFTA_COUNTER_BYTES, &0_u64.to_be_bytes());
+                unknown.extend(attribute(NFTA_COUNTER_PACKETS, &0_u64.to_be_bytes()));
+                unknown.extend(attribute(4, &[]));
+                unknown
+            },
+        ];
+        for payload in malformed {
+            assert!(matches!(
+                parse_counter_expression(&payload),
+                Err(NftablesError::Malformed)
+            ));
+        }
     }
 
     #[test]
@@ -4739,7 +5020,7 @@ mod tests {
             handles: PolicyHandles {
                 table: 1,
                 chain: 2,
-                rules: [3, 4],
+                rules: [3, 4, 5],
             },
         }
     }
@@ -4759,10 +5040,14 @@ mod tests {
             &test_rule_payload(expectation, 1, 3, Some(2))?,
             ACTIVE_POLICY_GENERATION,
         )?;
+        let terminal = parse_rule_payload(
+            &test_rule_payload(expectation, 2, 4, Some(3))?,
+            ACTIVE_POLICY_GENERATION,
+        )?;
         Ok(RulesetSnapshot {
             tables: vec![table],
             chains: vec![chain],
-            rules: vec![alpha, omega],
+            rules: vec![alpha, omega, terminal],
         })
     }
 
@@ -4802,7 +5087,7 @@ mod tests {
             &nul_terminated(FILTER_CHAIN_TYPE)?,
         ));
         payload.extend(attribute(NFTA_CHAIN_FLAGS, &NFT_CHAIN_BASE.to_be_bytes()));
-        payload.extend(attribute(NFTA_CHAIN_USE, &2_u32.to_be_bytes()));
+        payload.extend(attribute(NFTA_CHAIN_USE, &3_u32.to_be_bytes()));
         Ok(payload)
     }
 
@@ -4851,7 +5136,10 @@ mod tests {
         if !matches!(nested, 0 | NLA_F_NESTED) {
             return Err(NftablesError::Malformed);
         }
-        if expressions.len() != MAX_RULE_EXPRESSIONS {
+        if !matches!(
+            expressions.len(),
+            ACCEPT_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
+        ) {
             return Err(NftablesError::Malformed);
         }
         let mut encoded = Vec::new();
@@ -4885,8 +5173,21 @@ mod tests {
                     data.extend(attribute(NFTA_PAYLOAD_LEN, &length.to_be_bytes()));
                     (b"payload".as_slice(), data)
                 }
-                ObservedExpression::ImmediateAccept => {
-                    let verdict = attribute(NFTA_VERDICT_CODE, &NF_ACCEPT.to_be_bytes());
+                ObservedExpression::Counter(counter) => {
+                    let mut data = attribute(NFTA_COUNTER_BYTES, &counter.bytes.to_be_bytes());
+                    data.extend(attribute(
+                        NFTA_COUNTER_PACKETS,
+                        &counter.packets.to_be_bytes(),
+                    ));
+                    (b"counter".as_slice(), data)
+                }
+                ObservedExpression::ImmediateAccept | ObservedExpression::ImmediateDrop => {
+                    let code = if matches!(expression, ObservedExpression::ImmediateAccept) {
+                        NF_ACCEPT
+                    } else {
+                        NF_DROP
+                    };
+                    let verdict = attribute(NFTA_VERDICT_CODE, &code.to_be_bytes());
                     let verdict = attribute(NFTA_DATA_VERDICT | nested, &verdict);
                     let mut data = attribute(NFTA_IMMEDIATE_DREG, &NFT_REG_VERDICT.to_be_bytes());
                     data.extend(attribute(NFTA_IMMEDIATE_DATA | nested, &verdict));

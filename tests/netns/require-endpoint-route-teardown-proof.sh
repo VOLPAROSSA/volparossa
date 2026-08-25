@@ -1,5 +1,5 @@
 #!/bin/sh
-# Require the fixed forward-policy teardown proof on an unprivileged Debian 13 host.
+# Require the fixed no-packet counted-forward-policy proof on an unprivileged Debian 13 host.
 set -eu
 
 export LC_ALL=C
@@ -12,7 +12,7 @@ usage() {
 }
 
 fail() {
-    printf '%s\n' "IPv4 forwarding runtime proof gate failed: $1" >&2
+    printf '%s\n' "counted forward-policy proof gate failed: $1" >&2
     exit 1
 }
 
@@ -22,7 +22,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-runner_source=$repository_root/target/ipv4-forwarding-runtime-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
+runner_source=$repository_root/target/counted-forward-policy-proof/x86_64-unknown-linux-gnu/debug/volparossa-netns-runner
 if [ ! -f "$runner_source" ] || [ ! -x "$runner_source" ] || [ -L "$runner_source" ]; then
     fail 'fixed workspace runner must be one executable regular file, not a symlink'
 fi
@@ -98,7 +98,7 @@ do
     fi
 done
 
-proof_tmp=$(mktemp -d /tmp/volparossa-ipv4-forwarding-runtime-proof.XXXXXX)
+proof_tmp=$(mktemp -d /tmp/volparossa-counted-forward-policy-proof.XXXXXX)
 cleanup() {
     rm -rf -- "$proof_tmp"
 }
@@ -303,10 +303,10 @@ if [ -s "$proof_tmp/stdout" ]; then
     fail 'runner wrote unexpected standard output'
 fi
 printf '%s\n' \
-    'BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized the descriptor-relative private run, two live run-bound nsfs endpoint pins, two fixed veth pairs, four fixed /30 IPv4 addresses, an all-IPv6-addrgen-NONE barrier, and one canonically topology-bound parent FORWARD policy. Before link activation, PID 1 atomically installed and freshly proved one run-bound inet vpl_<run_id> table at generation 2, one priority-0 filter base chain at the forward hook with policy drop, and exactly two accept rules: the A-to-B IPv4 ICMP echo-request tuple and its exact B-to-A echo reply. With that policy active and all four veth ends still down, PID 1 established the canonical enabled IPv4-forwarding value through one bounded two-byte write only when the retained original was disabled; an already-enabled original was freshly re-read without a write. It retained and re-proved the exact policy and enabled record through four-end activation, the two exact static endpoint /32 routes, and direct veth deletion B then A. While generation 2 remained active and every route, address, and pair owner remained armed, PID 1 restored the exact original forwarding record and proved the parent and both endpoints byte-exactly equal to their retained baselines. It then deleted only the freshly observed table handle, proved a semantically empty generation 3, repeated the final parent/endpoint proof, and only then retired those lower owners. PID 1 unmounted nsfs B then A, restored the hidden slots, reversed every private-run creation, and emitted one rollback-complete checkpoint. The outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap; its IPv4-forwarding record remained byte-identical. Exact record restoration does not claim restoration of every related namespace-local IPv4 devconf value; complete cleanup of that state follows when the disposable network namespace is destroyed after its last reference closes, which this slice does not separately observe. This proves bounded exact policy, topology, forwarding-record, and teardown configuration only; it makes no packet-absence, packet-capture, probe, datapath, ownership-manifest, network-topology-readiness, TOPOLOGY_READY, A14, A15, or acceptance-evidence claim.' \
+    'BLOCKED: one pinned BOOTSTRAP_READY and canonical GO authorized the descriptor-relative private run, two live run-bound nsfs endpoint pins, two fixed veth pairs, four fixed /30 IPv4 addresses, an all-IPv6-addrgen-NONE barrier, and one canonically topology-bound parent FORWARD policy. Before link activation, PID 1 atomically installed and freshly proved one run-bound inet vpl_<run_id> table at generation 2, one priority-0 filter base chain at the forward hook with policy drop, and exactly three ordered rules: the A-to-B IPv4 ICMP echo-request tuple with one inline counter immediately before accept, its exact B-to-A echo reply with one inline counter immediately before accept, followed by one unconditional inline counter immediately before drop. Every fresh complete policy observation required all three typed counters to be exactly packets=0 and bytes=0. With that policy active and all four veth ends still down, PID 1 established the canonical enabled IPv4-forwarding value through one bounded two-byte write only when the retained original was disabled; an already-enabled original was freshly re-read without a write. It retained and re-proved the exact policy and enabled record through four-end activation, the two exact static endpoint /32 routes, and direct veth deletion B then A. While generation 2 remained active and every route, address, and pair owner remained armed, PID 1 restored the exact original forwarding record and proved the parent and both endpoints byte-exactly equal to their retained baselines. It then deleted only the freshly observed table handle, proved a semantically empty generation 3, repeated the final parent/endpoint proof, and only then retired those lower owners. PID 1 unmounted nsfs B then A, restored the hidden slots, reversed every private-run creation, and emitted one rollback-complete checkpoint. The outer independently re-proved empty private mounts before fixed pidfd-to-PID1-signalfd TERM, post-GO cleanup-required EOF, and exact reap; its IPv4-forwarding record remained byte-identical. Exact record restoration does not claim restoration of every related namespace-local IPv4 devconf value; complete cleanup of that state follows when the disposable network namespace is destroyed after its last reference closes, which this slice does not separately observe. This proves bounded exact policy, topology, forwarding-record, and teardown configuration only; it makes no packet-absence, counter-stability, packet-capture, probe, datapath, ownership-manifest, network-topology-readiness, TOPOLOGY_READY, A14, A15, or acceptance-evidence claim.' \
     >"$proof_tmp/expected-stderr"
 if ! cmp -s "$proof_tmp/expected-stderr" "$proof_tmp/stderr"; then
-        fail 'runner did not report the forward policy teardown outcome'
+        fail 'runner did not report the counted forward-policy teardown outcome'
 fi
 for record in \
     namespaces \
@@ -335,14 +335,14 @@ done
 # This unprivileged gate deliberately does not escalate merely to inspect the
 # host firewall.  Host nftables/legacy-firewall state and VPN-private peer/key
 # state are not authoritatively readable here.  The visible link/configuration
-# fingerprint is useful forward-policy teardown evidence, but it is not A14 or A15 acceptance.
+# fingerprint is useful counted-policy teardown evidence, but it is not A14 or A15 acceptance.
 
 case $proof_scope in
     vm)
-        printf '%s\n' 'Debian 13 VM IPv4 forwarding runtime configuration-fingerprint gate passed (not A14/A15)'
+        printf '%s\n' 'Debian 13 VM counted forward-policy configuration-fingerprint gate passed (no packet claim; not A14/A15)'
         ;;
     additional-bare-metal-local)
-        printf '%s\n' 'additional bare-metal local IPv4 forwarding runtime configuration-fingerprint gate passed (not A14/A15)'
+        printf '%s\n' 'additional bare-metal local counted forward-policy configuration-fingerprint gate passed (no packet claim; not A14/A15)'
         ;;
-    *) fail 'forward policy teardown proof scope was not classified' ;;
+    *) fail 'counted forward-policy proof scope was not classified' ;;
 esac

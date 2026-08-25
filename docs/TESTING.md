@@ -181,7 +181,7 @@ the parent-death chain established before network-topology mutation. The outer i
 compares the three namespace identities with
 its original host identities. Only then may it send the affine `GO` authorization. The current
 early slice reaches that barrier and permits only one bounded private-`/run` root-and-slot,
-two-transient-nsfs-pin, two-veth, four-address, exact parent-FORWARD-policy, link-activation, and
+two-transient-nsfs-pin, two-veth, four-address, exact counted parent-FORWARD-policy, link-activation, and
 endpoint-route transaction with deletion-only link teardown and exact policy retirement; it does
 not claim that the remaining configured topology lifecycle is implemented.
 `TOPOLOGY_READY` attests to the run ID, fixed topology-specification digest, exact two run-bound
@@ -396,17 +396,23 @@ while retained mount, runtime, and signal proofs bracket both barriers.
 
 The production raw-`NFNETLINK` writer and strict observer implement the exact lifecycle forward
 policy: one run-derived `inet vpl_<run_id>` table, one `filter` base chain named
-`forward` at the `inet` forward hook with priority 0 and policy drop, one exact IPv4 ICMP echo
-request tuple from endpoint A (`10.241.1.2`) to endpoint B (`10.241.2.2`), and only its exact echo
-reply tuple in the reverse direction. Its only mutations are the bounded generation-pinned atomic
+`forward` at the `inet` forward hook with priority 0 and policy drop, and exactly three ordered
+rules. The first matches only the IPv4 ICMP echo-request tuple from endpoint A (`10.241.1.2`) to
+endpoint B (`10.241.2.2`) and places one inline counter immediately before `accept`; the second
+matches only its exact reverse echo reply and likewise places one inline counter immediately before
+`accept`; the third is unconditional and places one inline counter immediately before `drop`.
+Every fresh complete active-policy observation requires each of the three typed counters to be
+exactly `packets=0` and `bytes=0`. Its only mutations are the bounded generation-pinned atomic
 install transaction and the later handle-only table deletion; strict capped ACK binding and fresh
 full-ruleset reconciliation cover every possibly sent request. Disposable namespace tests exercise
 the production writer and prove the complete observed lineage from empty generation 1, through that
 exact policy at generation 2, back to a semantically empty ruleset at generation 3. They record
 canonical `0\n` or `1\n` before mutation and prove the value is byte-identical afterward. Extra or
-altered tables, chains, rules, expressions, hooks, policies, tuples, verdicts, ACKs, handles, or
-generations fail closed. This is real configuration and cleanup proof, but it is not forwarding,
-packet-behaviour, probe, datapath, or acceptance evidence.
+altered tables, chains, rules, expressions, counter values, hooks, policies, tuples, verdicts, ACKs,
+handles, or generations fail closed. Counter updates do not advance the nftables generation ID, so
+these isolated exact-zero observations are not counter-stability evidence and make no packet
+inference between observations. This is real configuration and cleanup proof, but it is not
+forwarding, packet-behaviour, probe, datapath, or acceptance evidence.
 
 The readiness observation does not claim that forwarding is disabled and makes no pre-`GO`
 forwarding-setting request. A separate fixed proc writer can target only the descriptor-pinned
@@ -456,9 +462,10 @@ carrier/qdisc/address/route requirements through bounded convergence, directly d
 and requires byte-exact parent and endpoint restoration.
 The exact endpoint-route cases prove canonical request encoding, strict route decoding,
 both-pair/namespace lineage, fail-closed sibling classification, and deletion-bound ownership.
-The live production-policy round trip installs the exact generation-2 ruleset in a disposable
-namespace, deletes only its observed table handle, proves semantic-empty generation 3, and verifies
-the inherited canonical forwarding value unchanged. It deliberately sends no packet.
+The live production-policy round trip installs the exact three-rule, zero-counter generation-2
+ruleset in a disposable namespace, deletes only its observed table handle, proves semantic-empty
+generation 3, and verifies the inherited canonical forwarding value unchanged. It deliberately
+sends no packet and makes no counter-stability claim.
 Separate fixed-writer tests use a distinct disposable network namespace to establish `0\n`, perform
 a real `0\n` to `1\n` to `0\n` round trip, and restore that namespace's initial value. Synthetic
 descriptor-backed tests prove that an inherited `1\n` takes the no-write enable and restore path.
@@ -470,7 +477,7 @@ UID/GID-map write as an environmental skip; every other spawn, child, parser, or
 remains fatal. Such a skip is not readiness evidence and cannot replace the dedicated gate.
 
 ```sh
-just test-netns-ipv4-forwarding-runtime-proof
+just test-netns-counted-forward-policy-proof
 ```
 
 That opt-in gate requires an unprivileged Debian 13 amd64 host with unprivileged user namespaces
@@ -491,7 +498,8 @@ A14, A15, or acceptance evidence. A container on an Ubuntu runner does not suppl
 Debian-host kernel evidence, and a privileged container would test a different privilege boundary.
 The gate executes a private, owner-only copy of the fixed-target build artifact.
 
-The earlier `just test-netns-forward-policy-teardown-proof`,
+The earlier `just test-netns-ipv4-forwarding-runtime-proof`,
+`just test-netns-forward-policy-teardown-proof`,
 `just test-netns-endpoint-route-teardown-proof`,
 `just test-netns-link-activation-teardown-proof`,
 `just test-netns-ipv4-address-rollback-proof`,
@@ -520,7 +528,8 @@ affine `MutationAuthorization`, the descriptor-relative root/slot transaction, t
 nsfs pins, and two exactly proven down-veth pairs, each created through one atomic `RTM_NEWLINK`
 request. It also proves the four fixed `/30` addresses and exactly four kernel-created local-table
 `/32` routes while every veth end remains down, the all-addrgen-NONE barrier, the atomic exact
-generation-2 parent-FORWARD policy installed before activation, exact carrier-up activation and
+generation-2 counted parent-FORWARD policy installed before activation, exact carrier-up activation
+and
 kernel-owned qdisc/route side effects, both exact static endpoint routes and their strict parent/A/B
 observation, direct veth B/A deletion while the policy remains exact, parent/endpoint restoration
 under generation 2 after exact restoration of the retained parent `ip_forward` record, handle-only
@@ -529,8 +538,10 @@ parent/endpoint reproof before route/address/pair owner retirement, and the nsfs
 unmount, internal `MUTATION_ROLLBACK_COMPLETE` checkpoint, independent empty-`/run` verification,
 and fixed pidfd-to-PID1-signalfd TERM observation described above. It conditionally writes only the
 disposable parent namespace's fixed forwarding record, restores that exact original record, leaves
-the outer host setting byte-identical, and creates no manifest. It produces no packet-absence,
-probe, datapath, general crash-cleanup, A14, A15, or acceptance evidence. At supervised IPC boundaries, managed
+the outer host setting byte-identical, and creates no manifest. Every fresh active-policy observation
+requires all three counters at exact zero, but this produces no packet-absence, counter-stability,
+probe, datapath, general crash-cleanup, A14, A15, or acceptance evidence. At supervised IPC
+boundaries, managed
 outer HUP/INT/TERM events take
 priority over pending protocol records and trigger bounded exact-launcher containment. The live
 gate does not yet prove external-signal handling throughout every reap/report phase, a forced
@@ -539,7 +550,7 @@ prove that the runner invokes no namespace or networking utility. It still has n
 root-filesystem or supplementary-group isolation, `TOPOLOGY_READY`, `STOP`, `FINISHED`, configured
 dataplane-topology mutation, crash-cleanup evidence, acceptance report, or A01-A15 result.
 `BOOTSTRAP_READY` remains readiness evidence; this `GO` authorizes only the bounded private-root,
-two-pin, two-veth, four-address, exact forward-policy, conditional forwarding enable/restore,
+two-pin, two-veth, four-address, exact counted forward-policy, conditional forwarding enable/restore,
 link-activation, endpoint-route, and policy teardown transaction, and the
 rollback checkpoint is not A14 cleanup or acceptance evidence.
 The dedicated-host proof also does not claim hostile same-UID sender provenance from the
@@ -605,7 +616,8 @@ Those publication tests deliberately use synthetic device/inode records and one 
 they do not prove a live namespace, hostile same-UID concurrency safety, safe production namespace
 teardown, topology/probe readiness, cleanup, A14, or A15. Separately, the runtime transaction
 proves its own two transient live nsfs pins, two fixed veth pairs, four fixed IPv4 addresses,
-their exact active qdisc/route side effects, one exact generation-2 parent-FORWARD policy,
+their exact active qdisc/route side effects, one exact zero-counter generation-2 parent-FORWARD
+policy,
 conditional enable/restore of the fixed parent `ip_forward` record, and
 deletion-only link teardown plus handle-only policy retirement with pre-retirement pristine and
 semantic-empty generation-3 proofs inside the fixed one-PID-1-task, trusted-launcher model, but
@@ -618,8 +630,9 @@ future ownership-manifest integration.
 
 The V1 lifecycle specification digest also pins the two namespace and underlay-interface name
 formulas, two isolated `/30` networks, two exact host routes, absence of default routes and host
-links, namespace-local forwarding, an nftables forward policy of drop, and only the exact IPv4 ICMP
-request/reply tuples needed by the one-shot probe. Changing that topology requires an explicit
+links, namespace-local forwarding, an nftables forward policy of drop, the exact counted IPv4 ICMP
+request/reply tuples needed by the one-shot probe, and the unconditional counted terminal drop.
+Changing that topology requires an explicit
 contract/digest change rather than an implicit worker variation.
 
 ## Native and performance gates
