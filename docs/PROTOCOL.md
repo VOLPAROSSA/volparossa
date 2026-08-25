@@ -452,8 +452,13 @@ adoption then uses the audited Linux-UAPI
 `FD_CLOEXEC`, and closes the original when the duplication call returns. The parent returns the
 adopted owner only after the exact release record arrives within the same absolute deadline. Any
 adoption or release-barrier failure closes every local owner. A consuming parent validator also
-re-queries the closed socket shape; the fixed `SIOCGSKNS` UAPI safely returns a typed namespace FD,
-but comparison against the retained worker namespace pin is not connected yet. Closed worker-side
+re-queries the closed socket shape. The disconnected coordinator additionally duplicates the
+already attested worker namespace pin affinely before recording this request's tombstone or
+in-flight transition, retains it across concurrent retirement without probing the worker process
+under the registry lock, and before registry COMMIT compares the typed namespace FD returned by
+fixed `SIOCGSKNS` against that pin by exact nsfs device/inode identity. Expired cache and tombstone
+housekeeping may precede pinning but carries no socket or namespace authority. Post-PLAN mismatch,
+validation failure or expiry closes the descriptor and quarantines the generation. Closed worker-side
 factories create and revalidate connected MPTCP, listening MPTCP and unconnected UDP sockets,
 including genuine `MPTCP_INFO` negotiation evidence for a connected stream. These components are
 not wired into a production worker process, so their socketpair/fake-kernel tests do not prove a

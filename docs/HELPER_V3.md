@@ -630,9 +630,17 @@ peer tuples, `O_NONBLOCK`, `FD_CLOEXEC`, IPv6-only family closure, `SO_ACCEPTCON
 genuine negotiated `MPTCP_INFO` where applicable. Rejection drops the only supplied owner. The
 audited Linux-UAPI also
 provides fixed `SIOCGSKNS` namespace-FD acquisition with immediate RAII ownership and readback of
-`FD_CLOEXEC`, read-only mode, and `CLONE_NEWNET`. A production adapter must still compare that
-kernel-returned namespace identity with the worker's retained pinned namespace before publishing a
-socket; the current disconnected validator does not yet make that comparison.
+`FD_CLOEXEC`, read-only mode, and `CLONE_NEWNET`. For every planned Acquire call the disconnected
+coordinator now takes an affine CLOEXEC duplicate of the already attested worker namespace pin
+before it records this request's tombstone or in-flight transition. Expired cache and tombstone
+housekeeping may run earlier but carries no socket or namespace authority. The duplicate keeps the
+expected namespace alive independently of concurrent worker retirement and performs no process
+probe under the registry lock. After the credentialed source-release barrier and an initial
+worker-liveness check outside that lock, but before the final liveness proof and registry COMMIT,
+the consuming parent validator obtains the socket's namespace with `SIOCGSKNS` and requires exact
+non-zero nsfs device/inode equality with that retained duplicate in addition to the complete
+socket-shape proof. Every post-PLAN error, mismatch or late result closes the socket and quarantines
+the generation; no descriptor can be published first and checked afterwards.
 
 Socketpair and fake-kernel tests cover the three metadata kinds, response/digest binding, retry-cache
 cleanup on context destruction, missing/wrong binding, FD-on-error, worker EOF, unexpected
@@ -640,10 +648,14 @@ ancillary data and close-on-reject. Credentialed-channel tests separately cover 
 descriptor counts, wrong-binding closure, shared-deadline receipt, successful consuming raw-owner
 adoption, injected adoption-failure closure, consumed worker-source ownership, exact/missing/late
 release records, and closure before ambiguous return. Parent socket tests reject wrong tuple,
-family, type, protocol, flags, listener state and forbidden peer shape. The audited UAPI/adoption
+family, type, protocol, flags, listener state, forbidden peer shape and namespace identity. Registry
+tests also prove that an Acquire plan obtains its duplicate before this request's authority mutation,
+while pin-owner tests prove the duplicate remains usable after the original namespace owner is
+dropped. The audited UAPI/adoption
 regressions prove invalid source rejection, `F_DUPFD_CLOEXEC` with minimum 3, independent ownership,
 `FD_CLOEXEC` readback, original closure and closure of the final owner. A disposable user/network
-namespace test proves the fixed `SIOCGSKNS` wrapper without changing host networking. Other socket
+namespace test proves the fixed `SIOCGSKNS` wrapper and exact same/different-namespace comparison
+without changing host networking. Other socket
 tests perform read-only kernel revalidation; no route, link, firewall or sysctl was changed. The
 production backend still advertises the operation as unsupported and returns
 `Unavailable/TRANSPORT_SOCKET_UNAVAILABLE` before context lookup or any socket/network work. The

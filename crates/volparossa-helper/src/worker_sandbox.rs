@@ -35,7 +35,9 @@ use rustix::{
     },
 };
 use thiserror::Error;
-use volparossa_linux_uapi::install_worker_confinement_filter;
+use volparossa_linux_uapi::{
+    duplicate_descriptor_cloexec, install_worker_confinement_filter, namespace_type,
+};
 
 const SANDBOX_PROOF_DOMAIN: &[u8; 32] = b"volparossa/worker-sandbox/v5\0\0\0\0";
 const SANDBOX_PROOF_VERSION: u32 = 5;
@@ -138,6 +140,40 @@ impl NetworkNamespaceIdentity {
 
     fn is_valid(self) -> bool {
         self.device != 0 && self.inode != 0
+    }
+}
+
+/// Affine parent-side ownership of one independently pinned worker network namespace.
+///
+/// The descriptor, rather than only its numeric identity, is retained so a concurrent worker reap
+/// cannot destroy the expected namespace and permit an nsfs inode-reuse race while an adopted
+/// transport socket is being validated.
+#[derive(Debug)]
+#[must_use = "dropping the worker network-namespace pin releases its kernel reference"]
+pub(crate) struct PinnedWorkerNetworkNamespace {
+    descriptor: OwnedFd,
+    identity: NetworkNamespaceIdentity,
+}
+
+impl PinnedWorkerNetworkNamespace {
+    /// Compares another typed network-namespace descriptor with this still-live exact pin.
+    ///
+    /// Both descriptors are re-read on every comparison. The cached identity must still match this
+    /// owner before the observed descriptor can be accepted.
+    pub(crate) fn matches_descriptor<Fd: AsFd>(
+        &self,
+        observed: &Fd,
+    ) -> Result<bool, WorkerSandboxError> {
+        let retained = typed_network_namespace_identity(&self.descriptor)?;
+        if retained != self.identity {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        Ok(typed_network_namespace_identity(observed)? == self.identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn identity_for_test(&self) -> NetworkNamespaceIdentity {
+        self.identity
     }
 }
 
@@ -730,6 +766,15 @@ fn namespace_identity<Fd: AsFd>(
     Ok(identity)
 }
 
+fn typed_network_namespace_identity<Fd: AsFd>(
+    descriptor: &Fd,
+) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
+    if namespace_type(descriptor)? != libc::CLONE_NEWNET {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    namespace_identity(descriptor)
+}
+
 pub(super) fn current_network_namespace_identity()
 -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
     let descriptor = open(
@@ -1052,17 +1097,48 @@ impl WorkerKernelPins {
         self.network_namespace.is_some()
     }
 
+    /// Duplicates the retained worker network namespace into an independent affine call pin.
+    ///
+    /// Exact nsfs device and inode identity is read from both owners, and the duplicate itself
+    /// keeps that namespace alive until its planned call finishes or is rejected. This method does
+    /// not probe the worker process: callers which hold a registry lock may use it only as an FD
+    /// ownership operation and must check liveness outside that lock.
+    pub(super) fn duplicate_network_namespace_pin(
+        &self,
+    ) -> Result<PinnedWorkerNetworkNamespace, WorkerSandboxError> {
+        let source = self
+            .network_namespace
+            .as_ref()
+            .ok_or(WorkerSandboxError::Invalid)?;
+        let identity = typed_network_namespace_identity(source)?;
+        let descriptor = duplicate_descriptor_cloexec(source)?;
+        if typed_network_namespace_identity(&descriptor)? != identity {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        Ok(PinnedWorkerNetworkNamespace {
+            descriptor,
+            identity,
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn fixture() -> Self {
         Self {
-            pidfd: File::open("/dev/null").expect("fake pidfd").into(),
-            process_directory: File::open("/dev/null")
-                .expect("fake process directory")
-                .into(),
+            pidfd: pidfd_open(rustix::process::getpid(), PidfdFlags::empty())
+                .expect("pin current test process"),
+            process_directory: open(
+                format!("/proc/{}", std::process::id()),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .expect("pin current test process directory"),
             network_namespace: Some(
-                File::open("/dev/null")
-                    .expect("fake network namespace")
-                    .into(),
+                open(
+                    "/proc/thread-self/ns/net",
+                    OFlags::RDONLY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .expect("pin current test network namespace"),
             ),
             final_descriptor_directory: None,
         }
@@ -1602,6 +1678,7 @@ mod tests {
             invalid.seccomp = seccomp;
             assert!(plan.verify(invalid).is_err());
         }
+
         for invalid_baseline in [
             LinuxSeccompState::fixture(0, 1),
             LinuxSeccompState::fixture(1, 0),
@@ -1647,6 +1724,72 @@ mod tests {
             invalid.capabilities = capabilities;
             assert!(plan.verify(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn duplicated_worker_namespace_pin_is_typed_exact_and_survives_source_owner_drop() {
+        let pins = WorkerKernelPins::fixture();
+        let pin = pins
+            .duplicate_network_namespace_pin()
+            .expect("duplicate current test network namespace pin");
+        let original_identity = pin.identity_for_test();
+        assert!(original_identity.is_valid());
+        assert_eq!(
+            namespace_type(&pin.descriptor).expect("query duplicate namespace type"),
+            libc::CLONE_NEWNET
+        );
+        let descriptor_flags = nix::fcntl::FdFlag::from_bits_truncate(
+            nix::fcntl::fcntl(&pin.descriptor, nix::fcntl::FcntlArg::F_GETFD)
+                .expect("read duplicate descriptor flags"),
+        );
+        assert!(descriptor_flags.contains(nix::fcntl::FdFlag::FD_CLOEXEC));
+
+        drop(pins);
+        let current = open(
+            "/proc/self/ns/net",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open current network namespace after source drop");
+        assert!(
+            pin.matches_descriptor(&current)
+                .expect("compare retained exact namespace")
+        );
+        assert_eq!(pin.identity_for_test(), original_identity);
+
+        let wrong_type = open(
+            "/proc/self/ns/user",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open current user namespace");
+        assert!(pin.matches_descriptor(&wrong_type).is_err());
+    }
+
+    #[test]
+    fn duplicating_worker_namespace_pin_does_not_probe_process_liveness() {
+        let mut pins = WorkerKernelPins::fixture();
+        pins.pidfd = File::open("/dev/null")
+            .expect("open a deliberately non-pidfd descriptor")
+            .into();
+        assert!(
+            pins.ensure_alive().is_err(),
+            "fixture must fail if the namespace-only operation accidentally probes liveness"
+        );
+
+        let pin = pins
+            .duplicate_network_namespace_pin()
+            .expect("namespace ownership is independent of process probing");
+        let current = open(
+            "/proc/self/ns/net",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open current network namespace");
+        assert!(
+            pin.matches_descriptor(&current)
+                .expect("compare independently retained namespace")
+        );
     }
 
     #[test]
