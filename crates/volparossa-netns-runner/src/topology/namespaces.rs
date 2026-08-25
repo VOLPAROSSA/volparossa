@@ -35,6 +35,11 @@ use super::{
         FixedLinkOperationError, FixedLinkRetirement, FixedPairAbsenceProof,
         PendingFixedPairAbsenceProof,
     },
+    neighbour::{
+        FixedNeighbourInstallError, FixedNeighbourOperationError, FixedNeighbourPlanError,
+        FixedNeighbourVerifyError, FixedPermanentNeighbour, FixedPermanentNeighbourOwner,
+        FixedPermanentNeighbourPlan, FixedPermanentNeighbourRetirement,
+    },
     ownership::{AuthorizedPrivateRun, AuthorizedPrivateRunError, NamespacePinTarget},
     route::{
         FixedEndpointRouteOwner, FixedEndpointRoutePlan, FixedEndpointRouteRetirement,
@@ -51,6 +56,7 @@ const CURRENT_NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
 const PRIVATE_NETNS_PREFIX: &str = "/run/netns/";
 const NSFS_MAGIC: FsWord = 0x6e73_6673;
 const ENDPOINT_COUNT: usize = 2;
+const PERMANENT_NEIGHBOUR_COUNT: usize = 4;
 const RAW_LINK_RETIREMENT_PROOF_ATTEMPTS: usize = 2;
 
 const NAMESPACE_STATX_FLAGS: StatxFlags = StatxFlags::TYPE
@@ -191,6 +197,90 @@ pub(crate) enum FixedEndpointRouteSetError {
     /// The fixed route set, visit order, or affine owner set was incomplete.
     #[error("fixed endpoint-route set proof failed: {0}")]
     Unsafe(&'static str),
+}
+
+/// Failure to install, reprove, or explicitly remove the exact four-neighbour set.
+#[derive(Debug, Error)]
+pub(crate) enum FixedPermanentNeighbourSetError {
+    /// The routed topology failed its final preflight or postflight proof.
+    #[error("fixed permanent-neighbour routed-topology binding failed: {0}")]
+    Routed(#[source] FixedEndpointRouteSetError),
+    /// Entering, proving, or restoring one retained namespace failed.
+    #[error("fixed permanent-neighbour namespace binding failed: {0}")]
+    Namespace(#[from] NamespacePinError),
+    /// Retained topology authority could not derive one exact neighbour.
+    #[error("fixed permanent-neighbour plan failed: {0}")]
+    Plan(#[source] FixedNeighbourPlanError),
+    /// Installation failed before a neighbour request could reach the kernel.
+    #[error("fixed permanent-neighbour installation failed before mutation: {0}")]
+    InstallBeforeMutation(#[source] FixedNeighbourOperationError),
+    /// A neighbour installation crossed its deletion-only boundary.
+    #[error("fixed permanent-neighbour installation crossed its deletion-only boundary: {0}")]
+    InstallDeletionBound(#[source] FixedNeighbourOperationError),
+    /// Fresh readback no longer matched one retained neighbour owner.
+    #[error("fixed permanent-neighbour verification failed: {0}")]
+    Verify(#[source] FixedNeighbourVerifyError),
+    /// Explicit deletion could not prove exact absence before pair retirement.
+    #[error("fixed permanent-neighbour deletion failed: {0}")]
+    Delete(#[source] FixedNeighbourOperationError),
+    /// The exact neighbour set, visit order, or affine owner set was incomplete.
+    #[error("fixed permanent-neighbour set proof failed: {0}")]
+    Unsafe(&'static str),
+    /// The original transition failed and reverse cleanup observed another anomaly.
+    #[error("{transition}; reverse permanent-neighbour cleanup also failed: {cleanup}")]
+    Cleanup {
+        /// Original install, verify, or deletion failure.
+        #[source]
+        transition: Box<FixedPermanentNeighbourSetError>,
+        /// First independently observed cleanup failure.
+        cleanup: Box<FixedPermanentNeighbourSetError>,
+    },
+}
+
+/// Affine failed neighbour transition preserving deletion-bound cleanup authority.
+#[must_use = "a failed permanent-neighbour transition retains mandatory cleanup authority"]
+pub(crate) struct FixedPermanentNeighbourFailure {
+    source: FixedPermanentNeighbourSetError,
+    deleted: Box<AuthorizedDeletedTopology>,
+}
+
+impl std::fmt::Debug for FixedPermanentNeighbourFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FixedPermanentNeighbourFailure")
+            .field("source", &self.source)
+            .field("deleted", &true)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FixedPermanentNeighbourFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for FixedPermanentNeighbourFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl FixedPermanentNeighbourFailure {
+    /// Recover the original failure and the still-armed deleted topology.
+    pub(crate) fn into_parts(self) -> (FixedPermanentNeighbourSetError, AuthorizedDeletedTopology) {
+        (self.source, *self.deleted)
+    }
+
+    fn deleted(
+        source: FixedPermanentNeighbourSetError,
+        deleted: AuthorizedDeletedTopology,
+    ) -> Self {
+        Self {
+            source,
+            deleted: Box::new(deleted),
+        }
+    }
 }
 
 /// Affine failed route transition preserving deletion-bound cleanup authority.
@@ -1205,16 +1295,30 @@ pub(crate) struct AuthorizedEndpointRoutes {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+/// Affine authority for the sole four permanent IPv4 neighbour records.
+///
+/// Installation is exactly parent A, parent B, endpoint A, endpoint B. The
+/// routed authority remains whole behind this state, and the only successful
+/// reverse transition explicitly deletes endpoint B, endpoint A, parent B,
+/// then parent A before returning that same routed authority.
+#[must_use = "the permanent-neighbour topology must be explicitly removed or retired"]
+pub(crate) struct AuthorizedPermanentNeighbours {
+    routed: Option<AuthorizedEndpointRoutes>,
+    neighbours: [Option<FixedPermanentNeighbourOwner>; PERMANENT_NEIGHBOUR_COUNT],
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
 /// Intermediate authority after direct B/A pair deletion and raw lineage proof.
 ///
-/// Zero, one, or two route-retirement owners, all four address owners, and both
-/// pair owners remain armed. Only the higher private-mount owner can compare
-/// its retained parent and endpoint baselines; it must do so before calling
-/// `finish_after_pristine_network_proof`.
+/// Zero to four neighbour-retirement owners, zero to two route-retirement
+/// owners, all four address owners, and both pair owners remain armed. Only the
+/// higher private-mount owner can compare its retained parent and endpoint
+/// baselines; it must do so before calling `finish_after_pristine_network_proof`.
 #[must_use = "deleted topology still requires the full pristine-network barrier"]
 pub(crate) struct AuthorizedDeletedTopology {
     addressed: Option<AuthorizedIpv4Addresses>,
     absence: Option<FixedPairAbsenceProof>,
+    neighbour_retirements: [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
     route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -2228,9 +2332,12 @@ impl AuthorizedIpv4AddrgenNone {
             .take()
             .unwrap_or_else(|| std::process::abort());
         match links.into_retirement() {
-            FixedLinkRetirement::Deleted(pending) => {
-                complete_raw_link_retirement(addressed, pending, [None, None])
-            }
+            FixedLinkRetirement::Deleted(pending) => complete_raw_link_retirement(
+                addressed,
+                pending,
+                [None, None],
+                empty_permanent_neighbour_retirements(),
+            ),
             FixedLinkRetirement::Untouched => std::process::abort(),
         }
     }
@@ -2461,7 +2568,7 @@ impl AuthorizedActivatedTopology {
     /// Delete pair B then A and retain every lower owner through the external
     /// full pristine-network proof barrier.
     pub(crate) fn begin_retirement(self) -> AuthorizedDeletedTopology {
-        self.into_deleted_topology([None, None])
+        self.into_deleted_topology([None, None], empty_permanent_neighbour_retirements())
     }
 
     fn addressed(&self) -> &AuthorizedIpv4Addresses {
@@ -2494,9 +2601,12 @@ impl AuthorizedActivatedTopology {
             .take()
             .unwrap_or_else(|| std::process::abort());
         let deleted = match links.into_retirement() {
-            FixedLinkRetirement::Deleted(pending) => {
-                complete_raw_link_retirement(addressed, pending, route_retirements)
-            }
+            FixedLinkRetirement::Deleted(pending) => complete_raw_link_retirement(
+                addressed,
+                pending,
+                route_retirements,
+                empty_permanent_neighbour_retirements(),
+            ),
             FixedLinkRetirement::Untouched => std::process::abort(),
         };
         FixedEndpointRouteFailure::deleted(source, deleted)
@@ -2505,6 +2615,8 @@ impl AuthorizedActivatedTopology {
     fn into_deleted_topology(
         mut self,
         route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
+        neighbour_retirements: [Option<FixedPermanentNeighbourRetirement>;
+            PERMANENT_NEIGHBOUR_COUNT],
     ) -> AuthorizedDeletedTopology {
         let links = self.links.take().unwrap_or_else(|| std::process::abort());
         let addressed = self
@@ -2512,9 +2624,12 @@ impl AuthorizedActivatedTopology {
             .take()
             .unwrap_or_else(|| std::process::abort());
         match links.into_retirement() {
-            FixedLinkRetirement::Deleted(pending) => {
-                complete_raw_link_retirement(addressed, pending, route_retirements)
-            }
+            FixedLinkRetirement::Deleted(pending) => complete_raw_link_retirement(
+                addressed,
+                pending,
+                route_retirements,
+                neighbour_retirements,
+            ),
             FixedLinkRetirement::Untouched => std::process::abort(),
         }
     }
@@ -2597,6 +2712,104 @@ impl AuthorizedEndpointRoutes {
         visit_endpoint_route_state_endpoints(self, visitor)
     }
 
+    /// Install exactly parent A/B then endpoint A/B permanent neighbours.
+    ///
+    /// Every plan derives solely from the retained all-UP pair/MAC authority,
+    /// both same-pair address owners, and the currently proved namespace
+    /// descriptor. Any possibly-sent request remains affine through explicit
+    /// reverse cleanup or full pair-absence retirement.
+    pub(crate) fn install_permanent_neighbours(
+        self,
+    ) -> Result<AuthorizedPermanentNeighbours, FixedPermanentNeighbourFailure> {
+        if let Err(source) = self.verify() {
+            return Err(permanent_neighbour_failure_from_routed(
+                self,
+                FixedPermanentNeighbourSetError::Routed(source),
+                empty_permanent_neighbour_owners(),
+                empty_permanent_neighbour_retirements(),
+            ));
+        }
+
+        let mut neighbours = empty_permanent_neighbour_owners();
+        let mut retirements = empty_permanent_neighbour_retirements();
+        let parent_namespace = match NetworkNamespace::capture_current() {
+            Ok(namespace) => namespace,
+            Err(source) => {
+                return Err(permanent_neighbour_failure_from_routed(
+                    self,
+                    FixedPermanentNeighbourSetError::Namespace(source),
+                    neighbours,
+                    retirements,
+                ));
+            }
+        };
+        for specification in FixedPermanentNeighbour::INSTALL_ORDER[..ENDPOINT_COUNT]
+            .iter()
+            .copied()
+        {
+            if let Err(source) = install_one_permanent_neighbour(
+                &self,
+                specification,
+                &parent_namespace.descriptor,
+                &mut neighbours,
+                &mut retirements,
+            ) {
+                return Err(permanent_neighbour_failure_from_routed(
+                    self,
+                    source,
+                    neighbours,
+                    retirements,
+                ));
+            }
+        }
+
+        let installed_endpoints = self.visit_network_namespaces(|endpoint| {
+            let specification =
+                FixedPermanentNeighbour::INSTALL_ORDER[ENDPOINT_COUNT + endpoint.index()];
+            let descriptor = self
+                .activated()
+                .addressed()
+                .veth_pairs()
+                .endpoint_namespace_descriptor(endpoint);
+            install_one_permanent_neighbour(
+                &self,
+                specification,
+                descriptor,
+                &mut neighbours,
+                &mut retirements,
+            )
+        });
+        if let Err(error) = installed_endpoints {
+            let source = map_permanent_neighbour_route_visit_error(error);
+            return Err(permanent_neighbour_failure_from_routed(
+                self,
+                source,
+                neighbours,
+                retirements,
+            ));
+        }
+        if neighbours.iter().any(Option::is_none) || retirements.iter().any(Option::is_some) {
+            return Err(permanent_neighbour_failure_from_routed(
+                self,
+                FixedPermanentNeighbourSetError::Unsafe(
+                    "fixed permanent-neighbour installation visit was incomplete",
+                ),
+                neighbours,
+                retirements,
+            ));
+        }
+
+        let authorized = AuthorizedPermanentNeighbours {
+            routed: Some(self),
+            neighbours,
+            _thread_bound: PhantomData,
+        };
+        match authorized.verify() {
+            Ok(()) => Ok(authorized),
+            Err(source) => Err(authorized.into_failure(source)),
+        }
+    }
+
     /// Delete pair B then A and retain both route owners, all address owners,
     /// and both pair owners through the external pristine-network proof.
     pub(crate) fn begin_retirement(mut self) -> AuthorizedDeletedTopology {
@@ -2605,7 +2818,7 @@ impl AuthorizedEndpointRoutes {
             .take()
             .unwrap_or_else(|| std::process::abort());
         let routes = take_route_retirements(&mut self.routes);
-        activated.into_deleted_topology(routes)
+        activated.into_deleted_topology(routes, empty_permanent_neighbour_retirements())
     }
 
     fn activated(&self) -> &AuthorizedActivatedTopology {
@@ -2614,14 +2827,225 @@ impl AuthorizedEndpointRoutes {
             .unwrap_or_else(|| std::process::abort())
     }
 
+    fn into_deleted_topology_with_neighbours(
+        mut self,
+        neighbour_retirements: [Option<FixedPermanentNeighbourRetirement>;
+            PERMANENT_NEIGHBOUR_COUNT],
+    ) -> AuthorizedDeletedTopology {
+        let activated = self
+            .activated
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        let routes = take_route_retirements(&mut self.routes);
+        activated.into_deleted_topology(routes, neighbour_retirements)
+    }
+
     fn into_failure(mut self, source: FixedEndpointRouteSetError) -> FixedEndpointRouteFailure {
         let activated = self
             .activated
             .take()
             .unwrap_or_else(|| std::process::abort());
         let routes = take_route_retirements(&mut self.routes);
-        FixedEndpointRouteFailure::deleted(source, activated.into_deleted_topology(routes))
+        FixedEndpointRouteFailure::deleted(
+            source,
+            activated.into_deleted_topology(routes, empty_permanent_neighbour_retirements()),
+        )
     }
+}
+
+impl AuthorizedPermanentNeighbours {
+    /// Reprove the routed topology and all four neighbours in canonical order.
+    pub(crate) fn verify(&self) -> Result<(), FixedPermanentNeighbourSetError> {
+        self.routed()
+            .verify()
+            .map_err(FixedPermanentNeighbourSetError::Routed)?;
+        let mut visited = [false; PERMANENT_NEIGHBOUR_COUNT];
+        self.routed()
+            .visit_parent_network_namespace(|| {
+                for specification in FixedPermanentNeighbour::INSTALL_ORDER[..ENDPOINT_COUNT]
+                    .iter()
+                    .copied()
+                {
+                    verify_one_permanent_neighbour(self, specification, &mut visited)?;
+                }
+                Ok(())
+            })
+            .map_err(map_permanent_neighbour_route_visit_error)?;
+        self.routed()
+            .visit_network_namespaces(|endpoint| {
+                let specification =
+                    FixedPermanentNeighbour::INSTALL_ORDER[ENDPOINT_COUNT + endpoint.index()];
+                verify_one_permanent_neighbour(self, specification, &mut visited)
+            })
+            .map_err(map_permanent_neighbour_route_visit_error)?;
+        if visited != [true; PERMANENT_NEIGHBOUR_COUNT] {
+            return Err(FixedPermanentNeighbourSetError::Unsafe(
+                "fixed permanent-neighbour verification visit was incomplete",
+            ));
+        }
+        self.routed()
+            .verify()
+            .map_err(FixedPermanentNeighbourSetError::Routed)
+    }
+
+    pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
+        self.routed().mount_ids()
+    }
+
+    pub(crate) fn mount_point_bytes(&self) -> [&[u8]; ENDPOINT_COUNT] {
+        self.routed().mount_point_bytes()
+    }
+
+    /// Run one parent-scoped operation between exact neighbour-set reproofs.
+    pub(crate) fn visit_parent_network_namespace<Visitor, Output, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<Output, FixedPermanentNeighbourVisitError<VisitorError>>
+    where
+        Visitor: FnOnce() -> Result<Output, VisitorError>,
+    {
+        self.verify()
+            .map_err(FixedPermanentNeighbourVisitError::Topology)?;
+        let visited = visitor();
+        self.verify()
+            .map_err(FixedPermanentNeighbourVisitError::Topology)?;
+        visited.map_err(FixedPermanentNeighbourVisitError::Visitor)
+    }
+
+    /// Visit endpoint A then B between exact neighbour-set reproofs.
+    pub(crate) fn visit_network_namespaces<Visitor, VisitorError>(
+        &self,
+        visitor: Visitor,
+    ) -> Result<(), FixedPermanentNeighbourVisitError<VisitorError>>
+    where
+        Visitor: FnMut(NamespaceEndpoint) -> Result<(), VisitorError>,
+    {
+        self.verify()
+            .map_err(FixedPermanentNeighbourVisitError::Topology)?;
+        let visited = self
+            .routed()
+            .activated()
+            .addressed()
+            .veth_pairs()
+            .namespace_pins()
+            .visit_network_namespaces(visitor)
+            .map_err(|error| match error {
+                NamespaceVisitError::Namespace(source) => {
+                    FixedPermanentNeighbourVisitError::Namespace(source)
+                }
+                NamespaceVisitError::Visitor(source) => {
+                    FixedPermanentNeighbourVisitError::Visitor(source)
+                }
+            });
+        self.verify()
+            .map_err(FixedPermanentNeighbourVisitError::Topology)?;
+        visited
+    }
+
+    /// Explicitly delete endpoint B/A then parent B/A and recover routed authority.
+    pub(crate) fn remove_permanent_neighbours(
+        mut self,
+    ) -> Result<AuthorizedEndpointRoutes, FixedPermanentNeighbourFailure> {
+        if let Err(source) = self.verify() {
+            return Err(self.into_failure(source));
+        }
+        let mut retirements = empty_permanent_neighbour_retirements();
+        let cleanup = cleanup_permanent_neighbour_owners(
+            self.routed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort()),
+            &mut self.neighbours,
+            &mut retirements,
+        );
+        if let Some(source) = cleanup {
+            return Err(self.into_failure_after_cleanup(source, retirements));
+        }
+        if self.neighbours.iter().any(Option::is_some) {
+            return Err(self.into_failure_after_cleanup(
+                FixedPermanentNeighbourSetError::Unsafe(
+                    "explicit permanent-neighbour removal left an owner",
+                ),
+                retirements,
+            ));
+        }
+        Ok(self.routed.take().unwrap_or_else(|| std::process::abort()))
+    }
+
+    /// Fail-closed generic retirement for higher-layer proof failures.
+    ///
+    /// Exact owners are first offered the same explicit reverse deletion. Any
+    /// ambiguous authority is carried through B/A pair deletion and retired
+    /// only by the later full-pair absence barrier.
+    pub(crate) fn begin_retirement(mut self) -> AuthorizedDeletedTopology {
+        let mut retirements = empty_permanent_neighbour_retirements();
+        let _ = cleanup_permanent_neighbour_owners(
+            self.routed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort()),
+            &mut self.neighbours,
+            &mut retirements,
+        );
+        if self.neighbours.iter().any(Option::is_some) {
+            std::process::abort();
+        }
+        let routed = self.routed.take().unwrap_or_else(|| std::process::abort());
+        routed.into_deleted_topology_with_neighbours(retirements)
+    }
+
+    fn routed(&self) -> &AuthorizedEndpointRoutes {
+        self.routed
+            .as_ref()
+            .unwrap_or_else(|| std::process::abort())
+    }
+
+    fn into_failure(
+        mut self,
+        source: FixedPermanentNeighbourSetError,
+    ) -> FixedPermanentNeighbourFailure {
+        let mut retirements = empty_permanent_neighbour_retirements();
+        let cleanup = cleanup_permanent_neighbour_owners(
+            self.routed
+                .as_ref()
+                .unwrap_or_else(|| std::process::abort()),
+            &mut self.neighbours,
+            &mut retirements,
+        );
+        let source = combine_permanent_neighbour_cleanup_error(source, cleanup);
+        if self.neighbours.iter().any(Option::is_some) {
+            std::process::abort();
+        }
+        let routed = self.routed.take().unwrap_or_else(|| std::process::abort());
+        FixedPermanentNeighbourFailure::deleted(
+            source,
+            routed.into_deleted_topology_with_neighbours(retirements),
+        )
+    }
+
+    fn into_failure_after_cleanup(
+        mut self,
+        source: FixedPermanentNeighbourSetError,
+        retirements: [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
+    ) -> FixedPermanentNeighbourFailure {
+        if self.neighbours.iter().any(Option::is_some) {
+            std::process::abort();
+        }
+        let routed = self.routed.take().unwrap_or_else(|| std::process::abort());
+        FixedPermanentNeighbourFailure::deleted(
+            source,
+            routed.into_deleted_topology_with_neighbours(retirements),
+        )
+    }
+}
+
+/// Failure from a scoped parent or endpoint visit through neighbour typestate.
+#[derive(Debug)]
+pub(crate) enum FixedPermanentNeighbourVisitError<VisitorError> {
+    /// The retained permanent-neighbour typestate failed reproof.
+    Topology(FixedPermanentNeighbourSetError),
+    /// Entering or restoring a retained endpoint namespace failed.
+    Namespace(NamespacePinError),
+    /// The scoped caller operation failed after exact restoration.
+    Visitor(VisitorError),
 }
 
 /// Failure from a scoped parent or endpoint visit through routed typestate.
@@ -2701,6 +3125,231 @@ fn merge_route_retirements(
         }
     }
     retirements
+}
+
+fn empty_permanent_neighbour_owners()
+-> [Option<FixedPermanentNeighbourOwner>; PERMANENT_NEIGHBOUR_COUNT] {
+    std::array::from_fn(|_| None)
+}
+
+fn empty_permanent_neighbour_retirements()
+-> [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT] {
+    std::array::from_fn(|_| None)
+}
+
+const fn permanent_neighbour_index(specification: FixedPermanentNeighbour) -> usize {
+    match specification {
+        FixedPermanentNeighbour::ParentA => 0,
+        FixedPermanentNeighbour::ParentB => 1,
+        FixedPermanentNeighbour::EndpointA => 2,
+        FixedPermanentNeighbour::EndpointB => 3,
+    }
+}
+
+fn install_one_permanent_neighbour<Fd: AsFd>(
+    routed: &AuthorizedEndpointRoutes,
+    specification: FixedPermanentNeighbour,
+    current_namespace: &Fd,
+    neighbours: &mut [Option<FixedPermanentNeighbourOwner>; PERMANENT_NEIGHBOUR_COUNT],
+    retirements: &mut [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
+) -> Result<(), FixedPermanentNeighbourSetError> {
+    let neighbour_index = permanent_neighbour_index(specification);
+    if neighbours[neighbour_index].is_some() || retirements[neighbour_index].is_some() {
+        return Err(FixedPermanentNeighbourSetError::Unsafe(
+            "fixed permanent-neighbour installation was duplicated",
+        ));
+    }
+    let endpoint_index = match specification.endpoint() {
+        FixedVethEndpoint::A => 0,
+        FixedVethEndpoint::B => 1,
+    };
+    let activated = routed.activated();
+    let address_authority = activated.addressed();
+    let pair = address_authority.veth_pairs().fixed_pairs()[endpoint_index];
+    let address_owners = address_authority.owners();
+    let base = endpoint_index * 2;
+    let (local_address, destination_address) = if specification.is_parent() {
+        (address_owners[base], address_owners[base + 1])
+    } else {
+        (address_owners[base + 1], address_owners[base])
+    };
+    let plan = FixedPermanentNeighbourPlan::derive(
+        specification,
+        activated.links(),
+        current_namespace,
+        pair,
+        local_address,
+        destination_address,
+    )
+    .map_err(FixedPermanentNeighbourSetError::Plan)?;
+    match plan.install() {
+        Ok(owner) => {
+            neighbours[neighbour_index] = Some(owner);
+            Ok(())
+        }
+        Err(FixedNeighbourInstallError::BeforeMutation(source)) => Err(
+            FixedPermanentNeighbourSetError::InstallBeforeMutation(source),
+        ),
+        Err(FixedNeighbourInstallError::DeletionBound { source, authority }) => {
+            retirements[neighbour_index] = Some(*authority);
+            Err(FixedPermanentNeighbourSetError::InstallDeletionBound(
+                source,
+            ))
+        }
+    }
+}
+
+fn verify_one_permanent_neighbour(
+    state: &AuthorizedPermanentNeighbours,
+    specification: FixedPermanentNeighbour,
+    visited: &mut [bool; PERMANENT_NEIGHBOUR_COUNT],
+) -> Result<(), FixedPermanentNeighbourSetError> {
+    let index = permanent_neighbour_index(specification);
+    let owner = state.neighbours[index]
+        .as_ref()
+        .ok_or(FixedPermanentNeighbourSetError::Unsafe(
+            "fixed permanent-neighbour owner is missing",
+        ))?;
+    if visited[index] || owner.specification() != specification {
+        return Err(FixedPermanentNeighbourSetError::Unsafe(
+            "fixed permanent-neighbour owner order changed",
+        ));
+    }
+    owner
+        .verify()
+        .map_err(FixedPermanentNeighbourSetError::Verify)?;
+    visited[index] = true;
+    Ok(())
+}
+
+fn map_permanent_neighbour_route_visit_error(
+    error: FixedEndpointRouteVisitError<FixedPermanentNeighbourSetError>,
+) -> FixedPermanentNeighbourSetError {
+    match error {
+        FixedEndpointRouteVisitError::Topology(source) => {
+            FixedPermanentNeighbourSetError::Routed(source)
+        }
+        FixedEndpointRouteVisitError::Namespace(source) => {
+            FixedPermanentNeighbourSetError::Namespace(source)
+        }
+        FixedEndpointRouteVisitError::Visitor(source) => source,
+    }
+}
+
+fn delete_one_permanent_neighbour(
+    specification: FixedPermanentNeighbour,
+    neighbours: &mut [Option<FixedPermanentNeighbourOwner>; PERMANENT_NEIGHBOUR_COUNT],
+    retirements: &mut [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
+    first_error: &mut Option<FixedPermanentNeighbourSetError>,
+) {
+    let index = permanent_neighbour_index(specification);
+    if retirements[index].is_some() {
+        if neighbours[index].is_some() {
+            std::process::abort();
+        }
+        return;
+    }
+    let Some(owner) = neighbours[index].take() else {
+        return;
+    };
+    if owner.specification() != specification && first_error.is_none() {
+        *first_error = Some(FixedPermanentNeighbourSetError::Unsafe(
+            "fixed permanent-neighbour delete order changed",
+        ));
+    }
+    if let Err(failure) = owner.delete() {
+        let (source, authority) = failure.into_parts();
+        retirements[index] = Some(authority);
+        if first_error.is_none() {
+            *first_error = Some(FixedPermanentNeighbourSetError::Delete(source));
+        }
+    }
+}
+
+fn cleanup_permanent_neighbour_owners(
+    routed: &AuthorizedEndpointRoutes,
+    neighbours: &mut [Option<FixedPermanentNeighbourOwner>; PERMANENT_NEIGHBOUR_COUNT],
+    retirements: &mut [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
+) -> Option<FixedPermanentNeighbourSetError> {
+    let mut first_error = None;
+    let mut endpoints_consumed = false;
+    for _ in 0..RAW_LINK_RETIREMENT_PROOF_ATTEMPTS {
+        let visited = routed
+            .activated()
+            .addressed()
+            .veth_pairs()
+            .visit_network_namespaces_reverse(|endpoint| {
+                let specification = match endpoint {
+                    NamespaceEndpoint::B => FixedPermanentNeighbour::DELETE_ORDER[0],
+                    NamespaceEndpoint::A => FixedPermanentNeighbour::DELETE_ORDER[1],
+                };
+                delete_one_permanent_neighbour(
+                    specification,
+                    neighbours,
+                    retirements,
+                    &mut first_error,
+                );
+                Ok::<(), std::convert::Infallible>(())
+            });
+        match visited {
+            Ok(()) => {
+                endpoints_consumed = true;
+                break;
+            }
+            Err(NamespaceVisitError::Namespace(source)) => {
+                if first_error.is_none() {
+                    first_error = Some(FixedPermanentNeighbourSetError::Namespace(source));
+                }
+            }
+            Err(NamespaceVisitError::Visitor(never)) => match never {},
+        }
+    }
+    if !endpoints_consumed
+        || neighbours[permanent_neighbour_index(FixedPermanentNeighbour::EndpointA)].is_some()
+        || neighbours[permanent_neighbour_index(FixedPermanentNeighbour::EndpointB)].is_some()
+    {
+        std::process::abort();
+    }
+    for specification in FixedPermanentNeighbour::DELETE_ORDER[ENDPOINT_COUNT..]
+        .iter()
+        .copied()
+    {
+        delete_one_permanent_neighbour(specification, neighbours, retirements, &mut first_error);
+    }
+    if neighbours.iter().any(Option::is_some) {
+        std::process::abort();
+    }
+    first_error
+}
+
+fn combine_permanent_neighbour_cleanup_error(
+    transition: FixedPermanentNeighbourSetError,
+    cleanup: Option<FixedPermanentNeighbourSetError>,
+) -> FixedPermanentNeighbourSetError {
+    match cleanup {
+        Some(cleanup) => FixedPermanentNeighbourSetError::Cleanup {
+            transition: Box::new(transition),
+            cleanup: Box::new(cleanup),
+        },
+        None => transition,
+    }
+}
+
+fn permanent_neighbour_failure_from_routed(
+    routed: AuthorizedEndpointRoutes,
+    source: FixedPermanentNeighbourSetError,
+    mut neighbours: [Option<FixedPermanentNeighbourOwner>; PERMANENT_NEIGHBOUR_COUNT],
+    mut retirements: [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
+) -> FixedPermanentNeighbourFailure {
+    let cleanup = cleanup_permanent_neighbour_owners(&routed, &mut neighbours, &mut retirements);
+    let source = combine_permanent_neighbour_cleanup_error(source, cleanup);
+    if neighbours.iter().any(Option::is_some) {
+        std::process::abort();
+    }
+    FixedPermanentNeighbourFailure::deleted(
+        source,
+        routed.into_deleted_topology_with_neighbours(retirements),
+    )
 }
 
 trait RetainedLinkState {
@@ -2827,8 +3476,8 @@ impl AuthorizedDeletedTopology {
 
     /// Release lower affine owners only after consuming the unforgeable affine
     /// token minted by the higher layer's external parent/A/B pristine-network
-    /// proof. Every retained route, address, and pair is prevalidated before
-    /// the first infallible journal disarm.
+    /// proof. Every retained neighbour, route, address, and pair is
+    /// prevalidated before the first infallible journal disarm.
     #[allow(clippy::needless_pass_by_value)] // consuming this affine token is the disarm boundary
     pub(crate) fn finish_after_pristine_network_proof(
         mut self,
@@ -2843,6 +3492,16 @@ impl AuthorizedDeletedTopology {
                 .prevalidate_pair_absence_retirement(proof, &pristine_network_proof)
                 .is_ok()
         });
+        let neighbour_prevalidated =
+            self.neighbour_retirements
+                .iter()
+                .enumerate()
+                .all(|(index, neighbour)| {
+                    neighbour.as_ref().is_none_or(|neighbour| {
+                        permanent_neighbour_index(neighbour.specification()) == index
+                            && neighbour.prevalidate_pair_absence_retirement(proof).is_ok()
+                    })
+                });
         let addressed = self
             .addressed
             .as_mut()
@@ -2857,10 +3516,20 @@ impl AuthorizedDeletedTopology {
             .fixed_pairs()
             .into_iter()
             .all(|pair| pair.prevalidate_pair_absence_retirement(proof).is_ok());
-        if !route_prevalidated || !address_prevalidated || !pair_prevalidated {
+        if !neighbour_prevalidated
+            || !route_prevalidated
+            || !address_prevalidated
+            || !pair_prevalidated
+        {
             std::process::abort();
         }
 
+        for specification in FixedPermanentNeighbour::DELETE_ORDER {
+            let index = permanent_neighbour_index(specification);
+            if let Some(neighbour) = self.neighbour_retirements[index].take() {
+                neighbour.retire_after_validated_pair_absence(proof);
+            }
+        }
         for index in (0..ENDPOINT_COUNT).rev() {
             if let Some(route) = self.route_retirements[index].take() {
                 route.retire_after_validated_pair_absence(proof, &pristine_network_proof);
@@ -2930,7 +3599,12 @@ fn failure_after_retirement(
         }
         FixedLinkRetirement::Deleted(pending) => FixedLinkActivationFailure::deleted(
             source,
-            complete_raw_link_retirement(addressed, pending, [None, None]),
+            complete_raw_link_retirement(
+                addressed,
+                pending,
+                [None, None],
+                empty_permanent_neighbour_retirements(),
+            ),
         ),
     }
 }
@@ -2939,6 +3613,7 @@ fn complete_raw_link_retirement(
     addressed: AuthorizedIpv4Addresses,
     mut pending: PendingFixedPairAbsenceProof,
     route_retirements: [Option<FixedEndpointRouteRetirement>; ENDPOINT_COUNT],
+    neighbour_retirements: [Option<FixedPermanentNeighbourRetirement>; PERMANENT_NEIGHBOUR_COUNT],
 ) -> AuthorizedDeletedTopology {
     let mut endpoint_proved = false;
     for _ in 0..RAW_LINK_RETIREMENT_PROOF_ATTEMPTS {
@@ -2972,6 +3647,7 @@ fn complete_raw_link_retirement(
     AuthorizedDeletedTopology {
         addressed: Some(addressed),
         absence: Some(pending.finish()),
+        neighbour_retirements,
         route_retirements,
         _thread_bound: PhantomData,
     }
@@ -3032,9 +3708,29 @@ impl Drop for AuthorizedEndpointRoutes {
             }
             Some(activated) => {
                 let routes = take_route_retirements(&mut self.routes);
-                drop(activated.into_deleted_topology(routes));
+                drop(
+                    activated
+                        .into_deleted_topology(routes, empty_permanent_neighbour_retirements()),
+                );
             }
         }
+    }
+}
+
+impl Drop for AuthorizedPermanentNeighbours {
+    fn drop(&mut self) {
+        let Some(routed) = self.routed.take() else {
+            if self.neighbours.iter().any(Option::is_some) {
+                std::process::abort();
+            }
+            return;
+        };
+        let mut retirements = empty_permanent_neighbour_retirements();
+        let _ = cleanup_permanent_neighbour_owners(&routed, &mut self.neighbours, &mut retirements);
+        if self.neighbours.iter().any(Option::is_some) {
+            std::process::abort();
+        }
+        drop(routed.into_deleted_topology_with_neighbours(retirements));
     }
 }
 
@@ -3042,6 +3738,7 @@ impl Drop for AuthorizedDeletedTopology {
     fn drop(&mut self) {
         if self.addressed.is_some()
             || self.absence.is_some()
+            || self.neighbour_retirements.iter().any(Option::is_some)
             || self.route_retirements.iter().any(Option::is_some)
         {
             // The higher mount/network layer did not authorize affine release.
@@ -3059,6 +3756,7 @@ fn drop_activation_state(addressed: AuthorizedIpv4Addresses, retirement: FixedLi
                 addressed,
                 pending,
                 [None, None],
+                empty_permanent_neighbour_retirements(),
             ));
         }
     }
@@ -4224,6 +4922,8 @@ mod tests {
             assert_eq!(self.current.get(), ModelNetworkNamespace::Parent);
             Ok(ModelDeletedTopology {
                 addressed: self.addressed.take(),
+                neighbour_retirements: [false; PERMANENT_NEIGHBOUR_COUNT],
+                neighbour_lineage_valid: [true; PERMANENT_NEIGHBOUR_COUNT],
                 route_retirements: [false; ENDPOINT_COUNT],
                 route_lineage_valid: [true; ENDPOINT_COUNT],
             })
@@ -4249,6 +4949,8 @@ mod tests {
 
     struct ModelDeletedTopology {
         addressed: Option<ModelActivationAddressedAuthority>,
+        neighbour_retirements: [bool; PERMANENT_NEIGHBOUR_COUNT],
+        neighbour_lineage_valid: [bool; PERMANENT_NEIGHBOUR_COUNT],
         route_retirements: [bool; ENDPOINT_COUNT],
         route_lineage_valid: [bool; ENDPOINT_COUNT],
     }
@@ -4258,6 +4960,8 @@ mod tests {
             formatter
                 .debug_struct("ModelDeletedTopology")
                 .field("addressed", &self.addressed.is_some())
+                .field("neighbour_retirements", &self.neighbour_retirements)
+                .field("neighbour_lineage_valid", &self.neighbour_lineage_valid)
                 .field("route_retirements", &self.route_retirements)
                 .field("route_lineage_valid", &self.route_lineage_valid)
                 .finish()
@@ -4275,6 +4979,11 @@ mod tests {
                 .expect("deleted topology must retain its addressed owner");
             if !proof_valid
                 || self
+                    .neighbour_retirements
+                    .iter()
+                    .zip(self.neighbour_lineage_valid)
+                    .any(|(armed, valid)| *armed && !valid)
+                || self
                     .route_retirements
                     .iter()
                     .zip(self.route_lineage_valid)
@@ -4289,6 +4998,16 @@ mod tests {
                 .as_mut()
                 .expect("deleted topology must retain its addressed owner");
             addressed.events.borrow_mut().push("prove pristine network");
+            for specification in FixedPermanentNeighbour::DELETE_ORDER {
+                let index = permanent_neighbour_index(specification);
+                if self.neighbour_retirements[index] {
+                    self.neighbour_retirements[index] = false;
+                    addressed
+                        .events
+                        .borrow_mut()
+                        .push(model_neighbour_retire_event(specification));
+                }
+            }
             for endpoint in REVERSE_NAMESPACE_VISIT_ORDER {
                 let index = endpoint.index();
                 if self.route_retirements[index] {
@@ -4482,6 +5201,13 @@ mod tests {
     }
 
     impl ModelRoutedTopology {
+        fn core(&self) -> &ModelActivationCore {
+            self.activated
+                .as_ref()
+                .and_then(|activated| activated.core.as_ref())
+                .expect("model routed topology must retain active authority")
+        }
+
         fn begin_retirement(mut self) -> ModelDeletedTopology {
             let mut deleted = self
                 .activated
@@ -4503,6 +5229,186 @@ mod tests {
                 drop(deleted);
             }
         }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ModelNeighbourInstallFailure {
+        BeforeMutation,
+        DeletionBound,
+    }
+
+    struct ModelPermanentNeighbours {
+        routed: Option<ModelRoutedTopology>,
+        neighbour_owners: [bool; PERMANENT_NEIGHBOUR_COUNT],
+    }
+
+    impl ModelPermanentNeighbours {
+        fn remove_permanent_neighbours(self) -> Result<ModelRoutedTopology, ModelDeletedTopology> {
+            self.remove_permanent_neighbours_with_failure(None)
+        }
+
+        fn remove_permanent_neighbours_with_failure(
+            mut self,
+            fail_at: Option<FixedPermanentNeighbour>,
+        ) -> Result<ModelRoutedTopology, ModelDeletedTopology> {
+            let routed = self
+                .routed
+                .take()
+                .expect("model neighbour topology must retain routed authority");
+            let mut retirements = [false; PERMANENT_NEIGHBOUR_COUNT];
+            let mut deletion_failed = false;
+            for specification in FixedPermanentNeighbour::DELETE_ORDER {
+                let index = permanent_neighbour_index(specification);
+                if self.neighbour_owners[index] {
+                    model_record_neighbour_event(
+                        &routed,
+                        specification,
+                        model_neighbour_delete_event(specification),
+                    );
+                    self.neighbour_owners[index] = false;
+                    if fail_at == Some(specification) {
+                        retirements[index] = true;
+                        deletion_failed = true;
+                    }
+                }
+            }
+            if deletion_failed {
+                let mut deleted = routed.begin_retirement();
+                deleted.neighbour_retirements = retirements;
+                Err(deleted)
+            } else {
+                Ok(routed)
+            }
+        }
+
+        fn begin_retirement(mut self) -> ModelDeletedTopology {
+            let routed = self
+                .routed
+                .take()
+                .expect("model neighbour topology must retain routed authority");
+            model_delete_neighbour_owners(&routed, &mut self.neighbour_owners);
+            routed.begin_retirement()
+        }
+    }
+
+    impl Drop for ModelPermanentNeighbours {
+        fn drop(&mut self) {
+            if let Some(routed) = self.routed.take() {
+                model_delete_neighbour_owners(&routed, &mut self.neighbour_owners);
+                drop(routed.begin_retirement());
+            }
+        }
+    }
+
+    const fn model_neighbour_install_event(specification: FixedPermanentNeighbour) -> &'static str {
+        match specification {
+            FixedPermanentNeighbour::ParentA => "install neighbour parent A",
+            FixedPermanentNeighbour::ParentB => "install neighbour parent B",
+            FixedPermanentNeighbour::EndpointA => "install neighbour endpoint A",
+            FixedPermanentNeighbour::EndpointB => "install neighbour endpoint B",
+        }
+    }
+
+    const fn model_neighbour_delete_event(specification: FixedPermanentNeighbour) -> &'static str {
+        match specification {
+            FixedPermanentNeighbour::ParentA => "delete neighbour parent A",
+            FixedPermanentNeighbour::ParentB => "delete neighbour parent B",
+            FixedPermanentNeighbour::EndpointA => "delete neighbour endpoint A",
+            FixedPermanentNeighbour::EndpointB => "delete neighbour endpoint B",
+        }
+    }
+
+    const fn model_neighbour_retire_event(specification: FixedPermanentNeighbour) -> &'static str {
+        match specification {
+            FixedPermanentNeighbour::ParentA => "retire neighbour parent A",
+            FixedPermanentNeighbour::ParentB => "retire neighbour parent B",
+            FixedPermanentNeighbour::EndpointA => "retire neighbour endpoint A",
+            FixedPermanentNeighbour::EndpointB => "retire neighbour endpoint B",
+        }
+    }
+
+    const fn model_neighbour_endpoint(
+        specification: FixedPermanentNeighbour,
+    ) -> Option<NamespaceEndpoint> {
+        match specification {
+            FixedPermanentNeighbour::ParentA | FixedPermanentNeighbour::ParentB => None,
+            FixedPermanentNeighbour::EndpointA => Some(NamespaceEndpoint::A),
+            FixedPermanentNeighbour::EndpointB => Some(NamespaceEndpoint::B),
+        }
+    }
+
+    fn model_record_neighbour_event(
+        routed: &ModelRoutedTopology,
+        specification: FixedPermanentNeighbour,
+        event: &'static str,
+    ) {
+        let events = Rc::clone(&routed.core().events);
+        let current = Rc::clone(&routed.core().current);
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        if let Some(endpoint) = model_neighbour_endpoint(specification) {
+            events.borrow_mut().push(model_enter_event(endpoint));
+            current.set(ModelNetworkNamespace::Endpoint(endpoint));
+            events.borrow_mut().push(event);
+            current.set(ModelNetworkNamespace::Parent);
+            events.borrow_mut().push(model_restore_event(endpoint));
+        } else {
+            events.borrow_mut().push(event);
+        }
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+    }
+
+    fn model_delete_neighbour_owners(
+        routed: &ModelRoutedTopology,
+        neighbour_owners: &mut [bool; PERMANENT_NEIGHBOUR_COUNT],
+    ) {
+        for specification in FixedPermanentNeighbour::DELETE_ORDER {
+            let index = permanent_neighbour_index(specification);
+            if neighbour_owners[index] {
+                model_record_neighbour_event(
+                    routed,
+                    specification,
+                    model_neighbour_delete_event(specification),
+                );
+                neighbour_owners[index] = false;
+            }
+        }
+    }
+
+    fn model_install_permanent_neighbours(
+        routed: ModelRoutedTopology,
+        fail_at: Option<(FixedPermanentNeighbour, ModelNeighbourInstallFailure)>,
+    ) -> Result<ModelPermanentNeighbours, (ModelNeighbourInstallFailure, ModelDeletedTopology)>
+    {
+        let mut neighbour_owners = [false; PERMANENT_NEIGHBOUR_COUNT];
+        let mut retirements = [false; PERMANENT_NEIGHBOUR_COUNT];
+        for specification in FixedPermanentNeighbour::INSTALL_ORDER {
+            let index = permanent_neighbour_index(specification);
+            model_record_neighbour_event(
+                &routed,
+                specification,
+                model_neighbour_install_event(specification),
+            );
+            let failure = fail_at
+                .filter(|(failed_specification, _)| *failed_specification == specification)
+                .map(|(_, failure)| failure);
+            match failure {
+                None => neighbour_owners[index] = true,
+                Some(ModelNeighbourInstallFailure::BeforeMutation) => {}
+                Some(ModelNeighbourInstallFailure::DeletionBound) => {
+                    retirements[index] = true;
+                }
+            }
+            if let Some(failure) = failure {
+                model_delete_neighbour_owners(&routed, &mut neighbour_owners);
+                let mut deleted = routed.begin_retirement();
+                deleted.neighbour_retirements = retirements;
+                return Err((failure, deleted));
+            }
+        }
+        Ok(ModelPermanentNeighbours {
+            routed: Some(routed),
+            neighbour_owners,
+        })
     }
 
     fn model_install_endpoint_routes(
@@ -4625,6 +5531,194 @@ mod tests {
             "release namespace pins",
             "namespace pins dropped",
         ]));
+    }
+
+    const MODEL_NEIGHBOUR_INSTALL_AND_DELETE_EVENTS: [&str; 16] = [
+        "install neighbour parent A",
+        "install neighbour parent B",
+        "enter endpoint A",
+        "install neighbour endpoint A",
+        "restore parent from endpoint A",
+        "enter endpoint B",
+        "install neighbour endpoint B",
+        "restore parent from endpoint B",
+        "enter endpoint B",
+        "delete neighbour endpoint B",
+        "restore parent from endpoint B",
+        "enter endpoint A",
+        "delete neighbour endpoint A",
+        "restore parent from endpoint A",
+        "delete neighbour parent B",
+        "delete neighbour parent A",
+    ];
+
+    const MODEL_NEIGHBOUR_DELETE_EVENTS: [&str; 8] = [
+        "enter endpoint B",
+        "delete neighbour endpoint B",
+        "restore parent from endpoint B",
+        "enter endpoint A",
+        "delete neighbour endpoint A",
+        "restore parent from endpoint A",
+        "delete neighbour parent B",
+        "delete neighbour parent A",
+    ];
+
+    #[test]
+    fn permanent_neighbour_state_returns_routed_authority_only_after_exact_reverse_delete() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+        let activated = model_complete_activation(&events, &current);
+        let routed = model_install_endpoint_routes(activated, None).expect("model routed topology");
+        events.borrow_mut().clear();
+
+        let neighbours = model_install_permanent_neighbours(routed, None)
+            .expect("model permanent-neighbour topology");
+        let routed = neighbours
+            .remove_permanent_neighbours()
+            .expect("explicit model neighbour removal");
+        assert_eq!(
+            events.borrow().as_slice(),
+            MODEL_NEIGHBOUR_INSTALL_AND_DELETE_EVENTS
+        );
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+
+        let neighbours = model_install_permanent_neighbours(routed, None)
+            .expect("reinstalled model permanent-neighbour topology");
+        events.borrow_mut().clear();
+        let mut deleted = neighbours.begin_retirement();
+        assert!(events.borrow().starts_with(&MODEL_NEIGHBOUR_DELETE_EVENTS));
+        assert_model_raw_retirement(&events.borrow());
+        let pins = deleted
+            .finish_after_pristine_network_proof(true)
+            .expect("finish generic model neighbour retirement");
+        drop(pins);
+        assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+    }
+
+    #[test]
+    fn permanent_neighbour_install_failures_clean_exact_owners_and_carry_ambiguity() {
+        for failed_specification in FixedPermanentNeighbour::INSTALL_ORDER {
+            for failure in [
+                ModelNeighbourInstallFailure::BeforeMutation,
+                ModelNeighbourInstallFailure::DeletionBound,
+            ] {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+                let activated = model_complete_activation(&events, &current);
+                let routed =
+                    model_install_endpoint_routes(activated, None).expect("model routed topology");
+                events.borrow_mut().clear();
+
+                let (observed_failure, mut deleted) = match model_install_permanent_neighbours(
+                    routed,
+                    Some((failed_specification, failure)),
+                ) {
+                    Ok(_) => panic!("model neighbour failure was accepted"),
+                    Err(failure) => failure,
+                };
+                assert_eq!(observed_failure, failure);
+                let failed_index = permanent_neighbour_index(failed_specification);
+                let mut expected_retirements = [false; PERMANENT_NEIGHBOUR_COUNT];
+                if failure == ModelNeighbourInstallFailure::DeletionBound {
+                    expected_retirements[failed_index] = true;
+                }
+                assert_eq!(deleted.neighbour_retirements, expected_retirements);
+                assert_eq!(deleted.route_retirements, [true; ENDPOINT_COUNT]);
+
+                let observed = events.borrow();
+                let first_pair_delete = observed
+                    .iter()
+                    .position(|event| *event == "delete pair B")
+                    .expect("raw pair retirement follows neighbour cleanup");
+                for specification in FixedPermanentNeighbour::DELETE_ORDER {
+                    let delete_event = model_neighbour_delete_event(specification);
+                    let delete_position = observed.iter().position(|event| *event == delete_event);
+                    if permanent_neighbour_index(specification) < failed_index {
+                        assert!(
+                            delete_position.is_some_and(|position| position < first_pair_delete),
+                            "installed neighbour was not explicitly deleted before pair retirement"
+                        );
+                    } else {
+                        assert!(delete_position.is_none());
+                    }
+                }
+                drop(observed);
+                assert_model_raw_retirement(&events.borrow());
+
+                let pins = deleted
+                    .finish_after_pristine_network_proof(true)
+                    .expect("finish failed-install model retirement");
+                let observed = events.borrow();
+                let retirement = observed
+                    .iter()
+                    .position(|event| *event == model_neighbour_retire_event(failed_specification));
+                if failure == ModelNeighbourInstallFailure::DeletionBound {
+                    let retirement = retirement.expect("ambiguous neighbour retirement");
+                    let first_route = observed
+                        .iter()
+                        .position(|event| *event == "retire route B")
+                        .expect("route B retirement");
+                    assert!(retirement < first_route);
+                } else {
+                    assert!(retirement.is_none());
+                }
+                drop(observed);
+                drop(pins);
+                assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+            }
+        }
+    }
+
+    #[test]
+    fn permanent_neighbour_delete_ambiguities_are_prevalidated_before_any_disarm() {
+        for failed_specification in FixedPermanentNeighbour::DELETE_ORDER {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
+            let activated = model_complete_activation(&events, &current);
+            let routed =
+                model_install_endpoint_routes(activated, None).expect("model routed topology");
+            let neighbours = model_install_permanent_neighbours(routed, None)
+                .expect("model permanent-neighbour topology");
+            events.borrow_mut().clear();
+
+            let mut deleted = match neighbours
+                .remove_permanent_neighbours_with_failure(Some(failed_specification))
+            {
+                Ok(_) => panic!("ambiguous model neighbour deletion returned routed authority"),
+                Err(deleted) => deleted,
+            };
+            let failed_index = permanent_neighbour_index(failed_specification);
+            let mut expected_retirements = [false; PERMANENT_NEIGHBOUR_COUNT];
+            expected_retirements[failed_index] = true;
+            assert_eq!(deleted.neighbour_retirements, expected_retirements);
+            assert!(events.borrow().starts_with(&MODEL_NEIGHBOUR_DELETE_EVENTS));
+            assert_model_raw_retirement(&events.borrow());
+
+            deleted.neighbour_lineage_valid[failed_index] = false;
+            let event_count_before_failed_proof = events.borrow().len();
+            assert!(deleted.finish_after_pristine_network_proof(true).is_err());
+            assert_eq!(deleted.neighbour_retirements, expected_retirements);
+            assert_eq!(deleted.route_retirements, [true; ENDPOINT_COUNT]);
+            assert_eq!(events.borrow().len(), event_count_before_failed_proof);
+
+            deleted.neighbour_lineage_valid[failed_index] = true;
+            let pins = deleted
+                .finish_after_pristine_network_proof(true)
+                .expect("finish valid neighbour deletion retirement");
+            let observed = events.borrow();
+            let neighbour_retirement = observed
+                .iter()
+                .position(|event| *event == model_neighbour_retire_event(failed_specification))
+                .expect("ambiguous neighbour retirement");
+            let route_b = observed
+                .iter()
+                .position(|event| *event == "retire route B")
+                .expect("route B retirement");
+            assert!(neighbour_retirement < route_b);
+            drop(observed);
+            drop(pins);
+            assert_eq!(current.get(), ModelNetworkNamespace::Parent);
+        }
     }
 
     #[test]

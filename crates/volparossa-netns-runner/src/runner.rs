@@ -57,7 +57,7 @@ pub enum LifecycleOutcome {
     BlockedAtPidOneProof,
     /// PID 1 was proven, but kernel policy denied one fixed private-mount operation.
     BlockedAtPrivateMountSetup,
-    /// Forwarding, the fixed policy, and endpoint routes were established and exactly retired.
+    /// Policy, routes, and four permanent neighbours were established and exactly retired.
     BlockedAfterForwardPolicyTeardown,
     /// A managed outer signal triggered bounded fail-closed launcher containment.
     BlockedByManagedSignal,
@@ -114,8 +114,8 @@ pub enum RunnerError {
     /// One fixed private-mount operation or its direct kernel proof failed.
     #[error("private-mount setup or proof failed: {0}")]
     PrivateMount(#[source] io::Error),
-    /// The fixed endpoint-route and forward-policy transaction failed.
-    #[error("fixed forward-policy installation or teardown failed: {0}")]
+    /// The fixed endpoint-route, permanent-neighbour, or forward-policy transaction failed.
+    #[error("fixed topology or forward-policy installation or teardown failed: {0}")]
     ForwardPolicy(#[source] io::Error),
     /// Fixed managed-signal setup, observation, or quiescence proof failed.
     #[error("fixed signal supervision failed: {0}")]
@@ -1006,15 +1006,18 @@ fn finish_pid_one(
 /// forwarding record, activates all four ends, and re-proves the carrier-up
 /// links, `noqueue` qdiscs, and complete kernel-owned route side effects. It
 /// installs and exactly observes the two fixed main-table static endpoint `/32`
-/// routes while the policy remains exact. It then directly deletes veth B
-/// followed by A as the sole route removal, restores the original forwarding
-/// record, and proves all three namespaces byte-exactly equal to their retained
+/// routes while the policy remains exact. It installs and semantically proves
+/// exactly four permanent neighbours, explicitly removes them in reverse, and
+/// proves restoration of the routed barrier before directly deleting veth B
+/// followed by A as the sole route removal. It restores the original forwarding
+/// record and proves all three namespaces exactly equal to their retained
 /// enumerated network baselines. Only then does it remove the policy, prove
-/// semantic emptiness, and retire the still-armed route, address, and pair
-/// owners. It reverses both pins and every private-run creation and reports the
-/// internal rollback checkpoint. Only after the outer independently
-/// re-proves empty private mounts does PID 1 consume pidfd-delivered TERM and
-/// report the affine observation over the launcher-private control channel. The
+/// semantic emptiness, and retire the still-armed route, neighbour, address,
+/// and pair authorities. It reverses both pins and every private-run creation
+/// and reports the internal rollback checkpoint. Only after the outer
+/// independently re-proves empty private mounts does PID 1 consume
+/// pidfd-delivered TERM and report the affine observation over the
+/// launcher-private control channel. The
 /// final EOF is post-`GO` and therefore remains cleanup-required.
 #[doc(hidden)]
 #[must_use]
@@ -1312,6 +1315,18 @@ fn complete_fixed_forward_policy_teardown(
             }
         };
     let (routed, routed_proof) = match activated.install_endpoint_routes(active_proof) {
+        Ok(result) => result,
+        Err(failure) => {
+            return recover_failed_forward_policy_transition(failure, endpoint_baselines);
+        }
+    };
+    let (neighbours, neighbour_proof) = match routed.install_permanent_neighbours(routed_proof) {
+        Ok(result) => result,
+        Err(failure) => {
+            return recover_failed_forward_policy_transition(failure, endpoint_baselines);
+        }
+    };
+    let (routed, routed_proof) = match neighbours.remove_permanent_neighbours(neighbour_proof) {
         Ok(result) => result,
         Err(failure) => {
             return recover_failed_forward_policy_transition(failure, endpoint_baselines);

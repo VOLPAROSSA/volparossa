@@ -49,22 +49,23 @@ test-package-licenses:
 test-netns:
     ./tests/netns/run-topology.sh --preview --only all
 
-test-netns-counted-forward-policy-proof:
+test-netns-permanent-neighbour-proof:
     cargo build --locked --target x86_64-unknown-linux-gnu \
-        --target-dir target/counted-forward-policy-proof -p volparossa-netns-runner
+        --target-dir target/permanent-neighbour-proof -p volparossa-netns-runner
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
-        ./tests/netns/require-endpoint-route-teardown-proof.sh
+        ./tests/netns/require-permanent-neighbour-proof.sh
 
-# Backwards-compatible names for the now-stronger no-packet counted-policy proof.
-test-netns-ipv4-forwarding-runtime-proof: test-netns-counted-forward-policy-proof
-test-netns-forward-policy-teardown-proof: test-netns-counted-forward-policy-proof
-test-netns-endpoint-route-teardown-proof: test-netns-forward-policy-teardown-proof
-test-netns-link-activation-teardown-proof: test-netns-forward-policy-teardown-proof
-test-netns-ipv4-address-rollback-proof: test-netns-forward-policy-teardown-proof
-test-netns-veth-rollback-proof: test-netns-forward-policy-teardown-proof
-test-netns-live-nsfs-proof: test-netns-forward-policy-teardown-proof
-test-netns-authorized-private-run-proof: test-netns-forward-policy-teardown-proof
-test-netns-bootstrap-ready-proof: test-netns-forward-policy-teardown-proof
+# Backwards-compatible names for the now-stronger no-packet permanent-neighbour proof.
+test-netns-counted-forward-policy-proof: test-netns-permanent-neighbour-proof
+test-netns-ipv4-forwarding-runtime-proof: test-netns-permanent-neighbour-proof
+test-netns-forward-policy-teardown-proof: test-netns-permanent-neighbour-proof
+test-netns-endpoint-route-teardown-proof: test-netns-permanent-neighbour-proof
+test-netns-link-activation-teardown-proof: test-netns-permanent-neighbour-proof
+test-netns-ipv4-address-rollback-proof: test-netns-permanent-neighbour-proof
+test-netns-veth-rollback-proof: test-netns-permanent-neighbour-proof
+test-netns-live-nsfs-proof: test-netns-permanent-neighbour-proof
+test-netns-authorized-private-run-proof: test-netns-permanent-neighbour-proof
+test-netns-bootstrap-ready-proof: test-netns-permanent-neighbour-proof
 
 test-mptcp:
     ./tests/netns/run-topology.sh --preview --only mptcp

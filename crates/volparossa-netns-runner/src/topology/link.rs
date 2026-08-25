@@ -334,6 +334,106 @@ pub(super) struct FixedEndpointRoutePairLineage {
     pairs: [PairBinding; 2],
 }
 
+/// Compact retained provenance for one activated pair used by the fixed
+/// permanent-neighbour transaction.
+///
+/// Only [`AllLinksUp`] can mint this value, and only after the supplied affine
+/// pair owner matches its exact retained pair binding. The endpoint MAC must
+/// already have been pinned by the all-UP barrier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FixedPermanentNeighbourPairLineage {
+    parent_namespace: NamespaceIdentity,
+    pair: PairBinding,
+}
+
+impl FixedPermanentNeighbourPairLineage {
+    pub(super) fn endpoint(&self) -> FixedVethEndpoint {
+        self.pair.endpoint
+    }
+
+    pub(super) fn parent_name(&self) -> &str {
+        &self.pair.parent_name
+    }
+
+    pub(super) fn parent_ifindex(&self) -> u32 {
+        self.pair.parent_ifindex
+    }
+
+    pub(super) fn endpoint_ifindex(&self) -> u32 {
+        self.pair.peer_ifindex
+    }
+
+    pub(super) fn parent_namespace_parts(&self) -> (u64, u64) {
+        (self.parent_namespace.device, self.parent_namespace.inode)
+    }
+
+    pub(super) fn endpoint_namespace_parts(&self) -> (u64, u64) {
+        (
+            self.pair.target_namespace.device,
+            self.pair.target_namespace.inode,
+        )
+    }
+
+    pub(super) fn parent_mac(&self) -> [u8; ETHERNET_ADDRESS_BYTES] {
+        self.pair.parent_mac
+    }
+
+    pub(super) fn endpoint_mac(
+        &self,
+    ) -> Result<[u8; ETHERNET_ADDRESS_BYTES], FixedLinkOperationError> {
+        self.pair
+            .endpoint_mac
+            .ok_or(FixedLinkOperationError::Unsafe(
+                "all-UP pair lineage lacks a pinned endpoint MAC",
+            ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_test_parts(endpoint: FixedVethEndpoint) -> Self {
+        let (parent_ifindex, target_inode, parent_mac, endpoint_mac) = match endpoint {
+            FixedVethEndpoint::A => (2, 20, [0x02, 1, 2, 3, 4, 5], [0x02, 6, 7, 8, 9, 10]),
+            FixedVethEndpoint::B => (
+                4,
+                30,
+                [0x02, 11, 12, 13, 14, 15],
+                [0x02, 16, 17, 18, 19, 20],
+            ),
+        };
+        Self {
+            parent_namespace: NamespaceIdentity {
+                device: 1,
+                inode: 10,
+            },
+            pair: PairBinding {
+                endpoint,
+                parent_name: match endpoint {
+                    FixedVethEndpoint::A => "vpa01234567",
+                    FixedVethEndpoint::B => "vpb01234567",
+                }
+                .to_owned(),
+                parent_ifindex,
+                peer_ifindex: if endpoint == FixedVethEndpoint::A {
+                    3
+                } else {
+                    5
+                },
+                target_namespace: NamespaceIdentity {
+                    device: if endpoint == FixedVethEndpoint::A {
+                        2
+                    } else {
+                        3
+                    },
+                    inode: target_inode,
+                },
+                parent_peer_netnsid: i32::from(endpoint == FixedVethEndpoint::B),
+                parent_mac,
+                endpoint_mac: Some(endpoint_mac),
+                endpoint_peer_netnsid: Some(0),
+            },
+        }
+    }
+}
+
 impl FixedEndpointRoutePairLineage {
     #[cfg(test)]
     pub(super) fn from_test_parts(local_endpoint: FixedVethEndpoint) -> Self {
@@ -652,6 +752,30 @@ impl AllLinksUp {
         )
     }
 
+    /// Bind one caller-retained pair owner to its exact all-UP MAC, namespace,
+    /// and interface lineage for permanent-neighbour derivation.
+    pub(super) fn bind_permanent_neighbour_pair(
+        &self,
+        pair: &FixedVethPair,
+    ) -> Result<FixedPermanentNeighbourPairLineage, FixedLinkOperationError> {
+        let core = self.core();
+        core.require_all_up()?;
+        core.parent.verify()?;
+        let index = endpoint_index(pair.endpoint());
+        let retained = &core.pairs[index];
+        if PairAuthorityIdentity::from_pair(pair) != PairAuthorityIdentity::from_binding(retained)
+            || retained.endpoint_mac.is_none()
+        {
+            return Err(FixedLinkOperationError::Unsafe(
+                "all-UP authority does not bind the permanent-neighbour pair argument",
+            ));
+        }
+        Ok(FixedPermanentNeighbourPairLineage {
+            parent_namespace: core.parent.identity,
+            pair: retained.clone(),
+        })
+    }
+
     /// Consume the activated state through mandatory B-then-A deletion.
     pub(crate) fn into_retirement(mut self) -> FixedLinkRetirement {
         FixedLinkRetirement::Deleted(self.take_core().delete_into_proof())
@@ -778,6 +902,14 @@ impl FixedPairAbsenceProof {
 
     pub(super) fn validates_endpoint_route(&self, lineage: &FixedEndpointRoutePairLineage) -> bool {
         self.parent_namespace == lineage.parent_namespace && self.pairs == lineage.pairs
+    }
+
+    pub(super) fn validates_permanent_neighbour(
+        &self,
+        lineage: &FixedPermanentNeighbourPairLineage,
+    ) -> bool {
+        self.parent_namespace == lineage.parent_namespace
+            && self.pairs[endpoint_index(lineage.pair.endpoint)] == lineage.pair
     }
 }
 
@@ -3401,6 +3533,54 @@ mod tests {
         proof.pairs[1].peer_ifindex = proof.pairs[0].peer_ifindex;
         let lineage = endpoint_route_lineage(&proof, FixedVethEndpoint::A);
         assert!(proof.validates_endpoint_route(&lineage));
+    }
+
+    #[test]
+    fn permanent_neighbour_lineage_pins_each_exact_pair_and_mac_snapshot() {
+        let proof = proof_fixture();
+        for endpoint in [FixedVethEndpoint::A, FixedVethEndpoint::B] {
+            let lineage = FixedPermanentNeighbourPairLineage::from_test_parts(endpoint);
+            let pair = &proof.pairs[endpoint_index(endpoint)];
+            assert_eq!(lineage.endpoint(), endpoint);
+            assert_eq!(lineage.parent_name(), pair.parent_name);
+            assert_eq!(lineage.parent_ifindex(), pair.parent_ifindex);
+            assert_eq!(lineage.endpoint_ifindex(), pair.peer_ifindex);
+            assert_eq!(lineage.parent_mac(), pair.parent_mac);
+            assert_eq!(
+                lineage.endpoint_mac().expect("endpoint MAC"),
+                pair.endpoint_mac.unwrap()
+            );
+            assert!(proof.validates_permanent_neighbour(&lineage));
+        }
+    }
+
+    #[test]
+    fn permanent_neighbour_retirement_rejects_changed_pair_or_parent_lineage() {
+        let proof = proof_fixture();
+        let exact = FixedPermanentNeighbourPairLineage::from_test_parts(FixedVethEndpoint::A);
+        let mut variants = Vec::new();
+
+        let mut changed = exact.clone();
+        changed.parent_namespace.inode += 1;
+        variants.push(changed);
+        let mut changed = exact.clone();
+        changed.pair.parent_name = "wrong".to_owned();
+        variants.push(changed);
+        let mut changed = exact.clone();
+        changed.pair.peer_ifindex += 1;
+        variants.push(changed);
+        let mut changed = exact.clone();
+        changed.pair.parent_mac[1] ^= 1;
+        variants.push(changed);
+        let mut changed = exact;
+        changed.pair.endpoint_mac = Some([0x02, 99, 98, 97, 96, 95]);
+        variants.push(changed);
+
+        assert!(
+            variants
+                .iter()
+                .all(|lineage| !proof.validates_permanent_neighbour(lineage))
+        );
     }
 
     #[test]

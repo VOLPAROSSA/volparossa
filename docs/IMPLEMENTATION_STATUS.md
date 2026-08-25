@@ -529,11 +529,28 @@ Last updated: 2026-08-25
   destination, gateway, interface index, and both-pair lineage from retained authority. A fresh
   dump proves the parent equal to its active baseline and each endpoint equal except for its one
   authorized route; a non-exact sibling or any extra object fails closed. Route authority remains
-  deletion-bound after a possibly sent request, including lost or ambiguous ACK/readback. No
-  `RTM_DELROUTE` request or encoder exists. PID 1 directly deletes veth B followed by A as the sole
-  route-removal mechanism. It does not attempt to restore link-down or EUI-64 state and does not run
-  ordinary per-address rollback after the first possibly-sent link mutation. Both route owners,
-  all four address owners, and both pair owners remain armed. After deleting both pairs, PID 1
+  deletion-bound after a possibly sent request, including lost or ambiguous ACK/readback. PID 1
+  next installs exactly four affine IPv4 neighbours through bounded raw `RTM_NEWNEIGH` requests,
+  each with `NLM_F_REQUEST|NLM_F_ACK|NLM_F_CREATE|NLM_F_EXCL`, `AF_INET`, `NUD_PERMANENT`,
+  unicast type, flags zero, and exactly `NDA_DST`, `NDA_LLADDR`, and
+  `NDA_PROTOCOL=RTPROT_STATIC`. Their canonical install order is
+  parent A, parent B, endpoint A, endpoint B. The two parent records map each fixed endpoint address
+  to its endpoint MAC; the two endpoint records map each fixed parent gateway to its parent MAC.
+  Every address, MAC, interface index, namespace identity, and route relationship is derived from
+  retained affine authority rather than caller input. Strict semantic parent/A/B snapshots require
+  exactly those four records, `NDA_PROBES=0`, zero proxy-neighbour records, and no other
+  configuration delta. They validate the exact `NDA_CACHEINFO` structure but exclude only its
+  volatile telemetry values from equality; unknown, duplicate, malformed, non-permanent, or
+  conflicting neighbour records fail closed. The generation-2 policy is freshly re-proved with all
+  three counters still exactly zero around installation. Before deleting either veth, PID 1 sends
+  explicit bounded `RTM_DELNEIGH` requests in reverse endpoint B, endpoint A, parent B, parent A
+  order, reconciles every possibly sent request to exact absence, proves the pre-neighbour routed
+  state restored, and again re-proves the zero-counter policy. It never relies on link deletion to
+  remove a neighbour. No `RTM_DELROUTE` request or encoder exists. PID 1 then directly deletes veth
+  B followed by A as the sole route-removal mechanism. It does not attempt to restore link-down or
+  EUI-64 state and does not run ordinary per-address rollback after the first possibly-sent link
+  mutation. Both route owners, all four address owners, and both pair owners remain armed. After
+  deleting both pairs, PID 1
   restores the exact retained original `ip_forward` record while the generation-2 policy remains
   active: an original `0\n` causes one bounded two-byte restore write, while an original `1\n`
   requires no write. The retained parent and endpoint baselines then prove all three namespaces
@@ -575,7 +592,9 @@ Last updated: 2026-08-25
   all ends remain down, the separate all-addrgen-NONE barrier, atomic exact generation-2 parent
   FORWARD policy installation, exact carrier-up activation of all four ends with `noqueue` and the
   complete kernel-created route set, both exact static endpoint routes and their exact parent/A/B
-  observation, direct veth B/A deletion while that policy remains exact, complete pristine reverse
+  observation, exactly four semantically proved permanent neighbours with zero probes and zero
+  proxy-neighbour records, their explicit canonical reverse removal back to the exact routed state,
+  direct veth B/A deletion while that policy remains exact, complete pristine reverse
   proof under generation 2 after exact restoration of the original parent `ip_forward` record,
   handle-only policy deletion, semantic-empty generation 3, final
   parent/endpoint reproof before route/address/pair owner retirement, the
@@ -583,12 +602,13 @@ Last updated: 2026-08-25
   the post-rollback empty-`/run` proof, the TERM/EOF/signal chain, and exact PID-1 exit/reap. The only
   transient topology is the two otherwise-pristine network namespace objects, their kernel-default
   loopback/rules, their nsfs mounts, two fixed veth pairs, four fixed IPv4 addresses, four active
-  link ends, four `noqueue` qdiscs, fourteen associated IPv4 routes, four IPv6 multicast routes, and
-  the one transient exact `inet` policy table/chain/three-rule counted set. The parent namespace's fixed
+  link ends, four `noqueue` qdiscs, fourteen associated IPv4 routes, four IPv6 multicast routes,
+  four affine `NUD_PERMANENT` IPv4 neighbours, and the one transient exact `inet`
+  policy table/chain/three-rule counted set. The parent namespace's fixed
   `ip_forward` record is conditionally changed from `0\n` to `1\n` and restored to `0\n`; an
   inherited `1\n` takes the no-write path throughout. The outer host record remains byte-identical.
   This
-  slice creates no packet-capture or probe evidence and makes no packet-absence, counter-stability,
+  slice creates no packet or probe evidence and makes no packet-absence or counter-stability,
   dataplane, or topology-readiness claim. Repeated portable tests prove exact
   outer-launcher reaping, unchanged outer namespace/mount observations, and an unchanged canonical
   outer fingerprint of stable link fields,
@@ -616,13 +636,14 @@ Last updated: 2026-08-25
   parent-death/crash-chain cleanup, or A14. The production ownership and namespace modules and their
   affine `PristineRun`/`AuthorizedPrivateRun`/`AuthorizedNamespacePins`/`AuthorizedVethPairs` and
   borrowed `AuthorizedIpv4Addresses`, `AuthorizedIpv4AddrgenNone`,
-  `AuthorizedActivatedTopology`, `AuthorizedEndpointRoutes`, and `AuthorizedDeletedTopology`
+  `AuthorizedActivatedTopology`, `AuthorizedEndpointRoutes`, `AuthorizedPermanentNeighbours`, and
+  `AuthorizedDeletedTopology`
   typestates plus the affine initial/active/retired nftables authorities, the enabled/restored/
   indeterminate IPv4-forwarding authorities, and
   `PolicyBoundPrivateMounts` are active in the runtime path for the
   descriptor-relative private-root, empty-slot,
   two-pin, two-veth, four-address, counted forward-policy, conditional parent-forwarding enable/restore,
-  link-activation, endpoint-route, deletion-only link teardown, and exact policy-retirement
+  link-activation, endpoint-route, permanent-neighbour, deletion-only link teardown, and exact policy-retirement
   transaction described above. A provisional
   containment guard is installed immediately after each exclusive creation. Within this fixed
   runner's one-PID-1-task and trusted-launcher scope, an inotify witness rejects delete, move, or
@@ -642,7 +663,7 @@ Last updated: 2026-08-25
   fixtures. Manifest publication remains test-only: production does not create or publish an
   ownership manifest. The runtime does construct and fully reverse two transient live nsfs pins,
   two fixed veth pairs, four fixed IPv4 addresses, four active link ends, two explicit endpoint
-  routes, the exact kernel-created qdisc and route side effects, and the exact transient
+  routes, four explicitly removed permanent neighbours, the exact kernel-created qdisc and route side effects, and the exact transient
   zero-counter generation-2 nftables policy described above, but proves direct link deletion, handle-only policy
   retirement, and
   ordinary unmount only within its fixed one-PID-1-task and
@@ -651,12 +672,15 @@ Last updated: 2026-08-25
   `/proc/thread-self/fd/<fd>/<leaf>` path, with an identity verification before ordinary unmount;
   the intervening path lookup means this is not a race-free unmount proof against an excluded
   hostile mapped-same-UID actor. A production helper must provide root-owned exclusive mutation
-  authority before reusing it. The link-activation, exact endpoint-route, exact nftables-policy,
+  authority before reusing it. The link-activation, exact endpoint-route, exact permanent-neighbour,
+  exact nftables-policy,
   and fixed parent-namespace `ip_forward` writers are fixed and bounded; no general sysctl, general
-  nftables, ownership-manifest, packet, probe, or route-deletion mutation API exists. The only route objects
+  nftables, ownership-manifest, packet, probe, or general route/neighbour mutation API exists. The only route objects
   admitted in this slice are the exact kernel-created local,
   connected, high-broadcast, and IPv6 multicast routes coupled to the fixed address and activation
-  transaction plus the two exact static `/32` endpoint routes described above. The slice
+  transaction plus the two exact static `/32` endpoint routes described above. The only ordinary
+  neighbour objects admitted are the four exact affine `NUD_PERMANENT` IPv4 records described
+  above; proxy neighbours remain forbidden. The slice
   still has no general
   root-filesystem or supplementary-group isolation,
   `TOPOLOGY_READY`, `STOP`, `FINISHED`, configured dataplane-topology mutation, crash-cleanup evidence,
@@ -664,7 +688,7 @@ Last updated: 2026-08-25
   not forced-crash cleanup or A14, A15, or acceptance evidence. `BOOTSTRAP_READY` remains
   readiness evidence; `GO` authorizes only this bounded private-root, two-pin, two-veth,
   four-address, counted forward-policy, conditional forwarding enable/restore, link-activation,
-  endpoint-route, and policy-teardown transaction,
+  endpoint-route, permanent-neighbour, and policy-teardown transaction,
   and `MUTATION_ROLLBACK_COMPLETE` is an
   internal containment checkpoint rather than cleanup or acceptance evidence.
 - [ ] Integration run performs real discovery, advertisement, selection, reservation, WireGuard, MPTCP, MPQUIC, TCP, UDP, and HTTP/3 operations.

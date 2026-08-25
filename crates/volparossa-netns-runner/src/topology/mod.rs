@@ -1,6 +1,7 @@
 pub(crate) mod ipv4;
 pub(crate) mod link;
 pub(crate) mod namespaces;
+pub(crate) mod neighbour;
 pub(crate) mod ownership;
 pub(crate) mod route;
 pub(crate) mod veth;
