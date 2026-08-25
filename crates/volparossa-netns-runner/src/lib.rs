@@ -28,10 +28,19 @@
 //! exact carrier-up links, `noqueue` qdiscs, absence of IPv6 addresses, and
 //! kernel-owned local, connected, high-broadcast, and IPv6 multicast routes,
 //! and exactly observes the two fixed main-table static endpoint `/32` routes.
-//! That policy remains exact while PID 1 directly deletes veth B followed by A
-//! as the only route-removal mechanism. All route, address, and pair owners
-//! remain armed while the parent and both endpoints are proven byte-exactly
-//! equal to their retained enumerated network baselines under generation two.
+//! It next installs exactly four affine IPv4 `NUD_PERMANENT` neighbours in
+//! canonical parent A/B then endpoint A/B order. Parent entries map each fixed
+//! endpoint address to its endpoint MAC; endpoint entries map each fixed parent
+//! gateway to its parent MAC. Semantic parent/A/B snapshots require exactly
+//! those records, zero probes, and zero proxy neighbours while excluding only
+//! validated volatile `NDA_CACHEINFO` telemetry from equality. Generation two
+//! and all three zero counters are freshly re-proved around the transition.
+//! PID 1 explicitly removes the four neighbours in reverse endpoint B/A then
+//! parent B/A order, proves restoration of the exact routed state, and only
+//! then directly deletes veth B followed by A as the route-removal mechanism.
+//! All route, address, and pair owners remain armed while the parent and both
+//! endpoints are proven exactly equal to their retained enumerated network
+//! baselines under generation two.
 //! PID 1 deletes only the freshly observed table handle, proves a semantically
 //! empty generation three, and repeats the final parent/endpoint proof. Only
 //! then are those affine lower owners retired. It ordinarily unmounts nsfs B
@@ -40,11 +49,12 @@
 //! internal rollback checkpoint. The
 //! outer then independently re-proves empty private mounts before delivering
 //! TERM through a retained pidfd. PID 1 consumes it through a fixed `signalfd`
-//! before exact PID-1 and launcher reaping. The slice never writes the
-//! inherited canonical IPv4-forwarding setting. It produces no packet-capture
-//! or probe evidence, ownership manifest, dataplane topology,
+//! before exact PID-1 and launcher reaping. The outer host's inherited
+//! canonical IPv4-forwarding setting remains byte-identical. The slice
+//! produces no packet, packet-absence, packet-capture, counter-stability, or
+//! probe evidence, ownership manifest, dataplane topology,
 //! `TOPOLOGY_READY`, or acceptance evidence; its exact policy and explicit
-//! endpoint routes are configuration proof, not production route
+//! endpoint routes and neighbours are configuration proof, not production route
 //! orchestration or packet-behaviour proof.
 
 #![cfg(target_os = "linux")]

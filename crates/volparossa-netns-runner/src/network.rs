@@ -67,7 +67,12 @@ const IFINFO_LEN: usize = 16;
 const IFADDR_LEN: usize = 8;
 const RTMSG_LEN: usize = 12;
 const NDMSG_LEN: usize = 12;
+const NDMSG_PAD1_OFFSET: usize = 1;
+const NDMSG_PAD2_OFFSET: usize = 2;
+const NDMSG_IFINDEX_OFFSET: usize = 4;
+const NDMSG_STATE_OFFSET: usize = 8;
 const NDMSG_FLAGS_OFFSET: usize = 10;
+const NDMSG_TYPE_OFFSET: usize = 11;
 const NHMSG_LEN: usize = 8;
 const FIB_RULE_HEADER_LEN: usize = 12;
 const TCMSG_LEN: usize = 20;
@@ -250,6 +255,13 @@ const FRA_SUPPRESS_PREFIXLEN: u16 = 14;
 const FRA_TABLE: u16 = 15;
 const FRA_PROTOCOL: u16 = 21;
 
+const NDA_DST: u16 = 1;
+const NDA_LLADDR: u16 = 2;
+const NDA_CACHEINFO: u16 = 3;
+const NDA_PROBES: u16 = 4;
+const NDA_PROTOCOL: u16 = 12;
+const NDA_CACHEINFO_LEN: usize = 16;
+
 const RT_TABLE_DEFAULT: u32 = 253;
 const RT_TABLE_MAIN: u32 = 254;
 const RT_TABLE_LOCAL: u32 = 255;
@@ -265,6 +277,7 @@ const RTN_MULTICAST: u8 = 5;
 const IPV6_DEFAULT_PREFERENCE: u8 = 0;
 const FR_ACT_TO_TBL: u8 = 1;
 const NTF_PROXY: u8 = 0x08;
+const NUD_PERMANENT: u16 = 0x80;
 
 const FIXED_IPV4_PREFIX_LENGTH: u8 = 30;
 const FIXED_IPV4_ADDRESSES: [[u8; 4]; 4] = [
@@ -304,6 +317,9 @@ pub(crate) enum NetworkError {
     /// A caller supplied an endpoint route outside the fixed A/B route set.
     #[error("fixed endpoint IPv4 route expectation was invalid")]
     InvalidIpv4RouteExpectation,
+    /// A permanent neighbour expectation did not derive from the routed A/B lineage.
+    #[error("fixed IPv4 permanent-neighbour expectation was invalid")]
+    InvalidIpv4NeighbourExpectation,
     /// The expected destination existed with non-exact route semantics.
     #[error("fixed endpoint IPv4 route destination had a conflicting route")]
     ConflictingIpv4EndpointRoute,
@@ -629,6 +645,53 @@ pub(crate) struct ExactIpv4EndpointRouteEndpointObservation {
     link: VethLinkObservation,
     address: ExpectedIpv4Address,
     route: ExpectedIpv4EndpointRoute,
+    namespace: NetworkNamespaceIdentity,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExpectedIpv4PermanentNeighbour {
+    namespace: Option<NetworkNamespaceIdentity>,
+    ifindex: u32,
+    destination: [u8; 4],
+    link_layer_address: [u8; ETHERNET_ADDRESS_BYTES],
+}
+
+/// The sole four permanent-neighbour records derivable from the routed A/B lineage.
+///
+/// The parent owns two records and each endpoint owns one. All interface
+/// indices, IPv4 destinations, Ethernet addresses, and endpoint namespace
+/// identities come from the independent routed observations; callers cannot
+/// construct or alter this value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExpectedIpv4PermanentNeighbours {
+    parent: [ExpectedIpv4PermanentNeighbour; 2],
+    endpoints: [ExpectedIpv4PermanentNeighbour; 2],
+}
+
+/// Exact parent proof after both fixed ordinary permanent neighbours exist.
+///
+/// This is configuration evidence only. Volatile `NDA_CACHEINFO` telemetry is
+/// structurally validated but is not packet, forwarding, or readiness proof.
+pub(crate) struct ExactIpv4PermanentNeighbourParentObservation {
+    routed: RtnlProcNetworkBaseline,
+    active: RtnlProcNetworkBaseline,
+    links: [VethLinkObservation; 2],
+    neighbours: [ExpectedIpv4PermanentNeighbour; 2],
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Exact endpoint proof after its one fixed ordinary permanent neighbour exists.
+///
+/// This is configuration evidence only. Volatile `NDA_CACHEINFO` telemetry is
+/// structurally validated but is not packet, forwarding, or readiness proof.
+pub(crate) struct ExactIpv4PermanentNeighbourEndpointObservation {
+    routed: PreGoNetworkBaseline,
+    active: PreGoNetworkBaseline,
+    link: VethLinkObservation,
+    address: ExpectedIpv4Address,
+    route: ExpectedIpv4EndpointRoute,
+    neighbour: ExpectedIpv4PermanentNeighbour,
     namespace: NetworkNamespaceIdentity,
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -1718,7 +1781,7 @@ impl ExactActivatedIpv4EndpointObservation {
 }
 
 impl ExactIpv4EndpointRouteParentObservation {
-    /// Reobserve and require exact equality with the retained activated parent.
+    /// Reobserve and require exact semantic equality with the retained activated parent.
     pub(crate) fn verify<RunState>(
         &self,
         mounts: &PrivateMounts<RunState>,
@@ -1728,7 +1791,7 @@ impl ExactIpv4EndpointRouteParentObservation {
 }
 
 impl ExactIpv4EndpointRouteEndpointObservation {
-    /// Reobserve and require exact equality with the retained routed endpoint.
+    /// Reobserve and require exact semantic equality with the retained routed endpoint.
     pub(crate) fn verify<RunState>(
         &self,
         mounts: &PrivateMounts<RunState>,
@@ -1736,6 +1799,138 @@ impl ExactIpv4EndpointRouteEndpointObservation {
         require_current_network_namespace(self.namespace)?;
         require_current_stable_baseline(mounts, &self.active)?;
         require_current_network_namespace(self.namespace)
+    }
+
+    /// Consume the routed observation after proving its one exact permanent neighbour.
+    pub(crate) fn observe_exact_ipv4_permanent_neighbour_endpoint<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        expected: &ExpectedIpv4PermanentNeighbours,
+        index: usize,
+    ) -> Result<ExactIpv4PermanentNeighbourEndpointObservation, NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        let expected = expected
+            .endpoints
+            .get(index)
+            .ok_or(NetworkError::InvalidIpv4NeighbourExpectation)?;
+        require_endpoint_permanent_neighbour_expectation(expected, &self)?;
+        let (active, ()) = collect_exact_stable_network_delta(mounts, |active| {
+            require_current_network_namespace(self.namespace)?;
+            verify_exact_endpoint_ipv4_permanent_neighbour_delta(&self.active, active, expected)
+        })?;
+        require_current_network_namespace(self.namespace)?;
+        Ok(ExactIpv4PermanentNeighbourEndpointObservation {
+            routed: self.active,
+            active,
+            link: self.link,
+            address: self.address,
+            route: self.route,
+            neighbour: expected.clone(),
+            namespace: self.namespace,
+            _thread_bound: PhantomData,
+        })
+    }
+}
+
+/// Derive the only four fixed permanent-neighbour expectations from routed observations.
+pub(crate) fn expected_ipv4_permanent_neighbours(
+    parent: &ExactIpv4EndpointRouteParentObservation,
+    endpoints: [&ExactIpv4EndpointRouteEndpointObservation; 2],
+) -> Result<ExpectedIpv4PermanentNeighbours, NetworkError> {
+    verify_exact_ipv4_endpoint_route_observations(parent, endpoints)?;
+    let parent_neighbours = std::array::from_fn(|index| ExpectedIpv4PermanentNeighbour {
+        namespace: None,
+        ifindex: parent.links[index].identity.parent_ifindex,
+        destination: endpoints[index].address.address,
+        link_layer_address: endpoints[index].link.mac,
+    });
+    let endpoint_neighbours = std::array::from_fn(|index| ExpectedIpv4PermanentNeighbour {
+        namespace: Some(endpoints[index].namespace),
+        ifindex: endpoints[index].link.identity.endpoint_ifindex,
+        destination: endpoints[index].route.gateway,
+        link_layer_address: parent.links[index].mac,
+    });
+    Ok(ExpectedIpv4PermanentNeighbours {
+        parent: parent_neighbours,
+        endpoints: endpoint_neighbours,
+    })
+}
+
+impl ExactIpv4EndpointRouteParentObservation {
+    /// Consume the routed parent after proving exactly two permanent neighbours.
+    pub(crate) fn observe_exact_ipv4_permanent_neighbours_parent<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        expected: &ExpectedIpv4PermanentNeighbours,
+    ) -> Result<ExactIpv4PermanentNeighbourParentObservation, NetworkError> {
+        require_parent_permanent_neighbour_expectations(&expected.parent, &self.links)?;
+        let (active, ()) = collect_exact_stable_parent_delta(mounts, |active| {
+            verify_exact_parent_ipv4_permanent_neighbour_delta(
+                &self.active,
+                active,
+                &expected.parent,
+            )
+        })?;
+        Ok(ExactIpv4PermanentNeighbourParentObservation {
+            routed: self.active,
+            active,
+            links: self.links,
+            neighbours: expected.parent.clone(),
+            _thread_bound: PhantomData,
+        })
+    }
+}
+
+impl ExactIpv4PermanentNeighbourParentObservation {
+    /// Reobserve and require exact semantic equality with the retained parent state.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
+    }
+
+    /// Consume the neighbour proof after explicit deletion restored the routed parent.
+    pub(crate) fn observe_exact_ipv4_permanent_neighbour_removal_parent<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<ExactIpv4EndpointRouteParentObservation, NetworkError> {
+        require_current_stable_rtnl_proc_baseline(mounts, &self.routed)?;
+        Ok(ExactIpv4EndpointRouteParentObservation {
+            active: self.routed,
+            links: self.links,
+            _thread_bound: PhantomData,
+        })
+    }
+}
+
+impl ExactIpv4PermanentNeighbourEndpointObservation {
+    /// Reobserve and require exact semantic equality with the retained endpoint state.
+    pub(crate) fn verify<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_stable_baseline(mounts, &self.active)?;
+        require_current_network_namespace(self.namespace)
+    }
+
+    /// Consume the neighbour proof after explicit deletion restored the routed endpoint.
+    pub(crate) fn observe_exact_ipv4_permanent_neighbour_removal_endpoint<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<ExactIpv4EndpointRouteEndpointObservation, NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_stable_baseline(mounts, &self.routed)?;
+        require_current_network_namespace(self.namespace)?;
+        Ok(ExactIpv4EndpointRouteEndpointObservation {
+            active: self.routed,
+            link: self.link,
+            address: self.address,
+            route: self.route,
+            namespace: self.namespace,
+            _thread_bound: PhantomData,
+        })
     }
 }
 
@@ -1814,6 +2009,45 @@ pub(crate) fn verify_exact_ipv4_endpoint_route_observations(
             &endpoint.address,
             endpoint.namespace,
         )?;
+    }
+    Ok(())
+}
+
+/// Cross-check the exact 2+1+1 permanent-neighbour observations and zero-proxy lineage.
+///
+/// This proves only the enumerated configuration. `NDA_CACHEINFO` values are
+/// volatile telemetry and make no packet, forwarding, or readiness claim.
+pub(crate) fn verify_exact_ipv4_permanent_neighbour_observations(
+    parent: &ExactIpv4PermanentNeighbourParentObservation,
+    endpoints: [&ExactIpv4PermanentNeighbourEndpointObservation; 2],
+) -> Result<(), NetworkError> {
+    verify_veth_observation_relations(
+        &parent.links,
+        [&endpoints[0].link, &endpoints[1].link],
+        [endpoints[0].namespace, endpoints[1].namespace],
+    )?;
+    for (index, endpoint) in endpoints.into_iter().enumerate() {
+        require_ipv4_endpoint_route_expectation(
+            &endpoint.route,
+            &endpoint.link.identity,
+            &endpoint.address,
+            endpoint.namespace,
+        )?;
+        let expected_parent = ExpectedIpv4PermanentNeighbour {
+            namespace: None,
+            ifindex: parent.links[index].identity.parent_ifindex,
+            destination: endpoint.address.address,
+            link_layer_address: endpoint.link.mac,
+        };
+        let expected_endpoint = ExpectedIpv4PermanentNeighbour {
+            namespace: Some(endpoint.namespace),
+            ifindex: endpoint.link.identity.endpoint_ifindex,
+            destination: endpoint.route.gateway,
+            link_layer_address: parent.links[index].mac,
+        };
+        if parent.neighbours[index] != expected_parent || endpoint.neighbour != expected_endpoint {
+            return Err(NetworkError::InvalidIpv4NeighbourExpectation);
+        }
     }
     Ok(())
 }
@@ -2094,32 +2328,57 @@ impl DumpKind {
     }
 }
 
+/// Stable semantic neighbour configuration from one validated RTNL record.
+///
+/// `NDA_CACHEINFO` contains kernel-relative activity telemetry. Its exact
+/// presence and shape are validated before this value is built, while its four
+/// u32 values are deliberately absent so time passing cannot invalidate an
+/// otherwise unchanged configuration snapshot.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CanonicalNeighbourRecord {
+    family: u8,
+    ifindex: i32,
+    state: u16,
+    flags: u8,
+    record_type: u8,
+    destination: Vec<u8>,
+    link_layer_address: Option<Vec<u8>>,
+    cacheinfo_present: bool,
+    probes: Option<u32>,
+    protocol: Option<u8>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct NetworkSnapshot {
     links: Vec<Vec<u8>>,
     qdiscs: Vec<Vec<u8>>,
     addresses: Vec<Vec<u8>>,
     routes: Vec<Vec<u8>>,
-    neighbours: Vec<Vec<u8>>,
-    proxy_neighbours: Vec<Vec<u8>>,
+    neighbours: Vec<CanonicalNeighbourRecord>,
+    proxy_neighbours: Vec<CanonicalNeighbourRecord>,
     nexthops: Vec<Vec<u8>>,
     rules_v4: Vec<Vec<u8>>,
     rules_v6: Vec<Vec<u8>>,
 }
 
 impl NetworkSnapshot {
-    fn records_mut(&mut self, kind: DumpKind) -> &mut Vec<Vec<u8>> {
+    fn set_records(&mut self, kind: DumpKind, records: Vec<Vec<u8>>) -> Result<(), NetworkError> {
         match kind {
-            DumpKind::Link => &mut self.links,
-            DumpKind::Qdisc => &mut self.qdiscs,
-            DumpKind::Address => &mut self.addresses,
-            DumpKind::Route => &mut self.routes,
-            DumpKind::Neighbour => &mut self.neighbours,
-            DumpKind::ProxyNeighbour => &mut self.proxy_neighbours,
-            DumpKind::Nexthop => &mut self.nexthops,
-            DumpKind::RuleV4 => &mut self.rules_v4,
-            DumpKind::RuleV6 => &mut self.rules_v6,
+            DumpKind::Link => self.links = records,
+            DumpKind::Qdisc => self.qdiscs = records,
+            DumpKind::Address => self.addresses = records,
+            DumpKind::Route => self.routes = records,
+            DumpKind::Neighbour => {
+                self.neighbours = canonicalize_neighbour_records(kind, &records)?;
+            }
+            DumpKind::ProxyNeighbour => {
+                self.proxy_neighbours = canonicalize_neighbour_records(kind, &records)?;
+            }
+            DumpKind::Nexthop => self.nexthops = records,
+            DumpKind::RuleV4 => self.rules_v4 = records,
+            DumpKind::RuleV6 => self.rules_v6 = records,
         }
+        Ok(())
     }
 
     fn canonicalize(&mut self) -> Result<(), NetworkError> {
@@ -2128,12 +2387,16 @@ impl NetworkSnapshot {
             &mut self.qdiscs,
             &mut self.addresses,
             &mut self.routes,
-            &mut self.neighbours,
-            &mut self.proxy_neighbours,
             &mut self.nexthops,
             &mut self.rules_v4,
             &mut self.rules_v6,
         ] {
+            records.sort_unstable();
+            if records.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(NetworkError::Malformed);
+            }
+        }
+        for records in [&mut self.neighbours, &mut self.proxy_neighbours] {
             records.sort_unstable();
             if records.windows(2).any(|pair| pair[0] == pair[1]) {
                 return Err(NetworkError::Malformed);
@@ -2324,7 +2587,8 @@ impl NetlinkCollector {
     ) -> Result<NetworkSnapshot, NetworkError> {
         let mut snapshot = NetworkSnapshot::default();
         for kind in DumpKind::ALL {
-            *snapshot.records_mut(kind) = self.collect_dump(kind, deadline, budget)?;
+            let records = self.collect_dump(kind, deadline, budget)?;
+            snapshot.set_records(kind, records)?;
         }
         snapshot.canonicalize()?;
         Ok(snapshot)
@@ -2984,6 +3248,121 @@ fn verify_exact_endpoint_ipv4_route_snapshot_delta(
     } else {
         Err(NetworkError::NotPristine)
     }
+}
+
+fn require_parent_permanent_neighbour_expectations(
+    expected: &[ExpectedIpv4PermanentNeighbour; 2],
+    links: &[VethLinkObservation; 2],
+) -> Result<(), NetworkError> {
+    for index in 0..2 {
+        if expected[index].namespace.is_some()
+            || expected[index].ifindex != links[index].identity.parent_ifindex
+            || expected[index].destination != fixed_endpoint_ipv4(&links[index].identity)?
+        {
+            return Err(NetworkError::InvalidIpv4NeighbourExpectation);
+        }
+    }
+    Ok(())
+}
+
+fn require_endpoint_permanent_neighbour_expectation(
+    expected: &ExpectedIpv4PermanentNeighbour,
+    routed: &ExactIpv4EndpointRouteEndpointObservation,
+) -> Result<(), NetworkError> {
+    if expected.namespace != Some(routed.namespace)
+        || expected.ifindex != routed.link.identity.endpoint_ifindex
+        || expected.ifindex != routed.route.ifindex
+        || expected.destination != routed.route.gateway
+    {
+        Err(NetworkError::InvalidIpv4NeighbourExpectation)
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_exact_parent_ipv4_permanent_neighbour_delta(
+    routed: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
+    expected: &[ExpectedIpv4PermanentNeighbour; 2],
+) -> Result<(), NetworkError> {
+    if active.ipv4_forwarding != routed.ipv4_forwarding {
+        return Err(NetworkError::Inconsistent);
+    }
+    verify_exact_ipv4_permanent_neighbour_snapshot_delta(&routed.rtnl, &active.rtnl, expected)
+}
+
+fn verify_exact_endpoint_ipv4_permanent_neighbour_delta(
+    routed: &PreGoNetworkBaseline,
+    active: &PreGoNetworkBaseline,
+    expected: &ExpectedIpv4PermanentNeighbour,
+) -> Result<(), NetworkError> {
+    if active.ipv4_forwarding != routed.ipv4_forwarding || active.nftables != routed.nftables {
+        return Err(NetworkError::Inconsistent);
+    }
+    verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+        &routed.rtnl,
+        &active.rtnl,
+        std::slice::from_ref(expected),
+    )
+}
+
+fn verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+    routed: &NetworkSnapshot,
+    active: &NetworkSnapshot,
+    expected: &[ExpectedIpv4PermanentNeighbour],
+) -> Result<(), NetworkError> {
+    if active.links != routed.links
+        || active.qdiscs != routed.qdiscs
+        || active.addresses != routed.addresses
+        || active.routes != routed.routes
+        || active.nexthops != routed.nexthops
+        || active.rules_v4 != routed.rules_v4
+        || active.rules_v6 != routed.rules_v6
+    {
+        return Err(NetworkError::Inconsistent);
+    }
+    if !routed.neighbours.is_empty()
+        || !routed.proxy_neighbours.is_empty()
+        || !active.proxy_neighbours.is_empty()
+    {
+        return Err(NetworkError::Inconsistent);
+    }
+    let mut expected_records = expected
+        .iter()
+        .map(canonical_ipv4_permanent_neighbour)
+        .collect::<Result<Vec<_>, _>>()?;
+    expected_records.sort_unstable();
+    if expected_records.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(NetworkError::InvalidIpv4NeighbourExpectation);
+    }
+    if active.neighbours == expected_records {
+        Ok(())
+    } else if active.neighbours.is_empty() {
+        Err(NetworkError::NotPristine)
+    } else {
+        Err(NetworkError::Inconsistent)
+    }
+}
+
+fn canonical_ipv4_permanent_neighbour(
+    expected: &ExpectedIpv4PermanentNeighbour,
+) -> Result<CanonicalNeighbourRecord, NetworkError> {
+    let ifindex = i32::try_from(expected.ifindex)
+        .ok()
+        .filter(|ifindex| *ifindex > 0)
+        .ok_or(NetworkError::InvalidIpv4NeighbourExpectation)?;
+    Ok(CanonicalNeighbourRecord {
+        family: AF_INET,
+        ifindex,
+        state: NUD_PERMANENT,
+        flags: 0,
+        record_type: RTN_UNICAST,
+        destination: expected.destination.to_vec(),
+        link_layer_address: Some(expected.link_layer_address.to_vec()),
+        cacheinfo_present: true,
+        probes: Some(0),
+        protocol: Some(RTPROT_STATIC),
+    })
 }
 
 fn route_has_ipv4_destination(payload: &[u8], expected: [u8; 4]) -> bool {
@@ -4691,11 +5070,112 @@ fn parse_attributes(mut bytes: &[u8]) -> Result<Vec<Attribute<'_>>, NetworkError
     Ok(attributes)
 }
 
+fn canonicalize_neighbour_records(
+    kind: DumpKind,
+    records: &[Vec<u8>],
+) -> Result<Vec<CanonicalNeighbourRecord>, NetworkError> {
+    records
+        .iter()
+        .map(|payload| decode_canonical_neighbour_record(kind, payload))
+        .collect()
+}
+
+fn decode_canonical_neighbour_record(
+    kind: DumpKind,
+    payload: &[u8],
+) -> Result<CanonicalNeighbourRecord, NetworkError> {
+    if !matches!(kind, DumpKind::Neighbour | DumpKind::ProxyNeighbour) || payload.len() < NDMSG_LEN
+    {
+        return Err(NetworkError::Malformed);
+    }
+    validate_neighbour_dump_classification(kind, payload)?;
+    let family = payload[0];
+    let destination_length = match family {
+        AF_INET => 4,
+        AF_INET6 => 16,
+        _ => return Err(NetworkError::NotPristine),
+    };
+    if payload[NDMSG_PAD1_OFFSET] != 0 || payload[NDMSG_PAD2_OFFSET..NDMSG_IFINDEX_OFFSET] != [0, 0]
+    {
+        return Err(NetworkError::Malformed);
+    }
+    let ifindex = read_i32(payload, NDMSG_IFINDEX_OFFSET)?;
+    if ifindex <= 0 {
+        return Err(NetworkError::NotPristine);
+    }
+
+    let mut destination = None;
+    let mut link_layer_address = None;
+    let mut cacheinfo_present = false;
+    let mut probes = None;
+    let mut protocol = None;
+    for attribute in parse_attributes(&payload[NDMSG_LEN..])? {
+        let value = attribute.unflagged_payload()?;
+        match attribute.kind {
+            NDA_DST => {
+                if value.len() != destination_length {
+                    return Err(NetworkError::NotPristine);
+                }
+                set_once(&mut destination, value.to_vec())?;
+            }
+            NDA_LLADDR => {
+                if value.is_empty() {
+                    return Err(NetworkError::NotPristine);
+                }
+                set_once(&mut link_layer_address, value.to_vec())?;
+            }
+            NDA_CACHEINFO => {
+                if cacheinfo_present || value.len() != NDA_CACHEINFO_LEN {
+                    return Err(NetworkError::NotPristine);
+                }
+                for offset in (0..NDA_CACHEINFO_LEN).step_by(size_of::<u32>()) {
+                    let _ = read_u32(value, offset)?;
+                }
+                cacheinfo_present = true;
+            }
+            NDA_PROBES => set_once(&mut probes, read_exact_u32(value)?)?,
+            NDA_PROTOCOL => set_once(&mut protocol, read_exact_u8(value)?)?,
+            _ => return Err(NetworkError::NotPristine),
+        }
+    }
+    let destination = destination.ok_or(NetworkError::NotPristine)?;
+    Ok(CanonicalNeighbourRecord {
+        family,
+        ifindex,
+        state: read_u16(payload, NDMSG_STATE_OFFSET)?,
+        flags: payload[NDMSG_FLAGS_OFFSET],
+        record_type: payload[NDMSG_TYPE_OFFSET],
+        destination,
+        link_layer_address,
+        cacheinfo_present,
+        probes,
+        protocol,
+    })
+}
+
+fn validate_neighbour_dump_classification(
+    kind: DumpKind,
+    payload: &[u8],
+) -> Result<(), NetworkError> {
+    let flags = *payload
+        .get(NDMSG_FLAGS_OFFSET)
+        .ok_or(NetworkError::Malformed)?;
+    let is_proxy = flags & NTF_PROXY != 0;
+    if is_proxy == matches!(kind, DumpKind::ProxyNeighbour) {
+        Ok(())
+    } else {
+        Err(NetworkError::Malformed)
+    }
+}
+
 fn validate_record(kind: DumpKind, payload: &[u8]) -> Result<(), NetworkError> {
     if payload.len() < kind.fixed_header_len() {
         return Err(NetworkError::Malformed);
     }
     parse_attributes(&payload[kind.fixed_header_len()..])?;
+    if matches!(kind, DumpKind::Neighbour | DumpKind::ProxyNeighbour) {
+        validate_neighbour_dump_classification(kind, payload)?;
+    }
     if matches!(kind, DumpKind::RuleV4) && payload[0] != AF_INET
         || matches!(kind, DumpKind::RuleV6) && payload[0] != AF_INET6
     {
@@ -4941,6 +5421,7 @@ mod tests {
     const LIVE_VETH_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_VETH_CHILD";
     const LIVE_IPV4_ROLLBACK_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_IPV4_ROLLBACK_CHILD";
     const LIVE_LINK_ACTIVATION_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_LINK_ACTIVATION_CHILD";
+    const LIVE_NEIGHBOUR_CANONICAL_CHILD_ENV: &str = "VOLPAROSSA_NETWORK_NEIGHBOUR_CANONICAL_CHILD";
     const FORWARDING_DROP_GUARD_CHILD_ENV: &str = "VOLPAROSSA_FORWARDING_DROP_GUARD_CHILD";
     const TEST_SEQUENCE: u32 = 7;
     const TEST_PORT: u32 = 41;
@@ -5694,7 +6175,7 @@ mod tests {
             Err(NetworkError::Inconsistent)
         ));
         let mut neighbour = routed;
-        neighbour.neighbours.push(vec![0; NDMSG_LEN]);
+        neighbour.neighbours.push(test_neighbour_record(false));
         assert!(matches!(
             verify_exact_endpoint_ipv4_route_snapshot_delta(&active, &neighbour, &expected),
             Err(NetworkError::Inconsistent)
@@ -5876,7 +6357,7 @@ mod tests {
         ipv6_address.addresses.push(record);
         variants.push(ipv6_address);
         let mut neighbour = valid.clone();
-        neighbour.neighbours.push(vec![0; NDMSG_LEN]);
+        neighbour.neighbours.push(test_neighbour_record(false));
         variants.push(neighbour);
         let mut changed_rules = valid.clone();
         changed_rules.rules_v4.pop();
@@ -6091,10 +6572,12 @@ mod tests {
         route.routes.push(vec![0]);
         variants.push(route);
         let mut neighbour = active.clone();
-        neighbour.neighbours.push(vec![0]);
+        neighbour.neighbours.push(test_neighbour_record(false));
         variants.push(neighbour);
         let mut proxy_neighbour = active.clone();
-        proxy_neighbour.proxy_neighbours.push(vec![0]);
+        proxy_neighbour
+            .proxy_neighbours
+            .push(test_neighbour_record(true));
         variants.push(proxy_neighbour);
         let mut nexthop = active.clone();
         nexthop.nexthops.push(vec![0]);
@@ -6432,10 +6915,12 @@ mod tests {
         route.routes.push(vec![0; RTMSG_LEN]);
         variants.push(route);
         let mut neighbour = pristine_snapshot();
-        neighbour.neighbours.push(vec![0; NDMSG_LEN]);
+        neighbour.neighbours.push(test_neighbour_record(false));
         variants.push(neighbour);
         let mut proxy_neighbour = pristine_snapshot();
-        proxy_neighbour.proxy_neighbours.push(vec![0; NDMSG_LEN]);
+        proxy_neighbour
+            .proxy_neighbours
+            .push(test_neighbour_record(true));
         variants.push(proxy_neighbour);
         let mut nexthop = pristine_snapshot();
         nexthop.nexthops.push(vec![0; NHMSG_LEN]);
@@ -6712,6 +7197,234 @@ mod tests {
     }
 
     #[test]
+    fn neighbour_canonicalization_excludes_only_valid_cacheinfo_telemetry() {
+        let first_payload =
+            permanent_neighbour_payload(2, [10, 241, 1, 2], [0x02, 1, 2, 3, 4, 5], [1, 2, 3, 4]);
+        let second_payload = permanent_neighbour_payload(
+            2,
+            [10, 241, 1, 2],
+            [0x02, 1, 2, 3, 4, 5],
+            [101, 202, 303, 404],
+        );
+        assert_ne!(first_payload, second_payload);
+        let first = decode_canonical_neighbour_record(DumpKind::Neighbour, &first_payload)
+            .expect("first canonical neighbour");
+        let second = decode_canonical_neighbour_record(DumpKind::Neighbour, &second_payload)
+            .expect("second canonical neighbour");
+        assert_eq!(first, second, "cache telemetry must not affect identity");
+
+        let mut reordered = first_payload[..NDMSG_LEN].to_vec();
+        let mut attributes =
+            parse_attributes(&first_payload[NDMSG_LEN..]).expect("fixture attributes");
+        attributes.reverse();
+        for attribute_value in attributes {
+            reordered.extend(attribute(
+                attribute_value.kind | attribute_value.flags,
+                attribute_value.payload,
+            ));
+        }
+        assert_eq!(
+            decode_canonical_neighbour_record(DumpKind::Neighbour, &reordered)
+                .expect("reordered canonical neighbour"),
+            first,
+            "attribute order must not affect semantic identity",
+        );
+
+        let changed_probes =
+            replace_record_attribute(&first_payload, NDMSG_LEN, NDA_PROBES, &1_u32.to_ne_bytes());
+        let changed_protocol =
+            replace_record_attribute(&first_payload, NDMSG_LEN, NDA_PROTOCOL, &[RTPROT_KERNEL]);
+        let missing_cacheinfo = without_record_attribute(&first_payload, NDMSG_LEN, NDA_CACHEINFO);
+        assert_ne!(
+            decode_canonical_neighbour_record(DumpKind::Neighbour, &changed_probes)
+                .expect("changed probes"),
+            first,
+        );
+        assert_ne!(
+            decode_canonical_neighbour_record(DumpKind::Neighbour, &changed_protocol)
+                .expect("changed protocol"),
+            first,
+        );
+        assert_ne!(
+            decode_canonical_neighbour_record(DumpKind::Neighbour, &missing_cacheinfo)
+                .expect("missing cacheinfo remains a distinct semantic shape"),
+            first,
+        );
+
+        let mut duplicate_snapshot = pristine_snapshot();
+        duplicate_snapshot
+            .set_records(DumpKind::Neighbour, vec![first_payload, second_payload])
+            .expect("individually valid neighbour records");
+        assert!(matches!(
+            duplicate_snapshot.canonicalize(),
+            Err(NetworkError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn neighbour_decoder_rejects_ambiguous_shapes_and_dump_crossovers() {
+        let valid = permanent_neighbour_payload(2, [10, 241, 1, 2], [0x02, 1, 2, 3, 4, 5], [0; 4]);
+        let mut variants = Vec::new();
+        variants.push(replace_record_attribute(
+            &valid,
+            NDMSG_LEN,
+            NDA_CACHEINFO,
+            &[0; NDA_CACHEINFO_LEN - 1],
+        ));
+        variants.push(replace_record_attribute_with_raw_kind(
+            &valid,
+            NDMSG_LEN,
+            NDA_CACHEINFO,
+            NDA_CACHEINFO | NLA_F_NESTED,
+            &[0; NDA_CACHEINFO_LEN],
+        ));
+        for kind in [NDA_DST, NDA_LLADDR, NDA_CACHEINFO, NDA_PROBES, NDA_PROTOCOL] {
+            let mut duplicate = valid.clone();
+            let value = parse_attributes(&valid[NDMSG_LEN..])
+                .expect("fixture attributes")
+                .into_iter()
+                .find(|attribute_value| attribute_value.kind == kind)
+                .expect("fixture attribute");
+            duplicate.extend(attribute(kind, value.payload));
+            variants.push(duplicate);
+        }
+        let mut unknown = valid.clone();
+        unknown.extend(attribute(99, &[1]));
+        variants.push(unknown);
+        variants.push(without_record_attribute(&valid, NDMSG_LEN, NDA_DST));
+        variants.push(replace_record_attribute(
+            &valid,
+            NDMSG_LEN,
+            NDA_DST,
+            &[10, 241, 1],
+        ));
+        variants.push(replace_record_attribute(&valid, NDMSG_LEN, NDA_LLADDR, &[]));
+        let mut nonzero_pad1 = valid.clone();
+        nonzero_pad1[NDMSG_PAD1_OFFSET] = 1;
+        variants.push(nonzero_pad1);
+        let mut nonzero_pad2 = valid.clone();
+        nonzero_pad2[NDMSG_PAD2_OFFSET] = 1;
+        variants.push(nonzero_pad2);
+        let mut zero_ifindex = valid.clone();
+        zero_ifindex[NDMSG_IFINDEX_OFFSET..NDMSG_STATE_OFFSET]
+            .copy_from_slice(&0_i32.to_ne_bytes());
+        variants.push(zero_ifindex);
+        let mut unsupported_family = valid.clone();
+        unsupported_family[0] = AF_UNSPEC;
+        variants.push(unsupported_family);
+
+        for payload in variants {
+            assert!(decode_canonical_neighbour_record(DumpKind::Neighbour, &payload).is_err());
+        }
+
+        let proxy = proxy_neighbour_payload(1, [192, 0, 2, 1]);
+        decode_canonical_neighbour_record(DumpKind::ProxyNeighbour, &proxy)
+            .expect("exact proxy dump record");
+        assert!(decode_canonical_neighbour_record(DumpKind::Neighbour, &proxy).is_err());
+        assert!(decode_canonical_neighbour_record(DumpKind::ProxyNeighbour, &valid).is_err());
+        assert!(validate_record(DumpKind::Neighbour, &proxy).is_err());
+        assert!(validate_record(DumpKind::ProxyNeighbour, &valid).is_err());
+    }
+
+    #[test]
+    fn permanent_neighbour_delta_requires_exact_two_plus_one_plus_one_and_zero_proxy() {
+        let parent_expected = [
+            ExpectedIpv4PermanentNeighbour {
+                namespace: None,
+                ifindex: 2,
+                destination: [10, 241, 1, 2],
+                link_layer_address: [0x02, 1, 2, 3, 4, 5],
+            },
+            ExpectedIpv4PermanentNeighbour {
+                namespace: None,
+                ifindex: 3,
+                destination: [10, 241, 2, 2],
+                link_layer_address: [0x06, 1, 2, 3, 4, 5],
+            },
+        ];
+        let routed = pristine_snapshot();
+        let mut parent_active = routed.clone();
+        parent_active.neighbours = parent_expected
+            .iter()
+            .map(canonical_ipv4_permanent_neighbour)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parent records");
+        parent_active.neighbours.sort_unstable();
+        verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+            &routed,
+            &parent_active,
+            &parent_expected,
+        )
+        .expect("exact two-parent-neighbour delta");
+
+        let mut missing = parent_active.clone();
+        missing.neighbours.pop();
+        assert!(
+            verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+                &routed,
+                &missing,
+                &parent_expected,
+            )
+            .is_err()
+        );
+        let mut extra = parent_active.clone();
+        extra.neighbours.push(CanonicalNeighbourRecord {
+            ifindex: 4,
+            destination: vec![10, 241, 3, 2],
+            ..test_neighbour_record(false)
+        });
+        extra.neighbours.sort_unstable();
+        assert!(
+            verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+                &routed,
+                &extra,
+                &parent_expected,
+            )
+            .is_err()
+        );
+        let mut proxy = parent_active.clone();
+        proxy.proxy_neighbours.push(test_neighbour_record(true));
+        assert!(
+            verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+                &routed,
+                &proxy,
+                &parent_expected,
+            )
+            .is_err()
+        );
+        for mutate in [
+            |record: &mut CanonicalNeighbourRecord| record.probes = Some(1),
+            |record: &mut CanonicalNeighbourRecord| record.protocol = Some(RTPROT_KERNEL),
+            |record: &mut CanonicalNeighbourRecord| record.cacheinfo_present = false,
+            |record: &mut CanonicalNeighbourRecord| record.state = 0,
+        ] {
+            let mut changed = parent_active.clone();
+            mutate(&mut changed.neighbours[0]);
+            assert!(
+                verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+                    &routed,
+                    &changed,
+                    &parent_expected,
+                )
+                .is_err()
+            );
+        }
+
+        for endpoint in parent_expected.each_ref() {
+            let mut endpoint_active = routed.clone();
+            endpoint_active
+                .neighbours
+                .push(canonical_ipv4_permanent_neighbour(endpoint).expect("endpoint record"));
+            verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+                &routed,
+                &endpoint_active,
+                std::slice::from_ref(endpoint),
+            )
+            .expect("exact one-endpoint-neighbour delta");
+        }
+    }
+
+    #[test]
     fn canonicalization_rejects_duplicate_records() {
         let mut snapshot = pristine_snapshot();
         snapshot.rules_v4.push(snapshot.rules_v4[0].clone());
@@ -6830,6 +7543,119 @@ mod tests {
                 "live {scenario} mutation was not rejected"
             );
         }
+    }
+
+    #[test]
+    fn live_permanent_neighbour_cacheinfo_drift_is_semantically_stable() {
+        if env::var_os(LIVE_NEIGHBOUR_CANONICAL_CHILD_ENV).is_some() {
+            prove_live_permanent_neighbour_cacheinfo_drift();
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        let output = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(executable)
+            .arg("--exact")
+            .arg("network::tests::live_permanent_neighbour_cacheinfo_drift_is_semantically_stable")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(LIVE_NEIGHBOUR_CANONICAL_CHILD_ENV, "1")
+            .env("LC_ALL", "C")
+            .output()
+            .expect("spawn isolated live permanent-neighbour proof");
+        if unprivileged_user_namespace_policy_denied(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        ) {
+            eprintln!("skipped live permanent-neighbour proof: user namespaces denied by policy");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "isolated live permanent-neighbour proof failed: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn prove_live_permanent_neighbour_cacheinfo_drift() {
+        collect_consistent_pristine_snapshot().expect("pristine baseline");
+        run_ip(&["link", "add", "va", "type", "veth", "peer", "name", "vb"]);
+        run_ip(&["link", "set", "dev", "va", "address", "02:00:00:00:00:01"]);
+        run_ip(&["link", "set", "dev", "vb", "address", "02:00:00:00:00:02"]);
+        run_ip(&["link", "set", "dev", "va", "addrgenmode", "none"]);
+        run_ip(&["link", "set", "dev", "vb", "addrgenmode", "none"]);
+        run_ip(&["address", "add", "10.241.1.1/30", "dev", "va"]);
+        run_ip(&["link", "set", "dev", "va", "up"]);
+        run_ip(&["link", "set", "dev", "vb", "up"]);
+        let routed = collect_converged_snapshot_before(
+            Deadline::after(NETWORK_PROOF_TIMEOUT).expect("routed fixture deadline"),
+        )
+        .expect("stable routed fixture");
+        let expected = ExpectedIpv4PermanentNeighbour {
+            namespace: None,
+            ifindex: live_link_ifindex(&routed, b"va"),
+            destination: [10, 241, 1, 2],
+            link_layer_address: [0x02, 0, 0, 0, 0, 2],
+        };
+        let expected_record =
+            canonical_ipv4_permanent_neighbour(&expected).expect("valid live expectation");
+        run_ip(&[
+            "neigh",
+            "replace",
+            "10.241.1.2",
+            "lladdr",
+            "02:00:00:00:00:02",
+            "nud",
+            "permanent",
+            "protocol",
+            "static",
+            "dev",
+            "va",
+        ]);
+        let raw_first = collect_live_dump(DumpKind::Neighbour);
+        let first = collect_consistent_snapshot_before(
+            Deadline::after(NETWORK_PROOF_TIMEOUT).expect("first neighbour deadline"),
+        )
+        .expect("first stable neighbour snapshot");
+        std::thread::sleep(Duration::from_millis(1_100));
+        let raw_second = collect_live_dump(DumpKind::Neighbour);
+        let second = collect_consistent_snapshot_before(
+            Deadline::after(NETWORK_PROOF_TIMEOUT).expect("second neighbour deadline"),
+        )
+        .expect("second stable neighbour snapshot");
+        assert_ne!(
+            exact_live_neighbour_cacheinfo(&raw_first, &expected_record),
+            exact_live_neighbour_cacheinfo(&raw_second, &expected_record),
+            "the live kernel fixture must actually exercise CACHEINFO drift",
+        );
+        assert_eq!(
+            first.neighbours, second.neighbours,
+            "CACHEINFO time deltas must be excluded from canonical neighbours",
+        );
+        assert_eq!(
+            first.proxy_neighbours, second.proxy_neighbours,
+            "ordinary-neighbour telemetry must not alter the proxy dump",
+        );
+        assert_eq!(first.neighbours, vec![expected_record]);
+        assert!(first.proxy_neighbours.is_empty());
+        verify_exact_ipv4_permanent_neighbour_snapshot_delta(
+            &routed,
+            &first,
+            std::slice::from_ref(&expected),
+        )
+        .expect("one exact live permanent neighbour and zero proxies");
+
+        run_ip(&["neigh", "delete", "10.241.1.2", "dev", "va"]);
+        let restored = collect_consistent_snapshot_before(
+            Deadline::after(NETWORK_PROOF_TIMEOUT).expect("neighbour rollback deadline"),
+        )
+        .expect("restored routed fixture");
+        assert_eq!(restored.neighbours, routed.neighbours);
+        assert_eq!(restored.proxy_neighbours, routed.proxy_neighbours);
+        run_ip(&["link", "delete", "dev", "va"]);
+        collect_consistent_pristine_snapshot().expect("semantically pristine namespace");
     }
 
     fn prove_live_down_veth_parent_profile() {
@@ -7636,6 +8462,40 @@ mod tests {
             .expect("live dump")
     }
 
+    fn exact_live_neighbour_cacheinfo(
+        records: &[Vec<u8>],
+        expected: &CanonicalNeighbourRecord,
+    ) -> [u32; 4] {
+        let mut matching = records.iter().filter(|payload| {
+            decode_canonical_neighbour_record(DumpKind::Neighbour, payload)
+                .is_ok_and(|record| record == *expected)
+        });
+        let payload = matching.next().expect("exact live neighbour record");
+        assert!(
+            matching.next().is_none(),
+            "the exact live neighbour record must be unique"
+        );
+        let mut cacheinfo = parse_attributes(&payload[NDMSG_LEN..])
+            .expect("live neighbour attributes")
+            .into_iter()
+            .filter(|attribute| attribute.kind == NDA_CACHEINFO);
+        let bytes = cacheinfo
+            .next()
+            .expect("live neighbour CACHEINFO")
+            .unflagged_payload()
+            .expect("unflagged live neighbour CACHEINFO");
+        assert!(
+            cacheinfo.next().is_none(),
+            "live neighbour CACHEINFO must be unique"
+        );
+        [
+            read_u32(bytes, 0).expect("confirmed"),
+            read_u32(bytes, 4).expect("used"),
+            read_u32(bytes, 8).expect("updated"),
+            read_u32(bytes, 12).expect("reference count"),
+        ]
+    }
+
     fn link_fixture_has_name(payload: &[u8], expected: &[u8]) -> bool {
         parse_attributes(payload.get(IFINFO_LEN..).unwrap_or_default())
             .ok()
@@ -7734,6 +8594,21 @@ mod tests {
 
     fn expected_ipv4(name: &str, ifindex: u32, address: [u8; 4]) -> ExpectedIpv4Address {
         ExpectedIpv4Address::new(name, ifindex, address).expect("valid fixed-IPv4 expectation")
+    }
+
+    fn test_neighbour_record(proxy: bool) -> CanonicalNeighbourRecord {
+        CanonicalNeighbourRecord {
+            family: AF_INET,
+            ifindex: 2,
+            state: if proxy { 0 } else { NUD_PERMANENT },
+            flags: if proxy { NTF_PROXY } else { 0 },
+            record_type: RTN_UNICAST,
+            destination: vec![192, 0, 2, 1],
+            link_layer_address: (!proxy).then(|| vec![0x02, 0, 0, 0, 0, 1]),
+            cacheinfo_present: !proxy,
+            probes: (!proxy).then_some(0),
+            protocol: (!proxy).then_some(RTPROT_STATIC),
+        }
     }
 
     fn valid_activated_endpoint_fixture() -> (
@@ -8103,6 +8978,40 @@ mod tests {
         payload.extend(attribute(FRA_TABLE, &table.to_ne_bytes()));
         payload.extend(attribute(FRA_SUPPRESS_PREFIXLEN, &u32::MAX.to_ne_bytes()));
         payload.extend(attribute(FRA_PROTOCOL, &[RTPROT_KERNEL]));
+        payload
+    }
+
+    fn permanent_neighbour_payload(
+        ifindex: i32,
+        destination: [u8; 4],
+        link_layer_address: [u8; ETHERNET_ADDRESS_BYTES],
+        cacheinfo: [u32; 4],
+    ) -> Vec<u8> {
+        let mut payload = vec![0; NDMSG_LEN];
+        payload[0] = AF_INET;
+        payload[NDMSG_IFINDEX_OFFSET..NDMSG_STATE_OFFSET].copy_from_slice(&ifindex.to_ne_bytes());
+        payload[NDMSG_STATE_OFFSET..NDMSG_FLAGS_OFFSET]
+            .copy_from_slice(&NUD_PERMANENT.to_ne_bytes());
+        payload[NDMSG_TYPE_OFFSET] = RTN_UNICAST;
+        payload.extend(attribute(NDA_DST, &destination));
+        payload.extend(attribute(NDA_LLADDR, &link_layer_address));
+        let mut cacheinfo_payload = Vec::with_capacity(NDA_CACHEINFO_LEN);
+        for value in cacheinfo {
+            cacheinfo_payload.extend_from_slice(&value.to_ne_bytes());
+        }
+        payload.extend(attribute(NDA_CACHEINFO, &cacheinfo_payload));
+        payload.extend(attribute(NDA_PROBES, &0_u32.to_ne_bytes()));
+        payload.extend(attribute(NDA_PROTOCOL, &[RTPROT_STATIC]));
+        payload
+    }
+
+    fn proxy_neighbour_payload(ifindex: i32, destination: [u8; 4]) -> Vec<u8> {
+        let mut payload = vec![0; NDMSG_LEN];
+        payload[0] = AF_INET;
+        payload[NDMSG_IFINDEX_OFFSET..NDMSG_STATE_OFFSET].copy_from_slice(&ifindex.to_ne_bytes());
+        payload[NDMSG_FLAGS_OFFSET] = NTF_PROXY;
+        payload[NDMSG_TYPE_OFFSET] = RTN_UNICAST;
+        payload.extend(attribute(NDA_DST, &destination));
         payload
     }
 

@@ -40,9 +40,10 @@ use crate::nftables::{
 };
 use crate::topology::namespaces::{
     AuthorizedActivatedTopology, AuthorizedDeletedTopology, AuthorizedEndpointRoutes,
-    AuthorizedIpv4AddrgenNone, FixedEndpointRouteFailure, FixedEndpointRouteSetError,
-    FixedEndpointRouteVisitError, FixedForwardPolicyBinding, FixedLinkActivationError,
-    FixedLinkActivationFailure, FixedTopologyVisitError,
+    AuthorizedIpv4AddrgenNone, AuthorizedPermanentNeighbours, FixedEndpointRouteFailure,
+    FixedEndpointRouteSetError, FixedEndpointRouteVisitError, FixedForwardPolicyBinding,
+    FixedLinkActivationError, FixedLinkActivationFailure, FixedPermanentNeighbourFailure,
+    FixedPermanentNeighbourSetError, FixedPermanentNeighbourVisitError, FixedTopologyVisitError,
 };
 use crate::topology::{
     AuthorizedIpv4Addresses, AuthorizedNamespacePins, AuthorizedVethPairs,
@@ -122,6 +123,9 @@ pub(crate) enum PrivateMountLinkActivationError {
     /// Exact endpoint-route installation or retained route verification failed.
     #[error("fixed endpoint-route transition failed: {0}")]
     Route(#[source] FixedEndpointRouteSetError),
+    /// Exact permanent-neighbour installation, removal, or retained verification failed.
+    #[error("fixed permanent-neighbour transition failed: {0}")]
+    Neighbour(#[source] FixedPermanentNeighbourSetError),
     /// The private mounts or their retained nsfs attachments failed reproof.
     #[error("fixed topology mount authority failed: {0}")]
     Mount(#[source] PrivateMountSetupError),
@@ -266,6 +270,18 @@ impl PrivateMountLinkActivationFailure {
         let (source, deleted) = failure.into_parts();
         Self::deleted_after_retirement(
             PrivateMountLinkActivationError::Route(source),
+            backing,
+            deleted,
+        )
+    }
+
+    fn from_fixed_neighbour_failure(
+        backing: PrivateMountBacking,
+        failure: FixedPermanentNeighbourFailure,
+    ) -> Self {
+        let (source, deleted) = failure.into_parts();
+        Self::deleted_after_retirement(
+            PrivateMountLinkActivationError::Neighbour(source),
             backing,
             deleted,
         )
@@ -678,6 +694,12 @@ pub(crate) struct ExactActivatedIpv4NetworkProof {
 pub(crate) struct ExactIpv4EndpointRouteNetworkProof {
     parent: crate::network::ExactIpv4EndpointRouteParentObservation,
     endpoints: [crate::network::ExactIpv4EndpointRouteEndpointObservation; 2],
+}
+
+/// Exact parent `2` plus endpoint `1+1` permanent-neighbour observations.
+pub(crate) struct ExactIpv4PermanentNeighbourNetworkProof {
+    parent: crate::network::ExactIpv4PermanentNeighbourParentObservation,
+    endpoints: [crate::network::ExactIpv4PermanentNeighbourEndpointObservation; 2],
 }
 
 struct ExactIpv4AddressExpectations {
@@ -2537,6 +2559,113 @@ impl PrivateMounts<AuthorizedEndpointRoutes> {
         Ok(proof)
     }
 
+    /// Install the sole four permanent neighbours and prove their exact 2+1+1 delta.
+    fn install_permanent_neighbours_without_policy(
+        self,
+        routed_proof: ExactIpv4EndpointRouteNetworkProof,
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedPermanentNeighbours>,
+            ExactIpv4PermanentNeighbourNetworkProof,
+        ),
+        PrivateMountLinkActivationFailure,
+    > {
+        if let Err(source) = self.verify_exact_ipv4_endpoint_route_state(&routed_proof) {
+            return Err(self.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)));
+        }
+        let expectations = match crate::network::expected_ipv4_permanent_neighbours(
+            &routed_proof.parent,
+            [&routed_proof.endpoints[0], &routed_proof.endpoints[1]],
+        ) {
+            Ok(expectations) => expectations,
+            Err(source) => {
+                return Err(
+                    self.into_deleted_failure(PrivateMountLinkActivationError::Proof(
+                        NamespacePinsNetworkProofError::Network(source),
+                    )),
+                );
+            }
+        };
+        let (backing, routed) = self.into_backing_and_run_state();
+        let neighbours = match routed.install_permanent_neighbours() {
+            Ok(neighbours) => neighbours,
+            Err(failure) => {
+                return Err(
+                    PrivateMountLinkActivationFailure::from_fixed_neighbour_failure(
+                        backing, failure,
+                    ),
+                );
+            }
+        };
+        let mounts = backing.with_run_state(neighbours);
+        if let Err(source) = mounts.verify_authorized_permanent_neighbours() {
+            return Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Mount(source)));
+        }
+        match mounts.prove_exact_ipv4_permanent_neighbours(routed_proof, &expectations) {
+            Ok(proof) => Ok((mounts, proof)),
+            Err(source) => {
+                Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)))
+            }
+        }
+    }
+
+    fn restore_exact_ipv4_endpoint_route_proof(
+        &self,
+        proof: ExactIpv4PermanentNeighbourNetworkProof,
+    ) -> Result<ExactIpv4EndpointRouteNetworkProof, NamespacePinsNetworkProofError> {
+        self.verify_authorized_endpoint_routes()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let ExactIpv4PermanentNeighbourNetworkProof { parent, endpoints } = proof;
+        let parent = self
+            .run_state
+            .visit_parent_network_namespace(|| {
+                parent.observe_exact_ipv4_permanent_neighbour_removal_parent(self)
+            })
+            .map_err(|error| {
+                map_endpoint_route_visit_error(
+                    "observe routed parent after permanent-neighbour removal",
+                    error,
+                )
+            })?;
+        let mut neighbour_endpoints = endpoints.map(Some);
+        let mut routed_endpoints = [None, None];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if routed_endpoints[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                let neighbour = neighbour_endpoints[index]
+                    .take()
+                    .ok_or(crate::network::NetworkError::Inconsistent)?;
+                routed_endpoints[index] =
+                    Some(neighbour.observe_exact_ipv4_permanent_neighbour_removal_endpoint(self)?);
+                Ok(())
+            })
+            .map_err(|error| {
+                map_endpoint_route_visit_error(
+                    "observe routed endpoint after permanent-neighbour removal",
+                    error,
+                )
+            })?;
+        if neighbour_endpoints.iter().any(Option::is_some) {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
+        let [Some(alpha), Some(omega)] = routed_endpoints else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        };
+        let routed = ExactIpv4EndpointRouteNetworkProof {
+            parent,
+            endpoints: [alpha, omega],
+        };
+        self.verify_exact_ipv4_endpoint_route_state(&routed)?;
+        Ok(routed)
+    }
+
     /// Directly delete pair B then A and retain route/address/pair authorities
     /// until the existing pristine parent/A/B proof authorizes retirement.
     fn begin_retirement_without_policy(self) -> PrivateMounts<AuthorizedDeletedTopology> {
@@ -2561,7 +2690,220 @@ impl PrivateMounts<AuthorizedEndpointRoutes> {
     }
 }
 
+impl PrivateMounts<AuthorizedPermanentNeighbours> {
+    /// Reprove all four neighbour owners and the two retained nsfs mount records.
+    pub(crate) fn verify_authorized_permanent_neighbours(
+        &self,
+    ) -> Result<(), PrivateMountSetupError> {
+        self.run_state.verify().map_err(|source| {
+            fixed_neighbour_error("verify authorized permanent neighbours", source)
+        })?;
+        self.verify_namespace_backed_mountinfo(
+            self.run_state.mount_ids(),
+            self.run_state.mount_point_bytes(),
+            "verify permanent-neighbour nsfs mount table",
+        )?;
+        self.run_state.verify().map_err(|source| {
+            fixed_neighbour_error("reverify authorized permanent neighbours", source)
+        })
+    }
+
+    /// Reobserve the exact parent 2 plus endpoint 1+1 permanent-neighbour state.
+    pub(crate) fn verify_exact_ipv4_permanent_neighbour_state(
+        &self,
+        proof: &ExactIpv4PermanentNeighbourNetworkProof,
+    ) -> Result<(), NamespacePinsNetworkProofError> {
+        self.verify_authorized_permanent_neighbours()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        self.run_state
+            .visit_parent_network_namespace(|| proof.parent.verify(self))
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "reprove exact permanent-neighbour parent state",
+                    error,
+                )
+            })?;
+        let mut visited = [false, false];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if visited[index] {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                proof.endpoints[index].verify(self)?;
+                visited[index] = true;
+                Ok(())
+            })
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "reprove exact permanent-neighbour endpoint state",
+                    error,
+                )
+            })?;
+        require_complete_endpoint_visit(visited)?;
+        crate::network::verify_exact_ipv4_permanent_neighbour_observations(
+            &proof.parent,
+            [&proof.endpoints[0], &proof.endpoints[1]],
+        )
+        .map_err(NamespacePinsNetworkProofError::Network)?;
+        self.verify_authorized_permanent_neighbours()
+            .map_err(NamespacePinsNetworkProofError::Mount)
+    }
+
+    fn prove_exact_ipv4_permanent_neighbours(
+        &self,
+        routed_proof: ExactIpv4EndpointRouteNetworkProof,
+        expectations: &crate::network::ExpectedIpv4PermanentNeighbours,
+    ) -> Result<ExactIpv4PermanentNeighbourNetworkProof, NamespacePinsNetworkProofError> {
+        self.verify_authorized_permanent_neighbours()
+            .map_err(NamespacePinsNetworkProofError::Mount)?;
+        let ExactIpv4EndpointRouteNetworkProof { parent, endpoints } = routed_proof;
+        let parent = self
+            .run_state
+            .visit_parent_network_namespace(|| {
+                parent.observe_exact_ipv4_permanent_neighbours_parent(self, expectations)
+            })
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "observe exact permanent-neighbour parent state",
+                    error,
+                )
+            })?;
+        let mut routed_endpoints = endpoints.map(Some);
+        let mut neighbour_endpoints = [None, None];
+        self.run_state
+            .visit_network_namespaces(|endpoint| {
+                let index = endpoint_index(endpoint);
+                if neighbour_endpoints[index].is_some() {
+                    return Err(crate::network::NetworkError::Inconsistent);
+                }
+                let routed = routed_endpoints[index]
+                    .take()
+                    .ok_or(crate::network::NetworkError::Inconsistent)?;
+                neighbour_endpoints[index] =
+                    Some(routed.observe_exact_ipv4_permanent_neighbour_endpoint(
+                        self,
+                        expectations,
+                        index,
+                    )?);
+                Ok(())
+            })
+            .map_err(|error| {
+                map_permanent_neighbour_visit_error(
+                    "observe exact permanent-neighbour endpoint state",
+                    error,
+                )
+            })?;
+        if routed_endpoints.iter().any(Option::is_some) {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        }
+        let [Some(alpha), Some(omega)] = neighbour_endpoints else {
+            return Err(NamespacePinsNetworkProofError::Network(
+                crate::network::NetworkError::Inconsistent,
+            ));
+        };
+        let proof = ExactIpv4PermanentNeighbourNetworkProof {
+            parent,
+            endpoints: [alpha, omega],
+        };
+        self.verify_exact_ipv4_permanent_neighbour_state(&proof)?;
+        Ok(proof)
+    }
+
+    /// Explicitly remove endpoint B/A then parent B/A and restore routed authority.
+    fn remove_permanent_neighbours_without_policy(
+        self,
+        proof: ExactIpv4PermanentNeighbourNetworkProof,
+    ) -> Result<
+        (
+            PrivateMounts<AuthorizedEndpointRoutes>,
+            ExactIpv4EndpointRouteNetworkProof,
+        ),
+        PrivateMountLinkActivationFailure,
+    > {
+        if let Err(source) = self.verify_exact_ipv4_permanent_neighbour_state(&proof) {
+            return Err(self.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)));
+        }
+        let (backing, neighbours) = self.into_backing_and_run_state();
+        let routed = match neighbours.remove_permanent_neighbours() {
+            Ok(routed) => routed,
+            Err(failure) => {
+                return Err(
+                    PrivateMountLinkActivationFailure::from_fixed_neighbour_failure(
+                        backing, failure,
+                    ),
+                );
+            }
+        };
+        let mounts = backing.with_run_state(routed);
+        if let Err(source) = mounts.verify_authorized_endpoint_routes() {
+            return Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Mount(source)));
+        }
+        match mounts.restore_exact_ipv4_endpoint_route_proof(proof) {
+            Ok(routed_proof) => Ok((mounts, routed_proof)),
+            Err(source) => {
+                Err(mounts.into_deleted_failure(PrivateMountLinkActivationError::Proof(source)))
+            }
+        }
+    }
+
+    fn into_deleted_failure(
+        self,
+        source: PrivateMountLinkActivationError,
+    ) -> PrivateMountLinkActivationFailure {
+        let (backing, neighbours) = self.into_backing_and_run_state();
+        PrivateMountLinkActivationFailure::deleted_after_retirement(
+            source,
+            backing,
+            neighbours.begin_retirement(),
+        )
+    }
+}
+
 impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProof> {
+    /// Install and prove the four exact permanent neighbours while policy counters stay zero.
+    pub(crate) fn install_permanent_neighbours(
+        self,
+        routed_proof: ExactIpv4EndpointRouteNetworkProof,
+    ) -> Result<
+        (
+            PolicyBoundPrivateMounts<AuthorizedPermanentNeighbours, PolicyEnabledNetworkProof>,
+            ExactIpv4PermanentNeighbourNetworkProof,
+        ),
+        FixedForwardPolicyFailure,
+    > {
+        if let Err(source) = self.verify_active_policy() {
+            return Err(self.into_deleted_failure(source));
+        }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (mounts, neighbour_proof) =
+            match mounts.install_permanent_neighbours_without_policy(routed_proof) {
+                Ok(result) => result,
+                Err(failure) => {
+                    return Err(policy_failure_from_topology(
+                        failure, policy, rollback, binding,
+                    ));
+                }
+            };
+        let neighbours = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        if let Err(source) = neighbours.verify_active_policy() {
+            return Err(neighbours.into_deleted_failure(source));
+        }
+        Ok((neighbours, neighbour_proof))
+    }
+
     /// Consume the routed proof, delete pair B then A while the exact policy
     /// stays armed, and return only deleted-topology generation-two authority.
     pub(crate) fn begin_retirement(
@@ -2612,6 +2954,71 @@ impl PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProo
             binding,
         } = self;
         let mounts = mounts.begin_retirement_without_policy();
+        let source =
+            retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
+        FixedForwardPolicyFailure::active_deleted(
+            source,
+            PolicyBoundPrivateMounts {
+                mounts,
+                policy,
+                rollback,
+                binding,
+            },
+        )
+    }
+}
+
+impl PolicyBoundPrivateMounts<AuthorizedPermanentNeighbours, PolicyEnabledNetworkProof> {
+    /// Explicitly remove endpoint B/A then parent B/A and restore exact routed proof.
+    pub(crate) fn remove_permanent_neighbours(
+        self,
+        neighbour_proof: ExactIpv4PermanentNeighbourNetworkProof,
+    ) -> Result<
+        (
+            PolicyBoundPrivateMounts<AuthorizedEndpointRoutes, PolicyEnabledNetworkProof>,
+            ExactIpv4EndpointRouteNetworkProof,
+        ),
+        FixedForwardPolicyFailure,
+    > {
+        if let Err(source) = self.verify_active_policy() {
+            return Err(self.into_deleted_failure(source));
+        }
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (mounts, routed_proof) =
+            match mounts.remove_permanent_neighbours_without_policy(neighbour_proof) {
+                Ok(result) => result,
+                Err(failure) => {
+                    return Err(policy_failure_from_topology(
+                        failure, policy, rollback, binding,
+                    ));
+                }
+            };
+        let routed = PolicyBoundPrivateMounts {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        };
+        if let Err(source) = routed.verify_active_policy() {
+            return Err(routed.into_deleted_failure(source));
+        }
+        Ok((routed, routed_proof))
+    }
+
+    fn into_deleted_failure(self, source: FixedForwardPolicyError) -> FixedForwardPolicyFailure {
+        let Self {
+            mounts,
+            policy,
+            rollback,
+            binding,
+        } = self;
+        let (backing, neighbours) = mounts.into_backing_and_run_state();
+        let mounts = backing.with_run_state(neighbours.begin_retirement());
         let source =
             retain_policy_cleanup_reproof(source, mounts.verify_authorized_deleted_topology());
         FixedForwardPolicyFailure::active_deleted(
@@ -4855,6 +5262,13 @@ fn fixed_route_error(
     hard_error(operation, io::Error::other(source))
 }
 
+fn fixed_neighbour_error(
+    operation: &'static str,
+    source: FixedPermanentNeighbourSetError,
+) -> PrivateMountSetupError {
+    hard_error(operation, io::Error::other(source))
+}
+
 fn endpoint_index(endpoint: NamespaceEndpoint) -> usize {
     match endpoint {
         NamespaceEndpoint::A => 0,
@@ -4992,6 +5406,23 @@ fn map_endpoint_route_visit_error(
             NamespacePinsNetworkProofError::Mount(namespace_pin_error(operation, source))
         }
         FixedEndpointRouteVisitError::Visitor(source) => {
+            NamespacePinsNetworkProofError::Network(source)
+        }
+    }
+}
+
+fn map_permanent_neighbour_visit_error(
+    operation: &'static str,
+    error: FixedPermanentNeighbourVisitError<crate::network::NetworkError>,
+) -> NamespacePinsNetworkProofError {
+    match error {
+        FixedPermanentNeighbourVisitError::Topology(source) => {
+            NamespacePinsNetworkProofError::Mount(fixed_neighbour_error(operation, source))
+        }
+        FixedPermanentNeighbourVisitError::Namespace(source) => {
+            NamespacePinsNetworkProofError::Mount(namespace_pin_error(operation, source))
+        }
+        FixedPermanentNeighbourVisitError::Visitor(source) => {
             NamespacePinsNetworkProofError::Network(source)
         }
     }
