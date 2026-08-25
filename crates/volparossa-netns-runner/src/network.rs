@@ -6,8 +6,11 @@
 //! limits, and the empty address, route, ordinary/proxy-neighbour, and nexthop
 //! object sets plus the default rules. The composite proof also pins one fixed
 //! namespace-local IPv4-forwarding proc record and a read-only generation-1
-//! empty nftables-table observation. It exposes no network-state writer or
-//! nftables mutation API; fixed GETs may trigger ordinary kernel module loading.
+//! empty nftables-table observation. After authorization, the RTNL/proc
+//! baseline remains independent from the affine nftables policy lineage so a
+//! semantically empty generation-3 ruleset can be proven without pretending
+//! that the kernel generation returned to one. This module exposes no proc or
+//! network-state writer; fixed GETs may trigger ordinary kernel module loading.
 
 use std::{
     io,
@@ -29,7 +32,11 @@ use volparossa_linux_uapi::namespace_type;
 
 use crate::{
     mounts::{Ipv4ForwardingRecordSnapshot, PrivateMountSetupError, PrivateMounts},
-    nftables::{NftablesBaseline, NftablesError, observe_empty_nftables},
+    nftables::{
+        ActiveNftablesPolicy, NftablesBaseline, NftablesError, SemanticallyEmptyNftables,
+        observe_empty_nftables, verify_empty_nftables, verify_exact_forward_policy,
+        verify_semantically_empty_after_forward_policy,
+    },
     topology::veth::VethTargetNamespaceIdentity,
 };
 
@@ -315,6 +322,12 @@ struct Ipv4ForwardingBaseline {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+struct RtnlProcNetworkBaseline {
+    rtnl: NetworkSnapshot,
+    ipv4_forwarding: Ipv4ForwardingBaseline,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 struct PreGoNetworkBaseline {
     rtnl: NetworkSnapshot,
     ipv4_forwarding: Ipv4ForwardingBaseline,
@@ -324,21 +337,53 @@ struct PreGoNetworkBaseline {
 /// An affine proof that the current thread observed the enumerated pre-`GO` network baseline.
 ///
 /// The token is deliberately neither cloneable nor transferable to another
-/// thread. [`Self::verify`] performs a fresh double snapshot before the proof is
-/// used at a later protocol barrier.
+/// thread. Mutation authorization performs a fresh double snapshot before the
+/// proof is consumed at the `GO` boundary.
 pub(crate) struct PreGoNetworkProof {
     baseline: PreGoNetworkBaseline,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-/// Affine baseline retained across one authorized, fully rolled-back mutation.
+/// Affine RTNL/proc baseline retained across one authorized mutation.
 ///
 /// Construction revalidates the pristine observation immediately before the
-/// mutation boundary. The token is neither cloneable nor transferable and is
-/// consumed by the post-rollback verification.
+/// mutation boundary. Nftables generation-one authority is deliberately split
+/// into [`AuthorizedNetworkMutationProof`] so later parent observations can
+/// remain valid under the exact active generation-two policy.
 pub(crate) struct MutationRollbackNetworkProof {
-    baseline: PreGoNetworkBaseline,
+    baseline: RtnlProcNetworkBaseline,
     _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// The exact parent authorities released by the pre-`GO` proof at mutation authorization.
+///
+/// The split is affine: the caller receives one RTNL/proc rollback proof and
+/// the sole initial empty nftables authority. Canonical inherited
+/// `ip_forward` may be either `0\n` or `1\n`; its record identity and bytes must
+/// remain exactly unchanged throughout the lineage.
+pub(crate) struct AuthorizedNetworkMutationProof {
+    rollback: MutationRollbackNetworkProof,
+    nftables: NftablesBaseline,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// Exact post-policy parent proof retaining semantic-empty generation-three lineage.
+///
+/// This is not a pre-`GO` proof: nftables generation is monotonic and remains
+/// three after the exact generation-one to generation-two to generation-three
+/// policy transaction. Reverification therefore checks semantics and lineage,
+/// not equality with the original generation number.
+pub(crate) struct FinalNetworkProof {
+    baseline: RtnlProcNetworkBaseline,
+    nftables: SemanticallyEmptyNftables,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+/// A consuming lineage transition failed without discarding either affine authority.
+#[must_use = "a failed network-lineage transition returns mandatory proof authority"]
+pub(crate) struct NetworkLineageFailure<Authority> {
+    source: NetworkError,
+    authority: Authority,
 }
 
 /// Fixed identity supplied by the veth owner for one read-only pair observation.
@@ -391,7 +436,7 @@ struct VethLinkObservation {
 
 /// Read-only exact-delta observation of both parent-side veth links.
 pub(crate) struct ExactVethParentObservation {
-    active: PreGoNetworkBaseline,
+    active: RtnlProcNetworkBaseline,
     links: [VethLinkObservation; 2],
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -406,7 +451,7 @@ pub(crate) struct ExactVethEndpointObservation {
 
 /// Read-only exact-delta observation of the two addressed parent-side veths.
 pub(crate) struct ExactIpv4AddressParentObservation {
-    active: PreGoNetworkBaseline,
+    active: RtnlProcNetworkBaseline,
     links: [VethLinkObservation; 2],
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -421,7 +466,7 @@ pub(crate) struct ExactIpv4AddressEndpointObservation {
 
 /// Exact addressed-down parent observation after the IPv6-addrgen barrier.
 pub(crate) struct ExactIpv4AddrgenNoneParentObservation {
-    active: PreGoNetworkBaseline,
+    active: RtnlProcNetworkBaseline,
     links: [VethLinkObservation; 2],
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -436,7 +481,7 @@ pub(crate) struct ExactIpv4AddrgenNoneEndpointObservation {
 
 /// Exact fully activated parent observation for both fixed IPv4 veth ends.
 pub(crate) struct ExactActivatedIpv4ParentObservation {
-    active: PreGoNetworkBaseline,
+    active: RtnlProcNetworkBaseline,
     links: [VethLinkObservation; 2],
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -473,7 +518,7 @@ pub(crate) struct ExpectedIpv4EndpointRoute {
 /// This is configuration evidence only. It does not observe packets, prove
 /// forwarding, establish a datapath, or establish readiness.
 pub(crate) struct ExactIpv4EndpointRouteParentObservation {
-    active: PreGoNetworkBaseline,
+    active: RtnlProcNetworkBaseline,
     links: [VethLinkObservation; 2],
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -587,38 +632,60 @@ impl ExpectedIpv4EndpointRoute {
 }
 
 impl PreGoNetworkProof {
-    /// Consume the affine proof, re-prove the baseline, and require equality.
-    pub(crate) fn verify(self, mounts: &PrivateMounts) -> Result<(), NetworkError> {
-        require_current_baseline(mounts, &self.baseline)
-    }
-
     /// Revalidate immediately before one authorized mutation and retain the
     /// exact baseline for a later rollback proof.
     pub(crate) fn authorize_mutation(
         self,
         mounts: &PrivateMounts,
-    ) -> Result<MutationRollbackNetworkProof, NetworkError> {
+    ) -> Result<AuthorizedNetworkMutationProof, NetworkError> {
         require_current_baseline(mounts, &self.baseline)?;
-        Ok(MutationRollbackNetworkProof {
-            baseline: self.baseline,
+        let PreGoNetworkBaseline {
+            rtnl,
+            ipv4_forwarding,
+            nftables,
+        } = self.baseline;
+        Ok(AuthorizedNetworkMutationProof {
+            rollback: MutationRollbackNetworkProof {
+                baseline: RtnlProcNetworkBaseline {
+                    rtnl,
+                    ipv4_forwarding,
+                },
+                _thread_bound: PhantomData,
+            },
+            nftables,
             _thread_bound: PhantomData,
         })
+    }
+}
+
+impl AuthorizedNetworkMutationProof {
+    /// Split the sole initial nftables authority from the retained RTNL/proc rollback proof.
+    pub(crate) fn into_parts(self) -> (MutationRollbackNetworkProof, NftablesBaseline) {
+        (self.rollback, self.nftables)
+    }
+}
+
+impl<Authority> NetworkLineageFailure<Authority> {
+    /// Recover the fixed failure and every affine input authority for fail-closed handling.
+    pub(crate) fn into_parts(self) -> (NetworkError, Authority) {
+        (self.source, self.authority)
     }
 }
 
 impl MutationRollbackNetworkProof {
     /// Observe the exact parent delta for two owner-retained, down veth pairs.
     ///
-    /// Every non-link RTNL record, IPv4-forwarding record, and nftables
-    /// observation must still equal the retained pristine baseline. The only
-    /// admitted link delta is the two expected parent-side veth observations.
+    /// Every non-link RTNL record and the IPv4-forwarding record must still
+    /// equal the retained pristine baseline. Nftables lineage is verified by
+    /// its separate affine authority. The only admitted link delta is the two
+    /// expected parent-side veth observations.
     pub(crate) fn observe_exact_veth_parent<RunState>(
         &self,
         mounts: &PrivateMounts<RunState>,
         expected: [&ExpectedVethPair; 2],
     ) -> Result<ExactVethParentObservation, NetworkError> {
         validate_parent_expectations(expected)?;
-        let active = collect_stable_network_baseline(mounts)?;
+        let active = collect_stable_rtnl_proc_baseline(mounts)?;
         let links = verify_exact_parent_veth_delta(&self.baseline, &active, expected)?;
         Ok(ExactVethParentObservation {
             active,
@@ -640,7 +707,7 @@ impl MutationRollbackNetworkProof {
     ) -> Result<ExactIpv4AddressParentObservation, NetworkError> {
         validate_parent_expectations(expected_pairs)?;
         validate_parent_ipv4_expectations(expected_pairs, expected_addresses)?;
-        let active = collect_stable_network_baseline(mounts)?;
+        let active = collect_stable_rtnl_proc_baseline(mounts)?;
         let links = verify_exact_parent_ipv4_address_delta(
             &self.baseline,
             &active,
@@ -668,7 +735,7 @@ impl MutationRollbackNetworkProof {
     ) -> Result<ExactIpv4AddrgenNoneParentObservation, NetworkError> {
         validate_parent_expectations(expected_pairs)?;
         validate_parent_ipv4_expectations(expected_pairs, expected_addresses)?;
-        let (active, links) = collect_exact_stable_network_delta(mounts, |active| {
+        let (active, links) = collect_exact_stable_parent_delta(mounts, |active| {
             verify_exact_parent_ipv4_addrgen_none_delta(
                 &self.baseline,
                 active,
@@ -697,7 +764,7 @@ impl MutationRollbackNetworkProof {
     ) -> Result<ExactActivatedIpv4ParentObservation, NetworkError> {
         validate_parent_expectations(expected_pairs)?;
         validate_parent_ipv4_expectations(expected_pairs, expected_addresses)?;
-        let (active, links) = collect_exact_stable_network_delta(mounts, |active| {
+        let (active, links) = collect_exact_stable_parent_delta(mounts, |active| {
             verify_exact_parent_activated_ipv4_delta(
                 &self.baseline,
                 active,
@@ -712,23 +779,83 @@ impl MutationRollbackNetworkProof {
         })
     }
 
-    /// Re-prove the exact retained pristine parent state without consuming the
-    /// rollback authority. This is the pre-disarm deletion barrier; the final
-    /// consuming rollback proof remains [`Self::verify_rollback`].
-    pub(crate) fn verify_pristine_state<RunState>(
+    /// Re-prove pristine parent RTNL/proc state and the untouched empty generation-one lineage.
+    pub(crate) fn verify_pristine_with_initial_nftables<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        nftables: &NftablesBaseline,
+    ) -> Result<(), NetworkError> {
+        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
+            verify_empty_nftables(nftables, deadline).map_err(NetworkError::Nftables)
+        })
+    }
+
+    /// Re-prove pristine parent RTNL/proc state while the exact drop policy remains active.
+    ///
+    /// Callers use this after deletion-only B/A veth retirement and before
+    /// `DELTABLE`; endpoint absence is proved separately through the retained
+    /// endpoint observations.
+    pub(crate) fn verify_pristine_with_active_policy<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+        policy: &ActiveNftablesPolicy,
+    ) -> Result<(), NetworkError> {
+        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
+            verify_exact_forward_policy(policy, deadline).map_err(NetworkError::Nftables)
+        })
+    }
+
+    /// Consume rollback and semantic-empty authorities into the reusable final parent proof.
+    pub(crate) fn finish_after_semantically_empty<RunState>(
+        self,
+        mounts: &PrivateMounts<RunState>,
+        nftables: SemanticallyEmptyNftables,
+    ) -> Result<FinalNetworkProof, NetworkLineageFailure<Box<(Self, SemanticallyEmptyNftables)>>>
+    {
+        match require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
+            verify_semantically_empty_after_forward_policy(&nftables, deadline)
+                .map_err(NetworkError::Nftables)
+        }) {
+            Ok(()) => Ok(FinalNetworkProof {
+                baseline: self.baseline,
+                nftables,
+                _thread_bound: PhantomData,
+            }),
+            Err(source) => Err(NetworkLineageFailure {
+                source,
+                authority: Box::new((self, nftables)),
+            }),
+        }
+    }
+}
+
+impl FinalNetworkProof {
+    /// Re-prove pristine RTNL/proc state plus the same semantic-empty generation-three lineage.
+    pub(crate) fn verify<RunState>(
         &self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<(), NetworkError> {
-        require_current_baseline(mounts, &self.baseline)
-    }
-
-    /// Consume the retained baseline and prove exact restoration after rollback.
-    pub(crate) fn verify_rollback(self, mounts: &PrivateMounts) -> Result<(), NetworkError> {
-        require_current_baseline(mounts, &self.baseline)
+        require_current_pristine_rtnl_proc_with_nftables(mounts, &self.baseline, |deadline| {
+            verify_semantically_empty_after_forward_policy(&self.nftables, deadline)
+                .map_err(NetworkError::Nftables)
+        })
     }
 }
 
 impl PristineNetworkNamespaceObservation {
+    /// Borrowingly re-prove the exact endpoint baseline while retaining it for final retirement.
+    ///
+    /// Endpoint nftables is never part of the parent policy transaction and
+    /// therefore remains the original empty generation-one lineage.
+    pub(crate) fn verify_pristine_state<RunState>(
+        &self,
+        mounts: &PrivateMounts<RunState>,
+    ) -> Result<(), NetworkError> {
+        require_current_network_namespace(self.namespace)?;
+        require_current_baseline(mounts, &self.baseline)?;
+        require_current_network_namespace(self.namespace)
+    }
+
     /// Observe one exact endpoint delta consisting only of down veth `eth0`.
     pub(crate) fn observe_exact_veth_endpoint<RunState>(
         &self,
@@ -843,9 +970,7 @@ impl PristineNetworkNamespaceObservation {
         self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<(), NetworkError> {
-        require_current_network_namespace(self.namespace)?;
-        require_current_baseline(mounts, &self.baseline)?;
-        require_current_network_namespace(self.namespace)
+        self.verify_pristine_state(mounts)
     }
 }
 
@@ -855,7 +980,7 @@ impl ExactVethParentObservation {
         &self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<(), NetworkError> {
-        require_current_stable_baseline(mounts, &self.active)
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
     }
 }
 
@@ -877,7 +1002,7 @@ impl ExactIpv4AddressParentObservation {
         &self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<(), NetworkError> {
-        require_current_stable_baseline(mounts, &self.active)
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
     }
 }
 
@@ -899,7 +1024,7 @@ impl ExactIpv4AddrgenNoneParentObservation {
         &self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<(), NetworkError> {
-        require_current_stable_baseline(mounts, &self.active)
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
     }
 }
 
@@ -921,7 +1046,7 @@ impl ExactActivatedIpv4ParentObservation {
         &self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<(), NetworkError> {
-        require_current_stable_baseline(mounts, &self.active)
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
     }
 
     /// Consume the activated observation after re-proving that the parent has
@@ -930,7 +1055,7 @@ impl ExactActivatedIpv4ParentObservation {
         self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<ExactIpv4EndpointRouteParentObservation, NetworkError> {
-        require_current_stable_baseline(mounts, &self.active)?;
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)?;
         Ok(ExactIpv4EndpointRouteParentObservation {
             active: self.active,
             links: self.links,
@@ -993,7 +1118,7 @@ impl ExactIpv4EndpointRouteParentObservation {
         &self,
         mounts: &PrivateMounts<RunState>,
     ) -> Result<(), NetworkError> {
-        require_current_stable_baseline(mounts, &self.active)
+        require_current_stable_rtnl_proc_baseline(mounts, &self.active)
     }
 }
 
@@ -1136,6 +1261,40 @@ fn require_current_stable_baseline<RunState>(
     expected: &PreGoNetworkBaseline,
 ) -> Result<(), NetworkError> {
     if collect_stable_network_baseline(mounts)? == *expected {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
+    }
+}
+
+fn require_current_stable_rtnl_proc_baseline<RunState>(
+    mounts: &PrivateMounts<RunState>,
+    expected: &RtnlProcNetworkBaseline,
+) -> Result<(), NetworkError> {
+    if collect_stable_rtnl_proc_baseline(mounts)? == *expected {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
+    }
+}
+
+fn require_current_pristine_rtnl_proc_with_nftables<RunState, VerifyNftables>(
+    mounts: &PrivateMounts<RunState>,
+    expected: &RtnlProcNetworkBaseline,
+    verify_nftables: VerifyNftables,
+) -> Result<(), NetworkError>
+where
+    VerifyNftables: FnOnce(Instant) -> Result<(), NetworkError>,
+{
+    let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
+    let active = collect_rtnl_proc_before_with(
+        mounts,
+        deadline,
+        collect_consistent_snapshot_before,
+        verify_nftables,
+    )?;
+    verify_pristine_snapshot(&active.rtnl)?;
+    if active == *expected {
         Ok(())
     } else {
         Err(NetworkError::Inconsistent)
@@ -1645,6 +1804,64 @@ fn collect_pre_go_network_baseline<RunState>(
     Ok(baseline)
 }
 
+fn collect_stable_rtnl_proc_baseline<RunState>(
+    mounts: &PrivateMounts<RunState>,
+) -> Result<RtnlProcNetworkBaseline, NetworkError> {
+    let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
+    collect_stable_rtnl_proc_baseline_before(mounts, deadline)
+}
+
+fn collect_stable_rtnl_proc_baseline_before<RunState>(
+    mounts: &PrivateMounts<RunState>,
+    deadline: Deadline,
+) -> Result<RtnlProcNetworkBaseline, NetworkError> {
+    collect_rtnl_proc_before_with(mounts, deadline, collect_consistent_snapshot_before, |_| {
+        Ok(())
+    })
+}
+
+fn collect_converged_rtnl_proc_baseline_before<RunState>(
+    mounts: &PrivateMounts<RunState>,
+    deadline: Deadline,
+) -> Result<RtnlProcNetworkBaseline, NetworkError> {
+    collect_rtnl_proc_before_with(mounts, deadline, collect_converged_snapshot_before, |_| {
+        Ok(())
+    })
+}
+
+fn collect_rtnl_proc_before_with<RunState, Collect, VerifyNftables>(
+    mounts: &PrivateMounts<RunState>,
+    deadline: Deadline,
+    collect_rtnl: Collect,
+    verify_nftables: VerifyNftables,
+) -> Result<RtnlProcNetworkBaseline, NetworkError>
+where
+    Collect: FnOnce(Deadline) -> Result<NetworkSnapshot, NetworkError>,
+    VerifyNftables: FnOnce(Instant) -> Result<(), NetworkError>,
+{
+    let forwarding_before = mounts
+        .read_ipv4_forwarding_record()
+        .map_err(NetworkError::PrivateProc)?;
+    let rtnl = collect_rtnl(deadline)?;
+    verify_nftables(deadline.instant())?;
+    let forwarding_after = mounts
+        .read_ipv4_forwarding_record()
+        .map_err(NetworkError::PrivateProc)?;
+    deadline.ensure_unexpired()?;
+    if forwarding_before != forwarding_after {
+        return Err(NetworkError::Inconsistent);
+    }
+    let state =
+        classify_ipv4_forwarding_records(forwarding_before.bytes(), forwarding_after.bytes())?;
+    Ok(RtnlProcNetworkBaseline {
+        rtnl,
+        ipv4_forwarding: Ipv4ForwardingBaseline {
+            record: forwarding_before,
+            state,
+        },
+    })
+}
+
 fn collect_stable_network_baseline<RunState>(
     mounts: &PrivateMounts<RunState>,
 ) -> Result<PreGoNetworkBaseline, NetworkError> {
@@ -1713,6 +1930,21 @@ where
     retry_exact_observation_before(
         deadline,
         || collect_converged_network_baseline_before(mounts, deadline),
+        verify,
+    )
+}
+
+fn collect_exact_stable_parent_delta<RunState, Output, Verify>(
+    mounts: &PrivateMounts<RunState>,
+    verify: Verify,
+) -> Result<(RtnlProcNetworkBaseline, Output), NetworkError>
+where
+    Verify: FnMut(&RtnlProcNetworkBaseline) -> Result<Output, NetworkError>,
+{
+    let deadline = Deadline::after(NETWORK_PROOF_TIMEOUT)?;
+    retry_exact_observation_before(
+        deadline,
+        || collect_converged_rtnl_proc_baseline_before(mounts, deadline),
         verify,
     )
 }
@@ -1886,11 +2118,11 @@ fn fixed_pair_subnet(pair: &ExpectedVethPair) -> Result<u8, NetworkError> {
 }
 
 fn verify_exact_parent_veth_delta(
-    pristine: &PreGoNetworkBaseline,
-    active: &PreGoNetworkBaseline,
+    pristine: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
     expected: [&ExpectedVethPair; 2],
 ) -> Result<[VethLinkObservation; 2], NetworkError> {
-    verify_unchanged_composite_except_links(pristine, active)?;
+    verify_unchanged_parent_except_links(pristine, active)?;
     verify_exact_parent_veth_snapshot_delta(&pristine.rtnl, &active.rtnl, expected)
 }
 
@@ -1935,12 +2167,12 @@ fn verify_exact_endpoint_veth_snapshot_delta(
 }
 
 fn verify_exact_parent_ipv4_address_delta(
-    pristine: &PreGoNetworkBaseline,
-    active: &PreGoNetworkBaseline,
+    pristine: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
     expected_pairs: [&ExpectedVethPair; 2],
     expected_addresses: [&ExpectedIpv4Address; 2],
 ) -> Result<[VethLinkObservation; 2], NetworkError> {
-    verify_unchanged_composite_except_links_and_fixed_ipv4(pristine, active)?;
+    verify_unchanged_parent_except_links_and_fixed_ipv4(pristine, active)?;
     let links = verify_exact_parent_veth_links_only(&pristine.rtnl, &active.rtnl, expected_pairs)?;
     verify_exact_fixed_ipv4_objects(&active.rtnl, &expected_addresses)?;
     Ok(links)
@@ -1959,12 +2191,12 @@ fn verify_exact_endpoint_ipv4_address_delta(
 }
 
 fn verify_exact_parent_ipv4_addrgen_none_delta(
-    pristine: &PreGoNetworkBaseline,
-    active: &PreGoNetworkBaseline,
+    pristine: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
     expected_pairs: [&ExpectedVethPair; 2],
     expected_addresses: [&ExpectedIpv4Address; 2],
 ) -> Result<[VethLinkObservation; 2], NetworkError> {
-    verify_unchanged_composite_except_links_and_fixed_ipv4(pristine, active)?;
+    verify_unchanged_parent_except_links_and_fixed_ipv4(pristine, active)?;
     verify_exact_parent_ipv4_addrgen_none_snapshot_delta(
         &pristine.rtnl,
         &active.rtnl,
@@ -2023,12 +2255,12 @@ fn verify_exact_endpoint_ipv4_addrgen_none_snapshot_delta(
 }
 
 fn verify_exact_parent_activated_ipv4_delta(
-    pristine: &PreGoNetworkBaseline,
-    active: &PreGoNetworkBaseline,
+    pristine: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
     expected_pairs: [&ExpectedVethPair; 2],
     expected_addresses: [&ExpectedIpv4Address; 2],
 ) -> Result<[VethLinkObservation; 2], NetworkError> {
-    verify_unchanged_composite_except_activated_ipv4(pristine, active)?;
+    verify_unchanged_parent_except_activated_ipv4(pristine, active)?;
     verify_exact_parent_activated_ipv4_snapshot_delta(
         &pristine.rtnl,
         &active.rtnl,
@@ -2253,6 +2485,18 @@ fn verify_unchanged_composite_except_links(
     }
 }
 
+fn verify_unchanged_parent_except_links(
+    pristine: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
+) -> Result<(), NetworkError> {
+    verify_unchanged_rtnl_except_links(&pristine.rtnl, &active.rtnl)?;
+    if active.ipv4_forwarding == pristine.ipv4_forwarding {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
+    }
+}
+
 fn verify_unchanged_composite_except_links_and_fixed_ipv4(
     pristine: &PreGoNetworkBaseline,
     active: &PreGoNetworkBaseline,
@@ -2265,6 +2509,18 @@ fn verify_unchanged_composite_except_links_and_fixed_ipv4(
     }
 }
 
+fn verify_unchanged_parent_except_links_and_fixed_ipv4(
+    pristine: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
+) -> Result<(), NetworkError> {
+    verify_unchanged_rtnl_except_links_and_fixed_ipv4(&pristine.rtnl, &active.rtnl)?;
+    if active.ipv4_forwarding == pristine.ipv4_forwarding {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
+    }
+}
+
 fn verify_unchanged_composite_except_activated_ipv4(
     pristine: &PreGoNetworkBaseline,
     active: &PreGoNetworkBaseline,
@@ -2274,6 +2530,18 @@ fn verify_unchanged_composite_except_activated_ipv4(
         Err(NetworkError::Inconsistent)
     } else {
         Ok(())
+    }
+}
+
+fn verify_unchanged_parent_except_activated_ipv4(
+    pristine: &RtnlProcNetworkBaseline,
+    active: &RtnlProcNetworkBaseline,
+) -> Result<(), NetworkError> {
+    verify_unchanged_rtnl_except_activated_ipv4(&pristine.rtnl, &active.rtnl)?;
+    if active.ipv4_forwarding == pristine.ipv4_forwarding {
+        Ok(())
+    } else {
+        Err(NetworkError::Inconsistent)
     }
 }
 
@@ -4071,6 +4339,19 @@ mod tests {
     const TEST_PORT: u32 = 41;
 
     #[test]
+    fn network_lineage_failure_returns_authority_without_substitution() {
+        let authority = Box::new([0x5a_u8; 32]);
+        let expected = std::ptr::from_ref::<[u8; 32]>(authority.as_ref());
+        let failure = NetworkLineageFailure {
+            source: NetworkError::Inconsistent,
+            authority,
+        };
+        let (source, authority) = failure.into_parts();
+        assert!(matches!(source, NetworkError::Inconsistent));
+        assert_eq!(std::ptr::from_ref::<[u8; 32]>(authority.as_ref()), expected);
+    }
+
+    #[test]
     fn fixed_requests_have_exact_headers_and_payloads() {
         for kind in DumpKind::ALL {
             let request = encode_dump_request(kind, TEST_SEQUENCE).expect("request");
@@ -5263,15 +5544,17 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_forwarding_baseline_is_canonical_and_stable() {
-        assert_eq!(
-            classify_ipv4_forwarding_records(b"0\n", b"0\n").expect("disabled baseline"),
-            Ipv4ForwardingState::Disabled
-        );
-        assert_eq!(
-            classify_ipv4_forwarding_records(b"1\n", b"1\n").expect("enabled baseline"),
-            Ipv4ForwardingState::Enabled
-        );
+    fn ipv4_forwarding_baseline_accepts_both_canonical_inherited_values_unchanged() {
+        for (record, expected) in [
+            (b"0\n".as_slice(), Ipv4ForwardingState::Disabled),
+            (b"1\n".as_slice(), Ipv4ForwardingState::Enabled),
+        ] {
+            assert_eq!(
+                classify_ipv4_forwarding_records(record, record)
+                    .expect("stable canonical inherited baseline"),
+                expected
+            );
+        }
         for malformed in [
             b"".as_slice(),
             b"0",

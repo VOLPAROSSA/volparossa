@@ -23,6 +23,7 @@ use rustix::{
 };
 use thiserror::Error;
 use volparossa_linux_uapi::{namespace_type, owning_user_namespace};
+use volparossa_test_support::RunId;
 
 use super::{
     ipv4::{
@@ -1255,6 +1256,134 @@ impl DeletedVethPairIdentity {
     }
 }
 
+/// Canonical run and pair lineage for the sole fixed parent forward policy.
+///
+/// This read-only value is derived only from the retained private-run and veth
+/// owners. It carries no mutation authority and accepts no caller-selected
+/// name, interface index, or namespace identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FixedForwardPolicyBinding {
+    run_id: RunId,
+    pairs: [DeletedVethPairIdentity; ENDPOINT_COUNT],
+}
+
+impl FixedForwardPolicyBinding {
+    /// Full canonical lifecycle run identifier retained by the private-run owner.
+    pub(crate) const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Parent-namespace interface indices in canonical endpoint A, B order.
+    pub(crate) fn parent_ifindices(&self) -> [u32; ENDPOINT_COUNT] {
+        self.pairs
+            .each_ref()
+            .map(DeletedVethPairIdentity::parent_ifindex)
+    }
+
+    /// Complete retained pair identities in canonical endpoint A, B order.
+    pub(crate) const fn pair_identities(&self) -> &[DeletedVethPairIdentity; ENDPOINT_COUNT] {
+        &self.pairs
+    }
+}
+
+fn fixed_pair_identities_from(
+    pairs: [&FixedVethPair; ENDPOINT_COUNT],
+) -> [DeletedVethPairIdentity; ENDPOINT_COUNT] {
+    pairs.map(|pair| {
+        let target = pair.target_namespace_identity();
+        DeletedVethPairIdentity {
+            endpoint: match pair.endpoint() {
+                FixedVethEndpoint::A => NamespaceEndpoint::A,
+                FixedVethEndpoint::B => NamespaceEndpoint::B,
+            },
+            parent_name: pair.parent_name().to_owned(),
+            parent_ifindex: pair.parent_ifindex(),
+            peer_ifindex: pair.peer_ifindex(),
+            target_namespace_device: target.device(),
+            target_namespace_inode: target.inode(),
+        }
+    })
+}
+
+fn derive_fixed_forward_policy_binding(
+    namespace_pins: &AuthorizedNamespacePins,
+    pairs: [&FixedVethPair; ENDPOINT_COUNT],
+) -> Result<FixedForwardPolicyBinding, NamespacePinError> {
+    let run_id = namespace_pins
+        .private_run
+        .as_ref()
+        .ok_or(NamespacePinError::Unsafe(
+            "fixed forward-policy private-run owner was consumed",
+        ))?
+        .verified_run_id()?
+        .clone();
+    let identities = fixed_pair_identities_from(pairs);
+    let [alpha, omega] = namespace_pins.mounts.entries.as_slice() else {
+        return Err(NamespacePinError::Unsafe(
+            "fixed forward-policy namespace-pin set is incomplete",
+        ));
+    };
+    let mounted_targets = [alpha, omega].map(|mounted| {
+        (
+            mounted.namespace.identity.device,
+            mounted.namespace.identity.inode,
+        )
+    });
+    validate_fixed_forward_policy_identities(&run_id, &identities, mounted_targets)?;
+
+    Ok(FixedForwardPolicyBinding {
+        run_id,
+        pairs: identities,
+    })
+}
+
+fn validate_fixed_forward_policy_identities(
+    run_id: &RunId,
+    identities: &[DeletedVethPairIdentity; ENDPOINT_COUNT],
+    mounted_targets: [(u64, u64); ENDPOINT_COUNT],
+) -> Result<(), NamespacePinError> {
+    let prefix = run_id
+        .as_str()
+        .get(..8)
+        .filter(|prefix| prefix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or(NamespacePinError::Unsafe(
+            "fixed forward-policy run ID prefix is unavailable",
+        ))?;
+    let expected_parent_names = [format!("vpa{prefix}"), format!("vpb{prefix}")];
+    if identities[0].endpoint != NamespaceEndpoint::A
+        || identities[1].endpoint != NamespaceEndpoint::B
+        || identities[0].parent_name != expected_parent_names[0]
+        || identities[1].parent_name != expected_parent_names[1]
+        || identities[0].parent_ifindex == identities[1].parent_ifindex
+        || identities
+            .iter()
+            .any(|identity| !(2..=i32::MAX as u32).contains(&identity.parent_ifindex))
+        || identities
+            .iter()
+            .any(|identity| !(2..=i32::MAX as u32).contains(&identity.peer_ifindex))
+        || identities.iter().any(|identity| {
+            identity.target_namespace_device == 0 || identity.target_namespace_inode == 0
+        })
+        || mounted_targets
+            .iter()
+            .any(|(device, inode)| *device == 0 || *inode == 0)
+        || mounted_targets[0] == mounted_targets[1]
+    {
+        return Err(NamespacePinError::Unsafe(
+            "fixed forward-policy pair order, name, or interface index is ambiguous",
+        ));
+    }
+
+    for (identity, (device, inode)) in identities.iter().zip(mounted_targets) {
+        if identity.target_namespace_device != device || identity.target_namespace_inode != inode {
+            return Err(NamespacePinError::Unsafe(
+                "fixed forward-policy pair escaped its retained endpoint namespace",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Private guard spanning the first possibly-sent SETLINK and all-NONE proof.
 struct ProvisionalLinkActivation {
     addressed: Option<AuthorizedIpv4Addresses>,
@@ -2015,6 +2144,21 @@ impl AuthorizedIpv4AddrgenNone {
         self.addressed().veth_pairs().fixed_pairs()
     }
 
+    /// Derive the full run-bound A/B identity used by the fixed parent policy.
+    ///
+    /// The all-NONE topology and its namespace backing are re-proven before and
+    /// after derivation. No caller-provided name or interface index is accepted.
+    pub(crate) fn fixed_forward_policy_binding(
+        &self,
+    ) -> Result<FixedForwardPolicyBinding, FixedLinkActivationError> {
+        self.verify()?;
+        let namespace_pins = self.addressed().veth_pairs().namespace_pins();
+        let binding = derive_fixed_forward_policy_binding(namespace_pins, self.fixed_pairs())
+            .map_err(FixedLinkActivationError::Namespace)?;
+        self.verify()?;
+        Ok(binding)
+    }
+
     pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
         self.addressed().veth_pairs().mount_ids()
     }
@@ -2613,21 +2757,28 @@ where
 impl AuthorizedDeletedTopology {
     /// Retained B/A identities for higher-level exact pristine observations.
     pub(crate) fn fixed_pair_identities(&self) -> [DeletedVethPairIdentity; ENDPOINT_COUNT] {
-        let pairs = self.addressed().veth_pairs().fixed_pairs();
-        pairs.map(|pair| {
-            let target = pair.target_namespace_identity();
-            DeletedVethPairIdentity {
-                endpoint: match pair.endpoint() {
-                    FixedVethEndpoint::A => NamespaceEndpoint::A,
-                    FixedVethEndpoint::B => NamespaceEndpoint::B,
-                },
-                parent_name: pair.parent_name().to_owned(),
-                parent_ifindex: pair.parent_ifindex(),
-                peer_ifindex: pair.peer_ifindex(),
-                target_namespace_device: target.device(),
-                target_namespace_inode: target.inode(),
-            }
-        })
+        fixed_pair_identities_from(self.addressed().veth_pairs().fixed_pairs())
+    }
+
+    /// Re-derive the same full run-bound A/B identity after pair deletion.
+    ///
+    /// This does not weaken or replace the existing deletion proof. It only
+    /// exposes immutable lineage while the lower owners remain armed.
+    pub(crate) fn fixed_forward_policy_binding(
+        &self,
+    ) -> Result<FixedForwardPolicyBinding, NamespacePinError> {
+        if self.absence.is_none() {
+            return Err(NamespacePinError::Unsafe(
+                "fixed forward-policy deletion proof was consumed",
+            ));
+        }
+        self.namespace_pins().verify()?;
+        let binding = derive_fixed_forward_policy_binding(
+            self.namespace_pins(),
+            self.addressed().veth_pairs().fixed_pairs(),
+        )?;
+        self.namespace_pins().verify()?;
+        Ok(binding)
     }
 
     pub(crate) fn mount_ids(&self) -> [u64; ENDPOINT_COUNT] {
@@ -2984,6 +3135,105 @@ mod tests {
         assert_eq!(
             REVERSE_NAMESPACE_VISIT_ORDER.map(NamespaceEndpoint::index),
             [1, 0]
+        );
+    }
+
+    fn fixed_forward_policy_binding_fixture() -> (
+        RunId,
+        [DeletedVethPairIdentity; ENDPOINT_COUNT],
+        [(u64, u64); ENDPOINT_COUNT],
+    ) {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run ID");
+        let identities = [
+            DeletedVethPairIdentity {
+                endpoint: NamespaceEndpoint::A,
+                parent_name: "vpa01234567".to_owned(),
+                parent_ifindex: 2,
+                peer_ifindex: 3,
+                target_namespace_device: 11,
+                target_namespace_inode: 21,
+            },
+            DeletedVethPairIdentity {
+                endpoint: NamespaceEndpoint::B,
+                parent_name: "vpb01234567".to_owned(),
+                parent_ifindex: 4,
+                peer_ifindex: 5,
+                target_namespace_device: 12,
+                target_namespace_inode: 22,
+            },
+        ];
+        (run_id, identities, [(11, 21), (12, 22)])
+    }
+
+    #[test]
+    fn fixed_forward_policy_binding_rejects_noncanonical_pair_lineage() {
+        let (run_id, identities, mounted_targets) = fixed_forward_policy_binding_fixture();
+        validate_fixed_forward_policy_identities(&run_id, &identities, mounted_targets)
+            .expect("canonical binding");
+
+        let mut wrong_order = identities.clone();
+        wrong_order[0].endpoint = NamespaceEndpoint::B;
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &wrong_order, mounted_targets)
+                .is_err()
+        );
+
+        let mut wrong_name = identities.clone();
+        wrong_name[1].parent_name = "vpb89abcdef".to_owned();
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &wrong_name, mounted_targets)
+                .is_err()
+        );
+        let other_run = RunId::parse("89abcdef0123456789abcdef01234567").expect("other run ID");
+        assert!(
+            validate_fixed_forward_policy_identities(&other_run, &identities, mounted_targets)
+                .is_err()
+        );
+
+        for invalid in [1, i32::MAX as u32 + 1] {
+            let mut wrong_parent = identities.clone();
+            wrong_parent[0].parent_ifindex = invalid;
+            assert!(
+                validate_fixed_forward_policy_identities(&run_id, &wrong_parent, mounted_targets,)
+                    .is_err()
+            );
+        }
+        let mut duplicate_parent = identities.clone();
+        duplicate_parent[1].parent_ifindex = duplicate_parent[0].parent_ifindex;
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &duplicate_parent, mounted_targets)
+                .is_err()
+        );
+        let mut wrong_peer = identities.clone();
+        wrong_peer[0].peer_ifindex = 1;
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &wrong_peer, mounted_targets)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fixed_forward_policy_binding_rejects_namespace_substitution() {
+        let (run_id, identities, mounted_targets) = fixed_forward_policy_binding_fixture();
+        let mut substituted = identities.clone();
+        substituted[1].target_namespace_inode += 1;
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &substituted, mounted_targets)
+                .is_err()
+        );
+
+        let mut zero_identity = identities.clone();
+        zero_identity[0].target_namespace_device = 0;
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &zero_identity, mounted_targets)
+                .is_err()
+        );
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &identities, [(0, 21), (12, 22)])
+                .is_err()
+        );
+        assert!(
+            validate_fixed_forward_policy_identities(&run_id, &identities, [(11, 21); 2]).is_err()
         );
     }
 
