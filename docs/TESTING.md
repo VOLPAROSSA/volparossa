@@ -206,8 +206,10 @@ containment slice. Its only transient topology is two otherwise-pristine network
 kernel-default loopback/rules, their nsfs mounts, two fixed veth pairs, four fixed `/30` IPv4
 addresses, four active link ends, two exact static `/32` endpoint routes, the exact kernel-created
 qdisc and route side effects, and one run-bound generation-2 `inet` table containing the sole fixed
-parent-FORWARD policy. The runner never writes the inherited IPv4-forwarding setting. It produces
-no packet-capture, probe, dataplane, or topology-readiness evidence. It re-executes only
+parent-FORWARD policy. While that policy is exact, the runner conditionally establishes
+namespace-local IPv4 forwarding in PID 1's disposable parent network namespace and restores the
+exact original record before policy retirement; the outer host setting remains unchanged. It
+produces no packet-capture, probe, dataplane, or topology-readiness evidence. It re-executes only
 `/proc/self/exe`,
 once as the fixed launcher and once as namespace PID 1, with a distinct private selector for each role. It
 clears both child environments, fences unrelated inherited descriptors, and uses three separate
@@ -317,7 +319,11 @@ installs a run-derived `inet vpl_<run_id>` table, one `filter` base chain named 
 `inet` forward hook with priority 0 and policy drop, one exact IPv4 ICMP echo-request accept rule
 from endpoint A (`10.241.1.2`) to endpoint B (`10.241.2.2`), and only its exact reverse echo-reply
 accept rule. Fresh full-ruleset observation proves exactly that semantic state at generation 2.
-It next activates all four ends with separate link-up requests. Exact converged parent/A/B
+With that policy active and all four ends still down at IPv6 addrgen mode `none`, PID 1 uses its
+retained private-proc descriptor to establish canonical `1\n` in the fixed parent
+`/proc/sys/net/ipv4/ip_forward` record. It requests exactly one bounded two-byte write when the
+retained original is `0\n`; an original `1\n` is freshly re-read and adopted without a write. It
+next activates all four ends with separate link-up requests. Exact converged parent/A/B
 observations require carrier-up `noqueue` links, no IPv6 addresses, four local `/32`, four
 connected `/30`, four high-broadcast `/32`, and four local-table IPv6 `ff00::/8` multicast routes.
 Only temporary stable kernel snapshots may be retried inside the same two-second absolute
@@ -335,14 +341,20 @@ fails closed, and any possibly sent request retains deletion-bound authority eve
 ambiguous ACK/readback. No `RTM_DELROUTE` request or encoder exists. PID 1 directly deletes veth B
 followed by A as the sole route-removal mechanism. Once a link request may have been sent, teardown
 never tries to restore link-down/EUI-64 state and never runs ordinary per-address rollback. Both
-route owners and every lower address and pair owner remain armed until retained parent/A/B
-baselines prove all three namespaces byte-exactly equal to the retained enumerated network
-baselines while the exact generation-2 policy remains active. PID 1 then deletes only the freshly
+route owners and every lower address and pair owner remain armed. After direct veth B/A deletion,
+PID 1 restores the exact retained original parent `ip_forward` record while the exact generation-2
+policy remains active: an original `0\n` causes one bounded two-byte restore write, while an
+original `1\n` requires no write. It then proves all three namespaces byte-exactly equal to the
+retained enumerated network baselines for the restored phase. PID 1 deletes only the freshly
 observed table handle with a generation-pinned atomic transaction and requires a fresh complete
 ruleset observation to prove semantic emptiness at generation 3. The final network proof binds the
 restored RTNL, proc, and endpoint state to that generation-3 nftables result. A prevalidated
 infallible retirement barrier disarms the route, address, and pair owners only after those final
-proofs.
+proofs. This restoration claim covers only the fixed `ip_forward` record. Linux may reset related
+per-device IPv4 configuration when forwarding changes; those other devconf values are not
+exhaustively enumerated here, and their complete removal relies on destruction of the disposable
+parent network namespace after its last reference closes. This slice does not separately observe
+that destruction.
 It ensures every detached-clone and transient visible-pin
 descriptor is closed before ordinarily unmounting nsfs B then A with `UMOUNT_NOFOLLOW`, proves the
 hidden empty slots and original mountinfo baseline are restored, and then rolls back slot B, slot A,
@@ -374,7 +386,9 @@ routing-policy database is exactly IPv4 priorities 0/local, 32766/main, and 3276
 IPv6 priorities 0/local and 32766/main. Each complete observation reads the fixed namespace-local
 `/proc/sys/net/ipv4/ip_forward` record through the retained private-proc descriptor, accepts only
 canonical `0\n` or `1\n`, and binds both the procfs object identity and value across the RTNL
-snapshot. The runner does not write this sysctl. A bounded read-only `NETLINK_NETFILTER` sequence
+snapshot. This readiness observation does not write the record; the later `GO`-authorized,
+policy-bound transition described above may conditionally do so. A bounded read-only
+`NETLINK_NETFILTER` sequence
 requires generation 1 immediately before and after complete table, chain, rule, set, object, and
 flowtable dumps, all of which must be empty. PID 1 repeats the complete observation immediately
 before the authorized write and again after root/slot rollback; every pinned component must match,
@@ -394,15 +408,22 @@ altered tables, chains, rules, expressions, hooks, policies, tuples, verdicts, A
 generations fail closed. This is real configuration and cleanup proof, but it is not forwarding,
 packet-behaviour, probe, datapath, or acceptance evidence.
 
-The readiness observation does not claim that forwarding is disabled, and this slice makes no
-forwarding-setting request. Neither proof claims that every firewall/netfilter facility is empty.
+The readiness observation does not claim that forwarding is disabled and makes no pre-`GO`
+forwarding-setting request. A separate fixed proc writer can target only the descriptor-pinned
+parent-namespace `ip_forward` record, accepts only canonical `0\n` or `1\n`, performs at most one
+two-byte write per transition, and returns affine reconciliation authority after a possibly written
+request. After a possibly written enable, any stable result other than the exact enabled target,
+including the original value, stays indeterminate and aborts fail closed. It has no general sysctl
+surface. Neither proof claims that every firewall/netfilter
+facility is empty.
 Qdisc records are enumerated so an ingress/`clsact` hook cannot hide behind link qdisc name
 `noop`; traffic-control classes, filters, and chains are not separately catalogued because this
 slice admits no non-baseline qdisc on which they could attach. Other netconf, address-label,
 neighbour-table parameter, conntrack, ipset,
 NFQUEUE/NFLOG, legacy-xtables, and independent-hook state is outside it. A read-only GET or the
-fixed writer may cause ordinary kernel module loading. The runner has no forwarding-setting or
-general nftables mutation API: it can install and retire only the exact policy above. A later
+fixed writers may cause ordinary kernel module loading. The runner has no general sysctl or
+general nftables mutation API: it can change only the fixed forwarding record and install or retire
+only the exact policy above. A later
 topology driver must pin every additional setting it relies on or extend this proof before packets
 are sent.
 
@@ -438,12 +459,18 @@ both-pair/namespace lineage, fail-closed sibling classification, and deletion-bo
 The live production-policy round trip installs the exact generation-2 ruleset in a disposable
 namespace, deletes only its observed table handle, proves semantic-empty generation 3, and verifies
 the inherited canonical forwarding value unchanged. It deliberately sends no packet.
+Separate fixed-writer tests use a distinct disposable network namespace to establish `0\n`, perform
+a real `0\n` to `1\n` to `0\n` round trip, and restore that namespace's initial value. Synthetic
+descriptor-backed tests prove that an inherited `1\n` takes the no-write enable and restore path.
+Together with the production lifecycle gate these cover both conditional branches without changing
+the development host, but they are not a claim that two separately forced initial values traversed
+the complete PID-1 lifecycle.
 These portable cases treat only the exact util-linux `EPERM` forms for an unavailable `unshare` or
 UID/GID-map write as an environmental skip; every other spawn, child, parser, or proof failure
 remains fatal. Such a skip is not readiness evidence and cannot replace the dedicated gate.
 
 ```sh
-just test-netns-forward-policy-teardown-proof
+just test-netns-ipv4-forwarding-runtime-proof
 ```
 
 That opt-in gate requires an unprivileged Debian 13 amd64 host with unprivileged user namespaces
@@ -464,7 +491,8 @@ A14, A15, or acceptance evidence. A container on an Ubuntu runner does not suppl
 Debian-host kernel evidence, and a privileged container would test a different privilege boundary.
 The gate executes a private, owner-only copy of the fixed-target build artifact.
 
-The earlier `just test-netns-endpoint-route-teardown-proof`,
+The earlier `just test-netns-forward-policy-teardown-proof`,
+`just test-netns-endpoint-route-teardown-proof`,
 `just test-netns-link-activation-teardown-proof`,
 `just test-netns-ipv4-address-rollback-proof`,
 `just test-netns-veth-rollback-proof`, `just test-netns-live-nsfs-proof`,
@@ -495,12 +523,14 @@ request. It also proves the four fixed `/30` addresses and exactly four kernel-c
 generation-2 parent-FORWARD policy installed before activation, exact carrier-up activation and
 kernel-owned qdisc/route side effects, both exact static endpoint routes and their strict parent/A/B
 observation, direct veth B/A deletion while the policy remains exact, parent/endpoint restoration
-under generation 2, handle-only policy deletion, semantic-empty generation 3, final
+under generation 2 after exact restoration of the retained parent `ip_forward` record, handle-only
+policy deletion, semantic-empty generation 3, final
 parent/endpoint reproof before route/address/pair owner retirement, and the nsfs ordinary reverse
 unmount, internal `MUTATION_ROLLBACK_COMPLETE` checkpoint, independent empty-`/run` verification,
-and fixed pidfd-to-PID1-signalfd TERM observation described above. It never writes the inherited
-forwarding setting and creates no manifest. It produces no packet-absence, probe, datapath,
-general crash-cleanup, A14, A15, or acceptance evidence. At supervised IPC boundaries, managed
+and fixed pidfd-to-PID1-signalfd TERM observation described above. It conditionally writes only the
+disposable parent namespace's fixed forwarding record, restores that exact original record, leaves
+the outer host setting byte-identical, and creates no manifest. It produces no packet-absence,
+probe, datapath, general crash-cleanup, A14, A15, or acceptance evidence. At supervised IPC boundaries, managed
 outer HUP/INT/TERM events take
 priority over pending protocol records and trigger bounded exact-launcher containment. The live
 gate does not yet prove external-signal handling throughout every reap/report phase, a forced
@@ -509,8 +539,8 @@ prove that the runner invokes no namespace or networking utility. It still has n
 root-filesystem or supplementary-group isolation, `TOPOLOGY_READY`, `STOP`, `FINISHED`, configured
 dataplane-topology mutation, crash-cleanup evidence, acceptance report, or A01-A15 result.
 `BOOTSTRAP_READY` remains readiness evidence; this `GO` authorizes only the bounded private-root,
-two-pin, two-veth, four-address, exact forward-policy, link-activation, endpoint-route, and policy
-teardown transaction, and the
+two-pin, two-veth, four-address, exact forward-policy, conditional forwarding enable/restore,
+link-activation, endpoint-route, and policy teardown transaction, and the
 rollback checkpoint is not A14 cleanup or acceptance evidence.
 The dedicated-host proof also does not claim hostile same-UID sender provenance from the
 `signalfd_siginfo` metadata; it proves that the retained pidfd send is followed by the exact
@@ -526,6 +556,9 @@ Run-scoped names derive from one 128-bit lowercase hexadecimal run ID. The produ
 namespace modules and the `PristineRun`, `AuthorizedPrivateRun`, `AuthorizedNamespacePins`,
 `AuthorizedVethPairs`, `AuthorizedIpv4Addresses`, `AuthorizedIpv4AddrgenNone`,
 `AuthorizedActivatedTopology`, and `AuthorizedDeletedTopology` typestates are active in the runner.
+Separate affine forwarding authorities distinguish the original, enabled, exactly restored, and
+indeterminate record states; lower-owner retirement and policy deletion cannot cross an enabled or
+unclassified forwarding state.
 After consuming
 `MutationAuthorization`, it uses only the retained private-`/run` descriptor to create the fixed
 mode-0700 roots `/run/netns` and `/run/volparossa-netns-runner/<run_id>` plus exactly two
@@ -541,10 +574,12 @@ replacement. Only a fully pinned and journalled layout can advance to the namesp
 That transition publishes exactly two live nsfs pins, visits each through its visible read-only
 descriptor, creates and proves exactly two fixed down-veth pairs, installs and proves the four fixed
 IPv4 addresses and their four kernel-created local-table routes while every end remains down,
-proves the all-NONE barrier, installs the exact generation-2 policy, and proves the carrier-up
+proves the all-NONE barrier, installs the exact generation-2 policy, conditionally establishes
+parent-namespace IPv4 forwarding, and proves the carrier-up
 barrier plus both endpoint routes with exact qdisc/route side effects. It directly deletes veth B
-then A, proves all three network namespaces pristine under generation 2, deletes the policy by its
-observed handle, proves semantic-empty generation 3, repeats the final network proof, retires the
+then A, restores the exact original forwarding record, proves all three network namespaces pristine
+for the enumerated restored phase under generation 2, deletes the policy by its observed handle,
+proves semantic-empty generation 3, repeats the final network proof, retires the
 lower owners, and ordinarily unmounts nsfs B then A,
 and proves its exact mountinfo baseline before the success path reverses slot B, slot A, the per-run
 directory, the workspace root, and the netns root, including directory `fsync`. Inotify and
@@ -570,7 +605,8 @@ Those publication tests deliberately use synthetic device/inode records and one 
 they do not prove a live namespace, hostile same-UID concurrency safety, safe production namespace
 teardown, topology/probe readiness, cleanup, A14, or A15. Separately, the runtime transaction
 proves its own two transient live nsfs pins, two fixed veth pairs, four fixed IPv4 addresses,
-their exact active qdisc/route side effects, one exact generation-2 parent-FORWARD policy, and
+their exact active qdisc/route side effects, one exact generation-2 parent-FORWARD policy,
+conditional enable/restore of the fixed parent `ip_forward` record, and
 deletion-only link teardown plus handle-only policy retirement with pre-retirement pristine and
 semantic-empty generation-3 proofs inside the fixed one-PID-1-task, trusted-launcher model, but
 production still has no manifest writer or configured topology lifecycle. The unmount target is

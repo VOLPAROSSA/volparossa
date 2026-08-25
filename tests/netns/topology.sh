@@ -23,9 +23,11 @@ print_plan() {
         '  current slice: publish two live nsfs pins and create two fixed veth pairs, each through one atomic RTM_NEWLINK' \
         '  configure four fixed IPv4 /30 addresses, disable IPv6 address generation, and prove the all-NONE barrier while all four links remain down' \
         '  atomically install and prove the run-bound generation-2 parent FORWARD drop policy with only the exact ICMP request/reply rules before link activation' \
+        '  behind that exact policy, conditionally establish 1 in the disposable parent namespace ip_forward record and retain its exact original 0 or 1 value' \
         '  activate and prove all four links with their exact kernel qdisc and route side effects while the policy remains exact' \
         '  install and prove endpoint A 10.241.2.2/32 via 10.241.1.1 and endpoint B 10.241.1.2/32 via 10.241.2.1 as exact main-table static routes' \
-        '  retain and reprove that policy while deleting veth B then A, prove all three namespaces pristine under generation 2, delete only its table handle, prove semantic-empty generation 3, then retire lower owners after final reproof' \
+        '  retain and reprove that policy while deleting veth B then A, restore the exact original parent ip_forward record, prove the enumerated restored phase under generation 2, delete only its table handle, prove semantic-empty generation 3, then retire lower owners after final reproof' \
+        '  treat only that exact forwarding record as restored; other IPv4 devconf state is discarded only when the disposable parent namespace is destroyed' \
         '  future full topology: send the fixed lifecycle probe and prove the exact policy behaviour before final teardown' \
         '  bind every cleanup decision to the recorded namespace mount inode' \
         '  tear down in reverse order and verify zero owned objects remain' \
@@ -56,7 +58,7 @@ case ${1-} in
         }
         print_plan
         printf '%s\n' \
-            'BLOCKED: the Rust runner now installs and proves the sole exact generation-2 parent FORWARD policy before link activation, retains it through the two endpoint routes and veth B/A deletion, proves pristine network state, deletes only the observed table handle, proves semantic-empty generation 3, and completes private-run rollback before exact TERM/EOF/reap. It never writes the inherited forwarding setting and creates no packet, probe, ownership manifest, or topology readiness evidence; this shell entry point remains non-executing until packet-level policy proof exists, and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence.' \
+            'BLOCKED: the Rust runner now installs and proves the sole exact generation-2 parent FORWARD policy before link activation, conditionally establishes IPv4 forwarding only in its disposable parent network namespace, retains that policy through the two endpoint routes and veth B/A deletion, restores the exact original ip_forward record, proves the enumerated restored phase, deletes only the observed table handle, proves semantic-empty generation 3, and completes private-run rollback before exact TERM/EOF/reap. An original 0 requires one bounded enable write and one restore write; an original 1 takes the no-write path. The outer host setting remains unchanged; other IPv4 devconf state is outside the record proof and is discarded only when the disposable namespace is destroyed. This creates no packet, probe, ownership manifest, or topology readiness evidence; the shell entry point remains non-executing until packet-level policy proof exists and produces no TOPOLOGY_READY, A14, A15, or acceptance evidence.' \
             'This invocation created no namespace, link, address, route, rule, firewall object, VPN, or sysctl.' >&2
         exit 77
         ;;
