@@ -46,9 +46,21 @@ pub use server::{AllowedPeer, ServerError, bind_production_socket, run_server};
 #[doc(hidden)]
 pub const INTERNAL_WORKER_V3_ARGUMENT: &str = worker_v3::INTERNAL_WORKER_V3_ARGUMENT;
 
+/// Fixed private live-proof selector; it accepts no path, environment, or agent input.
+#[doc(hidden)]
+pub const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str =
+    worker_v3::INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT;
+
 /// Runs the isolated worker-v3 child entry after its parent-authentication checks.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_worker_v3_entry() -> bool {
     worker_v3::run_internal_worker_v3_entry()
+}
+
+/// Runs one fixed production-image worker bootstrap and proves bounded retirement.
+#[doc(hidden)]
+#[must_use]
+pub fn run_internal_worker_v3_live_proof() -> bool {
+    worker_v3::run_internal_worker_v3_live_proof()
 }

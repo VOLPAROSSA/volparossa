@@ -55,6 +55,17 @@ test-netns-fixed-icmp-echo-proof:
     /usr/bin/setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all \
         ./tests/netns/require-fixed-icmp-echo-proof.sh
 
+test-helper-live-worker-identity-contract:
+    ./tests/helper/test-live-worker-identity-contract.sh
+
+test-helper-live-worker-identity-preview:
+    ./tests/helper/require-live-worker-identity-proof.sh --preview
+
+# Build this target as the workspace user first; execute the recipe itself as
+# root only inside a disposable Debian 13 amd64 VM.
+test-helper-live-worker-identity-proof:
+    ./tests/helper/require-live-worker-identity-proof.sh --execute --yes
+
 # Backwards-compatible names for the now-stronger fixed ICMP echo plus rollback proof.
 test-netns-permanent-neighbour-proof: test-netns-fixed-icmp-echo-proof
 test-netns-counted-forward-policy-proof: test-netns-fixed-icmp-echo-proof

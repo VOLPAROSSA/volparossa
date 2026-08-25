@@ -55,6 +55,9 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 for script_path in \
+    tests/helper/lib/live-worker-proof-capture.sh \
+    tests/helper/require-live-worker-identity-proof.sh \
+    tests/helper/test-live-worker-identity-contract.sh \
     tests/integration/run.sh \
     tests/integration/validate-report.sh \
     tests/netns/run-topology.sh \
@@ -75,6 +78,7 @@ do
     sh -n "$REPOSITORY_DIRECTORY/$script_path"
 done
 jq -e . "$REPOSITORY_DIRECTORY/tests/integration/acceptance-report.schema.json" >/dev/null
+"$REPOSITORY_DIRECTORY/tests/helper/test-live-worker-identity-contract.sh"
 
 /bin/mkdir "$TEMPORARY_DIRECTORY/bin"
 MUTATION_MARKER=$TEMPORARY_DIRECTORY/mutation-attempt

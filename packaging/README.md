@@ -45,6 +45,25 @@ the complete Debian 13 namespace suite before release. `ProtectKernelTunables=no
 documented exception needed for namespace-local MPTCP sysctls; the typed helper must prove it never
 writes host sysctls. Do not weaken the other sandbox settings merely to hide an implementation bug.
 
+The repository now has a component-only live worker-identity driver. Preview is always safe and
+non-writing. Build the helper as the workspace user, then run the explicit gate only as root inside
+a disposable Debian 13 amd64 VM:
+
+```sh
+cargo build --locked -p volparossa-helper
+./tests/helper/require-live-worker-identity-proof.sh --preview
+sudo ./tests/helper/require-live-worker-identity-proof.sh --execute --yes
+```
+
+The gate uses synthetic read-only account overlays, a transient `PrivateNetwork` service and a
+private `/run`; it never invokes `systemd-sysusers` and does not validate an installed package. The
+helper requires the transient parent to expose exactly the staged agent GID as its sole kernel
+supplementary group, so any additional group inherited for host root fails closed. Its
+one-shot, numeric-group, account-overlay, private-network/private-`/run`, bounded-output and
+no-restart deviations from the shipped helper unit are enumerated in `docs/HELPER_V3.md`. No
+required disposable-VM result has been recorded yet, so this is a driver rather than package,
+production-service, datapath, A14 or A15 evidence.
+
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
 See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
 
