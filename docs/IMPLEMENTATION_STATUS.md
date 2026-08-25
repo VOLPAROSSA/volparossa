@@ -96,10 +96,25 @@ Last updated: 2026-08-25
   Adversarial fake-backend tests cover factory/poll panic, caller cancellation, missing-binding
   recovery without stale-owner substitution, overflow, completion/deadline substitution,
   `CleanupIncomplete` quarantine, shutdown correlation, and wrong/late Acquire descriptor closure
-  before exact Destroy. Production still installs only the `Unavailable` backend and performs no
-  worker or network mutation. WorkerCoordinator deadline propagation and upgradeable shutdown,
-  audited `CredentialedWorkerFd` to `OwnedFd` transfer, durable journal/reaper integration, and the
-  separate Add/Remove MPTCP endpoint seam remain required; no datapath or acceptance checkbox closes.
+  before exact Destroy. The disconnected `WorkerCoordinator` now carries one absolute deadline from
+  pre-PLAN admission through request, response, optional Acquire FD, liveness and COMMIT; expiry
+  before PLAN leaves no state, late completion cannot commit, and a late installed FD is closed.
+  This is a success/COMMIT acceptance boundary rather than a wall-clock return guarantee because
+  exact-owner cleanup and scheduling may deliver the fail-closed result later.
+  Its separate launcher carries one absolute spawn/handshake budget, polls spawn-lock acquisition
+  against that deadline, pre-arms retirement ownership before the blocking `Command::spawn`
+  operation and installs any returned child into that owner before further fallible work; only the
+  spawn operation itself remains non-interruptible.
+  Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
+  an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
+  workers and handles for a later upgrade, and a waiter accepts only completion published strictly
+  before its own deadline, while runtime/task cancellation fails closed and cannot upgrade.
+  Terminal unresolved settlement atomically drains captured owners and immediately escalates any
+  later owner instead of leaving it stranded.
+  Production still installs only the `Unavailable` backend and performs no worker or network
+  mutation. Production adapter wiring, audited
+  `CredentialedWorkerFd` to `OwnedFd` transfer, durable journal/reaper integration, and the separate
+  Add/Remove MPTCP endpoint seam remain required; no datapath or acceptance checkbox closes.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
   and doctor contract now require exactly the reviewed seven-capability bootstrap set

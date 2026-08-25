@@ -150,6 +150,18 @@ flags unchanged. While the spawn lock is held and after retirement-permit acquis
 reads `Seccomp` and `Seccomp_filters` from `/proc/thread-self/status` immediately before
 `Command::spawn`; the child therefore inherits that exact per-thread filter baseline.
 
+One 30-second absolute monotonic deadline now follows the disconnected launcher through setup,
+the post-lock pre-spawn check, credentialed handshake records, sandbox observation and liveness
+proofs. Spawn-lock acquisition repeatedly uses `try_lock` with deadline-bounded sleeps and rechecks
+the same deadline after acquiring the mutex, so an expired queued caller creates no child. The
+blocking `Command::spawn` operation itself is not interruptible. Before entering it, the launcher
+constructs an armed retirement owner with its permit and empty child slot. The spawn boundary holds
+that slot and moves a successfully returned `Child` into it before returning, so no allocation,
+deadline check or other fallible post-spawn step can observe an unowned child. Late setup or
+handshake failure therefore retires that exact child boundedly or transfers the same owner to the
+escalation reaper. This is a disconnected launcher bound, not production route-setup or acceptance
+evidence.
+
 After exec, the child closes raw descriptor 3 if present, atomically duplicates stdin with
 `fcntl_dupfd_cloexec` using minimum 3, requires the returned descriptor to be exactly 3 and closes
 stdin. Its bounded self-audit then requires exactly descriptors `{1, 2, 3}`. Before authentication,
@@ -327,13 +339,15 @@ The registry uses one short synchronous mutex so shutdown can install its fence 
 process owner before returning a wait future. Code under that mutex only validates or moves state
 and ownership; it never probes, kills, polls, sleeps or reaps. Bounded process work runs under a
 supervisor after detachment. While the coordinator remains open, a failed bounded attempt is
-reattached only to the exact quarantined generation. Once the shutdown fence is installed, normal reattach is prohibited: the
-supervisor moves that detached owner into the bounded shutdown-settlement queue. A non-shutdown
-reattach failure, launch-cleanup uncertainty and shutdown uncertainty transfer a linearly owned
-retirement record to a process-wide in-memory escalation reaper. `WorkerProcess`
-and `ProcessRetirement` destruction perform no child-process operation: they only move an armed
-retirement record to that reaper. Queue mutex poisoning is recovered with the contained ownership
-intact.
+reattached only to the exact quarantined generation. Once the shutdown fence is installed, normal
+reattach is prohibited: the supervisor moves that detached owner into the bounded
+shutdown-settlement queue. An orderly shutdown timeout retains each exact `DetachedWorker` and
+unfinished supervisor handle in the coordinator for a later attempt. A non-shutdown reattach
+failure, launch-cleanup uncertainty, fatal retirement result, or cancelled/panicked shutdown task
+instead transfers every remaining linearly owned retirement record to the process-wide in-memory
+escalation reaper. `WorkerProcess` and `ProcessRetirement` destruction perform no child-process
+operation: they only move an armed retirement record to that reaper. Queue mutex poisoning is
+recovered with the contained ownership intact.
 
 The reaper and its fixed pool of 64 permits are initialised before `command.spawn()`. Every
 admitted child consumes exactly one permit, carried through `WorkerProcess` and
@@ -345,16 +359,18 @@ process without unwinding an owner. Failure to start the reaper is remembered an
 later launch before a child exists; unexpected reaper-thread return or panic is likewise
 process-fatal.
 
-Each supervisor or reaper process attempt is bounded to 250 ms. A clean timeout leaves the live hint,
-retirement ownership and namespace pins intact; the detached reaper waits 5 ms and queues that same
-owner for another bounded round. A signal error gets one immediate wait race-check: an already reaped
-child succeeds, while a still-running child or any wait error is process-fatal. Fatal outcomes abort
-without unwinding or requeueing the armed owner. No request or shutdown waiter follows the timeout
-retry loop. Shutdown therefore completes `false` after its own bounded attempt instead of
-waiting indefinitely for background confirmation. The retry record may remain in memory for the
-helper lifetime when the operating system never confirms reap. This queue and its permits are not
-durable across a helper crash. The dormant v3 store does not change that because no production
-writer or restart reaper is connected.
+Each ordinary supervisor or reaper process attempt is bounded to 250 ms. A clean timeout leaves the
+live hint, retirement ownership and namespace pins intact; the detached reaper waits 5 ms and queues
+that same owner for another bounded round. Orderly shutdown instead uses the caller's absolute
+deadline for each retirement proof and preserves a timed-out owner for an explicit later shutdown
+attempt. A signal error gets one immediate wait race-check: an already reaped child succeeds, while
+a still-running child or any wait error is process-fatal. Fatal outcomes abort without unwinding or
+requeueing the armed owner. No ordinary request waiter follows the reaper retry loop. An orderly
+shutdown waiter is bounded independently from its caller-independent cleanup task and can observe
+`Pending`; the attempt later publishes `Confirmed`, `Retryable`, or terminal `Unresolved`. An exact
+retry owner may remain in memory for the helper lifetime when the operating system never confirms
+reap. Neither that state nor the reaper permits are durable across a helper crash. The dormant v3
+store does not change that because no production writer or restart reaper is connected.
 
 Exact cache hits use a registry-lock-free point-in-time process probe followed by registry-locked
 checks of the atomic hint, expiry, generation and shutdown state. There is deliberately no watcher
@@ -362,20 +378,34 @@ or pidfd, so a child can still die after a positive probe. The in-memory fallbac
 replacement for durable secret-free ownership and crash recovery; production remains disconnected.
 
 The disconnected async coordinator demonstrates the required transaction shape: PLAN records the
-exact context, generation, phase, token and request digest under its short mutex, then starts an
-owned supervisor before the caller can wait on the oneshot result. Bounded blocking credentialed
-IPC runs outside the registry mutex. The supervisor reacquires the mutex only to commit after
-revalidating generation, token, digest, TTL, shutdown and the latest registry-lock-free liveness
-hint, or to quarantine and detach for cleanup. A successful terminal `DestroyContext` detaches for
-bounded retirement without requiring a positive pre-retirement liveness probe. Timeout, EOF, join
-failure, malformed response, stale completion, detected child death, or either-record failure for
-an Acquire result never retries the IPC operation.
+exact context, generation, phase, token, request digest and one caller-owned monotonic deadline
+under its short mutex, then starts an owned supervisor before the caller can wait on the oneshot
+result. `execute_until` rejects expiry again immediately before PLAN, leaving no tombstone,
+in-flight token or channel write. Exact cache hits carry the same deadline into their liveness
+probe. For a new call, that one deadline is copied without renewal through request send, response
+receive, the required second binding/optional-FD record for Acquire, liveness proof and the COMMIT
+decision. Credentialed transport uses readiness polling plus nonblocking syscalls; interrupt and
+readiness races reuse the remaining budget, and every send/receive syscall has a post-operation
+expiry check. Any late installed descriptor is already RAII-owned and is closed before timeout is
+returned. This deadline is the PLAN/IPC/liveness/COMMIT acceptance boundary, not a promise that the
+call future is delivered by that instant: Tokio scheduling and mandatory exact-owner cleanup can
+delay an error result, but can never authorize a late success or COMMIT.
 
-Before admission, `execute` must obtain the current Tokio runtime handle. Its absence returns
-`RuntimeUnavailable` before any permit, registry PLAN or task creation. A fixed 64-slot linear
-supervisor admission is then acquired under the same mutex as the shutdown fence before every PLAN,
-including exact cache hits and cleanup-triggering requests. Saturation returns `Capacity` before
-registry mutation or task spawn.
+All blocking credentialed IPC and liveness work runs outside the registry mutex. The supervisor
+reacquires the mutex only to commit after revalidating generation, token, digest, deadline, TTL,
+shutdown and the latest registry-lock-free liveness hint, or to quarantine and detach for cleanup.
+A successful terminal `DestroyContext` detaches for bounded retirement without requiring a positive
+pre-retirement liveness probe. Timeout, EOF, join failure, malformed response, stale completion,
+detected child death, or either-record failure for an Acquire result never retries the IPC
+operation. Caller cancellation drops only its result receiver: the already-owned supervisor keeps
+the transaction authority until commit rejection or exact cleanup.
+
+Before admission, `execute`/`execute_until` must obtain the current Tokio runtime handle. Its absence
+returns `RuntimeUnavailable` before any permit, registry PLAN or task creation. The legacy
+`execute` wrapper creates one five-second absolute deadline for its complete typed call; it does not
+reset that budget per response record. A fixed 64-slot linear supervisor admission is then acquired
+under the same mutex as the shutdown fence before every PLAN, including exact cache hits and
+cleanup-triggering requests. Saturation returns `Capacity` before registry mutation or task spawn.
 
 Task creation is a gated two-phase handoff. The caller keeps the pending permit while it creates a
 dormant supervisor task outside the supervisor mutex. The task cannot receive its permit or run
@@ -389,32 +419,50 @@ releases a still-pending permit. The accounting invariant remains
 `recorded handles + pending admissions <= 64`; the pending side also bounds dormant handles. An
 earlier PLAN is covered by the initial/final fenced detach sweeps.
 
-`shutdown()` is a synchronous starter that returns a wait future. Before returning that future and
-before any await, one synchronous critical section fences new supervisors, performs the initial
-registry detach and transfers those owners plus every existing supervisor handle to one
-caller-independent shutdown task. Every supervisor has an explicit RAII settlement: a normal return
-settles it, an abnormal task drop records unresolved teardown, and a failed retire observed after
-the fence transfers its detached process into the bounded shutdown-owner queue instead of
-reattaching it as a registry worker.
+`shutdown_until` is a synchronous starter that returns a bounded wait future. A request that would
+start a new attempt first validates its deadline; an already-expired deadline returns `Retryable`
+without fencing, detaching, incrementing the attempt ID or otherwise changing state. For a valid
+deadline, before returning the future and before any await, one synchronous critical section fences
+new supervisors, assigns a monotonically increasing attempt ID, performs the initial registry
+detach and transfers those owners plus every existing supervisor handle to one caller-independent
+shutdown task. Every supervisor has an explicit RAII settlement: a normal return settles it, an
+abnormal task drop marks teardown unresolved, and a failed retire observed after the fence
+transfers its detached process into the bounded shutdown-owner queue instead of reattaching it as a
+registry worker.
 
-The shutdown task processes its initial owners, waits for all captured supervisor handles, drains
-their shutdown-owner settlements, and then performs a second fenced registry detach sweep. All
-process work remains outside the registry mutex. A `true` completion requires every retirement in
-both waves to be confirmed, every captured supervisor to settle, no unresolved settlement, and an
-empty worker-record registry after the final sweep. The task owns an RAII publication guard:
-normal completion publishes exactly once, while task panic, abort or runtime cancellation
-synchronously publishes the shared `false` result during future destruction. Concurrent, later,
-and even next-runtime callers wait on or read that same completion rather than starting another
-teardown.
+The shutdown state is explicit: `Pending`, `Confirmed`, `Retryable`, or `Unresolved`. Concurrent
+callers share the exact pending attempt and completion identity. Existing `Confirmed` and
+`Unresolved` results are sticky and returned before considering a new deadline; an existing
+`Pending` attempt also remains shared. A waiter's deadline can return `Pending` without cancelling
+that owned attempt. It accepts a published result only when completion was linearized strictly
+before that waiter's own absolute deadline; an equal or later publication is observed as `Pending`,
+even if the result is available when the waiter checks. The task processes its initial owners,
+waits for all captured supervisor handles, drains their shutdown-owner settlements, and then
+performs a second fenced registry detach sweep. All process work remains outside the registry
+mutex. An orderly deadline returns every still-owned worker and unfinished handle to coordinator
+state as `Retryable`; only then may a later caller create a new attempt with a new ID. That later
+attempt can upgrade the result to `Confirmed` after exact operating-system absence is proved.
 
-A `false` result is fail-closed: full settlement was not proven and process ownership is retained
-by the fenced registry, a shutdown settlement, or the in-memory escalation reaper according to the
-point of interruption. Tests cover waiter abort, temporary-runtime cancellation followed by a
-bounded next-runtime waiter, concurrent shutdown callers, shutdown exactly between a failed retire
-and reattach, the final detach sweep, launch cleanup timeout, reattach failure,
-process-owner permit-cap saturation, parallel exact-cache-hit coordinator-cap rejection before
-PLAN, no-runtime polling before admission or PLAN, mutex-poison ownership, caller abort around PLAN,
-generation ABA, expiry/death commit rejection, descriptor closure, tombstone bounds and
+`Confirmed` requires every retirement in both waves to be reaped and purged, every captured
+supervisor to settle, no unresolved settlement, zero active or pending permits, no retained owner
+or handle, and an empty worker-record registry after the final sweep. The task owns an
+attempt-correlated RAII publication guard. Panic, abort, missing runtime or runtime/task
+cancellation escalates remaining exact process owners, aborts retained handles and publishes
+terminal `Unresolved`; that fail-closed status is never upgraded by a later runtime. The settlement
+ledger's unresolved bit is also monotonic: setting it drains every already-captured shutdown owner
+to the reaper while holding the ledger lock, and a later owner capture observes the same bit and
+escalates immediately instead of becoming stranded. The legacy `shutdown()` wrapper creates one
+five-second absolute deadline and returns `true` only for `Confirmed`; `Pending`, `Retryable`, and
+`Unresolved` all map to `false`.
+
+Tests cover waiter abort without task cancellation, concurrent callers sharing one attempt,
+orderly timeout retaining exact owners for a later successful retry, runtime cancellation remaining
+terminal, rejection of an expired new shutdown attempt without state mutation, waiter publication
+ordering at its exact deadline, shutdown exactly between a failed retire and reattach, the final
+detach sweep, launch cleanup timeout, reattach failure, process-owner permit-cap saturation,
+parallel exact-cache-hit coordinator-cap rejection before PLAN, expired pre-PLAN admission without
+registry mutation, no-runtime polling before admission or PLAN, mutex-poison ownership, caller abort
+around PLAN, generation ABA, late/dead commit rejection, descriptor closure, tombstone bounds and
 registry-lock availability.
 
 Neither the launcher, registry, coordinator, nor production route manager calls this worker path.
@@ -460,13 +508,13 @@ mutation.
 
 Production wiring remains a separate audited change with these explicit blockers:
 
-- `WorkerCoordinator` currently publishes a one-shot `false` shutdown result that cannot later be
-  upgraded after escalation-reaper reconciliation; production shutdown needs durable, retryable
-  settlement semantics before the engine may select it.
-- The engine's five-second soft call boundary does not itself bound worker spawn, authentication or
-  internal calls, and the coordinator accepts no operation-specific absolute deadline. The adapter
-  must propagate and enforce that deadline and must never cancel-and-Destroy while the owned
-  supervisor is still Busy.
+- No production adapter maps `BackendLineage`/`OperationBinding` to a generation reservation and
+  `WorkerCoordinator`, or carries the engine's exact deadline through `spawn_worker_v3_until` and
+  `execute_until`. The implemented deadline and retryable-shutdown machinery therefore remains
+  disconnected from `HelperEngine`.
+- Retryable shutdown ownership and the escalation reaper are still process-memory-only. The dormant
+  journal has no production writer or restart reaper, so helper-crash reconciliation is not yet
+  durable.
 - `CredentialedWorkerFd` intentionally exposes no affine `OwnedFd` transfer. The adapter needs an
   audited ownership transfer (or safe duplicate/adoption in the Linux UAPI layer) plus
   close-on-reject tests.
