@@ -34,7 +34,7 @@ use crate::{
         InternalTransportSocketKind, InternalWorkerRequest, InternalWorkerResponse,
         InternalWorkerResult, MAX_INTERNAL_WORKER_FRAME, decode_request, decode_response,
         encode_request, encode_response, internal_worker_request, transport_descriptor_binding,
-        validate_response_for_request,
+        transport_descriptor_source_released_binding, validate_response_for_request,
     },
 };
 
@@ -623,9 +623,11 @@ pub(crate) fn receive_credential_worker_request_with_deadline<S: AsFd>(
 
 /// Sends one canonical response and every required completion record with kernel credentials.
 ///
-/// Acquire success carries exactly one descriptor in its bound second record. Acquire failure
-/// carries the same exact binding without a descriptor. Any partial failure makes the channel
-/// ambiguous and must cause worker termination rather than a retry.
+/// Acquire success carries exactly one descriptor in its bound second record. This function owns
+/// and drops the worker's source descriptor before sending a distinct descriptor-free release
+/// record. Acquire failure carries the same exact completion binding without a descriptor or
+/// release record. Any partial failure makes the channel ambiguous and must cause worker
+/// termination rather than a retry.
 ///
 /// # Errors
 ///
@@ -634,18 +636,18 @@ pub(crate) fn send_credential_worker_response<S: AsFd>(
     channel: &S,
     request: &InternalWorkerRequest,
     response: &InternalWorkerResponse,
-    descriptor: Option<&OwnedFd>,
+    descriptor: Option<OwnedFd>,
 ) -> Result<(), WorkerTransportError> {
     let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
     send_credential_worker_response_with_deadline(channel, request, response, descriptor, deadline)
 }
 
-/// Sends one response and its optional completion record under one absolute deadline.
+/// Sends one response and all required completion records under one absolute deadline.
 pub(crate) fn send_credential_worker_response_with_deadline<S: AsFd>(
     channel: &S,
     request: &InternalWorkerRequest,
     response: &InternalWorkerResponse,
-    descriptor: Option<&OwnedFd>,
+    descriptor: Option<OwnedFd>,
     deadline: HardDeadline,
 ) -> Result<(), WorkerTransportError> {
     deadline.ensure_remaining()?;
@@ -663,11 +665,20 @@ pub(crate) fn send_credential_worker_response_with_deadline<S: AsFd>(
     let binding = acquire
         .then(|| transport_descriptor_binding(request, response).map_err(protocol_error))
         .transpose()?;
+    let released = (acquire && success)
+        .then(|| {
+            transport_descriptor_source_released_binding(request, response).map_err(protocol_error)
+        })
+        .transpose()?;
     let encoded = encode_response(response).map_err(protocol_error)?;
     send_credential_record_with_deadline(channel, encoded.as_slice(), deadline)?;
     if let Some(binding) = binding {
         if let Some(descriptor) = descriptor {
-            send_credential_fd_record_with_deadline(channel, descriptor, &binding, deadline)?;
+            send_credential_fd_record_with_deadline(channel, &descriptor, &binding, deadline)?;
+            drop(descriptor);
+            let released = released.ok_or(WorkerTransportError::Invalid)?;
+            validate_credential_binding(&released)?;
+            send_credential_record_with_deadline(channel, &released, deadline)?;
         } else {
             validate_credential_binding(&binding)?;
             send_credential_record_with_deadline(channel, &binding, deadline)?;
@@ -693,10 +704,12 @@ pub(crate) fn receive_credential_worker_response<S: AsFd>(
     receive_credential_worker_response_with_deadline(channel, request, expected, deadline)
 }
 
-/// Receives one response and its optional FD/binding record under one absolute deadline.
+/// Receives one response and all required FD/binding records under one absolute deadline.
 ///
 /// The same copied deadline is used for every record. Any descriptor installed after the deadline
-/// is immediately owned and closed before this function reports timeout.
+/// is immediately owned and closed before this function reports timeout. Acquire success is not
+/// returned until an exact descriptor-free release record proves that the correct worker program
+/// dropped the source descriptor after its `SCM_RIGHTS` send.
 pub(crate) fn receive_credential_worker_response_with_deadline<S: AsFd>(
     channel: &S,
     request: &InternalWorkerRequest,
@@ -718,12 +731,30 @@ pub(crate) fn receive_credential_worker_response_with_deadline<S: AsFd>(
             _
         ))
     );
+    let success = response.result == InternalWorkerResult::Ok as i32;
+    let released = (acquire && success)
+        .then(|| {
+            transport_descriptor_source_released_binding(request, &response).map_err(protocol_error)
+        })
+        .transpose()?;
     let descriptor = if acquire {
         let binding = transport_descriptor_binding(request, &response).map_err(protocol_error)?;
-        if response.result == InternalWorkerResult::Ok as i32 {
-            Some(receive_credential_fd_record_with_deadline(
-                channel, &binding, expected, deadline,
-            )?)
+        if success {
+            let descriptor =
+                receive_credential_fd_record_with_deadline(channel, &binding, expected, deadline)?;
+            let released = released.ok_or(WorkerTransportError::Invalid)?;
+            let received = receive_credential_record_with_deadline(
+                channel,
+                released.len(),
+                expected,
+                deadline,
+            )?;
+            if received.as_slice() != released {
+                return Err(
+                    invalid_data("credentialed descriptor release binding mismatch").into(),
+                );
+            }
+            Some(descriptor)
         } else {
             let received = receive_credential_record_with_deadline(
                 channel,
@@ -775,10 +806,11 @@ pub(crate) fn receive_worker_request<S: AsFd>(
 
 /// Sends one correlated response and the exact transport completion record when applicable.
 ///
-/// An Acquire success requires exactly one descriptor. An Acquire failure requires none and emits
-/// a descriptor-free binding record, proving that no hidden capability accompanied the error.
-/// Any error from this function makes the channel ambiguous; the caller must terminate the worker
-/// and quarantine the context instead of retrying.
+/// An Acquire success requires exactly one owned descriptor. The source is dropped after the
+/// descriptor send and before a distinct release record. An Acquire failure requires none and
+/// emits a descriptor-free binding record, proving that no hidden capability accompanied the
+/// error. Any error from this function makes the channel ambiguous; the caller must terminate the
+/// worker and quarantine the context instead of retrying.
 ///
 /// # Errors
 ///
@@ -787,7 +819,7 @@ pub(crate) fn send_worker_response<S: AsFd>(
     channel: &S,
     request: &InternalWorkerRequest,
     response: &InternalWorkerResponse,
-    descriptor: Option<&OwnedFd>,
+    descriptor: Option<OwnedFd>,
 ) -> Result<(), WorkerTransportError> {
     validate_response_for_request(request, response).map_err(protocol_error)?;
     let acquire = matches!(
@@ -803,11 +835,19 @@ pub(crate) fn send_worker_response<S: AsFd>(
     let binding = acquire
         .then(|| transport_descriptor_binding(request, response).map_err(protocol_error))
         .transpose()?;
+    let released = (acquire && success)
+        .then(|| {
+            transport_descriptor_source_released_binding(request, response).map_err(protocol_error)
+        })
+        .transpose()?;
     let encoded = encode_response(response).map_err(protocol_error)?;
     send_seqpacket_without_fd(channel, encoded.as_slice())?;
     if let Some(binding) = binding {
         if let Some(descriptor) = descriptor {
-            send_fd_with_binding(channel, descriptor, &binding)?;
+            send_fd_with_binding(channel, &descriptor, &binding)?;
+            drop(descriptor);
+            let released = released.ok_or(WorkerTransportError::Invalid)?;
+            send_binding_without_fd(channel, &released)?;
         } else {
             send_binding_without_fd(channel, &binding)?;
         }
@@ -836,10 +876,19 @@ pub(crate) fn receive_worker_response<S: AsFd>(
             _
         ))
     );
+    let success = response.result == InternalWorkerResult::Ok as i32;
+    let released = (acquire && success)
+        .then(|| {
+            transport_descriptor_source_released_binding(request, &response).map_err(protocol_error)
+        })
+        .transpose()?;
     let descriptor = if acquire {
         let binding = transport_descriptor_binding(request, &response).map_err(protocol_error)?;
-        if response.result == InternalWorkerResult::Ok as i32 {
-            Some(receive_fd_with_binding(channel, &binding)?)
+        if success {
+            let descriptor = receive_fd_with_binding(channel, &binding)?;
+            let released = released.ok_or(WorkerTransportError::Invalid)?;
+            receive_binding_without_fd(channel, &released)?;
+            Some(descriptor)
         } else {
             receive_binding_without_fd(channel, &binding)?;
             None
@@ -864,27 +913,99 @@ pub(crate) fn create_transport_socket(
     request: &AcquireTransportSocket,
 ) -> Result<OwnedFd, WorkerTransportError> {
     validate_committed_request(lease, request)?;
+    match transport_socket_expectation(request)? {
+        TransportSocketExpectation::MptcpConnected { local, remote } => {
+            create_connected_mptcp(local, remote)
+        }
+        TransportSocketExpectation::MptcpListener { local } => create_mptcp_listener(local),
+        TransportSocketExpectation::UdpUnconnected { local } => create_bound_udp(local),
+    }
+}
+
+/// Consumes and revalidates one descriptor received for a canonical Acquire request.
+///
+/// The descriptor cannot escape on rejection: converting it to [`Socket`] preserves its affine
+/// ownership, and every error drops that owner. This proves the parent-observed kernel socket
+/// shape only. The credentialed receive path separately requires the worker's source-release
+/// barrier before returning its descriptor. A later production adapter must additionally prove the
+/// socket's pinned network namespace before publishing success.
+///
+/// # Errors
+///
+/// Returns Invalid unless the request has one closed transport shape and the kernel reports the
+/// exact domain, type, protocol, local/peer tuples, flags, listener state and error state. A
+/// connected MPTCP descriptor must additionally prove genuine negotiation without TCP fallback.
+pub(crate) fn validate_adopted_transport_socket(
+    descriptor: OwnedFd,
+    request: &AcquireTransportSocket,
+) -> Result<OwnedFd, WorkerTransportError> {
+    let expectation = transport_socket_expectation(request)?;
+    let socket = Socket::from(descriptor);
+    validate_transport_socket(&socket, expectation)?;
+    Ok(socket.into())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportSocketExpectation {
+    MptcpConnected {
+        local: SocketAddr,
+        remote: SocketAddr,
+    },
+    MptcpListener {
+        local: SocketAddr,
+    },
+    UdpUnconnected {
+        local: SocketAddr,
+    },
+}
+
+fn transport_socket_expectation(
+    request: &AcquireTransportSocket,
+) -> Result<TransportSocketExpectation, WorkerTransportError> {
+    let role =
+        InternalEndpointRole::try_from(request.role).map_err(|_| WorkerTransportError::Invalid)?;
     let kind = InternalTransportSocketKind::try_from(request.descriptor_kind)
         .map_err(|_| WorkerTransportError::Invalid)?;
+    if !role_allows_socket(role, kind) {
+        return Err(WorkerTransportError::Invalid);
+    }
     let local = socket_address(
         request
             .expected_local
             .as_ref()
             .ok_or(WorkerTransportError::Invalid)?,
     )?;
-    match kind {
-        InternalTransportSocketKind::MptcpConnected => {
-            let remote = socket_address(
-                request
-                    .expected_remote
-                    .as_ref()
-                    .ok_or(WorkerTransportError::Invalid)?,
-            )?;
-            create_connected_mptcp(local, remote)
+    match (kind, request.expected_remote.as_ref()) {
+        (InternalTransportSocketKind::MptcpConnected, Some(remote)) => {
+            let remote = socket_address(remote)?;
+            if std::mem::discriminant(&local) != std::mem::discriminant(&remote) || local == remote
+            {
+                return Err(WorkerTransportError::Invalid);
+            }
+            Ok(TransportSocketExpectation::MptcpConnected { local, remote })
         }
-        InternalTransportSocketKind::MptcpListener => create_mptcp_listener(local),
-        InternalTransportSocketKind::QuicUdpUnconnected => create_bound_udp(local),
-        InternalTransportSocketKind::Unspecified => Err(WorkerTransportError::Invalid),
+        (InternalTransportSocketKind::MptcpListener, None) => {
+            Ok(TransportSocketExpectation::MptcpListener { local })
+        }
+        (InternalTransportSocketKind::QuicUdpUnconnected, None) => {
+            Ok(TransportSocketExpectation::UdpUnconnected { local })
+        }
+        _ => Err(WorkerTransportError::Invalid),
+    }
+}
+
+fn validate_transport_socket(
+    socket: &Socket,
+    expectation: TransportSocketExpectation,
+) -> Result<(), WorkerTransportError> {
+    match expectation {
+        TransportSocketExpectation::MptcpConnected { local, remote } => {
+            validate_connected_mptcp(socket, local, remote)
+        }
+        TransportSocketExpectation::MptcpListener { local } => {
+            validate_mptcp_listener(socket, local)
+        }
+        TransportSocketExpectation::UdpUnconnected { local } => validate_bound_udp(socket, local),
     }
 }
 
@@ -957,6 +1078,7 @@ fn create_connected_mptcp(
         Type::STREAM.nonblocking().cloexec(),
         Some(Protocol::MPTCP),
     )?;
+    configure_exact_address_family(&socket, local)?;
     socket.bind(&SockAddr::from(local))?;
     match socket.connect(&SockAddr::from(remote)) {
         Ok(()) => {}
@@ -981,6 +1103,7 @@ fn create_mptcp_listener(local: SocketAddr) -> Result<OwnedFd, WorkerTransportEr
         Type::STREAM.nonblocking().cloexec(),
         Some(Protocol::MPTCP),
     )?;
+    configure_exact_address_family(&socket, local)?;
     socket.set_reuse_address(true)?;
     socket.bind(&SockAddr::from(local))?;
     socket.listen(MPTCP_LISTEN_BACKLOG)?;
@@ -994,6 +1117,7 @@ fn create_bound_udp(local: SocketAddr) -> Result<OwnedFd, WorkerTransportError> 
         Type::DGRAM.nonblocking().cloexec(),
         Some(Protocol::UDP),
     )?;
+    configure_exact_address_family(&socket, local)?;
     socket.bind(&SockAddr::from(local))?;
     validate_bound_udp(&socket, local)?;
     Ok(socket.into())
@@ -1026,8 +1150,8 @@ fn validate_connected_mptcp(
     local: SocketAddr,
     remote: SocketAddr,
 ) -> Result<(), WorkerTransportError> {
-    validate_common(socket, Type::STREAM, Protocol::MPTCP, local)?;
-    if socket.peer_addr()?.as_socket() != Some(remote) || socket.take_error()?.is_some() {
+    validate_common(socket, Type::STREAM, Protocol::MPTCP, local, false)?;
+    if socket.peer_addr()?.as_socket() != Some(remote) {
         return Err(WorkerTransportError::Invalid);
     }
     if !mptcp_info(socket)?.is_negotiated() {
@@ -1037,16 +1161,16 @@ fn validate_connected_mptcp(
 }
 
 fn validate_mptcp_listener(socket: &Socket, local: SocketAddr) -> Result<(), WorkerTransportError> {
-    validate_common(socket, Type::STREAM, Protocol::MPTCP, local)?;
-    if !socket.is_listener()? || peer_is_connected(socket)? {
+    validate_common(socket, Type::STREAM, Protocol::MPTCP, local, true)?;
+    if peer_is_connected(socket)? {
         return Err(WorkerTransportError::Invalid);
     }
     Ok(())
 }
 
 fn validate_bound_udp(socket: &Socket, local: SocketAddr) -> Result<(), WorkerTransportError> {
-    validate_common(socket, Type::DGRAM, Protocol::UDP, local)?;
-    if socket.is_listener()? || peer_is_connected(socket)? {
+    validate_common(socket, Type::DGRAM, Protocol::UDP, local, false)?;
+    if peer_is_connected(socket)? {
         return Err(WorkerTransportError::Invalid);
     }
     Ok(())
@@ -1057,10 +1181,15 @@ fn validate_common(
     expected_type: Type,
     expected_protocol: Protocol,
     expected_local: SocketAddr,
+    expected_listener: bool,
 ) -> Result<(), WorkerTransportError> {
-    if socket.r#type()? != expected_type
+    if socket.domain()? != Domain::for_address(expected_local)
+        || socket.r#type()? != expected_type
         || socket.protocol()? != Some(expected_protocol)
         || socket.local_addr()?.as_socket() != Some(expected_local)
+        || socket.is_listener()? != expected_listener
+        || socket.take_error()?.is_some()
+        || (expected_local.is_ipv6() && !socket.only_v6()?)
     {
         return Err(WorkerTransportError::Invalid);
     }
@@ -1070,6 +1199,16 @@ fn validate_common(
         OFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFL).map_err(errno_io)?);
     if !descriptor_flags.contains(FdFlag::FD_CLOEXEC) || !status_flags.contains(OFlag::O_NONBLOCK) {
         return Err(WorkerTransportError::Invalid);
+    }
+    Ok(())
+}
+
+fn configure_exact_address_family(
+    socket: &Socket,
+    local: SocketAddr,
+) -> Result<(), WorkerTransportError> {
+    if local.is_ipv6() {
+        socket.set_only_v6(true)?;
     }
     Ok(())
 }
@@ -1100,7 +1239,11 @@ fn socket_address(value: &InternalSocketAddress) -> Result<SocketAddr, WorkerTra
         || address.is_loopback()
         || address.is_multicast()
         || matches!(address, IpAddr::V4(value) if value == Ipv4Addr::BROADCAST)
-        || matches!(address, IpAddr::V6(value) if value.is_unicast_link_local())
+        || matches!(
+            address,
+            IpAddr::V6(value)
+                if value.is_unicast_link_local() || value.to_ipv4_mapped().is_some()
+        )
     {
         return Err(WorkerTransportError::Invalid);
     }
@@ -1143,6 +1286,100 @@ mod tests {
             address: octets.to_vec(),
             port,
         }
+    }
+
+    fn internal_address(value: SocketAddr) -> InternalSocketAddress {
+        InternalSocketAddress {
+            address: match value.ip() {
+                IpAddr::V4(address) => address.octets().to_vec(),
+                IpAddr::V6(address) => address.octets().to_vec(),
+            },
+            port: u32::from(value.port()),
+        }
+    }
+
+    fn acquire_operation_mut(request: &mut InternalWorkerRequest) -> &mut AcquireTransportSocket {
+        match request.operation.as_mut() {
+            Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) => {
+                operation
+            }
+            _ => panic!("Acquire request"),
+        }
+    }
+
+    fn acquire_operation(request: &InternalWorkerRequest) -> &AcquireTransportSocket {
+        match request.operation.as_ref() {
+            Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) => {
+                operation
+            }
+            _ => panic!("Acquire request"),
+        }
+    }
+
+    fn acquire_request_for_local(
+        kind: InternalTransportSocketKind,
+        local: SocketAddr,
+    ) -> InternalWorkerRequest {
+        let mut request = acquire_request(kind);
+        acquire_operation_mut(&mut request).expected_local = Some(internal_address(local));
+        request
+    }
+
+    fn freebound_udp() -> (Socket, SocketAddr) {
+        let socket = Socket::new(
+            Domain::IPV4,
+            Type::DGRAM.nonblocking().cloexec(),
+            Some(Protocol::UDP),
+        )
+        .expect("UDP socket");
+        socket.set_freebind_v4(true).expect("IP_FREEBIND");
+        socket
+            .bind(&SockAddr::from(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                0,
+            ))))
+            .expect("freebind UDP");
+        let local = socket
+            .local_addr()
+            .expect("local UDP")
+            .as_socket()
+            .expect("IP UDP");
+        (socket, local)
+    }
+
+    fn freebound_ipv4_mapped_udp() -> (Socket, SocketAddr) {
+        let socket = Socket::new(
+            Domain::IPV6,
+            Type::DGRAM.nonblocking().cloexec(),
+            Some(Protocol::UDP),
+        )
+        .expect("IPv6 UDP socket");
+        socket.set_freebind_v4(true).expect("mapped IPv4 FREEBIND");
+        socket.set_only_v6(false).expect("allow mapped IPv4");
+        socket
+            .bind(&SockAddr::from(SocketAddr::from((
+                Ipv6Addr::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 10]),
+                0,
+            ))))
+            .expect("freebind mapped IPv4 UDP");
+        let local = socket
+            .local_addr()
+            .expect("local IPv6 UDP")
+            .as_socket()
+            .expect("IP UDP");
+        (socket, local)
+    }
+
+    fn descriptor_target(raw: RawFd) -> std::path::PathBuf {
+        std::fs::read_link(format!("/proc/self/fd/{raw}")).expect("open descriptor target")
+    }
+
+    fn assert_descriptor_closed(raw: RawFd, original: &std::path::Path) {
+        let target = std::fs::read_link(format!("/proc/self/fd/{raw}"));
+        assert!(
+            !target.as_deref().is_ok_and(|current| current == original),
+            "rejected descriptor {raw} retained its original target {original:?}"
+        );
     }
 
     fn current_expected_credentials() -> ExpectedUnixCredentials {
@@ -1237,9 +1474,11 @@ mod tests {
         let success = response(&request, InternalWorkerResult::Ok);
         let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
         let descriptor = OwnedFd::from(descriptor);
-        send_credential_worker_response(&worker, &request, &success, Some(&descriptor))
+        let source_raw = descriptor.as_raw_fd();
+        let source_target = descriptor_target(source_raw);
+        send_credential_worker_response(&worker, &request, &success, Some(descriptor))
             .expect("typed success response");
-        drop(descriptor);
+        assert_descriptor_closed(source_raw, &source_target);
         let execution = receive_credential_worker_response(&parent, &request, expected)
             .expect("typed success receive");
         assert_eq!(execution.response, success);
@@ -1271,6 +1510,113 @@ mod tests {
             send_credential_worker_response(&worker, &request, &success, None),
             Err(WorkerTransportError::Invalid)
         ));
+    }
+
+    #[test]
+    fn credentialed_success_requires_exact_source_release_and_closes_adopted_fd() {
+        let expected = current_expected_credentials();
+        let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
+        let response = response(&request, InternalWorkerResult::Ok);
+        let encoded = encode_response(&response).expect("response encoding");
+        let binding = transport_descriptor_binding(&request, &response).expect("FD binding");
+        let mut wrong_release = transport_descriptor_source_released_binding(&request, &response)
+            .expect("source release binding");
+        wrong_release[0] ^= 1;
+
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
+        send_credential_record(&worker, &encoded).expect("response record");
+        send_credential_fd_record(&worker, &descriptor, &binding).expect("descriptor record");
+        drop(descriptor);
+        send_credential_record(&worker, &wrong_release).expect("wrong release record");
+        assert!(receive_credential_worker_response(&parent, &request, expected).is_err());
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).expect("wrong-release FD closed"), 0);
+
+        let released = transport_descriptor_source_released_binding(&request, &response)
+            .expect("source release binding");
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
+        let (unexpected, mut unexpected_peer) =
+            UnixStream::pair().expect("unexpected descriptor pair");
+        send_credential_record(&worker, &encoded).expect("response record");
+        send_credential_fd_record(&worker, &descriptor, &binding).expect("descriptor record");
+        drop(descriptor);
+        send_credential_fd_record(&worker, &unexpected, &released)
+            .expect("release record with forbidden descriptor");
+        drop(unexpected);
+        assert!(receive_credential_worker_response(&parent, &request, expected).is_err());
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        unexpected_peer
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("unexpected peer read timeout");
+        assert_eq!(peer.read(&mut byte).expect("release-FD owner closed"), 0);
+        assert_eq!(
+            unexpected_peer
+                .read(&mut byte)
+                .expect("forbidden release FD closed"),
+            0
+        );
+
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
+        send_credential_record(&worker, &encoded).expect("response record");
+        send_credential_fd_record(&worker, &descriptor, &binding).expect("descriptor record");
+        drop(descriptor);
+        drop(worker);
+        assert!(matches!(
+            receive_credential_worker_response(&parent, &request, expected),
+            Err(WorkerTransportError::Io(error))
+                if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        assert_eq!(peer.read(&mut byte).expect("missing-release FD closed"), 0);
+    }
+
+    #[test]
+    fn credentialed_source_release_uses_the_original_absolute_deadline() {
+        let expected = current_expected_credentials();
+        let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
+        let response = response(&request, InternalWorkerResult::Ok);
+        let encoded = encode_response(&response).expect("response encoding");
+        let binding = transport_descriptor_binding(&request, &response).expect("FD binding");
+        let released = transport_descriptor_source_released_binding(&request, &response)
+            .expect("source release binding");
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
+        send_credential_record(&worker, &encoded).expect("response record");
+        send_credential_fd_record(&worker, &descriptor, &binding).expect("descriptor record");
+        drop(descriptor);
+
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(260));
+            send_credential_record(&worker, &released).expect("late release remains queueable");
+        });
+        let deadline = HardDeadline::after(Duration::from_millis(180)).expect("shared deadline");
+        let started = Instant::now();
+        assert!(matches!(
+            receive_credential_worker_response_with_deadline(
+                &parent, &request, expected, deadline,
+            ),
+            Err(WorkerTransportError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+        ));
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(150));
+        assert!(elapsed < Duration::from_millis(500));
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).expect("late-release FD closed"), 0);
+        sender.join().expect("late release sender");
     }
 
     #[test]
@@ -1346,9 +1692,8 @@ mod tests {
         let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
         let descriptor = OwnedFd::from(descriptor);
 
-        send_credential_worker_response(&worker, &request, &response, Some(&descriptor))
+        send_credential_worker_response(&worker, &request, &response, Some(descriptor))
             .expect("queue complete terminal response");
-        drop(descriptor);
         drop(worker);
 
         let deadline = HardDeadline::after(Duration::from_secs(1)).expect("receive deadline");
@@ -1652,7 +1997,7 @@ mod tests {
         let response = response(&request, InternalWorkerResult::Ok);
         let (descriptor, mut peer) = UnixStream::pair().expect("descriptor pair");
         let descriptor = OwnedFd::from(descriptor);
-        send_worker_response(&worker, &request, &response, Some(&descriptor))
+        send_worker_response(&worker, &request, &response, Some(descriptor))
             .expect("send response and descriptor");
         let execution = receive_worker_response(&parent, &request).expect("receive exact response");
         assert_eq!(execution.response, response);
@@ -1844,6 +2189,134 @@ mod tests {
             .as_socket()
             .expect("IP TCP");
         assert!(validate_mptcp_listener(&tcp, local).is_err());
+    }
+
+    #[test]
+    fn adopted_udp_is_consumed_and_returned_only_for_the_exact_request_shape() {
+        let (socket, local) = freebound_udp();
+        let request =
+            acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+        let descriptor =
+            validate_adopted_transport_socket(socket.into(), acquire_operation(&request))
+                .expect("exact adopted UDP");
+        let adopted = Socket::from(descriptor);
+        assert_eq!(
+            adopted.local_addr().expect("adopted local").as_socket(),
+            Some(local)
+        );
+        assert!(!peer_is_connected(&adopted).expect("unconnected adopted UDP"));
+
+        let (socket, local) = freebound_udp();
+        let wrong_local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)), local.port());
+        let request =
+            acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, wrong_local);
+        let raw = socket.as_raw_fd();
+        let target = descriptor_target(raw);
+        assert!(
+            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+        );
+        assert_descriptor_closed(raw, &target);
+    }
+
+    #[test]
+    fn adopted_udp_rejects_missing_nonblocking_and_cloexec_flags() {
+        let (socket, local) = freebound_udp();
+        socket
+            .set_nonblocking(false)
+            .expect("clear nonblocking flag");
+        let request =
+            acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+        let raw = socket.as_raw_fd();
+        let target = descriptor_target(raw);
+        assert!(
+            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+        );
+        assert_descriptor_closed(raw, &target);
+
+        let (socket, local) = freebound_udp();
+        fcntl(&socket, FcntlArg::F_SETFD(FdFlag::empty())).expect("clear close-on-exec flag");
+        let request =
+            acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+        let raw = socket.as_raw_fd();
+        let target = descriptor_target(raw);
+        assert!(
+            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+        );
+        assert_descriptor_closed(raw, &target);
+    }
+
+    #[test]
+    fn adopted_ipv6_udp_rejects_mapped_ipv4_family_ambiguity() {
+        let (socket, local) = freebound_ipv4_mapped_udp();
+        let request =
+            acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+        let raw = socket.as_raw_fd();
+        let target = descriptor_target(raw);
+        assert!(
+            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+        );
+        assert_descriptor_closed(raw, &target);
+    }
+
+    #[test]
+    fn adopted_socket_rejects_wrong_protocol_listener_and_request_peer_shape() {
+        let tcp = Socket::new(
+            Domain::IPV4,
+            Type::STREAM.nonblocking().cloexec(),
+            Some(Protocol::TCP),
+        )
+        .expect("TCP socket");
+        tcp.set_freebind_v4(true).expect("IP_FREEBIND");
+        tcp.bind(&SockAddr::from(SocketAddr::from((
+            Ipv4Addr::new(192, 0, 2, 10),
+            0,
+        ))))
+        .expect("freebind TCP");
+        tcp.listen(1).expect("listen TCP");
+        let local = tcp
+            .local_addr()
+            .expect("local TCP")
+            .as_socket()
+            .expect("IP TCP");
+        validate_common(&tcp, Type::STREAM, Protocol::TCP, local, true)
+            .expect("SO_ACCEPTCONN true");
+        assert!(validate_common(&tcp, Type::STREAM, Protocol::TCP, local, false).is_err());
+        let request = acquire_request_for_local(InternalTransportSocketKind::MptcpListener, local);
+        let raw = tcp.as_raw_fd();
+        let target = descriptor_target(raw);
+        assert!(
+            validate_adopted_transport_socket(tcp.into(), acquire_operation(&request)).is_err()
+        );
+        assert_descriptor_closed(raw, &target);
+
+        let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
+        let (wrong_type, mut peer) = UnixStream::pair().expect("wrong-type descriptor pair");
+        assert!(
+            validate_adopted_transport_socket(
+                OwnedFd::from(wrong_type),
+                acquire_operation(&request),
+            )
+            .is_err()
+        );
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("wrong-type peer timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            peer.read(&mut byte)
+                .expect("wrong-type adopted owner closed"),
+            0
+        );
+
+        let (socket, local) = freebound_udp();
+        let mut request =
+            acquire_request_for_local(InternalTransportSocketKind::QuicUdpUnconnected, local);
+        acquire_operation_mut(&mut request).expected_remote = Some(address([192, 0, 2, 20], 443));
+        let raw = socket.as_raw_fd();
+        let target = descriptor_target(raw);
+        assert!(
+            validate_adopted_transport_socket(socket.into(), acquire_operation(&request)).is_err()
+        );
+        assert_descriptor_closed(raw, &target);
     }
 
     #[test]

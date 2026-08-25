@@ -125,11 +125,16 @@ blocking `AF_UNIX SOCK_SEQPACKET` socketpair has bounded read/write deadlines an
 request/response records. `SO_PASSCRED` is enabled on both receivers before either endpoint is
 exposed. Every received record must contain exactly one kernel-selected `SCM_CREDENTIALS` value
 matching the expected PID, UID and GID; missing, duplicate, wrong or truncated credentials and all
-unexpected ancillary data fail closed. An Acquire response is followed by one domain-separated
-32-byte completion record. Success requires exactly one `MSG_CMSG_CLOEXEC` descriptor in that
-record, while an error requires exactly none. Every installed descriptor becomes RAII-owned before
-semantic validation and is closed on every reject path. Creator-time `SO_PEERCRED` is never used as
-proof of the later executed child PID.
+unexpected ancillary data fail closed. Internal protocol v2 follows an Acquire response with a
+domain-separated 32-byte completion record. Success requires exactly one `MSG_CMSG_CLOEXEC`
+descriptor in that record, transfers ownership into the consuming send API, drops the worker's
+source owner, and then emits a distinct credentialed, descriptor-free source-release binding as a
+third record. An error requires exactly no descriptor and no release record. The parent adopts the
+installed descriptor immediately but does not return it before that exact release record arrives
+under the same deadline. Every reject path closes it. This marker proves ordering in the audited
+single-threaded worker implementation; it is not proof that a compromised process did not create an
+untracked duplicate. Creator-time `SO_PEERCRED` is never used as proof of the later executed child
+PID.
 
 ### Authenticated worker-v3 lifecycle foundation
 
@@ -383,13 +388,14 @@ under its short mutex, then starts an owned supervisor before the caller can wai
 result. `execute_until` rejects expiry again immediately before PLAN, leaving no tombstone,
 in-flight token or channel write. Exact cache hits carry the same deadline into their liveness
 probe. For a new call, that one deadline is copied without renewal through request send, response
-receive, the required second binding/optional-FD record for Acquire, liveness proof and the COMMIT
-decision. Credentialed transport uses readiness polling plus nonblocking syscalls; interrupt and
-readiness races reuse the remaining budget, and every send/receive syscall has a post-operation
-expiry check. Any late installed descriptor is already RAII-owned and is closed before timeout is
-returned. This deadline is the PLAN/IPC/liveness/COMMIT acceptance boundary, not a promise that the
-call future is delivered by that instant: Tokio scheduling and mandatory exact-owner cleanup can
-delay an error result, but can never authorize a late success or COMMIT.
+receive, the required second binding/optional-FD record and success-only third source-release record
+for Acquire, liveness proof and the COMMIT decision. Credentialed transport uses readiness polling
+plus nonblocking syscalls; interrupt and readiness races reuse the remaining budget, and every
+send/receive syscall has a post-operation expiry check. Any late installed descriptor is already
+RAII-owned and is closed before timeout is returned. This deadline is the PLAN/IPC/liveness/COMMIT
+acceptance boundary, not a promise that the call future is delivered by that instant: Tokio
+scheduling and mandatory exact-owner cleanup can delay an error result, but can never authorize a
+late success or COMMIT.
 
 An Acquire descriptor remains inside the private affine `CredentialedWorkerFd` owner until the
 second record has the exact expected PID/UID/GID credential, exactly one credential and one FD, no
@@ -398,9 +404,12 @@ Only then does the consuming adoption call the audited Linux-UAPI wrapper: `F_DU
 minimum descriptor 3 creates independent ownership, that result moves immediately into `OwnedFd`,
 and `F_GETFD` must read back `FD_CLOEXEC`. The wrapper closes the duplicate on failed readback; the
 private owner is consumed and closes the original when the duplication call returns, on either
-success or error. One final deadline completion check returns the adopted `OwnedFd` or closes it on
-expiry. Thus rejection, adoption failure and final-deadline failure retain no descriptor, while a
-success exposes exactly one ordinary affine owner.
+success or error. The receiver then requires the exact domain-separated, descriptor-free
+source-release record with the same credentials and original deadline. A missing, wrong or late
+record closes the adopted duplicate and makes the call ambiguous. One final deadline completion
+check returns the adopted `OwnedFd` or closes it on expiry. Thus rejection, adoption failure,
+release-barrier failure and final-deadline failure retain no descriptor, while a success exposes
+exactly one ordinary affine parent owner.
 
 All blocking credentialed IPC and liveness work runs outside the registry mutex. The supervisor
 reacquires the mutex only to commit after revalidating generation, token, digest, deadline, TTL,
@@ -615,15 +624,28 @@ must match the worker-retained committed overlay IP for the exact lease. Connect
 client-only, listening MPTCP is exit-only, UDP is client/exit-only, and relay roles can never obtain
 an application transport socket.
 
+A separate consuming parent-side validator now derives the same closed expectation from the exact
+Acquire request and independently re-queries `SO_DOMAIN`, `SO_TYPE`, `SO_PROTOCOL`, exact local and
+peer tuples, `O_NONBLOCK`, `FD_CLOEXEC`, IPv6-only family closure, `SO_ACCEPTCONN`, `SO_ERROR`, and
+genuine negotiated `MPTCP_INFO` where applicable. Rejection drops the only supplied owner. The
+audited Linux-UAPI also
+provides fixed `SIOCGSKNS` namespace-FD acquisition with immediate RAII ownership and readback of
+`FD_CLOEXEC`, read-only mode, and `CLONE_NEWNET`. A production adapter must still compare that
+kernel-returned namespace identity with the worker's retained pinned namespace before publishing a
+socket; the current disconnected validator does not yet make that comparison.
+
 Socketpair and fake-kernel tests cover the three metadata kinds, response/digest binding, retry-cache
 cleanup on context destruction, missing/wrong binding, FD-on-error, worker EOF, unexpected
 ancillary data and close-on-reject. Credentialed-channel tests separately cover exact credential and
 descriptor counts, wrong-binding closure, shared-deadline receipt, successful consuming raw-owner
-adoption and injected adoption-failure closure. The audited UAPI/adoption regressions prove invalid
-source rejection, `F_DUPFD_CLOEXEC` with minimum 3, independent ownership, `FD_CLOEXEC` readback,
-original closure and closure of the final owner. Loopback sockets test only read-only kernel
-revalidation; no namespace, route, link, firewall or sysctl was changed. The production backend
-still advertises the operation as unsupported and returns
+adoption, injected adoption-failure closure, consumed worker-source ownership, exact/missing/late
+release records, and closure before ambiguous return. Parent socket tests reject wrong tuple,
+family, type, protocol, flags, listener state and forbidden peer shape. The audited UAPI/adoption
+regressions prove invalid source rejection, `F_DUPFD_CLOEXEC` with minimum 3, independent ownership,
+`FD_CLOEXEC` readback, original closure and closure of the final owner. A disposable user/network
+namespace test proves the fixed `SIOCGSKNS` wrapper without changing host networking. Other socket
+tests perform read-only kernel revalidation; no route, link, firewall or sysctl was changed. The
+production backend still advertises the operation as unsupported and returns
 `Unavailable/TRANSPORT_SOCKET_UNAVAILABLE` before context lookup or any socket/network work. The
 factories are not invoked by a production v3 namespace worker, and the agent transport stacks do
 not yet consume this helper API. No working namespace datapath is claimed.

@@ -7719,7 +7719,7 @@ mod tests {
                 receive_credential_worker_request(&peer, current_credentials()).expect("request");
             let response = acquire_response(&request);
             worker_alive.store(false, Ordering::SeqCst);
-            send_credential_worker_response(&peer, &request, &response, Some(&sent))
+            send_credential_worker_response(&peer, &request, &response, Some(sent))
                 .expect("FD response");
         });
 
@@ -7758,9 +7758,8 @@ mod tests {
             .expect("observer timeout");
         let sent: OwnedFd = sent.into();
         let response = acquire_response(&request);
-        send_credential_worker_response(&peer, &request, &response, Some(&sent))
+        send_credential_worker_response(&peer, &request, &response, Some(sent))
             .expect("response and FD queued before execute");
-        drop(sent);
         let coordinator = WorkerCoordinator::new(registry);
         let deadline = HardDeadline::after(Duration::from_millis(30)).expect("commit deadline");
         assert!(matches!(

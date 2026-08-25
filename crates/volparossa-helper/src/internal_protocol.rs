@@ -13,7 +13,7 @@ use prost::Message;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 1;
+pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 2;
 pub(crate) const INTERNAL_WORKER_MAGIC: &[u8; 8] = b"VPWKR3\0\0";
 pub(crate) const MAX_INTERNAL_WORKER_FRAME: usize = 128 * 1024;
 const MAX_PATHS: u32 = 8;
@@ -494,6 +494,33 @@ pub(crate) fn transport_descriptor_binding(
     request: &InternalWorkerRequest,
     response: &InternalWorkerResponse,
 ) -> Result<[u8; 32], InternalProtocolError> {
+    transport_descriptor_event_binding(
+        b"VOLPAROSSA internal worker transport completion v1\0",
+        request,
+        response,
+    )
+}
+
+/// Derives the exact acknowledgement binding emitted after the worker drops its source descriptor.
+pub(crate) fn transport_descriptor_source_released_binding(
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
+    if response.result != InternalWorkerResult::Ok as i32 {
+        return Err(InternalProtocolError::Invalid);
+    }
+    transport_descriptor_event_binding(
+        b"VOLPAROSSA internal worker transport descriptor source released v1\0",
+        request,
+        response,
+    )
+}
+
+fn transport_descriptor_event_binding(
+    domain: &[u8],
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+) -> Result<[u8; 32], InternalProtocolError> {
     validate_response_for_request(request, response)?;
     let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
         request.operation.as_ref()
@@ -505,7 +532,7 @@ pub(crate) fn transport_descriptor_binding(
     let canonical = response.encode_to_vec();
     let length = u32::try_from(canonical.len()).map_err(|_| InternalProtocolError::TooLarge)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"VOLPAROSSA internal worker transport completion v1\0");
+    hasher.update(domain);
     hasher.update(&request.protocol_version.to_be_bytes());
     hasher.update(&request.magic);
     hasher.update(&request.request_id);
@@ -918,7 +945,7 @@ mod tests {
 
     #[test]
     fn protocol_identity_and_operation_tags_are_fixed() {
-        assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 1);
+        assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 2);
         assert_eq!(INTERNAL_WORKER_MAGIC, b"VPWKR3\0\0");
 
         let operations = [
@@ -996,7 +1023,7 @@ mod tests {
         let encoded = encode_request(&value).expect("encode");
 
         let mut wrong = value.clone();
-        wrong.protocol_version = 2;
+        wrong.protocol_version = 1;
         assert!(encode_request(&wrong).is_err());
         wrong = value.clone();
         wrong.magic[0] ^= 1;
@@ -1348,6 +1375,126 @@ mod tests {
         changed_response.request_id[0] ^= 1;
         assert!(transport_descriptor_binding(&acquire, &changed_response).is_err());
         assert_ne!(binding, [0; 32]);
+    }
+
+    #[test]
+    fn transport_source_release_binding_is_deterministic_and_domain_separated() {
+        let acquire = acquire();
+        let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
+            acquire.operation.as_ref()
+        else {
+            panic!("Acquire operation");
+        };
+        let success = correlated_response(
+            &acquire,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::TransportSocketReady(
+                TransportSocketReady {
+                    path_id: operation.path_id,
+                    role: operation.role,
+                    descriptor_kind: operation.descriptor_kind,
+                    local: operation.expected_local.clone(),
+                    remote: operation.expected_remote.clone(),
+                },
+            )),
+        );
+
+        let released =
+            transport_descriptor_source_released_binding(&acquire, &success).expect("released");
+        assert_eq!(
+            transport_descriptor_source_released_binding(&acquire, &success)
+                .expect("repeat released"),
+            released
+        );
+        assert_ne!(
+            transport_descriptor_binding(&acquire, &success).expect("descriptor"),
+            released
+        );
+        assert_ne!(released, [0; 32]);
+
+        let failure = correlated_response(&acquire, InternalWorkerResult::Kernel, None);
+        assert!(transport_descriptor_source_released_binding(&acquire, &failure).is_err());
+    }
+
+    #[test]
+    fn transport_source_release_binding_commits_to_request_response_and_context() {
+        fn successful_response(request: &InternalWorkerRequest) -> InternalWorkerResponse {
+            let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
+                request.operation.as_ref()
+            else {
+                panic!("Acquire operation");
+            };
+            correlated_response(
+                request,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::TransportSocketReady(
+                    TransportSocketReady {
+                        path_id: operation.path_id,
+                        role: operation.role,
+                        descriptor_kind: operation.descriptor_kind,
+                        local: operation.expected_local.clone(),
+                        remote: operation.expected_remote.clone(),
+                    },
+                )),
+            )
+        }
+
+        let acquire = acquire();
+        let success = successful_response(&acquire);
+        let baseline = transport_descriptor_source_released_binding(&acquire, &success)
+            .expect("baseline released");
+
+        let mut changed_request_id = acquire.clone();
+        changed_request_id.request_id[0] ^= 1;
+        let changed_response = successful_response(&changed_request_id);
+        assert_ne!(
+            transport_descriptor_source_released_binding(&changed_request_id, &changed_response)
+                .expect("request-id mutation"),
+            baseline
+        );
+
+        let mut changed_context = acquire.clone();
+        let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
+            changed_context.operation.as_mut()
+        else {
+            panic!("Acquire operation");
+        };
+        operation.route_context_id[0] ^= 1;
+        let changed_response = successful_response(&changed_context);
+        assert_ne!(
+            transport_descriptor_source_released_binding(&changed_context, &changed_response)
+                .expect("context mutation"),
+            baseline
+        );
+
+        let mut changed_tuple = acquire.clone();
+        let Some(internal_worker_request::Operation::AcquireTransportSocket(operation)) =
+            changed_tuple.operation.as_mut()
+        else {
+            panic!("Acquire operation");
+        };
+        operation.expected_local.as_mut().expect("local").port += 1;
+        let changed_response = successful_response(&changed_tuple);
+        assert_ne!(
+            transport_descriptor_source_released_binding(&changed_tuple, &changed_response)
+                .expect("response mutation"),
+            baseline
+        );
+
+        let mut mismatched_response = success.clone();
+        let Some(internal_worker_response::Outcome::TransportSocketReady(ready)) =
+            mismatched_response.outcome.as_mut()
+        else {
+            panic!("transport outcome");
+        };
+        ready.remote.as_mut().expect("remote").port += 1;
+        assert!(
+            transport_descriptor_source_released_binding(&acquire, &mismatched_response).is_err()
+        );
+
+        let mut uncorrelated = success;
+        uncorrelated.request_digest[0] ^= 1;
+        assert!(transport_descriptor_source_released_binding(&acquire, &uncorrelated).is_err());
     }
 
     #[test]

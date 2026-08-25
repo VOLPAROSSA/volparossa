@@ -440,19 +440,24 @@ cross-category unique. The agent locally permits only one acquisition attempt pe
 activation failure returns the prepared cleanup authority and all eight descriptors, and destroy
 borrows authority so ambiguous failure remains retryable.
 
-The independent internal worker protocol reserves exact tag 17 for the corresponding
+The independent internal worker protocol v2 reserves exact tag 17 for the corresponding
 route-context/path/role/kind/tuple request. Its tested private `SOCK_SEQPACKET` building block uses
 canonical records, a separately bound zero-or-one-FD completion record, fixed deadlines and
-close-on-reject semantics. A received FD remains in a private affine raw owner until exact peer
-PID/UID/GID, credential and descriptor counts, ancillary shape, request/response binding and the
-shared deadline all validate. Consuming adoption then uses the audited Linux-UAPI
+close-on-reject semantics. On success the consuming worker send API drops its source descriptor and
+then sends a distinct domain-separated, credentialed and descriptor-free release record. A received
+FD remains in a private affine raw owner until exact peer PID/UID/GID, credential and descriptor
+counts, ancillary shape, request/response binding and the shared deadline all validate. Consuming
+adoption then uses the audited Linux-UAPI
 `F_DUPFD_CLOEXEC` operation with minimum 3, immediately owns the duplicate, reads back
-`FD_CLOEXEC`, and closes the original when the duplication call returns. Any adoption failure closes
-the private original and every duplicate it created, and a final deadline check closes the adopted
-`OwnedFd` instead of returning it late. Closed worker-side factories create and revalidate connected
-MPTCP, listening MPTCP and unconnected UDP sockets, including genuine `MPTCP_INFO` negotiation
-evidence for a connected stream. These components are not wired into a production worker process,
-so their socketpair/fake-kernel tests do not prove a namespace socket or datapath.
+`FD_CLOEXEC`, and closes the original when the duplication call returns. The parent returns the
+adopted owner only after the exact release record arrives within the same absolute deadline. Any
+adoption or release-barrier failure closes every local owner. A consuming parent validator also
+re-queries the closed socket shape; the fixed `SIOCGSKNS` UAPI safely returns a typed namespace FD,
+but comparison against the retained worker namespace pin is not connected yet. Closed worker-side
+factories create and revalidate connected MPTCP, listening MPTCP and unconnected UDP sockets,
+including genuine `MPTCP_INFO` negotiation evidence for a connected stream. These components are
+not wired into a production worker process, so their socketpair/fake-kernel tests do not prove a
+namespace socket or datapath.
 
 The production lease backend currently fails closed: `PrepareLeaseBatch` returns
 `Unavailable/PREPARE_FAILED` and creates no context because the read-only rtnetlink
