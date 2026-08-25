@@ -6,12 +6,14 @@
 //! `inet` forward policy from generation one to two, then delete its exact
 //! observed table handle from generation two to semantic-empty generation
 //! three. Every possibly-sent request is reconciled through a fresh bounded
-//! full-ruleset observation. The active authority in this packetless slice
-//! recognizes only two counted accepts followed by one counted terminal drop,
-//! with all three byte and packet counters freshly observed at zero. Ruleset
-//! generation brackets stabilize object structure, not mutable counter values;
-//! later packet evidence therefore needs a separate quiescent counter protocol.
-//! This module never changes forwarding settings.
+//! full-ruleset observation. Installation and packetless runtime verification
+//! accept only two counted accepts followed by one counted terminal drop with
+//! all three byte and packet counters freshly observed at zero. Deletion is
+//! deliberately counter-agnostic because counters are mutable, but still
+//! requires the exact active generation, run-bound expectation, full structure
+//! and retained table, chain and rule handles. Later packet evidence needs a
+//! separate quiescent counter protocol. This module never changes forwarding
+//! settings.
 
 use std::{
     io,
@@ -42,6 +44,8 @@ const MAX_HOOK_ATTRIBUTES: usize = 4;
 const MAX_RULE_ATTRIBUTES: usize = 11;
 const ACCEPT_RULE_EXPRESSIONS: usize = 16;
 const TERMINAL_RULE_EXPRESSIONS: usize = 2;
+const ACCEPT_RULE_COUNTER_EXPRESSION: usize = 14;
+const TERMINAL_RULE_COUNTER_EXPRESSION: usize = 0;
 const MAX_RULE_EXPRESSIONS: usize = ACCEPT_RULE_EXPRESSIONS;
 const MAX_EXPRESSION_ATTRIBUTES: usize = 2;
 const MAX_EXPRESSION_DATA_ATTRIBUTES: usize = 8;
@@ -587,15 +591,21 @@ pub(crate) fn verify_exact_forward_policy(
 ) -> Result<(), NftablesError> {
     let journal = active.journal();
     let snapshot = observe_ruleset(deadline, ACTIVE_POLICY_GENERATION)?;
-    let handles = snapshot.exact_policy_handles(&journal.expectation)?;
-    if handles == journal.handles {
+    let observation =
+        validate_zero_counter_policy(&snapshot, &journal.expectation, ACTIVE_POLICY_GENERATION)?;
+    if observation.generation == journal.generation && observation.handles == journal.handles {
         Ok(())
     } else {
         Err(NftablesError::UnexpectedPolicy)
     }
 }
 
-/// Consume active authority, delete its exact table handle, and prove semantic-empty generation three.
+/// Consume active authority and delete its exact table at generation two.
+///
+/// Mutable counter values do not participate in deletion authority. The fresh
+/// preflight still requires the run-bound expectation, full policy structure,
+/// and every retained table, chain and rule handle before the table-handle-only
+/// transaction can prove semantic-empty generation three.
 pub(crate) fn delete_exact_forward_policy(
     active: ActiveNftablesPolicy,
     deadline: Instant,
@@ -1262,12 +1272,16 @@ fn reconcile_install(
             ))
         }
         Ok(observed) if observed.generation == ACTIVE_POLICY_GENERATION => {
-            match observed.snapshot.exact_policy_handles(&expectation) {
-                Ok(handles) => Ok(ActiveNftablesPolicy::from_journal(ActivePolicyJournal {
+            match validate_zero_counter_policy(
+                &observed.snapshot,
+                &expectation,
+                observed.generation,
+            ) {
+                Ok(observation) => Ok(ActiveNftablesPolicy::from_journal(ActivePolicyJournal {
                     expectation,
                     initial_generation: initial.generation,
                     generation: observed.generation,
-                    handles,
+                    handles: observation.handles,
                 })),
                 Err(source) => Err(install_failure(
                     source,
@@ -1304,7 +1318,11 @@ fn delete_policy(
     active: ActiveNftablesPolicy,
     deadline: Deadline,
 ) -> Result<SemanticallyEmptyNftables, NftablesLineageFailure<NftablesDeleteAuthority>> {
-    if let Err(source) = verify_exact_forward_policy(&active, deadline.0) {
+    let journal = active.journal();
+    let preflight = observe_ruleset(deadline.0, ACTIVE_POLICY_GENERATION).and_then(|snapshot| {
+        validate_deletion_authority(journal, &snapshot, ACTIVE_POLICY_GENERATION)
+    });
+    if let Err(source) = preflight {
         return Err(delete_failure(
             source,
             NftablesDeleteAuthority::Active(active),
@@ -1373,16 +1391,10 @@ fn reconcile_delete(
             })
         }
         Ok(observed) if observed.generation == ACTIVE_POLICY_GENERATION => {
-            match observed.snapshot.exact_policy_handles(&journal.expectation) {
-                Ok(handles) if handles == journal.handles => Err(delete_failure(
+            match validate_deletion_authority(&journal, &observed.snapshot, observed.generation) {
+                Ok(()) => Err(delete_failure(
                     mutation_source.unwrap_or(NftablesError::UnexpectedPolicy),
                     NftablesDeleteAuthority::Active(ActiveNftablesPolicy::from_journal(journal)),
-                )),
-                Ok(_) => Err(delete_failure(
-                    NftablesError::UnexpectedPolicy,
-                    NftablesDeleteAuthority::Indeterminate(
-                        IndeterminateNftablesPolicy::after_delete(journal),
-                    ),
                 )),
                 Err(source) => Err(delete_failure(
                     source,
@@ -1411,6 +1423,34 @@ fn reconcile_delete(
             )),
         )),
     }
+}
+
+fn validate_deletion_authority(
+    journal: &ActivePolicyJournal,
+    snapshot: &RulesetSnapshot,
+    observed_generation: u32,
+) -> Result<(), NftablesError> {
+    if journal.generation != ACTIVE_POLICY_GENERATION
+        || observed_generation != ACTIVE_POLICY_GENERATION
+    {
+        return Err(NftablesError::UnexpectedGeneration);
+    }
+    let observation =
+        snapshot.exact_policy_observation(&journal.expectation, observed_generation)?;
+    if observation.generation != journal.generation || observation.handles != journal.handles {
+        return Err(NftablesError::UnexpectedPolicy);
+    }
+    Ok(())
+}
+
+fn validate_zero_counter_policy(
+    snapshot: &RulesetSnapshot,
+    expectation: &FixedForwardPolicyExpectation,
+    observed_generation: u32,
+) -> Result<ZeroCounterPolicyObservation, NftablesError> {
+    snapshot
+        .exact_policy_observation(expectation, observed_generation)?
+        .into_zero_counter_observation()
 }
 
 /// Observe one stable empty nftables baseline before the supplied deadline.
@@ -1623,6 +1663,14 @@ impl ForwardPolicyCounter {
     };
 }
 
+/// The three typed per-rule counters retained by an exact structural observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ForwardPolicyCounters([ForwardPolicyCounter; 3]);
+
+impl ForwardPolicyCounters {
+    const ZERO: Self = Self([ForwardPolicyCounter::ZERO; 3]);
+}
+
 #[derive(Default)]
 struct RulesetSnapshot {
     tables: Vec<TableRecord>,
@@ -1635,6 +1683,38 @@ struct PolicyHandles {
     table: u64,
     chain: u64,
     rules: [u64; 3],
+}
+
+/// Exact policy structure with the mutable counter profile observed separately.
+#[derive(Debug, Eq, PartialEq)]
+struct ExactPolicyObservation {
+    generation: u32,
+    handles: PolicyHandles,
+    counters: ForwardPolicyCounters,
+}
+
+/// Affine proof that one exact generation-and-handle-bound observation was zero-counter.
+#[derive(Debug, Eq, PartialEq)]
+struct ZeroCounterPolicyObservation {
+    generation: u32,
+    handles: PolicyHandles,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl ExactPolicyObservation {
+    fn into_zero_counter_observation(self) -> Result<ZeroCounterPolicyObservation, NftablesError> {
+        if self.generation != ACTIVE_POLICY_GENERATION {
+            return Err(NftablesError::UnexpectedGeneration);
+        }
+        if self.counters != ForwardPolicyCounters::ZERO {
+            return Err(NftablesError::UnexpectedPolicy);
+        }
+        Ok(ZeroCounterPolicyObservation {
+            generation: self.generation,
+            handles: self.handles,
+            _thread_bound: PhantomData,
+        })
+    }
 }
 
 impl RulesetSnapshot {
@@ -1680,10 +1760,11 @@ impl RulesetSnapshot {
         self.tables.is_empty() && self.chains.is_empty() && self.rules.is_empty()
     }
 
-    fn exact_policy_handles(
+    fn exact_policy_observation(
         &self,
         expectation: &FixedForwardPolicyExpectation,
-    ) -> Result<PolicyHandles, NftablesError> {
+        generation: u32,
+    ) -> Result<ExactPolicyObservation, NftablesError> {
         let [table] = self.tables.as_slice() else {
             return Err(NftablesError::UnexpectedPolicy);
         };
@@ -1747,18 +1828,48 @@ impl RulesetSnapshot {
             || alpha.pad
             || omega.pad
             || terminal.pad
-            || alpha.expressions != expectation.expected_rule_expressions(0)
-            || omega.expressions != expectation.expected_rule_expressions(1)
-            || terminal.expressions != expectation.expected_rule_expressions(2)
         {
             return Err(NftablesError::UnexpectedPolicy);
         }
-        Ok(PolicyHandles {
-            table: table.handle,
-            chain: chain.handle,
-            rules: [alpha.handle, omega.handle, terminal.handle],
+        let counters = [
+            exact_rule_counter(expectation, 0, &alpha.expressions)?,
+            exact_rule_counter(expectation, 1, &omega.expressions)?,
+            exact_rule_counter(expectation, 2, &terminal.expressions)?,
+        ];
+        Ok(ExactPolicyObservation {
+            generation,
+            handles: PolicyHandles {
+                table: table.handle,
+                chain: chain.handle,
+                rules: [alpha.handle, omega.handle, terminal.handle],
+            },
+            counters: ForwardPolicyCounters(counters),
         })
     }
+}
+
+fn exact_rule_counter(
+    expectation: &FixedForwardPolicyExpectation,
+    rule_index: usize,
+    expressions: &[ObservedExpression],
+) -> Result<ForwardPolicyCounter, NftablesError> {
+    let counter_index = match rule_index {
+        0 | 1 => ACCEPT_RULE_COUNTER_EXPRESSION,
+        2 => TERMINAL_RULE_COUNTER_EXPRESSION,
+        _ => return Err(NftablesError::UnexpectedPolicy),
+    };
+    let Some(ObservedExpression::Counter(counter)) = expressions.get(counter_index) else {
+        return Err(NftablesError::UnexpectedPolicy);
+    };
+    let mut expected = expectation.expected_rule_expressions(rule_index);
+    let Some(expected_counter) = expected.get_mut(counter_index) else {
+        return Err(NftablesError::UnexpectedPolicy);
+    };
+    *expected_counter = ObservedExpression::Counter(*counter);
+    if expressions != expected {
+        return Err(NftablesError::UnexpectedPolicy);
+    }
+    Ok(*counter)
 }
 
 struct CollectionBudget {
@@ -4256,12 +4367,13 @@ mod tests {
         let expectation =
             FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
         let snapshot = test_policy_snapshot(&expectation).expect("canonical policy snapshot");
-        let handles = snapshot
-            .exact_policy_handles(&expectation)
+        let observation = snapshot
+            .exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION)
             .expect("exact policy");
-        assert_eq!(handles.table, 1);
-        assert_eq!(handles.chain, 1);
-        assert_eq!(handles.rules, [2, 3, 4]);
+        assert_eq!(observation.handles.table, 1);
+        assert_eq!(observation.handles.chain, 1);
+        assert_eq!(observation.handles.rules, [2, 3, 4]);
+        assert_eq!(observation.counters, ForwardPolicyCounters::ZERO);
 
         let mut wrong_nfproto = test_policy_snapshot(&expectation).expect("policy snapshot");
         let ObservedExpression::Compare { value, .. } = &mut wrong_nfproto.rules[0].expressions[5]
@@ -4270,14 +4382,14 @@ mod tests {
         };
         *value = vec![NFPROTO_IPV6];
         assert!(matches!(
-            wrong_nfproto.exact_policy_handles(&expectation),
+            wrong_nfproto.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
         let mut missing_nfproto = test_policy_snapshot(&expectation).expect("policy snapshot");
         missing_nfproto.rules[0].expressions.drain(4..=5);
         assert!(matches!(
-            missing_nfproto.exact_policy_handles(&expectation),
+            missing_nfproto.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4288,7 +4400,7 @@ mod tests {
         };
         *value = vec![ICMP_ECHO_REQUEST, 1];
         assert!(matches!(
-            wrong_code.exact_policy_handles(&expectation),
+            wrong_code.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4299,7 +4411,7 @@ mod tests {
         };
         *value = vec![ICMP_ECHO_REQUEST];
         assert!(matches!(
-            missing_code.exact_policy_handles(&expectation),
+            missing_code.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4307,7 +4419,7 @@ mod tests {
             test_policy_snapshot(&expectation).expect("policy snapshot");
         reordered_expressions.rules[0].expressions.swap(4, 6);
         assert!(matches!(
-            reordered_expressions.exact_policy_handles(&expectation),
+            reordered_expressions.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4318,47 +4430,76 @@ mod tests {
         };
         *value = 99_u32.to_ne_bytes().to_vec();
         assert!(matches!(
-            direct_exit.exact_policy_handles(&expectation),
+            direct_exit.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
     }
 
     #[test]
-    fn exact_initial_policy_requires_zero_ordered_counters_and_terminal_drop() {
+    fn install_and_runtime_require_generation_bound_zero_counter_evidence() {
         let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
         let expectation =
             FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
 
-        let mutations = [(0, 14, 64, 1), (2, 0, u64::MAX, u64::MAX)];
+        let zero_snapshot = test_policy_snapshot(&expectation).expect("policy snapshot");
+        let zero =
+            validate_zero_counter_policy(&zero_snapshot, &expectation, ACTIVE_POLICY_GENERATION)
+                .expect("zero-counter evidence");
+        assert_eq!(zero.generation, ACTIVE_POLICY_GENERATION);
+        assert_eq!(zero.handles.rules, [2, 3, 4]);
+
+        let mutations = [
+            (0, ACCEPT_RULE_COUNTER_EXPRESSION, 64, 1),
+            (2, TERMINAL_RULE_COUNTER_EXPRESSION, u64::MAX, u64::MAX),
+        ];
         for (rule, expression, bytes, packets) in mutations {
             let mut nonzero = test_policy_snapshot(&expectation).expect("policy snapshot");
             nonzero.rules[rule].expressions[expression] =
                 ObservedExpression::Counter(ForwardPolicyCounter { bytes, packets });
+            let observation = nonzero
+                .exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION)
+                .expect("counter values do not weaken exact structure");
+            assert_eq!(
+                observation.counters.0[rule],
+                ForwardPolicyCounter { bytes, packets }
+            );
             assert!(matches!(
-                nonzero.exact_policy_handles(&expectation),
+                validate_zero_counter_policy(&nonzero, &expectation, ACTIVE_POLICY_GENERATION),
                 Err(NftablesError::UnexpectedPolicy)
             ));
         }
 
+        assert!(matches!(
+            validate_zero_counter_policy(&zero_snapshot, &expectation, RETIRED_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedGeneration)
+        ));
+
+        assert!(matches!(
+            exact_rule_counter(&expectation, 3, &[]),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
         let mut verdict_before_counter =
             test_policy_snapshot(&expectation).expect("policy snapshot");
-        verdict_before_counter.rules[1].expressions.swap(14, 15);
+        verdict_before_counter.rules[1]
+            .expressions
+            .swap(ACCEPT_RULE_COUNTER_EXPRESSION, ACCEPT_RULE_EXPRESSIONS - 1);
         assert!(matches!(
-            verdict_before_counter.exact_policy_handles(&expectation),
+            verdict_before_counter.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
         let mut broadened_terminal = test_policy_snapshot(&expectation).expect("policy snapshot");
         broadened_terminal.rules[2].expressions[1] = ObservedExpression::ImmediateAccept;
         assert!(matches!(
-            broadened_terminal.exact_policy_handles(&expectation),
+            broadened_terminal.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
         let mut missing_terminal = test_policy_snapshot(&expectation).expect("policy snapshot");
         missing_terminal.rules.pop();
         assert!(matches!(
-            missing_terminal.exact_policy_handles(&expectation),
+            missing_terminal.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4366,14 +4507,15 @@ mod tests {
             test_policy_snapshot(&expectation).expect("policy snapshot");
         wrong_terminal_position.rules[2].position = Some(2);
         assert!(matches!(
-            wrong_terminal_position.exact_policy_handles(&expectation),
+            wrong_terminal_position
+                .exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
         let mut duplicate_handle = test_policy_snapshot(&expectation).expect("policy snapshot");
         duplicate_handle.rules[2].handle = duplicate_handle.rules[1].handle;
         assert!(matches!(
-            duplicate_handle.exact_policy_handles(&expectation),
+            duplicate_handle.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4381,7 +4523,7 @@ mod tests {
             let mut wrong_use_count = test_policy_snapshot(&expectation).expect("policy snapshot");
             wrong_use_count.chains[0].use_count = use_count;
             assert!(matches!(
-                wrong_use_count.exact_policy_handles(&expectation),
+                wrong_use_count.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
                 Err(NftablesError::UnexpectedPolicy)
             ));
         }
@@ -4389,7 +4531,7 @@ mod tests {
         let mut chain_counter = test_policy_snapshot(&expectation).expect("policy snapshot");
         chain_counter.chains[0].counters = Some(Vec::new());
         assert!(matches!(
-            chain_counter.exact_policy_handles(&expectation),
+            chain_counter.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4397,10 +4539,95 @@ mod tests {
             let mut zero_handle = test_policy_snapshot(&expectation).expect("policy snapshot");
             zero_handle.rules[rule].handle = 0;
             assert!(matches!(
-                zero_handle.exact_policy_handles(&expectation),
+                zero_handle.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
                 Err(NftablesError::UnexpectedPolicy)
             ));
         }
+    }
+
+    #[test]
+    fn deletion_authority_accepts_nonzero_counters_but_not_structural_drift() {
+        let run_id = RunId::parse("0123456789abcdef0123456789abcdef").expect("fixed run id");
+        let expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        let mut journal = ActivePolicyJournal {
+            expectation,
+            initial_generation: INITIAL_GENERATION,
+            generation: ACTIVE_POLICY_GENERATION,
+            handles: PolicyHandles {
+                table: 1,
+                chain: 1,
+                rules: [2, 3, 4],
+            },
+        };
+        let mut nonzero = test_policy_snapshot(&journal.expectation).expect("policy snapshot");
+        for rule in 0..2 {
+            nonzero.rules[rule].expressions[ACCEPT_RULE_COUNTER_EXPRESSION] =
+                ObservedExpression::Counter(ForwardPolicyCounter {
+                    bytes: 60,
+                    packets: 1,
+                });
+        }
+        nonzero.rules[2].expressions[TERMINAL_RULE_COUNTER_EXPRESSION] =
+            ObservedExpression::Counter(ForwardPolicyCounter {
+                bytes: u64::MAX,
+                packets: u64::MAX,
+            });
+        validate_deletion_authority(&journal, &nonzero, ACTIVE_POLICY_GENERATION)
+            .expect("nonzero counters retain exact deletion authority");
+
+        assert!(matches!(
+            validate_deletion_authority(&journal, &nonzero, RETIRED_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedGeneration)
+        ));
+
+        let canonical_handles = journal.handles;
+        journal.generation = RETIRED_POLICY_GENERATION;
+        assert!(matches!(
+            validate_deletion_authority(&journal, &nonzero, ACTIVE_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedGeneration)
+        ));
+        journal.generation = ACTIVE_POLICY_GENERATION;
+
+        for handle_index in 0..5 {
+            journal.handles = canonical_handles;
+            match handle_index {
+                0 => journal.handles.table += 1,
+                1 => journal.handles.chain += 1,
+                2..=4 => journal.handles.rules[handle_index - 2] += 10,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                validate_deletion_authority(&journal, &nonzero, ACTIVE_POLICY_GENERATION),
+                Err(NftablesError::UnexpectedPolicy)
+            ));
+        }
+        journal.handles = canonical_handles;
+
+        let wrong_run = RunId::parse("fedcba9876543210fedcba9876543210").expect("other run id");
+        journal.expectation =
+            FixedForwardPolicyExpectation::for_run(&wrong_run, [3, 5]).expect("wrong run");
+        assert!(matches!(
+            validate_deletion_authority(&journal, &nonzero, ACTIVE_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        journal.expectation = FixedForwardPolicyExpectation::for_run(&run_id, [3, 6])
+            .expect("wrong interface lineage");
+        assert!(matches!(
+            validate_deletion_authority(&journal, &nonzero, ACTIVE_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
+
+        journal.expectation =
+            FixedForwardPolicyExpectation::for_run(&run_id, [3, 5]).expect("expectation");
+        nonzero.rules[1]
+            .expressions
+            .swap(ACCEPT_RULE_COUNTER_EXPRESSION, ACCEPT_RULE_EXPRESSIONS - 1);
+        assert!(matches!(
+            validate_deletion_authority(&journal, &nonzero, ACTIVE_POLICY_GENERATION),
+            Err(NftablesError::UnexpectedPolicy)
+        ));
     }
 
     #[test]
@@ -4683,7 +4910,7 @@ mod tests {
         let mut wrong_position = test_policy_snapshot(&expectation).expect("policy snapshot");
         wrong_position.rules[1].position = Some(99);
         assert!(matches!(
-            wrong_position.exact_policy_handles(&expectation),
+            wrong_position.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
     }
@@ -4731,28 +4958,28 @@ mod tests {
         let mut wrong_family = test_policy_snapshot(&expectation).expect("policy snapshot");
         wrong_family.tables[0].family = NFPROTO_IPV4;
         assert!(matches!(
-            wrong_family.exact_policy_handles(&expectation),
+            wrong_family.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
         let mut wrong_hook = test_policy_snapshot(&expectation).expect("policy snapshot");
         wrong_hook.chains[0].hook_number = 1;
         assert!(matches!(
-            wrong_hook.exact_policy_handles(&expectation),
+            wrong_hook.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
         let mut wrong_policy = test_policy_snapshot(&expectation).expect("policy snapshot");
         wrong_policy.chains[0].policy = NF_ACCEPT;
         assert!(matches!(
-            wrong_policy.exact_policy_handles(&expectation),
+            wrong_policy.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
         let mut reversed = test_policy_snapshot(&expectation).expect("policy snapshot");
         reversed.rules.swap(0, 1);
         assert!(matches!(
-            reversed.exact_policy_handles(&expectation),
+            reversed.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4765,7 +4992,7 @@ mod tests {
             .expect("table record"),
         );
         assert!(matches!(
-            extra_table.exact_policy_handles(&expectation),
+            extra_table.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4778,7 +5005,7 @@ mod tests {
             .expect("chain record"),
         );
         assert!(matches!(
-            extra_chain.exact_policy_handles(&expectation),
+            extra_chain.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
@@ -4791,7 +5018,7 @@ mod tests {
             .expect("rule record"),
         );
         assert!(matches!(
-            extra_rule.exact_policy_handles(&expectation),
+            extra_rule.exact_policy_observation(&expectation, ACTIVE_POLICY_GENERATION),
             Err(NftablesError::UnexpectedPolicy)
         ));
 
