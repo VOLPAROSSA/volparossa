@@ -363,19 +363,34 @@ routing-policy database is exactly IPv4 priorities 0/local, 32766/main, and 3276
 IPv6 priorities 0/local and 32766/main. Each complete observation reads the fixed namespace-local
 `/proc/sys/net/ipv4/ip_forward` record through the retained private-proc descriptor, accepts only
 canonical `0\n` or `1\n`, and binds both the procfs object identity and value across the RTNL
-snapshot. A fixed read-only `NETLINK_NETFILTER` sequence requires generation 1 immediately before
-and after a dump containing zero nftables tables. PID 1 repeats the complete observation
-immediately before the authorized write and again after root/slot rollback; every pinned component
-must match, while retained mount, runtime, and signal proofs bracket both barriers.
+snapshot. The runner does not write this sysctl. A bounded read-only `NETLINK_NETFILTER` sequence
+requires generation 1 immediately before and after complete table, chain, rule, set, object, and
+flowtable dumps, all of which must be empty. PID 1 repeats the complete observation immediately
+before the authorized write and again after root/slot rollback; every pinned component must match,
+while retained mount, runtime, and signal proofs bracket both barriers.
 
-This proof does not claim that forwarding is disabled or that every firewall/netfilter facility is
-empty. Qdisc records are enumerated so an ingress/`clsact` hook cannot hide behind link qdisc name
+The raw-`NFNETLINK` test foundation also has a separate strict observer for the exact future
+lifecycle forward policy: one run-derived `inet vpl_<run_id>` table, one `filter` base chain named
+`forward` at the `inet` forward hook with priority 0 and policy drop, one exact IPv4 ICMP echo
+request tuple from endpoint A (`10.241.1.2`) to endpoint B (`10.241.2.2`), and only its exact echo
+reply tuple in the reverse direction. Disposable namespace tests prove the complete object dump and
+the observed generation lineage from empty generation 1, through that exact policy at generation 2,
+back to a semantically empty ruleset at generation 3. The fixture records canonical `0\n` or `1\n`
+before its isolated mutation and proves that value is unchanged after installation and removal.
+Extra or altered tables, chains, rules, expressions, hooks, policies, tuples, verdicts, or
+generations fail closed. The exact-policy recognizer and fixture mutation are test-only: there is no
+production/runtime exact-policy matcher, nftables writer, installed policy, forwarding-setting
+write, forwarding, packet, probe, or acceptance claim in this slice.
+
+The readiness observation does not claim that forwarding is disabled, and this slice makes no
+forwarding-setting request. Neither proof claims that every firewall/netfilter facility is empty.
+Qdisc records are enumerated so an ingress/`clsact` hook cannot hide behind link qdisc name
 `noop`; traffic-control classes, filters, and chains are not separately catalogued because this
 slice admits no non-baseline qdisc on which they could attach. Other netconf, address-label,
 neighbour-table parameter, conntrack, ipset,
 NFQUEUE/NFLOG, legacy-xtables, and independent-hook state is outside it. A read-only GET may cause
-ordinary kernel module loading, but the runner has no forwarding-setting or nftables mutation API. A later
-topology driver must either pin every setting it relies on or extend this proof before `GO`.
+ordinary kernel module loading, but the runner has no forwarding-setting or nftables mutation API.
+A later topology driver must either pin every setting it relies on or extend this proof before `GO`.
 
 The strict positive outer bootstrap exchange is `NAMESPACES_CREATED`, `MAPPINGS_INSTALLED`,
 `MAPPINGS_VERIFIED`, `MAPPINGS_PINNED`, `PID1_SPAWNED`, `PID1_PINNED`, `PRIVATE_MOUNTS_READY`,
