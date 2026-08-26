@@ -2459,6 +2459,7 @@ struct PendingWorkerRecoveryIdentity {
 struct WorkerRecoveryIdentitySource {
     pending: PendingWorkerRecoveryIdentity,
     durable_prepare_anchor: crate::ownership_journal::DurablePrepareAnchor,
+    restart_custody: crate::worker_sandbox::PinnedWorkerRestartCustody,
 }
 
 impl WorkerRecoveryIdentitySource {
@@ -5269,9 +5270,11 @@ impl WorkerCoordinator {
         let pending = registry.recovery_identity_owners(ownership.coordinates, deadline)?;
         drop(registry);
         ensure_worker_deadline(deadline)?;
-        let proof = pending.authenticated_pins.verified_recovery_anchor_parts();
+        let proof = pending
+            .authenticated_pins
+            .verified_anchor_with_restart_custody();
         ensure_worker_deadline(deadline)?;
-        let parts = proof?;
+        let (parts, restart_custody) = proof?;
         if parts.pid != pending.expected_child_pid {
             return Err(WorkerV3Error::Authentication);
         }
@@ -5308,6 +5311,7 @@ impl WorkerCoordinator {
         Ok(WorkerRecoveryIdentitySource {
             pending,
             durable_prepare_anchor,
+            restart_custody,
         })
     }
 
@@ -5340,6 +5344,16 @@ impl WorkerCoordinator {
             .ok_or(WorkerV3Error::Stale)?;
 
         source.pending.authenticated_pins.ensure_alive()?;
+        let anchor = source
+            .pending
+            .authenticated_pins
+            .verified_recovery_anchor_parts()?;
+        if durable_prepare_anchor_from_worker_parts(anchor)? != source.durable_prepare_anchor {
+            return Err(WorkerV3Error::Authentication);
+        }
+        source
+            .restart_custody
+            .ensure_live_and_namespace_matches_anchor(anchor)?;
         ensure_worker_deadline(deadline)?;
         let liveness = {
             let registry = lock_worker_registry_until(&self.registry, deadline)?;

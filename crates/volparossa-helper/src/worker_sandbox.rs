@@ -288,6 +288,51 @@ pub(super) struct PinnedWorkerRecoveryIdentity {
     recovery_anchor: PinnedWorkerRecoveryAnchor,
 }
 
+/// Candidate cleanup capabilities selected for future restart custody.
+///
+/// The pidfd preserves exact task continuity and the namespace descriptor preserves the exact
+/// anonymous `CLONE_NEWNET` object. All other recovery pins remain required as pre-arm proof
+/// inputs. Whether this smaller pair is sufficient across restart remains unproven until PID 1
+/// publication, journal-bound adoption and reaper evidence exist.
+#[must_use = "dropping restart custody releases exact worker cleanup capability"]
+pub(super) struct PinnedWorkerRestartCustody {
+    pidfd: OwnedFd,
+    network_namespace: PinnedWorkerNetworkNamespace,
+}
+
+impl PinnedWorkerRestartCustody {
+    pub(super) fn ensure_live_and_namespace_matches_anchor(
+        &self,
+        anchor: WorkerRecoveryAnchorParts,
+    ) -> Result<(), WorkerSandboxError> {
+        let mut descriptors = [PollFd::new(self.pidfd.as_fd(), PollFlags::POLLIN)];
+        let ready = poll(&mut descriptors, 0_u8).map_err(nix_io)?;
+        if ready != 0
+            || descriptors[0]
+                .revents()
+                .is_some_and(|events| !events.is_empty())
+        {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        let (device, inode) = self.network_namespace.verified_identity_parts()?;
+        if (device, inode)
+            != (
+                anchor.network_namespace_device,
+                anchor.network_namespace_inode,
+            )
+        {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for PinnedWorkerRestartCustody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PinnedWorkerRestartCustody(<redacted>)")
+    }
+}
+
 impl PinnedWorkerRecoveryIdentity {
     pub(super) fn ensure_alive(&self) -> Result<(), WorkerSandboxError> {
         let mut descriptors = [PollFd::new(self.pidfd.as_fd(), PollFlags::POLLIN)];
@@ -329,6 +374,23 @@ impl PinnedWorkerRecoveryIdentity {
             executable_inode,
             service_cgroup_inode,
         })
+    }
+
+    /// Revalidates the full pre-arm proof, then duplicates only the two restart capabilities.
+    pub(super) fn verified_anchor_with_restart_custody(
+        &self,
+    ) -> Result<(WorkerRecoveryAnchorParts, PinnedWorkerRestartCustody), WorkerSandboxError> {
+        let anchor = self.verified_recovery_anchor_parts()?;
+        let custody = PinnedWorkerRestartCustody {
+            pidfd: duplicate_descriptor_cloexec(&self.pidfd)?,
+            network_namespace: PinnedWorkerNetworkNamespace {
+                descriptor: duplicate_descriptor_cloexec(&self.network_namespace.descriptor)?,
+                identity: self.network_namespace.identity,
+            },
+        };
+        custody.ensure_live_and_namespace_matches_anchor(anchor)?;
+        self.ensure_alive()?;
+        Ok((anchor, custody))
     }
 
     #[cfg(test)]
@@ -2746,7 +2808,11 @@ mod tests {
         let second = recovery
             .verified_recovery_anchor_parts()
             .expect("repeat proof from offset zero");
+        let (third, custody) = recovery
+            .verified_anchor_with_restart_custody()
+            .expect("derive restart custody only after full proof");
         assert_eq!(first, second);
+        assert_eq!(second, third);
         assert_eq!(first.pid.get(), std::process::id());
         assert_ne!(first.boot_id, [0; 16]);
         assert_ne!(first.process_start_ticks.get(), 0);
@@ -2760,6 +2826,54 @@ mod tests {
                 .verified_recovery_anchor_parts()
                 .expect("duplicate owns every retained pin after source drop"),
             first
+        );
+        drop(recovery);
+        custody
+            .ensure_live_and_namespace_matches_anchor(first)
+            .expect("pidfd and namespace custody survive all pre-arm proof owners");
+        assert_eq!(
+            format!("{custody:?}"),
+            "PinnedWorkerRestartCustody(<redacted>)"
+        );
+    }
+
+    #[test]
+    fn restart_custody_rejects_wrong_namespace_and_exited_pidfd() {
+        let recovery = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        let (anchor, mut custody) = recovery
+            .verified_anchor_with_restart_custody()
+            .expect("derive custody candidate");
+        let mut wrong_namespace = anchor;
+        let changed_inode = if anchor.network_namespace_inode.get() == u64::MAX {
+            anchor.network_namespace_inode.get() - 1
+        } else {
+            anchor.network_namespace_inode.get() + 1
+        };
+        wrong_namespace.network_namespace_inode =
+            NonZeroU64::new(changed_inode).expect("changed inode remains nonzero");
+        assert!(
+            custody
+                .ensure_live_and_namespace_matches_anchor(wrong_namespace)
+                .is_err()
+        );
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn bounded custody liveness fixture");
+        custody.pidfd =
+            pidfd_open(Pid::from_child(&child), PidfdFlags::empty()).expect("pin child pidfd");
+        custody
+            .ensure_live_and_namespace_matches_anchor(anchor)
+            .expect("liveness subcheck accepts live fd; construction supplies causality");
+        child.kill().expect("kill custody liveness fixture");
+        child.wait().expect("reap custody liveness fixture");
+        assert!(
+            custody
+                .ensure_live_and_namespace_matches_anchor(anchor)
+                .is_err()
         );
     }
 

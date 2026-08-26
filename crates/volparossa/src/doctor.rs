@@ -1326,7 +1326,7 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
         && value_set_matches(service, "RestrictAddressFamilies", families)
         && value_set_matches(service, "SystemCallFilter", syscalls)
         && match kind {
-            UnitKind::Helper => service.get("LimitCORE").is_some_and(|value| value == "0"),
+            UnitKind::Helper => helper_has_required_custody_sandbox(service),
             UnitKind::Agent | UnitKind::Native => {
                 service
                     .get("CapabilityBoundingSet")
@@ -1336,6 +1336,19 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
                         .is_some_and(String::is_empty)
             }
         }
+}
+
+fn helper_has_required_custody_sandbox(service: &BTreeMap<String, String>) -> bool {
+    [
+        ("LimitCORE", "0"),
+        ("NotifyAccess", "main"),
+        ("FileDescriptorStoreMax", "128"),
+        ("FileDescriptorStorePreserve", "yes"),
+        ("KillMode", "control-group"),
+        ("SendSIGKILL", "yes"),
+    ]
+    .iter()
+    .all(|(key, expected)| service.get(*key).is_some_and(|value| value == expected))
 }
 
 fn value_set_matches(service: &BTreeMap<String, String>, key: &str, expected: &[&str]) -> bool {
@@ -2235,6 +2248,22 @@ mod tests {
             Some("@system-service @network-io @mount seccomp")
         );
         assert_eq!(helper.get("LimitCORE").map(String::as_str), Some("0"));
+        assert_eq!(
+            helper.get("FileDescriptorStoreMax").map(String::as_str),
+            Some("128")
+        );
+        assert_eq!(
+            helper
+                .get("FileDescriptorStorePreserve")
+                .map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(helper.get("NotifyAccess").map(String::as_str), Some("main"));
+        assert_eq!(
+            helper.get("KillMode").map(String::as_str),
+            Some("control-group")
+        );
+        assert_eq!(helper.get("SendSIGKILL").map(String::as_str), Some("yes"));
 
         let mut dumpable = helper.clone();
         dumpable.insert("LimitCORE".to_owned(), "infinity".to_owned());
@@ -2728,6 +2757,11 @@ mod tests {
                             "@system-service @network-io @mount seccomp",
                         ),
                         ("LimitCORE", "0"),
+                        ("NotifyAccess", "main"),
+                        ("FileDescriptorStoreMax", "128"),
+                        ("FileDescriptorStorePreserve", "yes"),
+                        ("KillMode", "control-group"),
+                        ("SendSIGKILL", "yes"),
                     ],
                 );
             }
