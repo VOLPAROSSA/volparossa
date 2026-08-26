@@ -39,7 +39,8 @@ use zbus::{
 
 use crate::{
     deadline::HardDeadline,
-    systemd_custody::{CUSTODY_FD_NAME_BYTES, custody_fd_name_is_valid},
+    ownership_journal::DurableCustodyNameDigest,
+    systemd_custody::{CUSTODY_FD_NAME_BYTES, CUSTODY_FD_NAME_PREFIX, custody_fd_name_is_valid},
 };
 const DESCRIPTORS_PER_CUSTODY: usize = 2;
 const MAX_DESCRIPTOR_STORE_ENTRIES: usize = 128;
@@ -59,12 +60,23 @@ static PRODUCTION_PUBLICATION_GATE: PublicationGate = PublicationGate::new();
 
 /// One opaque, fixed-shape systemd descriptor-store name.
 ///
-/// Construction from the durable ownership key belongs to the later worker/journal wiring. This
-/// type intentionally exposes neither a `String` nor path authority.
+/// Construction is fixed from the typed durable digest, and the dormant worker binds that name to
+/// its journal authority. Production publication/recovery composition remains later work. This type
+/// intentionally exposes neither a `String` nor path authority.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct CustodyFdName([u8; CUSTODY_FD_NAME_BYTES]);
 
 impl CustodyFdName {
+    /// Convert the typed durable digest directly into the fixed descriptor-store name buffer.
+    pub(crate) fn from_durable_digest(digest: DurableCustodyNameDigest) -> Self {
+        let mut bytes = [0_u8; CUSTODY_FD_NAME_BYTES];
+        let prefix = CUSTODY_FD_NAME_PREFIX.as_bytes();
+        let encoded_digest = digest.encode_lower_hex();
+        bytes[..prefix.len()].copy_from_slice(prefix);
+        bytes[prefix.len()..].copy_from_slice(&encoded_digest);
+        Self(bytes)
+    }
+
     pub(crate) fn parse(value: &str) -> Result<Self, FdStoreError> {
         if !custody_fd_name_is_valid(value) {
             return Err(FdStoreError::InvalidCustodyName);
@@ -194,6 +206,36 @@ impl fmt::Debug for InventoryAttestation {
     }
 }
 
+impl InventoryAttestation {
+    /// Revalidate that this inventory proof names and identifies the exact borrowed custody pair.
+    pub(crate) fn verify_exact_custody(
+        &self,
+        custody_name: CustodyFdName,
+        custody: BorrowedCustodyPair<'_>,
+    ) -> Result<(), FdStoreError> {
+        let identities = exact_custody_identities(custody)?;
+        if self.custody_name != custody_name || self.identities != identities {
+            return Err(invalid_inventory(
+                "inventory attestation does not match the exact custody pair",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Construct exact test evidence without exposing attestation fields or production authority.
+    #[cfg(test)]
+    pub(crate) fn for_test_exact_custody(
+        custody_name: CustodyFdName,
+        custody: BorrowedCustodyPair<'_>,
+    ) -> Result<Self, FdStoreError> {
+        Ok(Self {
+            custody_name,
+            identities: exact_custody_identities(custody)?,
+            stored_descriptors: 2,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DescriptorIdentity {
     mode: u32,
@@ -222,6 +264,16 @@ impl DescriptorIdentity {
             ),
         })
     }
+}
+
+fn exact_custody_identities(
+    custody: BorrowedCustodyPair<'_>,
+) -> Result<[DescriptorIdentity; DESCRIPTORS_PER_CUSTODY], FdStoreError> {
+    let identities = custody.identities()?;
+    if identities[0] == identities[1] {
+        return Err(FdStoreError::DuplicateCustodyDescriptor);
+    }
+    Ok(identities)
 }
 
 fn checked_device_component(value: u64) -> Result<u32, FdStoreError> {
@@ -334,6 +386,7 @@ impl DescriptorStoreSnapshot {
         &self,
         expected_main_pid: u32,
         custody_name: CustodyFdName,
+        custody_identities: &[DescriptorIdentity; DESCRIPTORS_PER_CUSTODY],
     ) -> Result<(), FdStoreError> {
         if self.main_pid != expected_main_pid {
             return Err(invalid_inventory("MainPID is not the publishing process"));
@@ -356,6 +409,15 @@ impl DescriptorStoreSnapshot {
             .any(|entry| entry.name.as_ref() == custody_name.as_bytes())
         {
             return Err(invalid_inventory("custody name already exists"));
+        }
+        if self
+            .entries
+            .iter()
+            .any(|entry| custody_identities.contains(&entry.identity))
+        {
+            return Err(invalid_inventory(
+                "custody descriptor identity already exists",
+            ));
         }
         Ok(())
     }
@@ -697,17 +759,10 @@ async fn publish_and_attest<S: DescriptorStoreInventorySource>(
         .snapshot(deadline)
         .await
         .map_err(PublicationFailure::before_send)?;
+    let identities = exact_custody_identities(custody).map_err(PublicationFailure::before_send)?;
     baseline
-        .validate_baseline(source.expected_main_pid(), custody_name)
+        .validate_baseline(source.expected_main_pid(), custody_name, &identities)
         .map_err(PublicationFailure::before_send)?;
-    let identities = custody
-        .identities()
-        .map_err(PublicationFailure::before_send)?;
-    if identities[0] == identities[1] {
-        return Err(PublicationFailure::before_send(
-            FdStoreError::DuplicateCustodyDescriptor,
-        ));
-    }
     let sender = NotifySender::new(address).map_err(PublicationFailure::before_send)?;
     let (barrier_read, barrier_write) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
         .map_err(nix_io)
@@ -890,6 +945,25 @@ mod tests {
         }
     }
 
+    fn descriptor_identity(seed: u32) -> DescriptorIdentity {
+        DescriptorIdentity {
+            mode: 0o100_600,
+            device_major: seed,
+            device_minor: seed + 1,
+            inode: u64::from(seed) + 2,
+            special_device_major: seed + 3,
+            special_device_minor: seed + 4,
+            status_flags: seed + 5,
+        }
+    }
+
+    fn assert_invalid_inventory_reason(result: Result<(), FdStoreError>, expected: &'static str) {
+        match result {
+            Err(FdStoreError::InvalidInventory(observed)) => assert_eq!(observed, expected),
+            other => panic!("unexpected baseline validation result: {other:?}"),
+        }
+    }
+
     fn receive_message(socket: &UnixDatagram) -> (Vec<u8>, Vec<RawFd>) {
         let mut payload = [0_u8; 256];
         let mut vectors = [IoSliceMut::new(&mut payload)];
@@ -944,6 +1018,7 @@ mod tests {
 
     #[test]
     fn custody_name_length_and_redaction_are_fixed() {
+        let _: fn(DurableCustodyNameDigest) -> CustodyFdName = CustodyFdName::from_durable_digest;
         assert_eq!(CUSTODY_FD_NAME_PREFIX.len(), 22);
         assert_eq!(CUSTODY_FD_NAME_BYTES, 86);
         let name = custody_name(1);
@@ -954,6 +1029,100 @@ mod tests {
         assert!(
             CustodyFdName::parse(&format!("{}{}", CUSTODY_FD_NAME_PREFIX, "A".repeat(64))).is_err()
         );
+    }
+
+    #[test]
+    fn exact_attestation_revalidates_name_role_order_and_open_file_identity() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct descriptor")
+            .expect("make fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let name = custody_name(24);
+        let attestation = InventoryAttestation::for_test_exact_custody(name, custody)
+            .expect("exact test attestation");
+        assert_eq!(attestation.stored_descriptors, 2);
+        assert!(attestation.verify_exact_custody(name, custody).is_ok());
+        assert!(
+            attestation
+                .verify_exact_custody(custody_name(25), custody)
+                .is_err()
+        );
+        let reversed = BorrowedCustodyPair::new(network_namespace.as_fd(), pidfd.as_fd())
+            .expect("borrow reversed pair");
+        assert!(attestation.verify_exact_custody(name, reversed).is_err());
+        assert_eq!(
+            format!("{attestation:?}"),
+            "InventoryAttestation(<redacted>)"
+        );
+
+        let duplicate = nix::unistd::dup(pidfd.as_fd()).expect("duplicate descriptor");
+        let duplicate_pair = BorrowedCustodyPair::new(pidfd.as_fd(), duplicate.as_fd())
+            .expect("raw descriptors remain distinct");
+        assert!(
+            InventoryAttestation::for_test_exact_custody(name, duplicate_pair).is_err(),
+            "one open file identity cannot fill both custody roles"
+        );
+    }
+
+    #[test]
+    fn baseline_preserves_exact_name_rejection_before_identity_overlap() {
+        let target_name = custody_name(26);
+        let identities = [descriptor_identity(10), descriptor_identity(20)];
+        let baseline = snapshot(
+            42,
+            vec![inventory_entry(target_name, descriptor_identity(30))],
+        );
+
+        assert_invalid_inventory_reason(
+            baseline.validate_baseline(42, target_name, &identities),
+            "custody name already exists",
+        );
+    }
+
+    #[test]
+    fn baseline_rejects_partial_and_full_cross_name_identity_overlap() {
+        let target_name = custody_name(27);
+        let first = descriptor_identity(40);
+        let second = descriptor_identity(50);
+        let identities = [first.clone(), second.clone()];
+        let first_name = custody_name(28);
+        let second_name = custody_name(29);
+        let partial_first = snapshot(42, vec![inventory_entry(first_name, first.clone())]);
+        let partial_second = snapshot(42, vec![inventory_entry(second_name, second.clone())]);
+        let full = snapshot(
+            42,
+            vec![
+                inventory_entry(first_name, first),
+                inventory_entry(second_name, second),
+            ],
+        );
+
+        for baseline in [partial_first, partial_second, full] {
+            assert_invalid_inventory_reason(
+                baseline.validate_baseline(42, target_name, &identities),
+                "custody descriptor identity already exists",
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_accepts_unrelated_cross_name_inventory() {
+        let target_name = custody_name(30);
+        let identities = [descriptor_identity(60), descriptor_identity(70)];
+        let baseline = snapshot(
+            42,
+            vec![
+                inventory_entry(custody_name(31), descriptor_identity(80)),
+                inventory_entry(custody_name(32), descriptor_identity(90)),
+            ],
+        );
+
+        baseline
+            .validate_baseline(42, target_name, &identities)
+            .expect("unrelated baseline entries remain valid");
     }
 
     #[test]
@@ -1083,6 +1252,53 @@ mod tests {
             receiver
                 .recv(&mut byte)
                 .expect_err("no datagram before send")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_name_identity_overlap_is_definitely_before_send() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("notify.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_nonblocking(true)
+            .expect("nonblocking receiver");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct descriptor")
+            .expect("make fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let identities = custody.identities().expect("local identities");
+        let source = FakeInventorySource::new(
+            42,
+            vec![snapshot(
+                42,
+                vec![inventory_entry(custody_name(34), identities[0].clone())],
+            )],
+        );
+        let gate = PublicationGate::new();
+
+        let error = publish_and_attest(
+            &gate,
+            &source,
+            &address,
+            custody_name(33),
+            custody,
+            HardDeadline::after(Duration::from_secs(1)).expect("deadline"),
+        )
+        .await
+        .expect_err("cross-name custody overlap");
+        assert!(matches!(error, PublicationFailure::BeforeSend { .. }));
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            receiver
+                .recv(&mut byte)
+                .expect_err("overlap rejection sends no datagram")
                 .kind(),
             io::ErrorKind::WouldBlock
         );

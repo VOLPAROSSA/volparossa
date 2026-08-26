@@ -47,6 +47,10 @@ use super::{
 const MAX_ACCEPTED_OPERATIONS: usize = 4;
 const COMMAND_CHANNEL_CAPACITY: usize = MAX_ACCEPTED_OPERATIONS + 1;
 const ACTOR_THREAD_NAME: &str = "volparossa-ownership-journal";
+const DURABLE_CUSTODY_NAME_DOMAIN: &str = "VOLPAROSSA helper durable systemd custody name v1";
+const DURABLE_CUSTODY_NAME_DIGEST_BYTES: usize = 32;
+const DURABLE_CUSTODY_NAME_HEX_BYTES: usize = DURABLE_CUSTODY_NAME_DIGEST_BYTES * 2;
+const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 #[cfg(not(test))]
 const REPLY_WAIT_LIMIT: Duration = Duration::from_secs(31);
 #[cfg(test)]
@@ -246,6 +250,31 @@ pub(crate) struct DurableOwnershipKey {
     coordinates: OwnershipCoordinates,
 }
 
+/// Stable, secret-free descriptor-store identity derived from one exact durable key.
+///
+/// This value is not ownership authority and is therefore copyable. Its raw digest remains
+/// private; the only exposed representation is a fixed-size lowercase hexadecimal buffer for the
+/// systemd descriptor-store naming boundary.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DurableCustodyNameDigest([u8; DURABLE_CUSTODY_NAME_DIGEST_BYTES]);
+
+impl DurableCustodyNameDigest {
+    pub(crate) fn encode_lower_hex(self) -> [u8; DURABLE_CUSTODY_NAME_HEX_BYTES] {
+        let mut encoded = [0_u8; DURABLE_CUSTODY_NAME_HEX_BYTES];
+        for (byte, pair) in self.0.iter().zip(encoded.chunks_exact_mut(2)) {
+            pair[0] = LOWER_HEX_DIGITS[usize::from(*byte >> 4)];
+            pair[1] = LOWER_HEX_DIGITS[usize::from(*byte & 0x0f)];
+        }
+        encoded
+    }
+}
+
+impl fmt::Debug for DurableCustodyNameDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableCustodyNameDigest(<redacted>)")
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct OwnershipCoordinates {
     journal_epoch_id: JournalEpochId,
@@ -257,6 +286,18 @@ struct OwnershipCoordinates {
 impl fmt::Debug for DurableOwnershipKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DurableOwnershipKey(<redacted>)")
+    }
+}
+
+impl DurableOwnershipKey {
+    /// Derive the stable descriptor-store name material without exposing durable coordinates.
+    pub(crate) fn custody_name_digest(&self) -> DurableCustodyNameDigest {
+        let mut digest = blake3::Hasher::new_derive_key(DURABLE_CUSTODY_NAME_DOMAIN);
+        digest.update(&self.coordinates.journal_epoch_id.0);
+        digest.update(&self.coordinates.context_id.0);
+        digest.update(&self.coordinates.ownership_id.0);
+        digest.update(&self.coordinates.generation.get().to_be_bytes());
+        DurableCustodyNameDigest(*digest.finalize().as_bytes())
     }
 }
 
@@ -1144,6 +1185,15 @@ impl DurableOwnershipActor {
         self.shutdown_until(default_actor_deadline()?)
     }
 
+    /// Deterministically fence the actor for cross-module retained-owner tests.
+    #[cfg(test)]
+    pub(crate) fn shutdown_for_test(
+        &mut self,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
+        self.shutdown_until(deadline)
+    }
+
     pub(super) fn shutdown_until(
         &mut self,
         deadline: HardDeadline,
@@ -1849,6 +1899,126 @@ fn finish_operation<T>(
             admission.fence_terminal(lifecycle, terminal);
             reply.complete(Err(error));
             true
+        }
+    }
+}
+
+#[cfg(test)]
+mod durable_custody_name_tests {
+    use super::*;
+    use crate::systemd_fdstore::CustodyFdName;
+
+    fn key(
+        journal_epoch_id: [u8; 32],
+        context_id: [u8; 16],
+        ownership_id: [u8; 32],
+        generation: u64,
+    ) -> DurableOwnershipKey {
+        DurableOwnershipKey {
+            coordinates: OwnershipCoordinates {
+                journal_epoch_id: JournalEpochId::new(journal_epoch_id).expect("journal epoch"),
+                context_id: Id16::new(context_id).expect("context identity"),
+                ownership_id: OwnershipId::new(ownership_id).expect("ownership identity"),
+                generation: NonZeroU64::new(generation).expect("non-zero generation"),
+            },
+        }
+    }
+
+    fn vector_a_key() -> DurableOwnershipKey {
+        key(
+            [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                0x1c, 0x1d, 0x1e, 0x1f,
+            ],
+            [
+                0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+                0x2e, 0x2f,
+            ],
+            [
+                0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d,
+                0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b,
+                0x4c, 0x4d, 0x4e, 0x4f,
+            ],
+            0x0102_0304_0506_0708,
+        )
+    }
+
+    #[test]
+    fn durable_custody_digest_and_name_vectors_are_frozen() {
+        let first = vector_a_key().custody_name_digest();
+        assert_eq!(
+            first.0,
+            [
+                0xfb, 0x92, 0xf5, 0x4d, 0xbd, 0x88, 0x48, 0xdc, 0xc4, 0x8f, 0x85, 0x85, 0x3b, 0x38,
+                0x6f, 0xf7, 0x54, 0xb9, 0xdb, 0x23, 0xfc, 0xd1, 0x17, 0x8a, 0xb7, 0xa2, 0x60, 0x9a,
+                0xf9, 0x38, 0x63, 0x24,
+            ]
+        );
+        assert_eq!(
+            first.encode_lower_hex(),
+            *b"fb92f54dbd8848dcc48f85853b386ff754b9db23fcd1178ab7a2609af9386324"
+        );
+        let first_name = CustodyFdName::from_durable_digest(first);
+        assert_eq!(
+            first_name,
+            CustodyFdName::parse(
+                "volparossa-custody-v1-fb92f54dbd8848dcc48f85853b386ff754b9db23fcd1178ab7a2609af9386324"
+            )
+            .expect("first frozen custody name")
+        );
+
+        let second = key([0xff; 32], [0xaa; 16], [0x55; 32], u64::MAX).custody_name_digest();
+        assert_eq!(
+            second.0,
+            [
+                0x54, 0x53, 0x8c, 0xe4, 0x20, 0x79, 0x5a, 0x9d, 0xc7, 0x2b, 0xb2, 0xc9, 0x82, 0x29,
+                0x91, 0xb3, 0x17, 0xf4, 0x48, 0x42, 0xd0, 0xc6, 0x35, 0x96, 0xac, 0x7e, 0x83, 0x5a,
+                0xaf, 0x79, 0xbe, 0x4c,
+            ]
+        );
+        assert_eq!(
+            CustodyFdName::from_durable_digest(second),
+            CustodyFdName::parse(
+                "volparossa-custody-v1-54538ce420795a9dc72bb2c9822991b317f44842d0c63596ac7e835aaf79be4c"
+            )
+            .expect("second frozen custody name")
+        );
+        assert_eq!(format!("{first:?}"), "DurableCustodyNameDigest(<redacted>)");
+        assert!(!format!("{first:?}").contains("fb92f54d"));
+    }
+
+    #[test]
+    fn every_durable_coordinate_changes_the_custody_digest() {
+        let base = vector_a_key();
+        let expected = base.custody_name_digest();
+        let coordinates = base.coordinates;
+        for changed in [
+            OwnershipCoordinates {
+                journal_epoch_id: JournalEpochId::new([0x11; 32]).expect("different epoch"),
+                ..coordinates
+            },
+            OwnershipCoordinates {
+                context_id: Id16::new([0x22; 16]).expect("different context"),
+                ..coordinates
+            },
+            OwnershipCoordinates {
+                ownership_id: OwnershipId::new([0x33; 32]).expect("different ownership"),
+                ..coordinates
+            },
+            OwnershipCoordinates {
+                generation: NonZeroU64::new(coordinates.generation.get() + 1)
+                    .expect("different generation"),
+                ..coordinates
+            },
+        ] {
+            assert_ne!(
+                DurableOwnershipKey {
+                    coordinates: changed,
+                }
+                .custody_name_digest(),
+                expected
+            );
         }
     }
 }

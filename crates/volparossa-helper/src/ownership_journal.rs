@@ -11,12 +11,13 @@
 
 mod actor;
 
-// This affine surface is intentionally exported before its production composition is installed.
+// This affine surface and its opaque, non-authoritative custody digest are intentionally exported
+// before their production composition is installed.
 #[allow(unused_imports)]
 pub(crate) use actor::{
-    DurableArmOutcome, DurableIntentRegistration, DurableMayOwnPrepare, DurableOwnershipActor,
-    DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
-    DurableRegistrationOutcome,
+    DurableArmOutcome, DurableCustodyNameDigest, DurableIntentRegistration, DurableMayOwnPrepare,
+    DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor,
+    DurablePrepareAnchorParts, DurableRegistrationOutcome,
 };
 
 use crate::{deadline::HardDeadline, lease_spec::WireguardLeaseSpec};
