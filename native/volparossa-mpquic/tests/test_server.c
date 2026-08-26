@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-#include "volparossa_mpquic_server.h"
+#define _GNU_SOURCE
+
+#include "volparossa_mpquic_runtime.h"
 
 #include <assert.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,6 +16,10 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#ifndef IPV6_FREEBIND
+#define IPV6_FREEBIND 78
+#endif
 
 typedef struct test_encoder {
     uint8_t *cursor;
@@ -24,9 +32,30 @@ typedef struct dispatch_state {
     bool inject_assignment;
 } dispatch_state_t;
 
+typedef struct runtime_dispatch_state {
+    vmp_runtime_t *runtime;
+    unsigned calls;
+    unsigned closed_descriptors;
+    vmp_result_t results[2];
+    char diagnostics[2][VMP_MAX_DIAGNOSTIC_CODE + 1U];
+} runtime_dispatch_state_t;
+
+typedef struct runtime_clock {
+    uint64_t boottime_ms;
+    uint64_t realtime_ms;
+    unsigned snapshot_calls;
+    unsigned boottime_calls;
+} runtime_clock_t;
+
 static int injected_recvmsg_flags;
 static size_t injected_recvmsg_capacity;
+static unsigned runtime_auth_calls;
+static unsigned runtime_backend_calls;
 static const uint8_t test_instance[VMP_NATIVE_INSTANCE_ID_LEN] = {0x61U};
+static const uint8_t test_exit_listener_ip[16] = {
+    0xfdU, 0x76U, 0x6fU, 0x6cU, 0x70U, 0x61U, 0x11U, 0x11U,
+    0x22U, 0x22U, 0U,    1U,    0x33U, 0x33U, 0U,    4U,
+};
 static const uint8_t test_auth_commitment[VMP_AUTH_COMMITMENT_LEN] = {
     0x2bU, 0x80U, 0x72U, 0x70U, 0xdbU, 0xd6U, 0x15U, 0x73U,
     0xccU, 0x59U, 0x14U, 0x25U, 0x11U, 0x62U, 0x1eU, 0xd6U,
@@ -204,7 +233,9 @@ static size_t make_add_path_frame(uint8_t *frame, size_t capacity)
     return make_add_path_frame_for(frame, capacity, UINT16_C(51820), false);
 }
 
-static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
+static size_t make_start_exit_frame_for(uint8_t *frame, size_t capacity,
+                                        uint8_t nonce_byte,
+                                        uint16_t listener_port)
 {
     static const uint8_t auth[VMP_AUTH_SECRET_LEN] =
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -222,14 +253,10 @@ static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
         0xfdU, 0x76U, 0x6fU, 0x6cU, 0x70U, 0x61U, 0x11U, 0x11U,
         0x22U, 0x22U, 0U,    1U,    0x33U, 0x33U, 0U,    1U,
     };
-    uint8_t listener_ip[16];
-    memset(nonce, 0x34, sizeof(nonce));
+    memset(nonce, nonce_byte, sizeof(nonce));
     memset(context, 0x44, sizeof(context));
     memset(spki, 0x45, sizeof(spki));
     memset(reservation, 0x46, sizeof(reservation));
-    memcpy(listener_ip, client_ip, sizeof(listener_ip));
-    listener_ip[15] = 4U;
-
     test_encoder_t child = {.cursor = nested, .end = nested + sizeof(nested)};
     put_bytes(&child, 1U, context, sizeof(context));
     put_bytes(&child, 2U, auth, sizeof(auth));
@@ -240,8 +267,9 @@ static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
     put_bytes(&child, 7U, spki, sizeof(spki));
     put_bytes(&child, 8U, tls_name, sizeof(tls_name) - 1U);
     put_uint(&child, 9U, 1U);
-    put_bytes(&child, 10U, listener_ip, sizeof(listener_ip));
-    put_uint(&child, 11U, 443U);
+    put_bytes(&child, 10U, test_exit_listener_ip,
+              sizeof(test_exit_listener_ip));
+    put_uint(&child, 11U, listener_port);
     put_bytes(&child, 12U, client_ip, sizeof(client_ip));
     put_uint(&child, 13U, UINT16_C(51820));
     put_bytes(&child, 14U, reservation, sizeof(reservation));
@@ -272,6 +300,11 @@ static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
     put_bytes(&parent, VMP_OPERATION_START_EXIT_SESSION, nested,
               (size_t)(child.cursor - nested));
     return finish_frame(frame, &parent);
+}
+
+static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
+{
+    return make_start_exit_frame_for(frame, capacity, 0x34U, 443U);
 }
 
 static bool test_request_binding(void *context, vmp_operation_t operation,
@@ -376,6 +409,165 @@ static vmp_server_error_t test_dispatch(void *context,
     return VMP_SERVER_OK;
 }
 
+static vmp_transport_error_t reject_transport_create(
+    void *factory_context, const vmp_transport_create_params_t *params,
+    void **out_session)
+{
+    (void)factory_context;
+    (void)params;
+    assert(out_session != NULL);
+    *out_session = NULL;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static void reject_transport_destroy(void *session)
+{
+    (void)session;
+    ++runtime_backend_calls;
+}
+
+static vmp_transport_error_t reject_transport_add(
+    void *session, const vmp_add_path_t *path, int path_fd,
+    int64_t *out_handle)
+{
+    (void)session;
+    (void)path;
+    (void)out_handle;
+    if (path_fd >= 0) assert(close(path_fd) == 0);
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t reject_transport_remove(void *session,
+                                                     int64_t handle)
+{
+    (void)session;
+    (void)handle;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t reject_transport_pump(void *session)
+{
+    (void)session;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t reject_transport_snapshot(
+    void *session, vmp_transport_path_snapshot_t *out, size_t capacity,
+    size_t *out_count, bool *out_tunnel_ready, bool *out_has_assignment,
+    vmp_tunnel_assignment_t *out_assignment)
+{
+    (void)session;
+    (void)out;
+    (void)capacity;
+    (void)out_count;
+    (void)out_tunnel_ready;
+    (void)out_has_assignment;
+    (void)out_assignment;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t reject_transport_send(
+    void *session, uint64_t masque_context_id, const uint8_t *packet,
+    size_t packet_len)
+{
+    (void)session;
+    (void)masque_context_id;
+    (void)packet;
+    (void)packet_len;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static vmp_transport_error_t reject_transport_receive(
+    void *session, uint64_t masque_context_id, uint8_t *out,
+    size_t out_capacity, size_t *out_len)
+{
+    (void)session;
+    (void)masque_context_id;
+    (void)out;
+    (void)out_capacity;
+    (void)out_len;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
+static const vmp_transport_ops_t REJECT_TRANSPORT_OPS = {
+    .create = reject_transport_create,
+    .destroy = reject_transport_destroy,
+    .add_path = reject_transport_add,
+    .remove_path = reject_transport_remove,
+    .pump = reject_transport_pump,
+    .snapshot = reject_transport_snapshot,
+    .send_inner = reject_transport_send,
+    .receive_inner = reject_transport_receive,
+};
+
+static bool runtime_clock_snapshot(void *context, uint64_t *out_boottime_ms,
+                                   uint64_t *out_realtime_ms)
+{
+    runtime_clock_t *clock = context;
+    assert(clock != NULL && out_boottime_ms != NULL &&
+           out_realtime_ms != NULL);
+    ++clock->snapshot_calls;
+    *out_boottime_ms = clock->boottime_ms;
+    *out_realtime_ms = clock->realtime_ms;
+    return true;
+}
+
+static bool runtime_boottime(void *context, uint64_t *out_boottime_ms)
+{
+    runtime_clock_t *clock = context;
+    assert(clock != NULL && out_boottime_ms != NULL);
+    ++clock->boottime_calls;
+    *out_boottime_ms = clock->boottime_ms;
+    return true;
+}
+
+static bool runtime_auth_commitment(
+    void *context, const uint8_t *auth_secret, size_t auth_secret_len,
+    uint8_t out[VMP_AUTH_COMMITMENT_LEN])
+{
+    static const uint8_t expected_secret[VMP_AUTH_SECRET_LEN] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    (void)context;
+    ++runtime_auth_calls;
+    if (auth_secret == NULL || out == NULL ||
+        auth_secret_len != sizeof(expected_secret) ||
+        memcmp(auth_secret, expected_secret, sizeof(expected_secret)) != 0) {
+        return false;
+    }
+    memcpy(out, test_auth_commitment, VMP_AUTH_COMMITMENT_LEN);
+    return true;
+}
+
+static vmp_server_error_t runtime_dispatch_capture(
+    void *context, const vmp_request_t *request, vmp_response_t *response,
+    int request_fd)
+{
+    runtime_dispatch_state_t *state = context;
+    assert(state != NULL && state->runtime != NULL && state->calls < 2U);
+    const vmp_server_error_t error =
+        vmp_runtime_dispatch(state->runtime, request, response, request_fd);
+    if (request_fd >= 0) {
+        errno = 0;
+        assert(fcntl(request_fd, F_GETFD) == -1 && errno == EBADF);
+        ++state->closed_descriptors;
+    }
+    const unsigned index = state->calls++;
+    state->results[index] = response->result;
+    assert(response->diagnostic_code != NULL);
+    assert(response->diagnostic_code_len <= VMP_MAX_DIAGNOSTIC_CODE);
+    memcpy(state->diagnostics[index], response->diagnostic_code,
+           response->diagnostic_code_len);
+    state->diagnostics[index][response->diagnostic_code_len] = '\0';
+    return error;
+}
+
 static vmp_server_error_t count_pump(void *context)
 {
     unsigned *calls = context;
@@ -431,6 +623,33 @@ static size_t open_descriptor_count(void)
     return count;
 }
 
+static int make_bound_exit_listener(uint16_t *out_port)
+{
+    assert(out_port != NULL);
+    const int descriptor =
+        socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+               IPPROTO_UDP);
+    assert(descriptor >= 0);
+    const int enabled = 1;
+    assert(setsockopt(descriptor, IPPROTO_IPV6, IPV6_V6ONLY, &enabled,
+                      sizeof(enabled)) == 0);
+    assert(setsockopt(descriptor, IPPROTO_IPV6, IPV6_FREEBIND, &enabled,
+                      sizeof(enabled)) == 0);
+    struct sockaddr_in6 local;
+    memset(&local, 0, sizeof(local));
+    local.sin6_family = AF_INET6;
+    memcpy(&local.sin6_addr, test_exit_listener_ip,
+           sizeof(test_exit_listener_ip));
+    assert(bind(descriptor, (const struct sockaddr *)&local,
+                sizeof(local)) == 0);
+    socklen_t local_len = sizeof(local);
+    assert(getsockname(descriptor, (struct sockaddr *)&local,
+                       &local_len) == 0);
+    assert(local_len == sizeof(local) && local.sin6_port != 0U);
+    *out_port = ntohs(local.sin6_port);
+    return descriptor;
+}
+
 static void send_with_fds(int fd, const uint8_t *buffer, size_t len,
                           const int *descriptors, size_t descriptor_count)
 {
@@ -469,6 +688,34 @@ static void close_pair(int sockets[2])
 {
     assert(close(sockets[0]) == 0);
     assert(close(sockets[1]) == 0);
+}
+
+static void serve_runtime_exit_frame(runtime_dispatch_state_t *state,
+                                     uint8_t nonce_byte)
+{
+    const size_t baseline = open_descriptor_count();
+    int sockets[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    uint16_t listener_port = 0U;
+    const int listener = make_bound_exit_listener(&listener_port);
+    uint8_t request[1024];
+    uint8_t binding[VMP_FD_BINDING_LEN];
+    const size_t request_len = make_start_exit_frame_for(
+        request, sizeof(request), nonce_byte, listener_port);
+    binding_for_frame(request, request_len,
+                      VMP_OPERATION_START_EXIT_SESSION, binding);
+    send_binding(sockets[0], binding, &listener, 1U);
+    assert(close(listener) == 0);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+
+    const vmp_server_options_t configuration = options();
+    assert(vmp_serve_connection(sockets[1], &configuration,
+                                runtime_dispatch_capture,
+                                state) == VMP_SERVER_OK);
+    assert(open_descriptor_count() == baseline + 2U);
+    close_pair(sockets);
+    assert(open_descriptor_count() == baseline);
 }
 
 static void expect_protocol(int sockets[2], dispatch_state_t *state)
@@ -639,6 +886,28 @@ static void test_request_digest_and_assignment_shape_fail_closed(void)
     assert(state.calls == 0U);
     close_pair(sockets);
 
+    int pipe_fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(pipe(pipe_fds) == 0);
+    const size_t baseline = open_descriptor_count();
+    uint8_t descriptor_binding[VMP_FD_BINDING_LEN];
+    request_len = make_add_path_frame(request, sizeof(request));
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH,
+                      descriptor_binding);
+    send_binding(sockets[0], descriptor_binding, &pipe_fds[0], 1U);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    state = (dispatch_state_t){0};
+    configuration = options();
+    configuration.request_digest = reject_request_digest;
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) == VMP_SERVER_BACKEND);
+    assert(state.calls == 0U);
+    assert(open_descriptor_count() == baseline);
+    assert(close(pipe_fds[0]) == 0);
+    assert(close(pipe_fds[1]) == 0);
+    close_pair(sockets);
+
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
     request_len = make_start_frame(request, sizeof(request));
     send_binding(sockets[0], binding, NULL, 0U);
@@ -758,6 +1027,40 @@ static void test_exact_start_exit_fd_uses_distinct_binding_domain(void)
     assert(close(pipe_fds[0]) == 0);
     assert(close(pipe_fds[1]) == 0);
     close_pair(sockets);
+}
+
+static void test_framed_exit_authorization_replay_is_consumed_once(void)
+{
+    runtime_auth_calls = 0U;
+    runtime_backend_calls = 0U;
+    runtime_clock_t clock = {
+        .boottime_ms = UINT64_C(500000),
+        .realtime_ms = UINT64_C(1000000),
+    };
+    vmp_runtime_t *runtime = vmp_runtime_create(
+        VMP_RUNTIME_EXIT, test_instance, &REJECT_TRANSPORT_OPS, NULL,
+        runtime_auth_commitment, NULL, runtime_clock_snapshot,
+        runtime_boottime, &clock);
+    assert(runtime != NULL);
+    assert(clock.snapshot_calls == 1U && clock.boottime_calls == 0U);
+
+    runtime_dispatch_state_t state = {.runtime = runtime};
+    serve_runtime_exit_frame(&state, 0x71U);
+    assert(state.calls == 1U && state.closed_descriptors == 1U);
+    assert(state.results[0] == VMP_RESULT_TRANSPORT);
+    assert(strcmp(state.diagnostics[0],
+                  "exit_listener_orchestration_unavailable") == 0);
+    assert(runtime_auth_calls == 1U && runtime_backend_calls == 0U);
+
+    serve_runtime_exit_frame(&state, 0x72U);
+    assert(state.calls == 2U && state.closed_descriptors == 2U);
+    assert(state.results[1] == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(state.diagnostics[1], "authorization_replay") == 0);
+    assert(runtime_auth_calls == 2U && runtime_backend_calls == 0U);
+    assert(clock.snapshot_calls == 3U && clock.boottime_calls == 0U);
+
+    vmp_runtime_destroy(runtime);
+    assert(runtime_backend_calls == 0U);
 }
 
 static void test_fragmented_binding_recvmsg_is_reassembled(void)
@@ -1041,6 +1344,7 @@ int main(void)
     test_request_digest_and_assignment_shape_fail_closed();
     test_exact_add_path_fd_and_binding_succeeds();
     test_exact_start_exit_fd_uses_distinct_binding_domain();
+    test_framed_exit_authorization_replay_is_consumed_once();
     test_fragmented_binding_recvmsg_is_reassembled();
     test_incomplete_binding_is_rejected_and_fd_closed();
     test_rejected_descriptors_are_closed_on_every_boundary();

@@ -9,7 +9,8 @@ explicit multipath and single-path modes, descriptor-only path adoption, and a
 fail-closed descriptor-bound single-path exit-listener contract. API v6 also
 binds every operational request to a native-generated process incarnation,
 correlates responses to the exact canonical request digest, carries the
-exit-signed route scope, and reserves a strictly validated tunnel-assignment
+fields derived from the exit-signed route scope without verifying that
+signature itself, and reserves a strictly validated tunnel-assignment
 wire-shape contract.
 It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, exact scheduler, honest
 unique-payload metric, trusted helper origin for path descriptors, and
@@ -69,6 +70,16 @@ applicable.
   is idempotent only for byte-identical requests, remains pending until the
   tunnel and requested active-path count are real, and otherwise reports
   insufficient paths.
+- Authorization admission samples `CLOCK_BOOTTIME` before `CLOCK_REALTIME`,
+  advances a monotone effective wall-clock floor, and converts the accepted
+  remaining lifetime once to a BOOTTIME deadline. Runtime checks thereafter
+  use only BOOTTIME; clock failure, regression, and overflow fail closed. A
+  fixed 128-record process-local ledger with no live eviction rejects exact
+  reservation/finalize pair replay and one-ID scope collisions. Exact client
+  retries are allowed only while their byte-identical session remains live;
+  stop, expiry, and valid exit attempts leave tombstones until the deadline.
+  This ledger neither verifies signed scope nor caches general request nonces,
+  and it is erased on process restart.
 - Explicit `MultipathQuic` and `SinglePathGeneralUdp` modes. Multipath requires
   at least two active paths; single-path permits exactly one. Shape mismatches
   are rejected without downgrade.
@@ -108,7 +119,9 @@ applicable.
   socket and tuple checks. Neither proves helper origin, assigned-address state,
   or network namespace. The dormant native runtime closes it on every
   path and returns `exit_listener_orchestration_unavailable`; no host bind,
-  pathname secret, or fallback exists.
+  pathname secret, or fallback exists. A structurally valid request with a
+  matching bearer commitment consumes its reservation/finalize pair before
+  that failure, so a same-process retry of the pair is rejected.
 - Focused upstream patches enforce the caller-supplied leaf-SPKI SHA-256 pin
   on every handshake, pass explicit local/remote tuples to xquic, expose real
   RTT, congestion-window, bytes-in-flight, loss, rate, and ACKed-transport
@@ -335,14 +348,17 @@ The following gates remain hard blockers:
    end-to-end listener provenance/handoff to a reviewed exit factory. API v6
    accepts and closes the descriptor and carries the TLS material in memory,
    but does not yet bind it cryptographically to the certificate key, DNS name,
-   SPKI pin, signed reservation scope, or a replay decision. Valid
+   SPKI pin, or independently verify the signed reservation scope. Valid
    `StartExitSession` requests still return
    `exit_listener_orchestration_unavailable`; no launcher is shipped.
-4. **No replay authority or monotonic authorization deadline.** Native request
-   nonces correlate one response but have no replay tombstone. The active client
-   runtime compares expiry to `CLOCK_REALTIME`, so a backward clock adjustment
-   can extend an accepted session. Production must consume verified signed scope
-   affinely and convert its remaining lifetime once to a monotonic deadline.
+4. **Process-local replay and BOOTTIME admission are not a production
+   authority.** Native request nonces correlate one response but have no
+   general replay tombstone. The bounded pair ledger and converted BOOTTIME
+   deadline prevent same-process pair reuse and wall-clock lifetime extension,
+   but native does not verify the signed bundle, both changed IDs look like a
+   new scope, tombstones expire, and process restart clears the table.
+   Production still needs cryptographic verification and a preverified affine
+   handoff bound to both process instances.
 5. **No retained or enforced production tunnel assignment.** API v6 strictly
    encodes the upstream assignment shape and refuses a successful start without
    one, but the mqvpn adapter deliberately reports no assignment until a later

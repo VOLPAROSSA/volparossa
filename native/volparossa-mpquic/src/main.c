@@ -73,19 +73,34 @@ static bool parse_arguments(int argc, char **argv,
     return arguments->have_mode && arguments->socket_path != NULL;
 }
 
-static uint64_t realtime_ms(void *context)
+static bool clock_ms(clockid_t clock_id, uint64_t *out_ms)
 {
-    (void)context;
+    if (out_ms == NULL) return false;
     struct timespec now;
-    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0) {
-        return UINT64_MAX;
-    }
+    if (clock_gettime(clock_id, &now) != 0 || now.tv_sec < 0) return false;
     const uint64_t seconds = (uint64_t)now.tv_sec;
     const uint64_t milliseconds = (uint64_t)now.tv_nsec / UINT64_C(1000000);
     if (seconds > (UINT64_MAX - milliseconds) / UINT64_C(1000)) {
-        return UINT64_MAX;
+        return false;
     }
-    return seconds * UINT64_C(1000) + milliseconds;
+    *out_ms = seconds * UINT64_C(1000) + milliseconds;
+    return true;
+}
+
+static bool clock_snapshot(void *context, uint64_t *out_boottime_ms,
+                           uint64_t *out_realtime_ms)
+{
+    (void)context;
+    /* This order converts from the preceding boot sample, so sampling delay
+     * can only shorten an authorization lifetime and can never extend it. */
+    return clock_ms(CLOCK_BOOTTIME, out_boottime_ms) &&
+           clock_ms(CLOCK_REALTIME, out_realtime_ms);
+}
+
+static bool boottime_ms(void *context, uint64_t *out_boottime_ms)
+{
+    (void)context;
+    return clock_ms(CLOCK_BOOTTIME, out_boottime_ms);
 }
 
 static bool random_native_instance(
@@ -190,7 +205,7 @@ int main(int argc, char **argv)
     }
     vmp_runtime_t *runtime = vmp_runtime_create(
         arguments.mode, native_instance_id, vmp_mqvpn_transport_ops(), NULL,
-        vmp_sha256_auth_commitment, NULL, realtime_ms, NULL);
+        vmp_sha256_auth_commitment, NULL, clock_snapshot, boottime_ms, NULL);
     vmp_wipe_secret(native_instance_id, sizeof(native_instance_id));
     if (runtime == NULL) {
         fputs("volparossa-mpquic: invalid runtime configuration\n", stderr);

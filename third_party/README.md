@@ -41,7 +41,7 @@ pinning, explicit peer-tuple binding, honest path-metric, server session
 correlation, credential-retirement, and caller-supplied TLS-secret-path seams.
 The mqvpn server now accepts bounded in-memory PEM identity and uses sealed
 anonymous Linux memfds for its synchronous xquic import. Native API version 6
-implements role-specific preflight, a fresh per-start process instance, exact request-digest
+implements role-specific preflight, a fresh per-process-start instance, exact request-digest
 correlation, bounded request-driven reverse polling, and separate multipath-at-least-two versus
 single-path-exactly-one modes without downgrade, and route-scoped auth/TLS
 material plus signed reservation/finalize, commitment, certificate and process-instance scope with
@@ -52,7 +52,9 @@ assigned-address state, or network namespace. The dormant C runtime closes that
 descriptor before failing closed. Versions
 1 through 5 and unknown versions fail closed. The process instance does not change
 the RFC 9484 zero IP Datagram wire Context ID. SCM_RIGHTS proves request correlation;
-only active client `AddPath` checks a same-session namespace cookie. Production
+only active client `AddPath` checks a same-session namespace cookie. Native converts accepted
+wall expiry to BOOTTIME and uses a bounded process-local reservation/finalize ledger with no live
+eviction, but does not verify the signed bundle or retain that ledger across restart. Production
 path adoption remains blocked until separate role service identities, helper provenance, the exact
 namespace and product-pool assignment are authenticated and durably bound. The current same-UID
 socket is not attestation or authentication against an explicitly untrusted agent.

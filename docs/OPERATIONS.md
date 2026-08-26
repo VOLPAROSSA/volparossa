@@ -155,9 +155,12 @@ Candidate units are installed as:
   `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and consumes exactly
   one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags are checked by
   Rust and native. Those descriptor checks do not prove assigned-address or network-namespace
-  state, and native does not independently verify the reservation signature or replay freshness.
-  The dormant exit runtime closes the descriptor and fails closed because no reviewed exit backend
-  exists. This blocks service enablement and package release;
+  state. Native converts the supplied wall expiry to a BOOTTIME deadline and keeps a bounded,
+  process-local reservation/finalize ledger with no live eviction; it rejects pair replay and
+  one-ID scope collisions, but does not independently verify the reservation signature or general
+  nonce freshness, and restart clears the ledger. The dormant exit runtime consumes a valid pair,
+  closes the descriptor, and fails closed because no reviewed exit backend exists. This blocks
+  service enablement and package release;
   the unit must not be treated as operational.
 
 Review `systemd-analyze verify`, `systemd-analyze security`, and functional tests in an installed

@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 #define VMP_MAX_SESSIONS 32U
+#define VMP_MAX_AUTHORIZATION_RECORDS 128U
 
 typedef enum vmp_runtime_mode {
     VMP_RUNTIME_CLIENT = 1,
@@ -88,14 +89,22 @@ typedef struct vmp_transport_ops {
 
 typedef struct vmp_runtime vmp_runtime_t;
 
-typedef uint64_t (*vmp_now_ms_fn)(void *context);
+/* A snapshot implementation samples CLOCK_BOOTTIME first and CLOCK_REALTIME
+ * second. The separate BOOTTIME reader is used after admission so a wall-clock
+ * change can neither extend nor revive an authorization. */
+typedef bool (*vmp_clock_snapshot_fn)(void *context,
+                                      uint64_t *out_boottime_ms,
+                                      uint64_t *out_realtime_ms);
+typedef bool (*vmp_boottime_ms_fn)(void *context,
+                                   uint64_t *out_boottime_ms);
 typedef bool (*vmp_auth_commitment_fn)(
     void *context, const uint8_t *auth_secret, size_t auth_secret_len,
     uint8_t out[VMP_AUTH_COMMITMENT_LEN]);
 
 /* Creates an empty role-specific runtime. Authentication and TLS names arrive
  * only in bounded START requests and are copied into their exact route session.
- * The injected clock is required for short-lived authorization expiry. */
+ * Both injected clocks are fallible and required for short-lived
+ * authorization admission and expiry. */
 vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
                                   const uint8_t native_instance_id
                                       [VMP_NATIVE_INSTANCE_ID_LEN],
@@ -103,7 +112,8 @@ vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
                                   void *factory_context,
                                   vmp_auth_commitment_fn auth_commitment,
                                   void *auth_commitment_context,
-                                  vmp_now_ms_fn now_ms,
+                                  vmp_clock_snapshot_fn clock_snapshot,
+                                  vmp_boottime_ms_fn boottime_now,
                                   void *clock_context);
 
 /* Destroys every native session and wipes all copied authentication,

@@ -321,10 +321,11 @@ finalization replies clone only public signed bytes. Exact full-path confirmatio
 one-shot exit authorization. Scope mismatch does not consume the owner, while success, release,
 expiry, and purge remove it. This layer validates bounds, canonical public fields, PEM framing, and
 exact ownership scope. It does **not** yet prove certificate/private-key cryptographic consistency,
-translate wall expiry to a native monotonic deadline, activate a listener, or start an mqvpn
-backend. Native API v6 can return a channel-correlated role/process instance, but no production
-agent caller performs that preflight or feeds it into the dormant route. The production identity
-provider and separate role service identities remain unavailable, so both sides still fail closed.
+activate a listener, start an mqvpn backend, or hand the verified signed authorization affinely to
+native. The separate API-v6 runtime converts the caller-supplied wall expiry once to a
+`CLOCK_BOOTTIME` deadline, but no production caller performs that preflight or carries the
+preverified authorization affinely into the dormant route. The production identity provider and
+separate role service identities remain unavailable, so both sides still fail closed.
 
 ## Hash and receipt binding
 
@@ -613,8 +614,9 @@ Production adoption remains blocked until helper provenance and the reviewed exi
 API v6 is intentionally incompatible with v5 and has no negotiation or downgrade. A consumed
 descriptor is never reused after success, rejection, timeout, or I/O failure; any caller-level
 retry requires a newly acquired listener, a fresh control connection and nonce, and a still-valid
-authorization. `exit_listener_orchestration_unavailable` is deterministic and must not be retried
-until a backend-capable native build is installed.
+authorization. A structurally valid `StartExitSession` whose bearer matches its supplied
+commitment consumes its reservation/finalize pair before returning
+`exit_listener_orchestration_unavailable`; that pair cannot be retried in the same process.
 
 The API-v6 exit boundary validates DNS syntax for the supplied TLS name, nonzero length for the
 SPKI pin, and only nonempty/NUL-free size bounds for the purported certificate/private-key PEM
@@ -623,12 +625,21 @@ verify that the key matches the certificate, and cryptographically bind the leaf
 both the exact DNS name and SPKI pin. No current success claim depends on that unfinished identity
 check.
 The bearer commitment, signed IDs, certificate digest, process instances and SPKI bytes are now
-carried together, but native still has no replay cache and does not itself verify the exit's signed
-final reservation bundle. Production handoff must remain affine to that already verified signed
-scope and fail closed on replay before the backend can be enabled. The current client runtime also
-compares accepted session expiry against `CLOCK_REALTIME`; before production adoption, it must
-convert the verified remaining wall-clock lifetime once into a monotonic deadline so a backward
-clock adjustment cannot extend an accepted authorization.
+carried together, but native does not itself verify the exit's signed final reservation bundle.
+After shape and bearer-commitment validation, native uses a fixed 128-record, no-live-eviction
+process-local ledger keyed by `(reservation_id, finalize_id)`: exact reuse is a replay, reuse of
+only one ID is a scope collision, an exact live client retry is allowed only while its original
+session remains active, and stop, expiry, or a valid exit start leaves a tombstone until the
+authorization deadline. Request nonces remain response-correlation values, not a general replay
+cache. The ledger is erased by process restart and purged at the deadline, so this is not
+independent cryptographic or durable replay verification; a production caller must verify the
+signed scope, bind both native instances, and hand it off affinely.
+
+For admission, native samples `CLOCK_BOOTTIME` before `CLOCK_REALTIME`, maintains a monotone
+effective wall-clock floor, and converts the accepted remaining wall lifetime once to a
+`CLOCK_BOOTTIME` deadline. Live-session checks thereafter read only `CLOCK_BOOTTIME`; wall-clock
+rollback cannot extend or revive an authorization, while a forward jump can only shorten it.
+Clock read failure, BOOTTIME regression, and arithmetic overflow fail closed.
 
 `NativeResponse` echoes version/nonce, requires the responding role/instance, and carries SHA-256
 over `"VOLPAROSSA-MPQUIC-REQUEST-V6\0"`, the four-byte big-endian canonical payload length, and the

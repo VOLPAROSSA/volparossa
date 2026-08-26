@@ -18,6 +18,19 @@ typedef struct runtime_path {
     vmp_add_path_t request;
 } runtime_path_t;
 
+typedef enum runtime_authorization_state {
+    RUNTIME_AUTHORIZATION_UNUSED = 0,
+    RUNTIME_AUTHORIZATION_ACTIVE,
+    RUNTIME_AUTHORIZATION_TOMBSTONE,
+} runtime_authorization_state_t;
+
+typedef struct runtime_authorization {
+    runtime_authorization_state_t state;
+    uint8_t reservation_id[VMP_RESERVATION_ID_LEN];
+    uint8_t finalize_id[VMP_FINALIZE_ID_LEN];
+    uint64_t deadline_boottime_ms;
+} runtime_authorization_t;
+
 typedef struct runtime_session {
     bool used;
     bool failed;
@@ -26,6 +39,8 @@ typedef struct runtime_session {
     vmp_start_session_t start;
     uint8_t auth_secret[VMP_MAX_AUTH_SECRET];
     char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U];
+    uint64_t authorization_deadline_boottime_ms;
+    size_t authorization_index;
     void *transport_session;
     runtime_path_t paths[VMP_MAX_PATHS];
 } runtime_session_t;
@@ -37,9 +52,15 @@ struct vmp_runtime {
     void *factory_context;
     vmp_auth_commitment_fn auth_commitment;
     void *auth_commitment_context;
-    vmp_now_ms_fn now_ms;
+    vmp_clock_snapshot_fn clock_snapshot;
+    vmp_boottime_ms_fn boottime_now;
     void *clock_context;
+    uint64_t wall_anchor_boottime_ms;
+    uint64_t wall_anchor_realtime_ms;
+    uint64_t last_boottime_ms;
     runtime_session_t sessions[VMP_MAX_SESSIONS];
+    runtime_authorization_t
+        authorizations[VMP_MAX_AUTHORIZATION_RECORDS];
 };
 
 static bool all_zero(const uint8_t *bytes, size_t len)
@@ -276,14 +297,6 @@ static bool valid_mode(uint32_t minimum_paths,
             minimum_paths == 1U);
 }
 
-static bool valid_authorization_window(const vmp_runtime_t *runtime,
-                                       uint64_t expires_at_ms)
-{
-    const uint64_t now_ms = runtime->now_ms(runtime->clock_context);
-    return expires_at_ms > now_ms &&
-           expires_at_ms - now_ms <= VMP_MAX_AUTHORIZATION_FUTURE_MS;
-}
-
 static bool valid_transport(const vmp_transport_ops_t *transport)
 {
     return transport != NULL && transport->create != NULL &&
@@ -306,6 +319,112 @@ static void set_result(vmp_response_t *response, vmp_result_t result,
     response->has_tunnel_assignment = false;
     secure_zero(&response->tunnel_assignment,
                 sizeof(response->tunnel_assignment));
+}
+
+static bool read_boottime(vmp_runtime_t *runtime, uint64_t *out_now_ms)
+{
+    uint64_t now_ms = 0U;
+    if (!runtime->boottime_now(runtime->clock_context, &now_ms) ||
+        now_ms == UINT64_MAX || now_ms < runtime->last_boottime_ms) {
+        return false;
+    }
+    runtime->last_boottime_ms = now_ms;
+    *out_now_ms = now_ms;
+    return true;
+}
+
+static bool read_admission_clock(vmp_runtime_t *runtime,
+                                 uint64_t *out_boottime_ms,
+                                 uint64_t *out_effective_realtime_ms)
+{
+    uint64_t boottime_ms = 0U;
+    uint64_t realtime_ms = 0U;
+    if (!runtime->clock_snapshot(runtime->clock_context, &boottime_ms,
+                                 &realtime_ms) ||
+        boottime_ms == UINT64_MAX || realtime_ms == UINT64_MAX ||
+        boottime_ms < runtime->last_boottime_ms ||
+        boottime_ms < runtime->wall_anchor_boottime_ms) {
+        return false;
+    }
+
+    const uint64_t elapsed_ms =
+        boottime_ms - runtime->wall_anchor_boottime_ms;
+    if (runtime->wall_anchor_realtime_ms > UINT64_MAX - elapsed_ms) {
+        return false;
+    }
+    const uint64_t floor_realtime_ms =
+        runtime->wall_anchor_realtime_ms + elapsed_ms;
+    const uint64_t effective_realtime_ms =
+        realtime_ms > floor_realtime_ms ? realtime_ms : floor_realtime_ms;
+
+    runtime->last_boottime_ms = boottime_ms;
+    runtime->wall_anchor_boottime_ms = boottime_ms;
+    runtime->wall_anchor_realtime_ms = effective_realtime_ms;
+    *out_boottime_ms = boottime_ms;
+    *out_effective_realtime_ms = effective_realtime_ms;
+    return true;
+}
+
+typedef enum authorization_lookup {
+    AUTHORIZATION_LOOKUP_NONE = 0,
+    AUTHORIZATION_LOOKUP_EXACT,
+    AUTHORIZATION_LOOKUP_COLLISION,
+} authorization_lookup_t;
+
+static authorization_lookup_t find_authorization(
+    vmp_runtime_t *runtime,
+    const uint8_t reservation_id[VMP_RESERVATION_ID_LEN],
+    const uint8_t finalize_id[VMP_FINALIZE_ID_LEN], size_t *out_index)
+{
+    bool collision = false;
+    for (size_t index = 0U; index < VMP_MAX_AUTHORIZATION_RECORDS;
+         ++index) {
+        const runtime_authorization_t *authorization =
+            &runtime->authorizations[index];
+        if (authorization->state == RUNTIME_AUTHORIZATION_UNUSED) continue;
+        const bool reservation_matches =
+            memcmp(authorization->reservation_id, reservation_id,
+                   VMP_RESERVATION_ID_LEN) == 0;
+        const bool finalize_matches =
+            memcmp(authorization->finalize_id, finalize_id,
+                   VMP_FINALIZE_ID_LEN) == 0;
+        if (reservation_matches && finalize_matches) {
+            *out_index = index;
+            return AUTHORIZATION_LOOKUP_EXACT;
+        }
+        collision = collision || reservation_matches || finalize_matches;
+    }
+    return collision ? AUTHORIZATION_LOOKUP_COLLISION
+                     : AUTHORIZATION_LOOKUP_NONE;
+}
+
+static runtime_authorization_t *free_authorization(vmp_runtime_t *runtime,
+                                                    size_t *out_index)
+{
+    for (size_t index = 0U; index < VMP_MAX_AUTHORIZATION_RECORDS;
+         ++index) {
+        if (runtime->authorizations[index].state ==
+            RUNTIME_AUTHORIZATION_UNUSED) {
+            *out_index = index;
+            return &runtime->authorizations[index];
+        }
+    }
+    return NULL;
+}
+
+static void store_authorization(
+    runtime_authorization_t *authorization,
+    runtime_authorization_state_t state,
+    const uint8_t reservation_id[VMP_RESERVATION_ID_LEN],
+    const uint8_t finalize_id[VMP_FINALIZE_ID_LEN],
+    uint64_t deadline_boottime_ms)
+{
+    memset(authorization, 0, sizeof(*authorization));
+    authorization->state = state;
+    memcpy(authorization->reservation_id, reservation_id,
+           VMP_RESERVATION_ID_LEN);
+    memcpy(authorization->finalize_id, finalize_id, VMP_FINALIZE_ID_LEN);
+    authorization->deadline_boottime_ms = deadline_boottime_ms;
 }
 
 static bool valid_inner_packet(const uint8_t *packet, size_t packet_len)
@@ -406,16 +525,11 @@ static bool start_matches(const runtime_session_t *session,
                   start->tls_server_name.len) == 0;
 }
 
-static bool session_expired(const vmp_runtime_t *runtime,
-                            const runtime_session_t *session)
-{
-    return runtime->now_ms(runtime->clock_context) >=
-           session->start.expires_at_ms;
-}
-
 static void copy_start(runtime_session_t *session,
                        const vmp_start_session_t *start,
-                       const char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U])
+                       const char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U],
+                       uint64_t authorization_deadline_boottime_ms,
+                       size_t authorization_index)
 {
     memset(session, 0, sizeof(*session));
     session->used = true;
@@ -450,6 +564,9 @@ static void copy_start(runtime_session_t *session,
     session->start.tls_server_name.data =
         (const uint8_t *)session->tls_server_name;
     session->start.tls_server_name.len = start->tls_server_name.len;
+    session->authorization_deadline_boottime_ms =
+        authorization_deadline_boottime_ms;
+    session->authorization_index = authorization_index;
 }
 
 static bool path_tuple_conflicts(const runtime_session_t *session,
@@ -556,21 +673,123 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
     return VMP_TRANSPORT_OK;
 }
 
+static bool session_authorization_matches(
+    const vmp_runtime_t *runtime, const runtime_session_t *session)
+{
+    if (session->authorization_index >= VMP_MAX_AUTHORIZATION_RECORDS) {
+        return false;
+    }
+    const runtime_authorization_t *authorization =
+        &runtime->authorizations[session->authorization_index];
+    return authorization->state == RUNTIME_AUTHORIZATION_ACTIVE &&
+           authorization->deadline_boottime_ms ==
+               session->authorization_deadline_boottime_ms &&
+           memcmp(authorization->reservation_id,
+                  session->start.reservation_id,
+                  VMP_RESERVATION_ID_LEN) == 0 &&
+           memcmp(authorization->finalize_id, session->start.finalize_id,
+                  VMP_FINALIZE_ID_LEN) == 0;
+}
+
 static void destroy_session(vmp_runtime_t *runtime, runtime_session_t *session)
 {
+    if (session->used && session_authorization_matches(runtime, session)) {
+        runtime->authorizations[session->authorization_index].state =
+            RUNTIME_AUTHORIZATION_TOMBSTONE;
+    }
     if (session->transport_session != NULL) {
         runtime->transport.destroy(session->transport_session);
     }
     secure_zero(session, sizeof(*session));
 }
 
+static void destroy_all_sessions(vmp_runtime_t *runtime)
+{
+    for (size_t index = 0U; index < VMP_MAX_SESSIONS; ++index) {
+        if (runtime->sessions[index].used) {
+            destroy_session(runtime, &runtime->sessions[index]);
+        }
+    }
+}
+
+static void expire_sessions_at(vmp_runtime_t *runtime, uint64_t now_ms)
+{
+    for (size_t index = 0U; index < VMP_MAX_SESSIONS; ++index) {
+        runtime_session_t *session = &runtime->sessions[index];
+        if (session->used &&
+            now_ms >= session->authorization_deadline_boottime_ms) {
+            destroy_session(runtime, session);
+        }
+    }
+}
+
+static void purge_authorizations_at(vmp_runtime_t *runtime,
+                                    uint64_t now_ms)
+{
+    for (size_t index = 0U; index < VMP_MAX_AUTHORIZATION_RECORDS;
+         ++index) {
+        runtime_authorization_t *authorization =
+            &runtime->authorizations[index];
+        if (authorization->state == RUNTIME_AUTHORIZATION_TOMBSTONE &&
+            now_ms >= authorization->deadline_boottime_ms) {
+            secure_zero(authorization, sizeof(*authorization));
+        }
+    }
+}
+
+typedef enum authorization_admission {
+    AUTHORIZATION_ADMISSION_OK = 0,
+    AUTHORIZATION_ADMISSION_CLOCK,
+    AUTHORIZATION_ADMISSION_WINDOW,
+} authorization_admission_t;
+
+static authorization_admission_t authorization_deadline(
+    vmp_runtime_t *runtime, uint64_t expires_at_ms,
+    uint64_t *out_deadline_boottime_ms)
+{
+    uint64_t boottime_ms = 0U;
+    uint64_t effective_realtime_ms = 0U;
+    if (!read_admission_clock(runtime, &boottime_ms,
+                              &effective_realtime_ms)) {
+        return AUTHORIZATION_ADMISSION_CLOCK;
+    }
+    expire_sessions_at(runtime, boottime_ms);
+    purge_authorizations_at(runtime, boottime_ms);
+
+    if (expires_at_ms <= effective_realtime_ms) {
+        return AUTHORIZATION_ADMISSION_WINDOW;
+    }
+    const uint64_t remaining_ms = expires_at_ms - effective_realtime_ms;
+    if (remaining_ms > VMP_MAX_AUTHORIZATION_FUTURE_MS ||
+        boottime_ms > UINT64_MAX - remaining_ms) {
+        return AUTHORIZATION_ADMISSION_WINDOW;
+    }
+    *out_deadline_boottime_ms = boottime_ms + remaining_ms;
+    return AUTHORIZATION_ADMISSION_OK;
+}
+
 static bool require_live(vmp_runtime_t *runtime, runtime_session_t *session,
                          vmp_response_t *response)
 {
-    if (!session_expired(runtime, session)) return true;
-    destroy_session(runtime, session);
-    set_result(response, VMP_RESULT_UNAUTHORISED, "session_expired");
-    return false;
+    uint64_t now_ms = 0U;
+    if (!read_boottime(runtime, &now_ms)) {
+        destroy_session(runtime, session);
+        set_result(response, VMP_RESULT_UNAUTHORISED,
+                   "authorization_clock");
+        return false;
+    }
+    if (now_ms >= session->authorization_deadline_boottime_ms) {
+        destroy_session(runtime, session);
+        purge_authorizations_at(runtime, now_ms);
+        set_result(response, VMP_RESULT_UNAUTHORISED, "session_expired");
+        return false;
+    }
+    if (!session_authorization_matches(runtime, session)) {
+        destroy_session(runtime, session);
+        set_result(response, VMP_RESULT_TRANSPORT, "authorization_state");
+        return false;
+    }
+    return true;
 }
 
 vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
@@ -580,14 +799,15 @@ vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
                                   void *factory_context,
                                   vmp_auth_commitment_fn auth_commitment,
                                   void *auth_commitment_context,
-                                  vmp_now_ms_fn now_ms,
+                                  vmp_clock_snapshot_fn clock_snapshot,
+                                  vmp_boottime_ms_fn boottime_now,
                                   void *clock_context)
 {
     if ((mode != VMP_RUNTIME_CLIENT && mode != VMP_RUNTIME_EXIT) ||
         native_instance_id == NULL ||
         all_zero(native_instance_id, VMP_NATIVE_INSTANCE_ID_LEN) ||
         !valid_transport(transport) || auth_commitment == NULL ||
-        now_ms == NULL) {
+        clock_snapshot == NULL || boottime_now == NULL) {
         return NULL;
     }
     vmp_runtime_t *runtime = calloc(1U, sizeof(*runtime));
@@ -599,19 +819,27 @@ vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
     runtime->factory_context = factory_context;
     runtime->auth_commitment = auth_commitment;
     runtime->auth_commitment_context = auth_commitment_context;
-    runtime->now_ms = now_ms;
+    runtime->clock_snapshot = clock_snapshot;
+    runtime->boottime_now = boottime_now;
     runtime->clock_context = clock_context;
+    uint64_t boottime_ms = 0U;
+    uint64_t realtime_ms = 0U;
+    if (!clock_snapshot(clock_context, &boottime_ms, &realtime_ms) ||
+        boottime_ms == UINT64_MAX || realtime_ms == UINT64_MAX) {
+        secure_zero(runtime, sizeof(*runtime));
+        free(runtime);
+        return NULL;
+    }
+    runtime->wall_anchor_boottime_ms = boottime_ms;
+    runtime->wall_anchor_realtime_ms = realtime_ms;
+    runtime->last_boottime_ms = boottime_ms;
     return runtime;
 }
 
 void vmp_runtime_destroy(vmp_runtime_t *runtime)
 {
     if (runtime == NULL) return;
-    for (size_t index = 0; index < VMP_MAX_SESSIONS; ++index) {
-        if (runtime->sessions[index].used) {
-            destroy_session(runtime, &runtime->sessions[index]);
-        }
-    }
+    destroy_all_sessions(runtime);
     secure_zero(runtime, sizeof(*runtime));
     free(runtime);
 }
@@ -620,13 +848,16 @@ vmp_server_error_t vmp_runtime_pump(void *context)
 {
     vmp_runtime_t *runtime = context;
     if (runtime == NULL) return VMP_SERVER_BACKEND;
+    uint64_t now_ms = 0U;
+    if (!read_boottime(runtime, &now_ms)) {
+        destroy_all_sessions(runtime);
+        return VMP_SERVER_BACKEND;
+    }
+    expire_sessions_at(runtime, now_ms);
+    purge_authorizations_at(runtime, now_ms);
     for (size_t index = 0; index < VMP_MAX_SESSIONS; ++index) {
         runtime_session_t *session = &runtime->sessions[index];
         if (!session->used) continue;
-        if (session_expired(runtime, session)) {
-            destroy_session(runtime, session);
-            continue;
-        }
         if (session->failed || session->transport_session == NULL) continue;
         if (runtime->transport.pump(session->transport_session) !=
             VMP_TRANSPORT_OK) {
@@ -649,10 +880,6 @@ static void dispatch_start(vmp_runtime_t *runtime,
 
     runtime_session_t *session =
         find_session(runtime, start->route_context_id);
-    if (session != NULL && session_expired(runtime, session)) {
-        destroy_session(runtime, session);
-        session = NULL;
-    }
 
     char tls_server_name[VMP_MAX_TLS_SERVER_NAME + 1U];
     memset(tls_server_name, 0, sizeof(tls_server_name));
@@ -680,32 +907,69 @@ static void dispatch_start(vmp_runtime_t *runtime,
                    "auth_commitment_mismatch");
         return;
     }
-    if (!valid_authorization_window(runtime, start->expires_at_ms)) {
-        secure_zero(tls_server_name, sizeof(tls_server_name));
-        set_result(response, VMP_RESULT_UNAUTHORISED,
-                   "authorization_window");
-        return;
-    }
 
-    if (session == NULL) {
+    if (session != NULL) {
+        if (!require_live(runtime, session, response)) {
+            secure_zero(tls_server_name, sizeof(tls_server_name));
+            return;
+        }
+        if (!start_matches(session, start)) {
+            secure_zero(tls_server_name, sizeof(tls_server_name));
+            set_result(response, VMP_RESULT_INVALID_REQUEST,
+                       "session_parameters_changed");
+            return;
+        }
+    } else {
+        uint64_t deadline_boottime_ms = 0U;
+        const authorization_admission_t admission = authorization_deadline(
+            runtime, start->expires_at_ms, &deadline_boottime_ms);
+        if (admission != AUTHORIZATION_ADMISSION_OK) {
+            secure_zero(tls_server_name, sizeof(tls_server_name));
+            set_result(response, VMP_RESULT_UNAUTHORISED,
+                       admission == AUTHORIZATION_ADMISSION_CLOCK
+                           ? "authorization_clock"
+                           : "authorization_window");
+            return;
+        }
+
+        size_t authorization_index = 0U;
+        const authorization_lookup_t lookup = find_authorization(
+            runtime, start->reservation_id, start->finalize_id,
+            &authorization_index);
+        if (lookup != AUTHORIZATION_LOOKUP_NONE) {
+            secure_zero(tls_server_name, sizeof(tls_server_name));
+            set_result(response, VMP_RESULT_UNAUTHORISED,
+                       lookup == AUTHORIZATION_LOOKUP_EXACT
+                           ? "authorization_replay"
+                           : "authorization_scope_reuse");
+            return;
+        }
+
         session = free_session(runtime);
         if (session == NULL) {
             secure_zero(tls_server_name, sizeof(tls_server_name));
             set_result(response, VMP_RESULT_TRANSPORT, "session_limit");
             return;
         }
-        copy_start(session, start, tls_server_name);
+        runtime_authorization_t *authorization =
+            free_authorization(runtime, &authorization_index);
+        if (authorization == NULL) {
+            secure_zero(tls_server_name, sizeof(tls_server_name));
+            set_result(response, VMP_RESULT_TRANSPORT,
+                       "authorization_capacity");
+            return;
+        }
+        store_authorization(authorization, RUNTIME_AUTHORIZATION_ACTIVE,
+                            start->reservation_id, start->finalize_id,
+                            deadline_boottime_ms);
+        copy_start(session, start, tls_server_name, deadline_boottime_ms,
+                   authorization_index);
         secure_zero(tls_server_name, sizeof(tls_server_name));
         set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
                    "required_paths_not_active");
         return;
     }
-    if (!start_matches(session, start)) {
-        secure_zero(tls_server_name, sizeof(tls_server_name));
-        set_result(response, VMP_RESULT_INVALID_REQUEST,
-                   "session_parameters_changed");
-        return;
-    }
+
     secure_zero(tls_server_name, sizeof(tls_server_name));
     if (session->reverse_overflow) {
         set_result(response, VMP_RESULT_QUEUE_OVERFLOW,
@@ -1042,11 +1306,43 @@ static void dispatch_start_exit(vmp_runtime_t *runtime,
                    "auth_commitment_mismatch");
         return;
     }
-    if (!valid_authorization_window(runtime, start->expires_at_ms)) {
+    uint64_t deadline_boottime_ms = 0U;
+    const authorization_admission_t admission = authorization_deadline(
+        runtime, start->expires_at_ms, &deadline_boottime_ms);
+    if (admission != AUTHORIZATION_ADMISSION_OK) {
         set_result(response, VMP_RESULT_UNAUTHORISED,
-                   "authorization_window");
+                   admission == AUTHORIZATION_ADMISSION_CLOCK
+                       ? "authorization_clock"
+                       : "authorization_window");
         return;
     }
+
+    size_t authorization_index = 0U;
+    const authorization_lookup_t lookup = find_authorization(
+        runtime, start->reservation_id, start->finalize_id,
+        &authorization_index);
+    if (lookup != AUTHORIZATION_LOOKUP_NONE) {
+        set_result(response, VMP_RESULT_UNAUTHORISED,
+                   lookup == AUTHORIZATION_LOOKUP_EXACT
+                       ? "authorization_replay"
+                       : "authorization_scope_reuse");
+        return;
+    }
+    runtime_authorization_t *authorization =
+        free_authorization(runtime, &authorization_index);
+    if (authorization == NULL) {
+        set_result(response, VMP_RESULT_TRANSPORT,
+                   "authorization_capacity");
+        return;
+    }
+    /* A structurally valid exit request whose bearer matches its supplied
+     * commitment is consumed process-locally before the still fail-closed
+     * backend boundary. Signature verification and a preverified affine
+     * handoff are outside this runtime; this table only binds the exact
+     * reservation/finalize scope it receives. */
+    store_authorization(authorization, RUNTIME_AUTHORIZATION_TOMBSTONE,
+                        start->reservation_id, start->finalize_id,
+                        deadline_boottime_ms);
 
     /* API v6 has consumed a UDP descriptor whose current tuple and flags match
      * the route request. Helper origin, assigned-address state and exact

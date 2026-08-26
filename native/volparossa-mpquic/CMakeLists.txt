@@ -234,7 +234,7 @@ if(BUILD_TESTING)
 
     add_executable(test_volparossa_mpquic_server tests/test_server.c)
     target_link_libraries(test_volparossa_mpquic_server
-        PRIVATE volparossa_mpquic_server)
+        PRIVATE volparossa_mpquic_runtime)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(test_volparossa_mpquic_server PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
