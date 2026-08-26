@@ -92,7 +92,9 @@ const RT_SCOPE_UNIVERSE: u8 = 0;
 const RTN_UNICAST: u8 = 1;
 
 const HELPER_ALIAS_PREFIX: &[u8] = b"volparossa:";
-const HELPER_V3_ALIAS_PREFIX: &[u8] = b"volparossa:wireguard:v3:";
+const HELPER_OWNERSHIP_V1_ALIAS_PREFIX: &[u8] = b"volparossa:wireguard:ownership-v1:";
+const OWNERSHIP_DIGEST_HEX_BYTES: usize = 64;
+const MAX_IFALIAS_BYTES: usize = 255;
 
 /// A fixed, non-sensitive failure produced by the read-only collector.
 #[derive(Debug, Error)]
@@ -581,7 +583,7 @@ fn decode_link(frame: &[u8]) -> Result<UnderlayLink, UnderlayNetlinkError> {
             )?,
             IFLA_IFALIAS => set_once(
                 &mut alias,
-                parse_nul_string(attribute.value, true, 256)?,
+                parse_nul_string(attribute.value, true, MAX_IFALIAS_BYTES)?,
                 attribute.flags,
             )?,
             _ => reject_unknown_flags(attribute.flags)?,
@@ -591,7 +593,9 @@ fn decode_link(frame: &[u8]) -> Result<UnderlayLink, UnderlayNetlinkError> {
     let helper_owned = alias
         .as_deref()
         .is_some_and(|value| value.starts_with(HELPER_ALIAS_PREFIX));
-    if helper_owned && !is_exact_helper_v3_alias(&ifname, alias.as_deref().unwrap_or_default()) {
+    if helper_owned
+        && !is_exact_helper_ownership_v1_alias(&ifname, alias.as_deref().unwrap_or_default())
+    {
         return Err(UnderlayNetlinkError::Ambiguous);
     }
     Ok(UnderlayLink {
@@ -847,14 +851,22 @@ fn parse_nul_string(
     Ok(bytes.to_vec())
 }
 
-fn is_exact_helper_v3_alias(ifname: &[u8], alias: &[u8]) -> bool {
+fn is_exact_helper_ownership_v1_alias(ifname: &[u8], alias: &[u8]) -> bool {
     if !safe_helper_interface(ifname) {
         return false;
     }
-    let mut expected = Vec::with_capacity(HELPER_V3_ALIAS_PREFIX.len() + ifname.len());
-    expected.extend_from_slice(HELPER_V3_ALIAS_PREFIX);
-    expected.extend_from_slice(ifname);
-    alias == expected
+    let Some(suffix) = alias.strip_prefix(HELPER_OWNERSHIP_V1_ALIAS_PREFIX) else {
+        return false;
+    };
+    if suffix.len() != ifname.len() + 1 + OWNERSHIP_DIGEST_HEX_BYTES {
+        return false;
+    }
+    let (bound_ifname, digest) = suffix.split_at(ifname.len());
+    bound_ifname == ifname
+        && digest.first() == Some(&b':')
+        && digest[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn safe_helper_interface(name: &[u8]) -> bool {
@@ -985,6 +997,26 @@ mod tests {
             payload.extend_from_slice(&attr(IFLA_IFALIAS, &nul(alias)));
         }
         msg(RTM_NEWLINK, NLM_F_MULTI, SEQ, &payload)
+    }
+
+    fn link_with_raw_alias(index: u32, name: &[u8], raw_alias: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0; IFINFO_LEN];
+        payload[4..8].copy_from_slice(&i32::try_from(index).expect("index").to_ne_bytes());
+        payload[8..12].copy_from_slice(&u32::try_from(libc::IFF_UP).expect("flag").to_ne_bytes());
+        payload.extend_from_slice(&attr(IFLA_IFNAME, &nul(name)));
+        payload.extend_from_slice(&attr(IFLA_IFALIAS, raw_alias));
+        msg(RTM_NEWLINK, NLM_F_MULTI, SEQ, &payload)
+    }
+
+    fn ownership_alias(ifname: &[u8], digest: &[u8]) -> Vec<u8> {
+        let mut alias = Vec::with_capacity(
+            HELPER_OWNERSHIP_V1_ALIAS_PREFIX.len() + ifname.len() + 1 + digest.len(),
+        );
+        alias.extend_from_slice(HELPER_OWNERSHIP_V1_ALIAS_PREFIX);
+        alias.extend_from_slice(ifname);
+        alias.push(b':');
+        alias.extend_from_slice(digest);
+        alias
     }
 
     fn raw_ip(value: &str) -> Vec<u8> {
@@ -1305,24 +1337,83 @@ mod tests {
     }
 
     #[test]
-    fn helper_alias_and_double_snapshot_policy_are_exact() {
-        let owned = link(
-            7,
-            b"vpc1deadbeef",
-            Some(b"volparossa:wireguard:v3:vpc1deadbeef"),
-        );
+    fn helper_ownership_alias_grammar_is_exact() {
+        const IFNAME: &[u8] = b"vpc1deadbeef";
+        const OTHER_IFNAME: &[u8] = b"vpc1feedface";
+        const DIGEST: &[u8] = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        let exact = ownership_alias(IFNAME, DIGEST);
+        let owned = link(7, IFNAME, Some(&exact));
         assert!(
             parse(DumpKind::Link, &[owned, done()])
                 .expect("owned")
                 .links[0]
                 .helper_owned
         );
-        let wrong = link(7, b"vpc1deadbeef", Some(b"volparossa:wireguard:v3:other"));
+
+        let mut uppercase = exact.clone();
+        *uppercase.last_mut().expect("non-empty alias") = b'F';
+        let mut non_hex = exact.clone();
+        *non_hex.last_mut().expect("non-empty alias") = b'g';
+        let mut digest_65 = DIGEST.to_vec();
+        digest_65.push(b'0');
+        let adversarial = [
+            ownership_alias(OTHER_IFNAME, DIGEST),
+            uppercase,
+            non_hex,
+            ownership_alias(IFNAME, &DIGEST[..63]),
+            ownership_alias(IFNAME, &digest_65),
+            b"volparossa:wireguard:v3:vpc1deadbeef".to_vec(),
+        ];
+        for alias in adversarial {
+            assert!(matches!(
+                parse(DumpKind::Link, &[link(7, IFNAME, Some(&alias)), done()]),
+                Err(UnderlayNetlinkError::Ambiguous)
+            ));
+        }
+
+        let mut embedded_nul = exact.clone();
+        *embedded_nul.last_mut().expect("non-empty alias") = 0;
         assert!(matches!(
-            parse(DumpKind::Link, &[wrong, done()]),
-            Err(UnderlayNetlinkError::Ambiguous)
+            parse(
+                DumpKind::Link,
+                &[link(7, IFNAME, Some(&embedded_nul)), done()]
+            ),
+            Err(UnderlayNetlinkError::Malformed)
+        ));
+        assert!(matches!(
+            parse(
+                DumpKind::Link,
+                &[link_with_raw_alias(7, IFNAME, &exact), done()]
+            ),
+            Err(UnderlayNetlinkError::Malformed)
         ));
 
+        let maximum = vec![b'x'; MAX_IFALIAS_BYTES];
+        assert!(
+            !parse(DumpKind::Link, &[link(7, IFNAME, Some(&maximum)), done()])
+                .expect("255-byte non-helper alias")
+                .links[0]
+                .helper_owned
+        );
+        let mut maximum_helper_alias = HELPER_ALIAS_PREFIX.to_vec();
+        maximum_helper_alias.resize(MAX_IFALIAS_BYTES, b'x');
+        assert!(matches!(
+            parse(
+                DumpKind::Link,
+                &[link(7, IFNAME, Some(&maximum_helper_alias)), done()]
+            ),
+            Err(UnderlayNetlinkError::Ambiguous)
+        ));
+        let oversized = vec![b'x'; MAX_IFALIAS_BYTES + 1];
+        assert!(matches!(
+            parse(DumpKind::Link, &[link(7, IFNAME, Some(&oversized)), done()]),
+            Err(UnderlayNetlinkError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn double_snapshot_policy_is_exact() {
         let first = stable("8.8.8.8", UnderlayFamily::Ipv4);
         assert_eq!(
             select_consistent(&first, &first)

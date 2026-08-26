@@ -62,11 +62,6 @@ impl WireguardLeaseSpec {
         &self.interface
     }
 
-    /// Fixed v3 marker used for exact link ownership checks.
-    pub(crate) fn ownership_alias(&self) -> String {
-        format!("volparossa:wireguard:v3:{}", self.interface)
-    }
-
     /// Exact locally derived overlay host address.
     pub(crate) const fn local_address(&self) -> Ipv6Addr {
         self.local_address
@@ -103,11 +98,6 @@ mod tests {
                 .expect("client lease");
         assert_eq!(client.key(), (1, WireguardRole::Client as i32));
         assert!(client.interface().starts_with("vpc1"));
-        assert!(
-            client
-                .ownership_alias()
-                .starts_with("volparossa:wireguard:v3:vpc1")
-        );
         assert_eq!(client.local_address().octets()[14..], [0, 1]);
 
         assert!(

@@ -12,7 +12,7 @@ mod actor;
 
 pub(crate) use actor::{DurablePrepareAnchor, DurablePrepareAnchorParts};
 
-use crate::deadline::HardDeadline;
+use crate::{deadline::HardDeadline, lease_spec::WireguardLeaseSpec};
 
 /// Constructs one journal anchor without exposing actor-internal failure types outside this module.
 pub(crate) fn durable_prepare_anchor_from_parts(
@@ -55,6 +55,10 @@ const MAX_LEASE_IDENTITIES: usize = 16;
 const JOURNAL_MAGIC: [u8; 8] = *b"VOLJRN3\0";
 const JOURNAL_VERSION: u16 = 3;
 const DIGEST_BYTES: usize = 32;
+const DURABLE_WIREGUARD_ALIAS_PREFIX: &str = "volparossa:wireguard:ownership-v1:";
+const DURABLE_WIREGUARD_MARKER_DOMAIN: &str =
+    "VOLPAROSSA helper durable WireGuard resource marker v1";
+const DERIVED_WIREGUARD_INTERFACE_BYTES: usize = 12;
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct Id16([u8; 16]);
@@ -125,6 +129,46 @@ impl fmt::Debug for OwnershipId {
 impl fmt::Debug for RuntimeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RuntimeId(<redacted>)")
+    }
+}
+
+/// Secret-free kernel metadata derived from one exact durable ownership record.
+///
+/// The alias is public evidence used to reject stale same-name links. It is neither proof of the
+/// journal's current phase nor authority to create, adopt, mutate or delete a kernel resource.
+/// Construction stays private to this module so callers cannot supply raw ownership coordinates or
+/// a free-form alias. The value is deliberately non-`Clone` and its debug form reveals no marker.
+#[derive(Eq, PartialEq)]
+pub(crate) struct DurableWireguardResource {
+    specification: WireguardLeaseSpec,
+    ownership_alias: String,
+}
+
+impl DurableWireguardResource {
+    /// Context-local path and endpoint role committed by the durable record.
+    pub(crate) const fn key(&self) -> (u8, i32) {
+        self.specification.key()
+    }
+
+    /// Exact topology-derived kernel interface name committed by the marker.
+    pub(crate) fn interface(&self) -> &str {
+        self.specification.interface()
+    }
+
+    /// Public fixed-format ownership marker; this is evidence, not authority.
+    pub(crate) fn ownership_alias(&self) -> &str {
+        &self.ownership_alias
+    }
+
+    /// Exact topology-derived local overlay address committed by the marker.
+    pub(crate) const fn local_address(&self) -> std::net::Ipv6Addr {
+        self.specification.local_address()
+    }
+}
+
+impl fmt::Debug for DurableWireguardResource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableWireguardResource(<redacted>)")
     }
 }
 
@@ -398,6 +442,64 @@ impl OwnershipRecord {
         Ok(())
     }
 
+    /// Project the immutable durable identity into exact per-link public kernel markers.
+    ///
+    /// Validation precedes every construction. Mutable lifecycle and reconciliation evidence is
+    /// intentionally excluded so the marker remains stable until exact cleanup is proved.
+    fn durable_wireguard_resources(&self) -> Result<Vec<DurableWireguardResource>, JournalError> {
+        self.validate()?;
+        let path_count =
+            u8::try_from(self.plan.paths.len()).map_err(|_| JournalError::InvalidRecord)?;
+        let mut resources = Vec::with_capacity(self.plan.paths.len());
+        for resource_path in &self.plan.paths {
+            let specification = WireguardLeaseSpec::derive(
+                self.context_id.0,
+                routing_context_role(self.plan.context_role),
+                u32::from(resource_path.path_id),
+                routing_wireguard_role(resource_path.role) as i32,
+            )
+            .map_err(|_| JournalError::InvalidRecord)?;
+            if specification.interface().len() != DERIVED_WIREGUARD_INTERFACE_BYTES
+                || specification.key()
+                    != (
+                        resource_path.path_id,
+                        routing_wireguard_role(resource_path.role) as i32,
+                    )
+            {
+                return Err(JournalError::InvalidRecord);
+            }
+
+            let mut marker = blake3::Hasher::new_derive_key(DURABLE_WIREGUARD_MARKER_DOMAIN);
+            marker.update(&self.journal_epoch_id.0);
+            marker.update(&self.origin_runtime_id.0);
+            marker.update(&self.ownership_id.0);
+            marker.update(&self.context_id.0);
+            marker.update(&self.prepare_request_id.0);
+            marker.update(&self.prepare_operation_digest);
+            marker.update(&self.generation.get().to_be_bytes());
+            marker.update(&self.setup_expires_at_unix.get().to_be_bytes());
+            marker.update(&self.hard_expires_at_unix.get().to_be_bytes());
+            marker.update(&[self.plan.context_role as u8, path_count]);
+            for path in &self.plan.paths {
+                marker.update(&[path.path_id, path.role as u8]);
+            }
+            marker.update(&[resource_path.path_id, resource_path.role as u8]);
+            marker.update(specification.interface().as_bytes());
+            marker.update(&specification.local_address().octets());
+            let digest = marker.finalize();
+            let ownership_alias = format!(
+                "{DURABLE_WIREGUARD_ALIAS_PREFIX}{}:{}",
+                specification.interface(),
+                digest.to_hex()
+            );
+            resources.push(DurableWireguardResource {
+                specification,
+                ownership_alias,
+            });
+        }
+        Ok(resources)
+    }
+
     fn advance(
         &mut self,
         next: OwnershipPhase,
@@ -434,6 +536,102 @@ impl OwnershipRecord {
         *self = candidate;
         Ok(())
     }
+}
+
+const fn routing_context_role(role: ContextRole) -> volparossa_routing::ContextRole {
+    match role {
+        ContextRole::Client => volparossa_routing::ContextRole::Client,
+        ContextRole::Relay => volparossa_routing::ContextRole::Relay,
+        ContextRole::Exit => volparossa_routing::ContextRole::Exit,
+    }
+}
+
+const fn routing_wireguard_role(role: WireguardRole) -> volparossa_routing::WireguardRole {
+    match role {
+        WireguardRole::Client => volparossa_routing::WireguardRole::Client,
+        WireguardRole::RelayClient => volparossa_routing::WireguardRole::RelayClient,
+        WireguardRole::RelayExit => volparossa_routing::WireguardRole::RelayExit,
+        WireguardRole::Exit => volparossa_routing::WireguardRole::Exit,
+    }
+}
+
+/// Build one deterministic marker fixture without adding a production raw-marker constructor.
+#[cfg(test)]
+pub(crate) fn durable_wireguard_resource_for_test(
+    route_context_id: [u8; 16],
+    context_role: volparossa_routing::ContextRole,
+    path_id: u8,
+    role: volparossa_routing::WireguardRole,
+    ownership_seed: u8,
+) -> Option<DurableWireguardResource> {
+    if route_context_id.iter().all(|byte| *byte == 0)
+        || !(1..=MAX_PATH_ID).contains(&path_id)
+        || !(1..=240).contains(&ownership_seed)
+    {
+        return None;
+    }
+    let context_role = match context_role {
+        volparossa_routing::ContextRole::Client => ContextRole::Client,
+        volparossa_routing::ContextRole::Relay => ContextRole::Relay,
+        volparossa_routing::ContextRole::Exit => ContextRole::Exit,
+        volparossa_routing::ContextRole::Unspecified => return None,
+    };
+    let requested_role = match role {
+        volparossa_routing::WireguardRole::Client => WireguardRole::Client,
+        volparossa_routing::WireguardRole::RelayClient => WireguardRole::RelayClient,
+        volparossa_routing::WireguardRole::RelayExit => WireguardRole::RelayExit,
+        volparossa_routing::WireguardRole::Exit => WireguardRole::Exit,
+        volparossa_routing::WireguardRole::Unspecified => return None,
+    };
+    if !requested_role.belongs_to(context_role) {
+        return None;
+    }
+    let paths = match context_role {
+        ContextRole::Client => vec![PathPlan {
+            path_id,
+            role: WireguardRole::Client,
+        }],
+        ContextRole::Relay => vec![
+            PathPlan {
+                path_id,
+                role: WireguardRole::RelayClient,
+            },
+            PathPlan {
+                path_id,
+                role: WireguardRole::RelayExit,
+            },
+        ],
+        ContextRole::Exit => vec![PathPlan {
+            path_id,
+            role: WireguardRole::Exit,
+        }],
+    };
+    let origin_seed = ownership_seed.checked_add(1)?;
+    let owner_seed = ownership_seed.checked_add(2)?;
+    let request_seed = ownership_seed.checked_add(3)?;
+    let digest_seed = ownership_seed.checked_add(4)?;
+    let generation = NonZeroU64::new(u64::from(ownership_seed))?;
+    let record = OwnershipRecord {
+        journal_epoch_id: JournalEpochId::new([ownership_seed; 32]).ok()?,
+        origin_runtime_id: RuntimeId::new([origin_seed; 32]).ok()?,
+        ownership_id: OwnershipId::new([owner_seed; 32]).ok()?,
+        context_id: Id16::new(route_context_id).ok()?,
+        prepare_request_id: Id16::new([request_seed; 16]).ok()?,
+        prepare_operation_digest: [digest_seed; DIGEST_BYTES],
+        generation,
+        setup_expires_at_unix: NonZeroU64::new(1_000 + u64::from(ownership_seed))?,
+        hard_expires_at_unix: NonZeroU64::new(2_000 + u64::from(ownership_seed))?,
+        plan: ClosedPlan::new(context_role, paths).ok()?,
+        phase: OwnershipPhase::Intent,
+        absent_origin: None,
+        reconcile: None,
+        recovery_anchor: None,
+    };
+    record
+        .durable_wireguard_resources()
+        .ok()?
+        .into_iter()
+        .find(|resource| resource.key() == (path_id, role as i32))
 }
 
 impl fmt::Debug for OwnershipRecord {
@@ -953,6 +1151,14 @@ struct RecoveryTarget {
 }
 
 impl RecoveryTarget {
+    /// Re-derive the exact public kernel markers committed by this validated durable record.
+    ///
+    /// These descriptors let a future trusted recovery backend inventory exact resources. They do
+    /// not themselves prove absence or grant cleanup authority.
+    fn durable_wireguard_resources(&self) -> Result<Vec<DurableWireguardResource>, JournalError> {
+        self.exact_record.durable_wireguard_resources()
+    }
+
     /// Constructs only a typed echo, not cryptographic or kernel evidence. A trusted executor may
     /// call this only after a complete exact-owner inventory has proved absence. This dormant
     /// slice deliberately provides no production executor.
@@ -2307,6 +2513,203 @@ mod tests {
         }
     }
 
+    fn marker_aliases(record: &OwnershipRecord) -> Vec<String> {
+        record
+            .durable_wireguard_resources()
+            .expect("valid durable resource projection")
+            .into_iter()
+            .map(|resource| resource.ownership_alias().to_owned())
+            .collect()
+    }
+
+    fn marker_digest(alias: &str) -> &str {
+        alias
+            .rsplit_once(':')
+            .map(|(_, digest)| digest)
+            .expect("fixed marker separator")
+    }
+
+    #[test]
+    fn durable_wireguard_marker_has_fixed_golden_grammar_and_redacts_coordinates() {
+        let exact = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Intent);
+        let resources = exact
+            .durable_wireguard_resources()
+            .expect("valid resource projection");
+        assert_eq!(resources.len(), 2);
+        let first = &resources[0];
+        assert_eq!(first.key(), (1, WireguardRole::Client as i32));
+        assert_eq!(first.interface().len(), DERIVED_WIREGUARD_INTERFACE_BYTES);
+        assert_eq!(first.local_address().octets()[14..], [0, 1]);
+        assert_eq!(
+            first.ownership_alias(),
+            "volparossa:wireguard:ownership-v1:vpc123799507:\
+             badfee16fe6577b6ea576dca60b0db2ed40adce2bf94d4571ae6fe95265f502b"
+        );
+        let expected_prefix = format!("{DURABLE_WIREGUARD_ALIAS_PREFIX}{}:", first.interface());
+        assert!(first.ownership_alias().starts_with(&expected_prefix));
+        assert_eq!(
+            first.ownership_alias().len(),
+            DURABLE_WIREGUARD_ALIAS_PREFIX.len()
+                + DERIVED_WIREGUARD_INTERFACE_BYTES
+                + 1
+                + DIGEST_BYTES * 2
+        );
+        let digest = marker_digest(first.ownership_alias());
+        assert_eq!(digest.len(), DIGEST_BYTES * 2);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        );
+        assert!(!first.ownership_alias().contains(&"01".repeat(32)));
+        assert!(!first.ownership_alias().contains(&"02".repeat(32)));
+        assert_eq!(format!("{first:?}"), "DurableWireguardResource(<redacted>)");
+
+        let target = RecoveryTarget {
+            exact_record: exact.clone(),
+        };
+        assert_eq!(
+            target
+                .durable_wireguard_resources()
+                .expect("recovery resource projection")[0]
+                .ownership_alias(),
+            first.ownership_alias()
+        );
+        let snapshot = snapshot_with(vec![exact]);
+        let decoded = JournalSnapshot::decode(&snapshot.encode().expect("encoded marker record"))
+            .expect("decoded marker record");
+        assert_eq!(
+            marker_aliases(decoded.records.values().next().expect("decoded record")),
+            resources
+                .iter()
+                .map(|resource| resource.ownership_alias().to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn durable_wireguard_marker_commits_every_immutable_record_class_and_exact_resource() {
+        let base = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Intent);
+        let base_digest = marker_digest(&marker_aliases(&base)[0]).to_owned();
+        let assert_changes = |candidate: OwnershipRecord, field: &str| {
+            candidate.validate().expect("valid immutable mutation");
+            assert_ne!(
+                marker_digest(&marker_aliases(&candidate)[0]),
+                base_digest,
+                "immutable field did not change marker: {field}"
+            );
+        };
+
+        let mut candidate = base.clone();
+        candidate.journal_epoch_id = epoch(5);
+        assert_changes(candidate, "journal epoch");
+        let mut candidate = base.clone();
+        candidate.origin_runtime_id = runtime(5);
+        assert_changes(candidate, "origin runtime");
+        let mut candidate = base.clone();
+        candidate.ownership_id = ownership(5);
+        assert_changes(candidate, "ownership ID");
+        let mut candidate = base.clone();
+        candidate.context_id = id16(5);
+        assert_changes(candidate, "context ID");
+        let mut candidate = base.clone();
+        candidate.prepare_request_id = id16(5);
+        assert_changes(candidate, "prepare request ID");
+        let mut candidate = base.clone();
+        candidate.prepare_operation_digest = [5; DIGEST_BYTES];
+        assert_changes(candidate, "prepare operation digest");
+        let mut candidate = base.clone();
+        candidate.generation = nz(5);
+        assert_changes(candidate, "generation");
+        let mut candidate = base.clone();
+        candidate.setup_expires_at_unix = nz(101);
+        assert_changes(candidate, "setup expiry");
+        let mut candidate = base.clone();
+        candidate.hard_expires_at_unix = nz(201);
+        assert_changes(candidate, "hard expiry");
+        let mut candidate = base.clone();
+        candidate.plan = client_plan(&[1]);
+        assert_changes(candidate, "canonical path list");
+        let mut candidate = base.clone();
+        candidate.plan = ClosedPlan::new(
+            ContextRole::Exit,
+            vec![
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::Exit,
+                },
+                PathPlan {
+                    path_id: 2,
+                    role: WireguardRole::Exit,
+                },
+            ],
+        )
+        .expect("exit plan");
+        assert_changes(candidate, "canonical context role");
+
+        let client_resources = base
+            .durable_wireguard_resources()
+            .expect("client resources");
+        assert_ne!(
+            marker_digest(client_resources[0].ownership_alias()),
+            marker_digest(client_resources[1].ownership_alias()),
+            "different path/name/address must have a distinct marker"
+        );
+        let mut relay = base;
+        relay.plan = ClosedPlan::new(
+            ContextRole::Relay,
+            vec![
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayClient,
+                },
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayExit,
+                },
+            ],
+        )
+        .expect("relay plan");
+        let relay_resources = relay
+            .durable_wireguard_resources()
+            .expect("relay resources");
+        assert_ne!(
+            relay_resources[0].interface(),
+            relay_resources[1].interface()
+        );
+        assert_ne!(
+            relay_resources[0].local_address(),
+            relay_resources[1].local_address()
+        );
+        assert_ne!(
+            marker_digest(relay_resources[0].ownership_alias()),
+            marker_digest(relay_resources[1].ownership_alias()),
+            "different role/name/address must have a distinct marker"
+        );
+    }
+
+    #[test]
+    fn durable_wireguard_marker_excludes_every_mutable_record_field() {
+        let intent = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Intent);
+        let expected = marker_aliases(&intent);
+
+        let mut reconciled = intent.clone();
+        reconciled.reconcile = Some(binding(8));
+        assert_eq!(marker_aliases(&reconciled), expected);
+
+        let may_own = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::MayOwnPrepare);
+        assert_eq!(marker_aliases(&may_own), expected);
+        let mut different_anchor = may_own;
+        different_anchor.recovery_anchor = Some(anchor(8));
+        assert_eq!(marker_aliases(&different_anchor), expected);
+
+        let absent = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Absent);
+        assert_eq!(marker_aliases(&absent), expected);
+        let mut different_absent_origin = absent;
+        different_absent_origin.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        assert_eq!(marker_aliases(&different_absent_origin), expected);
+    }
+
     #[test]
     fn canonical_codec_round_trips_byte_exact_and_detects_every_truncation_and_corruption() {
         let mut first = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::MayOwnPrepare);
@@ -2924,6 +3327,15 @@ mod tests {
         journal
             .insert_intent(0, exact_intent.clone())
             .expect("durable insert whose reply is discarded");
+        let marker_before_restart = marker_aliases(
+            journal
+                .snapshot()
+                .expect("inserted snapshot")
+                .records
+                .values()
+                .next()
+                .expect("inserted record"),
+        );
         drop(journal);
 
         let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
@@ -2935,6 +3347,7 @@ mod tests {
             .next()
             .expect("durable ownership")
             .clone();
+        assert_eq!(marker_aliases(&existing), marker_before_restart);
         let before = fs::read(&config.journal_path).expect("durable insert bytes");
         for wrong_revision in [0, 2] {
             assert!(matches!(
