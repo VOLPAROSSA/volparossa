@@ -760,7 +760,7 @@ mod tests {
                 result,
                 Err(NativeClientError::InvalidExitListenerDescriptor)
             ),
-            "unexpected listener-validation result: {result:?}"
+            "unexpected listener-validation result"
         );
         probe.assert_consumed();
     }
