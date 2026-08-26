@@ -8,6 +8,11 @@ use volparossa_helper::{
     run_internal_worker_v3_entry, run_internal_worker_v3_live_proof, run_production_server,
 };
 
+const LIVE_PROOF_SUCCESS_RECORDS: [&str; 2] = [
+    "VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass",
+    "VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Invocation {
     Production,
@@ -52,7 +57,9 @@ fn main() -> ExitCode {
         }
         Ok(Invocation::InternalWorkerV3LiveProof) => {
             if run_internal_worker_v3_live_proof() {
-                println!("VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass");
+                for record in LIVE_PROOF_SUCCESS_RECORDS {
+                    println!("{record}");
+                }
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -82,6 +89,17 @@ fn run_production() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_proof_success_records_are_exact_and_ordered() {
+        assert_eq!(
+            LIVE_PROOF_SUCCESS_RECORDS,
+            [
+                "VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass",
+                "VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass",
+            ]
+        );
+    }
 
     #[test]
     fn retired_context_worker_argument_is_not_a_valid_invocation() {

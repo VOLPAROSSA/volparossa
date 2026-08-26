@@ -55,14 +55,29 @@ cargo build --locked -p volparossa-helper
 sudo ./tests/helper/require-live-worker-identity-proof.sh --execute --yes
 ```
 
-The gate uses synthetic read-only account overlays, a transient `PrivateNetwork` service and a
-private `/run`; it never invokes `systemd-sysusers` and does not validate an installed package. The
-helper requires the transient parent to expose exactly the staged agent GID as its sole kernel
-supplementary group, so any additional group inherited for host root fails closed. Its
-one-shot, numeric-group, account-overlay, private-network/private-`/run`, bounded-output and
-no-restart deviations from the shipped helper unit are enumerated in `docs/HELPER_V3.md`. No
+The gate requires exact systemd v257 and uses synthetic read-only account overlays, a transient
+`PrivateNetwork` service and a private `/run`; it never invokes `systemd-sysusers` and does not
+validate an installed package. The canonical system bus socket is bound read-only into that private
+`/run`, and `DBUS_SYSTEM_BUS_ADDRESS` is pinned to that verified path. The unit retains
+`NotifyAccess=main`, `FileDescriptorStoreMax=128` and
+`FileDescriptorStorePreserve=yes`; success requires the two exact ordered helper records and an
+external post-exit `NFileDescriptorStore=2`. The helper also requires the transient parent to expose
+exactly the staged agent GID as its sole kernel supplementary group, so any additional group
+inherited for host root fails closed. Retirement stops only the exact random transient unit, cleans
+only its `fdstore`, binds every mutation to that run's nonzero systemd v257 `InvocationID`, accepts
+only a zero count or not-found unit, and resets/collects with bounded waiting. Failed one-shots are
+reset inactive before cleaning. Its one-shot, numeric-group, account-overlay,
+private-network/private-`/run`, bounded-output
+and no-restart deviations from the shipped helper unit are enumerated in `docs/HELPER_V3.md`. No
 required disposable-VM result has been recorded yet, so this is a driver rather than package,
-production-service, datapath, A14 or A15 evidence.
+production-service, restart-recovery, datapath, A14 or A15 evidence.
+
+The start request atomically carries a per-stage SHA-256 `Description` ownership marker. Bounded
+unit retirement normally begins after `systemd-run` returns the exact requested name plus a nonzero
+lowercase `InvocationID` and the manager reports the same marker and ID. During interruption or an
+invalid reply, tentative ownership may be adopted only through bounded read-only proof of that
+exact marker and a nonzero current ID. Remaining ambiguity causes no unit mutation; the proof fails
+and the disposable VM must be discarded.
 
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
 See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.

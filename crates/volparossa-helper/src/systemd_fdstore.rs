@@ -180,6 +180,7 @@ impl From<zbus::Error> for FdStoreError {
 
 /// Proof that a barrier completed and D-Bus reported exactly the baseline inventory plus the
 /// requested pair.
+#[must_use = "successful descriptor-store publication requires retaining its exact inventory proof"]
 #[derive(Eq, PartialEq)]
 pub(crate) struct InventoryAttestation {
     custody_name: CustodyFdName,
