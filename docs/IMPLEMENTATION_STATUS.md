@@ -163,9 +163,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   inside the non-cancellable recovery executor can only be detached while retaining the journal
   lock; the process latch remains set. Clean shutdown proves the durable boundary and additionally
   requires every record to be durably `Absent`; it refuses rather than retires or recovers an
-  outstanding record. The codec and actor remain private and pre-production; no production
-  writer/recovery wiring, server-wired restart reaper, supported on-disk migration, cross-runtime
-  tag-28 proof, or live root proof exists.
+  outstanding record. Each validated wire intent locally receives a fresh random 256-bit
+  `OwnershipId` inside a non-`Clone` registration owner. Registration consumes it into one durable
+  key, arming consumes that key into a `MayOwnPrepare` token with only borrowed owner-bound
+  resources, and every error retains the exact affine owner which still exists. The codec and actor
+  remain private and pre-production; no production writer/recovery wiring, server-wired restart
+  reaper, supported on-disk migration, cross-runtime tag-28 proof, or live root proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.
@@ -210,8 +213,21 @@ single clean-build A01--A15 run; the score is not a release claim.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
   transiently retain a `Registered` owner while record or detached process ownership remains; after
   confirmed reap and complete six-index purge, that same owner settles without a second signal or
-  wait. Neither production journal/reaper wiring nor a cancellation-safe production settlement
-  guard exists. No datapath or acceptance checkbox closes.
+  wait. A private composite handoff now durably registers `Intent` before even reserving a local
+  generation, authenticates one anonymous-`NEWNET` child as an exact passive `Starting` worker, and
+  atomically installs a `DurableHandoffPending` dispatch fence at registration. Normal planning
+  rejects that generation before channel, in-flight, cache, tombstone, or phase mutation. The seam
+  revalidates the complete recovery anchor and only then durably arms `MayOwnPrepare`, carrying the
+  same caller-supplied absolute deadline throughout. Success retains the durable token, registered
+  worker owner, affine fence owner, recovery pins, and only borrowed owner-bound resources together;
+  every failure retains all affine owners which exist at that point. The fence remains closed after
+  arming because this slice has no authority-consuming transition that opens child dispatch. It
+  dispatches no child operation, sends zero protocol-request bytes, and performs no WireGuard
+  link/address, route, firewall, or dataplane configuration. Worker launch still creates the
+  deliberately isolated process and anonymous `NEWNET`, without altering host-network state. This
+  seam remains private and dormant with no server or engine caller. Neither production
+  journal/reaper wiring nor a cancellation-safe production settlement guard exists. No datapath or
+  acceptance checkbox closes.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
