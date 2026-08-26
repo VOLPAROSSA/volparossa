@@ -128,8 +128,6 @@ enum WorkerV3Error {
     RuntimeUnavailable,
     #[error("worker operation hard deadline elapsed")]
     Deadline,
-    #[error("authenticated worker pins do not prove a complete durable recovery anchor")]
-    RecoveryIdentityIncomplete,
     #[error("worker I/O failed")]
     Io(#[from] io::Error),
     #[error("worker transport failed")]
@@ -1970,7 +1968,7 @@ impl WorkerProcess {
         &self,
         coordinates: WorkerGenerationCoordinates,
         deadline: HardDeadline,
-    ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
+    ) -> Result<PendingWorkerRecoveryIdentity, WorkerV3Error> {
         ensure_worker_deadline(deadline)?;
         let expected_binding = (coordinates.context_id, coordinates.worker_generation.get());
         if self.binding != Some(expected_binding) {
@@ -1990,15 +1988,12 @@ impl WorkerProcess {
             .and_then(|retirement| retirement.kernel_pins.as_ref())
             .ok_or(WorkerV3Error::Authentication)?;
         let authenticated_pins = pins.duplicate_recovery_identity_pins()?;
-        let (network_namespace_device, network_namespace_inode) =
-            authenticated_pins.verified_network_namespace_identity_parts()?;
         ensure_worker_deadline(deadline)?;
-        let child_pid = NonZeroU32::new(self.child_pid).ok_or(WorkerV3Error::Authentication)?;
-        Ok(WorkerRecoveryIdentitySource {
+        let expected_child_pid =
+            NonZeroU32::new(self.child_pid).ok_or(WorkerV3Error::Authentication)?;
+        Ok(PendingWorkerRecoveryIdentity {
             coordinates,
-            child_pid,
-            network_namespace_device,
-            network_namespace_inode,
+            expected_child_pid,
             process_identity: Arc::clone(&self.lifetime),
             authenticated_pins,
         })
@@ -2315,7 +2310,7 @@ struct WorkerGenerationCoordinates {
 enum WorkerGenerationPlacement {
     LifecycleReservation(GenerationReservation),
     SpawnAmbiguous(GenerationReservation),
-    Spawned(SpawnedWorker),
+    Spawned(Box<SpawnedWorker>),
     Registered,
     Detached(Box<LifecycleDetachedOwnership>),
     ReapedPendingPurge(Box<LifecycleDetachedOwnership>),
@@ -2364,24 +2359,43 @@ impl std::fmt::Debug for WorkerGenerationOwnership {
 /// The namespace descriptor remains owned here. The numeric nsfs coordinates must never be used
 /// after this value is dropped as though they were independent ownership evidence.
 #[must_use = "the authenticated recovery pin must remain alive while its coordinates are used"]
-struct WorkerRecoveryIdentitySource {
+struct PendingWorkerRecoveryIdentity {
     coordinates: WorkerGenerationCoordinates,
-    child_pid: NonZeroU32,
-    network_namespace_device: NonZeroU64,
-    network_namespace_inode: NonZeroU64,
+    expected_child_pid: NonZeroU32,
     process_identity: Arc<WorkerLifetime>,
     authenticated_pins: crate::worker_sandbox::PinnedWorkerRecoveryIdentity,
 }
 
+/// Affine source whose complete durable anchor was proven before final registry revalidation.
+#[must_use = "the authenticated recovery pin must remain alive during durable ownership handoff"]
+struct WorkerRecoveryIdentitySource {
+    pending: PendingWorkerRecoveryIdentity,
+    durable_prepare_anchor: crate::ownership_journal::DurablePrepareAnchor,
+}
+
 impl WorkerRecoveryIdentitySource {
-    /// A full durable prepare anchor additionally needs an attested boot ID, process start time,
-    /// executable inode and service-cgroup inode. None of those are retained by the current
-    /// authenticated bootstrap, so inventing or path-sampling them here would be unsafe.
-    fn require_complete_prepare_anchor(&self) -> Result<(), WorkerV3Error> {
-        self.authenticated_pins
-            .verified_network_namespace_identity_parts()?;
-        Err(WorkerV3Error::RecoveryIdentityIncomplete)
+    #[cfg(test)]
+    fn durable_prepare_anchor(&self) -> crate::ownership_journal::DurablePrepareAnchor {
+        self.durable_prepare_anchor
     }
+}
+
+fn durable_prepare_anchor_from_worker_parts(
+    parts: crate::worker_sandbox::WorkerRecoveryAnchorParts,
+) -> Result<crate::ownership_journal::DurablePrepareAnchor, WorkerV3Error> {
+    crate::ownership_journal::durable_prepare_anchor_from_parts(
+        crate::ownership_journal::DurablePrepareAnchorParts {
+            boot_id: parts.boot_id,
+            pid: parts.pid,
+            process_start_ticks: parts.process_start_ticks,
+            network_namespace_device: parts.network_namespace_device,
+            network_namespace_inode: parts.network_namespace_inode,
+            executable_device: parts.executable_device,
+            executable_inode: parts.executable_inode,
+            service_cgroup_inode: parts.service_cgroup_inode,
+        },
+    )
+    .ok_or(WorkerV3Error::Authentication)
 }
 
 impl std::fmt::Debug for WorkerRecoveryIdentitySource {
@@ -2745,7 +2759,7 @@ impl WorkerRegistry {
         &self,
         coordinates: WorkerGenerationCoordinates,
         deadline: HardDeadline,
-    ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
+    ) -> Result<PendingWorkerRecoveryIdentity, WorkerV3Error> {
         ensure_worker_deadline(deadline)?;
         let process = self.recovery_identity_process(coordinates)?;
         let source = process.duplicate_recovery_identity_source_until(coordinates, deadline)?;
@@ -2778,7 +2792,7 @@ impl WorkerRegistry {
 
     fn confirm_recovery_identity_source(
         &self,
-        source: &WorkerRecoveryIdentitySource,
+        source: &PendingWorkerRecoveryIdentity,
     ) -> Result<(), WorkerV3Error> {
         let process = self.recovery_identity_process(source.coordinates)?;
         if process.binding
@@ -2786,7 +2800,7 @@ impl WorkerRegistry {
                 source.coordinates.context_id,
                 source.coordinates.worker_generation.get(),
             ))
-            || process.child_pid != source.child_pid.get()
+            || process.child_pid != source.expected_child_pid.get()
             || !Arc::ptr_eq(&process.lifetime, &source.process_identity)
         {
             return Err(WorkerV3Error::Stale);
@@ -3605,7 +3619,7 @@ struct WorkerSupervisor {
 #[must_use = "shutdown retirement must retain retryable worker ownership"]
 enum ShutdownRetirement {
     Confirmed,
-    Retryable(DetachedWorker),
+    Retryable(Box<DetachedWorker>),
     Unresolved,
 }
 
@@ -3835,24 +3849,24 @@ impl WorkerSupervisor {
         {
             Ok(TerminationOutcome::Reaped) => {
                 if ensure_worker_deadline(deadline).is_err() {
-                    return ShutdownRetirement::Retryable(detached);
+                    return ShutdownRetirement::Retryable(Box::new(detached));
                 }
                 let mut registry = match self.registry.try_lock() {
                     Ok(registry) => registry,
                     Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                     Err(std::sync::TryLockError::WouldBlock) => {
-                        return ShutdownRetirement::Retryable(detached);
+                        return ShutdownRetirement::Retryable(Box::new(detached));
                     }
                 };
                 if ensure_worker_deadline(deadline).is_err() {
-                    return ShutdownRetirement::Retryable(detached);
+                    return ShutdownRetirement::Retryable(Box::new(detached));
                 }
                 if detached
                     .process
                     .disarm_retirement_for_shutdown(deadline)
                     .is_err()
                 {
-                    return ShutdownRetirement::Retryable(detached);
+                    return ShutdownRetirement::Retryable(Box::new(detached));
                 }
                 let purged = registry
                     .purge_confirmed(detached.context_id, detached.generation)
@@ -3865,7 +3879,7 @@ impl WorkerSupervisor {
                     ShutdownRetirement::Unresolved
                 }
             }
-            Ok(TerminationOutcome::TimedOut) => ShutdownRetirement::Retryable(detached),
+            Ok(TerminationOutcome::TimedOut) => ShutdownRetirement::Retryable(Box::new(detached)),
             Ok(TerminationOutcome::Fatal) | Err(_) => {
                 detached.escalate_to_reaper();
                 ShutdownRetirement::Unresolved
@@ -4383,7 +4397,7 @@ impl WorkerCoordinator {
 
         match spawn(reservation, deadline) {
             Ok(spawned) => {
-                ownership.placement = Some(WorkerGenerationPlacement::Spawned(spawned));
+                ownership.placement = Some(WorkerGenerationPlacement::Spawned(Box::new(spawned)));
                 self.commit_spawned_lifecycle_until(ownership, deadline)
             }
             Err(WorkerSpawnFailure {
@@ -4451,7 +4465,7 @@ impl WorkerCoordinator {
             ownership.placement = Some(WorkerGenerationPlacement::Spawned(spawned));
             return WorkerLifecycleAdmission::Retained { error, ownership };
         }
-        match registry.commit_spawned(spawned, Instant::now()) {
+        match registry.commit_spawned(*spawned, Instant::now()) {
             Ok(worker_generation) => {
                 if worker_generation != ownership.coordinates.worker_generation.get() {
                     std::process::abort();
@@ -4568,10 +4582,17 @@ impl WorkerCoordinator {
         {
             return Err(WorkerV3Error::Stale);
         }
-        let source = lock_worker_registry_until(&self.registry, deadline)?
-            .recovery_identity_owners(ownership.coordinates, deadline)?;
+        let registry = lock_worker_registry_until(&self.registry, deadline)?;
+        let pending = registry.recovery_identity_owners(ownership.coordinates, deadline)?;
+        drop(registry);
         ensure_worker_deadline(deadline)?;
-        source.authenticated_pins.ensure_alive()?;
+        let proof = pending.authenticated_pins.verified_recovery_anchor_parts();
+        ensure_worker_deadline(deadline)?;
+        let parts = proof?;
+        if parts.pid != pending.expected_child_pid {
+            return Err(WorkerV3Error::Authentication);
+        }
+        let durable_prepare_anchor = durable_prepare_anchor_from_worker_parts(parts)?;
         ensure_worker_deadline(deadline)?;
         #[cfg(test)]
         if let Some(hook) = self
@@ -4584,10 +4605,14 @@ impl WorkerCoordinator {
             hook.release.wait();
         }
         let registry = lock_worker_registry_until(&self.registry, deadline)?;
-        registry.confirm_recovery_identity_source(&source)?;
+        registry.confirm_recovery_identity_source(&pending)?;
         ensure_worker_deadline(deadline)?;
         drop(registry);
-        Ok(source)
+        ensure_worker_deadline(deadline)?;
+        Ok(WorkerRecoveryIdentitySource {
+            pending,
+            durable_prepare_anchor,
+        })
     }
 
     /// Makes one hard-deadline-bounded attempt to reap exactly the owned worker generation.
@@ -5355,7 +5380,7 @@ impl WorkerCoordinator {
             }
             match supervisor.retire_for_shutdown_until(worker, deadline).await {
                 ShutdownRetirement::Confirmed => {}
-                ShutdownRetirement::Retryable(worker) => retryable.push(worker),
+                ShutdownRetirement::Retryable(worker) => retryable.push(*worker),
                 ShutdownRetirement::Unresolved => {
                     owners.workers.append(&mut retryable);
                     return Err(ShutdownStatus::Unresolved);
@@ -6449,6 +6474,35 @@ mod tests {
     }
 
     #[test]
+    fn worker_recovery_parts_map_to_the_exact_durable_anchor_fields() {
+        let parts = crate::worker_sandbox::WorkerRecoveryAnchorParts {
+            boot_id: [1; 16],
+            pid: NonZeroU32::new(2).expect("pid"),
+            process_start_ticks: NonZeroU64::new(3).expect("start ticks"),
+            network_namespace_device: NonZeroU64::new(4).expect("namespace device"),
+            network_namespace_inode: NonZeroU64::new(5).expect("namespace inode"),
+            executable_device: NonZeroU64::new(6).expect("executable device"),
+            executable_inode: NonZeroU64::new(7).expect("executable inode"),
+            service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+        };
+        let actual = durable_prepare_anchor_from_worker_parts(parts).expect("mapped anchor");
+        let expected = crate::ownership_journal::durable_prepare_anchor_from_parts(
+            crate::ownership_journal::DurablePrepareAnchorParts {
+                boot_id: [1; 16],
+                pid: NonZeroU32::new(2).expect("pid"),
+                process_start_ticks: NonZeroU64::new(3).expect("start ticks"),
+                network_namespace_device: NonZeroU64::new(4).expect("namespace device"),
+                network_namespace_inode: NonZeroU64::new(5).expect("namespace inode"),
+                executable_device: NonZeroU64::new(6).expect("executable device"),
+                executable_inode: NonZeroU64::new(7).expect("executable inode"),
+                service_cgroup_inode: NonZeroU64::new(8).expect("cgroup inode"),
+            },
+        )
+        .expect("expected anchor");
+        assert!(actual == expected);
+    }
+
+    #[test]
     fn dormant_lifecycle_registers_without_dispatch_and_exposes_only_pinned_identity() {
         let context_id = [70; 16];
         let coordinator =
@@ -6476,14 +6530,19 @@ mod tests {
                 HardDeadline::after(Duration::from_secs(1)).expect("identity deadline"),
             )
             .expect("source from exact authenticated pins");
-        assert_eq!(source.coordinates, coordinates);
-        assert_ne!(source.child_pid.get(), process::id());
-        assert_ne!(source.network_namespace_device.get(), 0);
-        assert_ne!(source.network_namespace_inode.get(), 0);
-        assert!(matches!(
-            source.require_complete_prepare_anchor(),
-            Err(WorkerV3Error::RecoveryIdentityIncomplete)
-        ));
+        assert_eq!(source.pending.coordinates, coordinates);
+        assert_ne!(source.pending.expected_child_pid.get(), process::id());
+        let durable_anchor = source.durable_prepare_anchor();
+        assert_eq!(
+            format!("{durable_anchor:?}"),
+            "DurablePrepareAnchor(<redacted>)"
+        );
+        let network_namespace_identity = source
+            .pending
+            .authenticated_pins
+            .network_namespace_pin_for_test()
+            .verified_identity_parts()
+            .expect("complete source retains exact namespace ownership");
 
         let proof = match coordinator.terminate_generation_until(
             ownership,
@@ -6498,19 +6557,17 @@ mod tests {
         assert_eq!(proof.coordinates, coordinates);
         assert!(lock_worker_registry(&coordinator.registry).exact_generation_absent(coordinates));
         assert!(
-            source.authenticated_pins.ensure_alive().is_err(),
+            source.pending.authenticated_pins.ensure_alive().is_err(),
             "the retained real pidfd must observe exact child exit"
         );
         assert_eq!(
             source
+                .pending
                 .authenticated_pins
                 .network_namespace_pin_for_test()
                 .verified_identity_parts()
                 .expect("affine source keeps exact namespace pinned"),
-            (
-                source.network_namespace_device,
-                source.network_namespace_inode
-            )
+            network_namespace_identity
         );
     }
 
@@ -7171,6 +7228,81 @@ mod tests {
     }
 
     #[test]
+    fn recovery_deadline_after_proof_preserves_registered_ownership() {
+        let context_id = [82; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xac; 32]),
+                })
+            },
+        ));
+        let coordinates = ownership.coordinates;
+
+        let proof_complete = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_recovery_hook(Some(LifecycleRecoveryHook {
+            pinned: Arc::clone(&proof_complete),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let deadline = HardDeadline::after(Duration::from_millis(60)).expect("recovery deadline");
+        let recovery = thread::spawn(move || {
+            let result = worker_coordinator.recovery_identity_source_until(&ownership, deadline);
+            (result, ownership)
+        });
+        proof_complete.wait();
+        let registry = coordinator
+            .registry
+            .try_lock()
+            .expect("full recovery proof must run without the registry lock");
+        let record = registry
+            .records
+            .get(&context_id)
+            .expect("registered worker");
+        assert_eq!(record.stable_phase, StablePhase::Starting);
+        assert!(!record.quarantined);
+        assert!(record.in_flight.is_none());
+        drop(registry);
+        wait_until_deadline_elapsed(deadline);
+        release.wait();
+        let (result, ownership) = recovery.join().expect("deadline recovery thread");
+        assert!(matches!(result, Err(WorkerV3Error::Deadline)));
+        assert_eq!(ownership.coordinates, coordinates);
+        assert!(matches!(
+            ownership.placement,
+            Some(WorkerGenerationPlacement::Registered)
+        ));
+        assert_eq!(
+            coordinator
+                .phase(context_id, coordinates.worker_generation.get())
+                .expect("deadline leaves registered worker untouched"),
+            VisiblePhase::Stable(StablePhase::Starting)
+        );
+
+        coordinator.set_lifecycle_recovery_hook(None);
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("deadline recovery fixture cleanup failed: {error}")
+            }
+        }
+    }
+
+    #[test]
     fn recovery_source_revalidates_ttl_and_phase_after_pin_duplication() {
         let context_id = [83; 16];
         let coordinator =
@@ -7205,6 +7337,12 @@ mod tests {
             (result, ownership)
         });
         pinned.wait();
+        drop(
+            coordinator
+                .registry
+                .try_lock()
+                .expect("TTL proof must not hold the registry lock"),
+        );
         let expires_at = {
             let expires_at = Instant::now() + Duration::from_millis(40);
             lock_worker_registry(&coordinator.registry)
@@ -7224,19 +7362,48 @@ mod tests {
         let (result, ownership) = recovery.join().expect("TTL recovery thread");
         assert!(matches!(result, Err(WorkerV3Error::Dead)));
 
-        {
-            let mut registry = lock_worker_registry(&coordinator.registry);
-            let record = registry
-                .records
-                .get_mut(&context_id)
-                .expect("worker record");
-            record.expires_at = Instant::now() + Duration::from_secs(1);
-            record.stable_phase = StablePhase::Starting;
+        lock_worker_registry(&coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .expect("worker record")
+            .expires_at = Instant::now() + Duration::from_secs(1);
+        coordinator.set_lifecycle_recovery_hook(None);
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("recovery revalidation fixture cleanup failed: {error}")
+            }
         }
-        let pinned = Arc::new(std::sync::Barrier::new(2));
+    }
+
+    #[test]
+    fn recovery_source_revalidates_phase_and_process_binding_after_proof() {
+        let context_id = [84; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xae; 32]),
+                })
+            },
+        ));
+
+        let proof_complete = Arc::new(std::sync::Barrier::new(2));
         let release = Arc::new(std::sync::Barrier::new(2));
         coordinator.set_lifecycle_recovery_hook(Some(LifecycleRecoveryHook {
-            pinned: Arc::clone(&pinned),
+            pinned: Arc::clone(&proof_complete),
             release: Arc::clone(&release),
         }));
         let worker_coordinator = coordinator.clone();
@@ -7247,7 +7414,13 @@ mod tests {
             );
             (result, ownership)
         });
-        pinned.wait();
+        proof_complete.wait();
+        drop(
+            coordinator
+                .registry
+                .try_lock()
+                .expect("phase proof must not hold the registry lock"),
+        );
         lock_worker_registry(&coordinator.registry)
             .records
             .get_mut(&context_id)
@@ -7256,6 +7429,44 @@ mod tests {
         release.wait();
         let (result, ownership) = recovery.join().expect("phase recovery thread");
         assert!(matches!(result, Err(WorkerV3Error::Conflict)));
+
+        lock_worker_registry(&coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .expect("worker record")
+            .stable_phase = StablePhase::Starting;
+        let proof_complete = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_recovery_hook(Some(LifecycleRecoveryHook {
+            pinned: Arc::clone(&proof_complete),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let generation = ownership.coordinates.worker_generation.get();
+        let recovery = thread::spawn(move || {
+            let result = worker_coordinator.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("binding recovery deadline"),
+            );
+            (result, ownership)
+        });
+        proof_complete.wait();
+        lock_worker_registry(&coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .and_then(|record| record.process.as_mut())
+            .expect("registered process")
+            .binding = Some(([0xff; 16], generation));
+        release.wait();
+        let (result, ownership) = recovery.join().expect("binding recovery thread");
+        assert!(matches!(result, Err(WorkerV3Error::Stale)));
+        lock_worker_registry(&coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .and_then(|record| record.process.as_mut())
+            .expect("registered process")
+            .binding = Some((context_id, generation));
+
         coordinator.set_lifecycle_recovery_hook(None);
         match coordinator.terminate_generation_until(
             ownership,
@@ -7264,7 +7475,82 @@ mod tests {
             WorkerGenerationReap::Confirmed(_) => {}
             WorkerGenerationReap::Retained { error, ownership } => {
                 drop(ownership);
-                panic!("recovery revalidation fixture cleanup failed: {error}")
+                panic!("binding recovery fixture cleanup failed: {error}")
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_source_revalidates_process_lifetime_after_proof() {
+        let context_id = [85; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xaf; 32]),
+                })
+            },
+        ));
+
+        let proof_complete = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_recovery_hook(Some(LifecycleRecoveryHook {
+            pinned: Arc::clone(&proof_complete),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let recovery = thread::spawn(move || {
+            let result = worker_coordinator.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("lifetime recovery deadline"),
+            );
+            (result, ownership)
+        });
+        proof_complete.wait();
+        let original_lifetime = {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            let process = registry
+                .records
+                .get_mut(&context_id)
+                .and_then(|record| record.process.as_mut())
+                .expect("registered process");
+            let original = Arc::clone(&process.lifetime);
+            process.lifetime = Arc::new(WorkerLifetime::Fake {
+                termination_results: Mutex::new(VecDeque::new()),
+                default_result: TerminationOutcome::Reaped,
+                attempts: Arc::new(AtomicUsize::new(0)),
+                termination_delay: Duration::ZERO,
+                probe_delay: Duration::ZERO,
+            });
+            original
+        };
+        release.wait();
+        let (result, ownership) = recovery.join().expect("lifetime recovery thread");
+        assert!(matches!(result, Err(WorkerV3Error::Stale)));
+        lock_worker_registry(&coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .and_then(|record| record.process.as_mut())
+            .expect("registered process")
+            .lifetime = original_lifetime;
+
+        coordinator.set_lifecycle_recovery_hook(None);
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("lifetime recovery fixture cleanup failed: {error}")
             }
         }
     }

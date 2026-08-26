@@ -2,7 +2,7 @@
 //!
 //! The production child first enters a fresh network namespace and then pauses at an affine
 //! bootstrap barrier after setting no-new-privileges and installing one fixed seccomp filter that
-//! denies descendant creation and every later namespace transition. While the child is still root,
+//! denies descendant creation, re-exec and every later namespace transition. While the child is root,
 //! the parent pins that namespace and attests the filter, exact descriptor set and single task. Only
 //! after the pin acknowledgement may the child clear all supplementary groups, irreversibly assume
 //! its dedicated uid/gid and reduce every capability set to exactly `CAP_NET_ADMIN`. The child and
@@ -12,10 +12,12 @@
 
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs::{self, File},
     io::{self, Read},
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     os::fd::{AsFd, OwnedFd},
+    os::unix::ffi::OsStrExt,
     process::Child,
 };
 
@@ -26,7 +28,7 @@ use nix::{
     unistd::{Pid as NixPid, getppid},
 };
 use rustix::{
-    fs::{Dir, Mode, OFlags, fstat, open, openat},
+    fs::{Dir, FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat, openat2},
     process::{Pid, PidfdFlags, getgroups, pidfd_open},
     thread::{
         CapabilitySet, CapabilitySets, Gid, Uid, capabilities, clear_ambient_capability_set,
@@ -44,6 +46,13 @@ const SANDBOX_PROOF_DOMAIN: &[u8; 32] = b"volparossa/worker-sandbox/v5\0\0\0\0";
 const SANDBOX_PROOF_VERSION: u32 = 5;
 const MAX_DESCRIPTOR_AUDIT: usize = 4_096;
 const MAX_PROC_STATUS_BYTES: usize = 64 * 1024;
+const MAX_PROC_STAT_BYTES: usize = 4 * 1024;
+const MAX_PROC_CGROUP_BYTES: usize = 4 * 1024;
+const MAX_CGROUP_COMPONENTS: usize = 256;
+const MAX_CGROUP_COMPONENT_BYTES: usize = 255;
+const BOOT_ID_BYTES: usize = 37;
+const CGROUP2_SUPER_MAGIC: i64 = 0x6367_7270;
+const PROC_SUPER_MAGIC: i64 = 0x0000_9fa0;
 const MAX_CAP_LAST_CAP_BYTES: usize = 4;
 const WORKER_CHANNEL_DESCRIPTOR: i32 = 3;
 const CAP_KILL: u32 = 5;
@@ -144,6 +153,82 @@ impl NetworkNamespaceIdentity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    fn nonzero_parts(self) -> Result<(NonZeroU64, NonZeroU64), WorkerSandboxError> {
+        Ok((
+            NonZeroU64::new(self.device).ok_or(WorkerSandboxError::Mismatch)?,
+            NonZeroU64::new(self.inode).ok_or(WorkerSandboxError::Mismatch)?,
+        ))
+    }
+}
+
+/// Numeric recovery identity proven by the retained authenticated worker pins.
+///
+/// These coordinates are intentionally separate from worker-registry and journal generations.
+/// Callers must retain the affine `PinnedWorkerRecoveryIdentity` which produced them until the
+/// durable ownership handoff has completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WorkerRecoveryAnchorParts {
+    pub(super) boot_id: [u8; 16],
+    pub(super) pid: NonZeroU32,
+    pub(super) process_start_ticks: NonZeroU64,
+    pub(super) network_namespace_device: NonZeroU64,
+    pub(super) network_namespace_inode: NonZeroU64,
+    pub(super) executable_device: NonZeroU64,
+    pub(super) executable_inode: NonZeroU64,
+    pub(super) service_cgroup_inode: NonZeroU64,
+}
+
+/// Retained kernel objects from which one worker's durable recovery anchor is revalidated.
+///
+/// The cgroup path is kernel-observed and retained only in memory. It is never part of the
+/// durable journal; the journal receives only the exact pinned service-cgroup inode.
+struct PinnedWorkerRecoveryAnchor {
+    process_directory_identity: FileIdentity,
+    boot_id_file: OwnedFd,
+    boot_id_file_identity: FileIdentity,
+    boot_id: [u8; 16],
+    pid: NonZeroU32,
+    process_start_ticks: NonZeroU64,
+    executable: OwnedFd,
+    executable_identity: FileIdentity,
+    cgroup_namespace: OwnedFd,
+    cgroup_namespace_identity: NetworkNamespaceIdentity,
+    cgroup_root: OwnedFd,
+    cgroup_root_identity: FileIdentity,
+    service_cgroup: OwnedFd,
+    service_cgroup_identity: FileIdentity,
+    service_cgroup_path: Box<[u8]>,
+}
+
+impl PinnedWorkerRecoveryAnchor {
+    fn duplicate(&self) -> Result<Self, WorkerSandboxError> {
+        Ok(Self {
+            process_directory_identity: self.process_directory_identity,
+            boot_id_file: duplicate_descriptor_cloexec(&self.boot_id_file)?,
+            boot_id_file_identity: self.boot_id_file_identity,
+            boot_id: self.boot_id,
+            pid: self.pid,
+            process_start_ticks: self.process_start_ticks,
+            executable: duplicate_descriptor_cloexec(&self.executable)?,
+            executable_identity: self.executable_identity,
+            cgroup_namespace: duplicate_descriptor_cloexec(&self.cgroup_namespace)?,
+            cgroup_namespace_identity: self.cgroup_namespace_identity,
+            cgroup_root: duplicate_descriptor_cloexec(&self.cgroup_root)?,
+            cgroup_root_identity: self.cgroup_root_identity,
+            service_cgroup: duplicate_descriptor_cloexec(&self.service_cgroup)?,
+            service_cgroup_identity: self.service_cgroup_identity,
+            service_cgroup_path: self.service_cgroup_path.clone(),
+        })
+    }
+}
+
 /// Affine parent-side ownership of one independently pinned worker network namespace.
 ///
 /// The descriptor, rather than only its numeric identity, is retained so a concurrent worker reap
@@ -195,15 +280,12 @@ impl PinnedWorkerNetworkNamespace {
 }
 
 /// Affine duplicate of every parent-side kernel pin which identifies one authenticated worker.
-///
-/// This does not manufacture the additional boot, start-time, executable and cgroup evidence
-/// required by the durable journal. It only keeps the already-attested process and namespace
-/// objects from being confused with later PID or namespace-inode reuse.
 #[must_use = "dropping recovery identity pins releases their exact kernel references"]
 pub(super) struct PinnedWorkerRecoveryIdentity {
     pidfd: OwnedFd,
-    _process_directory: OwnedFd,
+    process_directory: OwnedFd,
     network_namespace: PinnedWorkerNetworkNamespace,
+    recovery_anchor: PinnedWorkerRecoveryAnchor,
 }
 
 impl PinnedWorkerRecoveryIdentity {
@@ -220,10 +302,33 @@ impl PinnedWorkerRecoveryIdentity {
         Ok(())
     }
 
-    pub(super) fn verified_network_namespace_identity_parts(
+    /// Revalidates every exact retained object before exposing durable numeric coordinates.
+    ///
+    /// This performs proof I/O and therefore must be called only after dropping the worker
+    /// registry lock. Descriptor duplication itself is the short affine handoff done while the
+    /// registered worker is still visible.
+    pub(super) fn verified_recovery_anchor_parts(
         &self,
-    ) -> Result<(NonZeroU64, NonZeroU64), WorkerSandboxError> {
-        self.network_namespace.verified_identity_parts()
+    ) -> Result<WorkerRecoveryAnchorParts, WorkerSandboxError> {
+        self.ensure_alive()?;
+        let (network_namespace_device, network_namespace_inode) =
+            self.network_namespace.verified_identity_parts()?;
+        let anchor = &self.recovery_anchor;
+        verify_sealed_recovery_anchor(&self.process_directory, anchor)?;
+        let (executable_device, executable_inode) = anchor.executable_identity.nonzero_parts()?;
+        let service_cgroup_inode = NonZeroU64::new(anchor.service_cgroup_identity.inode)
+            .ok_or(WorkerSandboxError::Mismatch)?;
+        self.ensure_alive()?;
+        Ok(WorkerRecoveryAnchorParts {
+            boot_id: anchor.boot_id,
+            pid: anchor.pid,
+            process_start_ticks: anchor.process_start_ticks,
+            network_namespace_device,
+            network_namespace_inode,
+            executable_device,
+            executable_inode,
+            service_cgroup_inode,
+        })
     }
 
     #[cfg(test)]
@@ -830,6 +935,497 @@ fn typed_network_namespace_identity<Fd: AsFd>(
     namespace_identity(descriptor)
 }
 
+fn typed_namespace_identity<Fd: AsFd>(
+    descriptor: &Fd,
+    expected_type: i32,
+) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
+    if namespace_type(descriptor)? != expected_type {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    namespace_identity(descriptor)
+}
+
+fn descriptor_identity<Fd: AsFd>(
+    descriptor: &Fd,
+    expected_type: FileType,
+) -> Result<FileIdentity, WorkerSandboxError> {
+    let metadata = fstat(descriptor).map_err(rustix_io)?;
+    if FileType::from_raw_mode(metadata.st_mode) != expected_type
+        || metadata.st_dev == 0
+        || metadata.st_ino == 0
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    Ok(FileIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn read_bounded_descriptor<Fd: AsFd>(
+    descriptor: &Fd,
+    maximum: usize,
+) -> Result<Vec<u8>, WorkerSandboxError> {
+    const READ_CHUNK_BYTES: usize = 1_024;
+    let limit = maximum.checked_add(1).ok_or(WorkerSandboxError::Invalid)?;
+    let mut bytes = Vec::with_capacity(limit);
+    while bytes.len() < limit {
+        let mut chunk = [0_u8; READ_CHUNK_BYTES];
+        let remaining = limit - bytes.len();
+        let length = rustix::io::pread(
+            descriptor,
+            &mut chunk[..remaining.min(READ_CHUNK_BYTES)],
+            u64::try_from(bytes.len()).map_err(|_| WorkerSandboxError::Invalid)?,
+        )
+        .map_err(rustix_io)?;
+        if length == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..length]);
+    }
+    if bytes.is_empty() || bytes.len() > maximum {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    Ok(bytes)
+}
+
+fn parse_boot_id(bytes: &[u8]) -> Result<[u8; 16], WorkerSandboxError> {
+    const HYPHENS: [usize; 4] = [8, 13, 18, 23];
+    if bytes.len() != BOOT_ID_BYTES || bytes[BOOT_ID_BYTES - 1] != b'\n' {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    let text = &bytes[..BOOT_ID_BYTES - 1];
+    for (index, byte) in text.iter().copied().enumerate() {
+        if HYPHENS.contains(&index) {
+            if byte != b'-' {
+                return Err(WorkerSandboxError::Invalid);
+            }
+        } else if !byte.is_ascii_digit() && !matches!(byte, b'a'..=b'f') {
+            return Err(WorkerSandboxError::Invalid);
+        }
+    }
+    let mut decoded = [0_u8; 16];
+    let mut nibble_index = 0_usize;
+    for byte in text.iter().copied().filter(|byte| *byte != b'-') {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => return Err(WorkerSandboxError::Invalid),
+        };
+        let target = nibble_index / 2;
+        decoded[target] = if nibble_index % 2 == 0 {
+            nibble << 4
+        } else {
+            decoded[target] | nibble
+        };
+        nibble_index += 1;
+    }
+    if nibble_index != 32 || decoded == [0; 16] {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    Ok(decoded)
+}
+
+fn parse_canonical_u64(bytes: &[u8]) -> Result<u64, WorkerSandboxError> {
+    if bytes.is_empty()
+        || (bytes.len() > 1 && bytes[0] == b'0')
+        || !bytes.iter().all(u8::is_ascii_digit)
+    {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    bytes.iter().try_fold(0_u64, |value, byte| {
+        value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+            .ok_or(WorkerSandboxError::Invalid)
+    })
+}
+
+fn parse_process_start_ticks(
+    bytes: &[u8],
+    expected_pid: NonZeroU32,
+) -> Result<NonZeroU64, WorkerSandboxError> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_PROC_STAT_BYTES
+        || bytes.last() != Some(&b'\n')
+        || bytes.contains(&0)
+    {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    let pid_end = bytes
+        .iter()
+        .position(|byte| *byte == b' ')
+        .ok_or(WorkerSandboxError::Invalid)?;
+    let pid = parse_canonical_u64(&bytes[..pid_end])?;
+    if pid != u64::from(expected_pid.get()) || bytes.get(pid_end + 1) != Some(&b'(') {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    let command_start = pid_end + 2;
+    let command_end = bytes[..bytes.len() - 1]
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or(WorkerSandboxError::Invalid)?;
+    if command_end < command_start
+        || command_end - command_start > 15
+        || bytes.get(command_end + 1) != Some(&b' ')
+        || bytes.get(command_end + 3) != Some(&b' ')
+    {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    if !matches!(
+        bytes.get(command_end + 2),
+        Some(b'R' | b'S' | b'D' | b'Z' | b'T' | b't' | b'X' | b'x' | b'K' | b'W' | b'P' | b'I')
+    ) {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    let fields = bytes[command_end + 4..bytes.len() - 1]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    if fields.len() < 19 || fields.iter().any(|field| field.is_empty()) {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    let parent_pid = parse_canonical_u64(fields[0])?;
+    if parent_pid > u64::from(u32::MAX) {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    NonZeroU64::new(parse_canonical_u64(fields[18])?).ok_or(WorkerSandboxError::Invalid)
+}
+
+fn parse_unified_cgroup_path(bytes: &[u8]) -> Result<Box<[u8]>, WorkerSandboxError> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_PROC_CGROUP_BYTES
+        || !bytes.starts_with(b"0::/")
+        || bytes.last() != Some(&b'\n')
+        || bytes[..bytes.len() - 1].contains(&b'\n')
+    {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    let path = &bytes[3..bytes.len() - 1];
+    if path == b"/" {
+        return Ok(path.into());
+    }
+    if path.last() == Some(&b'/') {
+        return Err(WorkerSandboxError::Invalid);
+    }
+    let mut count = 0_usize;
+    for component in path[1..].split(|byte| *byte == b'/') {
+        count = count.checked_add(1).ok_or(WorkerSandboxError::Invalid)?;
+        if count > MAX_CGROUP_COMPONENTS
+            || component.is_empty()
+            || component.len() > MAX_CGROUP_COMPONENT_BYTES
+            || matches!(component, b"." | b"..")
+            || component.ends_with(b" (deleted)")
+            || component
+                .iter()
+                .any(|byte| *byte == 0 || *byte < b' ' || *byte == 0x7f)
+        {
+            return Err(WorkerSandboxError::Invalid);
+        }
+    }
+    Ok(path.into())
+}
+
+fn ensure_filesystem_type<Fd: AsFd>(
+    descriptor: &Fd,
+    expected_magic: i64,
+) -> Result<(), WorkerSandboxError> {
+    let filesystem = fstatfs(descriptor).map_err(rustix_io)?;
+    if i128::from(filesystem.f_type) != i128::from(expected_magic) {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    Ok(())
+}
+
+fn ensure_cgroup2<Fd: AsFd>(descriptor: &Fd) -> Result<(), WorkerSandboxError> {
+    ensure_filesystem_type(descriptor, CGROUP2_SUPER_MAGIC)
+}
+
+fn ensure_procfs<Fd: AsFd>(descriptor: &Fd) -> Result<(), WorkerSandboxError> {
+    ensure_filesystem_type(descriptor, PROC_SUPER_MAGIC)
+}
+
+fn open_process_file<Fd: AsFd>(
+    process_directory: &Fd,
+    name: &str,
+) -> Result<OwnedFd, WorkerSandboxError> {
+    Ok(openat2(
+        process_directory,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(rustix_io)?)
+}
+
+fn open_process_magic_link<Fd: AsFd>(
+    process_directory: &Fd,
+    name: &str,
+    flags: OFlags,
+) -> Result<OwnedFd, WorkerSandboxError> {
+    // `exe` and `ns/cgroup` are procfs magic links by definition. Their names are fixed here,
+    // relative to the already pinned exact process directory; no caller-controlled path enters
+    // this resolution.
+    Ok(openat2(
+        process_directory,
+        name,
+        flags | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::empty(),
+    )
+    .map_err(rustix_io)?)
+}
+
+fn resolve_service_cgroup<Fd: AsFd>(
+    cgroup_root: &Fd,
+    absolute_path: &[u8],
+) -> Result<OwnedFd, WorkerSandboxError> {
+    let relative = if absolute_path == b"/" {
+        &b"."[..]
+    } else {
+        absolute_path
+            .strip_prefix(b"/")
+            .ok_or(WorkerSandboxError::Invalid)?
+    };
+    Ok(openat2(
+        cgroup_root,
+        OsStr::from_bytes(relative),
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_XDEV
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(rustix_io)?)
+}
+
+fn capture_recovery_anchor(
+    process_directory: &OwnedFd,
+    child_pid: u32,
+) -> Result<PinnedWorkerRecoveryAnchor, WorkerSandboxError> {
+    let pid = NonZeroU32::new(child_pid).ok_or(WorkerSandboxError::Invalid)?;
+    ensure_procfs(process_directory)?;
+    let process_directory_identity = descriptor_identity(process_directory, FileType::Directory)?;
+    let boot_id_file = open(
+        "/proc/sys/kernel/random/boot_id",
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    ensure_procfs(&boot_id_file)?;
+    let boot_id_file_identity = descriptor_identity(&boot_id_file, FileType::RegularFile)?;
+    let boot_id = parse_boot_id(&read_bounded_descriptor(&boot_id_file, BOOT_ID_BYTES)?)?;
+    let stat = open_process_file(process_directory, "stat")?;
+    ensure_procfs(&stat)?;
+    let _ = descriptor_identity(&stat, FileType::RegularFile)?;
+    let process_start_ticks =
+        parse_process_start_ticks(&read_bounded_descriptor(&stat, MAX_PROC_STAT_BYTES)?, pid)?;
+    let executable = open_process_magic_link(process_directory, "exe", OFlags::PATH)?;
+    let executable_identity = descriptor_identity(&executable, FileType::RegularFile)?;
+    let parent_executable = open(
+        "/proc/self/exe",
+        OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    if descriptor_identity(&parent_executable, FileType::RegularFile)? != executable_identity {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+
+    let cgroup_namespace = open_process_magic_link(process_directory, "ns/cgroup", OFlags::RDONLY)?;
+    let cgroup_namespace_identity =
+        typed_namespace_identity(&cgroup_namespace, libc::CLONE_NEWCGROUP)?;
+    let parent_cgroup_namespace = open(
+        "/proc/self/ns/cgroup",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    if typed_namespace_identity(&parent_cgroup_namespace, libc::CLONE_NEWCGROUP)?
+        != cgroup_namespace_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+
+    let cgroup_record = open_process_file(process_directory, "cgroup")?;
+    ensure_procfs(&cgroup_record)?;
+    let _ = descriptor_identity(&cgroup_record, FileType::RegularFile)?;
+    let service_cgroup_path = parse_unified_cgroup_path(&read_bounded_descriptor(
+        &cgroup_record,
+        MAX_PROC_CGROUP_BYTES,
+    )?)?;
+    let parent_cgroup_record = open(
+        "/proc/self/cgroup",
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    ensure_procfs(&parent_cgroup_record)?;
+    let _ = descriptor_identity(&parent_cgroup_record, FileType::RegularFile)?;
+    let parent_service_cgroup_path = parse_unified_cgroup_path(&read_bounded_descriptor(
+        &parent_cgroup_record,
+        MAX_PROC_CGROUP_BYTES,
+    )?)?;
+    if parent_service_cgroup_path != service_cgroup_path {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    let cgroup_root = open(
+        "/sys/fs/cgroup",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    ensure_cgroup2(&cgroup_root)?;
+    let cgroup_root_identity = descriptor_identity(&cgroup_root, FileType::Directory)?;
+    let service_cgroup = resolve_service_cgroup(&cgroup_root, &service_cgroup_path)?;
+    ensure_cgroup2(&service_cgroup)?;
+    let service_cgroup_identity = descriptor_identity(&service_cgroup, FileType::Directory)?;
+    if service_cgroup_identity.device != cgroup_root_identity.device {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+
+    let anchor = PinnedWorkerRecoveryAnchor {
+        process_directory_identity,
+        boot_id_file,
+        boot_id_file_identity,
+        boot_id,
+        pid,
+        process_start_ticks,
+        executable,
+        executable_identity,
+        cgroup_namespace,
+        cgroup_namespace_identity,
+        cgroup_root,
+        cgroup_root_identity,
+        service_cgroup,
+        service_cgroup_identity,
+        service_cgroup_path,
+    };
+    verify_bootstrap_recovery_anchor(process_directory, &anchor)?;
+    Ok(anchor)
+}
+
+fn verify_bootstrap_recovery_anchor(
+    process_directory: &OwnedFd,
+    anchor: &PinnedWorkerRecoveryAnchor,
+) -> Result<(), WorkerSandboxError> {
+    verify_recovery_anchor(process_directory, anchor, true)
+}
+
+fn verify_sealed_recovery_anchor(
+    process_directory: &OwnedFd,
+    anchor: &PinnedWorkerRecoveryAnchor,
+) -> Result<(), WorkerSandboxError> {
+    verify_recovery_anchor(process_directory, anchor, false)
+}
+
+fn attest_protected_magic_link_denials(
+    process_directory: &OwnedFd,
+) -> Result<(), WorkerSandboxError> {
+    // A successful post-transition open would mean that the parent has an unexpected ptrace-like
+    // authority or that the child's credential/dumpability boundary was not applied. Neither is
+    // part of the fixed production service contract.
+    for (name, flags) in [("exe", OFlags::PATH), ("ns/cgroup", OFlags::RDONLY)] {
+        match open_process_magic_link(process_directory, name, flags) {
+            Err(WorkerSandboxError::Io(error)) if error.raw_os_error() == Some(libc::EACCES) => {}
+            Ok(_) | Err(_) => return Err(WorkerSandboxError::Mismatch),
+        }
+    }
+    Ok(())
+}
+
+fn verify_recovery_anchor(
+    process_directory: &OwnedFd,
+    anchor: &PinnedWorkerRecoveryAnchor,
+    reopen_protected_magic_links: bool,
+) -> Result<(), WorkerSandboxError> {
+    ensure_procfs(process_directory)?;
+    if descriptor_identity(process_directory, FileType::Directory)?
+        != anchor.process_directory_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    ensure_procfs(&anchor.boot_id_file)?;
+    if descriptor_identity(&anchor.boot_id_file, FileType::RegularFile)?
+        != anchor.boot_id_file_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    if parse_boot_id(&read_bounded_descriptor(
+        &anchor.boot_id_file,
+        BOOT_ID_BYTES,
+    )?)? != anchor.boot_id
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    let stat = open_process_file(process_directory, "stat")?;
+    ensure_procfs(&stat)?;
+    let _ = descriptor_identity(&stat, FileType::RegularFile)?;
+    if parse_process_start_ticks(
+        &read_bounded_descriptor(&stat, MAX_PROC_STAT_BYTES)?,
+        anchor.pid,
+    )? != anchor.process_start_ticks
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+
+    if descriptor_identity(&anchor.executable, FileType::RegularFile)? != anchor.executable_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    if reopen_protected_magic_links {
+        let executable = open_process_magic_link(process_directory, "exe", OFlags::PATH)?;
+        if descriptor_identity(&executable, FileType::RegularFile)? != anchor.executable_identity {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+    }
+
+    if typed_namespace_identity(&anchor.cgroup_namespace, libc::CLONE_NEWCGROUP)?
+        != anchor.cgroup_namespace_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    if reopen_protected_magic_links {
+        let cgroup_namespace =
+            open_process_magic_link(process_directory, "ns/cgroup", OFlags::RDONLY)?;
+        if typed_namespace_identity(&cgroup_namespace, libc::CLONE_NEWCGROUP)?
+            != anchor.cgroup_namespace_identity
+        {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+    }
+
+    ensure_cgroup2(&anchor.cgroup_root)?;
+    if descriptor_identity(&anchor.cgroup_root, FileType::Directory)? != anchor.cgroup_root_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    ensure_cgroup2(&anchor.service_cgroup)?;
+    if descriptor_identity(&anchor.service_cgroup, FileType::Directory)?
+        != anchor.service_cgroup_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    let cgroup_record = open_process_file(process_directory, "cgroup")?;
+    ensure_procfs(&cgroup_record)?;
+    let _ = descriptor_identity(&cgroup_record, FileType::RegularFile)?;
+    let current_path = parse_unified_cgroup_path(&read_bounded_descriptor(
+        &cgroup_record,
+        MAX_PROC_CGROUP_BYTES,
+    )?)?;
+    if current_path != anchor.service_cgroup_path {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    let current_service_cgroup = resolve_service_cgroup(&anchor.cgroup_root, &current_path)?;
+    if descriptor_identity(&current_service_cgroup, FileType::Directory)?
+        != anchor.service_cgroup_identity
+    {
+        return Err(WorkerSandboxError::Mismatch);
+    }
+    Ok(())
+}
+
 pub(super) fn current_network_namespace_identity()
 -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
     let descriptor = open(
@@ -932,7 +1528,11 @@ pub(super) struct WorkerKernelPins {
     pidfd: OwnedFd,
     process_directory: OwnedFd,
     network_namespace: Option<OwnedFd>,
+    network_namespace_identity: Option<NetworkNamespaceIdentity>,
     final_descriptor_directory: Option<OwnedFd>,
+    recovery_anchor: PinnedWorkerRecoveryAnchor,
+    recovery_anchor_protected_links_attested: bool,
+    recovery_anchor_sealed: bool,
 }
 
 impl WorkerKernelPins {
@@ -945,11 +1545,16 @@ impl WorkerKernelPins {
             Mode::empty(),
         )
         .map_err(rustix_io)?;
+        let recovery_anchor = capture_recovery_anchor(&process_directory, child.id())?;
         Ok(Self {
             pidfd,
             process_directory,
             network_namespace: None,
+            network_namespace_identity: None,
             final_descriptor_directory: None,
+            recovery_anchor,
+            recovery_anchor_protected_links_attested: false,
+            recovery_anchor_sealed: false,
         })
     }
 
@@ -964,7 +1569,10 @@ impl WorkerKernelPins {
     ) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
         if !parent_network_namespace.is_valid()
             || self.network_namespace.is_some()
+            || self.network_namespace_identity.is_some()
             || self.final_descriptor_directory.is_some()
+            || self.recovery_anchor_protected_links_attested
+            || self.recovery_anchor_sealed
         {
             return Err(WorkerSandboxError::Invalid);
         }
@@ -978,7 +1586,13 @@ impl WorkerKernelPins {
             required_group,
             status,
         )?;
+        // `exe` and `ns/cgroup` become unreadable to the capability-bounded parent when the child
+        // changes uid/gid and Linux clears dumpability. Revalidate those magic links only here:
+        // the independently observed worker filter already forbids re-exec and namespace changes,
+        // while the child still has its pre-transition identity.
+        verify_bootstrap_recovery_anchor(&self.process_directory, &self.recovery_anchor)?;
         self.ensure_alive()?;
+        self.recovery_anchor_protected_links_attested = true;
         Ok(worker_network_namespace)
     }
 
@@ -993,11 +1607,17 @@ impl WorkerKernelPins {
     ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
         let plan = WorkerSandboxPlan::production(parent_seccomp, identity)?;
         self.ensure_alive()?;
+        if !self.recovery_anchor_protected_links_attested || self.recovery_anchor_sealed {
+            return Err(WorkerSandboxError::Invalid);
+        }
         let network_namespace = self
             .network_namespace
             .as_ref()
             .ok_or(WorkerSandboxError::Invalid)?;
-        let worker_network_namespace = namespace_identity(network_namespace)?;
+        let worker_network_namespace = typed_network_namespace_identity(network_namespace)?;
+        if self.network_namespace_identity != Some(worker_network_namespace) {
+            return Err(WorkerSandboxError::Mismatch);
+        }
         let descriptor_directory = self
             .final_descriptor_directory
             .take()
@@ -1014,7 +1634,13 @@ impl WorkerKernelPins {
             capabilities: status.capabilities,
         };
         plan.verify(snapshot)?;
+        // Post-transition proof uses only retained protected descriptors plus procfs records which
+        // remain readable without CAP_SYS_PTRACE. The pre-transition attestation and monotone
+        // seccomp denials bind the protected magic links across the credential transition.
+        attest_protected_magic_link_denials(&self.process_directory)?;
+        verify_sealed_recovery_anchor(&self.process_directory, &self.recovery_anchor)?;
         self.ensure_alive()?;
+        self.recovery_anchor_sealed = true;
         Ok(snapshot)
     }
 
@@ -1024,13 +1650,20 @@ impl WorkerKernelPins {
         parent_pid: u32,
         child_pid: u32,
     ) -> Result<NetworkNamespaceIdentity, WorkerSandboxError> {
-        if self.network_namespace.is_some() || self.final_descriptor_directory.is_some() {
+        if self.network_namespace.is_some()
+            || self.network_namespace_identity.is_some()
+            || self.final_descriptor_directory.is_some()
+            || self.recovery_anchor_protected_links_attested
+            || self.recovery_anchor_sealed
+        {
             return Err(WorkerSandboxError::Invalid);
         }
         self.ensure_alive()?;
         let (worker_network_namespace, _) =
             self.observe_and_pin_common(parent_pid, child_pid, false)?;
+        verify_bootstrap_recovery_anchor(&self.process_directory, &self.recovery_anchor)?;
         self.ensure_alive()?;
+        self.recovery_anchor_protected_links_attested = true;
         Ok(worker_network_namespace)
     }
 
@@ -1044,7 +1677,10 @@ impl WorkerKernelPins {
     ) -> Result<WorkerSandboxSnapshot, WorkerSandboxError> {
         let plan = WorkerSandboxPlan::production(parent_seccomp, fixture.identity)?;
         self.ensure_alive()?;
-        if self.network_namespace.is_none() {
+        if self.network_namespace.is_none()
+            || !self.recovery_anchor_protected_links_attested
+            || self.recovery_anchor_sealed
+        {
             return Err(WorkerSandboxError::Invalid);
         }
         let descriptor_directory = self
@@ -1054,7 +1690,9 @@ impl WorkerKernelPins {
         validate_exact_worker_descriptors(read_numeric_directory(descriptor_directory)?)?;
         let _ = self.observe_status(parent_pid, child_pid)?;
         plan.verify(fixture)?;
+        verify_sealed_recovery_anchor(&self.process_directory, &self.recovery_anchor)?;
         self.ensure_alive()?;
+        self.recovery_anchor_sealed = true;
         Ok(fixture)
     }
 
@@ -1099,7 +1737,10 @@ impl WorkerKernelPins {
         child_pid: u32,
         require_single_task: bool,
     ) -> Result<(NetworkNamespaceIdentity, ParsedProcessStatus), WorkerSandboxError> {
-        if self.network_namespace.is_some() || self.final_descriptor_directory.is_some() {
+        if self.network_namespace.is_some()
+            || self.network_namespace_identity.is_some()
+            || self.final_descriptor_directory.is_some()
+        {
             return Err(WorkerSandboxError::Invalid);
         }
         let status = self.observe_status(parent_pid, child_pid)?;
@@ -1143,21 +1784,26 @@ impl WorkerKernelPins {
             Mode::empty(),
         )
         .map_err(rustix_io)?;
-        let worker_network_namespace = namespace_identity(&network_namespace)?;
+        let worker_network_namespace = typed_network_namespace_identity(&network_namespace)?;
         self.network_namespace = Some(network_namespace);
+        self.network_namespace_identity = Some(worker_network_namespace);
         Ok((worker_network_namespace, status))
     }
 
     pub(super) fn has_complete_pins(&self) -> bool {
         self.network_namespace.is_some()
+            && self.network_namespace_identity.is_some()
+            && self.recovery_anchor_protected_links_attested
+            && self.recovery_anchor_sealed
     }
 
     /// Duplicates the retained worker network namespace into an independent affine call pin.
     ///
-    /// Exact nsfs device and inode identity is read from both owners, and the duplicate itself
-    /// keeps that namespace alive until its planned call finishes or is rejected. This method does
-    /// not probe the worker process: callers which hold a registry lock may use it only as an FD
-    /// ownership operation and must check liveness outside that lock.
+    /// The already-attested identity snapshot is copied without proof reads; the duplicate itself
+    /// keeps that namespace alive until its planned call finishes or is rejected. Callers which
+    /// hold a registry lock may use this only as an FD ownership operation. The affine pin's
+    /// comparison methods re-read its typed identity, and process liveness is checked outside the
+    /// registry lock.
     pub(super) fn duplicate_network_namespace_pin(
         &self,
     ) -> Result<PinnedWorkerNetworkNamespace, WorkerSandboxError> {
@@ -1165,11 +1811,10 @@ impl WorkerKernelPins {
             .network_namespace
             .as_ref()
             .ok_or(WorkerSandboxError::Invalid)?;
-        let identity = typed_network_namespace_identity(source)?;
+        let identity = self
+            .network_namespace_identity
+            .ok_or(WorkerSandboxError::Invalid)?;
         let descriptor = duplicate_descriptor_cloexec(source)?;
-        if typed_network_namespace_identity(&descriptor)? != identity {
-            return Err(WorkerSandboxError::Mismatch);
-        }
         Ok(PinnedWorkerNetworkNamespace {
             descriptor,
             identity,
@@ -1180,36 +1825,48 @@ impl WorkerKernelPins {
     pub(super) fn duplicate_recovery_identity_pins(
         &self,
     ) -> Result<PinnedWorkerRecoveryIdentity, WorkerSandboxError> {
+        if !self.recovery_anchor_protected_links_attested || !self.recovery_anchor_sealed {
+            return Err(WorkerSandboxError::Invalid);
+        }
         let network_namespace = self.duplicate_network_namespace_pin()?;
         let pidfd = duplicate_descriptor_cloexec(&self.pidfd)?;
         let process_directory = duplicate_descriptor_cloexec(&self.process_directory)?;
         Ok(PinnedWorkerRecoveryIdentity {
             pidfd,
-            _process_directory: process_directory,
+            process_directory,
             network_namespace,
+            recovery_anchor: self.recovery_anchor.duplicate()?,
         })
     }
 
     #[cfg(test)]
     pub(super) fn fixture() -> Self {
+        let process_directory = open(
+            format!("/proc/{}", std::process::id()),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("pin current test process directory");
+        let network_namespace = open(
+            "/proc/thread-self/ns/net",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("pin current test network namespace");
+        let network_namespace_identity = typed_network_namespace_identity(&network_namespace)
+            .expect("type current test network namespace");
+        let recovery_anchor = capture_recovery_anchor(&process_directory, std::process::id())
+            .expect("pin current test recovery anchor");
         Self {
             pidfd: pidfd_open(rustix::process::getpid(), PidfdFlags::empty())
                 .expect("pin current test process"),
-            process_directory: open(
-                format!("/proc/{}", std::process::id()),
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::empty(),
-            )
-            .expect("pin current test process directory"),
-            network_namespace: Some(
-                open(
-                    "/proc/thread-self/ns/net",
-                    OFlags::RDONLY | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .expect("pin current test network namespace"),
-            ),
+            process_directory,
+            network_namespace: Some(network_namespace),
+            network_namespace_identity: Some(network_namespace_identity),
             final_descriptor_directory: None,
+            recovery_anchor,
+            recovery_anchor_protected_links_attested: true,
+            recovery_anchor_sealed: true,
         }
     }
 }
@@ -1683,6 +2340,8 @@ pub(super) fn validate_post_exec_descriptor_allowlist(
 mod tests {
     use super::*;
 
+    const PROTECTED_LINK_ACCESS_FIXTURE: &str = "VOLPAROSSA_TEST_RECOVERY_PROTECTED_LINK_ACCESS";
+
     fn worker_identity() -> WorkerIdentity {
         WorkerIdentity::fixture(987, 988)
     }
@@ -1859,6 +2518,358 @@ mod tests {
             pin.matches_descriptor(&current)
                 .expect("compare independently retained namespace")
         );
+    }
+
+    fn process_stat(pid: u32, command: &str, start_ticks: &str) -> Vec<u8> {
+        format!("{pid} ({command}) S 1 1 1 0 -1 4194304 1 0 0 0 1 1 0 0 20 0 1 0 {start_ticks}\n")
+            .into_bytes()
+    }
+
+    #[test]
+    fn recovery_boot_id_parser_is_canonical_exact_and_nonzero() {
+        let canonical = b"00112233-4455-6677-8899-aabbccddeeff\n";
+        assert_eq!(
+            parse_boot_id(canonical).expect("canonical boot id"),
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ]
+        );
+        for invalid in [
+            b"00000000-0000-0000-0000-000000000000\n".as_slice(),
+            b"00112233-4455-6677-8899-AABBCCDDEEFF\n",
+            b"001122334455-6677-8899-aabbccddeeff\n",
+            b"00112233-4455-6677-8899-aabbccddeeff",
+            b"00112233-4455-6677-8899-aabbccddeeff\n\n",
+        ] {
+            assert!(parse_boot_id(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn recovery_process_stat_parser_binds_pid_start_ticks_and_weird_comm() {
+        let pid = NonZeroU32::new(43).expect("nonzero pid");
+        assert_eq!(
+            parse_process_start_ticks(&process_stat(43, "worker) name", "987654"), pid)
+                .expect("bounded proc stat"),
+            NonZeroU64::new(987_654).expect("nonzero ticks")
+        );
+        for invalid in [
+            process_stat(44, "worker", "987654"),
+            process_stat(43, "worker", "0"),
+            process_stat(43, "worker", "0987654"),
+            process_stat(43, "sixteen-byte-name", "987654"),
+            b"43 (worker) S 1 1 1\n".to_vec(),
+            process_stat(43, "worker", "18446744073709551616"),
+            vec![b'x'; MAX_PROC_STAT_BYTES + 1],
+        ] {
+            assert!(parse_process_start_ticks(&invalid, pid).is_err());
+        }
+    }
+
+    #[test]
+    fn unified_cgroup_parser_rejects_ambiguity_and_traversal() {
+        assert_eq!(
+            parse_unified_cgroup_path(b"0::/\n").expect("root cgroup"),
+            Box::<[u8]>::from(b"/".as_slice())
+        );
+        assert_eq!(
+            parse_unified_cgroup_path(b"0::/system.slice/volparossa-helper.service\n")
+                .expect("systemd service cgroup"),
+            Box::<[u8]>::from(b"/system.slice/volparossa-helper.service".as_slice())
+        );
+        for invalid in [
+            b"1:name=/legacy\n".as_slice(),
+            b"0::relative\n",
+            b"0::/a\n0::/b\n",
+            b"0::/a/../b\n",
+            b"0::/a/./b\n",
+            b"0::/a//b\n",
+            b"0::/a/\n",
+            b"0::/system.slice/volparossa-helper.service (deleted)\n",
+            b"0::/a\0b\n",
+        ] {
+            assert!(parse_unified_cgroup_path(invalid).is_err());
+        }
+        let oversized_component = [
+            b"0::/".as_slice(),
+            vec![b'x'; MAX_CGROUP_COMPONENT_BYTES + 1].as_slice(),
+            b"\n",
+        ]
+        .concat();
+        assert!(parse_unified_cgroup_path(&oversized_component).is_err());
+        let too_many_components = [
+            b"0::/".as_slice(),
+            vec![b'a'; MAX_CGROUP_COMPONENTS * 2 + 1].as_slice(),
+            b"\n",
+        ]
+        .concat();
+        let too_many_components = too_many_components
+            .into_iter()
+            .enumerate()
+            .map(|(index, byte)| {
+                if index >= 4 && index % 2 == 1 && byte == b'a' {
+                    b'/'
+                } else {
+                    byte
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(parse_unified_cgroup_path(&too_many_components).is_err());
+    }
+
+    #[test]
+    fn recovery_reads_are_bounded_segmented_and_restart_at_offset_zero() {
+        use std::io::Write as _;
+
+        let mut file = tempfile::tempfile().expect("temporary recovery evidence");
+        let evidence = vec![b'x'; 2 * 1_024 + 17];
+        file.write_all(&evidence).expect("write segmented evidence");
+        assert_eq!(
+            read_bounded_descriptor(&file, evidence.len()).expect("segmented pread"),
+            evidence
+        );
+        assert_eq!(
+            read_bounded_descriptor(&file, evidence.len()).expect("repeat from offset zero"),
+            evidence
+        );
+        assert!(read_bounded_descriptor(&file, evidence.len() - 1).is_err());
+    }
+
+    #[test]
+    fn protected_link_access_transition_child_fixture() {
+        use std::io::{Read as _, Write as _};
+
+        if std::env::var_os(PROTECTED_LINK_ACCESS_FIXTURE).is_none() {
+            return;
+        }
+
+        let mut control = [0_u8; 1];
+        io::stderr()
+            .write_all(b"P")
+            .expect("publish pre-transition readiness");
+        io::stderr().flush().expect("flush readiness");
+        io::stdin()
+            .read_exact(&mut control)
+            .expect("receive dumpability transition");
+        nix::sys::prctl::set_dumpable(false).expect("clear child dumpability");
+        io::stderr()
+            .write_all(b"D")
+            .expect("publish protected-access transition");
+        io::stderr().flush().expect("flush transition");
+        let _ = io::stdin().read_exact(&mut control);
+    }
+
+    #[test]
+    fn dumpability_boundary_uses_retained_anchor_without_reopening_magic_links() {
+        use std::{
+            io::{Read as _, Write as _},
+            process::{Command, Stdio},
+        };
+
+        let mut child = Command::new("/proc/self/exe")
+            .arg("--exact")
+            .arg("worker_sandbox::tests::protected_link_access_transition_child_fixture")
+            .arg("--nocapture")
+            .env(PROTECTED_LINK_ACCESS_FIXTURE, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn exact recovery access fixture");
+        let mut child_input = child.stdin.take().expect("fixture control input");
+        let mut child_evidence = child.stderr.take().expect("fixture evidence output");
+        let mut signal = [0_u8; 1];
+        child_evidence
+            .read_exact(&mut signal)
+            .expect("receive pre-transition readiness");
+        assert_eq!(signal, *b"P");
+
+        let pins = WorkerKernelPins::pin_process(&child).expect("capture pre-transition anchor");
+        child_input
+            .write_all(b"D")
+            .expect("request dumpability transition");
+        child_evidence
+            .read_exact(&mut signal)
+            .expect("receive protected-access transition");
+        assert_eq!(signal, *b"D");
+
+        let error =
+            verify_bootstrap_recovery_anchor(&pins.process_directory, &pins.recovery_anchor)
+                .expect_err("protected proc magic links must no longer be reopenable");
+        assert!(matches!(
+            error,
+            WorkerSandboxError::Io(ref error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && error.raw_os_error() == Some(libc::EACCES)
+        ));
+        attest_protected_magic_link_denials(&pins.process_directory)
+            .expect("both protected magic links deny exact EACCES");
+        verify_sealed_recovery_anchor(&pins.process_directory, &pins.recovery_anchor)
+            .expect("retained descriptors and readable records remain exact");
+
+        child_input.write_all(b"X").expect("release access fixture");
+        assert!(child.wait().expect("wait for access fixture").success());
+    }
+
+    #[test]
+    fn cgroup_resolution_refuses_symlinks_and_parent_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary cgroup resolver root");
+        fs::create_dir(temporary.path().join("target")).expect("create target");
+        symlink("target", temporary.path().join("link")).expect("create symlink");
+        let root = open(
+            temporary.path(),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("open resolver root");
+        assert!(resolve_service_cgroup(&root, b"/target").is_ok());
+        assert!(resolve_service_cgroup(&root, b"/link").is_err());
+        assert!(resolve_service_cgroup(&root, b"/../target").is_err());
+    }
+
+    #[test]
+    fn complete_recovery_anchor_is_repeatable_affine_and_exact() {
+        let mut unsealed = WorkerKernelPins::fixture();
+        unsealed.recovery_anchor_sealed = false;
+        assert!(unsealed.duplicate_recovery_identity_pins().is_err());
+
+        let pins = WorkerKernelPins::fixture();
+        let recovery = pins
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate full recovery pins");
+        let first = recovery
+            .verified_recovery_anchor_parts()
+            .expect("first complete proof");
+        let second = recovery
+            .verified_recovery_anchor_parts()
+            .expect("repeat proof from offset zero");
+        assert_eq!(first, second);
+        assert_eq!(first.pid.get(), std::process::id());
+        assert_ne!(first.boot_id, [0; 16]);
+        assert_ne!(first.process_start_ticks.get(), 0);
+        assert_ne!(first.executable_device.get(), 0);
+        assert_ne!(first.executable_inode.get(), 0);
+        assert_ne!(first.service_cgroup_inode.get(), 0);
+
+        drop(pins);
+        assert_eq!(
+            recovery
+                .verified_recovery_anchor_parts()
+                .expect("duplicate owns every retained pin after source drop"),
+            first
+        );
+    }
+
+    #[test]
+    fn complete_recovery_anchor_rejects_each_wrong_retained_object() {
+        let mut wrong_boot = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_boot.recovery_anchor.boot_id_file = File::open("/dev/null")
+            .expect("open wrong boot object")
+            .into();
+        assert!(wrong_boot.verified_recovery_anchor_parts().is_err());
+
+        let mut wrong_process_directory = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_process_directory.process_directory = open(
+            "/tmp",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("open wrong process directory");
+        assert!(
+            wrong_process_directory
+                .verified_recovery_anchor_parts()
+                .is_err()
+        );
+
+        let mut wrong_start_ticks = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_start_ticks.recovery_anchor.process_start_ticks = NonZeroU64::new(
+            wrong_start_ticks
+                .recovery_anchor
+                .process_start_ticks
+                .get()
+                .checked_add(1)
+                .expect("fixture ticks increment"),
+        )
+        .expect("nonzero fixture ticks");
+        assert!(wrong_start_ticks.verified_recovery_anchor_parts().is_err());
+
+        let mut wrong_executable = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_executable.recovery_anchor.executable =
+            open("/dev/null", OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
+                .expect("open wrong executable object");
+        assert!(wrong_executable.verified_recovery_anchor_parts().is_err());
+
+        let mut wrong_cgroup_namespace = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_cgroup_namespace.recovery_anchor.cgroup_namespace = open(
+            "/proc/self/ns/net",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open wrong namespace type");
+        assert!(
+            wrong_cgroup_namespace
+                .verified_recovery_anchor_parts()
+                .is_err()
+        );
+
+        let mut wrong_cgroup = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_cgroup.recovery_anchor.service_cgroup = open(
+            "/tmp",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("open wrong cgroup object");
+        assert!(wrong_cgroup.verified_recovery_anchor_parts().is_err());
+
+        let mut wrong_cgroup_root = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_cgroup_root.recovery_anchor.cgroup_root = open(
+            "/tmp",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("open wrong cgroup root");
+        assert!(wrong_cgroup_root.verified_recovery_anchor_parts().is_err());
+
+        let mut wrong_cgroup_path = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        wrong_cgroup_path.recovery_anchor.service_cgroup_path =
+            Box::from(b"/definitely-not-the-service-cgroup".as_slice());
+        assert!(wrong_cgroup_path.verified_recovery_anchor_parts().is_err());
+    }
+
+    #[test]
+    fn recovery_pidfd_reports_real_child_exit() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn bounded liveness fixture");
+        let mut recovery = WorkerKernelPins::fixture()
+            .duplicate_recovery_identity_pins()
+            .expect("duplicate anchor");
+        recovery.pidfd =
+            pidfd_open(Pid::from_child(&child), PidfdFlags::empty()).expect("pin child pidfd");
+        recovery.ensure_alive().expect("child alive");
+        child.kill().expect("kill fixture child");
+        child.wait().expect("reap fixture child");
+        assert!(recovery.ensure_alive().is_err());
     }
 
     #[test]
