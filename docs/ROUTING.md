@@ -9,7 +9,7 @@ state.
 
 Every active or backup path is `client -> exactly one datapath relay -> selected exit`. Parallel
 paths use different relays and the same exit. One control relay is selected before the exit and is
-bound to every exit-facing v3 operation for that route attempt. It differs from the exit by node ID
+bound to every exit-facing v4 operation for that route attempt. It differs from the exit by node ID
 and Peer ID. It may also become one datapath relay only through its own permit, real probe,
 selection, authorization, and grant.
 
@@ -24,10 +24,10 @@ defaults false, and is rejected in production.
 
 The required order is:
 
-1. Directly fetch and verify a relay-capable `/volparossa/advertisement/3`, then choose its node as
+1. Directly fetch and verify a relay-capable `/volparossa/advertisement/4`, then choose its node as
    the control relay. Direct provenance can never mint exit capability.
 2. Ask that control relay to fetch candidate exit advertisements over
-   `/volparossa/exit-forward/3` and `/volparossa/exit-forward-upstream/3`. A combined-role node is
+   `/volparossa/exit-forward/4` and `/volparossa/exit-forward-upstream/4`. A combined-role node is
    usable as an exit only from exclusively forwarded provenance: direct-then-forwarded is rejected,
    while forwarded-then-direct withdraws and quarantines exit capability for the advertisement
    lifetime. Select an exit distinct by node ID and Peer ID from the control relay and every
@@ -35,13 +35,13 @@ The required order is:
 3. Create a fresh Ed25519 session key and request an exit capacity hold through the control relay.
    The hold declares path count, policy, transport, rates, and lifetime but reveals no relay list.
 4. Obtain an exit-signed permit for every prospective relay through the same control relay, execute
-   a real controlled client-relay-exit probe on `/volparossa/datapath-relay/3`, verify both-leg
+   a real controlled client-relay-exit probe on `/volparossa/datapath-relay/4`, verify both-leg
    evidence, and only then select final datapath relays.
 5. Build the exact helper `Prepare` request, register its intent with tag-35
    `BindHelperRuntime`, then send that prebuilt Prepare on the same authenticated helper stream.
 6. Finalize the strictly ordered relay set through the control relay; verify the exit grant and
    every exact relay authorization.
-7. Request each selected relay grant directly over `/volparossa/datapath-relay/3` and verify its
+7. Request each selected relay grant directly over `/volparossa/datapath-relay/4` and verify its
    nested exit authorization and helper-bound endpoints.
 8. Send each exact relay grant to the exit through the control relay and require an exit-signed
    confirmation receipt bound to the exact confirmation bytes.
@@ -52,7 +52,7 @@ The required order is:
 All calls share one absolute setup deadline. The only retryable reservation outcome is genuinely
 ambiguous after dispatch: resend the exact bytes with the same operation ID, peers, and original
 deadline while every signed scope remains live. A received `Rejected` or fail-closed backend
-`Unavailable` ends that setup. Cancellation is not a retry reason, and v1/v2 is never negotiated
+`Unavailable` ends that setup. Cancellation is not a retry reason, and peer-control v1/v2/v3 is never negotiated
 or used as fallback.
 
 The local Bind-plus-Prepare subsequence has one absolute five-second HelperClient budget inside the
@@ -290,7 +290,7 @@ active host network.
 
 ## Current evidence boundary
 
-The v3 wire types, service state machines, forwarding codecs, helper plan/call/commit supervisor, and
+The v4 wire types, service state machines, forwarding codecs, helper plan/call/commit supervisor, and
 authorization binding have unprivileged tests. They are not proof of a live route. The production
 two-leg probe producer does not exist. The actor-linearized candidate snapshot and staged preflight
 described above are dormant and report no production-usable candidates. Helper `Prepare`

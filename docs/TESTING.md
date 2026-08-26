@@ -41,11 +41,11 @@ idempotent cleanup planning. These tests are not dataplane or privacy evidence.
 among three real libp2p swarms over process-local MemoryTransport. It proves a client cannot send an
 exit request directly to the exit, then carries the same canonical wrapper client -> control relay
 -> exit and the signed response back. Its probe case proves
-`/volparossa/datapath-relay/3` framing while the production handler returns a received
+`/volparossa/datapath-relay/4` framing while the production handler returns a received
 fail-closed `Unavailable` without exposing a fake probe event.
 
-Discovery unit tests prove `/volparossa/advertisement/3` canonical bounds and reject request
-versions 1, 2, and future values plus the retired direct-reservation v2 identifiers. Protocol,
+Discovery unit tests prove `/volparossa/advertisement/4` canonical bounds and reject request
+versions 1, 2, 3, and future values plus the retired direct-reservation v2 identifiers. Protocol,
 reservation, exit, and relay tests cover fresh session identities, hold/permit/finalize/grant/
 confirmation/receipt binding, exact successful retries, replay/expiry, capacity rollback, and
 removal of permanent client Peer ID fields. Test-only exact evidence verifiers do not make a real
@@ -55,8 +55,8 @@ The production agent route state machine is not yet proven end to end. Helper `P
 two-leg probing, client ingress, and live relay/exit publication remain fail-closed. None of the
 tests above creates a WireGuard device or host route or satisfies a privileged acceptance case.
 
-Fuzz targets are required for every externally controlled parser: all eighteen signed v3 control
-payloads, advertisement-v3, exit-forwarding-v3, datapath-relay-v3, policy manifests, local/helper/
+Fuzz targets are required for every externally controlled parser: all eighteen signed v4 control
+payloads, advertisement-v4, exit-forwarding-v4, datapath-relay-v4, policy manifests, local/helper/
 native control frames, `OPEN_TCP`, UDP authorization, TLS ClientHello, QUIC
 Initial/classification, peerlinks, and configuration. Inputs must reach the 512 KiB frame boundary
 and at least one byte beyond it. Corpora contain only synthetic metadata. Enforce allocation,

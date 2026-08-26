@@ -1,0 +1,632 @@
+syntax = "proto3";
+
+package volparossa.control.v4;
+
+// Hard-incompatible v4 schema evidence for SignedEnvelope and the eighteen
+// signed ControlPayload messages implemented by volparossa-protocol.
+//
+// This file deliberately does NOT specify the hand-written discovery,
+// forwarding, or datapath request-response wrapper structs. Those RPC frames
+// require separate parity evidence and must not be inferred from this schema.
+//
+// There are no maps. Set-like repeated fields MUST be strictly sorted and
+// unique. Receivers MUST reject decoded input that does not re-encode
+// byte-for-byte to the received canonical prost encoding. Protocol v1, v2, v3,
+// and future versions are rejected without fallback.
+
+enum ControlMessageType {
+  CONTROL_MESSAGE_TYPE_UNSPECIFIED = 0;
+  CONTROL_MESSAGE_TYPE_NODE_ADVERTISEMENT = 1;
+  CONTROL_MESSAGE_TYPE_EXIT_RESERVATION = 2;
+  CONTROL_MESSAGE_TYPE_RELAY_AUTHORIZATION = 3;
+  CONTROL_MESSAGE_TYPE_RELAY_RESERVATION = 4;
+  CONTROL_MESSAGE_TYPE_OPEN_TCP = 5;
+  CONTROL_MESSAGE_TYPE_UDP_FLOW_AUTHORIZATION = 6;
+  CONTROL_MESSAGE_TYPE_EXIT_CAPACITY_HOLD_REQUEST = 7;
+  CONTROL_MESSAGE_TYPE_RELAY_RESERVATION_REQUEST = 8;
+  CONTROL_MESSAGE_TYPE_EXIT_RESERVATION_CONFIRMATION = 9;
+  CONTROL_MESSAGE_TYPE_CLIENT_SESSION_CAPABILITY = 10;
+  CONTROL_MESSAGE_TYPE_EXIT_CAPACITY_HOLD = 11;
+  CONTROL_MESSAGE_TYPE_RELAY_PROBE_PERMIT_REQUEST = 12;
+  CONTROL_MESSAGE_TYPE_RELAY_PROBE_PERMIT = 13;
+  CONTROL_MESSAGE_TYPE_RELAY_PROBE_RESULT = 14;
+  CONTROL_MESSAGE_TYPE_EXIT_RESERVATION_FINALIZE_REQUEST = 15;
+  CONTROL_MESSAGE_TYPE_EXIT_CONFIRMATION_RECEIPT = 16;
+  CONTROL_MESSAGE_TYPE_PRESELECTION_OBSERVATION_RECEIPT = 17;
+  CONTROL_MESSAGE_TYPE_FORWARDED_PRESELECTION_ATTESTATION = 18;
+}
+
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_TCP_MPTCP = 1;
+  TRANSPORT_UDP_SINGLE_PATH = 2;
+  TRANSPORT_MULTIPATH_QUIC = 3;
+}
+
+enum ProbeAddressFamily {
+  PROBE_ADDRESS_FAMILY_UNSPECIFIED = 0;
+  PROBE_ADDRESS_FAMILY_IPV4 = 1;
+  PROBE_ADDRESS_FAMILY_IPV6 = 2;
+}
+
+enum PreselectionObservationRole {
+  PRESELECTION_OBSERVATION_ROLE_UNSPECIFIED = 0;
+  PRESELECTION_OBSERVATION_ROLE_RELAY = 1;
+  PRESELECTION_OBSERVATION_ROLE_EXIT = 2;
+}
+
+enum ObservationAddressFamily {
+  OBSERVATION_ADDRESS_FAMILY_UNSPECIFIED = 0;
+  OBSERVATION_ADDRESS_FAMILY_IPV4 = 1;
+  OBSERVATION_ADDRESS_FAMILY_IPV6 = 2;
+}
+
+message SignedEnvelope {
+  uint32 protocol_version = 1;
+  bytes sender_id = 2;
+  bytes sender_public_key = 3;
+  uint64 timestamp_ms = 4;
+  uint64 expires_at_ms = 5;
+  bytes nonce = 6;
+  ControlMessageType message_type = 7;
+  bytes payload = 8;
+  bytes payload_hash = 9;
+  bytes signature = 10;
+}
+
+// Ed25519 signs the ASCII domain "volparossa/control-envelope/v4", one NUL
+// byte, and the canonical encoding of this message.
+message EnvelopeSignatureInput {
+  uint32 protocol_version = 1;
+  bytes sender_id = 2;
+  bytes sender_public_key = 3;
+  uint64 timestamp_ms = 4;
+  uint64 expires_at_ms = 5;
+  bytes nonce = 6;
+  ControlMessageType message_type = 7;
+  bytes payload_hash = 8;
+}
+
+
+message PreselectionActorBinding {
+  bytes node_id = 1;
+  bytes peer_id = 2;
+  bytes public_key = 3;
+  uint64 advertisement_sequence = 4;
+  uint64 advertisement_expires_at_ms = 5;
+  // A future producer MUST copy the exact SignedEnvelope.payload_hash from the
+  // same freshly cryptographically verified canonical NodeAdvertisement. A0
+  // validates only this value's non-zero 32-byte shape and exact transcript echo.
+  bytes advertisement_payload_hash = 6;
+  uint64 capability_expires_at_ms = 7;
+}
+
+message PreselectionObservationScope {
+  PreselectionObservationRole role = 1;
+  Transport transport = 2;
+  ObservationAddressFamily address_family = 3;
+  uint64 policy_version = 4;
+  bytes policy_hash = 5;
+  uint64 policy_expires_at_ms = 6;
+}
+
+// This request is deliberately unsigned and carries no route, batch, session,
+// reservation, capacity, endpoint, or dispatch authority. A future caller MUST
+// CSPRNG-generate a fresh unique 32-byte challenge for every observation request,
+// challenged subject (direct relay or forwarded exit), and attempt and MUST
+// never reuse it across requests, subjects, or attempts. A0 checks only
+// 32-byte/non-zero shape and has no caller or uniqueness registry. The forwarded
+// control intentionally echoes the exit-subject challenge in a distinct signed
+// envelope with its own nonce and time window; it is not separately challenged.
+// The request lifetime is at most five seconds and its exact canonical encoding
+// is at most 4096 bytes.
+//
+// request_hash is SHA-256 of the ASCII domain
+// "volparossa/preselection-observation-request/v4", one NUL byte, the exact
+// canonical request byte length as unsigned u32 big-endian, and those exact
+// canonical unsigned request bytes.
+message PreselectionObservationRequest {
+  uint32 protocol_version = 1;
+  bytes challenge = 2;
+  PreselectionActorBinding actor = 3;
+  PreselectionObservationScope scope = 4;
+  PreselectionActorBinding forwarded_control = 5;
+  uint64 created_at_ms = 6;
+  uint64 expires_at_ms = 7;
+}
+
+message PreselectionObservationReceipt {
+  bytes request_hash = 1;
+  bytes challenge = 2;
+  PreselectionActorBinding actor = 3;
+  PreselectionObservationScope scope = 4;
+  uint64 observed_at_ms = 5;
+  uint64 valid_until_ms = 6;
+  bytes nonce = 7;
+}
+
+// Actor receipt envelopes are at most 4096 bytes and have at most a 60-second
+// signed lifetime. A conforming Relay request/receipt binding requires
+// capability_expires_at_ms exactly equal to min(advertisement_expires_at_ms,
+// policy_expires_at_ms). A raw Exit receipt permits only a ceiling no later than
+// that own-actor minimum; the dedicated forwarded request/attestation verifier
+// requires the exit value exactly equal to min(exit advertisement expiry,
+// policy expiry, control capability expiry). A0 applies each envelope's own
+// TimePolicy and imposes no ordering between independently signed actor clocks.
+//
+// Prefix bytes are exactly three octets for public IPv4 /24 or six octets for
+// public IPv6 /48. No host address or port is carried. This is a control-signed
+// claim, not proof that a malicious control relay reported truthfully; a future
+// handler MUST derive it from the exact authenticated upstream connection.
+message ObservationNetworkPrefix {
+  ObservationAddressFamily address_family = 1;
+  bytes network_prefix = 2;
+}
+
+// Forwarded attestation envelopes are at most 8192 bytes and their exact nested
+// signed receipt is at most 4096 bytes. exit_receipt_hash is SHA-256 of the
+// ASCII domain "volparossa/preselection-observation-receipt/v4", one NUL byte,
+// the exact canonical nested signed-envelope length as unsigned u32 big-endian,
+// and those exact canonical signed-envelope bytes.
+message ForwardedPreselectionAttestation {
+  bytes request_hash = 1;
+  bytes challenge = 2;
+  bytes signed_exit_receipt = 3;
+  bytes exit_receipt_hash = 4;
+  PreselectionActorBinding control = 5;
+  PreselectionActorBinding exit = 6;
+  PreselectionObservationScope scope = 7;
+  ObservationNetworkPrefix upstream_network_prefix = 8;
+  uint64 observed_at_ms = 9;
+  uint64 valid_until_ms = 10;
+  bytes nonce = 11;
+}
+
+message AdvertisementRoles {
+  bool client = 1;
+  bool relay = 2;
+  bool exit = 3;
+}
+
+message AdvertisementCapabilities {
+  bool tcp_mptcp = 1;
+  bool udp_single_path = 2;
+  bool multipath_quic = 3;
+  bool ipv4 = 4;
+  bool ipv6 = 5;
+  bool udp_hole_punching = 6;
+}
+
+message AdvertisementCapacity {
+  uint64 operator_relay_limit_up_mbps = 1;
+  uint64 operator_relay_limit_down_mbps = 2;
+  uint64 operator_exit_limit_up_mbps = 3;
+  uint64 operator_exit_limit_down_mbps = 4;
+  uint64 currently_reserved_up_mbps = 5;
+  uint64 currently_reserved_down_mbps = 6;
+  uint64 estimated_free_up_mbps = 7;
+  uint64 estimated_free_down_mbps = 8;
+  uint32 active_relay_sessions = 9;
+  uint32 active_exit_sessions = 10;
+  uint32 free_relay_slots = 11;
+  uint32 free_exit_slots = 12;
+  uint32 sample_window_seconds = 13;
+}
+
+message AdvertisementNetwork {
+  string region = 1;
+  string country_code = 2;
+  uint32 asn = 3;
+  string ipv4_prefix_hint = 4;
+  string ipv6_prefix_hint = 5;
+  string operator_id = 6;
+}
+
+message AdvertisementQuality {
+  uint64 local_uptime_seconds = 1;
+  uint32 historical_uptime_ppm = 2;
+  uint32 historical_delivery_ratio_p25_ppm = 3;
+}
+
+message AdvertisementPolicy {
+  uint64 whitelist_version = 1;
+  bytes whitelist_hash = 2;
+}
+
+message WireguardEndpoint {
+  bytes public_key = 1;
+  bytes underlay_ip = 2;
+  uint32 listen_port = 3;
+}
+
+message NodeAdvertisement {
+  reserved 7;
+  reserved "wireguard";
+
+  bytes node_id = 1;
+  bytes peer_id = 2;
+  uint64 sequence_number = 3;
+  AdvertisementRoles roles = 4;
+  AdvertisementCapabilities capabilities = 5;
+  repeated string control_addresses = 6;
+  AdvertisementCapacity capacity = 8;
+  AdvertisementNetwork network = 9;
+  AdvertisementQuality quality = 10;
+  AdvertisementPolicy policy = 11;
+  uint64 measured_at_ms = 12;
+  uint64 expires_at_ms = 13;
+}
+
+message ExitCapacityHoldRequest {
+  reserved 5, 10;
+  reserved "client_peer_id", "relay_paths";
+
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes exit_node_id = 3;
+  bytes client_session_id = 4;
+  repeated Transport allowed_transports = 6;
+  uint64 reserved_up_mbps = 7;
+  uint64 reserved_down_mbps = 8;
+  uint32 maximum_paths = 9;
+  bytes policy_hash = 11;
+  uint64 created_at_ms = 12;
+  uint64 expires_at_ms = 13;
+  bytes nonce = 14;
+  bytes client_session_public_key = 15;
+  bytes control_relay_node_id = 16;
+  bytes control_relay_peer_id = 17;
+  bytes exit_peer_id = 18;
+  uint64 reservation_expires_at_ms = 19;
+  uint32 probe_permit_limit = 20;
+}
+
+message ClientSessionCapability {
+  bytes capability_id = 1;
+  bytes reservation_id = 2;
+  bytes route_context_id = 3;
+  bytes client_session_id = 4;
+  bytes client_session_public_key = 5;
+  bytes exit_node_id = 6;
+  bytes exit_boot_id = 7;
+  bytes control_relay_node_id = 8;
+  bytes control_relay_peer_id = 9;
+  bytes policy_hash = 10;
+  repeated Transport allowed_transports = 11;
+  uint64 reserved_up_mbps = 12;
+  uint64 reserved_down_mbps = 13;
+  uint32 maximum_paths = 14;
+  uint64 created_at_ms = 15;
+  uint64 expires_at_ms = 16;
+  bytes nonce = 17;
+  bytes exit_peer_id = 18;
+  uint32 probe_permit_limit = 19;
+}
+
+message ExitCapacityHold {
+  bytes hold_id = 1;
+  bytes client_session_capability = 2;
+  bytes reservation_id = 3;
+  bytes route_context_id = 4;
+  bytes exit_node_id = 5;
+  bytes exit_boot_id = 6;
+  bytes client_session_id = 7;
+  bytes policy_hash = 8;
+  repeated Transport allowed_transports = 9;
+  uint64 reserved_up_mbps = 10;
+  uint64 reserved_down_mbps = 11;
+  uint32 maximum_paths = 12;
+  uint64 created_at_ms = 13;
+  uint64 expires_at_ms = 14;
+  bytes nonce = 15;
+  bytes exit_peer_id = 16;
+  bytes control_relay_node_id = 17;
+  bytes control_relay_peer_id = 18;
+  uint64 reservation_expires_at_ms = 19;
+  uint32 probe_permit_limit = 20;
+}
+
+message RelayProbePermitRequest {
+  bytes probe_id = 1;
+  bytes exit_capacity_hold = 2;
+  bytes client_session_capability = 3;
+  uint32 path_id = 4;
+  bytes relay_node_id = 5;
+  bytes relay_peer_id = 6;
+  bytes client_session_id = 7;
+  bytes control_relay_node_id = 8;
+  bytes control_relay_peer_id = 9;
+  uint64 created_at_ms = 10;
+  uint64 expires_at_ms = 11;
+  bytes nonce = 12;
+  bytes exit_node_id = 13;
+  bytes exit_peer_id = 14;
+  Transport transport = 15;
+  ProbeAddressFamily address_family = 16;
+}
+
+message RelayProbePermit {
+  bytes probe_id = 1;
+  bytes hold_id = 2;
+  bytes capability_id = 3;
+  bytes reservation_id = 4;
+  bytes route_context_id = 5;
+  bytes client_session_id = 6;
+  bytes exit_node_id = 7;
+  bytes exit_boot_id = 8;
+  bytes control_relay_node_id = 9;
+  bytes control_relay_peer_id = 10;
+  bytes relay_node_id = 11;
+  bytes relay_peer_id = 12;
+  uint32 path_id = 13;
+  uint64 created_at_ms = 14;
+  uint64 expires_at_ms = 15;
+  bytes nonce = 16;
+  bytes exit_peer_id = 17;
+  bytes policy_hash = 18;
+  Transport transport = 19;
+  ProbeAddressFamily address_family = 20;
+}
+
+message ProbeLegEvidence {
+  uint64 up_capacity_mbps = 1;
+  uint64 down_capacity_mbps = 2;
+  uint64 rtt_micros = 3;
+  uint64 transmitted_bytes = 4;
+  uint64 received_bytes = 5;
+  uint64 window_started_at_ms = 6;
+  uint64 window_ended_at_ms = 7;
+  uint64 measured_at_ms = 8;
+}
+
+message RelayProbeResult {
+  bytes probe_id = 1;
+  bytes relay_probe_permit = 2;
+  bytes relay_node_id = 3;
+  bytes relay_peer_id = 4;
+  bytes exit_node_id = 5;
+  bytes exit_peer_id = 6;
+  bytes exit_boot_id = 7;
+  bytes hold_id = 8;
+  bytes capability_id = 9;
+  bytes reservation_id = 10;
+  bytes route_context_id = 11;
+  bytes client_session_id = 12;
+  bytes policy_hash = 13;
+  Transport transport = 14;
+  ProbeAddressFamily address_family = 15;
+  ProbeLegEvidence client_relay = 16;
+  ProbeLegEvidence relay_exit = 17;
+  uint64 measured_at_ms = 18;
+  uint64 expires_at_ms = 19;
+  bytes nonce = 20;
+}
+
+message FinalizedRelayPath {
+  reserved 5;
+  reserved "overlay_prefixes";
+
+  uint32 path_id = 1;
+  bytes relay_node_id = 2;
+  bytes relay_peer_id = 3;
+  bytes client_wireguard_public_key = 4;
+  bytes relay_probe_permit = 6;
+  bytes relay_probe_result = 7;
+}
+
+message ExitReservationFinalizeRequest {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes exit_node_id = 3;
+  bytes client_session_id = 4;
+  bytes client_session_capability = 5;
+  bytes exit_capacity_hold = 6;
+  repeated FinalizedRelayPath relay_paths = 7;
+  uint64 created_at_ms = 8;
+  uint64 expires_at_ms = 9;
+  bytes nonce = 10;
+  bytes control_relay_node_id = 11;
+  bytes control_relay_peer_id = 12;
+  bytes finalize_id = 13;
+  bytes exit_peer_id = 14;
+  // Required exact 32-byte commitment to the client's canonical 43-byte
+  // unpadded base64url bearer; the bearer itself is never serialized here.
+  bytes auth_commitment = 15;
+  // Required non-zero QUIC variable-length integer, at most 2^62 - 1.
+  uint64 masque_context_id = 16;
+  // Required exact non-zero 32-byte native client process identity.
+  bytes client_native_instance_id = 17;
+}
+
+message RelayReservationRequest {
+  reserved 2;
+  reserved "client_peer_id";
+
+  bytes client_session_id = 1;
+  bytes exit_authorization = 3;
+  uint64 created_at_ms = 4;
+  uint64 expires_at_ms = 5;
+  bytes nonce = 6;
+  WireguardEndpoint client_wireguard_endpoint = 7;
+  bytes client_session_capability = 8;
+  bytes exit_reservation = 9;
+}
+
+// Semantically required exit-signed identity for one native route. All hash
+// and instance fields are exact non-zero 32-byte values. tls_server_name is a
+// canonical lowercase ASCII multi-label DNS name of at most 253 bytes with
+// labels of at most 63 bytes. masque_context_id is in 1..=2^62-1.
+message NativeRouteIdentity {
+  bytes auth_commitment = 1;
+  bytes certificate_sha256 = 2;
+  bytes spki_sha256 = 3;
+  string tls_server_name = 4;
+  uint64 masque_context_id = 5;
+  bytes client_native_instance_id = 6;
+  bytes exit_native_instance_id = 7;
+}
+
+message ExitReservation {
+  reserved 5;
+  reserved "client_peer_id";
+
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes exit_node_id = 3;
+  bytes client_session_id = 4;
+  repeated Transport allowed_transports = 6;
+  uint64 reserved_up_mbps = 7;
+  uint64 reserved_down_mbps = 8;
+  uint32 maximum_paths = 9;
+  bytes policy_hash = 10;
+  uint64 created_at_ms = 11;
+  uint64 expires_at_ms = 12;
+  bytes nonce = 13;
+  bytes capability_id = 14;
+  bytes client_session_public_key = 15;
+  bytes exit_boot_id = 16;
+  bytes hold_id = 17;
+  bytes finalize_id = 18;
+  bytes control_relay_node_id = 19;
+  bytes control_relay_peer_id = 20;
+  bytes exit_peer_id = 21;
+  NativeRouteIdentity native_route_identity = 22;
+}
+
+message RelayAuthorization {
+  reserved 7, 13;
+  reserved "client_peer_id", "overlay_prefixes";
+
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  uint32 path_id = 3;
+  bytes relay_node_id = 4;
+  bytes exit_node_id = 5;
+  bytes client_session_id = 6;
+  repeated Transport allowed_transports = 8;
+  uint64 maximum_up_mbps = 9;
+  uint64 maximum_down_mbps = 10;
+  bytes client_wireguard_public_key = 11;
+  WireguardEndpoint exit_wireguard_endpoint = 12;
+  bytes policy_hash = 14;
+  uint64 created_at_ms = 15;
+  uint64 expires_at_ms = 16;
+  bytes nonce = 17;
+  bytes relay_peer_id = 18;
+  bytes capability_id = 19;
+  bytes client_session_public_key = 20;
+  bytes exit_boot_id = 21;
+  bytes hold_id = 22;
+  bytes finalize_id = 23;
+  bytes control_relay_node_id = 24;
+  bytes control_relay_peer_id = 25;
+  bytes exit_peer_id = 26;
+}
+
+message RelayReservation {
+  reserved 7, 15;
+  reserved "client_peer_id", "overlay_prefixes";
+
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  uint32 path_id = 3;
+  bytes relay_node_id = 4;
+  bytes exit_node_id = 5;
+  bytes client_session_id = 6;
+  repeated Transport allowed_transports = 8;
+  uint64 maximum_up_mbps = 9;
+  uint64 maximum_down_mbps = 10;
+  bytes client_wireguard_public_key = 11;
+  WireguardEndpoint relay_client_wireguard_endpoint = 12;
+  WireguardEndpoint relay_exit_wireguard_endpoint = 13;
+  WireguardEndpoint exit_wireguard_endpoint = 14;
+  bytes policy_hash = 16;
+  uint64 created_at_ms = 17;
+  uint64 expires_at_ms = 18;
+  bytes nonce = 19;
+  bytes exit_authorization = 20;
+  bytes relay_peer_id = 21;
+  bytes capability_id = 22;
+  bytes client_session_public_key = 23;
+  bytes exit_boot_id = 24;
+  bytes hold_id = 25;
+  bytes finalize_id = 26;
+  bytes control_relay_node_id = 27;
+  bytes control_relay_peer_id = 28;
+  bytes exit_peer_id = 29;
+}
+
+message ExitReservationConfirmation {
+  reserved 7;
+  reserved "client_peer_id";
+
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  uint32 path_id = 3;
+  bytes relay_node_id = 4;
+  bytes exit_node_id = 5;
+  bytes client_session_id = 6;
+  bytes policy_hash = 8;
+  bytes relay_reservation = 9;
+  uint64 created_at_ms = 10;
+  uint64 expires_at_ms = 11;
+  bytes nonce = 12;
+  bytes capability_id = 13;
+  bytes client_session_public_key = 14;
+  bytes exit_boot_id = 15;
+  bytes hold_id = 16;
+  bytes finalize_id = 17;
+  bytes control_relay_node_id = 18;
+  bytes control_relay_peer_id = 19;
+  bytes exit_peer_id = 20;
+}
+
+// finalized_bundle_hash is SHA-256 over the fixed v4 domain, u32-BE lengths,
+// the canonical final ExitReservation envelope, and the ordered exact
+// RelayAuthorization envelope set. confirmation_envelope_hash similarly binds
+// the fixed v4 domain, u32-BE length, and exact canonical confirmation bytes.
+message ExitConfirmationReceipt {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes client_session_id = 3;
+  bytes capability_id = 4;
+  bytes hold_id = 5;
+  bytes finalize_id = 6;
+  uint32 path_id = 7;
+  bytes finalized_bundle_hash = 8;
+  bytes control_relay_node_id = 9;
+  bytes control_relay_peer_id = 10;
+  bytes exit_node_id = 11;
+  bytes exit_peer_id = 12;
+  bytes exit_boot_id = 13;
+  uint64 created_at_ms = 14;
+  uint64 expires_at_ms = 15;
+  bytes nonce = 16;
+  bytes confirmation_envelope_hash = 17;
+}
+
+message OpenTcp {
+  bytes route_context_id = 1;
+  bytes flow_id = 2;
+  bytes client_ephemeral_id = 3;
+  string hostname = 4;
+  uint32 port = 5;
+  bytes policy_hash = 6;
+  uint64 timestamp_ms = 7;
+  uint64 expires_at_ms = 8;
+  bytes nonce = 9;
+}
+
+message UdpFlowAuthorization {
+  bytes route_context_id = 1;
+  bytes flow_id = 2;
+  bytes client_ephemeral_id = 3;
+  string hostname = 4;
+  bytes destination_ip = 5;
+  uint32 port = 6;
+  bytes policy_hash = 7;
+  uint32 idle_timeout_ms = 8;
+  uint64 timestamp_ms = 9;
+  uint64 expires_at_ms = 10;
+  bytes nonce = 11;
+}

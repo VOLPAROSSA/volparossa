@@ -51,9 +51,9 @@ esac
 TARGETS='node_advertisement
 policy_manifest
 control_plane
-advertisement_v3
-forwarding_v3
-datapath_relay_v3
+advertisement_v4
+forwarding_v4
+datapath_relay_v4
 tcp_open
 udp_authorization
 quic_classification

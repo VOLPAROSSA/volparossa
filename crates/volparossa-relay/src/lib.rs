@@ -959,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn verifies_v3_grants_reserves_capacity_and_signs_exact_acceptance() {
+    fn verifies_v4_grants_reserves_capacity_and_signs_exact_acceptance() {
         let fixture = SignedRouteFixture::new(1, &[Transport::UdpSinglePath], NOW_MS).unwrap();
         let metrics = MetricsRegistry::new();
         let mut service = service_for(&fixture, metrics.clone());

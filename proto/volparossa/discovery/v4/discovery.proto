@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package volparossa.discovery.v4;
+
+// Hard-incompatible v4 discovery RPC wrappers implemented by
+// volparossa-discovery. Protocol v1, v2, v3, and future protocol identifiers or
+// rpc_version values are rejected without fallback.
+//
+// All frames use canonical prost encoding: a receiver rejects input unless
+// decoding and re-encoding produces the exact original bytes. The two exit
+// forwarding protocol hops deliberately use distinct Rust types and libp2p
+// behaviours, but both encode the ExitForwardRequest/Response messages below.
+// A control relay forwards those bytes unchanged and performs no internal
+// retry.
+//
+// Protocol and fixed resource limits:
+//   /volparossa/advertisement/4
+//     request frame <= 64 bytes; response frame <= 524288 bytes;
+//     signed_envelope <= 262144 bytes.
+//   /volparossa/exit-forward/4
+//   /volparossa/exit-forward-upstream/4
+//     request or response frame <= 524288 bytes;
+//     each signed envelope <= 262144 bytes.
+//   /volparossa/datapath-relay/4
+//     request or response frame <= 524288 bytes;
+//     each signed envelope <= 262144 bytes.
+//
+// forward_id and request_id are 16 bytes. Node IDs and the control-relay
+// public key are 32 bytes. Peer IDs are non-empty canonical libp2p PeerId
+// encodings of at most 64 bytes. Absolute deadlines are non-zero. The signed
+// envelopes referenced below are volparossa.control.v4.SignedEnvelope bytes.
+
+enum ExitForwardOperation {
+  EXIT_FORWARD_OPERATION_UNSPECIFIED = 0;
+  EXIT_FORWARD_OPERATION_FETCH_EXIT_ADVERTISEMENT = 1;
+  EXIT_FORWARD_OPERATION_CAPACITY_HOLD = 2;
+  EXIT_FORWARD_OPERATION_PROBE_PERMIT = 3;
+  EXIT_FORWARD_OPERATION_FINALIZE_RESERVATION = 4;
+  EXIT_FORWARD_OPERATION_CONFIRM_RELAY = 5;
+}
+
+enum ForwardStatus {
+  FORWARD_STATUS_UNSPECIFIED = 0;
+  FORWARD_STATUS_GRANTED = 1;
+  FORWARD_STATUS_REJECTED = 2;
+  FORWARD_STATUS_UNAVAILABLE = 3;
+}
+
+enum DatapathRelayOperation {
+  DATAPATH_RELAY_OPERATION_UNSPECIFIED = 0;
+  // This is framing only. Production handling remains fail-closed and returns
+  // Unavailable until a safe, evidence-producing probe handshake exists.
+  DATAPATH_RELAY_OPERATION_EXECUTE_PROBE = 1;
+  DATAPATH_RELAY_OPERATION_RESERVE_PATH = 2;
+}
+
+message AdvertisementRequest {
+  // Exactly 4.
+  uint32 protocol_version = 1;
+}
+
+message AdvertisementResponse {
+  // Exactly one canonical v4 NodeAdvertisement SignedEnvelope.
+  bytes signed_envelope = 1;
+}
+
+message ExitForwardRequest {
+  // Exactly 4.
+  uint32 rpc_version = 1;
+  bytes forward_id = 2;
+  bytes control_relay_node_id = 3;
+  bytes control_relay_peer_id = 4;
+  bytes control_relay_public_key = 5;
+  bytes exit_peer_id = 6;
+  // Empty only for FETCH_EXIT_ADVERTISEMENT.
+  bytes exit_node_id = 7;
+  uint64 deadline_unix_ms = 8;
+  ExitForwardOperation operation = 9;
+  // Empty only for FETCH_EXIT_ADVERTISEMENT. Otherwise one exact canonical
+  // signed request envelope of the operation-specific v4 control type.
+  bytes canonical_request = 10;
+}
+
+message ExitForwardResponse {
+  // Exactly 4.
+  uint32 rpc_version = 1;
+  bytes forward_id = 2;
+  ExitForwardOperation operation = 3;
+  ForwardStatus status = 4;
+  bytes exit_node_id = 5;
+  bytes exit_peer_id = 6;
+  // Empty for REJECTED and UNAVAILABLE. GRANTED carries the exact ordered,
+  // operation-specific signed response set. A received canonical UNAVAILABLE
+  // is a valid final fail-closed RPC response, not a local transport error.
+  repeated bytes signed_responses = 7;
+}
+
+message DatapathRelayRequest {
+  // Exactly 4.
+  uint32 rpc_version = 1;
+  bytes request_id = 2;
+  bytes relay_node_id = 3;
+  bytes relay_peer_id = 4;
+  uint64 deadline_unix_ms = 5;
+  DatapathRelayOperation operation = 6;
+  bytes client_signed_request = 7;
+  // Present only for EXECUTE_PROBE; empty for RESERVE_PATH.
+  bytes exit_signed_authorization = 8;
+}
+
+message DatapathRelayResponse {
+  // Exactly 4.
+  uint32 rpc_version = 1;
+  bytes request_id = 2;
+  DatapathRelayOperation operation = 3;
+  ForwardStatus status = 4;
+  bytes relay_node_id = 5;
+  bytes relay_peer_id = 6;
+  // One operation-specific signed envelope for GRANTED; empty for REJECTED
+  // and UNAVAILABLE. ExecuteProbe is not evidence of production readiness.
+  bytes signed_response = 7;
+}

@@ -29,7 +29,7 @@ the kernel networking API, and systemd service boundaries.
 
 The selected control relay sees the client's authenticated control connection, the chosen exit,
 operation types, timing, and volume. It may drop, delay, replay, reorder, or substitute forwarding
-bytes. End-to-end signed v3 envelopes, exact full-byte comparison, bound node/Peer IDs, absolute
+bytes. End-to-end signed v4 envelopes, exact full-byte comparison, bound node/Peer IDs, absolute
 deadlines, and detail-free failures prevent it from minting a positive exit response. It performs
 no internal retry and forwards no permanent client Peer ID or public address upstream. It still
 learns that one client selected one exit and can correlate that fact with an exit if they collude.
@@ -92,7 +92,7 @@ eliminated.
 Provider records are untrusted capability hints. Relay/control-relay advertisements are fetched
 directly from their authenticated providers and verified for signature, sender binding, version,
 expiry, sequence, consistency, and resource bounds. Exit provider IDs are never directly dialed for
-advertisement retrieval; the selected control relay fetches exit advertisements over the two-hop v3
+advertisement retrieval; the selected control relay fetches exit advertisements over the two-hop v4
 protocols. Direct provenance cannot mint exit capability. Multiple independent bootstrap methods,
 remembered peers, mDNS, peerlinks, routing diversity, and no central all-node catalogue reduce
 single-source dependence. An eclipse can still suppress or bias available candidates; clients fail
@@ -107,10 +107,10 @@ exploration pool. Attackers may still waste setup time or perform selective serv
 
 ### Replay, downgrade, and resource exhaustion
 
-Signed peer-control messages require exactly version 3 and commit to sender/public key, creation and
+Signed peer-control messages require exactly version 4 and commit to sender/public key, creation and
 expiry, 256-bit nonce, type, and payload hash. Canonical encoding, strict field validation, maximum
 lifetimes, bounded replay caches, frame limits, timeouts, count limits, and fail-closed cache
-exhaustion address replay and parser abuse. Peer-control and advertisement versions 1 and 2 and all
+exhaustion address replay and parser abuse. Peer-control and advertisement versions 1, 2, and 3 and all
 future versions are rejected without negotiation or fallback. The threshold policy manifest's own
 version 2 and libp2p Circuit Relay v2 are independent protocols and are not downgrade paths. Peers
 can still consume bounded CPU, memory, sockets, bandwidth, and log volume, so per-peer/session/rate
@@ -138,7 +138,7 @@ an intentional security tradeoff.
 NAT can expose endpoint metadata, make mappings unstable, or let an attacker race coordinated UDP
 hole punching. Endpoint candidates and reservations are authenticated and bounded; reachability must
 be proven before activation and keepalive is limited. libp2p Circuit Relay v2 is control-plane
-connectivity only; it is legitimate alongside privacy-v3 but never an implicit WireGuard dataplane
+connectivity only; it is legitimate alongside privacy-v4 but never an implicit WireGuard dataplane
 fallback. Paths that cannot establish an authorized direct dataplane are rejected. The production
 two-leg probe producer does not exist yet, so the current runtime fails closed before this claim.
 

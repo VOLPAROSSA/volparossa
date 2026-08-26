@@ -9,7 +9,7 @@ use crate::{
     ProtocolError, decode_canonical, encode_canonical,
 };
 
-const SIGNATURE_DOMAIN: &[u8] = b"volparossa/control-envelope/v3\0";
+const SIGNATURE_DOMAIN: &[u8] = b"volparossa/control-envelope/v4\0";
 const NODE_ID_DOMAIN: &[u8] = b"volparossa/node-id/v1\0";
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 32;

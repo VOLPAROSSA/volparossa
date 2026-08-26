@@ -26,10 +26,10 @@ pub use volparossa_protocol::{
 };
 
 /// Client-to-control/direct-relay preselection observation protocol.
-pub const PRESELECTION_OBSERVATION_PROTOCOL: &str = "/volparossa/preselection-observation/3";
+pub const PRESELECTION_OBSERVATION_PROTOCOL: &str = "/volparossa/preselection-observation/4";
 /// Control-relay-to-exit preselection observation protocol.
 pub const PRESELECTION_OBSERVATION_UPSTREAM_PROTOCOL: &str =
-    "/volparossa/preselection-observation-upstream/3";
+    "/volparossa/preselection-observation-upstream/4";
 /// Exact transport timeout for both preselection observation behaviours.
 pub const PRESELECTION_OBSERVATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Per-behaviour concurrent inbound plus outbound stream ceiling.
@@ -735,7 +735,7 @@ mod tests {
         for wrong in [
             "/volparossa/preselection-observation/1",
             "/volparossa/preselection-observation/2",
-            "/volparossa/preselection-observation/4",
+            "/volparossa/preselection-observation/3",
             PRESELECTION_OBSERVATION_UPSTREAM_PROTOCOL,
         ] {
             assert!(
@@ -757,6 +757,22 @@ mod tests {
                 .await
                 .is_err()
         );
+        for wrong in [
+            "/volparossa/preselection-observation-upstream/1",
+            "/volparossa/preselection-observation-upstream/2",
+            "/volparossa/preselection-observation-upstream/3",
+            PRESELECTION_OBSERVATION_PROTOCOL,
+        ] {
+            assert!(
+                upstream_codec
+                    .read_request(
+                        &StreamProtocol::try_from_owned(wrong.to_owned()).expect("protocol"),
+                        &mut Cursor::new(forwarded.request.clone()),
+                    )
+                    .await
+                    .is_err()
+            );
+        }
         assert!(
             client_codec
                 .read_request(&upstream_protocol, &mut Cursor::new(direct.request.clone()),)
@@ -772,7 +788,7 @@ mod tests {
         assert!(ClientPreselectionObservationRequest::from_canonical(Vec::new()).is_err());
         assert!(ClientPreselectionObservationResponse::from_canonical(Vec::new()).is_err());
 
-        for version in [1, 2, 4] {
+        for version in [1, 2, 3, 5] {
             let mut envelope: SignedEnvelope =
                 decode_canonical(&direct.receipt, MAX_PRESELECTION_RECEIPT_SIZE)
                     .expect("receipt envelope");

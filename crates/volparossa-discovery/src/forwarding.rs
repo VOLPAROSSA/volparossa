@@ -19,11 +19,11 @@ use volparossa_protocol::{
 };
 
 /// Client-to-control-relay exit-forwarding protocol.
-pub const EXIT_FORWARD_PROTOCOL: &str = "/volparossa/exit-forward/3";
+pub const EXIT_FORWARD_PROTOCOL: &str = "/volparossa/exit-forward/4";
 /// Control-relay-to-exit forwarding protocol.
-pub const EXIT_FORWARD_UPSTREAM_PROTOCOL: &str = "/volparossa/exit-forward-upstream/3";
+pub const EXIT_FORWARD_UPSTREAM_PROTOCOL: &str = "/volparossa/exit-forward-upstream/4";
 /// Exact forwarding RPC schema version.
-pub const FORWARDING_RPC_VERSION: u32 = 3;
+pub const FORWARDING_RPC_VERSION: u32 = 4;
 /// Maximum canonical request or response frame size.
 pub const MAX_FORWARDING_FRAME_BYTES: u64 = 512 * 1024;
 /// Maximum combined inbound and outbound streams for either forwarding hop.
@@ -94,7 +94,7 @@ impl ExitForwardRequest {
     /// Construct and validate one canonical forwarding request.
     ///
     /// The exit node ID and canonical request are both empty only for an
-    /// advertisement fetch. Every other operation carries one v3 signed envelope.
+    /// advertisement fetch. Every other operation carries one v4 signed envelope.
     ///
     /// # Errors
     ///
@@ -132,7 +132,7 @@ impl ExitForwardRequest {
     ///
     /// # Errors
     ///
-    /// Returns an error for a non-v3, ambiguous, oversized, identity-inconsistent,
+    /// Returns an error for a non-v4, ambiguous, oversized, identity-inconsistent,
     /// or operation-inconsistent request.
     pub fn validate(&self) -> Result<(), ForwardingRpcError> {
         validate_version(self.rpc_version)?;
@@ -362,7 +362,7 @@ impl ExitForwardResponse {
     ///
     /// # Errors
     ///
-    /// Returns an error for a malformed, ambiguous, oversized, or non-v3 response.
+    /// Returns an error for a malformed, ambiguous, oversized, or non-v4 response.
     pub fn validate(&self) -> Result<(), ForwardingRpcError> {
         validate_version(self.rpc_version)?;
         validate_fixed_nonzero::<REQUEST_ID_LENGTH>(&self.forward_id)?;
@@ -967,10 +967,28 @@ mod tests {
         for wrong in [
             "/volparossa/exit-forward/1",
             "/volparossa/exit-forward/2",
+            "/volparossa/exit-forward/3",
             EXIT_FORWARD_UPSTREAM_PROTOCOL,
         ] {
             assert!(
                 client_codec
+                    .read_request(
+                        &StreamProtocol::try_from_owned(wrong.to_owned()).expect("protocol"),
+                        &mut Cursor::new(raw.clone()),
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+
+        for wrong in [
+            "/volparossa/exit-forward-upstream/1",
+            "/volparossa/exit-forward-upstream/2",
+            "/volparossa/exit-forward-upstream/3",
+            EXIT_FORWARD_PROTOCOL,
+        ] {
+            assert!(
+                upstream_codec
                     .read_request(
                         &StreamProtocol::try_from_owned(wrong.to_owned()).expect("protocol"),
                         &mut Cursor::new(raw.clone()),
@@ -1001,7 +1019,7 @@ mod tests {
     #[test]
     fn versions_operations_identities_and_request_types_fail_closed() {
         let mut request = advertisement_request();
-        for version in [1, 2, 4] {
+        for version in [1, 2, 3, 5] {
             request.rpc_version = version;
             assert!(matches!(
                 request.validate(),

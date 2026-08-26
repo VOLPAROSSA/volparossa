@@ -18,13 +18,13 @@ const NONCE_LENGTH: usize = 32;
 const MAX_RATE_MBPS: u64 = 1_000_000;
 const MAX_RESERVATION_LIFETIME_MS: u64 = 15 * 60 * 1_000;
 const MAX_PHASE_LIFETIME_MS: u64 = 30 * 1_000;
-const FINALIZED_BUNDLE_DOMAIN: &[u8] = b"volparossa/finalized-reservation-bundle/v3\0";
-const CONFIRMATION_ENVELOPE_DOMAIN: &[u8] = b"volparossa/exit-confirmation-envelope/v3\0";
+const FINALIZED_BUNDLE_DOMAIN: &[u8] = b"volparossa/finalized-reservation-bundle/v4\0";
+const CONFIRMATION_ENVELOPE_DOMAIN: &[u8] = b"volparossa/exit-confirmation-envelope/v4\0";
 const MAX_ADVERTISEMENT_LIFETIME_MS: u64 = 15 * 60 * 1_000;
 const MAX_CONTROL_ADDRESSES: usize = 16;
 const MAX_TRANSPORTS: usize = 3;
 
-/// Discriminator for signed v3 control-plane payloads.
+/// Discriminator for signed v4 control-plane payloads.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, prost::Enumeration)]
 #[repr(i32)]
@@ -284,6 +284,28 @@ pub struct ExitReservation {
     pub control_relay_peer_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "21")]
     pub exit_peer_id: Vec<u8>,
+    #[prost(message, optional, tag = "22")]
+    pub native_route_identity: Option<NativeRouteIdentity>,
+}
+
+/// Exit-signed identity and authentication commitment for one native route.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeRouteIdentity {
+    #[prost(bytes = "vec", tag = "1")]
+    pub auth_commitment: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub certificate_sha256: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub spki_sha256: Vec<u8>,
+    #[prost(string, tag = "4")]
+    pub tls_server_name: String,
+    #[prost(uint64, tag = "5")]
+    pub masque_context_id: u64,
+    #[prost(bytes = "vec", tag = "6")]
+    pub client_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub exit_native_instance_id: Vec<u8>,
 }
 
 /// Exit-signed authorization for one relay path.
@@ -637,6 +659,12 @@ impl ControlPayload for ExitReservation {
             &self.control_relay_node_id,
             &self.control_relay_peer_id,
         )?;
+        self.native_route_identity
+            .as_ref()
+            .ok_or(ProtocolError::InvalidField(
+                "exit_reservation.native_route_identity",
+            ))?
+            .validate()?;
         validate_transports(&self.allowed_transports)?;
         validate_rate(self.reserved_up_mbps, "exit_reservation.reserved_up_mbps")?;
         validate_rate(
@@ -667,6 +695,41 @@ impl ControlPayload for ExitReservation {
             envelope,
             "exit_reservation envelope binding",
         )
+    }
+}
+
+impl NativeRouteIdentity {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.auth_commitment,
+            "native_route_identity.auth_commitment",
+        )?;
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.certificate_sha256,
+            "native_route_identity.certificate_sha256",
+        )?;
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.spki_sha256,
+            "native_route_identity.spki_sha256",
+        )?;
+        validate_canonical_dns_name(
+            &self.tls_server_name,
+            "native_route_identity.tls_server_name",
+        )?;
+        if self.masque_context_id == 0 || self.masque_context_id > crate::MAX_MASQUE_CONTEXT_ID {
+            return Err(ProtocolError::InvalidField(
+                "native_route_identity.masque_context_id",
+            ));
+        }
+        require_nonzero_length::<KEY_LENGTH>(
+            &self.client_native_instance_id,
+            "native_route_identity.client_native_instance_id",
+        )?;
+        require_nonzero_length::<KEY_LENGTH>(
+            &self.exit_native_instance_id,
+            "native_route_identity.exit_native_instance_id",
+        )?;
+        Ok(())
     }
 }
 
@@ -1038,7 +1101,7 @@ pub fn verify_relay_reservation(
 
 /// Hash one exact canonical client-signed exit-confirmation envelope.
 ///
-/// The digest is SHA-256 over a fixed v3 domain, one unsigned 32-bit
+/// The digest is SHA-256 over a fixed v4 domain, one unsigned 32-bit
 /// big-endian byte length, and the exact canonical `SignedEnvelope` bytes.
 /// Signature verification remains the caller's mandatory preceding step.
 ///
@@ -1064,7 +1127,7 @@ pub fn exit_confirmation_envelope_hash(
 
 /// Hash one canonical finalized exit grant and its exact ordered authorization set.
 ///
-/// The digest is SHA-256 over the fixed v3 domain followed by each canonical
+/// The digest is SHA-256 over the fixed v4 domain followed by each canonical
 /// envelope framed with one unsigned 32-bit big-endian byte length. The exit
 /// grant is first and the authorizations follow in strictly increasing path order.
 ///
@@ -1495,13 +1558,17 @@ fn is_network_address(address: IpAddr, prefix_length: u8) -> bool {
 }
 
 fn validate_canonical_hostname(hostname: &str) -> Result<(), ProtocolError> {
+    validate_canonical_dns_name(hostname, "hostname")
+}
+
+fn validate_canonical_dns_name(hostname: &str, field: &'static str) -> Result<(), ProtocolError> {
     if hostname.is_empty()
         || hostname.len() > 253
         || hostname.ends_with('.')
         || hostname.bytes().any(|byte| byte.is_ascii_uppercase())
         || hostname.parse::<IpAddr>().is_ok()
     {
-        return Err(ProtocolError::InvalidField("hostname"));
+        return Err(ProtocolError::InvalidField(field));
     }
     let labels_valid = hostname.split('.').all(|label| {
         !label.is_empty()
@@ -1513,7 +1580,7 @@ fn validate_canonical_hostname(hostname: &str) -> Result<(), ProtocolError> {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     });
     if !labels_valid || !hostname.contains('.') {
-        return Err(ProtocolError::InvalidField("hostname"));
+        return Err(ProtocolError::InvalidField(field));
     }
     Ok(())
 }

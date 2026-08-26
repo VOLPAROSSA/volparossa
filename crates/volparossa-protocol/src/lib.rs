@@ -1,4 +1,4 @@
-//! Canonical, bounded VOLPAROSSA v3 control-plane messages.
+//! Canonical, bounded VOLPAROSSA v4 control-plane messages.
 //!
 //! The public verification API deliberately combines canonical protobuf
 //! decoding, Ed25519 verification, time validation, payload validation, and
@@ -8,6 +8,7 @@
 mod canonical;
 mod envelope;
 mod messages;
+mod native_route;
 mod preselection_observation;
 mod reservation_requests;
 
@@ -20,9 +21,13 @@ pub use envelope::{
 pub use messages::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
     AdvertisementQuality, AdvertisementRoles, ControlMessageType, ExitConfirmationReceipt,
-    ExitReservation, ExitReservationConfirmation, NodeAdvertisement, OpenTcp, RelayAuthorization,
-    RelayReservation, Transport, UdpFlowAuthorization, WireguardEndpoint,
+    ExitReservation, ExitReservationConfirmation, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
+    RelayAuthorization, RelayReservation, Transport, UdpFlowAuthorization, WireguardEndpoint,
     exit_confirmation_envelope_hash, finalized_reservation_bundle_hash, verify_relay_reservation,
+};
+pub use native_route::{
+    NATIVE_ROUTE_AUTH_BEARER_LENGTH, NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN,
+    native_route_auth_commitment,
 };
 pub use preselection_observation::{
     BoundDirectPreselectionTranscript, BoundForwardedPreselectionTranscript,
@@ -44,7 +49,10 @@ pub use reservation_requests::{
 use thiserror::Error;
 
 /// Current VOLPAROSSA control-plane protocol version.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// Largest valid MASQUE context identifier encoded as a QUIC variable-length integer.
+pub const MAX_MASQUE_CONTEXT_ID: u64 = (1_u64 << 62) - 1;
 
 /// Maximum accepted encoded control message size.
 pub const MAX_CONTROL_MESSAGE_SIZE: usize = 256 * 1024;
@@ -76,7 +84,7 @@ pub enum ProtocolError {
     #[error("non-canonical protobuf encoding")]
     NonCanonical,
 
-    /// A protocol version other than v3 was received.
+    /// A protocol version other than v4 was received.
     #[error("unsupported protocol version {0}")]
     UnsupportedVersion(u32),
 

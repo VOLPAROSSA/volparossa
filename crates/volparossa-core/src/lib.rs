@@ -26,7 +26,7 @@ pub use time::{TimeError, UnixTime};
 use serde::{Deserialize, Serialize};
 
 /// The incompatible control and advertisement protocol version implemented by this release.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// A transport advertised by a node or requested for a route.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]

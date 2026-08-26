@@ -36,10 +36,10 @@ use volparossa_policy::{
     TrustedMaintainer, VerificationPolicy, VerifiedManifest, sign_manifest, verify_manifest,
 };
 use volparossa_protocol::{
-    ClientSessionCapability, ExitReservation, OpenTcp, ProtocolError, RelayAuthorization,
-    RelayReservation, RelayReservationRequest, TimePolicy, Transport, UdpFlowAuthorization,
-    WireguardEndpoint, finalized_reservation_bundle_hash, generate_nonce, node_id_from_public_key,
-    sign_control_message,
+    ClientSessionCapability, ExitReservation, NativeRouteIdentity, OpenTcp, ProtocolError,
+    RelayAuthorization, RelayReservation, RelayReservationRequest, TimePolicy, Transport,
+    UdpFlowAuthorization, WireguardEndpoint, finalized_reservation_bundle_hash, generate_nonce,
+    node_id_from_public_key, sign_control_message,
 };
 use volparossa_wireguard::WireGuardPublicKey;
 
@@ -151,7 +151,7 @@ pub fn verified_development_manifest(
     DevelopmentPolicyFiles::generate(now_ms, rules).map(DevelopmentPolicyFiles::into_verified)
 }
 
-/// Cryptographically valid, random, short-lived finalized v3 route messages for tests.
+/// Cryptographically valid, random, short-lived finalized v4 route messages for tests.
 pub struct SignedRouteFixture {
     exit_key: SigningKey,
     client_session_key: SigningKey,
@@ -173,7 +173,7 @@ pub struct SignedRouteFixture {
 }
 
 impl SignedRouteFixture {
-    /// Generate a valid finalized v3 route with one through eight distinct relays.
+    /// Generate a valid finalized v4 route with one through eight distinct relays.
     ///
     /// This fixture bypasses the production probe-evidence provider solely to
     /// exercise downstream cryptographic service boundaries. It is not a
@@ -194,7 +194,7 @@ impl SignedRouteFixture {
         Self::new_with_path_ids(&path_ids, maximum_paths, maximum_paths, transports, now_ms)
     }
 
-    /// Generate a finalized v3 route with an independently bounded prospective probe scope.
+    /// Generate a finalized v4 route with an independently bounded prospective probe scope.
     ///
     /// The path IDs are the exact selected final paths. They must be strictly increasing and may
     /// be non-contiguous. The maximum path count is the capability's final upper bound, while the
@@ -206,7 +206,7 @@ impl SignedRouteFixture {
     /// closed.
     #[allow(
         clippy::too_many_lines,
-        reason = "one fixture constructor builds a single cryptographically consistent v3 route graph"
+        reason = "one fixture constructor builds a single cryptographically consistent v4 route graph"
     )]
     pub fn new_with_path_ids(
         path_ids: &[u32],
@@ -317,6 +317,15 @@ impl SignedRouteFixture {
             control_relay_node_id: control_relay_node_id.to_vec(),
             control_relay_peer_id: control_relay_peer_id.clone(),
             exit_peer_id: exit_peer_id.clone(),
+            native_route_identity: Some(NativeRouteIdentity {
+                auth_commitment: random_nonzero::<KEY_BYTES>().to_vec(),
+                certificate_sha256: random_nonzero::<KEY_BYTES>().to_vec(),
+                spki_sha256: random_nonzero::<KEY_BYTES>().to_vec(),
+                tls_server_name: "exit.volparossa.test".to_owned(),
+                masque_context_id: 1,
+                client_native_instance_id: random_nonzero::<KEY_BYTES>().to_vec(),
+                exit_native_instance_id: random_nonzero::<KEY_BYTES>().to_vec(),
+            }),
         };
         let exit_reservation = sign_control_message(
             &exit_payload,

@@ -2974,6 +2974,7 @@ fn build_parameters(
         expires_at_ms: deadlines.hard_expires_at_ms,
         setup_expires_at_unix,
         hard_expires_at_unix,
+        client_native_route_scope: None,
     })
 }
 

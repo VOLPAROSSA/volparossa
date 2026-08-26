@@ -16,9 +16,9 @@ low-latency timing and volume remain observable.
 | Local operator/root | potentially all local process and kernel state | no technical protection against hostile root is claimed |
 
 The client chooses and authenticates a control relay before looking up an exit. Exit advertisements
-and all exit RPCs cross `/volparossa/exit-forward/3` and
-`/volparossa/exit-forward-upstream/3`; the client never creates a direct exit control connection.
-A directly retrieved v3 advertisement can establish relay/control-relay provenance only. A
+and all exit RPCs cross `/volparossa/exit-forward/4` and
+`/volparossa/exit-forward-upstream/4`; the client never creates a direct exit control connection.
+A directly retrieved v4 advertisement can establish relay/control-relay provenance only. A
 combined-role node may be an exit only when this client process learned its advertisement
 exclusively through forwarding. Direct-then-forwarded provenance is rejected; forwarded-then-direct
 provenance withdraws and quarantines exit capability for the advertisement lifetime, because the

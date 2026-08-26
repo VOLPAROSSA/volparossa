@@ -4291,6 +4291,7 @@ dependencies = [
  "volparossa-test-support",
  "volparossa-udp",
  "volparossa-wireguard",
+ "zeroize",
 ]
 
 [[package]]
@@ -4473,6 +4474,7 @@ dependencies = [
 name = "volparossa-reservation"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "rand_core 0.6.4",
  "serde",
@@ -4480,6 +4482,7 @@ dependencies = [
  "volparossa-core",
  "volparossa-protocol",
  "volparossa-wireguard",
+ "zeroize",
 ]
 
 [[package]]

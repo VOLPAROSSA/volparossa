@@ -1,4 +1,4 @@
-//! Typed client construction and verification for the hard-incompatible v3 reservation rounds.
+//! Typed client construction and verification for the hard-incompatible v4 reservation rounds.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -6,6 +6,7 @@ use std::{
     net::IpAddr,
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::SigningKey;
 use rand_core::{OsRng, RngCore};
 use thiserror::Error;
@@ -13,20 +14,24 @@ use volparossa_protocol::{
     ClientSessionCapability, ControlMessageType, ControlPayload, ExitCapacityHold,
     ExitCapacityHoldRequest, ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
     ExitReservationFinalizeRequest, FinalizedRelayPath, MAX_CONTROL_MESSAGE_SIZE,
-    MAX_CONTROL_PAYLOAD_SIZE, OpenTcp, ProbeAddressFamily, ProbeLegEvidence, ProtocolError,
+    MAX_CONTROL_PAYLOAD_SIZE, MAX_MASQUE_CONTEXT_ID, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
+    NativeRouteIdentity, OpenTcp, ProbeAddressFamily, ProbeLegEvidence, ProtocolError,
     RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
     RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
     UdpFlowAuthorization, WireguardEndpoint, decode_canonical, exit_confirmation_envelope_hash,
-    finalized_reservation_bundle_hash, generate_nonce, node_id_from_public_key,
-    sign_control_message, verify_control_message, verify_relay_reservation,
+    finalized_reservation_bundle_hash, generate_nonce, native_route_auth_commitment,
+    node_id_from_public_key, sign_control_message, verify_control_message,
+    verify_relay_reservation,
 };
 use volparossa_wireguard::{
     ClientEndpointLease, HelperContextHandle, PublicWireGuardEndpoint, WireGuardPublicKey,
 };
+use zeroize::Zeroizing;
 
 const KEY_BYTES: usize = 32;
 const ID_BYTES: usize = 16;
 const MAX_LOCAL_PATH_LEASES: usize = 64;
+const MAX_PENDING_NATIVE_AUTHORIZATIONS: usize = 64;
 const MAX_PROTOCOL_PATHS: u32 = 8;
 
 /// Exact client-selected scope for one relay path.
@@ -73,6 +78,10 @@ pub struct ExitReservationIntent {
     pub hold_expires_at_ms: u64,
     /// Exclusive final capability and reservation expiry, at most 15 minutes.
     pub reservation_expires_at_ms: u64,
+    /// Exact non-zero MASQUE association selected for this route attempt.
+    pub masque_context_id: u64,
+    /// Exact native-process instance that will consume the resulting authorization.
+    pub client_native_instance_id: [u8; KEY_BYTES],
 }
 
 /// Verified exit-issued proof-of-possession and capacity hold.
@@ -227,6 +236,9 @@ pub struct SignedExitFinalizeRequest {
     encoded: Vec<u8>,
     finalize_id: [u8; ID_BYTES],
     paths: Vec<RelayPathIntent>,
+    auth_commitment: [u8; KEY_BYTES],
+    masque_context_id: u64,
+    client_native_instance_id: [u8; KEY_BYTES],
 }
 
 impl SignedExitFinalizeRequest {
@@ -246,6 +258,76 @@ impl SignedExitFinalizeRequest {
     #[must_use]
     pub fn relay_paths(&self) -> &[RelayPathIntent] {
         &self.paths
+    }
+
+    /// Public commitment to the affine route bearer retained only by this coordinator.
+    #[must_use]
+    pub const fn auth_commitment(&self) -> &[u8; KEY_BYTES] {
+        &self.auth_commitment
+    }
+
+    /// Exact non-zero MASQUE association signed for this finalization attempt.
+    #[must_use]
+    pub const fn masque_context_id(&self) -> u64 {
+        self.masque_context_id
+    }
+
+    /// Exact native-process instance authorized to consume this route bearer.
+    #[must_use]
+    pub const fn client_native_instance_id(&self) -> &[u8; KEY_BYTES] {
+        &self.client_native_instance_id
+    }
+}
+
+/// One confirmed, affine client authorization for starting the exact native route.
+///
+/// This type deliberately implements neither [`Clone`] nor [`Debug`]. Its bearer is wiped on
+/// drop and can leave the coordinator only once, after every exact relay-path confirmation was
+/// verified.
+pub struct ClientNativeRouteAuthorization {
+    reservation_id: [u8; ID_BYTES],
+    route_context_id: [u8; ID_BYTES],
+    finalize_id: [u8; ID_BYTES],
+    auth_bearer: Zeroizing<[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+    identity: NativeRouteIdentity,
+    expires_at_ms: u64,
+}
+
+impl ClientNativeRouteAuthorization {
+    /// Reservation identifier bound by the signed native-route identity.
+    #[must_use]
+    pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
+        &self.reservation_id
+    }
+
+    /// Route context to pass to the native process.
+    #[must_use]
+    pub const fn route_context_id(&self) -> &[u8; ID_BYTES] {
+        &self.route_context_id
+    }
+
+    /// Exact finalization attempt that produced this authorization.
+    #[must_use]
+    pub const fn finalize_id(&self) -> &[u8; ID_BYTES] {
+        &self.finalize_id
+    }
+
+    /// Canonical 43-byte route bearer. Callers must not log or persist it.
+    #[must_use]
+    pub fn auth_bearer(&self) -> &[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH] {
+        &self.auth_bearer
+    }
+
+    /// Exit-signed TLS, MASQUE, and native-instance identity for this exact bearer commitment.
+    #[must_use]
+    pub const fn native_route_identity(&self) -> &NativeRouteIdentity {
+        &self.identity
+    }
+
+    /// Signed hard expiry for the native route authorization.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
     }
 }
 
@@ -349,6 +431,20 @@ struct ClientPathState {
     expires_at_ms: u64,
 }
 
+struct PendingNativeRouteAuthorization {
+    reservation_id: [u8; ID_BYTES],
+    route_context_id: [u8; ID_BYTES],
+    auth_bearer: Zeroizing<[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]>,
+    auth_commitment: [u8; KEY_BYTES],
+    masque_context_id: u64,
+    client_native_instance_id: [u8; KEY_BYTES],
+    expires_at_ms: u64,
+    expected_path_ids: HashSet<u32>,
+    confirmed_path_ids: HashSet<u32>,
+    finalized_bundle_hash: Option<[u8; KEY_BYTES]>,
+    identity: Option<NativeRouteIdentity>,
+}
+
 /// Client-side fresh session signer, replay state and bounded endpoint leases.
 pub struct ReservationCoordinator {
     session_key: SigningKey,
@@ -357,6 +453,7 @@ pub struct ReservationCoordinator {
     probe_replay: ReplayCache,
     relay_replay: ReplayCache,
     client_paths: HashMap<ClientPathKey, ClientPathState>,
+    pending_native_authorizations: HashMap<[u8; ID_BYTES], PendingNativeRouteAuthorization>,
 }
 
 impl fmt::Debug for ReservationCoordinator {
@@ -366,6 +463,10 @@ impl fmt::Debug for ReservationCoordinator {
             .field("client_session_id", &self.client_session_id)
             .field("session_key", &"<redacted>")
             .field("client_paths", &self.client_paths.len())
+            .field(
+                "pending_native_authorizations",
+                &self.pending_native_authorizations.len(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -386,6 +487,7 @@ impl ReservationCoordinator {
             probe_replay: ReplayCache::new(replay_capacity)?,
             relay_replay: ReplayCache::new(replay_capacity)?,
             client_paths: HashMap::new(),
+            pending_native_authorizations: HashMap::new(),
         })
     }
 
@@ -774,8 +876,16 @@ impl ReservationCoordinator {
             )
             || expires_at_ms > hold.hold.expires_at_ms
             || created_at_ms >= expires_at_ms
+            || intent.masque_context_id == 0
+            || intent.masque_context_id > MAX_MASQUE_CONTEXT_ID
+            || intent.client_native_instance_id == [0; KEY_BYTES]
         {
             return Err(CoordinatorError::Scope("finalize phase scope"));
+        }
+        if self.pending_native_authorizations.len() >= MAX_PENDING_NATIVE_AUTHORIZATIONS {
+            return Err(CoordinatorError::Scope(
+                "pending native authorization capacity",
+            ));
         }
         let next_count = self
             .client_paths
@@ -871,7 +981,14 @@ impl ReservationCoordinator {
             generated.push((path_id, endpoint, probe));
         }
 
-        let finalize_id = random_nonzero_id();
+        let finalize_id = loop {
+            let candidate = random_nonzero_id();
+            if !self.pending_native_authorizations.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let auth_bearer = generate_native_route_bearer()?;
+        let auth_commitment = native_route_auth_commitment(auth_bearer.as_ref())?;
         let nonce = generate_nonce();
         let request = ExitReservationFinalizeRequest {
             reservation_id: intent.reservation_id.to_vec(),
@@ -902,6 +1019,9 @@ impl ReservationCoordinator {
             control_relay_peer_id: intent.control_relay_peer_id.clone(),
             finalize_id: finalize_id.to_vec(),
             exit_peer_id: intent.exit_peer_id.clone(),
+            auth_commitment: auth_commitment.to_vec(),
+            masque_context_id: intent.masque_context_id,
+            client_native_instance_id: intent.client_native_instance_id.to_vec(),
         };
         let encoded = sign_control_message(
             &request,
@@ -923,10 +1043,30 @@ impl ReservationCoordinator {
                 },
             );
         }
+        let expected_path_ids = paths.iter().map(|path| path.path_id).collect();
+        self.pending_native_authorizations.insert(
+            finalize_id,
+            PendingNativeRouteAuthorization {
+                reservation_id: intent.reservation_id,
+                route_context_id: intent.route_context_id,
+                auth_bearer,
+                auth_commitment,
+                masque_context_id: intent.masque_context_id,
+                client_native_instance_id: intent.client_native_instance_id,
+                expires_at_ms: intent.reservation_expires_at_ms,
+                expected_path_ids,
+                confirmed_path_ids: HashSet::new(),
+                finalized_bundle_hash: None,
+                identity: None,
+            },
+        );
         Ok(SignedExitFinalizeRequest {
             encoded,
             finalize_id,
             paths,
+            auth_commitment,
+            masque_context_id: intent.masque_context_id,
+            client_native_instance_id: intent.client_native_instance_id,
         })
     }
 
@@ -951,6 +1091,28 @@ impl ReservationCoordinator {
             || authenticated_exit_peer_id != intent.exit_peer_id
         {
             return Err(CoordinatorError::Scope("finalized exit response count"));
+        }
+        let pending_matches = self
+            .pending_native_authorizations
+            .get(&request.finalize_id)
+            .is_some_and(|pending| {
+                pending.reservation_id == intent.reservation_id
+                    && pending.route_context_id == intent.route_context_id
+                    && pending.auth_commitment == request.auth_commitment
+                    && pending.masque_context_id == request.masque_context_id
+                    && pending.client_native_instance_id == request.client_native_instance_id
+                    && pending.expected_path_ids.len() == request.paths.len()
+                    && request
+                        .paths
+                        .iter()
+                        .all(|path| pending.expected_path_ids.contains(&path.path_id))
+                    && pending.identity.is_none()
+                    && pending.finalized_bundle_hash.is_none()
+            });
+        if !pending_matches {
+            return Err(CoordinatorError::Scope(
+                "pending native authorization scope",
+            ));
         }
         let mut accepted = Vec::with_capacity(1 + relay_authorizations.len());
         let outcome = (|| {
@@ -994,17 +1156,34 @@ impl ReservationCoordinator {
             }
             let bundle_hash =
                 finalized_reservation_bundle_hash(&signed_exit_reservation, &relay_authorizations)?;
-            Ok(VerifiedFinalizedExitBundle {
-                signed_capability: hold.signed_capability.clone(),
-                signed_exit_reservation,
-                relay_authorizations,
-                finalized_bundle_hash: bundle_hash,
-            })
+            let identity = exit
+                .message()
+                .native_route_identity
+                .clone()
+                .ok_or(CoordinatorError::Scope("native route identity"))?;
+            Ok((
+                VerifiedFinalizedExitBundle {
+                    signed_capability: hold.signed_capability.clone(),
+                    signed_exit_reservation,
+                    relay_authorizations,
+                    finalized_bundle_hash: bundle_hash,
+                },
+                identity,
+            ))
         })();
         if outcome.is_err() {
             rollback(&mut self.exit_replay, &accepted);
         }
-        outcome
+        let (bundle, identity) = outcome?;
+        let pending = self
+            .pending_native_authorizations
+            .get_mut(&request.finalize_id)
+            .ok_or(CoordinatorError::Scope(
+                "pending native authorization scope",
+            ))?;
+        pending.finalized_bundle_hash = Some(bundle.finalized_bundle_hash);
+        pending.identity = Some(identity);
+        Ok(bundle)
     }
 
     /// Sign one short relay request embedding the exact capability and final exit grants.
@@ -1223,8 +1402,27 @@ impl ReservationCoordinator {
         )?;
         let entry = (*receipt.sender_id(), *receipt.nonce());
         let message = receipt.message();
-        let confirmation_hash = exit_confirmation_envelope_hash(signed_confirmation)?;
-        let valid = *receipt.sender_id() == grant.exit_node_id
+        let confirmation_hash = match exit_confirmation_envelope_hash(signed_confirmation) {
+            Ok(hash) => hash,
+            Err(error) => {
+                let _ = self.exit_replay.rollback(&entry.0, &entry.1);
+                return Err(error.into());
+            }
+        };
+        let pending_valid = self
+            .pending_native_authorizations
+            .get(&grant.finalize_id)
+            .is_some_and(|pending| {
+                pending.reservation_id == grant.reservation_id
+                    && pending.route_context_id == grant.route_context_id
+                    && pending.expires_at_ms > now_ms
+                    && pending.finalized_bundle_hash == Some(grant.finalized_bundle_hash)
+                    && pending.identity.is_some()
+                    && pending.expected_path_ids.contains(&grant.path_id)
+                    && !pending.confirmed_path_ids.contains(&grant.path_id)
+            });
+        let valid = pending_valid
+            && *receipt.sender_id() == grant.exit_node_id
             && message.reservation_id.as_slice() == grant.reservation_id
             && message.route_context_id.as_slice() == grant.route_context_id
             && message.client_session_id.as_slice() == self.client_session_id
@@ -1240,11 +1438,94 @@ impl ReservationCoordinator {
             && message.exit_peer_id == grant.exit_peer_id
             && message.exit_boot_id.as_slice() == grant.exit_boot_id;
         if valid {
-            Ok(())
+            let Some(pending) = self
+                .pending_native_authorizations
+                .get_mut(&grant.finalize_id)
+            else {
+                let _ = self.exit_replay.rollback(&entry.0, &entry.1);
+                return Err(CoordinatorError::Scope(
+                    "pending native authorization scope",
+                ));
+            };
+            if pending.confirmed_path_ids.insert(grant.path_id) {
+                Ok(())
+            } else {
+                let _ = self.exit_replay.rollback(&entry.0, &entry.1);
+                Err(CoordinatorError::Scope(
+                    "duplicate exit confirmation receipt",
+                ))
+            }
         } else {
             let _ = self.exit_replay.rollback(&entry.0, &entry.1);
             Err(CoordinatorError::Scope("exit confirmation receipt"))
         }
+    }
+
+    /// Consume one fully confirmed route bearer and its exact exit-signed native identity.
+    ///
+    /// The authorization is affine: a successful call removes it from coordinator state, and a
+    /// second call for the same finalization fails. Incomplete attempts remain retained so the
+    /// remaining exact path receipts can be verified. Expired attempts are removed and wiped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the attempt is missing, expired, lacks a verified signed identity,
+    /// or has not received the exact complete set of path confirmations.
+    pub fn take_native_route_authorization(
+        &mut self,
+        finalize_id: [u8; ID_BYTES],
+        now_ms: u64,
+    ) -> Result<ClientNativeRouteAuthorization, CoordinatorError> {
+        let Some(pending) = self.pending_native_authorizations.get(&finalize_id) else {
+            return Err(CoordinatorError::Scope(
+                "native route authorization unavailable",
+            ));
+        };
+        if pending.expires_at_ms <= now_ms {
+            let reservation_id = pending.reservation_id;
+            self.pending_native_authorizations
+                .retain(|_, pending| pending.reservation_id != reservation_id);
+            self.client_paths
+                .retain(|key, _| key.reservation_id != reservation_id);
+            return Err(CoordinatorError::Scope(
+                "native route authorization expired",
+            ));
+        }
+        let identity_matches = pending.identity.as_ref().is_some_and(|identity| {
+            identity.auth_commitment.as_slice() == pending.auth_commitment
+                && identity.masque_context_id == pending.masque_context_id
+                && identity.client_native_instance_id.as_slice()
+                    == pending.client_native_instance_id
+        });
+        let bearer_matches = native_route_auth_commitment(pending.auth_bearer.as_ref())
+            .is_ok_and(|commitment| commitment == pending.auth_commitment);
+        if pending.finalized_bundle_hash.is_none()
+            || !identity_matches
+            || !bearer_matches
+            || pending.expected_path_ids.is_empty()
+            || pending.confirmed_path_ids != pending.expected_path_ids
+        {
+            return Err(CoordinatorError::Scope(
+                "native route authorization is not fully confirmed",
+            ));
+        }
+        let pending = self
+            .pending_native_authorizations
+            .remove(&finalize_id)
+            .ok_or(CoordinatorError::Scope(
+                "native route authorization unavailable",
+            ))?;
+        let identity = pending
+            .identity
+            .ok_or(CoordinatorError::Scope("native route identity"))?;
+        Ok(ClientNativeRouteAuthorization {
+            reservation_id: pending.reservation_id,
+            route_context_id: pending.route_context_id,
+            finalize_id,
+            auth_bearer: pending.auth_bearer,
+            identity,
+            expires_at_ms: pending.expires_at_ms,
+        })
     }
 
     /// Return the exact public endpoint lease and opaque helper capabilities.
@@ -1267,6 +1548,8 @@ impl ReservationCoordinator {
         let before = self.client_paths.len();
         self.client_paths
             .retain(|key, _| key.reservation_id != reservation_id);
+        self.pending_native_authorizations
+            .retain(|_, pending| pending.reservation_id != reservation_id);
         before - self.client_paths.len()
     }
 
@@ -1275,6 +1558,8 @@ impl ReservationCoordinator {
         let before = self.client_paths.len();
         self.client_paths
             .retain(|_, state| state.expires_at_ms > now_ms);
+        self.pending_native_authorizations
+            .retain(|_, pending| pending.expires_at_ms > now_ms);
         before - self.client_paths.len()
     }
 }
@@ -1394,6 +1679,9 @@ fn same_final_exit_scope(
     let Ok(final_path_count) = u32::try_from(request.paths.len()) else {
         return false;
     };
+    let Some(native_identity) = response.native_route_identity.as_ref() else {
+        return false;
+    };
     response.reservation_id.as_slice() == intent.reservation_id
         && response.route_context_id.as_slice() == intent.route_context_id
         && response.exit_node_id.as_slice() == intent.exit_node_id
@@ -1414,6 +1702,9 @@ fn same_final_exit_scope(
         && response.finalize_id.as_slice() == request.finalize_id
         && response.control_relay_node_id.as_slice() == intent.control_relay_node_id
         && response.control_relay_peer_id == intent.control_relay_peer_id
+        && native_identity.auth_commitment.as_slice() == request.auth_commitment
+        && native_identity.masque_context_id == request.masque_context_id
+        && native_identity.client_native_instance_id.as_slice() == request.client_native_instance_id
 }
 
 fn same_authorization_scope(
@@ -1466,6 +1757,20 @@ fn random_nonzero_id() -> [u8; ID_BYTES] {
     }
 }
 
+fn generate_native_route_bearer()
+-> Result<Zeroizing<[u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]>, CoordinatorError> {
+    let mut entropy = Zeroizing::new([0_u8; KEY_BYTES]);
+    OsRng.fill_bytes(entropy.as_mut());
+    let mut bearer = Zeroizing::new([0_u8; NATIVE_ROUTE_AUTH_BEARER_LENGTH]);
+    let written = URL_SAFE_NO_PAD
+        .encode_slice(entropy.as_ref(), bearer.as_mut())
+        .map_err(|_| CoordinatorError::Scope("native route bearer encoding"))?;
+    if written != NATIVE_ROUTE_AUTH_BEARER_LENGTH {
+        return Err(CoordinatorError::Scope("native route bearer encoding"));
+    }
+    Ok(bearer)
+}
+
 fn wire_endpoint(endpoint: PublicWireGuardEndpoint) -> WireguardEndpoint {
     let underlay_ip = match endpoint.underlay_ip() {
         IpAddr::V4(address) => address.octets().to_vec(),
@@ -1514,20 +1819,32 @@ pub enum CoordinatorError {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{
+        cell::Cell,
+        collections::HashSet,
+        net::{IpAddr, Ipv4Addr},
+    };
 
     use ed25519_dalek::SigningKey;
     use volparossa_protocol::{
-        ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest,
-        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, ProbeAddressFamily, ProbeLegEvidence,
-        RelayProbePermit, RelayProbePermitRequest, RelayProbeResult, ReplayCache, SignedEnvelope,
-        TimePolicy, Transport, decode_canonical, generate_nonce, node_id_from_public_key,
-        sign_control_message, verify_control_message,
+        ClientSessionCapability, ControlMessageType, ExitCapacityHold, ExitCapacityHoldRequest,
+        ExitConfirmationReceipt, ExitReservation, ExitReservationFinalizeRequest,
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NATIVE_ROUTE_AUTH_BEARER_LENGTH,
+        NativeRouteIdentity, PROTOCOL_VERSION, ProbeAddressFamily, ProbeLegEvidence,
+        RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
+        ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
+        exit_confirmation_envelope_hash, generate_nonce, native_route_auth_commitment,
+        node_id_from_public_key, sign_control_message, verify_control_message,
+    };
+    use volparossa_wireguard::{
+        ClientEndpointLease, EndpointRole, HelperContextHandle, HelperLeaseHandle,
+        PublicWireGuardEndpoint, WireGuardPublicKey,
     };
 
     use super::{
         CoordinatorError, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
-        VerifiedExitCapacityHold,
+        SignedExitFinalizeRequest, VerifiedExitCapacityHold, VerifiedRelayGrant,
+        VerifiedRelayProbe, generate_native_route_bearer, wire_endpoint,
     };
 
     const NOW: u64 = 1_700_000_000_000;
@@ -1553,6 +1870,8 @@ mod tests {
             created_at_ms: NOW,
             hold_expires_at_ms: NOW + 20_000,
             reservation_expires_at_ms: NOW + 300_000,
+            masque_context_id: 41,
+            client_native_instance_id: [8; 32],
         };
         let encoded = first.sign_hold_request(&intent).unwrap();
         let mut replay = ReplayCache::new(2).unwrap();
@@ -1577,6 +1896,15 @@ mod tests {
     }
 
     fn held_fixture(coordinator: &mut ReservationCoordinator, seed: u8) -> HeldFixture {
+        held_fixture_for_paths(coordinator, seed, 1)
+    }
+
+    #[allow(clippy::too_many_lines, reason = "complete signed phase fixture")]
+    fn held_fixture_for_paths(
+        coordinator: &mut ReservationCoordinator,
+        seed: u8,
+        path_count: u32,
+    ) -> HeldFixture {
         let exit_key = SigningKey::from_bytes(&[seed; 32]);
         let created_at_ms = NOW - 100;
         let hold_expires_at_ms = NOW + 20_000;
@@ -1591,12 +1919,14 @@ mod tests {
             allowed_transports: vec![Transport::UdpSinglePath],
             reserved_up_mbps: 10,
             reserved_down_mbps: 20,
-            maximum_paths: 1,
-            probe_permit_limit: 1,
+            maximum_paths: path_count,
+            probe_permit_limit: path_count,
             policy_hash: [seed.wrapping_add(6); 32],
             created_at_ms,
             hold_expires_at_ms,
             reservation_expires_at_ms,
+            masque_context_id: u64::from(seed) + 1,
+            client_native_instance_id: [seed.wrapping_add(10); 32],
         };
         let capability_nonce = generate_nonce();
         let capability = ClientSessionCapability {
@@ -1721,6 +2051,553 @@ mod tests {
             window_ended_at_ms: NOW,
             measured_at_ms: NOW,
         }
+    }
+
+    fn verified_probe_for(
+        coordinator: &mut ReservationCoordinator,
+        fixture: &HeldFixture,
+        path_id: u32,
+        relay_seed: u8,
+    ) -> VerifiedRelayProbe {
+        let relay_key = SigningKey::from_bytes(&[relay_seed; 32]);
+        let path = RelayPathIntent {
+            path_id,
+            relay_node_id: node_id_from_public_key(&relay_key.verifying_key().to_bytes()),
+            relay_peer_id: vec![relay_seed.wrapping_add(1); 38],
+        };
+        let signed_request = coordinator
+            .sign_probe_permit_request(
+                &fixture.verified,
+                &path,
+                Transport::UdpSinglePath,
+                ProbeAddressFamily::Ipv4,
+                NOW,
+                NOW + 10_000,
+            )
+            .unwrap();
+        let request = decode_probe_request(&signed_request);
+        let permit = permit_for(&request, fixture);
+        let permit_nonce = permit.nonce.as_slice().try_into().unwrap();
+        let signed_permit = sign_control_message(
+            &permit,
+            &fixture.exit_key,
+            permit.created_at_ms,
+            permit.expires_at_ms,
+            permit_nonce,
+            TimePolicy::default(),
+        )
+        .unwrap();
+        let verified_permit = coordinator
+            .verify_probe_permit(&signed_request, signed_permit.clone(), NOW)
+            .unwrap();
+        let result_nonce = generate_nonce();
+        let result = RelayProbeResult {
+            probe_id: permit.probe_id.clone(),
+            relay_probe_permit: signed_permit,
+            relay_node_id: permit.relay_node_id.clone(),
+            relay_peer_id: permit.relay_peer_id.clone(),
+            exit_node_id: permit.exit_node_id.clone(),
+            exit_peer_id: permit.exit_peer_id.clone(),
+            exit_boot_id: permit.exit_boot_id.clone(),
+            hold_id: permit.hold_id.clone(),
+            capability_id: permit.capability_id.clone(),
+            reservation_id: permit.reservation_id.clone(),
+            route_context_id: permit.route_context_id.clone(),
+            client_session_id: permit.client_session_id.clone(),
+            policy_hash: permit.policy_hash.clone(),
+            transport: permit.transport,
+            address_family: permit.address_family,
+            client_relay: Some(probe_leg()),
+            relay_exit: Some(probe_leg()),
+            measured_at_ms: NOW,
+            expires_at_ms: permit.expires_at_ms,
+            nonce: result_nonce.to_vec(),
+        };
+        let signed_result = sign_control_message(
+            &result,
+            &relay_key,
+            NOW,
+            result.expires_at_ms,
+            result_nonce,
+            TimePolicy::default(),
+        )
+        .unwrap();
+        coordinator
+            .verify_probe_result(verified_permit, signed_result, NOW)
+            .unwrap()
+    }
+
+    fn client_endpoint(route_context_id: [u8; 16], path_id: u32) -> Option<ClientEndpointLease> {
+        let path_seed = u8::try_from(path_id).ok()?;
+        let port = 30_000_u16.checked_add(u16::try_from(path_id).ok()?)?;
+        ClientEndpointLease::new(
+            route_context_id,
+            HelperContextHandle::from_bytes([200; 32]).ok()?,
+            HelperLeaseHandle::from_bytes([210_u8.checked_add(path_seed)?; 32]).ok()?,
+            path_id,
+            EndpointRole::Client,
+            PublicWireGuardEndpoint::new(
+                WireGuardPublicKey::from_bytes([20_u8.checked_add(path_seed)?; 32]),
+                IpAddr::V4(Ipv4Addr::new(8, 8, 4, 10_u8.checked_add(path_seed)?)),
+                port,
+            )
+            .ok()?,
+        )
+        .ok()
+    }
+
+    fn native_identity(
+        request: &SignedExitFinalizeRequest,
+        auth_commitment: [u8; 32],
+    ) -> NativeRouteIdentity {
+        NativeRouteIdentity {
+            auth_commitment: auth_commitment.to_vec(),
+            certificate_sha256: vec![81; 32],
+            spki_sha256: vec![82; 32],
+            tls_server_name: "exit.example".to_owned(),
+            masque_context_id: request.masque_context_id,
+            client_native_instance_id: request.client_native_instance_id.to_vec(),
+            exit_native_instance_id: vec![83; 32],
+        }
+    }
+
+    fn signed_finalized_bundle(
+        coordinator: &ReservationCoordinator,
+        fixture: &HeldFixture,
+        request: &SignedExitFinalizeRequest,
+        identity: NativeRouteIdentity,
+        exit_nonce: [u8; 32],
+    ) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let intent = &fixture.intent;
+        let exit = ExitReservation {
+            reservation_id: intent.reservation_id.to_vec(),
+            route_context_id: intent.route_context_id.to_vec(),
+            exit_node_id: intent.exit_node_id.to_vec(),
+            client_session_id: coordinator.client_session_id().to_vec(),
+            allowed_transports: intent
+                .allowed_transports
+                .iter()
+                .map(|transport| *transport as i32)
+                .collect(),
+            reserved_up_mbps: intent.reserved_up_mbps,
+            reserved_down_mbps: intent.reserved_down_mbps,
+            maximum_paths: u32::try_from(request.paths.len()).unwrap(),
+            policy_hash: intent.policy_hash.to_vec(),
+            created_at_ms: intent.created_at_ms,
+            expires_at_ms: intent.reservation_expires_at_ms,
+            nonce: exit_nonce.to_vec(),
+            capability_id: fixture.capability.capability_id.clone(),
+            client_session_public_key: coordinator.client_session_public_key().to_vec(),
+            exit_boot_id: fixture.capability.exit_boot_id.clone(),
+            hold_id: fixture.capacity_hold.hold_id.clone(),
+            finalize_id: request.finalize_id.to_vec(),
+            control_relay_node_id: intent.control_relay_node_id.to_vec(),
+            control_relay_peer_id: intent.control_relay_peer_id.clone(),
+            exit_peer_id: intent.exit_peer_id.clone(),
+            native_route_identity: Some(identity),
+        };
+        let signed_exit = sign_control_message(
+            &exit,
+            &fixture.exit_key,
+            exit.created_at_ms,
+            exit.expires_at_ms,
+            exit_nonce,
+            TimePolicy::default(),
+        )
+        .unwrap();
+        let authorizations = request
+            .paths
+            .iter()
+            .map(|path| {
+                let local = coordinator
+                    .client_endpoint_lease(intent.reservation_id, path.path_id)
+                    .unwrap();
+                let exit_endpoint = PublicWireGuardEndpoint::new(
+                    WireGuardPublicKey::from_bytes(
+                        [100_u8
+                            .checked_add(u8::try_from(path.path_id).unwrap())
+                            .unwrap(); 32],
+                    ),
+                    IpAddr::V4(Ipv4Addr::new(8, 8, 4, 40)),
+                    40_000_u16
+                        .checked_add(u16::try_from(path.path_id).unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+                let nonce = generate_nonce();
+                let authorization = RelayAuthorization {
+                    reservation_id: intent.reservation_id.to_vec(),
+                    route_context_id: intent.route_context_id.to_vec(),
+                    path_id: path.path_id,
+                    relay_node_id: path.relay_node_id.to_vec(),
+                    exit_node_id: intent.exit_node_id.to_vec(),
+                    client_session_id: coordinator.client_session_id().to_vec(),
+                    allowed_transports: exit.allowed_transports.clone(),
+                    maximum_up_mbps: intent.reserved_up_mbps,
+                    maximum_down_mbps: intent.reserved_down_mbps,
+                    client_wireguard_public_key: local
+                        .public_endpoint()
+                        .public_key()
+                        .as_bytes()
+                        .to_vec(),
+                    exit_wireguard_endpoint: Some(wire_endpoint(exit_endpoint)),
+                    policy_hash: intent.policy_hash.to_vec(),
+                    created_at_ms: intent.created_at_ms,
+                    expires_at_ms: intent.reservation_expires_at_ms,
+                    nonce: nonce.to_vec(),
+                    relay_peer_id: path.relay_peer_id.clone(),
+                    capability_id: fixture.capability.capability_id.clone(),
+                    client_session_public_key: coordinator.client_session_public_key().to_vec(),
+                    exit_boot_id: fixture.capability.exit_boot_id.clone(),
+                    hold_id: fixture.capacity_hold.hold_id.clone(),
+                    finalize_id: request.finalize_id.to_vec(),
+                    control_relay_node_id: intent.control_relay_node_id.to_vec(),
+                    control_relay_peer_id: intent.control_relay_peer_id.clone(),
+                    exit_peer_id: intent.exit_peer_id.clone(),
+                };
+                sign_control_message(
+                    &authorization,
+                    &fixture.exit_key,
+                    authorization.created_at_ms,
+                    authorization.expires_at_ms,
+                    nonce,
+                    TimePolicy::default(),
+                )
+                .unwrap()
+            })
+            .collect();
+        (signed_exit, authorizations)
+    }
+
+    fn confirmation_envelope_stub() -> Vec<u8> {
+        encode_canonical(
+            &SignedEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                sender_id: vec![1; 32],
+                sender_public_key: vec![2; 32],
+                timestamp_ms: NOW,
+                expires_at_ms: NOW + 5_000,
+                nonce: vec![3; 32],
+                message_type: ControlMessageType::ExitReservationConfirmation as i32,
+                payload: vec![4],
+                payload_hash: vec![5; 32],
+                signature: vec![6; 64],
+            },
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .unwrap()
+    }
+
+    fn verified_grant_for(
+        coordinator: &ReservationCoordinator,
+        fixture: &HeldFixture,
+        request: &SignedExitFinalizeRequest,
+        finalized_bundle_hash: [u8; 32],
+        path_index: usize,
+    ) -> VerifiedRelayGrant {
+        let path = &request.paths[path_index];
+        VerifiedRelayGrant {
+            signed_relay_reservation: Vec::new(),
+            reservation_id: fixture.intent.reservation_id,
+            route_context_id: fixture.intent.route_context_id,
+            path_id: path.path_id,
+            relay_node_id: path.relay_node_id,
+            exit_node_id: fixture.intent.exit_node_id,
+            policy_hash: fixture.intent.policy_hash,
+            capability_id: fixture
+                .capability
+                .capability_id
+                .as_slice()
+                .try_into()
+                .unwrap(),
+            exit_boot_id: fixture
+                .capability
+                .exit_boot_id
+                .as_slice()
+                .try_into()
+                .unwrap(),
+            hold_id: fixture.capacity_hold.hold_id.as_slice().try_into().unwrap(),
+            finalize_id: request.finalize_id,
+            control_relay_node_id: fixture.intent.control_relay_node_id,
+            control_relay_peer_id: fixture.intent.control_relay_peer_id.clone(),
+            exit_peer_id: fixture.intent.exit_peer_id.clone(),
+            finalized_bundle_hash,
+            relay_client_endpoint: coordinator
+                .client_endpoint_lease(fixture.intent.reservation_id, path.path_id)
+                .unwrap()
+                .public_endpoint(),
+            expires_at_ms: fixture.intent.reservation_expires_at_ms,
+        }
+    }
+
+    fn signed_receipt_for(
+        coordinator: &ReservationCoordinator,
+        fixture: &HeldFixture,
+        grant: &VerifiedRelayGrant,
+        signed_confirmation: &[u8],
+    ) -> Vec<u8> {
+        let nonce = generate_nonce();
+        let receipt = ExitConfirmationReceipt {
+            reservation_id: grant.reservation_id.to_vec(),
+            route_context_id: grant.route_context_id.to_vec(),
+            client_session_id: coordinator.client_session_id().to_vec(),
+            capability_id: grant.capability_id.to_vec(),
+            hold_id: grant.hold_id.to_vec(),
+            finalize_id: grant.finalize_id.to_vec(),
+            path_id: grant.path_id,
+            finalized_bundle_hash: grant.finalized_bundle_hash.to_vec(),
+            control_relay_node_id: grant.control_relay_node_id.to_vec(),
+            control_relay_peer_id: grant.control_relay_peer_id.clone(),
+            exit_node_id: grant.exit_node_id.to_vec(),
+            exit_peer_id: grant.exit_peer_id.clone(),
+            exit_boot_id: grant.exit_boot_id.to_vec(),
+            created_at_ms: NOW,
+            expires_at_ms: NOW + 5_000,
+            nonce: nonce.to_vec(),
+            confirmation_envelope_hash: exit_confirmation_envelope_hash(signed_confirmation)
+                .unwrap()
+                .to_vec(),
+        };
+        sign_control_message(
+            &receipt,
+            &fixture.exit_key,
+            receipt.created_at_ms,
+            receipt.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn finalize_bearers_are_unique_committed_and_absent_from_protocol_bytes_and_debug() {
+        let mut seen = HashSet::new();
+        for _ in 0..64 {
+            let bearer = generate_native_route_bearer().unwrap();
+            assert_eq!(bearer.len(), NATIVE_ROUTE_AUTH_BEARER_LENGTH);
+            assert!(native_route_auth_commitment(bearer.as_ref()).is_ok());
+            assert!(seen.insert(bearer.to_vec()));
+        }
+
+        let mut coordinator = ReservationCoordinator::new(64).unwrap();
+        let fixture = held_fixture(&mut coordinator, 91);
+        let probe = verified_probe_for(&mut coordinator, &fixture, 1, 101);
+        let request = coordinator
+            .sign_finalize_request(
+                &fixture.intent,
+                &fixture.verified,
+                &[probe],
+                NOW,
+                NOW + 5_000,
+                |path_id| client_endpoint(fixture.intent.route_context_id, path_id),
+            )
+            .unwrap();
+        let pending = coordinator
+            .pending_native_authorizations
+            .get(request.finalize_id())
+            .unwrap();
+        assert_eq!(
+            native_route_auth_commitment(pending.auth_bearer.as_ref()).unwrap(),
+            *request.auth_commitment()
+        );
+        assert!(
+            !request
+                .encoded()
+                .windows(NATIVE_ROUTE_AUTH_BEARER_LENGTH)
+                .any(|window| window == pending.auth_bearer.as_ref())
+        );
+        let envelope: SignedEnvelope =
+            decode_canonical(request.encoded(), MAX_CONTROL_MESSAGE_SIZE).unwrap();
+        let decoded: ExitReservationFinalizeRequest =
+            decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).unwrap();
+        assert_eq!(decoded.auth_commitment, request.auth_commitment());
+        assert_eq!(decoded.masque_context_id, fixture.intent.masque_context_id);
+        assert_eq!(
+            decoded.client_native_instance_id,
+            fixture.intent.client_native_instance_id
+        );
+        let bearer_text = std::str::from_utf8(pending.auth_bearer.as_ref()).unwrap();
+        assert!(!format!("{coordinator:?}").contains(bearer_text));
+    }
+
+    #[test]
+    fn release_and_expiry_remove_pending_native_route_bearers() {
+        let mut released = ReservationCoordinator::new(64).unwrap();
+        let released_fixture = held_fixture(&mut released, 93);
+        let released_probe = verified_probe_for(&mut released, &released_fixture, 1, 104);
+        let released_request = released
+            .sign_finalize_request(
+                &released_fixture.intent,
+                &released_fixture.verified,
+                &[released_probe],
+                NOW,
+                NOW + 5_000,
+                |path_id| client_endpoint(released_fixture.intent.route_context_id, path_id),
+            )
+            .unwrap();
+        assert!(
+            released
+                .pending_native_authorizations
+                .contains_key(released_request.finalize_id())
+        );
+        assert_eq!(released.release(released_fixture.intent.reservation_id), 1);
+        assert!(released.pending_native_authorizations.is_empty());
+        assert!(released.client_paths.is_empty());
+
+        let mut expired = ReservationCoordinator::new(64).unwrap();
+        let expired_fixture = held_fixture(&mut expired, 94);
+        let expired_probe = verified_probe_for(&mut expired, &expired_fixture, 1, 105);
+        let expired_request = expired
+            .sign_finalize_request(
+                &expired_fixture.intent,
+                &expired_fixture.verified,
+                &[expired_probe],
+                NOW,
+                NOW + 5_000,
+                |path_id| client_endpoint(expired_fixture.intent.route_context_id, path_id),
+            )
+            .unwrap();
+        assert!(
+            expired
+                .pending_native_authorizations
+                .contains_key(expired_request.finalize_id())
+        );
+        assert_eq!(
+            expired.purge_expired(expired_fixture.intent.reservation_expires_at_ms),
+            1
+        );
+        assert!(expired.pending_native_authorizations.is_empty());
+        assert!(expired.client_paths.is_empty());
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end affine ownership and rollback assertion"
+    )]
+    fn identity_mismatch_rolls_back_and_authorization_requires_all_receipts_then_is_one_shot() {
+        let mut coordinator = ReservationCoordinator::new(128).unwrap();
+        let fixture = held_fixture_for_paths(&mut coordinator, 92, 2);
+        let probes = vec![
+            verified_probe_for(&mut coordinator, &fixture, 1, 102),
+            verified_probe_for(&mut coordinator, &fixture, 2, 103),
+        ];
+        let request = coordinator
+            .sign_finalize_request(
+                &fixture.intent,
+                &fixture.verified,
+                &probes,
+                NOW,
+                NOW + 5_000,
+                |path_id| client_endpoint(fixture.intent.route_context_id, path_id),
+            )
+            .unwrap();
+        let exit_nonce = generate_nonce();
+        let mut wrong_commitment = *request.auth_commitment();
+        wrong_commitment[0] ^= 1;
+        let (wrong_exit, wrong_authorizations) = signed_finalized_bundle(
+            &coordinator,
+            &fixture,
+            &request,
+            native_identity(&request, wrong_commitment),
+            exit_nonce,
+        );
+        assert!(matches!(
+            coordinator.verify_finalize_response(
+                &fixture.intent,
+                &fixture.verified,
+                &request,
+                wrong_exit,
+                wrong_authorizations,
+                &fixture.intent.exit_peer_id,
+                NOW,
+            ),
+            Err(CoordinatorError::Scope("finalized exit reservation"))
+        ));
+        assert!(
+            coordinator
+                .pending_native_authorizations
+                .get(request.finalize_id())
+                .is_some_and(|pending| pending.identity.is_none())
+        );
+
+        let (signed_exit, authorizations) = signed_finalized_bundle(
+            &coordinator,
+            &fixture,
+            &request,
+            native_identity(&request, *request.auth_commitment()),
+            exit_nonce,
+        );
+        let bundle = coordinator
+            .verify_finalize_response(
+                &fixture.intent,
+                &fixture.verified,
+                &request,
+                signed_exit,
+                authorizations,
+                &fixture.intent.exit_peer_id,
+                NOW,
+            )
+            .unwrap();
+        assert!(
+            coordinator
+                .take_native_route_authorization(*request.finalize_id(), NOW)
+                .is_err()
+        );
+
+        let confirmation = confirmation_envelope_stub();
+        for path_index in 0..request.paths.len() {
+            let grant = verified_grant_for(
+                &coordinator,
+                &fixture,
+                &request,
+                bundle.finalized_bundle_hash,
+                path_index,
+            );
+            let receipt = signed_receipt_for(&coordinator, &fixture, &grant, &confirmation);
+            if path_index == 0 {
+                assert!(
+                    coordinator
+                        .verify_confirmation_receipt(&grant, &[0], &receipt, NOW)
+                        .is_err()
+                );
+            }
+            coordinator
+                .verify_confirmation_receipt(&grant, &confirmation, &receipt, NOW)
+                .unwrap();
+            if path_index + 1 != request.paths.len() {
+                assert!(
+                    coordinator
+                        .take_native_route_authorization(*request.finalize_id(), NOW)
+                        .is_err()
+                );
+            }
+        }
+        let authorization = coordinator
+            .take_native_route_authorization(*request.finalize_id(), NOW)
+            .unwrap();
+        assert_eq!(
+            authorization.reservation_id(),
+            &fixture.intent.reservation_id
+        );
+        assert_eq!(
+            authorization.route_context_id(),
+            &fixture.intent.route_context_id
+        );
+        assert_eq!(authorization.finalize_id(), request.finalize_id());
+        assert_eq!(
+            native_route_auth_commitment(authorization.auth_bearer()).unwrap(),
+            *request.auth_commitment()
+        );
+        assert_eq!(
+            authorization.native_route_identity().auth_commitment,
+            request.auth_commitment()
+        );
+        assert!(
+            coordinator
+                .take_native_route_authorization(*request.finalize_id(), NOW)
+                .is_err()
+        );
     }
 
     #[derive(Clone, Copy)]
