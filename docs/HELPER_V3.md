@@ -169,6 +169,36 @@ After a definite pre-rename I/O failure, another mutation is admitted only if a 
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
 temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the actor permanently.
 
+### Production fail-closed inherited-custody capture
+
+Before constructing Tokio or binding the helper socket, the production entry parses systemd's
+complete `LISTEN_PID`/`LISTEN_FDS`/`LISTEN_FDNAMES` tuple. The descriptor count must be positive,
+even and at most 128, and every name is parsed directly into the fixed lowercase opaque
+`CustodyFdName` buffer before descriptor-table mutation. The one-shot Linux-UAPI boundary seals
+the complete contiguous advertised range beginning at fd 3 `CLOEXEC` and duplicates every entry
+into a new Rust owner without claiming ownership of the raw source entries. The shipped production
+entry treats every failure after the one-shot latch as terminal for that process.
+
+Each same-name pair is then classified without trusting descriptor order. A pidfd is accepted only
+when `fstatfs(2)` returns Debian 13's `PID_FS_MAGIC`; a network namespace is accepted only when
+`NS_GET_NSTYPE` returns `CLONE_NEWNET`. Exactly one of each is retained in canonical role order,
+both retained owners are re-sealed `CLOEXEC`, and their full
+mode/device/inode/rdev/open-flag identities are retained for descriptor-store attestation. Object
+overlap is rejected within and across all bounded names using the stable mode/device/inode/rdev
+fields, so mutable `O_NONBLOCK` drift cannot hide an alias. Arbitrary files, other namespace kinds,
+duplicate roles, incomplete groups and identity reuse fail closed. Type classification deliberately
+accepts an exited pidfd: capture proves object type, not worker liveness or cleanup.
+
+This is still a refusal boundary, not production recovery. Any non-empty captured set blocks
+startup and drops its captured duplicate owners without constructing the runtime or publishing the
+socket. The capture does not yet prove that a particular pidfd and namespace belong to the same
+worker, bind the pair to durable journal evidence, reconcile manager inventory, remove manager
+custody or reap kernel state. The sealed original advertised range also remains open: closing it
+through the current public safe count-only UAPI would invalidate possible Rust-owned descriptors
+without an ownership proof. A later explicit startup-ownership boundary must resolve that
+I/O-safety requirement before positive adoption. Those proofs remain mandatory before the refusal
+may be replaced by adoption.
+
 ### Production-dormant systemd descriptor-store publication boundary
 
 The helper contains a private adapter for the systemd v257 descriptor-store protocol. Only the
@@ -195,9 +225,11 @@ The journal key now derives an opaque, domain-separated fixed custody name from 
 epoch, context, ownership ID and generation without exposing those coordinates. A private dormant
 worker typestate binds that name to the exact pidfd/network-namespace role identities and consumes
 the resulting inventory attestation only after fencing the original absolute deadline. This is not
-production composition: there is no inherited-descriptor adoption, non-cancellable publication
-supervisor, reconciliation, restart reaper or request-path caller. Its executable live-proof path
-has not yet produced a recorded result inside the required disposable Debian 13 transient service.
+production composition: inherited descriptors are now snapshotted into typed local duplicate
+owners but still refused rather than journal-bound or adopted; there is no non-cancellable
+publication supervisor, manager reconciliation, restart reaper or request-path caller. Its
+executable live-proof path has not yet produced a recorded result inside the required disposable
+Debian 13 transient service.
 It therefore closes no production, crash-cleanup, datapath or acceptance milestone.
 
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context

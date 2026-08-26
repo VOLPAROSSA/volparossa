@@ -306,20 +306,26 @@ single clean-build A01--A15 run; the score is not a release claim.
   reject `CAP_SYS_PTRACE`; they also require `LimitCORE=0`, `NotifyAccess=main`, a 128-entry
   descriptor store (two descriptors for each of at most 64 workers), preserve that store while the
   unit is retained, and explicitly keep control-group kill escalation. Before constructing Tokio,
-  production parses the exact PID/count/name activation tuple, caps it at 128, uses a one-shot
-  audited raw-FD boundary to seal the contiguous range `CLOEXEC` and duplicate it into independently
-  owned descriptors, accepts only complete two-entry opaque digest groups, and refuses startup
-  while any inherited group exists because no recovery executor can consume it yet. The snapshot
-  is process-latched and never claims ownership of possibly pre-owned raw descriptors. A dormant
+  production parses the exact PID/even-count/fixed-name activation tuple and caps it at 128. A
+  one-shot audited raw-FD boundary seals the complete contiguous advertised range beginning at fd 3
+  `CLOEXEC` and duplicates every descriptor into a new Rust owner without claiming the raw source
+  entries. Each two-entry opaque-name group must then canonicalise, independent of input order, to
+  exactly one `PID_FS_MAGIC` pidfd and one typed `CLONE_NEWNET` namespace owner. Repeated
+  kernel-object identity within or across names fails closed even when mutable descriptor status
+  flags differ.
+  Production still refuses startup while any inherited group exists because durable journal
+  correlation and a recovery executor do not exist yet. The snapshot is process-latched. Exact,
+  I/O-safe consumption of the still-open sealed source range remains a blocker for positive
+  adoption. A dormant
   publication component sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
   From the first publish-send attempt, every non-success result remains manager-may-own until that
   inventory proof, and no error path issues `FDSTOREREMOVE`. Only the private live-proof selector
   calls it; there is still no production caller and no recorded live transient-unit result. This is
-  a fail-closed custody bootstrap, dormant durable-journal/name/attestation binding and
-  production-dormant publication foundation, not composed production publication, typed restart
-  adoption, restart recovery, or crash cleanup. The child
+  a fail-closed typed custody-capture bootstrap, dormant durable-journal/name/attestation binding
+  and production-dormant publication foundation, not composed production adoption, restart
+  recovery, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists, but staged-package and
   disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits

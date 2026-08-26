@@ -421,14 +421,17 @@ impl ConnectionError {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs::File,
         io::{Read, Write},
         os::fd::OwnedFd,
         os::unix::net::UnixStream as StdUnixStream,
+        process::{Command, Stdio},
         sync::Arc,
     };
 
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use nix::unistd::{getegid, geteuid};
+    use rustix::process::{PidfdFlags, getpid, pidfd_open};
     use volparossa_linux_uapi::receive_fd_with_binding;
     use volparossa_routing::{
         AcquireIngressSocket, AcquireTransportSocket, BindHelperRuntime, CleanupOwned,
@@ -827,23 +830,42 @@ mod tests {
         let name = format!("volparossa-custody-v1-{}", "0".repeat(64));
         let names = format!("{name}:{name}");
         let script = r#"
-exec 3</dev/null
-exec 4</dev/null
+exec 3<&0
+exec 4>&1
+exec 0</dev/null
+exec 1>&2
 exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES="$1" VOLPAROSSA_INHERITED_CUSTODY_FIXTURE=1 "$0" --exact server::tests::inherited_custody_subprocess_fixture --nocapture
 "#;
-        let output = std::process::Command::new("/bin/sh")
-            .arg("-eu")
-            .arg("-c")
-            .arg(script)
-            .arg(executable)
-            .arg(names)
-            .output()
-            .expect("run inherited-custody subprocess");
-        assert!(
-            output.status.success(),
-            "subprocess failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for reversed in [false, true] {
+            let pidfd = Stdio::from(
+                pidfd_open(getpid(), PidfdFlags::empty())
+                    .expect("open current-process pidfd fixture"),
+            );
+            let network_namespace = Stdio::from(
+                File::open("/proc/self/ns/net").expect("open network namespace fixture"),
+            );
+            let (stdin, stdout) = if reversed {
+                (network_namespace, pidfd)
+            } else {
+                (pidfd, network_namespace)
+            };
+            let output = Command::new("/bin/sh")
+                .arg("-eu")
+                .arg("-c")
+                .arg(script)
+                .arg(&executable)
+                .arg(&names)
+                .stdin(stdin)
+                .stdout(stdout)
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run inherited-custody subprocess");
+            assert!(
+                output.status.success(),
+                "subprocess failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
