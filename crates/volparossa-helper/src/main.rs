@@ -4,8 +4,8 @@ use std::{ffi::OsString, process::ExitCode};
 
 use volparossa_helper::{
     INTERNAL_NFT_FRONTEND_ARGUMENT, INTERNAL_WORKER_V3_ARGUMENT,
-    INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT, bind_production_socket, run_internal_nft_frontend,
-    run_internal_worker_v3_entry, run_internal_worker_v3_live_proof, run_server,
+    INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT, run_internal_nft_frontend,
+    run_internal_worker_v3_entry, run_internal_worker_v3_live_proof, run_production_server,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,24 +68,7 @@ fn run_production() -> ExitCode {
         .json()
         .with_max_level(tracing::Level::INFO)
         .try_init();
-    let Ok(server) = bind_production_socket() else {
-        tracing::error!(
-            diagnostic_code = "RUNTIME_SECURITY_FAILED",
-            "helper startup rejected"
-        );
-        return ExitCode::FAILURE;
-    };
-    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    else {
-        tracing::error!(
-            diagnostic_code = "ASYNC_RUNTIME_FAILED",
-            "helper startup rejected"
-        );
-        return ExitCode::FAILURE;
-    };
-    if runtime.block_on(run_server(server)).is_ok() {
+    if run_production_server().is_ok() {
         ExitCode::SUCCESS
     } else {
         tracing::error!(

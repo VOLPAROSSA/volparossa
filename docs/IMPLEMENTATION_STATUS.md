@@ -132,24 +132,31 @@ single clean-build A01--A15 run; the score is not a release claim.
   five-second budget for each Bind-plus-operation sequence; post-Prepare-write failures transfer
   exact authority to the owned route-ticket supervisor. Tag 35 now requires the context role and a
   canonical, role-complete closed lease plan projected from the same canonically ordered Prepare;
-  the engine rejects any plan substitution before that Prepare's Pending/backend dispatch, and the dormant journal
-  has an exact fallible conversion to its existing `ClosedPlan`. The crate-private Prepare method has no other
-  production call site; polling it standalone in future code would not be cancellation-safe. Runtime
+  the engine rejects any plan substitution before that Prepare's Pending/backend dispatch, and the
+  journal has an exact fallible conversion to its existing `ClosedPlan`. The crate-private Prepare
+  method has no other production call site; polling it standalone in future code would not be
+  cancellation-safe. Runtime
   mismatch and missing evidence quarantine, target-only cleanup never removes
   Activated/Committed state, and exact retries re-evaluate a capped 1024-entry runtime-lifetime
   `Absent` ledger. There is no tombstone ACK; tag 28 retries exact Pending/Owned cleanup, while tag 29
   is an independent process-wide operation outside per-route reconciliation. Production Prepare
-  remains `Unavailable`, and no production manager calls this path. A dormant boot-scoped,
-  secret-free canonical/CAS ownership store and a read-only startup interlock have temp-directory
-  tests. Its insert, prepare-arm, never-dispatched retirement, and confirmed-recovery transitions
+  remains `Unavailable`, and no production manager calls this path. A boot-scoped, secret-free
+  canonical/CAS ownership store and actor transitions have temp-directory tests; the production
+  wrapper has explicit composition and ordering tests. Production opens and locks the actor after
+  fixed runtime identity/directory validation but before cleanup-token publication, stale-socket
+  removal or listener bind; shutdown cleans the engine and then proves actor quiescence and joins it
+  before releasing the socket. Its insert, prepare-arm, never-dispatched retirement, and
+  confirmed-recovery transitions
   are exact-current-revision retry-safe after lost replies; persisted typed `Absent` origins prevent
   cross-operation acknowledgement and repeated recovery execution. Intervening transitions and
   conflicting identity, plan, expiry, generation, anchor, or reconciliation state fail closed
-  without journal mutation. A private dormant single-writer actor owns the store and recovery
+  without journal mutation. A private single-writer actor owns the store and recovery
   executor on one named thread, opens and retains one verified parent-directory descriptor, and
   trips a process-global one-shot start latch before lock creation. The latch remains set after
-  startup failure or clean shutdown. The private startup sweep resolves every observed uncertain
-  record before reporting ready, and admission is bounded to four operations plus shutdown.
+  startup failure or clean shutdown. The startup sweep resolves every observed uncertain record
+  before reporting ready, and admission is bounded to four operations plus shutdown. The installed
+  production executor deliberately refuses `MayOwnPrepare`, leaving it byte-identical and blocking
+  Ready; independently, the actor may durably settle only never-dispatched `Intent` records.
   Every non-test actor entry point now requires one absolute hard deadline carried through
   admission, queueing, actor execution, reply and thread settlement. Startup rechecks it before
   filesystem/latch work and each pending record, commands recheck it after dequeue, and recovery
@@ -166,9 +173,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   outstanding record. Each validated wire intent locally receives a fresh random 256-bit
   `OwnershipId` inside a non-`Clone` registration owner. Registration consumes it into one durable
   key, arming consumes that key into a `MayOwnPrepare` token with only borrowed owner-bound
-  resources, and every error retains the exact affine owner which still exists. The codec and actor
-  remain private and pre-production; no production writer/recovery wiring, server-wired restart
-  reaper, supported on-disk migration, cross-runtime tag-28 proof, or live root proof exists.
+  resources, and every error retains the exact affine owner which still exists. Raw codec,
+  issuance, arming and recovery authority remain private; no production request-path
+  issuance/arming writer, restart-stable pidfd/network-namespace vault, absence-proving
+  `MayOwnPrepare` recovery executor, restart reaper, supported on-disk migration, cross-runtime
+  tag-28 proof, or live-root production lifecycle proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.
@@ -225,9 +234,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   dispatches no child operation, sends zero protocol-request bytes, and performs no WireGuard
   link/address, route, firewall, or dataplane configuration. Worker launch still creates the
   deliberately isolated process and anonymous `NEWNET`, without altering host-network state. This
-  seam remains private and dormant with no server or engine caller. Neither production
-  journal/reaper wiring nor a cancellation-safe production settlement guard exists. No datapath or
-  acceptance checkbox closes.
+  seam remains private and dormant with no server or engine caller. The production journal actor
+  owns startup/shutdown and may settle only never-dispatched `Intent`; no request-path
+  issuance/arming writer, `MayOwnPrepare` reaper, or cancellation-safe production settlement guard
+  exists. No datapath or acceptance checkbox closes.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
@@ -249,10 +259,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   evidence rather than current journal-phase or cleanup authority and has no production call site,
   so these primitives remain disconnected.
   Production still installs only the `Unavailable` backend. This lifecycle settlement remains
-  private and dormant: there is no production journal writer or restart reaper, no production worker
-  or host-network mutation, and no datapath evidence. Production adapter wiring, durable
-  journal/reaper integration, and the separate Add/Remove MPTCP endpoint seam remain required; this
-  status and every datapath or acceptance checkbox remain open.
+  private and dormant: there is no production request-path issuance/arming writer or restart reaper,
+  no production worker or host-network mutation, and no datapath evidence. Production adapter
+  wiring, durable pidfd/network-namespace custody and recovery, and the separate Add/Remove MPTCP
+  endpoint seam remain required; this status and every datapath or acceptance checkbox remain open.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
   and doctor contract now require exactly the reviewed seven-capability bootstrap set

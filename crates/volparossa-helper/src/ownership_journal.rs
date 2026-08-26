@@ -1,12 +1,13 @@
-//! Fail-closed migration interlock for the retired helper ownership journal.
+//! Fail-closed migration interlock and durable helper-v3 ownership journal.
 //!
 //! Helper v3 never parses or executes cleanup from the former v1 journal. If that journal exists,
-//! production startup stops and an operator must inspect the host explicitly. Those read-only
-//! production interlocks cover the retired path and the exact v3 main/lock/next paths; they perform
-//! no route, link, firewall, namespace or file mutation. The v3 store below is
-//! a dormant, boot-scoped substrate and is not called by production yet.
+//! production startup stops and an operator must inspect the host explicitly. Production now opens
+//! the v3 store through one canonical locked actor before publishing its cleanup token or socket.
+//! The installed recovery executor deliberately refuses `MayOwnPrepare`: until restart-stable
+//! namespace custody exists, startup may settle never-dispatched `Intent` records but can never
+//! claim that potentially created kernel state is absent.
 
-#![allow(dead_code)] // Dormant v3 store; production uses only read-only ownership interlocks.
+#![allow(dead_code)] // The production actor is live; mutation APIs remain private until wiring.
 
 mod actor;
 
@@ -83,6 +84,60 @@ impl RecoveryExecutor for ExactTestRecoveryExecutor {
         _deadline: HardDeadline,
     ) -> Result<ConfirmedAbsentProof, Self::Error> {
         Ok(target.confirmed_absent())
+    }
+}
+
+/// Production ownership lifecycle without any issuance or kernel-recovery surface.
+///
+/// The server can only start and shut down this wrapper. It cannot register or arm ownership, so
+/// the unavailable production lease backend remains the sole request path while restart custody is
+/// still incomplete.
+pub(crate) struct ProductionOwnershipRuntime {
+    actor: DurableOwnershipActor,
+}
+
+impl ProductionOwnershipRuntime {
+    /// Open, lock, validate and sweep the fixed journal before socket publication may proceed.
+    pub(crate) fn start_until(deadline: HardDeadline) -> Result<Self, DurableOwnershipError> {
+        Self::start_with_config_until(JournalConfig::production(), deadline)
+    }
+
+    fn start_with_config_until(
+        config: JournalConfig,
+        deadline: HardDeadline,
+    ) -> Result<Self, DurableOwnershipError> {
+        let actor = DurableOwnershipActor::spawn_with_executor_factory_until(
+            config,
+            || RefuseMayOwnRecovery,
+            deadline,
+        )?;
+        Ok(Self { actor })
+    }
+
+    /// Fence admission, prove that every record is Absent and join the actor thread.
+    pub(crate) fn shutdown_until(
+        mut self,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
+        self.actor.shutdown_until(deadline)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RefuseMayOwnRecovery;
+
+#[derive(Debug, Eq, PartialEq)]
+struct MayOwnRecoveryUnavailable;
+
+impl RecoveryExecutor for RefuseMayOwnRecovery {
+    type Error = MayOwnRecoveryUnavailable;
+
+    fn confirm_absent(
+        &mut self,
+        _target: &RecoveryTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedAbsentProof, Self::Error> {
+        Err(MayOwnRecoveryUnavailable)
     }
 }
 
@@ -1277,10 +1332,6 @@ struct OwnershipJournal {
 }
 
 impl OwnershipJournal {
-    fn open_production() -> Result<Self, JournalError> {
-        Self::open(JournalConfig::production())
-    }
-
     fn open(config: JournalConfig) -> Result<Self, JournalError> {
         config.validate()?;
         let parent_directory = open_verified_parent(&config)?;
@@ -2342,38 +2393,6 @@ fn is_revision_conflict_io(error: &io::Error) -> bool {
 /// Reject startup whenever any filesystem object occupies the retired journal path.
 pub(crate) fn ensure_legacy_journal_absent() -> io::Result<()> {
     ensure_absent(Path::new(LEGACY_JOURNAL_PATH))
-}
-
-/// Reject startup while any boot-scoped v3 ownership-store object awaits a real reaper.
-///
-/// This read-only interlock neither opens the dormant store nor parses, locks, creates, repairs or
-/// removes any object. A future production reaper must replace it atomically with recovery.
-pub(crate) fn ensure_unreaped_v3_journal_absent() -> io::Result<()> {
-    ensure_v3_journal_objects_absent(
-        Path::new(OWNERSHIP_JOURNAL_PATH),
-        Path::new(OWNERSHIP_LOCK_PATH),
-        Path::new(OWNERSHIP_NEXT_PATH),
-    )
-}
-
-fn ensure_v3_journal_objects_absent(
-    journal_path: &Path,
-    lock_path: &Path,
-    next_path: &Path,
-) -> io::Result<()> {
-    for path in [journal_path, lock_path, next_path] {
-        match fs::symlink_metadata(path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "unreaped helper v3 ownership journal requires recovery",
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn ensure_absent(path: &Path) -> io::Result<()> {
@@ -4474,16 +4493,115 @@ mod tests {
     }
 
     #[test]
-    fn v3_store_remains_dormant_in_known_production_entrypoints() {
-        for production_source in [
-            include_str!("lib.rs"),
-            include_str!("engine_v3.rs"),
-            include_str!("runtime.rs"),
-            include_str!("server.rs"),
-            include_str!("main.rs"),
-        ] {
-            assert!(!production_source.contains("open_production"));
-        }
+    fn production_config_is_consumed_only_by_the_lifecycle_wrapper() {
+        let source = include_str!("ownership_journal.rs");
+        let production_config = ["JournalConfig", "::production()"].concat();
+        assert_eq!(source.matches(&production_config).count(), 1);
+        let call = source
+            .find(&production_config)
+            .expect("production config call");
+        let wrapper = source
+            .find("impl ProductionOwnershipRuntime")
+            .expect("production wrapper");
+        let executor = source
+            .find("struct RefuseMayOwnRecovery")
+            .expect("production executor");
+        assert!(wrapper < call);
+        assert!(call < executor);
+    }
+
+    #[test]
+    fn production_recovery_boundary_never_claims_may_own_absence() {
+        let target = RecoveryTarget {
+            exact_record: record(epoch(1), 2, 3, 4, 1, OwnershipPhase::MayOwnPrepare),
+        };
+        let mut executor = RefuseMayOwnRecovery;
+        assert_eq!(
+            executor.confirm_absent(&target, recovery_deadline()),
+            Err(MayOwnRecoveryUnavailable)
+        );
+    }
+
+    #[test]
+    fn production_wrapper_exposes_only_lifecycle_and_installs_refusing_recovery() {
+        let source = include_str!("ownership_journal.rs");
+        let start = source
+            .find("impl ProductionOwnershipRuntime")
+            .expect("production wrapper");
+        let end = source[start..]
+            .find("struct RefuseMayOwnRecovery")
+            .map(|offset| start + offset)
+            .expect("recovery executor boundary");
+        let wrapper = &source[start..end];
+        let production_config = ["JournalConfig", "::production()"].concat();
+        assert!(wrapper.contains(&production_config));
+        assert!(wrapper.contains("|| RefuseMayOwnRecovery"));
+        assert!(wrapper.contains("start_until"));
+        assert!(wrapper.contains("shutdown_until"));
+        assert!(!wrapper.contains("register_until"));
+        assert!(!wrapper.contains("arm_until"));
+        assert!(!wrapper.contains("confirm_recovered_absent"));
+    }
+
+    #[test]
+    fn production_wrapper_sweeps_intent_and_preserves_may_own_bytes() {
+        let intent_directory = tempdir().expect("intent directory");
+        let intent_config = test_config(intent_directory.path());
+        let mut intent_journal =
+            OwnershipJournal::open(intent_config.clone()).expect("intent journal");
+        let intent_inserted = intent_journal
+            .insert_intent(0, intent(20, 21))
+            .expect("durable intent");
+        drop(intent_journal);
+
+        ProductionOwnershipRuntime::start_with_config_until(
+            intent_config.clone(),
+            recovery_deadline(),
+        )
+        .expect("intent startup")
+        .shutdown_until(recovery_deadline())
+        .expect("intent shutdown");
+        let intent_reopened =
+            OwnershipJournal::open(intent_config).expect("reopen swept intent journal");
+        assert_eq!(
+            intent_reopened
+                .snapshot()
+                .expect("intent snapshot")
+                .records
+                .get(&intent_inserted.ownership_id)
+                .expect("intent record")
+                .phase,
+            OwnershipPhase::Absent
+        );
+
+        let may_own_directory = tempdir().expect("MayOwn directory");
+        let may_own_config = test_config(may_own_directory.path());
+        let mut may_own_journal =
+            OwnershipJournal::open(may_own_config.clone()).expect("MayOwn journal");
+        let may_own_inserted = may_own_journal
+            .insert_intent(0, intent(22, 23))
+            .expect("MayOwn intent");
+        may_own_journal
+            .mark_may_own_prepare(
+                may_own_inserted.revision,
+                may_own_inserted.ownership_id,
+                may_own_inserted.generation,
+                anchor(24),
+            )
+            .expect("durable MayOwn");
+        drop(may_own_journal);
+        let before = fs::read(&may_own_config.journal_path).expect("MayOwn bytes before startup");
+        assert!(matches!(
+            ProductionOwnershipRuntime::start_with_config_until(
+                may_own_config.clone(),
+                recovery_deadline(),
+            ),
+            Err(DurableOwnershipError::RecoveryNotConfirmed)
+        ));
+        assert_eq!(
+            fs::read(&may_own_config.journal_path).expect("MayOwn bytes after refused startup"),
+            before
+        );
     }
 
     #[test]
@@ -4513,103 +4631,76 @@ mod tests {
     }
 
     #[test]
-    fn v3_interlock_checks_exactly_main_lock_and_next_without_mutation() {
-        let directory = tempdir().expect("temporary directory");
-        let journal = directory.path().join("helper.ownership-v3");
-        let lock = directory.path().join("helper.ownership-v3.lock");
-        let next = directory.path().join("helper.ownership-v3.next");
-        let exact = [&journal, &lock, &next];
-        let near_misses = [
-            "helper.ownership-v3.backup",
-            "helper.ownership-v3.lock.extra",
-            "helper.ownership-v3.next.extra",
-            ".helper.ownership-v3.tmp-deadbeef",
-        ];
-
-        ensure_v3_journal_objects_absent(&journal, &lock, &next).expect("all absent");
-        for name in near_misses {
-            fs::write(directory.path().join(name), b"near miss").expect("near-miss fixture");
-        }
-        ensure_v3_journal_objects_absent(&journal, &lock, &next)
-            .expect("near misses are outside the closed object set");
-
-        for path in exact {
-            fs::write(path, b"owned bytes").expect("file fixture");
-            assert_eq!(
-                ensure_v3_journal_objects_absent(&journal, &lock, &next)
-                    .expect_err("file must block")
-                    .kind(),
-                io::ErrorKind::AlreadyExists
-            );
-            assert_eq!(fs::read(path).expect("file remains"), b"owned bytes");
-            fs::remove_file(path).expect("remove file fixture");
-
-            fs::create_dir(path).expect("directory fixture");
-            assert_eq!(
-                ensure_v3_journal_objects_absent(&journal, &lock, &next)
-                    .expect_err("directory must block")
-                    .kind(),
-                io::ErrorKind::AlreadyExists
-            );
-            assert!(
-                fs::symlink_metadata(path)
-                    .expect("directory remains")
-                    .is_dir()
-            );
-            fs::remove_dir(path).expect("remove directory fixture");
-
-            symlink("missing-target", path).expect("symlink fixture");
-            assert_eq!(
-                ensure_v3_journal_objects_absent(&journal, &lock, &next)
-                    .expect_err("symlink must block")
-                    .kind(),
-                io::ErrorKind::AlreadyExists
-            );
-            assert!(
-                fs::symlink_metadata(path)
-                    .expect("symlink remains")
-                    .file_type()
-                    .is_symlink()
-            );
-            fs::remove_file(path).expect("remove symlink fixture");
-        }
-
-        for name in near_misses {
-            assert_eq!(
-                fs::read(directory.path().join(name)).expect("near miss remains"),
-                b"near miss"
-            );
-        }
-    }
-
-    #[test]
-    fn production_server_checks_journals_before_token_socket_and_listener_mutation() {
+    fn production_server_reaches_actor_ready_before_token_socket_and_listener_mutation() {
         let source = include_str!("server.rs");
         let start = source
-            .find("pub fn bind_production_socket")
+            .find("fn bind_production_socket")
             .expect("production bind function");
         let end = source[start..]
-            .find("pub async fn run_server")
+            .find("async fn run_server")
             .map(|offset| start + offset)
             .expect("end of production bind function");
         let bind = &source[start..end];
         let legacy = bind
             .find("ensure_legacy_journal_absent()?")
             .expect("legacy interlock");
-        let v3 = bind
-            .find("ensure_unreaped_v3_journal_absent()?")
-            .expect("v3 interlock");
-        let runtime = bind
-            .find("prepare_production_runtime()?")
-            .expect("runtime and cleanup-token preparation");
+        let identity = bind
+            .find("prepare_production_runtime_identity()?")
+            .expect("runtime identity preparation");
+        let ownership = bind
+            .find("ProductionOwnershipRuntime::start_until")
+            .expect("durable ownership startup");
+        let token = bind
+            .find("publish_cleanup_token()")
+            .expect("cleanup-token publication");
         let stale_socket = bind
             .find("remove_stale_socket")
             .expect("stale-socket removal");
-        let listener = bind.find("UnixListener::bind").expect("listener bind");
+        let guarded_listener = bind
+            .find("bind_guarded_nonblocking_socket")
+            .expect("guarded non-blocking listener bind");
+        let secure = bind.find("secure_socket").expect("socket security");
 
-        assert!(legacy < v3);
-        assert!(v3 < runtime);
-        assert!(runtime < stale_socket);
-        assert!(stale_socket < listener);
+        assert!(legacy < identity);
+        assert!(identity < ownership);
+        assert!(ownership < token);
+        assert!(token < stale_socket);
+        assert!(stale_socket < guarded_listener);
+        assert!(guarded_listener < secure);
+        assert!(!bind.contains("UnixListener::from_std"));
+    }
+
+    #[test]
+    fn production_shutdown_cleans_engine_then_joins_actor_before_socket_release() {
+        let source = include_str!("server.rs");
+        let start = source
+            .find("async fn run_server")
+            .expect("production server loop");
+        let end = source[start..]
+            .find("\nasync fn process_connection")
+            .map(|offset| start + offset)
+            .expect("server-loop end");
+        let shutdown = &source[start..end];
+        let adoption = shutdown
+            .find("UnixListener::from_std")
+            .expect("asynchronous listener adoption");
+        let service = shutdown
+            .find("serve_connections")
+            .expect("fallible service loop");
+        let listener = shutdown.find("drop(listener)").expect("listener close");
+        let tasks = shutdown.find("tasks.abort_all()").expect("task abort");
+        let engine = shutdown
+            .find("engine.shutdown_cleanup().await")
+            .expect("engine cleanup");
+        let ownership = shutdown
+            .find("shutdown_production_ownership(ownership_runtime)")
+            .expect("ownership shutdown and join");
+        let socket = shutdown.find("drop(socket_guard)").expect("socket release");
+        assert!(adoption < service);
+        assert!(service < listener);
+        assert!(listener < tasks);
+        assert!(tasks < engine);
+        assert!(engine < ownership);
+        assert!(ownership < socket);
     }
 }

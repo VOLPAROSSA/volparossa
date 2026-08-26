@@ -4,17 +4,24 @@ use std::{
     ffi::CString,
     fs::{self, DirBuilder, OpenOptions},
     io::{self, Read, Write},
+    os::fd::OwnedFd,
     os::unix::{
         ffi::OsStrExt,
         fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream},
     },
     path::{Path, PathBuf},
     sync::OnceLock,
+    time::Duration,
 };
 
+use nix::poll::PollFlags;
 use nix::unistd::{Gid, Group, Uid, User, getegid, geteuid, getgrouplist};
 use rand_core::{OsRng, RngCore};
+use socket2::{Domain, SockAddr, Socket, Type};
 use zeroize::Zeroizing;
+
+use crate::deadline::{HardDeadline, wait_for_fd, wait_for_readable_fd};
 
 /// Dedicated unprivileged system account allowed to call the helper.
 pub const AGENT_ACCOUNT: &str = "volparossa";
@@ -39,6 +46,10 @@ const MAX_ACCOUNT_DATABASE_LINE_BYTES: usize = 4096;
 const MAX_SHADOW_BYTES: usize = 1024 * 1024;
 const SYSTEMD_RESERVED_ID: u32 = 65_535;
 const POSIX_ACCESS_ACL_XATTR: &str = "system.posix_acl_access";
+const SOCKET_IDENTITY_PROBE_BYTES: usize = 32;
+const SOCKET_IDENTITY_MAX_ACCEPTS: usize = 8;
+const SOCKET_IDENTITY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const SOCKET_LISTEN_BACKLOG: i32 = 32;
 
 const fn service_identity_id_is_valid(id: u32) -> bool {
     id != 0 && id != SYSTEMD_RESERVED_ID && id != u32::MAX
@@ -104,6 +115,35 @@ pub(crate) struct ProductionRuntime {
     pub(crate) cleanup_token: Zeroizing<[u8; 32]>,
 }
 
+/// Validated production identity and runtime-directory boundary before capability publication.
+///
+/// Constructing this value may create the fixed systemd runtime directory when it is absent, but
+/// it neither creates nor replaces the cleanup token or helper socket. The server deliberately
+/// retains this boundary while durable ownership startup either reaches Ready or fails closed.
+pub(crate) struct PreparedProductionRuntime {
+    agent_uid: u32,
+    agent_gid: u32,
+}
+
+impl PreparedProductionRuntime {
+    /// Publish a fresh cleanup capability only after durable ownership startup is complete.
+    pub(crate) fn publish_cleanup_token(self) -> Result<ProductionRuntime, io::Error> {
+        let mut cleanup_token = Zeroizing::new([0_u8; 32]);
+        OsRng.fill_bytes(cleanup_token.as_mut());
+        write_token(
+            Path::new(TOKEN_PATH),
+            &cleanup_token,
+            Uid::from_raw(0),
+            Gid::from_raw(self.agent_gid),
+        )?;
+        Ok(ProductionRuntime {
+            agent_uid: self.agent_uid,
+            agent_gid: self.agent_gid,
+            cleanup_token,
+        })
+    }
+}
+
 struct LocalAccountFiles {
     passwd: Vec<u8>,
     groups: Vec<u8>,
@@ -125,7 +165,10 @@ pub(crate) fn pinned_production_worker_identity() -> Result<WorkerAccountIdentit
     })
 }
 
-pub(crate) fn prepare_production_runtime() -> Result<ProductionRuntime, io::Error> {
+/// Validate and pin the fixed production identities and runtime directory without publishing a
+/// cleanup token or socket.
+pub(crate) fn prepare_production_runtime_identity() -> Result<PreparedProductionRuntime, io::Error>
+{
     if !geteuid().is_root() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -162,19 +205,15 @@ pub(crate) fn prepare_production_runtime() -> Result<ProductionRuntime, io::Erro
     }
     validate_directory(directory, 0, group.gid.as_raw())?;
 
-    let mut cleanup_token = Zeroizing::new([0_u8; 32]);
-    OsRng.fill_bytes(cleanup_token.as_mut());
-    write_token(
-        Path::new(TOKEN_PATH),
-        &cleanup_token,
-        Uid::from_raw(0),
-        group.gid,
-    )?;
-    Ok(ProductionRuntime {
+    Ok(PreparedProductionRuntime {
         agent_uid: user.uid.as_raw(),
         agent_gid: group.gid.as_raw(),
-        cleanup_token,
     })
+}
+
+/// Complete the fixed production runtime setup in one call for the isolated live-proof entry.
+pub(crate) fn prepare_production_runtime() -> Result<ProductionRuntime, io::Error> {
+    prepare_production_runtime_identity()?.publish_cleanup_token()
 }
 
 fn read_validated_local_account_files() -> Result<LocalAccountFiles, io::Error> {
@@ -933,16 +972,180 @@ fn write_token(path: &Path, token: &[u8; 32], owner: Uid, group: Gid) -> Result<
 
 pub(crate) struct SocketPathGuard {
     path: PathBuf,
-    expected_gid: u32,
+    device: u64,
+    inode: u64,
+}
+
+/// Create the fixed filesystem listener as non-blocking/CLOEXEC and return its exact inode guard.
+///
+/// Non-blocking mode is selected before `bind`, so no post-bind mode switch can strand an
+/// unguarded pathname. The active challenge proves the newly listening descriptor is reachable
+/// through the same unchanged filesystem inode before the pair is returned.
+pub(crate) fn bind_guarded_nonblocking_socket(
+    path: &Path,
+    required_owner: u32,
+    required_group: u32,
+) -> io::Result<(StdUnixListener, SocketPathGuard)> {
+    let socket = Socket::new(Domain::UNIX, Type::STREAM.nonblocking().cloexec(), None)?;
+    socket.bind(&SockAddr::unix(path)?)?;
+    let guard = SocketPathGuard::capture_created(path, required_owner, required_group)?;
+    socket.listen(SOCKET_LISTEN_BACKLOG)?;
+    let descriptor: OwnedFd = socket.into();
+    let listener = StdUnixListener::from(descriptor);
+    guard.verify_listener(&listener)?;
+    Ok((listener, guard))
 }
 
 impl SocketPathGuard {
-    pub(crate) fn new(path: &Path, expected_gid: u32) -> Self {
-        Self {
+    fn capture_created(path: &Path, required_owner: u32, required_group: u32) -> io::Result<Self> {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != required_owner
+            || metadata.gid() != required_group
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "bound helper socket identity is unsafe",
+            ));
+        }
+        Ok(Self {
             path: path.to_owned(),
-            expected_gid,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn verify_listener(&self, listener: &StdUnixListener) -> io::Result<()> {
+        let identity = exact_bound_socket_identity(listener, &self.path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "bound helper socket pathname does not identify its listener",
+            )
+        })?;
+        if identity.device != self.device || identity.inode != self.inode {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "bound helper socket inode changed during listener proof",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BoundSocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn exact_bound_socket_identity(
+    listener: &StdUnixListener,
+    path: &Path,
+) -> io::Result<Option<BoundSocketIdentity>> {
+    if listener.local_addr()?.as_pathname() != Some(path) {
+        return Ok(None);
+    }
+    let before = fs::symlink_metadata(path)?;
+    if !before.file_type().is_socket() {
+        return Ok(None);
+    }
+    let deadline = HardDeadline::after(SOCKET_IDENTITY_PROBE_TIMEOUT)?;
+    let mut challenge = Zeroizing::new([0_u8; SOCKET_IDENTITY_PROBE_BYTES]);
+    OsRng.fill_bytes(challenge.as_mut());
+    let mut probe = connect_socket_probe(path, deadline)?;
+    write_all_until(&mut probe, challenge.as_ref(), deadline)?;
+    let mut matched = false;
+    for _ in 0..SOCKET_IDENTITY_MAX_ACCEPTS {
+        deadline.ensure_remaining()?;
+        let (mut accepted, _) = match listener.accept() {
+            Ok(accepted) => accepted,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error),
+        };
+        accepted.set_nonblocking(true)?;
+        let mut observed = Zeroizing::new([0_u8; SOCKET_IDENTITY_PROBE_BYTES]);
+        read_exact_until(&mut accepted, observed.as_mut(), deadline)?;
+        if observed.as_ref() == challenge.as_ref() {
+            matched = true;
+            break;
         }
     }
+    if !matched {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.dev() != before.dev()
+        || metadata.ino() != before.ino()
+    {
+        return Ok(None);
+    }
+    Ok(Some(BoundSocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }))
+}
+
+fn connect_socket_probe(path: &Path, deadline: HardDeadline) -> io::Result<StdUnixStream> {
+    let socket = Socket::new(Domain::UNIX, Type::STREAM.nonblocking().cloexec(), None)?;
+    let address = SockAddr::unix(path)?;
+    match socket.connect(&address) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code) if code == libc::EINPROGRESS || code == libc::EALREADY
+            ) =>
+        {
+            wait_for_fd(&socket, PollFlags::POLLOUT, deadline)?;
+        }
+        Err(error) => return Err(error),
+    }
+    if let Some(error) = socket.take_error()? {
+        return Err(error);
+    }
+    deadline.ensure_remaining()?;
+    let descriptor: OwnedFd = socket.into();
+    Ok(StdUnixStream::from(descriptor))
+}
+
+fn write_all_until(
+    stream: &mut StdUnixStream,
+    mut bytes: &[u8],
+    deadline: HardDeadline,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        wait_for_fd(stream, PollFlags::POLLOUT, deadline)?;
+        match stream.write(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "socket probe closed",
+                ));
+            }
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    deadline.ensure_remaining()
+}
+
+fn read_exact_until(
+    stream: &mut StdUnixStream,
+    mut bytes: &mut [u8],
+    deadline: HardDeadline,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        wait_for_readable_fd(stream, deadline)?;
+        match stream.read(bytes) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(read) => bytes = &mut bytes[read..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    deadline.ensure_remaining()
 }
 
 impl Drop for SocketPathGuard {
@@ -951,9 +1154,8 @@ impl Drop for SocketPathGuard {
             return;
         };
         if metadata.file_type().is_socket()
-            && metadata.uid() == 0
-            && metadata.gid() == self.expected_gid
-            && metadata.mode() & 0o777 == 0o660
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
         {
             let _ = fs::remove_file(&self.path);
         }
@@ -1319,11 +1521,103 @@ mod tests {
     }
 
     #[test]
+    fn identity_preparation_cannot_publish_the_cleanup_capability() {
+        let source = include_str!("runtime.rs");
+        let start = source
+            .find("pub(crate) fn prepare_production_runtime_identity")
+            .expect("identity preparation");
+        let end = source[start..]
+            .find("/// Complete the fixed production runtime setup")
+            .map(|offset| start + offset)
+            .expect("publication boundary");
+        let identity_phase = &source[start..end];
+        assert!(!identity_phase.contains("write_token"));
+        assert!(!identity_phase.contains("OsRng.fill_bytes"));
+
+        let publication = source
+            .split("impl PreparedProductionRuntime")
+            .nth(1)
+            .expect("prepared-runtime consumer");
+        assert!(publication.contains("pub(crate) fn publish_cleanup_token(self)"));
+        assert!(publication.contains("write_token"));
+    }
+
+    #[test]
     fn stale_cleanup_refuses_regular_files() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("helper.sock");
         File::create(&path).expect("file");
         assert!(remove_stale_socket(&path, getegid().as_raw()).is_err());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn socket_guard_removes_only_the_exact_captured_inode() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("helper.sock");
+        let (original, guard) =
+            bind_guarded_nonblocking_socket(&path, geteuid().as_raw(), getegid().as_raw())
+                .expect("guarded original socket");
+        assert_eq!(
+            original
+                .accept()
+                .expect_err("listener must already be non-blocking")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        fs::remove_file(&path).expect("unlink original pathname");
+        let (replacement, replacement_guard) =
+            bind_guarded_nonblocking_socket(&path, geteuid().as_raw(), getegid().as_raw())
+                .expect("guarded replacement socket");
+        drop(guard);
+        assert!(path.exists(), "a substituted inode must never be removed");
+        drop(replacement_guard);
+        drop(replacement);
+        assert!(!path.exists());
+        drop(original);
+
+        let (owned, guard) =
+            bind_guarded_nonblocking_socket(&path, geteuid().as_raw(), getegid().as_raw())
+                .expect("guarded owned socket");
+        drop(guard);
+        assert!(!path.exists(), "the exact captured inode must be removed");
+        drop(owned);
+    }
+
+    #[test]
+    fn socket_guard_rejects_and_never_unlinks_a_pre_capture_substitution() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("helper.sock");
+        let original = StdUnixListener::bind(&path).expect("original socket");
+        original
+            .set_nonblocking(true)
+            .expect("non-blocking original");
+        let original_guard =
+            SocketPathGuard::capture_created(&path, geteuid().as_raw(), getegid().as_raw())
+                .expect("capture created original inode");
+        let mut queued_original = StdUnixStream::connect(&path).expect("queued original client");
+        queued_original
+            .write_all(&[0xa5_u8; SOCKET_IDENTITY_PROBE_BYTES])
+            .expect("queued mismatched proof");
+        fs::remove_file(&path).expect("unlink original pathname");
+        let replacement = StdUnixListener::bind(&path).expect("replacement socket");
+        replacement
+            .set_nonblocking(true)
+            .expect("non-blocking replacement");
+
+        assert!(original_guard.verify_listener(&original).is_err());
+        drop(original_guard);
+        assert!(path.exists(), "the replacement pathname must remain");
+
+        let guard = SocketPathGuard::capture_created(&path, geteuid().as_raw(), getegid().as_raw())
+            .expect("capture replacement inode");
+        guard
+            .verify_listener(&replacement)
+            .expect("prove replacement listener");
+        drop(guard);
+        assert!(!path.exists());
+        drop(queued_original);
+        drop(replacement);
+        drop(original);
     }
 }

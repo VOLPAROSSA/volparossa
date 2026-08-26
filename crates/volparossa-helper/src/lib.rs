@@ -5,8 +5,10 @@
 //! `Unavailable` and spawns no worker. The private worker entry can now bootstrap and prove narrow
 //! network-namespace, capability, descriptor, credential and dedicated non-root identity
 //! confinement, but that lifecycle, kernel preparation, transaction-wide cleanup and disposable
-//! live-root proof are not yet connected to the engine. Leader retirement still does not own
-//! descendants.
+//! live-root proof are not yet connected to the engine. Production does own the canonical durable
+//! journal actor as a startup/shutdown barrier, but deliberately refuses `MayOwnPrepare` recovery;
+//! it has no request-path issuance/arming writer or restart-stable pidfd/network-namespace custody.
+//! Leader retirement still does not own descendants.
 
 #![cfg(target_os = "linux")]
 
@@ -40,7 +42,7 @@ pub use engine::HelperEngine;
 #[doc(hidden)]
 pub use relay_fence::{INTERNAL_NFT_FRONTEND_ARGUMENT, run_internal_nft_frontend};
 pub use runtime::{AGENT_ACCOUNT, RUNTIME_DIRECTORY, SOCKET_PATH, TOKEN_PATH, WORKER_ACCOUNT};
-pub use server::{AllowedPeer, ServerError, bind_production_socket, run_server};
+pub use server::{ServerError, run_production_server};
 
 /// Fixed private child-process selector; it is not an agent-facing helper operation.
 #[doc(hidden)]
