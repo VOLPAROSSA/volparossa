@@ -2,10 +2,11 @@
 
 This directory contains a bounded process boundary around exact, locally
 patched mqvpn/xquic source. The build produces a real `volparossa-mpquic`
-executable and links the pinned libraries from source. Native API version 4
+executable and links the pinned libraries from source. Native API version 5
 provides bounded request-driven bidirectional datagrams, per-route
 credentials and TLS server names, an independent local association identifier,
-explicit multipath and single-path modes, and descriptor-only path adoption.
+explicit multipath and single-path modes, descriptor-only path adoption, and a
+fail-closed descriptor-bound single-path exit-listener contract.
 It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, exact scheduler, honest
 unique-payload metric, trusted helper origin for path descriptors, and
 disposable namespace acceptance remain incomplete and fail closed where
@@ -13,9 +14,9 @@ applicable.
 
 ## What is implemented and tested
 
-- An allocation-free, strict decoder for native API version 4 requests and a
+- An allocation-free, strict decoder for native API version 5 requests and a
   bounded request/response encoder compatible with the `volparossa-quic`
-  messages. Versions 1, 2, 3, and unknown versions are rejected. Canonical field
+  messages. Versions 1 through 4 and unknown versions are rejected. Canonical field
   order and minimal varints are required.
 - A fixed 32-byte descriptor-binding record followed by a four-byte big-endian
   frame boundary capped at 1 MiB before allocation. Each control-socket contact
@@ -40,12 +41,13 @@ applicable.
   and a second request all fail closed. Tests force both `MSG_TRUNC` and
   `MSG_CTRUNC` through that production receive path and verify that any
   installed descriptor is closed.
-- `StartSession` carries a credential of at most 255 bytes, an exact DNS TLS
+- `StartSession` carries an exact 43-character base64url credential, an exact DNS TLS
   server name of at most 253 bytes, and an absolute expiry no more than fifteen
   minutes ahead. They are deep-copied into only that route session, compared
   without secret-length timing shortcuts, and wiped on retirement. The daemon
   accepts no static product credential or TLS name through argv, environment,
-  or a pathname.
+  or a pathname. This boundary check proves credential syntax and length, not
+  generator entropy.
 - A bounded runtime of 32 sessions and eight paths per session. `StartSession`
   is idempotent only for byte-identical requests, remains pending until the
   tunnel and requested active-path count are real, and otherwise reports
@@ -71,11 +73,25 @@ applicable.
   checks, connects the exact exit tuple, and requires one nonzero namespace
   cookie consistently across a session. A matching cookie proves only session
   namespace consistency, not that the helper created the descriptor.
-- `AddPath` transfers exactly one descriptor only with its 32-byte SHA-256
-  binding over the fixed `VOLPAROSSA-MPQUIC-ADD-PATH-FD-V4` domain, canonical
-  request length, and canonical request. Every other operation requires the
-  all-zero binding and zero descriptors. Missing, extra, truncated, late, or
-  wrongly bound descriptors are rejected and closed on every path.
+- `AddPath` and `StartExitSession` each transfer exactly one descriptor only
+  with a 32-byte SHA-256 binding over their separate API-v5 domains,
+  `VOLPAROSSA-MPQUIC-ADD-PATH-FD-V5` and
+  `VOLPAROSSA-MPQUIC-START-EXIT-FD-V5`, plus canonical request length and
+  canonical request. Every other operation requires the all-zero binding and
+  zero descriptors. The fixed binding prefix may be fragmented by `SOCK_STREAM`
+  and is assembled safely; missing, extra, incomplete, truncated, late,
+  cross-domain, or wrongly bound descriptors are rejected and closed on every
+  path.
+- `StartExitSession` is restricted to one `SinglePathGeneralUdp` route and
+  carries its nonzero SPKI pin, DNS TLS name, exact exit-listener/expected-client
+  overlay tuples, reservation hash, and bounded unparsed in-memory certificate/private-
+  key candidate PEM (64 KiB/16 KiB). Rust requires the transferred descriptor to be a
+  pre-bound, unconnected, nonblocking, close-on-exec, IPv6-only UDP socket
+  without address/port reuse, and the dormant C runtime repeats those current
+  socket and tuple checks. Neither proves helper origin, assigned-address state,
+  or network namespace. The dormant native runtime closes it on every
+  path and returns `exit_listener_orchestration_unavailable`; no host bind,
+  pathname secret, or fallback exists.
 - Focused upstream patches enforce the caller-supplied leaf-SPKI SHA-256 pin
   on every handshake, pass explicit local/remote tuples to xquic, expose real
   RTT, congestion-window, bytes-in-flight, loss, rate, and ACKed-transport
@@ -104,19 +120,22 @@ volparossa-mpquic --mode client --socket ABSOLUTE_PATH
 volparossa-mpquic --mode exit --socket ABSOLUTE_PATH
 ~~~
 
-`--api-version` is a side-effect-free offline probe: it writes exactly `4\n`
+`--api-version` is a side-effect-free offline probe: it writes exactly `5\n`
 and opens no socket or runtime. The control socket path must satisfy the
 ownership and mode checks above. Authentication and the TLS server name arrive
-only in bounded API-v4 `StartSession` messages. Client and exit roles are
+only in bounded API-v5 route-session messages. Client and exit roles are
 separate process modes; a node enabling both eventually needs two separately
 orchestrated instances and control sockets.
 
-Exit mode accepts only its role-specific `StartExitSession` shape and validates
-its credential, transport shape, and short authorization window, but returns
-`exit_listener_orchestration_unavailable`. The native boundary has no exit
-backend factory, and the helper/agent does not yet provide the inherited
-route-listener descriptor and bounded TLS-identity transfer into a native exit
-backend. It never substitutes a host-local listener or secret pathname.
+Exit mode accepts only its role-specific `StartExitSession` shape, validates
+its credential syntax, bounded identity metadata, exact overlay route and short authorization window,
+and consumes exactly one inherited listener descriptor, but still returns
+`exit_listener_orchestration_unavailable`. The native boundary has no reviewed
+exit backend factory. It closes the supplied listener and never substitutes a
+host-local listener, secret pathname, or fallback.
+The dormant boundary does not yet parse the certificate, prove that its key
+matches, or bind the leaf certificate to the supplied DNS name and SPKI pin;
+those checks are mandatory before the future backend may report success.
 
 ## Locked upstream source
 
@@ -250,7 +269,8 @@ patches close six concrete integration seams:
    wipes both copied PEM buffers. No caller-supplied certificate or private-key
    pathname is required.
 
-API version 4 retains the bounded reverse/session contracts and closes six
+API version 5 retains the bounded reverse/session contracts and adds a strict
+single-path exit-listener handoff while preserving the earlier six
 process-boundary seams:
 
 1. Reverse datagrams use bounded, request-driven polling with deterministic
@@ -262,50 +282,65 @@ process-boundary seams:
    Datagrams.
 3. Multipath QUIC requires at least two paths while general UDP single-path
    requires exactly one; either mismatch fails without fallback.
-4. Client auth, TLS server name, and an at-most-fifteen-minute expiry are
-   bound to one `StartSession`; no process-global product credential remains.
-5. Versions 1, 2, 3, unknown versions, non-minimal varints, reordered fields,
+4. Exact-length base64url client auth, TLS server name, and an
+   at-most-fifteen-minute expiry are bound to one `StartSession`; no
+   process-global product credential remains.
+5. Versions 1 through 4, unknown versions, non-minimal varints, reordered fields,
    duplicate fields, and unknown fields fail closed.
 6. `AddPath` consumes exactly one correlated UDP descriptor and native never
    opens or binds its own path socket. The descriptor and metadata are checked
-   independently by Rust and C; all non-`AddPath` requests carry no descriptor.
+   independently by Rust and C.
+7. `StartExitSession` consumes exactly one separately domain-bound, listener-shaped
+   descriptor, carries its exact overlay peer metadata and bounded unparsed TLS
+   candidate material, and closes the descriptor before the intentionally dormant backend returns
+   unavailable. Every remaining operation carries no descriptor.
 
 The following gates remain hard blockers:
 
-1. **No trusted helper-origin proof for path descriptors.** SCM_RIGHTS, the
-   request hash, the strict private overlay shape, and a same-session namespace
-   cookie prevent tuple substitution and public/direct-exit use, but an
-   untrusted agent can still create a conforming socket. Production `AddPath`
-   remains blocked until a privileged property or direct helper-to-native
-   capability binds each descriptor to the helper acquisition.
+1. **No trusted helper-origin proof for path or listener descriptors.** SCM_RIGHTS,
+   request hashes, strict private overlay shapes, and current socket checks prevent
+   several substitutions, but an untrusted agent can still create a conforming
+   socket. Only client `AddPath` checks a same-session namespace cookie; StartExit
+   lacks exact namespace and assigned-address proof. Production adoption remains
+   blocked until an affine helper-to-native capability binds each descriptor to
+   the attested helper acquisition.
 2. **No unique payload-delivery metric.** xquic's counter includes QUIC
    transport overhead and retransmission. It cannot satisfy
    `NativePathStatus.delivered_bytes`, which promises uniquely delivered
    payload. `GetStatus` returns `unique_delivery_metric_unsupported`.
 3. **No operational exit lifecycle.** The patched mqvpn server can report a
    session-correlated inbound packet and can initialize xquic from bounded
-   in-memory TLS identity without a caller-supplied secret pathname. The native
-   backend remains client-only, and the helper/agent does not yet provide the
-   listener descriptor, TLS-material transfer, or end-to-end namespace FD
-   handoff. Valid `StartExitSession` requests return
+   in-memory TLS candidate material without a caller-supplied secret pathname.
+   The native backend remains client-only, and the helper/agent does not yet provide the
+   end-to-end listener provenance/handoff to a reviewed exit factory. API v5
+   accepts and closes the descriptor and carries the TLS material in memory,
+   but does not yet bind it cryptographically to the certificate key, DNS name,
+   SPKI pin, signed reservation scope, or a replay decision. Valid
+   `StartExitSession` requests still return
    `exit_listener_orchestration_unavailable`; no launcher is shipped.
-4. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
+4. **No replay authority or monotonic authorization deadline.** Native request
+   nonces correlate one response but have no replay tombstone. The active client
+   runtime compares expiry to `CLOCK_REALTIME`, so a backward clock adjustment
+   can extend an accepted session. Production must consume verified signed scope
+   affinely and convert its remaining lifetime once to a monotonic deadline.
+5. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
    is not the required replaceable delivery-time formula. FEC, XOR, and
    reinjection remain disabled; that does not make WLB an EDT implementation.
-5. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
+6. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
    framing, correlation, overflow, and wiping, but no disposable topology has
    yet proved an exit-originated inner datagram reaches the Rust client.
-6. **No end-to-end dynamic path removal or failover evidence.** The pinned
+7. **No end-to-end dynamic path removal or failover evidence.** The pinned
    upstream exposes these operations, but the VOLPAROSSA lifecycle has not
    exercised them across real relay paths.
-7. **No full acceptance evidence.** No disposable namespace test yet proves
+8. **No full acceptance evidence.** No disposable namespace test yet proves
    at least two data-carrying paths via distinct relays, bidirectional
    CONNECT-IP, loss-aware scheduling, failover, disabled duplication/FEC,
    privacy packet captures, and unchanged host routes, firewall, and DNS.
 
 The implementation-status dataplane items remain unchecked until these gates
-and the real namespace acceptance suite are complete. API-v4 boundary tests
-alone must not be reported as A06/A07 or full dataplane acceptance.
+and the real namespace acceptance suite are complete. Focused API-v5 boundary
+tests and the full API-v5 sanitizer run alone must not be reported as A06/A07
+or full dataplane acceptance.
 
 ## Policy boundary
 

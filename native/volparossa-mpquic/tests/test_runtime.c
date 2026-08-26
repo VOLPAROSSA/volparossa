@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#define _GNU_SOURCE
+
 #include "volparossa_mpquic_runtime.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
+
+#ifndef IPV6_FREEBIND
+#define IPV6_FREEBIND 78
+#endif
 
 typedef struct mock_transport {
     unsigned create_calls;
@@ -34,8 +42,13 @@ typedef struct mock_clock {
     uint64_t now_ms;
 } mock_clock_t;
 
-static const uint8_t TEST_SECRET[] = "test-secret";
+static const uint8_t TEST_SECRET[VMP_AUTH_SECRET_LEN] =
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 static const uint8_t TEST_TLS_SERVER_NAME[] = "exit.example";
+static const uint8_t TEST_TLS_CERTIFICATE[] =
+    "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
+static const uint8_t TEST_TLS_PRIVATE_KEY[] =
+    "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
 #define TEST_NOW_MS UINT64_C(1000000)
 #define TEST_EXPIRY_MS (TEST_NOW_MS + UINT64_C(60000))
 
@@ -51,8 +64,9 @@ static vmp_transport_error_t mock_create(
 {
     mock_transport_t *mock = factory_context;
     assert(params != NULL);
-    assert(params->auth_secret_len == 11U);
-    assert(memcmp(params->auth_secret, "test-secret", 11U) == 0);
+    assert(params->auth_secret_len == VMP_AUTH_SECRET_LEN);
+    assert(memcmp(params->auth_secret, TEST_SECRET,
+                  VMP_AUTH_SECRET_LEN) == 0);
     assert(strcmp(params->tls_server_name, "exit.example") == 0);
     assert(params->exit_spki_sha256[0] == 0x22U);
     assert(params->ip_len == 16U);
@@ -207,7 +221,7 @@ static vmp_request_t start_request(uint8_t context_byte, uint64_t masque,
     request.body.start_session.masque_context_id = masque;
     request.body.start_session.transport_mode = transport_mode;
     request.body.start_session.auth_secret.data = TEST_SECRET;
-    request.body.start_session.auth_secret.len = sizeof(TEST_SECRET) - 1U;
+    request.body.start_session.auth_secret.len = sizeof(TEST_SECRET);
     request.body.start_session.tls_server_name.data = TEST_TLS_SERVER_NAME;
     request.body.start_session.tls_server_name.len =
         sizeof(TEST_TLS_SERVER_NAME) - 1U;
@@ -226,12 +240,45 @@ static vmp_request_t start_exit_request(
     memset(request.body.start_exit_session.route_context_id, context_byte,
            VMP_CONTEXT_ID_LEN);
     request.body.start_exit_session.auth_secret.data = TEST_SECRET;
-    request.body.start_exit_session.auth_secret.len =
-        sizeof(TEST_SECRET) - 1U;
+    request.body.start_exit_session.auth_secret.len = sizeof(TEST_SECRET);
     request.body.start_exit_session.expires_at_ms = TEST_EXPIRY_MS;
     request.body.start_exit_session.minimum_paths = minimum_paths;
     request.body.start_exit_session.masque_context_id = masque;
     request.body.start_exit_session.transport_mode = transport_mode;
+    memset(request.body.start_exit_session.exit_spki_sha256, 0x22,
+           VMP_SPKI_SHA256_LEN);
+    request.body.start_exit_session.tls_server_name.data =
+        TEST_TLS_SERVER_NAME;
+    request.body.start_exit_session.tls_server_name.len =
+        sizeof(TEST_TLS_SERVER_NAME) - 1U;
+    request.body.start_exit_session.path_id = 1U;
+    uint8_t *listener_ip = request.body.start_exit_session.listener_ip;
+    listener_ip[0] = 0xfdU;
+    listener_ip[1] = 0x76U;
+    listener_ip[2] = 0x6fU;
+    listener_ip[3] = 0x6cU;
+    listener_ip[4] = 0x70U;
+    listener_ip[5] = 0x61U;
+    listener_ip[6] = context_byte;
+    listener_ip[10] = 0U;
+    listener_ip[11] = 1U;
+    listener_ip[13] = context_byte;
+    listener_ip[15] = 4U;
+    memcpy(request.body.start_exit_session.expected_client_ip, listener_ip,
+           sizeof(request.body.start_exit_session.expected_client_ip));
+    request.body.start_exit_session.expected_client_ip[15] = 1U;
+    request.body.start_exit_session.listener_port = 45443U;
+    request.body.start_exit_session.expected_client_port = 51820U;
+    memset(request.body.start_exit_session.reservation_hash, 0x33,
+           VMP_RESERVATION_HASH_LEN);
+    request.body.start_exit_session.tls_certificate_pem.data =
+        TEST_TLS_CERTIFICATE;
+    request.body.start_exit_session.tls_certificate_pem.len =
+        sizeof(TEST_TLS_CERTIFICATE) - 1U;
+    request.body.start_exit_session.tls_private_key_pem.data =
+        TEST_TLS_PRIVATE_KEY;
+    request.body.start_exit_session.tls_private_key_pem.len =
+        sizeof(TEST_TLS_PRIVATE_KEY) - 1U;
     return request;
 }
 
@@ -266,19 +313,35 @@ static vmp_request_t add_request(uint8_t context_byte, uint32_t path_id,
     return request;
 }
 
-static vmp_response_t dispatch(vmp_runtime_t *runtime,
-                               const vmp_request_t *request)
+static int make_exit_listener(const vmp_start_exit_session_t *start)
+{
+    const int descriptor =
+        socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+               IPPROTO_UDP);
+    assert(descriptor >= 0);
+    const int enabled = 1;
+    assert(setsockopt(descriptor, IPPROTO_IPV6, IPV6_V6ONLY, &enabled,
+                      sizeof(enabled)) == 0);
+    assert(setsockopt(descriptor, IPPROTO_IPV6, IPV6_FREEBIND, &enabled,
+                      sizeof(enabled)) == 0);
+    struct sockaddr_in6 local;
+    memset(&local, 0, sizeof(local));
+    local.sin6_family = AF_INET6;
+    local.sin6_port = htons(start->listener_port);
+    memcpy(&local.sin6_addr, start->listener_ip,
+           sizeof(start->listener_ip));
+    assert(bind(descriptor, (const struct sockaddr *)&local,
+                sizeof(local)) == 0);
+    return descriptor;
+}
+
+static vmp_response_t dispatch_with_fd(vmp_runtime_t *runtime,
+                                       const vmp_request_t *request,
+                                       int request_fd)
 {
     vmp_response_t response;
     memset(&response, 0, sizeof(response));
     response.api_version = VMP_API_VERSION;
-    int request_fd = -1;
-    if (request->operation == VMP_OPERATION_ADD_PATH) {
-        int descriptors[2];
-        assert(pipe(descriptors) == 0);
-        assert(close(descriptors[1]) == 0);
-        request_fd = descriptors[0];
-    }
     assert(vmp_runtime_dispatch(runtime, request, &response, request_fd) ==
            VMP_SERVER_OK);
     if (request_fd >= 0) {
@@ -289,6 +352,21 @@ static vmp_response_t dispatch(vmp_runtime_t *runtime,
     assert(response.diagnostic_code != NULL);
     assert(response.diagnostic_code_len <= VMP_MAX_DIAGNOSTIC_CODE);
     return response;
+}
+
+static vmp_response_t dispatch(vmp_runtime_t *runtime,
+                               const vmp_request_t *request)
+{
+    int request_fd = -1;
+    if (request->operation == VMP_OPERATION_ADD_PATH) {
+        int descriptors[2];
+        assert(pipe(descriptors) == 0);
+        assert(close(descriptors[1]) == 0);
+        request_fd = descriptors[0];
+    } else if (request->operation == VMP_OPERATION_START_EXIT_SESSION) {
+        request_fd = make_exit_listener(&request->body.start_exit_session);
+    }
+    return dispatch_with_fd(runtime, request, request_fd);
 }
 
 static vmp_request_t context_request(vmp_operation_t operation,
@@ -515,7 +593,61 @@ static void test_explicit_modes_and_contexts(void)
     assert(strcmp(response.diagnostic_code, "operation_for_role") == 0);
 
     vmp_request_t start_exit = start_exit_request(
-        0x55U, 9U, VMP_TRANSPORT_MODE_MULTIPATH_QUIC, 2U);
+        0x55U, 9U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    vmp_request_t rejected_exit = start_exit;
+    rejected_exit.api_version = 4U;
+    response = dispatch(exit_runtime, &rejected_exit);
+    assert(response.result == VMP_RESULT_VERSION);
+    rejected_exit = start_exit;
+    rejected_exit.body.start_exit_session.listener_ip[15] = 5U;
+    response = dispatch(exit_runtime, &rejected_exit);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    rejected_exit = start_exit;
+    rejected_exit.body.start_exit_session.expires_at_ms = clock.now_ms;
+    response = dispatch(exit_runtime, &rejected_exit);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    int invalid_descriptors[2];
+    assert(pipe(invalid_descriptors) == 0);
+    assert(close(invalid_descriptors[1]) == 0);
+    response = dispatch_with_fd(exit_runtime, &start_exit,
+                                invalid_descriptors[0]);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(strcmp(response.diagnostic_code,
+                  "exit_listener_descriptor") == 0);
+
+    int mismatched_tuple = make_exit_listener(
+        &start_exit.body.start_exit_session);
+    rejected_exit = start_exit;
+    ++rejected_exit.body.start_exit_session.listener_port;
+    response = dispatch_with_fd(exit_runtime, &rejected_exit,
+                                mismatched_tuple);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(strcmp(response.diagnostic_code,
+                  "exit_listener_descriptor") == 0);
+
+    int blocking_listener = make_exit_listener(
+        &start_exit.body.start_exit_session);
+    const int status_flags = fcntl(blocking_listener, F_GETFL);
+    assert(status_flags >= 0);
+    assert(fcntl(blocking_listener, F_SETFL,
+                 status_flags & ~O_NONBLOCK) == 0);
+    response = dispatch_with_fd(exit_runtime, &start_exit,
+                                blocking_listener);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(strcmp(response.diagnostic_code,
+                  "exit_listener_descriptor") == 0);
+
+    int reusable_listener = make_exit_listener(
+        &start_exit.body.start_exit_session);
+    const int enabled = 1;
+    assert(setsockopt(reusable_listener, SOL_SOCKET, SO_REUSEADDR, &enabled,
+                      sizeof(enabled)) == 0);
+    response = dispatch_with_fd(exit_runtime, &start_exit,
+                                reusable_listener);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(strcmp(response.diagnostic_code,
+                  "exit_listener_descriptor") == 0);
+
     response = dispatch(exit_runtime, &start_exit);
     assert(response.result == VMP_RESULT_TRANSPORT);
     assert(strcmp(response.diagnostic_code,
@@ -597,18 +729,19 @@ static void test_session_credentials_versions_and_expiry(void)
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
     assert(runtime != NULL);
 
-    uint8_t auth_secret[] = "test-secret";
+    uint8_t auth_secret[VMP_AUTH_SECRET_LEN] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     uint8_t tls_server_name[] = "exit.example";
     vmp_request_t start = start_request(
         0x77U, 17U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
     start.body.start_session.auth_secret.data = auth_secret;
-    start.body.start_session.auth_secret.len = sizeof(auth_secret) - 1U;
+    start.body.start_session.auth_secret.len = sizeof(auth_secret);
     start.body.start_session.tls_server_name.data = tls_server_name;
     start.body.start_session.tls_server_name.len =
         sizeof(tls_server_name) - 1U;
     start.body.start_session.expires_at_ms = clock.now_ms + UINT64_C(1000);
 
-    const uint32_t rejected_versions[] = {1U, 2U, 3U, 99U};
+    const uint32_t rejected_versions[] = {1U, 2U, 3U, 4U, 99U};
     for (size_t index = 0U;
          index < sizeof(rejected_versions) / sizeof(rejected_versions[0]);
          ++index) {
@@ -618,13 +751,24 @@ static void test_session_credentials_versions_and_expiry(void)
         assert(strcmp(rejected.diagnostic_code, "api_version") == 0);
     }
     start.api_version = VMP_API_VERSION;
-    vmp_response_t response = dispatch(runtime, &start);
+    uint8_t noncanonical_secret[VMP_AUTH_SECRET_LEN];
+    memcpy(noncanonical_secret, auth_secret, sizeof(noncanonical_secret));
+    noncanonical_secret[VMP_AUTH_SECRET_LEN - 1U] = (uint8_t)'B';
+    vmp_request_t noncanonical = start;
+    noncanonical.body.start_session.auth_secret.data = noncanonical_secret;
+    vmp_response_t response = dispatch(runtime, &noncanonical);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(strcmp(response.diagnostic_code, "session_parameters") == 0);
+
+    response = dispatch(runtime, &start);
     assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
 
-    static const uint8_t other_secret[] = "other-secret";
+    uint8_t other_secret[VMP_AUTH_SECRET_LEN];
+    memcpy(other_secret, TEST_SECRET, sizeof(other_secret));
+    other_secret[0] = (uint8_t)'B';
     vmp_request_t changed = start;
     changed.body.start_session.auth_secret.data = other_secret;
-    changed.body.start_session.auth_secret.len = sizeof(other_secret) - 1U;
+    changed.body.start_session.auth_secret.len = sizeof(other_secret);
     response = dispatch(runtime, &changed);
     assert(response.result == VMP_RESULT_INVALID_REQUEST);
     assert(strcmp(response.diagnostic_code,

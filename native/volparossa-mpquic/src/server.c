@@ -29,6 +29,29 @@ typedef struct received_descriptors {
     size_t count;
 } received_descriptors_t;
 
+static bool canonical_base64url_final(uint8_t value)
+{
+    switch (value) {
+    case (uint8_t)'A':
+    case (uint8_t)'E':
+    case (uint8_t)'I':
+    case (uint8_t)'M':
+    case (uint8_t)'Q':
+    case (uint8_t)'U':
+    case (uint8_t)'Y':
+    case (uint8_t)'c':
+    case (uint8_t)'g':
+    case (uint8_t)'k':
+    case (uint8_t)'o':
+    case (uint8_t)'s':
+    case (uint8_t)'w':
+    case (uint8_t)'0':
+    case (uint8_t)'4':
+    case (uint8_t)'8': return true;
+    default: return false;
+    }
+}
+
 static void close_descriptors(received_descriptors_t *descriptors)
 {
     if (descriptors == NULL) return;
@@ -184,6 +207,37 @@ static io_result_t receive_exact(
     return IO_OK;
 }
 
+static io_result_t receive_binding_record(
+    int fd, uint8_t binding[VMP_FD_BINDING_LEN], uint64_t deadline_ms,
+    received_descriptors_t *descriptors,
+    const vmp_server_options_t *options)
+{
+    for (;;) {
+        const io_result_t waiting =
+            wait_fd(fd, POLLIN, deadline_ms, true, options);
+        if (waiting != IO_OK) return waiting;
+        size_t received = 0U;
+        const io_result_t result =
+            receive_once(fd, binding, VMP_FD_BINDING_LEN, true,
+                         descriptors, &received);
+        if (result == IO_EOF) continue;
+        if (result != IO_OK) return result;
+        if (received == 0U) return IO_PROTOCOL;
+        if (received == VMP_FD_BINDING_LEN) return IO_OK;
+
+        /* SOCK_STREAM does not preserve the sender's write boundary. The
+         * descriptor, when present, must accompany the first byte; assemble
+         * the remaining binding bytes while rejecting any later ancillary
+         * data. */
+        received_descriptors_t unexpected = {{-1, -1}, 0U};
+        const io_result_t remainder = receive_exact(
+            fd, binding + received, VMP_FD_BINDING_LEN - received,
+            deadline_ms, false, false, &unexpected, options);
+        close_descriptors(&unexpected);
+        return remainder;
+    }
+}
+
 static io_result_t require_write_eof(
     int fd, uint64_t deadline_ms, const vmp_server_options_t *options)
 {
@@ -310,9 +364,8 @@ vmp_server_error_t vmp_serve_connection(int connection_fd,
     uint8_t binding[VMP_FD_BINDING_LEN];
     memset(binding, 0, sizeof(binding));
     received_descriptors_t descriptors = {{-1, -1}, 0U};
-    io_result_t io = receive_exact(
-        connection_fd, binding, sizeof(binding), deadline, false, true,
-        &descriptors, options);
+    io_result_t io = receive_binding_record(
+        connection_fd, binding, deadline, &descriptors, options);
     if (io != IO_OK) {
         close_descriptors(&descriptors);
         return map_io(io);
@@ -366,13 +419,15 @@ vmp_server_error_t vmp_serve_connection(int connection_fd,
     }
 
     int request_fd = -1;
-    if (request.operation == VMP_OPERATION_ADD_PATH) {
+    if (request.operation == VMP_OPERATION_ADD_PATH ||
+        request.operation == VMP_OPERATION_START_EXIT_SESSION) {
         uint8_t expected[VMP_FD_BINDING_LEN];
         memset(expected, 0, sizeof(expected));
         const bool valid =
             descriptors.count == 1U &&
-            options->request_binding(options->request_binding_context, frame,
-                                     frame_len, expected) &&
+            options->request_binding(options->request_binding_context,
+                                     request.operation, frame, frame_len,
+                                     expected) &&
             equal_binding(binding, expected);
         vmp_wipe_secret(expected, sizeof(expected));
         if (!valid) {
@@ -463,14 +518,23 @@ vmp_server_error_t vmp_read_auth_secret(int secret_fd, uint8_t *out,
         if (received > 0) {
             for (ssize_t index = 0; index < received; ++index) {
                 const uint8_t byte = out[offset + (size_t)index];
-                if (byte == 0 || byte == '\n' || byte == '\r') {
+                const bool alphanumeric =
+                    (byte >= (uint8_t)'A' && byte <= (uint8_t)'Z') ||
+                    (byte >= (uint8_t)'a' && byte <= (uint8_t)'z') ||
+                    (byte >= (uint8_t)'0' && byte <= (uint8_t)'9');
+                if (!alphanumeric && byte != (uint8_t)'_' &&
+                    byte != (uint8_t)'-') {
                     vmp_wipe_secret(out, limit);
                     return VMP_SERVER_PROTOCOL;
                 }
             }
             offset += (size_t)received;
         } else if (received == 0) {
-            if (offset == 0) return VMP_SERVER_PROTOCOL;
+            if (offset != VMP_AUTH_SECRET_LEN ||
+                !canonical_base64url_final(out[offset - 1U])) {
+                vmp_wipe_secret(out, limit);
+                return VMP_SERVER_PROTOCOL;
+            }
             *out_len = offset;
             return VMP_SERVER_OK;
         } else if (errno != EINTR) {
@@ -485,8 +549,16 @@ vmp_server_error_t vmp_read_auth_secret(int secret_fd, uint8_t *out,
         received = read(secret_fd, &extra, 1);
     } while (received < 0 && errno == EINTR);
     if (received != 0) {
+        const bool overlong = received > 0;
+        vmp_wipe_secret(&extra, sizeof(extra));
         vmp_wipe_secret(out, limit);
-        return received > 0 ? VMP_SERVER_LIMIT : VMP_SERVER_IO;
+        return overlong ? VMP_SERVER_LIMIT : VMP_SERVER_IO;
+    }
+    vmp_wipe_secret(&extra, sizeof(extra));
+    if (offset != VMP_AUTH_SECRET_LEN ||
+        !canonical_base64url_final(out[offset - 1U])) {
+        vmp_wipe_secret(out, limit);
+        return VMP_SERVER_PROTOCOL;
     }
     *out_len = offset;
     return VMP_SERVER_OK;

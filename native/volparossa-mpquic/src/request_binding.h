@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 bool vmp_sha256_request_binding(
-    void *context, const uint8_t *canonical_request,
+    void *context, vmp_operation_t operation, const uint8_t *canonical_request,
     size_t canonical_request_len, uint8_t out[VMP_FD_BINDING_LEN]);
 
 #ifdef __cplusplus

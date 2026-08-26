@@ -24,12 +24,24 @@ typedef struct dispatch_state {
 } dispatch_state_t;
 
 static int injected_recvmsg_flags;
+static size_t injected_recvmsg_capacity;
 
 ssize_t __real_recvmsg(int socket, struct msghdr *message, int flags);
 
 ssize_t __wrap_recvmsg(int socket, struct msghdr *message, int flags)
 {
+    size_t original_capacity = 0U;
+    if (injected_recvmsg_capacity != 0U && message->msg_iov != NULL &&
+        message->msg_iovlen == 1U &&
+        message->msg_iov[0].iov_len > injected_recvmsg_capacity) {
+        original_capacity = message->msg_iov[0].iov_len;
+        message->msg_iov[0].iov_len = injected_recvmsg_capacity;
+    }
     const ssize_t received = __real_recvmsg(socket, message, flags);
+    if (original_capacity != 0U) {
+        message->msg_iov[0].iov_len = original_capacity;
+        if (received >= 0) injected_recvmsg_capacity = 0U;
+    }
     if (received >= 0 && injected_recvmsg_flags != 0) {
         message->msg_flags |= injected_recvmsg_flags;
         injected_recvmsg_flags = 0;
@@ -134,15 +146,72 @@ static size_t make_add_path_frame(uint8_t *frame, size_t capacity)
     return make_add_path_frame_for(frame, capacity, UINT16_C(51820), false);
 }
 
-static bool test_request_binding(void *context, const uint8_t *request,
+static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
+{
+    static const uint8_t auth[VMP_AUTH_SECRET_LEN] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    static const uint8_t tls_name[] = "exit.example";
+    static const uint8_t certificate[] =
+        "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
+    static const uint8_t private_key[] =
+        "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+    uint8_t nested[512];
+    uint8_t nonce[VMP_REQUEST_NONCE_LEN];
+    uint8_t context[VMP_CONTEXT_ID_LEN];
+    uint8_t spki[VMP_SPKI_SHA256_LEN];
+    uint8_t reservation[VMP_RESERVATION_HASH_LEN];
+    uint8_t client_ip[16] = {
+        0xfdU, 0x76U, 0x6fU, 0x6cU, 0x70U, 0x61U, 0x11U, 0x11U,
+        0x22U, 0x22U, 0U,    1U,    0x33U, 0x33U, 0U,    1U,
+    };
+    uint8_t listener_ip[16];
+    memset(nonce, 0x34, sizeof(nonce));
+    memset(context, 0x44, sizeof(context));
+    memset(spki, 0x45, sizeof(spki));
+    memset(reservation, 0x46, sizeof(reservation));
+    memcpy(listener_ip, client_ip, sizeof(listener_ip));
+    listener_ip[15] = 4U;
+
+    test_encoder_t child = {.cursor = nested, .end = nested + sizeof(nested)};
+    put_bytes(&child, 1U, context, sizeof(context));
+    put_bytes(&child, 2U, auth, sizeof(auth));
+    put_uint(&child, 3U, UINT64_C(1060000));
+    put_uint(&child, 4U, 1U);
+    put_uint(&child, 5U, 19U);
+    put_uint(&child, 6U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP);
+    put_bytes(&child, 7U, spki, sizeof(spki));
+    put_bytes(&child, 8U, tls_name, sizeof(tls_name) - 1U);
+    put_uint(&child, 9U, 1U);
+    put_bytes(&child, 10U, listener_ip, sizeof(listener_ip));
+    put_uint(&child, 11U, 443U);
+    put_bytes(&child, 12U, client_ip, sizeof(client_ip));
+    put_uint(&child, 13U, UINT16_C(51820));
+    put_bytes(&child, 14U, reservation, sizeof(reservation));
+    put_bytes(&child, 15U, certificate, sizeof(certificate) - 1U);
+    put_bytes(&child, 16U, private_key, sizeof(private_key) - 1U);
+    test_encoder_t parent = {.cursor = frame + 4U, .end = frame + capacity};
+    put_uint(&parent, 1U, VMP_API_VERSION);
+    put_bytes(&parent, 2U, nonce, sizeof(nonce));
+    put_bytes(&parent, VMP_OPERATION_START_EXIT_SESSION, nested,
+              (size_t)(child.cursor - nested));
+    return finish_frame(frame, &parent);
+}
+
+static bool test_request_binding(void *context, vmp_operation_t operation,
+                                 const uint8_t *request,
                                  size_t request_len,
                                  uint8_t out[VMP_FD_BINDING_LEN])
 {
     (void)context;
-    if (request == NULL || request_len == 0U || out == NULL) return false;
+    if ((operation != VMP_OPERATION_ADD_PATH &&
+         operation != VMP_OPERATION_START_EXIT_SESSION) ||
+        request == NULL || request_len == 0U || out == NULL) {
+        return false;
+    }
     for (size_t index = 0U; index < VMP_FD_BINDING_LEN; ++index) {
         out[index] = (uint8_t)(UINT8_C(0xa5) ^ (uint8_t)index);
     }
+    out[1] ^= (uint8_t)operation;
     out[0] ^= (uint8_t)request_len;
     for (size_t index = 0U; index < request_len; ++index) {
         out[index % VMP_FD_BINDING_LEN] ^= request[index];
@@ -151,10 +220,12 @@ static bool test_request_binding(void *context, const uint8_t *request,
 }
 
 static void binding_for_frame(const uint8_t *frame, size_t frame_len,
+                              vmp_operation_t operation,
                               uint8_t out[VMP_FD_BINDING_LEN])
 {
     assert(frame_len > 4U);
-    assert(test_request_binding(NULL, frame + 4U, frame_len - 4U, out));
+    assert(test_request_binding(NULL, operation, frame + 4U,
+                                frame_len - 4U, out));
 }
 
 static vmp_server_error_t test_dispatch(void *context,
@@ -165,7 +236,8 @@ static vmp_server_error_t test_dispatch(void *context,
     dispatch_state_t *state = context;
     ++state->calls;
     state->operation = request->operation;
-    if (request->operation == VMP_OPERATION_ADD_PATH) {
+    if (request->operation == VMP_OPERATION_ADD_PATH ||
+        request->operation == VMP_OPERATION_START_EXIT_SESSION) {
         assert(request_fd >= 0);
         const int flags = fcntl(request_fd, F_GETFD);
         assert(flags >= 0 && (flags & FD_CLOEXEC) != 0);
@@ -297,7 +369,8 @@ static void reject_one_fd_and_assert_closed(const uint8_t *request,
     const size_t baseline = open_descriptor_count();
     uint8_t binding[VMP_FD_BINDING_LEN];
     if (correct_binding) {
-        binding_for_frame(request, request_len, binding);
+        binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH,
+                          binding);
     } else {
         memset(binding, 0x5a, sizeof(binding));
     }
@@ -327,7 +400,7 @@ static void reject_descriptor_count_and_assert_closed(size_t descriptor_count)
     uint8_t request[256];
     uint8_t binding[VMP_FD_BINDING_LEN];
     const size_t request_len = make_add_path_frame(request, sizeof(request));
-    binding_for_frame(request, request_len, binding);
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH, binding);
     send_binding(sockets[0], binding, descriptors, descriptor_count);
     write_exact_test(sockets[0], request, request_len);
     assert(shutdown(sockets[0], SHUT_WR) == 0);
@@ -424,7 +497,7 @@ static void reject_injected_message_flag_and_assert_closed(int message_flag)
     uint8_t request[256];
     uint8_t binding[VMP_FD_BINDING_LEN];
     const size_t request_len = make_add_path_frame(request, sizeof(request));
-    binding_for_frame(request, request_len, binding);
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH, binding);
     send_binding(sockets[0], binding, &pipe_fds[0], 1U);
     write_exact_test(sockets[0], request, request_len);
     assert(shutdown(sockets[0], SHUT_WR) == 0);
@@ -455,7 +528,7 @@ static void test_exact_add_path_fd_and_binding_succeeds(void)
     uint8_t request[256];
     uint8_t binding[VMP_FD_BINDING_LEN];
     const size_t request_len = make_add_path_frame(request, sizeof(request));
-    binding_for_frame(request, request_len, binding);
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH, binding);
     send_binding(sockets[0], binding, &pipe_fds[0], 1U);
     write_exact_test(sockets[0], request, request_len);
     assert(shutdown(sockets[0], SHUT_WR) == 0);
@@ -469,12 +542,97 @@ static void test_exact_add_path_fd_and_binding_succeeds(void)
     close_pair(sockets);
 }
 
+static void test_exact_start_exit_fd_uses_distinct_binding_domain(void)
+{
+    uint8_t request[1024];
+    uint8_t binding[VMP_FD_BINDING_LEN];
+    const size_t request_len = make_start_exit_frame(request, sizeof(request));
+
+    int sockets[2];
+    int pipe_fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(pipe(pipe_fds) == 0);
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH, binding);
+    send_binding(sockets[0], binding, &pipe_fds[0], 1U);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    dispatch_state_t state = {0};
+    expect_protocol(sockets, &state);
+    assert(close(pipe_fds[0]) == 0);
+    assert(close(pipe_fds[1]) == 0);
+    close_pair(sockets);
+
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(pipe(pipe_fds) == 0);
+    binding_for_frame(request, request_len,
+                      VMP_OPERATION_START_EXIT_SESSION, binding);
+    send_binding(sockets[0], binding, &pipe_fds[0], 1U);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    state = (dispatch_state_t){0};
+    const vmp_server_options_t configuration = options();
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) == VMP_SERVER_OK);
+    assert(state.calls == 1U &&
+           state.operation == VMP_OPERATION_START_EXIT_SESSION);
+    assert(close(pipe_fds[0]) == 0);
+    assert(close(pipe_fds[1]) == 0);
+    close_pair(sockets);
+}
+
+static void test_fragmented_binding_recvmsg_is_reassembled(void)
+{
+    int sockets[2];
+    int pipe_fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(pipe(pipe_fds) == 0);
+    uint8_t request[256];
+    uint8_t binding[VMP_FD_BINDING_LEN];
+    const size_t request_len = make_add_path_frame(request, sizeof(request));
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH, binding);
+    send_binding(sockets[0], binding, &pipe_fds[0], 1U);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    injected_recvmsg_capacity = VMP_FD_BINDING_LEN / 2U;
+    dispatch_state_t state = {0};
+    const vmp_server_options_t configuration = options();
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) == VMP_SERVER_OK);
+    assert(injected_recvmsg_capacity == 0U);
+    assert(state.calls == 1U && state.operation == VMP_OPERATION_ADD_PATH);
+    assert(close(pipe_fds[0]) == 0);
+    assert(close(pipe_fds[1]) == 0);
+    close_pair(sockets);
+}
+
+static void test_incomplete_binding_is_rejected_and_fd_closed(void)
+{
+    int sockets[2];
+    int pipe_fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(pipe(pipe_fds) == 0);
+    const size_t baseline = open_descriptor_count();
+    uint8_t partial[VMP_FD_BINDING_LEN / 2U];
+    memset(partial, 0x5a, sizeof(partial));
+    send_with_fds(sockets[0], partial, sizeof(partial), &pipe_fds[0], 1U);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    dispatch_state_t state = {0};
+    const vmp_server_options_t configuration = options();
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) != VMP_SERVER_OK);
+    assert(state.calls == 0U);
+    assert(open_descriptor_count() == baseline);
+    assert(close(pipe_fds[0]) == 0);
+    assert(close(pipe_fds[1]) == 0);
+    close_pair(sockets);
+}
+
 static void test_missing_extra_and_wrong_binding_fds_are_rejected(void)
 {
     uint8_t request[256];
     uint8_t binding[VMP_FD_BINDING_LEN];
     const size_t request_len = make_add_path_frame(request, sizeof(request));
-    binding_for_frame(request, request_len, binding);
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH, binding);
 
     int sockets[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
@@ -623,23 +781,61 @@ static void test_oversize_and_partial_frame_are_bounded(void)
                                 &state) == VMP_SERVER_TIMEOUT);
     assert(state.calls == 0U && pump_calls > 0U);
     close_pair(sockets);
+
+    int pipe_fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(pipe(pipe_fds) == 0);
+    const size_t baseline = open_descriptor_count();
+    uint8_t request[256];
+    uint8_t descriptor_binding[VMP_FD_BINDING_LEN];
+    const size_t request_len = make_add_path_frame(request, sizeof(request));
+    binding_for_frame(request, request_len, VMP_OPERATION_ADD_PATH,
+                      descriptor_binding);
+    send_binding(sockets[0], descriptor_binding, &pipe_fds[0], 1U);
+    state = (dispatch_state_t){0};
+    configuration = options();
+    configuration.frame_timeout_ms = 20U;
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) == VMP_SERVER_TIMEOUT);
+    assert(state.calls == 0U);
+    assert(open_descriptor_count() == baseline);
+    assert(close(pipe_fds[0]) == 0);
+    assert(close(pipe_fds[1]) == 0);
+    close_pair(sockets);
 }
 
 static void test_secret_fd_is_bounded_and_wiped(void)
 {
     int descriptors[2];
     assert(pipe(descriptors) == 0);
-    const uint8_t secret[] = "opaque-auth";
-    write_exact_test(descriptors[1], secret, sizeof(secret) - 1U);
+    static const uint8_t secret[VMP_AUTH_SECRET_LEN] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    write_exact_test(descriptors[1], secret, sizeof(secret));
     assert(close(descriptors[1]) == 0);
-    uint8_t output[32] = {0};
+    uint8_t output[VMP_AUTH_SECRET_LEN] = {0};
     size_t output_len = 0U;
     assert(vmp_read_auth_secret(descriptors[0], output, sizeof(output),
                                 &output_len) == VMP_SERVER_OK);
-    assert(output_len == sizeof(secret) - 1U);
+    assert(output_len == sizeof(secret));
     assert(memcmp(output, secret, output_len) == 0);
     vmp_wipe_secret(output, output_len);
     for (size_t index = 0U; index < output_len; ++index) {
+        assert(output[index] == 0U);
+    }
+    assert(close(descriptors[0]) == 0);
+
+    assert(pipe(descriptors) == 0);
+    uint8_t noncanonical[VMP_AUTH_SECRET_LEN];
+    memcpy(noncanonical, secret, sizeof(noncanonical));
+    noncanonical[VMP_AUTH_SECRET_LEN - 1U] = (uint8_t)'B';
+    write_exact_test(descriptors[1], noncanonical, sizeof(noncanonical));
+    assert(close(descriptors[1]) == 0);
+    memset(output, 0xa5, sizeof(output));
+    output_len = 99U;
+    assert(vmp_read_auth_secret(descriptors[0], output, sizeof(output),
+                                &output_len) == VMP_SERVER_PROTOCOL);
+    assert(output_len == 0U);
+    for (size_t index = 0U; index < sizeof(output); ++index) {
         assert(output[index] == 0U);
     }
     assert(close(descriptors[0]) == 0);
@@ -663,6 +859,9 @@ int main(void)
 {
     test_authenticated_framed_exchange();
     test_exact_add_path_fd_and_binding_succeeds();
+    test_exact_start_exit_fd_uses_distinct_binding_domain();
+    test_fragmented_binding_recvmsg_is_reassembled();
+    test_incomplete_binding_is_rejected_and_fd_closed();
     test_rejected_descriptors_are_closed_on_every_boundary();
     test_message_truncation_flags_are_rejected_and_closed();
     test_missing_extra_and_wrong_binding_fds_are_rejected();

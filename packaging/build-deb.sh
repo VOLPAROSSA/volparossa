@@ -78,8 +78,8 @@ else
         'The launcher must orchestrate separate role processes and control sockets' \
         'with the agent. It remains blocked until trusted helper origin for' \
         'request-bound route UDP FDs and exit' \
-        'listener/certificate/key FDs are wired end to end.' \
-        'API-v4 session secrets arrive over the control socket, never through' \
+        'listener and in-memory TLS identity are wired end to end.' \
+        'API-v5 session secrets arrive over the control socket, never through' \
         'launcher argv, environment, or files.'
 fi
 

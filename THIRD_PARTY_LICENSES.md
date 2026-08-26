@@ -194,29 +194,59 @@ This API-v4 run does not prove privileged-helper origin for a descriptor,
 the separate BoringSSL Go suite, the xquic CUnit suite, or disposable-
 network-namespace dataplane acceptance.
 
+The native API-v5 exit-listener boundary was verified on Debian 13 amd64 on
+2026-08-26:
+
+- `verify-upstream.sh` accepted the exact locked commits, trees, tags,
+  gitlinks, origins, licenses, bundled files, and patch SHA-256 values before
+  the build started.
+- A clean, offline full-graph build instrumented BoringSSL, xquic, mqvpn/lwIP,
+  the VOLPAROSSA wrapper, and the final daemon with AddressSanitizer and
+  UndefinedBehaviorSanitizer. All 33 mqvpn/lwIP tests and all 5 wrapper tests
+  passed with leak detection and halt/abort-on-error enabled.
+- The sanitized daemon's side-effect-free API-version probe wrote exactly
+  `5\n`. Bounded SIGINT and SIGTERM lifecycle checks exited zero, removed the
+  exact mode-`0600` control sockets they created, and produced no sanitizer
+  finding.
+- Focused API-v5 boundary tests cover independent Rust/C listener socket
+  checks, operation-specific descriptor binding, fragmented stream assembly,
+  rejection of missing, late, extra, or truncated ancillary data, timeout
+  cleanup, and fail-closed dormant exit dispatch.
+
+This API-v5 run does not prove trusted-helper descriptor provenance,
+assigned-address or network-namespace state, cryptographic consistency of the
+candidate TLS identity, the separate BoringSSL Go suite, the xquic CUnit
+suite, or disposable-network-namespace dataplane acceptance.
+
 This evidence proves reproducible source intake, compilation, and bounded
 native behavior. It is not namespace dataplane acceptance.
 
 ### Mandatory unresolved findings
 
-Native API version 4 keeps the bounded request-driven reverse channel, carries
+Native API version 5 keeps the bounded request-driven reverse channel, carries
 and validates a nonzero local association identifier, and represents multipath
 (at least two paths) separately from single-path general UDP (exactly one
 path). It binds auth, TLS server name, and a short expiry to one route session,
 sends no unsolicited native frames, and does not silently downgrade any
 mode. `AddPath` consumes one request-bound UDP descriptor, enforces the fixed
-private IPv6 overlay shape, and never creates or binds a path socket. Versions
-1, 2, 3, and future versions fail closed. The local identifier does not change
-the RFC 9484 zero Context ID for IP Datagrams. SCM_RIGHTS, its request hash,
-and a same-session namespace cookie prove correlation and namespace
-consistency, not privileged-helper origin.
+private IPv6 overlay shape, and never creates or binds a path socket.
+`StartExitSession` consumes one separately domain-bound, listener-shaped descriptor,
+carries exact overlay peer metadata and bounded unparsed TLS candidate material, then closes the
+descriptor and fails closed while the exit backend remains dormant. Versions 1
+through 4 and future versions fail closed. The local identifier does not change
+the RFC 9484 zero Context ID for IP Datagrams. Both SCM_RIGHTS bindings prove
+request correlation only. The active client `AddPath` backend additionally checks
+one same-session namespace cookie; `StartExitSession` has no namespace or
+assigned-address provenance yet, and neither path proves privileged-helper origin.
 
 The following required contracts and evidence remain unresolved:
 
-1. trusted helper-origin proof for each client path descriptor;
+1. trusted helper-origin, exact namespace, and assigned-address proof for each
+   client path and exit-listener descriptor;
 2. a unique delivered-payload counter rather than ACKed transport bytes;
-3. an operational exit backend with helper-to-native listener and TLS
-   certificate/key FD orchestration;
+3. an operational exit backend with helper-to-native listener provenance,
+   signed reservation/replay binding, monotonic expiry, and cryptographic
+   certificate/key/name/SPKI consistency over the in-message TLS material;
 4. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
 5. disposable-topology proof that an exit-originated inner datagram traverses
    the native queue/poll boundary and reaches the Rust client;
