@@ -8,9 +8,11 @@
 //! wait, admission becomes permanently ambiguous and the worker handle is detached instead of
 //! joined. The process-lifetime latch remains set, the journal lock remains held while the worker
 //! is stuck, and at most that already-accepted recovery may finish late; no later command runs.
-//! Deadlines are rechecked on the actor thread before startup touches the store and after every
-//! dequeue before journal work begins. An expired, not-yet-started command is mutation-free;
-//! journal I/O which already started always settles before its late result fences admission.
+//! The same absolute deadline reaches the trusted executor and is checked again before a recovery
+//! proof may mutate the journal, so a late executor return cannot publish `Absent`. Deadlines are
+//! also rechecked before startup touches the store and after every dequeue. An expired,
+//! not-yet-started command is mutation-free; non-recovery journal I/O which already started always
+//! settles before its late result fences admission.
 
 use std::{
     fmt, fs,
@@ -1121,7 +1123,7 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
         })
     }
 
-    fn startup_sweep(&mut self) -> Result<(), FailureDisposition> {
+    fn startup_sweep(&mut self, deadline: HardDeadline) -> Result<(), FailureDisposition> {
         let snapshot = match self.journal.snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(self.classify_journal_error(error)),
@@ -1138,6 +1140,11 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
             })
             .collect::<Vec<_>>();
         for (ownership_id, generation, phase) in pending {
+            if deadline.ensure_remaining().is_err() {
+                return Err(FailureDisposition::Continue(
+                    DurableOwnershipError::DeadlineElapsed,
+                ));
+            }
             match phase {
                 OwnershipPhase::Intent => {
                     self.revision = self
@@ -1151,8 +1158,14 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
                         ownership_id,
                         generation,
                         &mut self.executor,
+                        deadline,
                     ) {
                         Ok(revision) => revision,
+                        Err(RecoveryAttemptError::Deadline) => {
+                            return Err(FailureDisposition::Continue(
+                                DurableOwnershipError::DeadlineElapsed,
+                            ));
+                        }
                         Err(RecoveryAttemptError::Executor(_)) => {
                             return Err(FailureDisposition::Continue(
                                 DurableOwnershipError::RecoveryNotConfirmed,
@@ -1243,7 +1256,11 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
         }
     }
 
-    fn confirm(&mut self, key: OwnershipCoordinates) -> OperationOutcome<()> {
+    fn confirm(
+        &mut self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> OperationOutcome<()> {
         if let Err(error) = self.validate_key(key) {
             return OperationOutcome::failure(error);
         }
@@ -1252,6 +1269,7 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
             key.ownership_id,
             key.generation,
             &mut self.executor,
+            deadline,
         ) {
             Ok(revision) => {
                 self.revision = revision;
@@ -1259,6 +1277,9 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
             }
             Err(RecoveryAttemptError::Executor(_)) => {
                 OperationOutcome::Complete(Err(DurableOwnershipError::RecoveryNotConfirmed))
+            }
+            Err(RecoveryAttemptError::Deadline) => {
+                OperationOutcome::Complete(Err(DurableOwnershipError::DeadlineElapsed))
             }
             Err(RecoveryAttemptError::Journal(error)) => {
                 OperationOutcome::failure(self.classify_journal_error(error))
@@ -1270,6 +1291,22 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
         self.journal
             .confirm_retry_safe_after_definite_failure()
             .map_err(|_| DurableOwnershipError::Ambiguous)
+    }
+
+    fn confirm_quiescent_boundary(&mut self) -> Result<(), DurableOwnershipError> {
+        self.confirm_complete_boundary()?;
+        let snapshot = self
+            .journal
+            .snapshot()
+            .map_err(|_| DurableOwnershipError::Ambiguous)?;
+        if snapshot
+            .records
+            .values()
+            .any(|record| record.phase != OwnershipPhase::Absent)
+        {
+            return Err(DurableOwnershipError::RecoveryNotConfirmed);
+        }
+        Ok(())
     }
 
     fn validate_key(&mut self, key: OwnershipCoordinates) -> Result<(), FailureDisposition> {
@@ -1465,7 +1502,7 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
             return;
         }
     };
-    if let Err(failure) = core.startup_sweep() {
+    if let Err(failure) = core.startup_sweep(deadline) {
         let (error, terminal) = terminal_start_failure(failure);
         complete_startup_failure(startup_reply, error, terminal, lifecycle);
         return;
@@ -1521,10 +1558,14 @@ fn run_actor_commands<Executor: RecoveryExecutor>(
                     reply.complete_unstarted_deadline();
                     return;
                 }
-                match core.confirm_complete_boundary() {
+                match core.confirm_quiescent_boundary() {
                     Ok(()) => {
                         lifecycle.transition(Lifecycle::Stopped);
                         reply.complete(Ok(()));
+                    }
+                    Err(DurableOwnershipError::RecoveryNotConfirmed) => {
+                        lifecycle.transition(Lifecycle::Stopped);
+                        reply.complete(Err(DurableOwnershipError::RecoveryNotConfirmed));
                     }
                     Err(error) => {
                         admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
@@ -1588,12 +1629,12 @@ fn process_operation<Executor: RecoveryExecutor>(
             finish_operation(reply, core.retire(key), lifecycle, admission)
         }
         Operation::ConfirmRecoveredAbsent {
-            deadline: _,
+            deadline,
             key,
             mut reply,
         } => {
             reply.arm();
-            finish_operation(reply, core.confirm(key), lifecycle, admission)
+            finish_operation(reply, core.confirm(key, deadline), lifecycle, admission)
         }
         #[cfg(test)]
         Operation::PanicAfterRegister {

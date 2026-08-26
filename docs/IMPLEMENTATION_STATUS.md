@@ -105,15 +105,18 @@ Last updated: 2026-08-26
   record before reporting ready, and admission is bounded to four operations plus shutdown.
   Every non-test actor entry point now requires one absolute hard deadline carried through
   admission, queueing, actor execution, reply and thread settlement. Startup rechecks it before
-  filesystem/latch work and commands recheck it after dequeue. Expired unstarted work is
-  mutation-free; late completion after work begins permanently fences admission as ambiguous, and
-  shutdown cannot hide settlement ambiguity behind a weaker deadline result.
+  filesystem/latch work and each pending record, commands recheck it after dequeue, and recovery
+  receives the exact same value. Recovery checks it before the executor and after the exact proof,
+  immediately before journal mutation, so a late executor return cannot publish `Absent`. Expired
+  unstarted work is mutation-free; every late completion permanently fences admission as ambiguous,
+  and shutdown cannot hide settlement ambiguity behind a weaker deadline result.
   Definite pre-rename I/O failures permit a retry only after the retained parent, exact exclusive
   lock, absent temporary entry, and durable snapshot are all re-proved; otherwise the actor is
   permanently ambiguous. Reply and thread-settlement waits are bounded, but an actor thread stuck
   inside the non-cancellable recovery executor can only be detached while retaining the journal
-  lock; the process latch remains set. Clean shutdown proves only the durable boundary and does not
-  retire outstanding records. The codec and actor remain private and pre-production; no production
+  lock; the process latch remains set. Clean shutdown proves the durable boundary and additionally
+  requires every record to be durably `Absent`; it refuses rather than retires or recovers an
+  outstanding record. The codec and actor remain private and pre-production; no production
   writer/recovery wiring, server-wired restart reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live root proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact

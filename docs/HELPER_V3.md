@@ -110,23 +110,27 @@ failure aborts startup, and readiness follows only after every record in the obs
 durably `Absent` and the complete boundary rechecks. There is also no supported on-disk migration
 or live root proof. Every non-test actor entry point requires one caller-supplied absolute hard
 deadline. That same value is carried through admission, the queued command, actor-thread execution,
-reply handling and thread settlement. Startup rechecks it before the first filesystem or latch
-operation, and ordinary commands recheck it immediately after dequeue. Work which expires before
-its first mutation returns `DeadlineElapsed` without touching journal bytes; once journal or
-recovery work has begun it must settle, and a late or unobservable completion permanently fences
-admission as ambiguous. Shutdown gives settlement ambiguity precedence over a weaker queued
+reply handling and thread settlement. Recovery additionally receives that exact same deadline and
+rechecks it before invoking the trusted executor and after the exact proof, immediately before any
+`MayOwnPrepare -> Absent` mutation. Startup rechecks it before the first filesystem or latch
+operation and before each pending record; ordinary commands recheck it immediately after dequeue.
+Work which expires before its first mutation returns `DeadlineElapsed` without touching journal
+bytes. Non-recovery journal I/O which already began must settle, while a recovery executor may
+return late but can no longer publish `Absent`; every late or unobservable completion permanently
+fences admission as ambiguous. Shutdown gives settlement ambiguity precedence over a weaker queued
 deadline result. Only `Drop` retains a private emergency deadline; relative-deadline convenience
 wrappers are test-only. If the actor thread is stuck inside the non-cancellable recovery executor,
 its join handle is detached after the bounded settlement wait; that thread may retain the journal
-lock, while the process-global latch remains set until process exit. A clean shutdown acknowledges
-only an intact durable boundary: it does not retire or recover outstanding records, and reopening
-requires a fresh process. These limitations must be resolved at the production service boundary
-before the actor can become the production writer. The required tag-35 closed plan has a fallible
-exact conversion into the store's existing `ClosedPlan`; this removes the wire/schema mismatch but
-performs no journal I/O and grants no mutation authority. A missing journal is therefore not proof
-that stale kernel state is absent, and the interlock cannot issue a cross-runtime tag-28 receipt.
-The current `doctor` has no helper-v3 crash-ownership readiness check, so its other successful
-checks must not be interpreted as evidence of live recovery or cleanup.
+lock, while the process-global latch remains set until process exit. A clean shutdown now requires
+both an intact durable boundary and every record already durably `Absent`; it never retires or
+recovers an outstanding record and returns `RecoveryNotConfirmed` for a known `Intent` or
+`MayOwnPrepare`. Reopening requires a fresh process. These limitations must be resolved at the
+production service boundary before the actor can become the production writer. The required tag-35
+closed plan has a fallible exact conversion into the store's existing `ClosedPlan`; this removes
+the wire/schema mismatch but performs no journal I/O and grants no mutation authority. A missing
+journal is therefore not proof that stale kernel state is absent, and the interlock cannot issue a
+cross-runtime tag-28 receipt. The current `doctor` has no helper-v3 crash-ownership readiness check,
+so its other successful checks must not be interpreted as evidence of live recovery or cleanup.
 
 The dormant store's insert, prepare-arm, never-dispatched retirement, and confirmed-recovery
 transitions are exact-current-revision retry-safe after a lost reply. A retry succeeds only when the
