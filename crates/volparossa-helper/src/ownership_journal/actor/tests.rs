@@ -35,6 +35,7 @@ struct ExecutorObservations {
     calls: usize,
     threads: Vec<ThreadId>,
     thread_names: Vec<Option<String>>,
+    deadlines: Vec<HardDeadline>,
 }
 
 #[derive(Default)]
@@ -110,6 +111,7 @@ impl RecoveryExecutor for RecordingExecutor {
     fn confirm_absent(
         &mut self,
         target: &RecoveryTarget,
+        deadline: HardDeadline,
     ) -> Result<ConfirmedAbsentProof, Self::Error> {
         {
             let mut observations = self.observations.lock().expect("executor observations");
@@ -118,6 +120,7 @@ impl RecoveryExecutor for RecordingExecutor {
             observations
                 .thread_names
                 .push(thread::current().name().map(str::to_owned));
+            observations.deadlines.push(deadline);
         }
         if let Some(gate) = &self.gate {
             gate.block();
@@ -644,6 +647,63 @@ fn startup_sweeps_every_intent_before_ready_on_the_named_actor_thread() {
 }
 
 #[test]
+fn startup_and_command_recovery_receive_the_exact_outer_deadline() {
+    let startup_directory = tempdir().expect("startup temporary directory");
+    let startup_config = test_config(startup_directory.path());
+    prepopulate(
+        &startup_config,
+        &[(durable_intent(28), Some(durable_anchor(28)))],
+    );
+    let startup_observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let startup_capture = Arc::clone(&startup_observations);
+    let startup_deadline = HardDeadline::after(TEST_WAIT).expect("startup deadline");
+    DurableOwnershipActor::spawn_with_executor_factory_until(
+        startup_config,
+        move || executor(ExecutorMode::Exact, &startup_capture, None),
+        startup_deadline,
+    )
+    .expect("start actor after deadline-bound recovery")
+    .shutdown()
+    .expect("clean startup actor shutdown");
+    assert_eq!(
+        startup_observations
+            .lock()
+            .expect("startup observations")
+            .deadlines,
+        vec![startup_deadline]
+    );
+
+    let command_directory = tempdir().expect("command temporary directory");
+    let command_config = test_config(command_directory.path());
+    let command_observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let actor = spawn_actor(
+        command_config,
+        ExecutorMode::Exact,
+        &command_observations,
+        None,
+    )
+    .expect("start command actor");
+    let key = actor
+        .register_intent(durable_intent(29))
+        .expect("register command fixture");
+    actor
+        .arm_prepare(&key, durable_anchor(29))
+        .expect("arm command fixture");
+    let command_deadline = HardDeadline::after(TEST_WAIT).expect("command deadline");
+    actor
+        .confirm_recovered_absent_until(&key, command_deadline)
+        .expect("deadline-bound command recovery");
+    actor.shutdown().expect("clean command actor shutdown");
+    assert_eq!(
+        command_observations
+            .lock()
+            .expect("command observations")
+            .deadlines,
+        vec![command_deadline]
+    );
+}
+
+#[test]
 fn dropped_replies_do_not_cancel_durable_transitions_and_exact_retries_recover() {
     let directory = tempdir().expect("temporary directory");
     let config = test_config(directory.path());
@@ -697,7 +757,7 @@ fn dropped_replies_do_not_cancel_durable_transitions_and_exact_retries_recover()
 }
 
 #[test]
-fn accepted_recovery_survives_caller_drop_and_late_completion_fences_admission() {
+fn late_recovery_after_caller_drop_fences_admission_without_publishing_absent() {
     let directory = tempdir().expect("temporary directory");
     let config = test_config(directory.path());
     let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
@@ -744,8 +804,8 @@ fn accepted_recovery_survives_caller_drop_and_late_completion_fences_admission()
             .get(&key.coordinates.ownership_id)
             .expect("late recovery record")
             .phase,
-        OwnershipPhase::Absent,
-        "the accepted recovery must finish even after its caller drops"
+        OwnershipPhase::MayOwnPrepare,
+        "an executor return after the hard deadline must not publish absence"
     );
     drop(actor);
 }
@@ -837,7 +897,10 @@ fn interposed_transitions_and_wrong_keys_reject_without_changing_durable_bytes()
         fs::read(&config.journal_path).expect("journal bytes after wrong keys"),
         before
     );
-    actor.shutdown().expect("clean actor shutdown");
+    assert_eq!(
+        actor.shutdown().unwrap_err(),
+        DurableOwnershipError::RecoveryNotConfirmed
+    );
 }
 
 #[test]
@@ -863,7 +926,10 @@ fn executor_failure_is_definite_and_preserves_may_own_for_later_recovery() {
     );
     assert_eq!(observations.lock().expect("executor observations").calls, 2);
     let ownership_id = key.coordinates.ownership_id;
-    actor.shutdown().expect("clean actor shutdown");
+    assert_eq!(
+        actor.shutdown().unwrap_err(),
+        DurableOwnershipError::RecoveryNotConfirmed
+    );
     assert_eq!(
         reopened_snapshot(&config)
             .records
@@ -872,6 +938,37 @@ fn executor_failure_is_definite_and_preserves_may_own_for_later_recovery() {
             .phase,
         OwnershipPhase::MayOwnPrepare
     );
+}
+
+#[test]
+fn shutdown_refuses_a_durable_intent_and_preserves_exact_bytes() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let actor =
+        spawn_actor(config.clone(), ExecutorMode::Exact, &observations, None).expect("start actor");
+    let key = actor
+        .register_intent(durable_intent(30))
+        .expect("register live intent");
+    let before = fs::read(&config.journal_path).expect("durable intent bytes");
+
+    assert_eq!(
+        actor.shutdown().unwrap_err(),
+        DurableOwnershipError::RecoveryNotConfirmed
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("journal bytes after refused shutdown"),
+        before
+    );
+    assert_eq!(
+        reopened_snapshot(&config)
+            .records
+            .get(&key.coordinates.ownership_id)
+            .expect("retained intent")
+            .phase,
+        OwnershipPhase::Intent
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
 }
 
 #[test]

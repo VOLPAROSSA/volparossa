@@ -12,6 +12,8 @@ mod actor;
 
 pub(crate) use actor::{DurablePrepareAnchor, DurablePrepareAnchorParts};
 
+use crate::deadline::HardDeadline;
+
 /// Constructs one journal anchor without exposing actor-internal failure types outside this module.
 pub(crate) fn durable_prepare_anchor_from_parts(
     parts: DurablePrepareAnchorParts,
@@ -986,6 +988,7 @@ trait RecoveryExecutor {
     fn confirm_absent(
         &mut self,
         target: &RecoveryTarget,
+        deadline: HardDeadline,
     ) -> Result<ConfirmedAbsentProof, Self::Error>;
 }
 
@@ -993,6 +996,7 @@ trait RecoveryExecutor {
 enum RecoveryAttemptError<ExecutorError> {
     Journal(JournalError),
     Executor(ExecutorError),
+    Deadline,
 }
 
 struct OwnershipJournal {
@@ -1291,6 +1295,26 @@ impl OwnershipJournal {
         ownership_id: OwnershipId,
         generation: NonZeroU64,
         executor: &mut Executor,
+        deadline: HardDeadline,
+    ) -> Result<u64, RecoveryAttemptError<Executor::Error>> {
+        self.recover_may_own_prepare_observed(
+            expected_revision,
+            ownership_id,
+            generation,
+            executor,
+            deadline,
+            &mut NoFailPersistObserver,
+        )
+    }
+
+    fn recover_may_own_prepare_observed<Executor: RecoveryExecutor>(
+        &mut self,
+        expected_revision: u64,
+        ownership_id: OwnershipId,
+        generation: NonZeroU64,
+        executor: &mut Executor,
+        deadline: HardDeadline,
+        observer: &mut impl PersistObserver,
     ) -> Result<u64, RecoveryAttemptError<Executor::Error>> {
         self.ensure_expected_revision(expected_revision)
             .map_err(RecoveryAttemptError::Journal)?;
@@ -1322,8 +1346,11 @@ impl OwnershipJournal {
         let target = RecoveryTarget {
             exact_record: record,
         };
+        deadline
+            .ensure_remaining()
+            .map_err(|_| RecoveryAttemptError::Deadline)?;
         let proof = executor
-            .confirm_absent(&target)
+            .confirm_absent(&target, deadline)
             .map_err(RecoveryAttemptError::Executor)?;
         if proof.exact_record != target.exact_record {
             return Err(RecoveryAttemptError::Journal(JournalError::ProofMismatch));
@@ -1338,8 +1365,24 @@ impl OwnershipJournal {
                 Some(AbsentOrigin::RecoveredMayOwn),
             )
             .map_err(RecoveryAttemptError::Journal)?;
-        self.compare_and_swap(expected_revision, next)
-            .map_err(RecoveryAttemptError::Journal)
+        deadline
+            .ensure_remaining()
+            .map_err(|_| RecoveryAttemptError::Deadline)?;
+        match self.compare_and_swap_observed_with_deadline(
+            expected_revision,
+            next,
+            observer,
+            Some(deadline),
+        ) {
+            Ok(revision) => Ok(revision),
+            Err(JournalError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+                    && deadline.ensure_remaining().is_err() =>
+            {
+                Err(RecoveryAttemptError::Deadline)
+            }
+            Err(error) => Err(RecoveryAttemptError::Journal(error)),
+        }
     }
 
     fn compare_and_swap(
@@ -1353,8 +1396,18 @@ impl OwnershipJournal {
     fn compare_and_swap_observed(
         &mut self,
         expected_revision: u64,
+        next: JournalSnapshot,
+        observer: &mut impl PersistObserver,
+    ) -> Result<u64, JournalError> {
+        self.compare_and_swap_observed_with_deadline(expected_revision, next, observer, None)
+    }
+
+    fn compare_and_swap_observed_with_deadline(
+        &mut self,
+        expected_revision: u64,
         mut next: JournalSnapshot,
         observer: &mut impl PersistObserver,
+        mutation_deadline: Option<HardDeadline>,
     ) -> Result<u64, JournalError> {
         self.ensure_expected_revision(expected_revision)?;
         if next.revision != expected_revision
@@ -1375,6 +1428,7 @@ impl OwnershipJournal {
             &self.snapshot,
             &encoded,
             observer,
+            mutation_deadline,
         ) {
             Ok(()) => {
                 self.snapshot = next;
@@ -1717,6 +1771,7 @@ fn persist_atomic(
     expected_snapshot: &JournalSnapshot,
     encoded: &[u8],
     observer: &mut impl PersistObserver,
+    mutation_deadline: Option<HardDeadline>,
 ) -> Result<(), PersistFailure> {
     observer
         .observe(PersistStep::BeforeCreate)
@@ -1732,6 +1787,14 @@ fn persist_atomic(
         error: journal_error_as_io(error),
         uncertain: false,
     })?;
+    if let Some(deadline) = mutation_deadline {
+        deadline
+            .ensure_remaining()
+            .map_err(|error| PersistFailure {
+                error,
+                uncertain: false,
+            })?;
+    }
     let mut temporary = match create_next_file(config, parent_directory) {
         Ok(file) => file,
         Err(error) => {
@@ -2088,6 +2151,25 @@ mod tests {
 
     fn ownership(byte: u8) -> OwnershipId {
         OwnershipId::new([byte; 32]).expect("non-zero ownership fixture")
+    }
+
+    fn recovery_deadline() -> HardDeadline {
+        HardDeadline::after(Duration::from_secs(1)).expect("live recovery deadline")
+    }
+
+    fn recover_fixture<Executor: RecoveryExecutor>(
+        journal: &mut OwnershipJournal,
+        expected_revision: u64,
+        inserted: InsertedOwnership,
+        executor: &mut Executor,
+    ) -> Result<u64, RecoveryAttemptError<Executor::Error>> {
+        journal.recover_may_own_prepare(
+            expected_revision,
+            inserted.ownership_id,
+            inserted.generation,
+            executor,
+            recovery_deadline(),
+        )
     }
 
     fn client_plan(path_ids: &[u8]) -> ClosedPlan {
@@ -2615,6 +2697,7 @@ mod tests {
         fn confirm_absent(
             &mut self,
             target: &RecoveryTarget,
+            _deadline: HardDeadline,
         ) -> Result<ConfirmedAbsentProof, Self::Error> {
             self.calls += 1;
             let mut proof = target.confirmed_absent();
@@ -2633,8 +2716,31 @@ mod tests {
         fn confirm_absent(
             &mut self,
             _target: &RecoveryTarget,
+            _deadline: HardDeadline,
         ) -> Result<ConfirmedAbsentProof, Self::Error> {
             Err("injected recovery failure")
+        }
+    }
+
+    struct ExpiringRecoveryExecutor {
+        calls: usize,
+        observed_deadline: Option<HardDeadline>,
+    }
+
+    impl RecoveryExecutor for ExpiringRecoveryExecutor {
+        type Error = ();
+
+        fn confirm_absent(
+            &mut self,
+            target: &RecoveryTarget,
+            deadline: HardDeadline,
+        ) -> Result<ConfirmedAbsentProof, Self::Error> {
+            self.calls += 1;
+            self.observed_deadline = Some(deadline);
+            while let Ok(remaining) = deadline.remaining() {
+                thread::sleep(remaining.min(Duration::from_millis(2)));
+            }
+            Ok(target.confirmed_absent())
         }
     }
 
@@ -2649,6 +2755,23 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    struct ExpireBeforeCreateObserver {
+        deadline: HardDeadline,
+        steps: Vec<PersistStep>,
+    }
+
+    impl PersistObserver for ExpireBeforeCreateObserver {
+        fn observe(&mut self, step: PersistStep) -> io::Result<()> {
+            self.steps.push(step);
+            if step == PersistStep::BeforeCreate {
+                while let Ok(remaining) = self.deadline.remaining() {
+                    thread::sleep(remaining.min(Duration::from_millis(2)));
+                }
+            }
+            Ok(())
         }
     }
 
@@ -3073,6 +3196,7 @@ mod tests {
                 inserted.ownership_id,
                 inserted.generation,
                 &mut PanicIfRecoveryRuns,
+                recovery_deadline(),
             ),
             Err(RecoveryAttemptError::Journal(
                 JournalError::InvalidTransition
@@ -3088,6 +3212,7 @@ mod tests {
         fn confirm_absent(
             &mut self,
             _target: &RecoveryTarget,
+            _deadline: HardDeadline,
         ) -> Result<ConfirmedAbsentProof, Self::Error> {
             panic!("an already-Absent retry must not run recovery again")
         }
@@ -3113,6 +3238,7 @@ mod tests {
                     exact: true,
                     calls: 0,
                 },
+                recovery_deadline(),
             )
             .expect("durable recovery whose reply is discarded");
         drop(journal);
@@ -3126,6 +3252,7 @@ mod tests {
                     inserted.ownership_id,
                     inserted.generation,
                     &mut PanicIfRecoveryRuns,
+                    recovery_deadline(),
                 ),
                 Err(RecoveryAttemptError::Journal(
                     JournalError::RevisionConflict
@@ -3143,6 +3270,7 @@ mod tests {
                     inserted.ownership_id,
                     inserted.generation,
                     &mut PanicIfRecoveryRuns,
+                    recovery_deadline(),
                 )
                 .expect("exact recovered retry at current revision skips executor"),
             3
@@ -3177,12 +3305,7 @@ mod tests {
             calls: 0,
         };
         assert!(matches!(
-            journal.recover_may_own_prepare(
-                1,
-                inserted.ownership_id,
-                inserted.generation,
-                &mut stale,
-            ),
+            recover_fixture(&mut journal, 1, inserted, &mut stale),
             Err(RecoveryAttemptError::Journal(
                 JournalError::RevisionConflict
             ))
@@ -3212,12 +3335,7 @@ mod tests {
             calls: 0,
         };
         assert!(matches!(
-            journal.recover_may_own_prepare(
-                2,
-                inserted.ownership_id,
-                inserted.generation,
-                &mut wrong,
-            ),
+            recover_fixture(&mut journal, 2, inserted, &mut wrong),
             Err(RecoveryAttemptError::Journal(JournalError::ProofMismatch))
         ));
         assert_eq!(wrong.calls, 1);
@@ -3228,12 +3346,7 @@ mod tests {
         );
 
         assert!(matches!(
-            journal.recover_may_own_prepare(
-                2,
-                inserted.ownership_id,
-                inserted.generation,
-                &mut ErrorRecoveryExecutor,
-            ),
+            recover_fixture(&mut journal, 2, inserted, &mut ErrorRecoveryExecutor),
             Err(RecoveryAttemptError::Executor("injected recovery failure"))
         ));
         assert_eq!(
@@ -3250,9 +3363,7 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            journal
-                .recover_may_own_prepare(2, inserted.ownership_id, inserted.generation, &mut exact,)
-                .expect("exact typed proof"),
+            recover_fixture(&mut journal, 2, inserted, &mut exact).expect("exact typed proof"),
             3
         );
         let recovered = journal
@@ -3264,6 +3375,125 @@ mod tests {
         assert_eq!(recovered.phase, OwnershipPhase::Absent);
         assert_eq!(recovered.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
         assert!(recovered.recovery_anchor.is_none());
+    }
+
+    #[test]
+    fn expired_recovery_and_late_exact_proof_leave_snapshot_and_bytes_unchanged() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        journal
+            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
+            .expect("durable MayOwnPrepare");
+        let before_snapshot = journal.snapshot().expect("usable snapshot").clone();
+        let before_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");
+
+        let mut never_started = FakeRecoveryExecutor {
+            exact: true,
+            calls: 0,
+        };
+        let expired_before_executor =
+            HardDeadline::after(Duration::from_millis(1)).expect("short deadline");
+        while expired_before_executor.ensure_remaining().is_ok() {
+            thread::yield_now();
+        }
+        assert!(matches!(
+            journal.recover_may_own_prepare(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut never_started,
+                expired_before_executor,
+            ),
+            Err(RecoveryAttemptError::Deadline)
+        ));
+        assert_eq!(never_started.calls, 0);
+        assert_eq!(
+            journal.snapshot().expect("expired recovery is inert"),
+            &before_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after pre-executor expiry"),
+            before_bytes
+        );
+
+        let deadline =
+            HardDeadline::after(Duration::from_millis(100)).expect("blocking executor deadline");
+        let mut blocked = ExpiringRecoveryExecutor {
+            calls: 0,
+            observed_deadline: None,
+        };
+        assert!(matches!(
+            journal.recover_may_own_prepare(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut blocked,
+                deadline,
+            ),
+            Err(RecoveryAttemptError::Deadline)
+        ));
+        assert_eq!(blocked.calls, 1);
+        assert_eq!(blocked.observed_deadline, Some(deadline));
+        assert_eq!(
+            journal.snapshot().expect("late proof is inert"),
+            &before_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after late exact proof"),
+            before_bytes
+        );
+    }
+
+    #[test]
+    fn recovery_expiry_after_encoding_stops_before_creating_the_next_file() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        journal
+            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
+            .expect("durable MayOwnPrepare");
+        let before_snapshot = journal.snapshot().expect("usable snapshot").clone();
+        let before_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");
+        let deadline =
+            HardDeadline::after(Duration::from_millis(30)).expect("persist boundary deadline");
+        let mut observer = ExpireBeforeCreateObserver {
+            deadline,
+            steps: Vec::new(),
+        };
+        let mut exact = FakeRecoveryExecutor {
+            exact: true,
+            calls: 0,
+        };
+
+        assert!(matches!(
+            journal.recover_may_own_prepare_observed(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut exact,
+                deadline,
+                &mut observer,
+            ),
+            Err(RecoveryAttemptError::Deadline)
+        ));
+        assert_eq!(exact.calls, 1);
+        assert_eq!(observer.steps, vec![PersistStep::BeforeCreate]);
+        assert_eq!(
+            journal.snapshot().expect("persist expiry is inert"),
+            &before_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after persist-boundary expiry"),
+            before_bytes
+        );
+        assert!(!config.next_path.exists());
     }
 
     #[test]
