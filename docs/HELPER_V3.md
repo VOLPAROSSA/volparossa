@@ -109,7 +109,12 @@ retains one verified parent-directory descriptor, acquires a process-global one-
 before opening the lock, sweeps every startup `Intent` and `MayOwnPrepare`, rechecks the complete
 durable boundary, and only then reports ready. Its non-blocking admission accepts at most four
 operations while reserving channel capacity for shutdown; opaque non-`Clone` keys expose neither
-the journal revision nor raw ownership coordinates.
+the journal revision nor raw ownership coordinates. Each validated wire intent locally receives a
+fresh random 256-bit `OwnershipId` inside a non-`Clone` registration owner. Registration consumes
+that owner into one durable key, and arming consumes the key into a `MayOwnPrepare` token which
+exposes only the context and borrowed owner-bound resource metadata. Every error returns the exact
+affine owner which still exists, so the typed API neither duplicates authority nor discards it on
+an error path.
 
 Validated records and private recovery targets now deterministically rederive the same non-`Clone`
 per-link resources. Focused tests fix the public alias grammar and cover every immutable field
@@ -643,6 +648,22 @@ present; after confirmed reap and complete six-index purge, that same affine own
 idempotently without another signal or wait. Production activation consequently still requires an
 owned cancellation-safe settlement guard, lifecycle quiescence before shutdown, and production
 journal/reaper wiring.
+
+A private composite handoff now commits the durable `Intent` before even reserving a local worker
+generation, then authenticates one child in an anonymous `NEWNET` namespace and registers it as an
+exact passive `Starting` worker under an atomically installed `DurableHandoffPending` dispatch
+fence and the same caller-supplied absolute deadline. Normal planning rejects that generation
+before cloning its channel or mutating in-flight, cache, tombstone, or phase state. The handoff
+derives and revalidates the worker's complete recovery anchor immediately before durable arming.
+Success keeps the durable `MayOwnPrepare` token, registered worker owner, affine fence owner, and
+recovery-pin source together; its owner-bound per-link resources remain borrowed. The pending fence
+deliberately remains closed after arming: this slice has no transition which consumes the composite
+authority and opens child dispatch. Every failure outcome retains all affine owners which exist at
+that point. The handoff dispatches no child operation, sends zero protocol-request bytes, and
+performs no WireGuard link/address, route, firewall, or dataplane configuration. Worker launch still
+creates the deliberately isolated process and anonymous `NEWNET`, without altering host-network
+state. The handoff remains private and dormant, with no server or engine caller, no restart reaper,
+and no cancellation-safe production settlement.
 
 Production wiring remains a separate audited change with these explicit blockers:
 

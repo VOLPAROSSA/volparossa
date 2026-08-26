@@ -39,9 +39,9 @@ use volparossa_routing::PrepareIntent;
 use crate::deadline::HardDeadline;
 
 use super::{
-    ClosedPlan, Id16, JournalConfig, JournalEpochId, JournalError, NewOwnershipIntent, OwnershipId,
-    OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1, RecoveryAttemptError,
-    RecoveryExecutor, RuntimeId, open_verified_parent,
+    ClosedPlan, DurableWireguardResource, Id16, JournalConfig, JournalEpochId, JournalError,
+    NewOwnershipIntent, OwnershipId, OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1,
+    RecoveryAttemptError, RecoveryExecutor, RuntimeId, open_verified_parent, random_ownership_id,
 };
 
 const MAX_ACCEPTED_OPERATIONS: usize = 4;
@@ -77,7 +77,7 @@ struct StartedStores {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(super) enum DurableOwnershipError {
+pub(crate) enum DurableOwnershipError {
     #[error("durable ownership admission is full")]
     Capacity,
     #[error("durable ownership request was rejected")]
@@ -108,10 +108,10 @@ fn ensure_deadline_before_acceptance(deadline: HardDeadline) -> Result<(), Durab
 }
 
 #[derive(Clone)]
-pub(super) struct DurablePrepareIntent(NewOwnershipIntent);
+struct DurablePrepareIntent(NewOwnershipIntent);
 
 impl DurablePrepareIntent {
-    pub(super) fn try_from_wire(
+    fn try_from_wire(
         origin_runtime_id: [u8; 32],
         value: &PrepareIntent,
     ) -> Result<Self, DurableOwnershipError> {
@@ -150,8 +150,10 @@ impl DurablePrepareIntent {
                 .ok_or(DurableOwnershipError::Rejected)?,
         )
         .map_err(|_| DurableOwnershipError::Rejected)?;
+        let ownership_id = random_ownership_id().map_err(|_| DurableOwnershipError::Unavailable)?;
         Ok(Self(NewOwnershipIntent {
             origin_runtime_id,
+            ownership_id,
             context_id,
             prepare_request_id,
             prepare_operation_digest,
@@ -165,6 +167,38 @@ impl DurablePrepareIntent {
 impl fmt::Debug for DurablePrepareIntent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DurablePrepareIntent(<redacted>)")
+    }
+}
+
+/// Unique, retryable owner of one validated wire Prepare intent.
+///
+/// This value is deliberately non-`Clone`: safe code can submit only the same retained owner
+/// after a definite or ambiguous error and cannot independently mint multiple durable keys for
+/// one wire message. The actor receives an internal payload copy while this owner stays with the
+/// synchronous caller until registration is known to have succeeded.
+#[must_use = "a durable intent registration must be registered or explicitly retained"]
+pub(crate) struct DurableIntentRegistration(DurablePrepareIntent);
+
+impl DurableIntentRegistration {
+    pub(crate) fn try_from_wire(
+        origin_runtime_id: [u8; 32],
+        value: &PrepareIntent,
+    ) -> Result<Self, DurableOwnershipError> {
+        DurablePrepareIntent::try_from_wire(origin_runtime_id, value).map(Self)
+    }
+
+    pub(crate) const fn context_id(&self) -> [u8; 16] {
+        self.0.0.context_id.0
+    }
+
+    fn actor_payload(&self) -> DurablePrepareIntent {
+        self.0.clone()
+    }
+}
+
+impl fmt::Debug for DurableIntentRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableIntentRegistration(<redacted>)")
     }
 }
 
@@ -207,13 +241,15 @@ impl fmt::Debug for DurablePrepareAnchor {
 }
 
 #[derive(Eq, PartialEq)]
-pub(super) struct DurableOwnershipKey {
+#[must_use = "a durable ownership key must be armed or explicitly retired"]
+pub(crate) struct DurableOwnershipKey {
     coordinates: OwnershipCoordinates,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct OwnershipCoordinates {
     journal_epoch_id: JournalEpochId,
+    context_id: Id16,
     ownership_id: OwnershipId,
     generation: NonZeroU64,
 }
@@ -221,6 +257,76 @@ struct OwnershipCoordinates {
 impl fmt::Debug for DurableOwnershipKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DurableOwnershipKey(<redacted>)")
+    }
+}
+
+/// Durable evidence that Prepare may own the exact ordered resource projection.
+///
+/// The key remains owned inside this token so safe code cannot arm the same authority twice. The
+/// only exposed data is the typed context identity and borrowed, owner-bound resource metadata.
+#[must_use = "MayOwnPrepare authority must remain owned until settled"]
+pub(crate) struct DurableMayOwnPrepare {
+    key: DurableOwnershipKey,
+    resources: Vec<DurableWireguardResource>,
+}
+
+impl DurableMayOwnPrepare {
+    pub(crate) const fn context_id(&self) -> [u8; 16] {
+        self.key.coordinates.context_id.0
+    }
+
+    pub(crate) fn resources(&self) -> &[DurableWireguardResource] {
+        &self.resources
+    }
+}
+
+impl fmt::Debug for DurableMayOwnPrepare {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableMayOwnPrepare(<redacted>)")
+    }
+}
+
+#[must_use = "registration outcomes retain the unique owner on every error"]
+pub(crate) enum DurableRegistrationOutcome {
+    Registered(DurableOwnershipKey),
+    Retained {
+        error: DurableOwnershipError,
+        registration: DurableIntentRegistration,
+    },
+}
+
+impl fmt::Debug for DurableRegistrationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Registered(_) => formatter.write_str("Registered(<redacted>)"),
+            Self::Retained { error, .. } => formatter
+                .debug_struct("Retained")
+                .field("error", error)
+                .field("registration", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+#[must_use = "arm outcomes retain ownership on every error"]
+pub(crate) enum DurableArmOutcome {
+    Armed(DurableMayOwnPrepare),
+    Retained {
+        error: DurableOwnershipError,
+        key: DurableOwnershipKey,
+    },
+}
+
+impl fmt::Debug for DurableArmOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Armed(_) => formatter.write_str("Armed(<redacted>)"),
+            Self::Retained { error, .. } => formatter
+                .debug_struct("Retained")
+                .field("error", error)
+                .field("key", &"<redacted>")
+                .finish(),
+        }
     }
 }
 
@@ -481,7 +587,7 @@ enum Operation {
         deadline: HardDeadline,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
-        reply: ReplySender<()>,
+        reply: ReplySender<Vec<DurableWireguardResource>>,
     },
     RetireNeverDispatched {
         deadline: HardDeadline,
@@ -542,8 +648,10 @@ impl Operation {
             Self::PanicAfterRegister { reply, .. } => {
                 reply.complete_unstarted_deadline();
             }
-            Self::Arm { reply, .. }
-            | Self::RetireNeverDispatched { reply, .. }
+            Self::Arm { reply, .. } => {
+                reply.complete_unstarted_deadline();
+            }
+            Self::RetireNeverDispatched { reply, .. }
             | Self::ConfirmRecoveredAbsent { reply, .. } => {
                 reply.complete_unstarted_deadline();
             }
@@ -635,7 +743,7 @@ impl ActorClient {
         &self,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
-    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+    ) -> Result<PendingReply<Vec<DurableWireguardResource>>, DurableOwnershipError> {
         self.arm_pending_until(key, anchor, default_actor_deadline()?)
     }
 
@@ -644,7 +752,7 @@ impl ActorClient {
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
         deadline: HardDeadline,
-    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+    ) -> Result<PendingReply<Vec<DurableWireguardResource>>, DurableOwnershipError> {
         self.submit(deadline, |reply| Operation::Arm {
             deadline,
             key,
@@ -755,7 +863,7 @@ impl ActorClient {
     }
 }
 
-pub(super) struct DurableOwnershipActor {
+pub(crate) struct DurableOwnershipActor {
     client: Option<ActorClient>,
     join: Option<JoinHandle<()>>,
     completion: Option<Receiver<()>>,
@@ -907,15 +1015,55 @@ impl DurableOwnershipActor {
         }
     }
 
+    pub(crate) fn register_until(
+        &self,
+        registration: DurableIntentRegistration,
+        deadline: HardDeadline,
+    ) -> DurableRegistrationOutcome {
+        let payload = registration.actor_payload();
+        let result = self
+            .client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)
+            .and_then(|client| client.register_pending_until(payload, deadline))
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(key) => DurableRegistrationOutcome::Registered(key),
+            Err(error) => DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            },
+        }
+    }
+
+    pub(crate) fn arm_until(
+        &self,
+        key: DurableOwnershipKey,
+        anchor: DurablePrepareAnchor,
+        deadline: HardDeadline,
+    ) -> DurableArmOutcome {
+        let result = self
+            .client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)
+            .and_then(|client| client.arm_pending_until(key.coordinates, anchor, deadline))
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(resources) => DurableArmOutcome::Armed(DurableMayOwnPrepare { key, resources }),
+            Err(error) => DurableArmOutcome::Retained { error, key },
+        }
+    }
+
     #[cfg(test)]
-    pub(super) fn register_intent(
+    fn register_intent(
         &self,
         intent: DurablePrepareIntent,
     ) -> Result<DurableOwnershipKey, DurableOwnershipError> {
         self.register_intent_until(intent, default_actor_deadline()?)
     }
 
-    pub(super) fn register_intent_until(
+    #[cfg(test)]
+    fn register_intent_until(
         &self,
         intent: DurablePrepareIntent,
         deadline: HardDeadline,
@@ -928,7 +1076,7 @@ impl DurableOwnershipActor {
     }
 
     #[cfg(test)]
-    pub(super) fn arm_prepare(
+    fn arm_prepare(
         &self,
         key: &DurableOwnershipKey,
         anchor: DurablePrepareAnchor,
@@ -936,7 +1084,8 @@ impl DurableOwnershipActor {
         self.arm_prepare_until(key, anchor, default_actor_deadline()?)
     }
 
-    pub(super) fn arm_prepare_until(
+    #[cfg(test)]
+    fn arm_prepare_until(
         &self,
         key: &DurableOwnershipKey,
         anchor: DurablePrepareAnchor,
@@ -947,6 +1096,7 @@ impl DurableOwnershipActor {
             .ok_or(DurableOwnershipError::Unavailable)?
             .arm_pending_until(key.coordinates, anchor, deadline)?
             .wait()
+            .map(drop)
     }
 
     #[cfg(test)]
@@ -1197,6 +1347,7 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
     }
 
     fn register(&mut self, intent: DurablePrepareIntent) -> OperationOutcome<DurableOwnershipKey> {
+        let context_id = intent.0.context_id;
         let journal_epoch_id = match self.journal.snapshot() {
             Ok(snapshot) => snapshot.journal_epoch_id,
             Err(error) => {
@@ -1209,6 +1360,7 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
                 OperationOutcome::Complete(Ok(DurableOwnershipKey {
                     coordinates: OwnershipCoordinates {
                         journal_epoch_id,
+                        context_id,
                         ownership_id: inserted.ownership_id,
                         generation: inserted.generation,
                     },
@@ -1222,7 +1374,7 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
         &mut self,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
-    ) -> OperationOutcome<()> {
+    ) -> OperationOutcome<Vec<DurableWireguardResource>> {
         if let Err(error) = self.validate_key(key) {
             return OperationOutcome::failure(error);
         }
@@ -1232,9 +1384,9 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
             key.generation,
             anchor.0,
         ) {
-            Ok(revision) => {
-                self.revision = revision;
-                OperationOutcome::Complete(Ok(()))
+            Ok(marked) => {
+                self.revision = marked.revision;
+                OperationOutcome::Complete(Ok(marked.resources))
             }
             Err(error) => OperationOutcome::failure(self.classify_journal_error(error)),
         }
@@ -1311,7 +1463,18 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
 
     fn validate_key(&mut self, key: OwnershipCoordinates) -> Result<(), FailureDisposition> {
         match self.journal.snapshot() {
-            Ok(snapshot) if snapshot.journal_epoch_id == key.journal_epoch_id => Ok(()),
+            Ok(snapshot)
+                if snapshot.journal_epoch_id == key.journal_epoch_id
+                    && snapshot
+                        .records
+                        .get(&key.ownership_id)
+                        .is_some_and(|record| {
+                            record.context_id == key.context_id
+                                && record.generation == key.generation
+                        }) =>
+            {
+                Ok(())
+            }
             Ok(_) => Err(FailureDisposition::Continue(
                 DurableOwnershipError::Rejected,
             )),

@@ -56,6 +56,10 @@ use crate::{
         InternalWorkerResult, encode_request, internal_worker_request, internal_worker_response,
         validate_response_for_request,
     },
+    ownership_journal::{
+        DurableArmOutcome, DurableIntentRegistration, DurableMayOwnPrepare, DurableOwnershipActor,
+        DurableOwnershipError, DurableOwnershipKey, DurableRegistrationOutcome,
+    },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
         CredentialedWorkerExecution, ExpectedUnixCredentials, WorkerTransportError,
@@ -2117,6 +2121,7 @@ enum StablePhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VisiblePhase {
     Stable(StablePhase),
+    DurableHandoffPending,
     InFlight,
     Quarantined,
 }
@@ -2164,8 +2169,41 @@ struct FinishCommitHook {
     release: Arc<std::sync::Barrier>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WorkerDispatchFence {
+    Open,
+    DurableHandoffPending,
+}
+
+impl std::fmt::Debug for WorkerDispatchFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => formatter.write_str("Open"),
+            Self::DurableHandoffPending => formatter.write_str("DurableHandoffPending"),
+        }
+    }
+}
+
+#[must_use = "the exact pending dispatch fence must remain paired with its worker owner"]
+struct DurableHandoffFenceOwner {
+    coordinates: WorkerGenerationCoordinates,
+}
+
+impl std::fmt::Debug for DurableHandoffFenceOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableHandoffFenceOwner(<redacted>)")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerDispatchRegistration {
+    Open,
+    DurableHandoffPending,
+}
+
 struct WorkerRecord {
     generation: u64,
+    dispatch_fence: WorkerDispatchFence,
     stable_phase: StablePhase,
     in_flight: Option<InFlight>,
     quarantined: bool,
@@ -2331,7 +2369,52 @@ struct LifecycleDetachedOwnership {
 struct WorkerGenerationOwnership {
     registry: Arc<Mutex<WorkerRegistry>>,
     coordinates: WorkerGenerationCoordinates,
+    dispatch_registration: WorkerDispatchRegistration,
+    handoff_fence: Option<DurableHandoffFenceOwner>,
     placement: Option<WorkerGenerationPlacement>,
+}
+
+impl WorkerGenerationOwnership {
+    fn has_valid_dispatch_fence_shape(&self) -> bool {
+        match (
+            self.dispatch_registration,
+            self.handoff_fence.as_ref(),
+            self.placement.as_ref(),
+        ) {
+            (WorkerDispatchRegistration::Open, None, Some(_))
+            | (
+                WorkerDispatchRegistration::DurableHandoffPending,
+                None,
+                Some(
+                    WorkerGenerationPlacement::LifecycleReservation(_)
+                    | WorkerGenerationPlacement::SpawnAmbiguous(_)
+                    | WorkerGenerationPlacement::Spawned(_),
+                ),
+            ) => true,
+            (
+                WorkerDispatchRegistration::DurableHandoffPending,
+                None,
+                Some(
+                    WorkerGenerationPlacement::Detached(detached)
+                    | WorkerGenerationPlacement::ReapedPendingPurge(detached),
+                ),
+            ) => detached.reservation.is_some(),
+            (
+                WorkerDispatchRegistration::DurableHandoffPending,
+                Some(fence),
+                Some(WorkerGenerationPlacement::Registered),
+            ) => fence.coordinates == self.coordinates,
+            (
+                WorkerDispatchRegistration::DurableHandoffPending,
+                Some(fence),
+                Some(
+                    WorkerGenerationPlacement::Detached(detached)
+                    | WorkerGenerationPlacement::ReapedPendingPurge(detached),
+                ),
+            ) => detached.reservation.is_none() && fence.coordinates == self.coordinates,
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Debug for WorkerGenerationOwnership {
@@ -2339,6 +2422,11 @@ impl std::fmt::Debug for WorkerGenerationOwnership {
         formatter
             .debug_struct("WorkerGenerationOwnership")
             .field("worker_generation", &self.coordinates.worker_generation)
+            .field("dispatch_registration", &self.dispatch_registration)
+            .field(
+                "handoff_fence",
+                &self.handoff_fence.as_ref().map(|_| "<redacted>"),
+            )
             .field(
                 "placement",
                 &self.placement.as_ref().map(|placement| match placement {
@@ -2374,7 +2462,6 @@ struct WorkerRecoveryIdentitySource {
 }
 
 impl WorkerRecoveryIdentitySource {
-    #[cfg(test)]
     fn durable_prepare_anchor(&self) -> crate::ownership_journal::DurablePrepareAnchor {
         self.durable_prepare_anchor
     }
@@ -2401,6 +2488,126 @@ fn durable_prepare_anchor_from_worker_parts(
 impl std::fmt::Debug for WorkerRecoveryIdentitySource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("WorkerRecoveryIdentitySource(<redacted>)")
+    }
+}
+
+/// The exact registered, passive `Starting` worker paired with its durable Intent authority.
+///
+/// Neither owner is independently recoverable from this value. In particular, the coordinator's
+/// generation is unrelated to the durable journal generation and remains encapsulated in the
+/// worker owner.
+#[must_use = "durable Intent and registered worker ownership must remain paired"]
+struct DurableRegisteredStartingWorker {
+    key: DurableOwnershipKey,
+    worker: WorkerGenerationOwnership,
+}
+
+impl std::fmt::Debug for DurableRegisteredStartingWorker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableRegisteredStartingWorker(<redacted>)")
+    }
+}
+
+/// Pre-arm handoff retaining the exact, revalidated recovery-pin source.
+///
+/// Construction is possible only after the registered generation was observed as a passive
+/// `Starting` worker both before and after deriving its durable recovery anchor.
+#[must_use = "the pre-arm worker handoff must be armed or explicitly retained"]
+struct DurableWorkerPrepareHandoff {
+    registered: DurableRegisteredStartingWorker,
+    source: WorkerRecoveryIdentitySource,
+}
+
+impl std::fmt::Debug for DurableWorkerPrepareHandoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableWorkerPrepareHandoff(<redacted>)")
+    }
+}
+
+/// Durable `MayOwnPrepare` authority bound to the exact generation observed passive pre-arm.
+///
+/// The retained owner and recovery pins preserve identity, not continued presence or liveness.
+/// This dormant token keeps dispatch pending, permits no child request and exposes no operation or
+/// kernel mutation seam.
+#[must_use = "MayOwnPrepare authority and passive worker ownership must remain paired"]
+struct DurableWorkerMayOwnPrepare {
+    durable: DurableMayOwnPrepare,
+    worker: WorkerGenerationOwnership,
+    source: WorkerRecoveryIdentitySource,
+}
+
+impl std::fmt::Debug for DurableWorkerMayOwnPrepare {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableWorkerMayOwnPrepare(<redacted>)")
+    }
+}
+
+/// Affine result of the dormant durable-Intent-to-passive-worker handoff.
+///
+/// Every failure variant returns every owner which exists at that point. A rejected worker
+/// admission can prove that no worker owner exists, while an ambiguous admission necessarily
+/// retains both the durable key and the coordinator-local generation owner.
+#[must_use = "every handoff outcome contains authority which must be settled or retained"]
+enum DurableWorkerPrepareOutcome {
+    MayOwn(DurableWorkerMayOwnPrepare),
+    RegistrationRetained {
+        error: DurableOwnershipError,
+        registration: DurableIntentRegistration,
+    },
+    KeyRetained {
+        error: WorkerV3Error,
+        key: DurableOwnershipKey,
+    },
+    WorkerAdmissionRetained {
+        error: WorkerV3Error,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+    },
+    RegisteredWorkerRetained {
+        error: WorkerV3Error,
+        registered: DurableRegisteredStartingWorker,
+    },
+    HandoffWorkerRetained {
+        error: WorkerV3Error,
+        handoff: DurableWorkerPrepareHandoff,
+    },
+    HandoffRetained {
+        error: DurableOwnershipError,
+        handoff: DurableWorkerPrepareHandoff,
+    },
+    ContextMismatch(DurableWorkerMayOwnPrepare),
+}
+
+impl std::fmt::Debug for DurableWorkerPrepareOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MayOwn(_) => formatter.write_str("MayOwn(<redacted>)"),
+            Self::RegistrationRetained { error, .. } => formatter
+                .debug_struct("RegistrationRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::KeyRetained { error, .. } => formatter
+                .debug_struct("KeyRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::WorkerAdmissionRetained { error, .. } => formatter
+                .debug_struct("WorkerAdmissionRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::RegisteredWorkerRetained { error, .. } => formatter
+                .debug_struct("RegisteredWorkerRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::HandoffWorkerRetained { error, .. } => formatter
+                .debug_struct("HandoffWorkerRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::HandoffRetained { error, .. } => formatter
+                .debug_struct("HandoffRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::ContextMismatch(_) => formatter.write_str("ContextMismatch(<redacted>)"),
+        }
     }
 }
 
@@ -2462,6 +2669,15 @@ enum WorkerLifecycleSettlement {
     Retained {
         error: WorkerV3Error,
         ownership: WorkerGenerationOwnership,
+    },
+}
+
+#[must_use = "a successful pending-fence commit returns the unique affine fence owner"]
+enum WorkerRegistrationCommit {
+    Open(u64),
+    DurableHandoffPending {
+        generation: u64,
+        fence: DurableHandoffFenceOwner,
     },
 }
 
@@ -2633,12 +2849,13 @@ impl WorkerRegistry {
         Ok(())
     }
 
-    fn commit_reserved(
+    fn commit_reserved_with_dispatch(
         &mut self,
         reservation: GenerationReservation,
         process: WorkerProcess,
         now: Instant,
-    ) -> Result<u64, RegistrationFailure> {
+        dispatch_registration: WorkerDispatchRegistration,
+    ) -> Result<WorkerRegistrationCommit, RegistrationFailure> {
         let context_id = reservation.context_id;
         let generation = reservation.generation;
         let expires_at = reservation.expires_at;
@@ -2677,10 +2894,28 @@ impl WorkerRegistry {
 
         self.reservations.remove(&context_id);
         let alive_hint = Arc::clone(&process.alive_hint);
+        let coordinates = WorkerGenerationCoordinates {
+            context_id,
+            worker_generation: NonZeroU64::new(generation).unwrap_or_else(|| std::process::abort()),
+        };
+        let (dispatch_fence, commit) = match dispatch_registration {
+            WorkerDispatchRegistration::Open => (
+                WorkerDispatchFence::Open,
+                WorkerRegistrationCommit::Open(generation),
+            ),
+            WorkerDispatchRegistration::DurableHandoffPending => (
+                WorkerDispatchFence::DurableHandoffPending,
+                WorkerRegistrationCommit::DurableHandoffPending {
+                    generation,
+                    fence: DurableHandoffFenceOwner { coordinates },
+                },
+            ),
+        };
         self.records.insert(
             context_id,
             WorkerRecord {
                 generation,
+                dispatch_fence,
                 stable_phase: StablePhase::Starting,
                 in_flight: None,
                 quarantined: false,
@@ -2689,7 +2924,24 @@ impl WorkerRegistry {
                 process: Some(process),
             },
         );
-        Ok(generation)
+        Ok(commit)
+    }
+
+    fn commit_reserved(
+        &mut self,
+        reservation: GenerationReservation,
+        process: WorkerProcess,
+        now: Instant,
+    ) -> Result<u64, RegistrationFailure> {
+        match self.commit_reserved_with_dispatch(
+            reservation,
+            process,
+            now,
+            WorkerDispatchRegistration::Open,
+        )? {
+            WorkerRegistrationCommit::Open(generation) => Ok(generation),
+            WorkerRegistrationCommit::DurableHandoffPending { .. } => std::process::abort(),
+        }
     }
 
     fn commit_spawned(
@@ -2703,6 +2955,20 @@ impl WorkerRegistry {
             bootstrap_challenge: _,
         } = spawned;
         self.commit_reserved(reservation, process, now)
+    }
+
+    fn commit_spawned_with_dispatch(
+        &mut self,
+        spawned: SpawnedWorker,
+        now: Instant,
+        dispatch_registration: WorkerDispatchRegistration,
+    ) -> Result<WorkerRegistrationCommit, RegistrationFailure> {
+        let SpawnedWorker {
+            reservation,
+            process,
+            bootstrap_challenge: _,
+        } = spawned;
+        self.commit_reserved_with_dispatch(reservation, process, now, dispatch_registration)
     }
 
     #[cfg(test)]
@@ -2745,6 +3011,12 @@ impl WorkerRegistry {
         let record = self.records.get(&context_id).ok_or(WorkerV3Error::Dead)?;
         if record.generation != generation {
             return Err(WorkerV3Error::Stale);
+        }
+        if matches!(
+            record.dispatch_fence,
+            WorkerDispatchFence::DurableHandoffPending
+        ) {
+            return Err(WorkerV3Error::Busy);
         }
         if record.quarantined {
             return Err(WorkerV3Error::Quarantined);
@@ -2815,6 +3087,67 @@ impl WorkerRegistry {
         Ok(())
     }
 
+    fn confirm_durable_handoff_pending(
+        &self,
+        coordinates: WorkerGenerationCoordinates,
+        fence: &DurableHandoffFenceOwner,
+    ) -> Result<(), WorkerV3Error> {
+        if fence.coordinates != coordinates {
+            return Err(WorkerV3Error::Stale);
+        }
+        let record = self
+            .records
+            .get(&coordinates.context_id)
+            .ok_or(WorkerV3Error::Dead)?;
+        if record.generation != coordinates.worker_generation.get()
+            || record.dispatch_fence != WorkerDispatchFence::DurableHandoffPending
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        if record.quarantined || record.in_flight.is_some() {
+            return Err(WorkerV3Error::Quarantined);
+        }
+        if record.stable_phase != StablePhase::Starting
+            || self.cache.keys().any(|key| {
+                key.context_id == coordinates.context_id
+                    && key.generation == coordinates.worker_generation.get()
+            })
+            || self.cache_order.iter().any(|key| {
+                key.context_id == coordinates.context_id
+                    && key.generation == coordinates.worker_generation.get()
+            })
+            || self.tombstones.keys().any(|key| {
+                key.context_id == coordinates.context_id
+                    && key.generation == coordinates.worker_generation.get()
+            })
+            || self.tombstone_order.iter().any(|key| {
+                key.context_id == coordinates.context_id
+                    && key.generation == coordinates.worker_generation.get()
+            })
+        {
+            return Err(WorkerV3Error::Conflict);
+        }
+        Ok(())
+    }
+
+    fn reject_pending_durable_handoff_dispatch(
+        &self,
+        context_id: ContextId,
+        generation: u64,
+    ) -> Result<(), WorkerV3Error> {
+        if self.records.get(&context_id).is_some_and(|record| {
+            record.generation == generation
+                && matches!(
+                    record.dispatch_fence,
+                    WorkerDispatchFence::DurableHandoffPending
+                )
+        }) {
+            Err(WorkerV3Error::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
     fn plan_until(
         &mut self,
         context_id: ContextId,
@@ -2824,6 +3157,7 @@ impl WorkerRegistry {
         deadline: HardDeadline,
     ) -> Result<RegistryPlan, WorkerV3Error> {
         ensure_worker_deadline(deadline)?;
+        self.reject_pending_durable_handoff_dispatch(context_id, generation)?;
         self.expire_cache(now);
         self.expire_tombstones(now);
         if self.shutting_down {
@@ -2964,8 +3298,19 @@ impl WorkerRegistry {
                     detached: None,
                 };
             };
-            if record.generation != token.generation
-                || record.in_flight != Some(token.in_flight)
+            if record.generation != token.generation {
+                return FinishOutcome::Rejected {
+                    error: WorkerV3Error::Stale,
+                    detached: None,
+                };
+            }
+            if record.dispatch_fence == WorkerDispatchFence::DurableHandoffPending {
+                return FinishOutcome::Rejected {
+                    error: WorkerV3Error::Busy,
+                    detached: None,
+                };
+            }
+            if record.in_flight != Some(token.in_flight)
                 || record.stable_phase != token.in_flight.prior_phase
             {
                 return FinishOutcome::Rejected {
@@ -3095,6 +3440,12 @@ impl WorkerRegistry {
                     detached: None,
                 };
             }
+            if record.dispatch_fence == WorkerDispatchFence::DurableHandoffPending {
+                return FinishOutcome::Rejected {
+                    error: WorkerV3Error::Busy,
+                    detached: None,
+                };
+            }
             if !record.quarantined
                 && record.in_flight.is_none()
                 && cache_present
@@ -3142,7 +3493,13 @@ impl WorkerRegistry {
                 .records
                 .get_mut(&token.context_id)
                 .ok_or(WorkerV3Error::Stale)?;
-            if record.generation != token.generation || record.in_flight != Some(token.in_flight) {
+            if record.generation != token.generation {
+                return Err(WorkerV3Error::Stale);
+            }
+            if record.dispatch_fence == WorkerDispatchFence::DurableHandoffPending {
+                return Err(WorkerV3Error::Busy);
+            }
+            if record.in_flight != Some(token.in_flight) {
                 return Err(WorkerV3Error::Stale);
             }
             record.in_flight = None;
@@ -3378,6 +3735,8 @@ impl WorkerRegistry {
         }
         Ok(if record.quarantined {
             VisiblePhase::Quarantined
+        } else if record.dispatch_fence == WorkerDispatchFence::DurableHandoffPending {
+            VisiblePhase::DurableHandoffPending
         } else if record.in_flight.is_some() {
             VisiblePhase::InFlight
         } else {
@@ -4269,6 +4628,13 @@ struct LifecycleRecoveryHook {
     release: Arc<std::sync::Barrier>,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct DurableHandoffSourceHook {
+    derived: std::sync::mpsc::SyncSender<()>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
 #[derive(Clone)]
 #[must_use = "call shutdown to retire registered workers before dropping the coordinator"]
 struct WorkerCoordinator {
@@ -4287,6 +4653,8 @@ struct WorkerCoordinator {
     lifecycle_mutation_hook: Arc<Mutex<Option<LifecycleMutationHook>>>,
     #[cfg(test)]
     lifecycle_recovery_hook: Arc<Mutex<Option<LifecycleRecoveryHook>>>,
+    #[cfg(test)]
+    durable_handoff_source_hook: Arc<Mutex<Option<DurableHandoffSourceHook>>>,
 }
 
 impl WorkerCoordinator {
@@ -4316,6 +4684,176 @@ impl WorkerCoordinator {
             lifecycle_mutation_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             lifecycle_recovery_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            durable_handoff_source_hook: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Dormant production handoff from one unique durable Prepare intent to one authenticated,
+    /// passive worker generation.
+    ///
+    /// The caller's absolute deadline is carried unchanged through journal registration, worker
+    /// admission, recovery-anchor derivation/revalidation and durable arming. This seam sends no
+    /// child protocol request and performs no `WireGuard` link/address, route, firewall or dataplane
+    /// configuration; worker launch still creates the deliberately isolated process and anonymous
+    /// NEWNET.
+    #[allow(dead_code)] // Connected only after the durable production coordinator is installed.
+    fn durable_passive_prepare_handoff_until(
+        &self,
+        actor: &DurableOwnershipActor,
+        registration: DurableIntentRegistration,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+    ) -> DurableWorkerPrepareOutcome {
+        self.durable_passive_prepare_handoff_with_until(
+            actor,
+            registration,
+            worker_ttl,
+            deadline,
+            spawn_worker_v3_until,
+        )
+    }
+
+    fn durable_passive_prepare_handoff_with_until<Spawn>(
+        &self,
+        actor: &DurableOwnershipActor,
+        registration: DurableIntentRegistration,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+        spawn: Spawn,
+    ) -> DurableWorkerPrepareOutcome
+    where
+        Spawn: FnOnce(
+            GenerationReservation,
+            HardDeadline,
+        ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
+    {
+        // Crossing the durable Intent boundary must precede even a local generation reservation,
+        // so cancellation can never leave an unjournalled authenticated worker generation.
+        let context_id = registration.context_id();
+        let key = match actor.register_until(registration, deadline) {
+            DurableRegistrationOutcome::Registered(key) => key,
+            DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            } => {
+                return DurableWorkerPrepareOutcome::RegistrationRetained {
+                    error,
+                    registration,
+                };
+            }
+        };
+
+        let worker = match self.reserve_spawn_register_durable_handoff_with_until(
+            context_id, worker_ttl, deadline, spawn,
+        ) {
+            WorkerLifecycleAdmission::Registered(worker) => worker,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                return DurableWorkerPrepareOutcome::KeyRetained { error, key };
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                return DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                    error,
+                    key,
+                    worker: ownership,
+                };
+            }
+        };
+        self.finish_durable_registered_worker_handoff_until(
+            actor, context_id, key, worker, deadline,
+        )
+    }
+
+    fn finish_durable_registered_worker_handoff_until(
+        &self,
+        actor: &DurableOwnershipActor,
+        context_id: ContextId,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> DurableWorkerPrepareOutcome {
+        if worker.coordinates.context_id != context_id
+            || !worker.has_valid_dispatch_fence_shape()
+            || worker.dispatch_registration != WorkerDispatchRegistration::DurableHandoffPending
+            || !matches!(
+                worker.placement.as_ref(),
+                Some(WorkerGenerationPlacement::Registered)
+            )
+        {
+            return DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                error: WorkerV3Error::Conflict,
+                key,
+                worker,
+            };
+        }
+        let registered = DurableRegisteredStartingWorker { key, worker };
+
+        let source = match self
+            .durable_handoff_recovery_identity_source_until(&registered.worker, deadline)
+        {
+            Ok(source) => source,
+            Err(error) => {
+                return DurableWorkerPrepareOutcome::RegisteredWorkerRetained { error, registered };
+            }
+        };
+        if source.pending.coordinates != registered.worker.coordinates {
+            return DurableWorkerPrepareOutcome::HandoffWorkerRetained {
+                error: WorkerV3Error::Stale,
+                handoff: DurableWorkerPrepareHandoff { registered, source },
+            };
+        }
+        let handoff = DurableWorkerPrepareHandoff { registered, source };
+        #[cfg(test)]
+        if let Some(hook) = self
+            .durable_handoff_source_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            let _ = hook.derived.send(());
+            let (released, changed) = hook.release.as_ref();
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+        if let Err(error) = self.revalidate_durable_recovery_identity_until(
+            &handoff.registered.worker,
+            &handoff.source,
+            deadline,
+        ) {
+            return DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff };
+        }
+        let anchor = handoff.source.durable_prepare_anchor();
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+
+        match actor.arm_until(key, anchor, deadline) {
+            DurableArmOutcome::Armed(durable) => {
+                let may_own = DurableWorkerMayOwnPrepare {
+                    durable,
+                    worker,
+                    source,
+                };
+                if may_own.durable.context_id() == may_own.worker.coordinates.context_id {
+                    DurableWorkerPrepareOutcome::MayOwn(may_own)
+                } else {
+                    DurableWorkerPrepareOutcome::ContextMismatch(may_own)
+                }
+            }
+            DurableArmOutcome::Retained { error, key } => {
+                DurableWorkerPrepareOutcome::HandoffRetained {
+                    error,
+                    handoff: DurableWorkerPrepareHandoff {
+                        registered: DurableRegisteredStartingWorker { key, worker },
+                        source,
+                    },
+                }
+            }
         }
     }
 
@@ -4336,6 +4874,51 @@ impl WorkerCoordinator {
         context_id: ContextId,
         ttl: Duration,
         deadline: HardDeadline,
+        spawn: Spawn,
+    ) -> WorkerLifecycleAdmission
+    where
+        Spawn: FnOnce(
+            GenerationReservation,
+            HardDeadline,
+        ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
+    {
+        self.reserve_spawn_register_with_dispatch_until(
+            context_id,
+            ttl,
+            deadline,
+            WorkerDispatchRegistration::Open,
+            spawn,
+        )
+    }
+
+    fn reserve_spawn_register_durable_handoff_with_until<Spawn>(
+        &self,
+        context_id: ContextId,
+        ttl: Duration,
+        deadline: HardDeadline,
+        spawn: Spawn,
+    ) -> WorkerLifecycleAdmission
+    where
+        Spawn: FnOnce(
+            GenerationReservation,
+            HardDeadline,
+        ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
+    {
+        self.reserve_spawn_register_with_dispatch_until(
+            context_id,
+            ttl,
+            deadline,
+            WorkerDispatchRegistration::DurableHandoffPending,
+            spawn,
+        )
+    }
+
+    fn reserve_spawn_register_with_dispatch_until<Spawn>(
+        &self,
+        context_id: ContextId,
+        ttl: Duration,
+        deadline: HardDeadline,
+        dispatch_registration: WorkerDispatchRegistration,
         spawn: Spawn,
     ) -> WorkerLifecycleAdmission
     where
@@ -4367,6 +4950,8 @@ impl WorkerCoordinator {
                     ownership: WorkerGenerationOwnership {
                         registry: Arc::clone(&self.registry),
                         coordinates,
+                        dispatch_registration,
+                        handoff_fence: None,
                         placement: Some(WorkerGenerationPlacement::LifecycleReservation(
                             reservation,
                         )),
@@ -4383,6 +4968,8 @@ impl WorkerCoordinator {
         let mut ownership = WorkerGenerationOwnership {
             registry: Arc::clone(&self.registry),
             coordinates,
+            dispatch_registration,
+            handoff_fence: None,
             placement: Some(WorkerGenerationPlacement::LifecycleReservation(reservation)),
         };
 
@@ -4454,6 +5041,12 @@ impl WorkerCoordinator {
                 ownership,
             };
         }
+        if !ownership.has_valid_dispatch_fence_shape() {
+            return WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Conflict,
+                ownership,
+            };
+        }
         let Some(WorkerGenerationPlacement::Spawned(spawned)) = ownership.placement.take() else {
             return WorkerLifecycleAdmission::Retained {
                 error: WorkerV3Error::Conflict,
@@ -4473,11 +5066,32 @@ impl WorkerCoordinator {
             ownership.placement = Some(WorkerGenerationPlacement::Spawned(spawned));
             return WorkerLifecycleAdmission::Retained { error, ownership };
         }
-        match registry.commit_spawned(*spawned, Instant::now()) {
-            Ok(worker_generation) => {
+        match registry.commit_spawned_with_dispatch(
+            *spawned,
+            Instant::now(),
+            ownership.dispatch_registration,
+        ) {
+            Ok(commit) => {
+                let (worker_generation, handoff_fence) = match commit {
+                    WorkerRegistrationCommit::Open(worker_generation) => {
+                        if ownership.dispatch_registration != WorkerDispatchRegistration::Open {
+                            std::process::abort();
+                        }
+                        (worker_generation, None)
+                    }
+                    WorkerRegistrationCommit::DurableHandoffPending { generation, fence } => {
+                        if ownership.dispatch_registration
+                            != WorkerDispatchRegistration::DurableHandoffPending
+                        {
+                            std::process::abort();
+                        }
+                        (generation, Some(fence))
+                    }
+                };
                 if worker_generation != ownership.coordinates.worker_generation.get() {
                     std::process::abort();
                 }
+                ownership.handoff_fence = handoff_fence;
                 ownership.placement = Some(WorkerGenerationPlacement::Registered);
                 WorkerLifecycleAdmission::Registered(ownership)
             }
@@ -4510,6 +5124,12 @@ impl WorkerCoordinator {
         if !Arc::ptr_eq(&ownership.registry, &self.registry) {
             return WorkerLifecycleSettlement::Retained {
                 error: WorkerV3Error::Stale,
+                ownership,
+            };
+        }
+        if !ownership.has_valid_dispatch_fence_shape() {
+            return WorkerLifecycleSettlement::Retained {
+                error: WorkerV3Error::Conflict,
                 ownership,
             };
         }
@@ -4581,16 +5201,71 @@ impl WorkerCoordinator {
         ownership: &WorkerGenerationOwnership,
         deadline: HardDeadline,
     ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
+        if ownership.dispatch_registration != WorkerDispatchRegistration::Open
+            || ownership.handoff_fence.is_some()
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        self.recovery_identity_source_with_dispatch_fence_until(ownership, None, deadline)
+    }
+
+    fn durable_handoff_recovery_identity_source_until(
+        &self,
+        ownership: &WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
+        if ownership.dispatch_registration != WorkerDispatchRegistration::DurableHandoffPending {
+            return Err(WorkerV3Error::Stale);
+        }
+        let fence = ownership
+            .handoff_fence
+            .as_ref()
+            .ok_or(WorkerV3Error::Stale)?;
+        self.recovery_identity_source_with_dispatch_fence_until(ownership, Some(fence), deadline)
+    }
+
+    fn recovery_identity_source_with_dispatch_fence_until(
+        &self,
+        ownership: &WorkerGenerationOwnership,
+        handoff_fence: Option<&DurableHandoffFenceOwner>,
+        deadline: HardDeadline,
+    ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
         ensure_worker_deadline(deadline)?;
+        let dispatch_pair_exact = match (
+            ownership.dispatch_registration,
+            ownership.handoff_fence.as_ref(),
+            handoff_fence,
+        ) {
+            (WorkerDispatchRegistration::Open, None, None) => true,
+            (WorkerDispatchRegistration::DurableHandoffPending, Some(retained), Some(supplied)) => {
+                retained.coordinates == ownership.coordinates
+                    && supplied.coordinates == ownership.coordinates
+            }
+            _ => false,
+        };
         if !Arc::ptr_eq(&ownership.registry, &self.registry)
+            || !dispatch_pair_exact
             || !matches!(
-                ownership.placement,
+                ownership.placement.as_ref(),
                 Some(WorkerGenerationPlacement::Registered)
             )
         {
             return Err(WorkerV3Error::Stale);
         }
         let registry = lock_worker_registry_until(&self.registry, deadline)?;
+        if let Some(fence) = handoff_fence {
+            registry.confirm_durable_handoff_pending(ownership.coordinates, fence)?;
+        } else {
+            let record = registry
+                .records
+                .get(&ownership.coordinates.context_id)
+                .ok_or(WorkerV3Error::Dead)?;
+            if record.generation != ownership.coordinates.worker_generation.get()
+                || record.dispatch_fence != WorkerDispatchFence::Open
+            {
+                return Err(WorkerV3Error::Stale);
+            }
+        }
         let pending = registry.recovery_identity_owners(ownership.coordinates, deadline)?;
         drop(registry);
         ensure_worker_deadline(deadline)?;
@@ -4613,6 +5288,19 @@ impl WorkerCoordinator {
             hook.release.wait();
         }
         let registry = lock_worker_registry_until(&self.registry, deadline)?;
+        if let Some(fence) = handoff_fence {
+            registry.confirm_durable_handoff_pending(ownership.coordinates, fence)?;
+        } else {
+            let record = registry
+                .records
+                .get(&ownership.coordinates.context_id)
+                .ok_or(WorkerV3Error::Dead)?;
+            if record.generation != ownership.coordinates.worker_generation.get()
+                || record.dispatch_fence != WorkerDispatchFence::Open
+            {
+                return Err(WorkerV3Error::Stale);
+            }
+        }
         registry.confirm_recovery_identity_source(&pending)?;
         ensure_worker_deadline(deadline)?;
         drop(registry);
@@ -4621,6 +5309,58 @@ impl WorkerCoordinator {
             pending,
             durable_prepare_anchor,
         })
+    }
+
+    /// Revalidates the complete pinned identity immediately before durable arming.
+    ///
+    /// Potentially blocking pidfd and process-liveness observations happen without the registry
+    /// mutex. A second exact registry observation then fences replacement, phase changes, expiry,
+    /// quarantine, in-flight work and binding/lifetime changes before this method returns. The
+    /// caller must invoke the journal actor only after the final registry guard is dropped.
+    fn revalidate_durable_recovery_identity_until(
+        &self,
+        ownership: &WorkerGenerationOwnership,
+        source: &WorkerRecoveryIdentitySource,
+        deadline: HardDeadline,
+    ) -> Result<(), WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        if !Arc::ptr_eq(&ownership.registry, &self.registry)
+            || ownership.dispatch_registration != WorkerDispatchRegistration::DurableHandoffPending
+            || !matches!(
+                ownership.placement.as_ref(),
+                Some(WorkerGenerationPlacement::Registered)
+            )
+            || ownership.coordinates != source.pending.coordinates
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        let fence = ownership
+            .handoff_fence
+            .as_ref()
+            .ok_or(WorkerV3Error::Stale)?;
+
+        source.pending.authenticated_pins.ensure_alive()?;
+        ensure_worker_deadline(deadline)?;
+        let liveness = {
+            let registry = lock_worker_registry_until(&self.registry, deadline)?;
+            registry.confirm_durable_handoff_pending(ownership.coordinates, fence)?;
+            registry.confirm_recovery_identity_source(&source.pending)?;
+            let liveness = registry
+                .recovery_identity_process(ownership.coordinates)?
+                .liveness();
+            ensure_worker_deadline(deadline)?;
+            liveness
+        };
+        if !liveness.probe_alive_until(deadline)? {
+            return Err(WorkerV3Error::Dead);
+        }
+        ensure_worker_deadline(deadline)?;
+        let registry = lock_worker_registry_until(&self.registry, deadline)?;
+        registry.confirm_durable_handoff_pending(ownership.coordinates, fence)?;
+        registry.confirm_recovery_identity_source(&source.pending)?;
+        ensure_worker_deadline(deadline)?;
+        drop(registry);
+        ensure_worker_deadline(deadline)
     }
 
     fn transition_registered_generation_until(
@@ -4672,6 +5412,9 @@ impl WorkerCoordinator {
     ) -> WorkerGenerationReap {
         if !Arc::ptr_eq(&ownership.registry, &self.registry) {
             return retained_worker_generation(WorkerV3Error::Stale, ownership);
+        }
+        if !ownership.has_valid_dispatch_fence_shape() {
+            return retained_worker_generation(WorkerV3Error::Conflict, ownership);
         }
         let Some(placement) = ownership.placement.take() else {
             std::process::abort();
@@ -4752,6 +5495,9 @@ impl WorkerCoordinator {
         mut ownership: WorkerGenerationOwnership,
         deadline: HardDeadline,
     ) -> WorkerGenerationReap {
+        if !ownership.has_valid_dispatch_fence_shape() {
+            return retained_worker_generation(WorkerV3Error::Conflict, ownership);
+        }
         let Some(WorkerGenerationPlacement::ReapedPendingPurge(detached)) =
             ownership.placement.take()
         else {
@@ -5165,6 +5911,14 @@ impl WorkerCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
     }
 
+    #[cfg(test)]
+    fn set_durable_handoff_source_hook(&self, hook: Option<DurableHandoffSourceHook>) {
+        *self
+            .durable_handoff_source_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
     fn shutdown(&self) -> impl Future<Output = bool> + Send + 'static {
         let deadline = HardDeadline::after(CHANNEL_TIMEOUT);
         let shutdown = deadline.ok().map(|deadline| self.shutdown_until(deadline));
@@ -5517,6 +6271,11 @@ mod tests {
     };
 
     use socket2::{Protocol, Type};
+    use tempfile::tempdir;
+    use volparossa_routing::{
+        ClosedPreparePlan, ContextRole as WireContextRole, LeasePlan, PrepareIntent,
+        WireguardRole as WireRole,
+    };
 
     use super::*;
     use crate::{
@@ -5553,6 +6312,25 @@ mod tests {
             uid: geteuid().as_raw(),
             gid: getegid().as_raw(),
         }
+    }
+
+    fn durable_worker_registration(context_id: ContextId, seed: u8) -> DurableIntentRegistration {
+        let intent = PrepareIntent {
+            route_context_id: context_id.to_vec(),
+            prepare_request_id: vec![seed; 16],
+            prepare_operation_digest: vec![seed.wrapping_add(1); 32],
+            setup_expires_at_unix: 100,
+            hard_expires_at_unix: 200,
+            closed_plan: Some(ClosedPreparePlan {
+                context_role: WireContextRole::Client as i32,
+                leases: vec![LeasePlan {
+                    path_id: 1,
+                    role: WireRole::Client as i32,
+                }],
+            }),
+        };
+        DurableIntentRegistration::try_from_wire([seed.wrapping_add(2); 32], &intent)
+            .expect("valid durable worker registration")
     }
 
     fn request(
@@ -6149,6 +6927,223 @@ mod tests {
         }
     }
 
+    fn assert_durable_handoff_fence_owner(worker: &WorkerGenerationOwnership) {
+        assert!(worker.has_valid_dispatch_fence_shape());
+        assert_eq!(
+            worker.dispatch_registration,
+            WorkerDispatchRegistration::DurableHandoffPending
+        );
+        let fence = worker
+            .handoff_fence
+            .as_ref()
+            .expect("retained affine dispatch fence");
+        assert_eq!(fence.coordinates, worker.coordinates);
+        assert_eq!(format!("{fence:?}"), "DurableHandoffFenceOwner(<redacted>)");
+    }
+
+    struct DurablePendingLifecycleFixture {
+        coordinator: WorkerCoordinator,
+        worker: WorkerGenerationOwnership,
+        peer: Socket,
+        alive: Arc<AtomicBool>,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    fn durable_pending_lifecycle_fixture(
+        context_id: ContextId,
+        termination_results: VecDeque<bool>,
+        default_termination_result: bool,
+    ) -> DurablePendingLifecycleFixture {
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, peer, alive, attempts) = fake_process_with_termination_results(
+            Duration::from_secs(1),
+            termination_results,
+            default_termination_result,
+        );
+        let worker = registered_lifecycle(
+            coordinator.reserve_spawn_register_durable_handoff_with_until(
+                context_id,
+                Duration::from_secs(5),
+                HardDeadline::after(Duration::from_secs(5))
+                    .expect("pending worker registration deadline"),
+                move |reservation, _deadline| {
+                    process.binding = Some(reservation.binding());
+                    Ok(SpawnedWorker {
+                        reservation,
+                        process,
+                        bootstrap_challenge: BootstrapChallenge([0xd0; 32]),
+                    })
+                },
+            ),
+        );
+        assert_durable_handoff_fence_owner(&worker);
+        DurablePendingLifecycleFixture {
+            coordinator,
+            worker,
+            peer,
+            alive,
+            attempts,
+        }
+    }
+
+    fn assert_no_worker_request_bytes(peer: &Socket) {
+        peer.set_nonblocking(true)
+            .expect("set passive worker peer nonblocking");
+        let mut byte = [0_u8; 1];
+        let mut peer = peer;
+        let error = peer
+            .read(&mut byte)
+            .expect_err("the passive handoff must send zero child-request bytes");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    fn assert_durable_handoff_registry_pristine(
+        coordinator: &WorkerCoordinator,
+        context_id: ContextId,
+        generation: u64,
+    ) {
+        let registry = lock_worker_registry(&coordinator.registry);
+        let record = registry
+            .records
+            .get(&context_id)
+            .expect("durable handoff worker record");
+        assert_eq!(record.generation, generation);
+        assert_eq!(
+            record.dispatch_fence,
+            WorkerDispatchFence::DurableHandoffPending
+        );
+        assert_eq!(record.stable_phase, StablePhase::Starting);
+        assert!(record.in_flight.is_none());
+        assert!(!record.quarantined);
+        assert!(
+            registry
+                .cache
+                .keys()
+                .all(|key| { key.context_id != context_id || key.generation != generation })
+        );
+        assert!(
+            registry
+                .cache_order
+                .iter()
+                .all(|key| { key.context_id != context_id || key.generation != generation })
+        );
+        assert!(
+            registry
+                .tombstones
+                .keys()
+                .all(|key| { key.context_id != context_id || key.generation != generation })
+        );
+        assert!(
+            registry
+                .tombstone_order
+                .iter()
+                .all(|key| { key.context_id != context_id || key.generation != generation })
+        );
+    }
+
+    fn reap_durable_handoff_worker(
+        coordinator: &WorkerCoordinator,
+        worker: WorkerGenerationOwnership,
+    ) {
+        assert_durable_handoff_fence_owner(&worker);
+        match coordinator.terminate_generation_until(
+            worker,
+            HardDeadline::after(Duration::from_secs(1)).expect("durable handoff cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("durable handoff worker cleanup remained unresolved: {error}")
+            }
+        }
+    }
+
+    struct FencedDurableHandoffFixture {
+        actor: DurableOwnershipActor,
+        coordinator: WorkerCoordinator,
+        outcome: DurableWorkerPrepareOutcome,
+        peer: Socket,
+        directory: tempfile::TempDir,
+    }
+
+    fn fenced_durable_handoff_fixture<Mutation>(
+        context_id: ContextId,
+        deadline: HardDeadline,
+        mutation: Mutation,
+    ) -> FencedDurableHandoffFixture
+    where
+        Mutation: FnOnce(&WorkerCoordinator, ContextId, u64),
+    {
+        let directory = tempdir().expect("durable handoff directory");
+        let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(5)).expect("actor fixture deadline"),
+        )
+        .expect("durable ownership actor fixture");
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (derived_sender, derived_receiver) = std::sync::mpsc::sync_channel(1);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        coordinator.set_durable_handoff_source_hook(Some(DurableHandoffSourceHook {
+            derived: derived_sender,
+            release: Arc::clone(&release),
+        }));
+        let registration = durable_worker_registration(context_id, context_id[0]);
+        let (mut process, peer, _alive) = fake_process(Duration::from_secs(1));
+        let thread_coordinator = coordinator.clone();
+        let handoff = thread::spawn(move || {
+            let outcome = thread_coordinator.durable_passive_prepare_handoff_with_until(
+                &actor,
+                registration,
+                Duration::from_secs(5),
+                deadline,
+                move |reservation, _deadline| {
+                    process.binding = Some(reservation.binding());
+                    Ok(SpawnedWorker {
+                        reservation,
+                        process,
+                        bootstrap_challenge: BootstrapChallenge([0xc1; 32]),
+                    })
+                },
+            );
+            (actor, outcome)
+        });
+
+        let reached = derived_receiver.recv_timeout(Duration::from_secs(5));
+        if reached.is_err() {
+            let (released, changed) = release.as_ref();
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            changed.notify_all();
+            let _ = handoff.join();
+            panic!("durable handoff did not reach its pre-arm source fence")
+        }
+        let mutation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mutation(&coordinator, context_id, 1);
+        }));
+        let (released, changed) = release.as_ref();
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+        let joined = handoff.join();
+        if let Err(payload) = mutation {
+            let _ = joined;
+            std::panic::resume_unwind(payload);
+        }
+        let (actor, outcome) = joined.expect("durable handoff thread");
+        coordinator.set_durable_handoff_source_hook(None);
+        FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        }
+    }
+
     struct RegisteredLifecycleFixture {
         coordinator: WorkerCoordinator,
         ownership: WorkerGenerationOwnership,
@@ -6301,6 +7296,7 @@ mod tests {
                         context_id,
                         WorkerRecord {
                             generation,
+                            dispatch_fence: WorkerDispatchFence::Open,
                             stable_phase: StablePhase::Starting,
                             in_flight: None,
                             quarantined: true,
@@ -6790,6 +7786,786 @@ mod tests {
         )
         .expect("expected anchor");
         assert!(actual == expected);
+    }
+
+    #[test]
+    fn durable_passive_handoff_journals_before_spawn_and_sends_zero_request_bytes() {
+        let context_id = [90; 16];
+        let directory = tempdir().expect("durable handoff directory");
+        let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(5)).expect("actor fixture deadline"),
+        )
+        .expect("durable ownership actor fixture");
+        let journal_path = directory.path().join("helper.ownership-v3");
+        assert!(!journal_path.exists());
+        let journal_advanced_before_spawn = Arc::new(AtomicBool::new(false));
+        let observed_advance = Arc::clone(&journal_advanced_before_spawn);
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let registration = durable_worker_registration(context_id, 90);
+        let (mut process, peer, _alive) = fake_process(Duration::from_secs(1));
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            registration,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(5)).expect("durable handoff deadline"),
+            move |reservation, _deadline| {
+                let durable_before_spawn =
+                    fs::read(&journal_path).is_ok_and(|current| !current.is_empty());
+                observed_advance.store(durable_before_spawn, Ordering::SeqCst);
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xc0; 32]),
+                })
+            },
+        );
+
+        let DurableWorkerPrepareOutcome::MayOwn(may_own) = outcome else {
+            panic!("durable passive handoff did not arm: {outcome:?}")
+        };
+        assert!(journal_advanced_before_spawn.load(Ordering::SeqCst));
+        assert_eq!(may_own.durable.context_id(), context_id);
+        assert_eq!(may_own.durable.resources().len(), 1);
+        assert_eq!(may_own.worker.coordinates.context_id, context_id);
+        assert_eq!(may_own.worker.coordinates.worker_generation.get(), 1);
+        assert_durable_handoff_fence_owner(&may_own.worker);
+        assert_eq!(
+            may_own.source.pending.coordinates,
+            may_own.worker.coordinates
+        );
+        assert_eq!(
+            coordinator
+                .phase(context_id, 1)
+                .expect("passive worker remains registered"),
+            VisiblePhase::DurableHandoffPending
+        );
+        assert_no_worker_request_bytes(&peer);
+
+        let DurableWorkerMayOwnPrepare {
+            durable,
+            worker,
+            source,
+        } = may_own;
+        drop(durable);
+        drop(source);
+        reap_durable_handoff_worker(&coordinator, worker);
+        drop(actor);
+        drop(directory);
+    }
+
+    #[test]
+    fn durable_dispatch_fence_blocks_execute_before_arm_and_after_may_own() {
+        let context_id = [97; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("dispatch-fence deadline"),
+            |coordinator, context_id, generation| {
+                assert_durable_handoff_registry_pristine(coordinator, context_id, generation);
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("dispatch-fence runtime");
+                let result = runtime.block_on(coordinator.execute_until(
+                    context_id,
+                    generation,
+                    initialise(context_id, 97),
+                    HardDeadline::after(Duration::from_secs(1)).expect("pre-arm execute deadline"),
+                ));
+                assert!(matches!(result, Err(WorkerV3Error::Busy)));
+                assert_durable_handoff_registry_pristine(coordinator, context_id, generation);
+            },
+        );
+        assert_no_worker_request_bytes(&fixture.peer);
+        assert_durable_handoff_registry_pristine(&fixture.coordinator, context_id, 1);
+
+        let DurableWorkerPrepareOutcome::MayOwn(may_own) = fixture.outcome else {
+            panic!("dispatch-fenced handoff did not reach durable MayOwnPrepare")
+        };
+        assert_durable_handoff_fence_owner(&may_own.worker);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("post-arm dispatch-fence runtime");
+        let result = runtime.block_on(fixture.coordinator.execute_until(
+            context_id,
+            1,
+            initialise(context_id, 98),
+            HardDeadline::after(Duration::from_secs(1)).expect("post-arm execute deadline"),
+        ));
+        assert!(matches!(result, Err(WorkerV3Error::Busy)));
+        assert_no_worker_request_bytes(&fixture.peer);
+        assert_durable_handoff_registry_pristine(&fixture.coordinator, context_id, 1);
+
+        let DurableWorkerMayOwnPrepare {
+            durable,
+            worker,
+            source,
+        } = may_own;
+        drop(durable);
+        drop(source);
+        reap_durable_handoff_worker(&fixture.coordinator, worker);
+        drop(fixture.actor);
+        drop(fixture.directory);
+    }
+
+    #[test]
+    fn ordinary_open_worker_registration_remains_plannable() {
+        let context_id = [98; 16];
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        let (process, peer, _alive) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context_id, process, Duration::from_secs(5), Instant::now())
+            .expect("ordinary Open registration");
+        assert_eq!(
+            registry
+                .records
+                .get(&context_id)
+                .expect("ordinary worker record")
+                .dispatch_fence,
+            WorkerDispatchFence::Open
+        );
+        let planned = call(
+            registry
+                .plan(
+                    context_id,
+                    generation,
+                    &initialise(context_id, 99),
+                    Instant::now(),
+                )
+                .expect("ordinary Open worker remains plannable"),
+        );
+        assert_no_worker_request_bytes(&peer);
+        let detached = registry
+            .mark_ambiguous(planned.token)
+            .expect("ordinary plan can be retired")
+            .expect("ordinary plan owns exact worker");
+        assert!(detached.process.terminate_bounded(TERMINATION_TIMEOUT));
+    }
+
+    #[test]
+    fn durable_handoff_expired_registration_retains_intent_and_never_starts_spawn() {
+        let context_id = [94; 16];
+        let directory = tempdir().expect("expired registration directory");
+        let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(5)).expect("actor fixture deadline"),
+        )
+        .expect("durable ownership actor fixture");
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let spawn_calls = Arc::new(AtomicUsize::new(0));
+        let observed_spawn_calls = Arc::clone(&spawn_calls);
+        let deadline =
+            HardDeadline::after(Duration::from_millis(20)).expect("expired registration deadline");
+        wait_until_deadline_elapsed(deadline);
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            durable_worker_registration(context_id, 94),
+            Duration::from_secs(5),
+            deadline,
+            move |_reservation, _deadline| {
+                observed_spawn_calls.fetch_add(1, Ordering::SeqCst);
+                panic!("expired durable registration must not start worker spawn")
+            },
+        );
+        let DurableWorkerPrepareOutcome::RegistrationRetained {
+            error,
+            registration,
+        } = outcome
+        else {
+            panic!("expired durable registration did not retain its affine owner")
+        };
+        assert!(matches!(error, DurableOwnershipError::DeadlineElapsed));
+        assert_eq!(registration.context_id(), context_id);
+        assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
+        drop(registration);
+        drop(actor);
+        drop(directory);
+    }
+
+    #[test]
+    fn durable_handoff_invalid_worker_ttl_retains_key_and_never_starts_spawn() {
+        let context_id = [95; 16];
+        let directory = tempdir().expect("invalid TTL directory");
+        let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(5)).expect("actor fixture deadline"),
+        )
+        .expect("durable ownership actor fixture");
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let spawn_calls = Arc::new(AtomicUsize::new(0));
+        let observed_spawn_calls = Arc::clone(&spawn_calls);
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            durable_worker_registration(context_id, 95),
+            Duration::ZERO,
+            HardDeadline::after(Duration::from_secs(5)).expect("invalid TTL deadline"),
+            move |_reservation, _deadline| {
+                observed_spawn_calls.fetch_add(1, Ordering::SeqCst);
+                panic!("invalid worker TTL must not start worker spawn")
+            },
+        );
+        let DurableWorkerPrepareOutcome::KeyRetained { error, key } = outcome else {
+            panic!("invalid worker TTL did not retain its durable key")
+        };
+        assert!(matches!(error, WorkerV3Error::Invalid));
+        assert_eq!(format!("{key:?}"), "DurableOwnershipKey(<redacted>)");
+        assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
+        drop(key);
+        drop(actor);
+        drop(directory);
+    }
+
+    #[test]
+    fn durable_handoff_ambiguous_spawn_retains_key_and_worker_generation_owner() {
+        let context_id = [96; 16];
+        let directory = tempdir().expect("ambiguous spawn directory");
+        let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(5)).expect("actor fixture deadline"),
+        )
+        .expect("durable ownership actor fixture");
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let spawn_calls = Arc::new(AtomicUsize::new(0));
+        let observed_spawn_calls = Arc::clone(&spawn_calls);
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            durable_worker_registration(context_id, 96),
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(5)).expect("ambiguous spawn deadline"),
+            move |reservation, _deadline| {
+                observed_spawn_calls.fetch_add(1, Ordering::SeqCst);
+                Err(WorkerSpawnFailure {
+                    error: WorkerV3Error::Ambiguous,
+                    reservation,
+                })
+            },
+        );
+        let DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker } = outcome
+        else {
+            panic!("ambiguous spawn did not retain both affine owners")
+        };
+        assert!(matches!(error, WorkerV3Error::Ambiguous));
+        assert_eq!(spawn_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(worker.coordinates.context_id, context_id);
+        assert_eq!(worker.coordinates.worker_generation.get(), 1);
+        assert!(matches!(
+            worker.placement.as_ref(),
+            Some(WorkerGenerationPlacement::SpawnAmbiguous(_))
+        ));
+        assert!(worker.has_valid_dispatch_fence_shape());
+        assert_eq!(
+            worker.dispatch_registration,
+            WorkerDispatchRegistration::DurableHandoffPending
+        );
+        assert!(worker.handoff_fence.is_none());
+        assert_eq!(format!("{key:?}"), "DurableOwnershipKey(<redacted>)");
+        drop(key);
+        drop(worker);
+        drop(actor);
+        drop(directory);
+    }
+
+    #[test]
+    fn durable_handoff_phase_fence_retains_key_worker_and_source_before_arm() {
+        let context_id = [91; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("phase-fence deadline"),
+            |coordinator, context_id, _generation| {
+                lock_worker_registry(&coordinator.registry)
+                    .records
+                    .get_mut(&context_id)
+                    .expect("registered passive worker")
+                    .stable_phase = StablePhase::Initialised;
+            },
+        );
+        assert_no_worker_request_bytes(&fixture.peer);
+        let DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff } = fixture.outcome
+        else {
+            panic!("phase change did not retain the complete pre-arm handoff")
+        };
+        assert!(matches!(error, WorkerV3Error::Conflict));
+        assert_eq!(handoff.source.pending.coordinates.context_id, context_id);
+        assert_durable_handoff_fence_owner(&handoff.registered.worker);
+        assert_eq!(
+            format!("{:?}", handoff.registered.key),
+            "DurableOwnershipKey(<redacted>)"
+        );
+        lock_worker_registry(&fixture.coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .expect("registered passive worker")
+            .stable_phase = StablePhase::Starting;
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+        drop(key);
+        drop(source);
+        reap_durable_handoff_worker(&fixture.coordinator, worker);
+        drop(fixture.actor);
+        drop(fixture.directory);
+    }
+
+    #[test]
+    fn durable_handoff_binding_fence_retains_key_worker_and_source_before_arm() {
+        let context_id = [92; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("binding-fence deadline"),
+            |coordinator, context_id, generation| {
+                lock_worker_registry(&coordinator.registry)
+                    .records
+                    .get_mut(&context_id)
+                    .and_then(|record| record.process.as_mut())
+                    .expect("registered passive worker")
+                    .binding = Some(([0xfe; 16], generation));
+            },
+        );
+        assert_no_worker_request_bytes(&fixture.peer);
+        let DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff } = fixture.outcome
+        else {
+            panic!("binding change did not retain the complete pre-arm handoff")
+        };
+        assert!(matches!(error, WorkerV3Error::Stale));
+        assert_eq!(handoff.source.pending.coordinates.context_id, context_id);
+        assert_durable_handoff_fence_owner(&handoff.registered.worker);
+        lock_worker_registry(&fixture.coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .and_then(|record| record.process.as_mut())
+            .expect("registered passive worker")
+            .binding = Some((context_id, 1));
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+        drop(key);
+        drop(source);
+        reap_durable_handoff_worker(&fixture.coordinator, worker);
+        drop(fixture.actor);
+        drop(fixture.directory);
+    }
+
+    #[test]
+    fn durable_handoff_deadline_fence_retains_key_worker_and_source_before_arm() {
+        let context_id = [93; 16];
+        let deadline =
+            HardDeadline::after(Duration::from_secs(2)).expect("deadline-fence deadline");
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            deadline,
+            |_coordinator, _context_id, _generation| wait_until_deadline_elapsed(deadline),
+        );
+        assert_no_worker_request_bytes(&fixture.peer);
+        let DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff } = fixture.outcome
+        else {
+            panic!("elapsed deadline did not retain the complete pre-arm handoff")
+        };
+        assert!(matches!(error, WorkerV3Error::Deadline));
+        assert_eq!(handoff.source.pending.coordinates.context_id, context_id);
+        assert_durable_handoff_fence_owner(&handoff.registered.worker);
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+        drop(key);
+        drop(source);
+        reap_durable_handoff_worker(&fixture.coordinator, worker);
+        drop(fixture.actor);
+        drop(fixture.directory);
+    }
+
+    #[test]
+    fn durable_pending_fence_survives_ambiguous_reap_and_exact_retry() {
+        let context_id = [99; 16];
+        let fixture =
+            durable_pending_lifecycle_fixture(context_id, VecDeque::from([false, true]), true);
+        assert_durable_handoff_registry_pristine(&fixture.coordinator, context_id, 1);
+        assert_no_worker_request_bytes(&fixture.peer);
+
+        let retained = match fixture.coordinator.terminate_generation_until(
+            fixture.worker,
+            HardDeadline::after(Duration::from_secs(1)).expect("first reap deadline"),
+        ) {
+            WorkerGenerationReap::Retained {
+                error: WorkerV3Error::Ambiguous,
+                ownership,
+            } => *ownership,
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected pending reap result: {error}")
+            }
+            WorkerGenerationReap::Confirmed(_) => {
+                panic!("ambiguous pending worker was falsely confirmed absent")
+            }
+        };
+        assert_durable_handoff_fence_owner(&retained);
+        assert!(matches!(
+            retained.placement.as_ref(),
+            Some(WorkerGenerationPlacement::Detached(detached))
+                if detached.reservation.is_none()
+        ));
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(fixture.alive.load(Ordering::SeqCst));
+        {
+            let registry = lock_worker_registry(&fixture.coordinator.registry);
+            let record = registry.records.get(&context_id).expect("pending record");
+            assert_eq!(
+                record.dispatch_fence,
+                WorkerDispatchFence::DurableHandoffPending
+            );
+            assert!(record.quarantined);
+            assert!(record.process.is_none());
+        }
+
+        match fixture.coordinator.terminate_generation_until(
+            retained,
+            HardDeadline::after(Duration::from_secs(1)).expect("retry reap deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => {
+                assert_eq!(proof.coordinates.context_id, context_id);
+            }
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("pending reap retry remained unresolved: {error}")
+            }
+        }
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 2);
+        assert!(!fixture.alive.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn durable_pending_timeout_reattach_preserves_gate_and_affine_owner() {
+        let context_id = [100; 16];
+        let fixture =
+            durable_pending_lifecycle_fixture(context_id, VecDeque::from([false, true]), true);
+        let detached = lock_worker_registry(&fixture.coordinator.registry)
+            .report_dead(context_id, 1)
+            .expect("exact pending detach")
+            .expect("pending worker process owner");
+        let supervisor = WorkerSupervisor {
+            registry: Arc::clone(&fixture.coordinator.registry),
+            settlements: Arc::clone(&fixture.coordinator.settlements),
+        };
+        assert!(!supervisor.retire(detached).await);
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(fixture.alive.load(Ordering::SeqCst));
+        assert_durable_handoff_fence_owner(&fixture.worker);
+        {
+            let registry = lock_worker_registry(&fixture.coordinator.registry);
+            let record = registry
+                .records
+                .get(&context_id)
+                .expect("reattached record");
+            assert_eq!(
+                record.dispatch_fence,
+                WorkerDispatchFence::DurableHandoffPending
+            );
+            assert!(record.quarantined);
+            assert!(record.in_flight.is_none());
+            assert!(record.process.is_some());
+        }
+        assert_no_worker_request_bytes(&fixture.peer);
+
+        reap_durable_handoff_worker(&fixture.coordinator, fixture.worker);
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 2);
+        assert!(!fixture.alive.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn durable_pending_shutdown_preserves_owner_until_exact_absence_proof() {
+        let context_id = [101; 16];
+        let fixture = durable_pending_lifecycle_fixture(context_id, VecDeque::new(), true);
+        assert_no_worker_request_bytes(&fixture.peer);
+        assert!(fixture.coordinator.shutdown().await);
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(!fixture.alive.load(Ordering::SeqCst));
+        assert_durable_handoff_fence_owner(&fixture.worker);
+        assert!(matches!(
+            fixture.coordinator.phase(context_id, 1),
+            Err(WorkerV3Error::Stale)
+        ));
+
+        match fixture.coordinator.terminate_generation_until(
+            fixture.worker,
+            HardDeadline::after(Duration::from_secs(1)).expect("absence proof deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => {
+                assert_eq!(proof.coordinates.context_id, context_id);
+            }
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("shutdown did not leave exact pending absence: {error}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_durable_pending_owner_cannot_touch_replacement_generation() {
+        let context_id = [102; 16];
+        let fixture = durable_pending_lifecycle_fixture(context_id, VecDeque::new(), true);
+        let detached = lock_worker_registry(&fixture.coordinator.registry)
+            .report_dead(context_id, 1)
+            .expect("detach old pending generation")
+            .expect("old pending process owner");
+        let supervisor = WorkerSupervisor {
+            registry: Arc::clone(&fixture.coordinator.registry),
+            settlements: Arc::clone(&fixture.coordinator.settlements),
+        };
+        assert!(supervisor.retire(detached).await);
+        assert_durable_handoff_fence_owner(&fixture.worker);
+
+        let (replacement, replacement_peer, replacement_alive) =
+            fake_process(Duration::from_secs(1));
+        let replacement_generation = lock_worker_registry(&fixture.coordinator.registry)
+            .register(
+                context_id,
+                replacement,
+                Duration::from_secs(5),
+                Instant::now(),
+            )
+            .expect("replacement Open generation");
+        assert_eq!(replacement_generation, 2);
+
+        match fixture.coordinator.terminate_generation_until(
+            fixture.worker,
+            HardDeadline::after(Duration::from_secs(1)).expect("stale owner deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => {
+                assert_eq!(proof.coordinates.worker_generation.get(), 1);
+            }
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("old pending owner did not observe exact absence: {error}")
+            }
+        }
+        {
+            let registry = lock_worker_registry(&fixture.coordinator.registry);
+            let replacement = registry
+                .records
+                .get(&context_id)
+                .expect("replacement record");
+            assert_eq!(replacement.generation, replacement_generation);
+            assert_eq!(replacement.dispatch_fence, WorkerDispatchFence::Open);
+            assert_eq!(replacement.stable_phase, StablePhase::Starting);
+            assert!(!replacement.quarantined);
+            assert!(replacement.process.is_some());
+        }
+        assert!(replacement_alive.load(Ordering::SeqCst));
+        assert_no_worker_request_bytes(&replacement_peer);
+
+        let detached = lock_worker_registry(&fixture.coordinator.registry)
+            .report_dead(context_id, replacement_generation)
+            .expect("detach replacement")
+            .expect("replacement process owner");
+        assert!(supervisor.retire(detached).await);
+        assert!(!replacement_alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn durable_pending_spawned_retry_commits_pending_with_exact_fence() {
+        let context_id = [103; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_mutation_hook(Some(LifecycleMutationHook {
+            point: LifecycleMutationPoint::Commit,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        }));
+        let (mut process, peer, alive) = fake_process(Duration::from_secs(1));
+        let worker_coordinator = coordinator.clone();
+        let deadline = HardDeadline::after(Duration::from_secs(2)).expect("commit fence deadline");
+        let admission = thread::spawn(move || {
+            worker_coordinator.reserve_spawn_register_durable_handoff_with_until(
+                context_id,
+                Duration::from_secs(5),
+                deadline,
+                move |reservation, _deadline| {
+                    process.binding = Some(reservation.binding());
+                    Ok(SpawnedWorker {
+                        reservation,
+                        process,
+                        bootstrap_challenge: BootstrapChallenge([0xd1; 32]),
+                    })
+                },
+            )
+        });
+        reached.wait();
+        wait_until_deadline_elapsed(deadline);
+        release.wait();
+        let retained = match admission.join().expect("pending commit thread") {
+            WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => ownership,
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected pending commit result: {error}")
+            }
+            WorkerLifecycleAdmission::Registered(ownership) => {
+                drop(ownership);
+                panic!("expired pending commit registered a worker")
+            }
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("expired pending commit lost its spawned owner: {error}")
+            }
+        };
+        assert!(retained.has_valid_dispatch_fence_shape());
+        assert_eq!(
+            retained.dispatch_registration,
+            WorkerDispatchRegistration::DurableHandoffPending
+        );
+        assert!(retained.handoff_fence.is_none());
+        assert!(matches!(
+            retained.placement.as_ref(),
+            Some(WorkerGenerationPlacement::Spawned(_))
+        ));
+        assert!(
+            lock_worker_registry(&coordinator.registry)
+                .records
+                .is_empty()
+        );
+        assert!(alive.load(Ordering::SeqCst));
+        assert_no_worker_request_bytes(&peer);
+
+        coordinator.set_lifecycle_mutation_hook(None);
+        let registered = match coordinator.settle_lifecycle_ownership_until(
+            retained,
+            HardDeadline::after(Duration::from_secs(1)).expect("pending commit retry deadline"),
+        ) {
+            WorkerLifecycleSettlement::Registered(worker) => worker,
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("pending commit retry remained unresolved: {error}")
+            }
+            WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
+                panic!("spawned pending worker was falsely absent")
+            }
+        };
+        assert_durable_handoff_fence_owner(&registered);
+        assert_durable_handoff_registry_pristine(&coordinator, context_id, 1);
+        assert_no_worker_request_bytes(&peer);
+        reap_durable_handoff_worker(&coordinator, registered);
+        assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn durable_handoff_source_fence_statically_precedes_arm_without_dispatch() {
+        let source = include_str!("worker_v3.rs");
+        let start = source
+            .find("    fn durable_passive_prepare_handoff_with_until<Spawn>(")
+            .expect("durable handoff implementation");
+        let end = source[start..]
+            .find("\n    /// Dormant production seam: reserves")
+            .map(|offset| start + offset)
+            .expect("durable handoff implementation boundary");
+        let handoff = &source[start..end];
+        let register = handoff
+            .find("actor.register_until(registration, deadline)")
+            .expect("durable Intent registration");
+        let worker = handoff
+            .find("self.reserve_spawn_register_durable_handoff_with_until")
+            .expect("passive worker admission");
+        let source_identity = handoff
+            .find(".durable_handoff_recovery_identity_source_until")
+            .expect("recovery identity source");
+        let revalidation = handoff
+            .find("self.revalidate_durable_recovery_identity_until")
+            .expect("final static source fence");
+        let anchor = handoff
+            .find("handoff.source.durable_prepare_anchor()")
+            .expect("durable recovery anchor");
+        let arm = handoff
+            .find("actor.arm_until(key, anchor, deadline)")
+            .expect("durable MayOwnPrepare arm");
+        assert!(
+            register < worker
+                && worker < source_identity
+                && source_identity < revalidation
+                && revalidation < anchor
+                && anchor < arm
+        );
+        assert!(!handoff[revalidation..arm].contains("lock_worker_registry"));
+        for forbidden in [
+            "InternalWorkerRequest",
+            "send_credential_worker_request",
+            ".execute(",
+            ".plan_until(",
+            "AcquireTransportSocket",
+        ] {
+            assert!(
+                !handoff.contains(forbidden),
+                "durable passive handoff gained a child dispatch seam: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_dispatch_fence_statically_precedes_every_dispatch_mutation() {
+        let source = include_str!("worker_v3.rs");
+        let plan_start = source
+            .find("    fn plan_until(")
+            .expect("registry planning implementation");
+        let plan_end = source[plan_start..]
+            .find("\n    #[cfg(test)]\n    fn plan(")
+            .map(|offset| plan_start + offset)
+            .expect("registry planning implementation boundary");
+        let plan = &source[plan_start..plan_end];
+        let pending_rejection = plan
+            .find("self.reject_pending_durable_handoff_dispatch(context_id, generation)?")
+            .expect("pending durable handoff rejection");
+        for mutation in [
+            "self.expire_cache(now)",
+            "self.expire_tombstones(now)",
+            "self.prepare_call_owners",
+            ".in_flight = Some(in_flight)",
+        ] {
+            assert!(
+                pending_rejection < plan.find(mutation).expect("dispatch mutation seam"),
+                "pending durable handoff rejection must precede {mutation}"
+            );
+        }
+
+        let prepare_start = source
+            .find("    fn prepare_call_owners(")
+            .expect("call-owner preparation implementation");
+        let prepare_end = source[prepare_start..]
+            .find("\n    fn recovery_identity_owners(")
+            .map(|offset| prepare_start + offset)
+            .expect("call-owner preparation boundary");
+        let prepare = &source[prepare_start..prepare_end];
+        let pending_rejection = prepare
+            .find("WorkerDispatchFence::DurableHandoffPending")
+            .expect("defensive pending durable handoff rejection");
+        for owner_exposure in [
+            "process.duplicate_network_namespace_pin(deadline)",
+            "process.clone_channel()",
+        ] {
+            assert!(
+                pending_rejection < prepare.find(owner_exposure).expect("call-owner exposure"),
+                "pending durable handoff rejection must precede {owner_exposure}"
+            );
+        }
+
+        let commit_start = source
+            .find("    fn commit_reserved_with_dispatch(")
+            .expect("dispatch-aware registration commit");
+        let commit_end = source[commit_start..]
+            .find("\n    fn commit_reserved(")
+            .map(|offset| commit_start + offset)
+            .expect("dispatch-aware registration boundary");
+        let commit = &source[commit_start..commit_end];
+        assert!(
+            commit
+                .find("WorkerDispatchFence::DurableHandoffPending")
+                .expect("pending record state")
+                < commit
+                    .find("self.records.insert(")
+                    .expect("atomic record insertion")
+        );
     }
 
     #[test]
@@ -7918,6 +9694,8 @@ mod tests {
         let ownership = WorkerGenerationOwnership {
             registry: Arc::clone(&coordinator.registry),
             coordinates,
+            dispatch_registration: WorkerDispatchRegistration::Open,
+            handoff_fence: None,
             placement: Some(WorkerGenerationPlacement::LifecycleReservation(reservation)),
         };
         let reached = Arc::new(std::sync::Barrier::new(2));
