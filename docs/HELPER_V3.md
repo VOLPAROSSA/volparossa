@@ -89,21 +89,21 @@ returns the explicit `Unavailable`
 / `PREPARE_FAILED` result and creates no context. It never returns an agent-supplied address,
 placeholder address, guessed port, public key, or endpoint.
 
-## Ownership journal interlocks
+## Ownership journal startup boundary
 
 The v1/v2 context worker, its internal command-line entry point, and its live journal cleanup
-executor have been removed. Production startup performs read-only fail-closed interlocks before
-cleanup-token rotation, stale-socket removal, or listener bind. Any filesystem object at the
-retired `/run/volparossa/helper.ownership-v1` path, or at the dormant v3 store's exact
-`helper.ownership-v3`, `helper.ownership-v3.lock`, or `helper.ownership-v3.next` path, stops startup
-and requires explicit operator inspection. It does not parse, lock, create, repair, delete, or
-execute cleanup from those objects. Operators must never remove them merely to bypass the
-interlock.
+executor have been removed. Any filesystem object at the retired
+`/run/volparossa/helper.ownership-v1` path still stops production startup before runtime-state
+mutation and requires explicit operator inspection. After fixed account and runtime-directory
+validation, production opens the v3 store through one canonical, exclusively locked actor. The
+actor must finish its startup sweep and complete-boundary recheck before cleanup-token publication,
+stale-socket removal, or listener bind. Orderly shutdown cleans the engine first, then fences and
+joins the quiescent actor before releasing the socket path.
 
 The v3 module contains a boot-scoped, secret-free, canonical and length-bounded codec/CAS store for
 exact `Intent`, `MayOwnPrepare`, and `Absent` ownership records. Its fixed lock, atomic
 file-fsync/rename/directory-fsync transaction, typed recovery anchor, and trusted
-non-cryptographic exact-echo absence-proof interface have temp-directory tests. A private dormant
+non-cryptographic exact-echo absence-proof interface have temp-directory tests. A private
 single-writer actor now owns both this store and its recovery executor on one named thread. It
 retains one verified parent-directory descriptor, acquires a process-global one-shot store latch
 before opening the lock, sweeps every startup `Intent` and `MayOwnPrepare`, rechecks the complete
@@ -122,14 +122,17 @@ class, mutable-field exclusion, redacted debug output, canonical codec/reopen st
 insert reply, and recovery projection. This dormant projection exposes no production issuance API
 and does not authorize a kernel operation.
 
-The actor remains disconnected from the server, engine, and worker coordinator. There is no
-production recovery executor and no server-wired startup/restart reaper; any private startup-sweep
-failure aborts startup, and readiness follows only after every record in the observed snapshot is
-durably `Absent` and the complete boundary rechecks. There is also no supported on-disk migration
-or live root proof. Every non-test actor entry point requires one caller-supplied absolute hard
-deadline. That same value is carried through admission, the queued command, actor-thread execution,
-reply handling and thread settlement. Recovery additionally receives that exact same deadline and
-rechecks it before invoking the trusted executor and after the exact proof, immediately before any
+Production exposes only a start/shutdown wrapper around the actor; registration, arming and raw
+recovery authority remain inaccessible to the server and engine. Its production executor always
+refuses `MayOwnPrepare`, so a potentially mutating record stays byte-identical and blocks startup.
+Only a never-dispatched `Intent` may be durably settled to `Absent` before the internal actor-ready
+and socket-publication boundary. There is no production request-path issuance/arming writer,
+namespace-FD vault, absence-proving `MayOwnPrepare` recovery executor, restart reaper, supported
+on-disk migration, or live-root proof. Every non-test actor entry point requires one caller-supplied
+absolute hard deadline. That same value is carried through admission, the queued
+command, actor-thread execution, reply handling and thread settlement. Recovery additionally
+receives that exact same deadline and rechecks it before invoking the trusted executor and after the
+exact proof, immediately before any
 `MayOwnPrepare -> Absent` mutation. Startup rechecks it before the first filesystem or latch
 operation and before each pending record; ordinary commands recheck it immediately after dequeue.
 Work which expires before its first mutation returns `DeadlineElapsed` without touching journal
@@ -143,22 +146,25 @@ lock, while the process-global latch remains set until process exit. A clean shu
 both an intact durable boundary and every record already durably `Absent`; it never retires or
 recovers an outstanding record and returns `RecoveryNotConfirmed` for a known `Intent` or
 `MayOwnPrepare`. Reopening requires a fresh process. These limitations must be resolved at the
-production service boundary before the actor can become the production writer. The required tag-35
-closed plan has a fallible exact conversion into the store's existing `ClosedPlan`; this removes
+production service boundary before the actor can become the request-path issuance/arming writer.
+The required tag-35 closed plan has a fallible exact conversion into the store's existing
+`ClosedPlan`; this removes
 the wire/schema mismatch but performs no journal I/O and grants no mutation authority. A missing
-journal is therefore not proof that stale kernel state is absent, and the interlock cannot issue a
-cross-runtime tag-28 receipt. The current `doctor` has no helper-v3 crash-ownership readiness check,
-so its other successful checks must not be interpreted as evidence of live recovery or cleanup.
+journal is therefore not proof that stale kernel state is absent, and the startup wrapper cannot
+issue a cross-runtime tag-28 receipt. The current `doctor` has no helper-v3 crash-ownership readiness
+check, so its other successful checks must not be interpreted as evidence of live recovery or
+cleanup.
 
-The dormant store's insert, prepare-arm, never-dispatched retirement, and confirmed-recovery
+The store's insert, prepare-arm, never-dispatched retirement, and confirmed-recovery
 transitions are exact-current-revision retry-safe after a lost reply. A retry succeeds only when the
 complete durable post-state of that same operation still exists; an intervening transition, changed
 intent, generation, recovery anchor, or reconciliation binding fails closed without another write.
 `Absent` records persist whether they came from a never-dispatched intent or from confirmed
 MayOwn recovery, so one operation can never acknowledge the other's tombstone and an already
-confirmed recovery never reruns its executor. These are private pre-production codec semantics:
-the store remains disconnected, version 3 has no supported on-disk migration contract yet, and any
-production-path v3 object still triggers the read-only startup interlock rather than being decoded.
+confirmed recovery never reruns its executor. Mutation authority remains private and
+pre-production: the server owns only the start/shutdown wrapper, version 3 has no supported on-disk
+migration contract yet, and production decodes a v3 object only behind the canonical lock and
+refuses Ready when a `MayOwnPrepare` record cannot be recovered.
 After a definite pre-rename I/O failure, another mutation is admitted only if a read-only health
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
 temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the actor permanently.
@@ -448,8 +454,9 @@ requeueing the armed owner. No ordinary request waiter follows the reaper retry 
 shutdown waiter is bounded independently from its caller-independent cleanup task and can observe
 `Pending`; the attempt later publishes `Confirmed`, `Retryable`, or terminal `Unresolved`. An exact
 retry owner may remain in memory for the helper lifetime when the operating system never confirms
-reap. Neither that state nor the reaper permits are durable across a helper crash. The dormant v3
-store does not change that because no production writer or restart reaper is connected.
+reap. Neither that state nor the reaper permits are durable across a helper crash. The
+production-started v3 actor does not change that because no production issuance/arming writer or
+restart reaper is connected.
 
 Exact cache hits use a registry-lock-free point-in-time process probe followed by registry-locked
 checks of the atomic hint, expiry, generation and shutdown state. There is deliberately no watcher
@@ -620,8 +627,8 @@ owner may prove that complete absence under the registry lock and settle idempot
 `ConfirmedWorkerGenerationAbsent`. That settlement neither signals nor waits for the process a
 second time. Any remaining record, reservation, cache entry, tombstone or ordering-index entry, or
 an elapsed hard deadline, fails closed while retaining the affine owner for exact retry. This seam
-remains private and dormant: it adds no production journal writer or restart reaper, performs no
-host-network mutation, and is not datapath or acceptance evidence.
+remains private and dormant: it adds no production issuance/arming writer or restart reaper,
+performs no host-network mutation, and is not datapath or acceptance evidence.
 
 The corresponding recovery source is available only for the exact same coordinator and generation
 while the registered record is live, unquarantined, idle and still in `Starting`. Bootstrap retains
@@ -678,9 +685,9 @@ Production wiring remains a separate audited change with these explicit blockers
   against the requested socket kind, protocol, local/remote tuple, nonblocking/listening state and
   genuine MPTCP evidence. The implemented deadline, adoption and retryable-shutdown machinery
   therefore remains disconnected from `HelperEngine`.
-- Retryable shutdown ownership and the escalation reaper are still process-memory-only. The dormant
-  journal has no production writer or restart reaper, so helper-crash reconciliation is not yet
-  durable.
+- Retryable shutdown ownership and the escalation reaper are still process-memory-only. The
+  journal has a production startup owner but no request-path issuance/arming writer or restart
+  reaper, so helper-crash reconciliation is not yet durable.
 - Add/Remove MPTCP endpoint operations are intentionally outside `AsyncLeaseBackend`; their typed
   asynchronous seam and dispatch are a separate bounded extension.
 
@@ -726,9 +733,9 @@ the fixed 1024-record bound makes retention finite and capacity exhaustion fails
 itself retries exact Pending/Owned cleanup. Tag 29 `CleanupOwned` is an independent process-wide
 cleanup operation, neither part of per-route reconciliation nor that ACK, and leaves `Absent` proof
 retained. A helper restart loses this in-memory ledger and changes the runtime ID, so the agent
-quarantines rather than releasing. A dormant secret-free journal substrate exists, but the
-production writer, restart reaper, recovery backend, and cross-runtime proof needed to settle that
-case do not.
+quarantines rather than releasing. A production-started secret-free journal substrate exists, but
+the request-path issuance/arming writer, restart reaper, absence-proving recovery backend, and
+cross-runtime proof needed to settle that case do not.
 
 This entire path is dormant containment, not a live route implementation. Production Prepare still
 returns `Unavailable`, and no production route-manager caller drives the helper-backed setup
@@ -880,10 +887,10 @@ remain:
   full rollback or quarantine;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - capture activation baselines and perform correlated handshake/RX/TX commit probes;
-- connect the dormant secret-free ownership store and its typed per-link marker projection only
-  after a real cleanup backend can prove reaper cleanup; the pure-tested typed marker/kernel
-  foundation rejects an old same-name link carrying a non-exact marker but grants no journal-phase
-  or cleanup authority;
+- extend the production startup-owned secret-free store with its typed per-link marker projection
+  only after a real cleanup backend and restart-stable namespace/pidfd custody can prove reaper
+  cleanup; the pure-tested typed marker/kernel foundation rejects an old same-name link carrying a
+  non-exact marker but grants no journal-phase or cleanup authority;
 - add the production tag-35/tag-28 writer plus restart reaper; until then a runtime mismatch must
   remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
 - invoke the implemented factories inside the correct committed child namespace and feed their

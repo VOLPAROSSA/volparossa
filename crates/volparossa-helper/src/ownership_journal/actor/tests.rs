@@ -1188,6 +1188,7 @@ fn startup_failure_retains_may_own_and_the_inode_latch_survives_aliases_and_shut
     let directory = tempdir().expect("temporary directory");
     let config = test_config(directory.path());
     let coordinates = prepopulate(&config, &[(durable_intent(9), Some(durable_anchor(9)))]);
+    let before = fs::read(&config.journal_path).expect("MayOwn bytes before startup");
     let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
     assert_eq!(
         expect_error(&spawn_actor(
@@ -1206,7 +1207,12 @@ fn startup_failure_retains_may_own_and_the_inode_latch_survives_aliases_and_shut
             .phase,
         OwnershipPhase::MayOwnPrepare
     );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("MayOwn bytes after refused startup"),
+        before
+    );
     let calls = observations.lock().expect("executor observations").calls;
+    assert_eq!(calls, 1);
     let alias_config = test_config(&directory.path().join("."));
     assert_eq!(
         expect_error(&spawn_actor(
@@ -1828,7 +1834,7 @@ fn definite_io_requires_health_confirmation_and_lifecycle_terminals_are_absorbin
 }
 
 #[test]
-fn affine_actor_api_is_bounded_redacted_and_disconnected_from_production() {
+fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send::<DurableOwnershipActor>();
@@ -1869,6 +1875,7 @@ fn affine_actor_api_is_bounded_redacted_and_disconnected_from_production() {
     let actor_source = include_str!("../actor.rs");
     let library_source = include_str!("../../lib.rs");
     let main_source = include_str!("../../main.rs");
+    let engine_source = include_str!("../../engine_v3.rs");
     let server_source = include_str!("../../server.rs");
     assert!(actor_source.contains("sync_channel(COMMAND_CHANNEL_CAPACITY)"));
     assert!(actor_source.contains("recv_timeout(remaining)"));
@@ -1890,7 +1897,6 @@ fn affine_actor_api_is_bounded_redacted_and_disconnected_from_production() {
         );
     }
     assert!(actor_source.contains("confirm_retry_safe_after_definite_failure"));
-    assert!(!actor_source.contains("open_production"));
     assert!(!actor_source.contains("tokio::"));
     assert!(!actor_source.contains("async fn"));
     assert!(!actor_source.contains("pub struct "));
@@ -1906,6 +1912,7 @@ fn affine_actor_api_is_bounded_redacted_and_disconnected_from_production() {
     for (name, source) in [
         ("lib", library_source),
         ("main", main_source),
+        ("engine", engine_source),
         ("server", server_source),
     ] {
         for affine_api in [
@@ -1917,7 +1924,7 @@ fn affine_actor_api_is_bounded_redacted_and_disconnected_from_production() {
         ] {
             assert!(
                 !source.contains(affine_api),
-                "dormant affine API unexpectedly has a production caller in {name}: {affine_api}"
+                "raw affine API escaped the production lifecycle wrapper in {name}: {affine_api}"
             );
         }
     }

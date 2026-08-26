@@ -295,12 +295,13 @@ authorization binding have unprivileged tests. They are not proof of a live rout
 two-leg probe producer does not exist. The actor-linearized candidate snapshot and staged preflight
 described above are dormant and report no production-usable candidates. Helper `Prepare`
 deliberately returns `Unavailable`, and the production manager does not call the helper-backed
-transaction. A dormant boot-scoped,
-secret-free canonical/CAS ownership store exists and any exact main/lock/next object blocks helper
-startup before token/socket mutation, but no production writer, recovery backend, restart reaper,
-or cross-runtime tag-28 proof uses it. Tag 35 now carries the exact canonical closed Prepare plan
-needed by that store, but the conversion is dormant and performs no journal write; journal absence
-is not cleanup proof. Client ingress is also
+transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
+cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
+never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
+blocks startup. There is no production request-path issuance/arming writer, absence-proving
+recovery backend, restart reaper, or cross-runtime tag-28 proof. Tag 35 carries the exact canonical
+closed Prepare plan needed by that store, but production does not yet issue it; journal absence is
+not cleanup proof. Client ingress is also
 blocked. Consequently
 no production path can reach finalize, `Activate`, or `Commit`, and kernel configuration,
 Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. See

@@ -513,15 +513,17 @@ worker lifecycle owns committed lease state and invokes the factory. The exact p
 namespace transport blocker and remaining live-kernel work are recorded in
 [Privileged helper protocol v3](HELPER_V3.md).
 
-Tags 35 and 28 therefore provide only dormant same-process ambiguity containment. Tag 35's closed
-plan is now directly convertible to the dormant journal's canonical `ClosedPlan`, but no production
-writer consumes it. No production
-route-manager caller reaches this transaction. A boot-scoped, secret-free canonical/CAS ownership
-store exists as a temp-directory-tested dormant primitive, and production startup refuses any of
-its exact main/lock/next objects before touching the token or socket. No production writer,
-recovery backend, restart reaper, or cross-runtime receipt uses that store. A helper restart changes
-the runtime ID, so retained agent authority remains quarantined rather than being misreported as
-absent; an absent journal is not cleanup evidence.
+Tags 35 and 28 therefore provide only same-process ambiguity containment. Tag 35's closed plan is
+directly convertible to the journal's canonical `ClosedPlan`, but no production request-path writer
+consumes it and no production route-manager caller reaches this transaction. Production now starts
+one boot-scoped, secret-free canonical/CAS ownership actor before publishing its cleanup token or
+socket, and joins it after engine cleanup. Startup may durably settle only never-dispatched
+`Intent`; its deliberately refusing executor leaves every `MayOwnPrepare` byte-identical and blocks
+the internal socket-publication boundary. No production issuance/arming writer, restart-stable
+namespace/pidfd vault, absence-proving `MayOwnPrepare` recovery backend, restart reaper, or
+cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
+authority remains quarantined rather than being misreported as absent; an absent journal is not
+cleanup evidence.
 
 All four client-ingress operations return `Unavailable/CLIENT_INGRESS_UNAVAILABLE` before clock,
 cache, state, backend or network access. The Linux UAPI has pure/socketpair-tested socket
