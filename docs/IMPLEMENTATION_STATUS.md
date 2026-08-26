@@ -103,6 +103,11 @@ Last updated: 2026-08-26
   trips a process-global one-shot start latch before lock creation. The latch remains set after
   startup failure or clean shutdown. The private startup sweep resolves every observed uncertain
   record before reporting ready, and admission is bounded to four operations plus shutdown.
+  Every non-test actor entry point now requires one absolute hard deadline carried through
+  admission, queueing, actor execution, reply and thread settlement. Startup rechecks it before
+  filesystem/latch work and commands recheck it after dequeue. Expired unstarted work is
+  mutation-free; late completion after work begins permanently fences admission as ambiguous, and
+  shutdown cannot hide settlement ambiguity behind a weaker deadline result.
   Definite pre-rename I/O failures permit a retry only after the retained parent, exact exclusive
   lock, absent temporary entry, and durable snapshot are all re-proved; otherwise the actor is
   permanently ambiguous. Reply and thread-settlement waits are bounded, but an actor thread stuck
@@ -131,6 +136,20 @@ Last updated: 2026-08-26
   against that deadline, pre-arms retirement ownership before the blocking `Command::spawn`
   operation and installs any returned child into that owner before further fallible work; only the
   spawn operation itself remains non-interruptible.
+  A private dormant lifecycle seam now reserves a coordinator-local generation, retains a
+  non-expiring `LifecycleOwned` shutdown fence, authenticates a passive worker under that same
+  deadline, and registers it in `Starting` without dispatching any child operation. Every
+  post-reservation uncertain outcome returns a non-`Clone` exact-placement owner; registration
+  failure keeps its reservation visible until detached reap, and `ReapedPendingPurge` retries only
+  idempotent six-index registry cleanup without signalling the process twice. Commit, settlement,
+  detach and purge recheck the deadline immediately before mutation. Its recovery source retains
+  duplicated pidfd, anchored proc-directory and typed network-namespace descriptors, then
+  revalidates exact process identity, `Starting`, TTL and liveness after pinning. It deliberately
+  returns `RecoveryIdentityIncomplete` because boot ID, process start ticks, executable inode and
+  service-cgroup inode are not yet attested. Ambiguous spawn therefore remains permanently
+  fail-closed. Dropped/unwound lifecycle ownership is not yet recoverable, concurrent terminal
+  shutdown can make a returning marker stale, and neither journal wiring nor a cancellation-safe
+  production settlement guard exists.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly

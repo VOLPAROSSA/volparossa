@@ -14,6 +14,7 @@ use std::{
     collections::BTreeSet,
     fs::{self, File},
     io::{self, Read},
+    num::NonZeroU64,
     os::fd::{AsFd, OwnedFd},
     process::Child,
 };
@@ -171,9 +172,63 @@ impl PinnedWorkerNetworkNamespace {
         Ok(typed_network_namespace_identity(observed)? == self.identity)
     }
 
+    /// Re-reads the retained typed descriptor before exposing its stable nsfs coordinates.
+    ///
+    /// Numeric coordinates alone are not ownership. Callers must keep this affine pin alive for
+    /// as long as they use the returned recovery identity.
+    pub(super) fn verified_identity_parts(
+        &self,
+    ) -> Result<(NonZeroU64, NonZeroU64), WorkerSandboxError> {
+        let retained = typed_network_namespace_identity(&self.descriptor)?;
+        if retained != self.identity {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        let device = NonZeroU64::new(retained.device).ok_or(WorkerSandboxError::Mismatch)?;
+        let inode = NonZeroU64::new(retained.inode).ok_or(WorkerSandboxError::Mismatch)?;
+        Ok((device, inode))
+    }
+
     #[cfg(test)]
     pub(crate) fn identity_for_test(&self) -> NetworkNamespaceIdentity {
         self.identity
+    }
+}
+
+/// Affine duplicate of every parent-side kernel pin which identifies one authenticated worker.
+///
+/// This does not manufacture the additional boot, start-time, executable and cgroup evidence
+/// required by the durable journal. It only keeps the already-attested process and namespace
+/// objects from being confused with later PID or namespace-inode reuse.
+#[must_use = "dropping recovery identity pins releases their exact kernel references"]
+pub(super) struct PinnedWorkerRecoveryIdentity {
+    pidfd: OwnedFd,
+    _process_directory: OwnedFd,
+    network_namespace: PinnedWorkerNetworkNamespace,
+}
+
+impl PinnedWorkerRecoveryIdentity {
+    pub(super) fn ensure_alive(&self) -> Result<(), WorkerSandboxError> {
+        let mut descriptors = [PollFd::new(self.pidfd.as_fd(), PollFlags::POLLIN)];
+        let ready = poll(&mut descriptors, 0_u8).map_err(nix_io)?;
+        if ready != 0
+            || descriptors[0]
+                .revents()
+                .is_some_and(|events| !events.is_empty())
+        {
+            return Err(WorkerSandboxError::Mismatch);
+        }
+        Ok(())
+    }
+
+    pub(super) fn verified_network_namespace_identity_parts(
+        &self,
+    ) -> Result<(NonZeroU64, NonZeroU64), WorkerSandboxError> {
+        self.network_namespace.verified_identity_parts()
+    }
+
+    #[cfg(test)]
+    pub(super) fn network_namespace_pin_for_test(&self) -> &PinnedWorkerNetworkNamespace {
+        &self.network_namespace
     }
 }
 
@@ -1118,6 +1173,20 @@ impl WorkerKernelPins {
         Ok(PinnedWorkerNetworkNamespace {
             descriptor,
             identity,
+        })
+    }
+
+    /// Duplicates the complete authenticated process and namespace pin set into one affine owner.
+    pub(super) fn duplicate_recovery_identity_pins(
+        &self,
+    ) -> Result<PinnedWorkerRecoveryIdentity, WorkerSandboxError> {
+        let network_namespace = self.duplicate_network_namespace_pin()?;
+        let pidfd = duplicate_descriptor_cloexec(&self.pidfd)?;
+        let process_directory = duplicate_descriptor_cloexec(&self.process_directory)?;
+        Ok(PinnedWorkerRecoveryIdentity {
+            pidfd,
+            _process_directory: process_directory,
+            network_namespace,
         })
     }
 

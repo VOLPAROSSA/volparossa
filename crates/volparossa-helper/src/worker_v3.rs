@@ -13,6 +13,7 @@ use std::{
     fs,
     future::Future,
     io,
+    num::{NonZeroU32, NonZeroU64},
     os::fd::{AsRawFd, OwnedFd},
     process::{Child, Command, Stdio},
     sync::{
@@ -127,6 +128,8 @@ enum WorkerV3Error {
     RuntimeUnavailable,
     #[error("worker operation hard deadline elapsed")]
     Deadline,
+    #[error("authenticated worker pins do not prove a complete durable recovery anchor")]
+    RecoveryIdentityIncomplete,
     #[error("worker I/O failed")]
     Io(#[from] io::Error),
     #[error("worker transport failed")]
@@ -1963,6 +1966,44 @@ impl WorkerProcess {
         Ok(duplicate)
     }
 
+    fn duplicate_recovery_identity_source_until(
+        &self,
+        coordinates: WorkerGenerationCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        let expected_binding = (coordinates.context_id, coordinates.worker_generation.get());
+        if self.binding != Some(expected_binding) {
+            return Err(WorkerV3Error::Stale);
+        }
+        let retirement = match self.retirement.try_lock() {
+            Ok(retirement) => retirement,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                ensure_worker_deadline(deadline)?;
+                return Err(WorkerV3Error::Ambiguous);
+            }
+        };
+        ensure_worker_deadline(deadline)?;
+        let pins = retirement
+            .as_ref()
+            .and_then(|retirement| retirement.kernel_pins.as_ref())
+            .ok_or(WorkerV3Error::Authentication)?;
+        let authenticated_pins = pins.duplicate_recovery_identity_pins()?;
+        let (network_namespace_device, network_namespace_inode) =
+            authenticated_pins.verified_network_namespace_identity_parts()?;
+        ensure_worker_deadline(deadline)?;
+        let child_pid = NonZeroU32::new(self.child_pid).ok_or(WorkerV3Error::Authentication)?;
+        Ok(WorkerRecoveryIdentitySource {
+            coordinates,
+            child_pid,
+            network_namespace_device,
+            network_namespace_inode,
+            process_identity: Arc::clone(&self.lifetime),
+            authenticated_pins,
+        })
+    }
+
     #[cfg(test)]
     fn fake(channel: Socket, child_pid: u32, alive: Arc<AtomicBool>) -> Self {
         Self::fake_with_termination(channel, child_pid, alive, true)
@@ -2192,6 +2233,7 @@ enum FinishOutcome {
 struct RegistrationFailure {
     error: WorkerV3Error,
     process: Box<WorkerProcess>,
+    reservation: Option<GenerationReservation>,
 }
 
 impl std::fmt::Debug for RegistrationFailure {
@@ -2265,9 +2307,154 @@ impl GenerationReservation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkerGenerationCoordinates {
+    context_id: ContextId,
+    worker_generation: NonZeroU64,
+}
+
+enum WorkerGenerationPlacement {
+    LifecycleReservation(GenerationReservation),
+    SpawnAmbiguous(GenerationReservation),
+    Spawned(SpawnedWorker),
+    Registered,
+    Detached(Box<LifecycleDetachedOwnership>),
+    ReapedPendingPurge(Box<LifecycleDetachedOwnership>),
+}
+
+#[must_use = "detached lifecycle ownership must retain both process and pending reservation"]
+struct LifecycleDetachedOwnership {
+    worker: DetachedWorker,
+    reservation: Option<GenerationReservation>,
+}
+
+/// Affine authority for one coordinator-owned worker generation.
+///
+/// `worker_generation` is allocated by `WorkerRegistry`; it is deliberately not accepted from an
+/// engine/backend generation. A retained detached placement owns the exact process retirement
+/// pins and can therefore be retried after a bounded, ambiguous reap attempt.
+#[must_use = "worker generation ownership must be reaped or remain fail-closed in the coordinator"]
+struct WorkerGenerationOwnership {
+    registry: Arc<Mutex<WorkerRegistry>>,
+    coordinates: WorkerGenerationCoordinates,
+    placement: Option<WorkerGenerationPlacement>,
+}
+
+impl std::fmt::Debug for WorkerGenerationOwnership {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerGenerationOwnership")
+            .field("worker_generation", &self.coordinates.worker_generation)
+            .field(
+                "placement",
+                &self.placement.as_ref().map(|placement| match placement {
+                    WorkerGenerationPlacement::LifecycleReservation(_) => "reservation",
+                    WorkerGenerationPlacement::SpawnAmbiguous(_) => "spawn-ambiguous",
+                    WorkerGenerationPlacement::Spawned(_) => "spawned",
+                    WorkerGenerationPlacement::Registered => "registered",
+                    WorkerGenerationPlacement::Detached(_) => "detached",
+                    WorkerGenerationPlacement::ReapedPendingPurge(_) => "reaped-pending-purge",
+                }),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Affine source for the recovery coordinates which current authenticated pins actually prove.
+///
+/// The namespace descriptor remains owned here. The numeric nsfs coordinates must never be used
+/// after this value is dropped as though they were independent ownership evidence.
+#[must_use = "the authenticated recovery pin must remain alive while its coordinates are used"]
+struct WorkerRecoveryIdentitySource {
+    coordinates: WorkerGenerationCoordinates,
+    child_pid: NonZeroU32,
+    network_namespace_device: NonZeroU64,
+    network_namespace_inode: NonZeroU64,
+    process_identity: Arc<WorkerLifetime>,
+    authenticated_pins: crate::worker_sandbox::PinnedWorkerRecoveryIdentity,
+}
+
+impl WorkerRecoveryIdentitySource {
+    /// A full durable prepare anchor additionally needs an attested boot ID, process start time,
+    /// executable inode and service-cgroup inode. None of those are retained by the current
+    /// authenticated bootstrap, so inventing or path-sampling them here would be unsafe.
+    fn require_complete_prepare_anchor(&self) -> Result<(), WorkerV3Error> {
+        self.authenticated_pins
+            .verified_network_namespace_identity_parts()?;
+        Err(WorkerV3Error::RecoveryIdentityIncomplete)
+    }
+}
+
+impl std::fmt::Debug for WorkerRecoveryIdentitySource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WorkerRecoveryIdentitySource(<redacted>)")
+    }
+}
+
+/// Affine proof that the exact worker generation was reaped and removed from every registry index.
+#[must_use = "confirmed absence is the only result which may release durable worker ownership"]
+struct ConfirmedWorkerGenerationAbsent {
+    coordinates: WorkerGenerationCoordinates,
+}
+
+impl std::fmt::Debug for ConfirmedWorkerGenerationAbsent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfirmedWorkerGenerationAbsent")
+            .field("worker_generation", &self.coordinates.worker_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+#[must_use = "an ambiguous reap result retains affine worker ownership for an exact retry"]
+enum WorkerGenerationReap {
+    Confirmed(ConfirmedWorkerGenerationAbsent),
+    Retained {
+        error: WorkerV3Error,
+        ownership: Box<WorkerGenerationOwnership>,
+    },
+}
+
+fn retained_worker_generation(
+    error: WorkerV3Error,
+    ownership: WorkerGenerationOwnership,
+) -> WorkerGenerationReap {
+    WorkerGenerationReap::Retained {
+        error,
+        ownership: Box::new(ownership),
+    }
+}
+
+#[must_use = "retained lifecycle admission ownership must be settled explicitly"]
+enum WorkerLifecycleAdmission {
+    Registered(WorkerGenerationOwnership),
+    Rejected(WorkerV3Error),
+    Retained {
+        error: WorkerV3Error,
+        ownership: WorkerGenerationOwnership,
+    },
+}
+
+#[must_use = "retained lifecycle ownership must be retried or remain fail-closed"]
+enum WorkerLifecycleSettlement {
+    Registered(WorkerGenerationOwnership),
+    ConfirmedAbsent(ConfirmedWorkerGenerationAbsent),
+    Retained {
+        error: WorkerV3Error,
+        ownership: WorkerGenerationOwnership,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingGenerationPhase {
+    Reserved,
+    LifecycleOwned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingGeneration {
     generation: u64,
     expires_at: Instant,
+    phase: PendingGenerationPhase,
 }
 
 #[must_use = "a populated worker registry requires explicit supervisor shutdown"]
@@ -2357,6 +2544,7 @@ impl WorkerRegistry {
             PendingGeneration {
                 generation,
                 expires_at,
+                phase: PendingGenerationPhase::Reserved,
             },
         );
         Ok(GenerationReservation {
@@ -2367,25 +2555,60 @@ impl WorkerRegistry {
         })
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "successful abandonment deliberately consumes the affine reservation token"
+    )]
     fn abandon_generation(
         &mut self,
         reservation: GenerationReservation,
     ) -> Result<(), WorkerV3Error> {
-        let GenerationReservation {
-            context_id,
-            generation,
-            expires_at,
-            linear: _linear,
-        } = reservation;
-        if self.reservations.get(&context_id)
-            != Some(&PendingGeneration {
-                generation,
-                expires_at,
+        self.abandon_generation_ref(&reservation)
+    }
+
+    fn abandon_generation_ref(
+        &mut self,
+        reservation: &GenerationReservation,
+    ) -> Result<(), WorkerV3Error> {
+        if self
+            .reservations
+            .get(&reservation.context_id)
+            .is_none_or(|pending| {
+                pending.generation != reservation.generation
+                    || pending.expires_at != reservation.expires_at
             })
         {
             return Err(WorkerV3Error::Stale);
         }
-        self.reservations.remove(&context_id);
+        self.reservations.remove(&reservation.context_id);
+        Ok(())
+    }
+
+    fn exact_lifecycle_reservation_present(&self, reservation: &GenerationReservation) -> bool {
+        self.reservations
+            .get(&reservation.context_id)
+            .is_some_and(|pending| {
+                pending.generation == reservation.generation
+                    && pending.expires_at == reservation.expires_at
+                    && pending.phase == PendingGenerationPhase::LifecycleOwned
+            })
+    }
+
+    fn retain_generation_for_lifecycle(
+        &mut self,
+        reservation: &GenerationReservation,
+    ) -> Result<(), WorkerV3Error> {
+        let pending = self
+            .reservations
+            .get_mut(&reservation.context_id)
+            .ok_or(WorkerV3Error::Stale)?;
+        if pending.generation != reservation.generation
+            || pending.expires_at != reservation.expires_at
+            || pending.phase != PendingGenerationPhase::Reserved
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        pending.phase = PendingGenerationPhase::LifecycleOwned;
         Ok(())
     }
 
@@ -2395,17 +2618,15 @@ impl WorkerRegistry {
         process: WorkerProcess,
         now: Instant,
     ) -> Result<u64, RegistrationFailure> {
-        let GenerationReservation {
-            context_id,
-            generation,
-            expires_at,
-            linear: _linear,
-        } = reservation;
-        let pending = PendingGeneration {
-            generation,
-            expires_at,
-        };
-        let exact_reservation = self.reservations.get(&context_id) == Some(&pending);
+        let context_id = reservation.context_id;
+        let generation = reservation.generation;
+        let expires_at = reservation.expires_at;
+        let exact_reservation_phase = self
+            .reservations
+            .get(&context_id)
+            .filter(|pending| pending.generation == generation && pending.expires_at == expires_at)
+            .map(|pending| pending.phase);
+        let exact_reservation = exact_reservation_phase.is_some();
         let error = if !exact_reservation {
             Some(WorkerV3Error::Stale)
         } else if self.shutting_down {
@@ -2420,12 +2641,16 @@ impl WorkerRegistry {
             None
         };
         if let Some(error) = error {
-            if exact_reservation {
+            // An ordinary short-lived reservation can be released on registration failure. A
+            // LifecycleOwned reservation is also the shutdown-visible fence for the returned
+            // process owner and must survive until exact reap and purge.
+            if exact_reservation_phase == Some(PendingGenerationPhase::Reserved) {
                 self.reservations.remove(&context_id);
             }
             return Err(RegistrationFailure {
                 error,
                 process: Box::new(process),
+                reservation: Some(reservation),
             });
         }
 
@@ -2473,6 +2698,7 @@ impl WorkerRegistry {
                 return Err(RegistrationFailure {
                     error,
                     process: Box::new(process),
+                    reservation: None,
                 });
             }
         };
@@ -2513,6 +2739,59 @@ impl WorkerRegistry {
         .transpose()?;
         ensure_worker_deadline(deadline)?;
         Ok((process.clone_channel()?, pinned_network_namespace))
+    }
+
+    fn recovery_identity_owners(
+        &self,
+        coordinates: WorkerGenerationCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        let process = self.recovery_identity_process(coordinates)?;
+        let source = process.duplicate_recovery_identity_source_until(coordinates, deadline)?;
+        ensure_worker_deadline(deadline)?;
+        Ok(source)
+    }
+
+    fn recovery_identity_process(
+        &self,
+        coordinates: WorkerGenerationCoordinates,
+    ) -> Result<&WorkerProcess, WorkerV3Error> {
+        let record = self
+            .records
+            .get(&coordinates.context_id)
+            .ok_or(WorkerV3Error::Dead)?;
+        if record.generation != coordinates.worker_generation.get() {
+            return Err(WorkerV3Error::Stale);
+        }
+        if Instant::now() >= record.expires_at {
+            return Err(WorkerV3Error::Dead);
+        }
+        if record.quarantined || record.in_flight.is_some() {
+            return Err(WorkerV3Error::Quarantined);
+        }
+        if record.stable_phase != StablePhase::Starting {
+            return Err(WorkerV3Error::Conflict);
+        }
+        record.process.as_ref().ok_or(WorkerV3Error::Dead)
+    }
+
+    fn confirm_recovery_identity_source(
+        &self,
+        source: &WorkerRecoveryIdentitySource,
+    ) -> Result<(), WorkerV3Error> {
+        let process = self.recovery_identity_process(source.coordinates)?;
+        if process.binding
+            != Some((
+                source.coordinates.context_id,
+                source.coordinates.worker_generation.get(),
+            ))
+            || process.child_pid != source.child_pid.get()
+            || !Arc::ptr_eq(&process.lifetime, &source.process_identity)
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        Ok(())
     }
 
     fn plan_until(
@@ -2966,9 +3245,91 @@ impl WorkerRegistry {
         Ok(())
     }
 
+    fn purge_or_confirm_generation_absent(
+        &mut self,
+        coordinates: WorkerGenerationCoordinates,
+    ) -> Result<(), WorkerV3Error> {
+        match self.records.get(&coordinates.context_id) {
+            Some(record) if record.generation == coordinates.worker_generation.get() => {
+                if !record.quarantined || record.process.is_some() {
+                    return Err(WorkerV3Error::Conflict);
+                }
+                self.records.remove(&coordinates.context_id);
+            }
+            Some(_) | None => {}
+        }
+        self.purge_generation(coordinates.context_id, coordinates.worker_generation.get());
+        if self.exact_generation_absent(coordinates) {
+            Ok(())
+        } else {
+            Err(WorkerV3Error::Ambiguous)
+        }
+    }
+
+    fn purge_and_abandon_unspawned_lifecycle_generation(
+        &mut self,
+        reservation: &GenerationReservation,
+        coordinates: WorkerGenerationCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<(), WorkerV3Error> {
+        if reservation.context_id != coordinates.context_id
+            || reservation.generation != coordinates.worker_generation.get()
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        if !self.exact_lifecycle_reservation_present(reservation) {
+            return Err(WorkerV3Error::Stale);
+        }
+        if self
+            .records
+            .get(&coordinates.context_id)
+            .is_some_and(|record| record.generation == coordinates.worker_generation.get())
+        {
+            return Err(WorkerV3Error::Conflict);
+        }
+        ensure_worker_deadline(deadline)?;
+        // Purge every exact secondary index while the non-expiring admission fence is still
+        // visible to shutdown. The affine reservation is consumed only as the last mutation.
+        self.purge_generation(coordinates.context_id, coordinates.worker_generation.get());
+        self.abandon_generation_ref(reservation)?;
+        if !self.exact_generation_absent(coordinates) {
+            // The registry mutex remained held across validation, purge and abandon, so residue
+            // here would be an internal ownership invariant violation, not retryable ambiguity.
+            std::process::abort();
+        }
+        Ok(())
+    }
+
+    fn exact_generation_absent(&self, coordinates: WorkerGenerationCoordinates) -> bool {
+        self.records
+            .get(&coordinates.context_id)
+            .is_none_or(|record| record.generation != coordinates.worker_generation.get())
+            && self
+                .reservations
+                .get(&coordinates.context_id)
+                .is_none_or(|pending| pending.generation != coordinates.worker_generation.get())
+            && self.cache.keys().all(|key| {
+                key.context_id != coordinates.context_id
+                    || key.generation != coordinates.worker_generation.get()
+            })
+            && self.cache_order.iter().all(|key| {
+                key.context_id != coordinates.context_id
+                    || key.generation != coordinates.worker_generation.get()
+            })
+            && self.tombstones.keys().all(|key| {
+                key.context_id != coordinates.context_id
+                    || key.generation != coordinates.worker_generation.get()
+            })
+            && self.tombstone_order.iter().all(|key| {
+                key.context_id != coordinates.context_id
+                    || key.generation != coordinates.worker_generation.get()
+            })
+    }
+
     fn begin_shutdown(&mut self) -> Vec<DetachedWorker> {
         self.shutting_down = true;
-        self.reservations.clear();
+        self.reservations
+            .retain(|_, pending| pending.phase == PendingGenerationPhase::LifecycleOwned);
         let identities = self
             .records
             .iter()
@@ -3038,8 +3399,10 @@ impl WorkerRegistry {
     }
 
     fn expire_reservations(&mut self, now: Instant) {
-        self.reservations
-            .retain(|_, reservation| now < reservation.expires_at);
+        self.reservations.retain(|_, reservation| {
+            reservation.phase == PendingGenerationPhase::LifecycleOwned
+                || now < reservation.expires_at
+        });
     }
 
     fn purge_cache_generation(&mut self, context_id: ContextId, generation: u64) {
@@ -3115,6 +3478,35 @@ fn lock_worker_registry(
     registry
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_worker_registry_until(
+    registry: &Mutex<WorkerRegistry>,
+    deadline: HardDeadline,
+) -> Result<std::sync::MutexGuard<'_, WorkerRegistry>, WorkerV3Error> {
+    loop {
+        ensure_worker_deadline(deadline)?;
+        match registry.try_lock() {
+            Ok(guard) => {
+                ensure_worker_deadline(deadline)?;
+                return Ok(guard);
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                ensure_worker_deadline(deadline)?;
+                return Ok(error.into_inner());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let remaining = deadline.remaining().map_err(|error| {
+                    if error.kind() == io::ErrorKind::TimedOut {
+                        WorkerV3Error::Deadline
+                    } else {
+                        WorkerV3Error::Io(error)
+                    }
+                })?;
+                thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
+            }
+        }
+    }
 }
 
 fn ensure_worker_deadline(deadline: HardDeadline) -> Result<(), WorkerV3Error> {
@@ -3824,6 +4216,37 @@ struct SupervisorHook {
     release: Arc<tokio::sync::Semaphore>,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct LifecycleReapedHook {
+    reached: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LifecycleMutationPoint {
+    Commit,
+    Settlement,
+    Detach,
+    Purge,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct LifecycleMutationHook {
+    point: LifecycleMutationPoint,
+    reached: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct LifecycleRecoveryHook {
+    pinned: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
 #[derive(Clone)]
 #[must_use = "call shutdown to retire registered workers before dropping the coordinator"]
 struct WorkerCoordinator {
@@ -3834,6 +4257,14 @@ struct WorkerCoordinator {
     registration_hook: Arc<Mutex<Option<RegistrationHook>>>,
     #[cfg(test)]
     before_plan_hook: Arc<Mutex<Option<BeforePlanHook>>>,
+    #[cfg(test)]
+    lifecycle_post_reservation_delay: Arc<Mutex<Option<Duration>>>,
+    #[cfg(test)]
+    lifecycle_reaped_hook: Arc<Mutex<Option<LifecycleReapedHook>>>,
+    #[cfg(test)]
+    lifecycle_mutation_hook: Arc<Mutex<Option<LifecycleMutationHook>>>,
+    #[cfg(test)]
+    lifecycle_recovery_hook: Arc<Mutex<Option<LifecycleRecoveryHook>>>,
 }
 
 impl WorkerCoordinator {
@@ -3855,7 +4286,468 @@ impl WorkerCoordinator {
             registration_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             before_plan_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            lifecycle_post_reservation_delay: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            lifecycle_reaped_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            lifecycle_mutation_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            lifecycle_recovery_hook: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Dormant production seam: reserves a coordinator-local worker generation, authenticates one
+    /// worker, then commits that exact reservation without issuing any child operation.
+    #[allow(dead_code)] // Connected only after durable recovery identity is complete.
+    fn reserve_spawn_register_until(
+        &self,
+        context_id: ContextId,
+        ttl: Duration,
+        deadline: HardDeadline,
+    ) -> WorkerLifecycleAdmission {
+        self.reserve_spawn_register_with_until(context_id, ttl, deadline, spawn_worker_v3_until)
+    }
+
+    fn reserve_spawn_register_with_until<Spawn>(
+        &self,
+        context_id: ContextId,
+        ttl: Duration,
+        deadline: HardDeadline,
+        spawn: Spawn,
+    ) -> WorkerLifecycleAdmission
+    where
+        Spawn: FnOnce(
+            GenerationReservation,
+            HardDeadline,
+        ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
+    {
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            return WorkerLifecycleAdmission::Rejected(error);
+        }
+        let reservation = {
+            let mut registry = match lock_worker_registry_until(&self.registry, deadline) {
+                Ok(registry) => registry,
+                Err(error) => return WorkerLifecycleAdmission::Rejected(error),
+            };
+            let reservation = match registry.reserve_generation(context_id, ttl, Instant::now()) {
+                Ok(reservation) => reservation,
+                Err(error) => return WorkerLifecycleAdmission::Rejected(error),
+            };
+            if let Err(error) = registry.retain_generation_for_lifecycle(&reservation) {
+                let coordinates = WorkerGenerationCoordinates {
+                    context_id: reservation.context_id,
+                    worker_generation: NonZeroU64::new(reservation.generation)
+                        .unwrap_or_else(|| std::process::abort()),
+                };
+                return WorkerLifecycleAdmission::Retained {
+                    error,
+                    ownership: WorkerGenerationOwnership {
+                        registry: Arc::clone(&self.registry),
+                        coordinates,
+                        placement: Some(WorkerGenerationPlacement::LifecycleReservation(
+                            reservation,
+                        )),
+                    },
+                };
+            }
+            reservation
+        };
+        let coordinates = WorkerGenerationCoordinates {
+            context_id: reservation.context_id,
+            worker_generation: NonZeroU64::new(reservation.generation)
+                .unwrap_or_else(|| std::process::abort()),
+        };
+        let mut ownership = WorkerGenerationOwnership {
+            registry: Arc::clone(&self.registry),
+            coordinates,
+            placement: Some(WorkerGenerationPlacement::LifecycleReservation(reservation)),
+        };
+
+        #[cfg(test)]
+        if let Some(delay) = *self
+            .lifecycle_post_reservation_delay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            thread::sleep(delay);
+        }
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            return WorkerLifecycleAdmission::Retained { error, ownership };
+        }
+        let Some(WorkerGenerationPlacement::LifecycleReservation(reservation)) =
+            ownership.placement.take()
+        else {
+            std::process::abort();
+        };
+
+        match spawn(reservation, deadline) {
+            Ok(spawned) => {
+                ownership.placement = Some(WorkerGenerationPlacement::Spawned(spawned));
+                self.commit_spawned_lifecycle_until(ownership, deadline)
+            }
+            Err(WorkerSpawnFailure {
+                error: WorkerV3Error::Ambiguous,
+                reservation,
+            }) => {
+                ownership.placement = Some(WorkerGenerationPlacement::SpawnAmbiguous(reservation));
+                WorkerLifecycleAdmission::Retained {
+                    error: WorkerV3Error::Ambiguous,
+                    ownership,
+                }
+            }
+            Err(WorkerSpawnFailure { error, reservation }) => {
+                ownership.placement =
+                    Some(WorkerGenerationPlacement::LifecycleReservation(reservation));
+                match self.settle_lifecycle_ownership_until(ownership, deadline) {
+                    WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
+                        WorkerLifecycleAdmission::Rejected(error)
+                    }
+                    WorkerLifecycleSettlement::Retained {
+                        error: settlement_error,
+                        ownership,
+                    } => WorkerLifecycleAdmission::Retained {
+                        error: settlement_error,
+                        ownership,
+                    },
+                    WorkerLifecycleSettlement::Registered(ownership) => {
+                        WorkerLifecycleAdmission::Retained {
+                            error: WorkerV3Error::Ambiguous,
+                            ownership,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn commit_spawned_lifecycle_until(
+        &self,
+        mut ownership: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> WorkerLifecycleAdmission {
+        if !Arc::ptr_eq(&ownership.registry, &self.registry) {
+            return WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Stale,
+                ownership,
+            };
+        }
+        let Some(WorkerGenerationPlacement::Spawned(spawned)) = ownership.placement.take() else {
+            return WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Conflict,
+                ownership,
+            };
+        };
+        let mut registry = match lock_worker_registry_until(&self.registry, deadline) {
+            Ok(registry) => registry,
+            Err(error) => {
+                ownership.placement = Some(WorkerGenerationPlacement::Spawned(spawned));
+                return WorkerLifecycleAdmission::Retained { error, ownership };
+            }
+        };
+        #[cfg(test)]
+        self.reach_lifecycle_mutation_hook(LifecycleMutationPoint::Commit);
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            ownership.placement = Some(WorkerGenerationPlacement::Spawned(spawned));
+            return WorkerLifecycleAdmission::Retained { error, ownership };
+        }
+        match registry.commit_spawned(spawned, Instant::now()) {
+            Ok(worker_generation) => {
+                if worker_generation != ownership.coordinates.worker_generation.get() {
+                    std::process::abort();
+                }
+                ownership.placement = Some(WorkerGenerationPlacement::Registered);
+                WorkerLifecycleAdmission::Registered(ownership)
+            }
+            Err(RegistrationFailure {
+                error,
+                process,
+                reservation,
+            }) => {
+                drop(registry);
+                ownership.placement = Some(WorkerGenerationPlacement::Detached(Box::new(
+                    LifecycleDetachedOwnership {
+                        worker: DetachedWorker {
+                            context_id: ownership.coordinates.context_id,
+                            generation: ownership.coordinates.worker_generation.get(),
+                            process: *process,
+                        },
+                        reservation,
+                    },
+                )));
+                WorkerLifecycleAdmission::Retained { error, ownership }
+            }
+        }
+    }
+
+    fn settle_lifecycle_ownership_until(
+        &self,
+        ownership: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> WorkerLifecycleSettlement {
+        if !Arc::ptr_eq(&ownership.registry, &self.registry) {
+            return WorkerLifecycleSettlement::Retained {
+                error: WorkerV3Error::Stale,
+                ownership,
+            };
+        }
+        match ownership.placement.as_ref() {
+            Some(WorkerGenerationPlacement::Registered) => {
+                return WorkerLifecycleSettlement::Registered(ownership);
+            }
+            Some(WorkerGenerationPlacement::SpawnAmbiguous(_)) => {
+                return WorkerLifecycleSettlement::Retained {
+                    error: WorkerV3Error::Ambiguous,
+                    ownership,
+                };
+            }
+            Some(
+                WorkerGenerationPlacement::Detached(_)
+                | WorkerGenerationPlacement::ReapedPendingPurge(_),
+            )
+            | None => {
+                return WorkerLifecycleSettlement::Retained {
+                    error: WorkerV3Error::Conflict,
+                    ownership,
+                };
+            }
+            Some(WorkerGenerationPlacement::LifecycleReservation(_)) => {}
+            Some(WorkerGenerationPlacement::Spawned(_)) => {
+                return match self.commit_spawned_lifecycle_until(ownership, deadline) {
+                    WorkerLifecycleAdmission::Registered(ownership) => {
+                        WorkerLifecycleSettlement::Registered(ownership)
+                    }
+                    WorkerLifecycleAdmission::Retained { error, ownership } => {
+                        WorkerLifecycleSettlement::Retained { error, ownership }
+                    }
+                    WorkerLifecycleAdmission::Rejected(_) => std::process::abort(),
+                };
+            }
+        }
+
+        let registry_result = lock_worker_registry_until(&self.registry, deadline);
+        let mut registry = match registry_result {
+            Ok(registry) => registry,
+            Err(error) => {
+                return WorkerLifecycleSettlement::Retained { error, ownership };
+            }
+        };
+        let Some(WorkerGenerationPlacement::LifecycleReservation(reservation)) =
+            ownership.placement.as_ref()
+        else {
+            std::process::abort();
+        };
+        #[cfg(test)]
+        self.reach_lifecycle_mutation_hook(LifecycleMutationPoint::Settlement);
+        if let Err(error) = registry.purge_and_abandon_unspawned_lifecycle_generation(
+            reservation,
+            ownership.coordinates,
+            deadline,
+        ) {
+            return WorkerLifecycleSettlement::Retained { error, ownership };
+        }
+        drop(registry);
+        WorkerLifecycleSettlement::ConfirmedAbsent(ConfirmedWorkerGenerationAbsent {
+            coordinates: ownership.coordinates,
+        })
+    }
+
+    /// Returns only identity material re-derived from the exact registered worker's retained,
+    /// authenticated namespace pin. Process liveness is checked outside the registry mutex.
+    fn recovery_identity_source_until(
+        &self,
+        ownership: &WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> Result<WorkerRecoveryIdentitySource, WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        if !Arc::ptr_eq(&ownership.registry, &self.registry)
+            || !matches!(
+                ownership.placement,
+                Some(WorkerGenerationPlacement::Registered)
+            )
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        let source = lock_worker_registry_until(&self.registry, deadline)?
+            .recovery_identity_owners(ownership.coordinates, deadline)?;
+        ensure_worker_deadline(deadline)?;
+        source.authenticated_pins.ensure_alive()?;
+        ensure_worker_deadline(deadline)?;
+        #[cfg(test)]
+        if let Some(hook) = self
+            .lifecycle_recovery_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            hook.pinned.wait();
+            hook.release.wait();
+        }
+        let registry = lock_worker_registry_until(&self.registry, deadline)?;
+        registry.confirm_recovery_identity_source(&source)?;
+        ensure_worker_deadline(deadline)?;
+        drop(registry);
+        Ok(source)
+    }
+
+    /// Makes one hard-deadline-bounded attempt to reap exactly the owned worker generation.
+    ///
+    /// Timeout, fatal observation, registry contention and proof mismatch all return the same
+    /// affine owner. A caller may retry that exact generation with a fresh deadline; no ambiguous
+    /// result can be converted into confirmed absence.
+    fn terminate_generation_until(
+        &self,
+        mut ownership: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> WorkerGenerationReap {
+        if !Arc::ptr_eq(&ownership.registry, &self.registry) {
+            return retained_worker_generation(WorkerV3Error::Stale, ownership);
+        }
+        let Some(placement) = ownership.placement.take() else {
+            std::process::abort();
+        };
+        let detached = match placement {
+            WorkerGenerationPlacement::LifecycleReservation(reservation) => {
+                ownership.placement =
+                    Some(WorkerGenerationPlacement::LifecycleReservation(reservation));
+                return retained_worker_generation(WorkerV3Error::Conflict, ownership);
+            }
+            WorkerGenerationPlacement::SpawnAmbiguous(reservation) => {
+                ownership.placement = Some(WorkerGenerationPlacement::SpawnAmbiguous(reservation));
+                return retained_worker_generation(WorkerV3Error::Ambiguous, ownership);
+            }
+            WorkerGenerationPlacement::Spawned(spawned) => {
+                ownership.placement = Some(WorkerGenerationPlacement::Spawned(spawned));
+                return retained_worker_generation(WorkerV3Error::Conflict, ownership);
+            }
+            WorkerGenerationPlacement::Registered => {
+                let mut registry = match lock_worker_registry_until(&self.registry, deadline) {
+                    Ok(registry) => registry,
+                    Err(error) => {
+                        ownership.placement = Some(WorkerGenerationPlacement::Registered);
+                        return retained_worker_generation(error, ownership);
+                    }
+                };
+                #[cfg(test)]
+                self.reach_lifecycle_mutation_hook(LifecycleMutationPoint::Detach);
+                if let Err(error) = ensure_worker_deadline(deadline) {
+                    ownership.placement = Some(WorkerGenerationPlacement::Registered);
+                    return retained_worker_generation(error, ownership);
+                }
+                match registry.report_dead(
+                    ownership.coordinates.context_id,
+                    ownership.coordinates.worker_generation.get(),
+                ) {
+                    Ok(Some(detached)) => Box::new(LifecycleDetachedOwnership {
+                        worker: detached,
+                        reservation: None,
+                    }),
+                    Ok(None) => {
+                        ownership.placement = Some(WorkerGenerationPlacement::Registered);
+                        return retained_worker_generation(WorkerV3Error::Ambiguous, ownership);
+                    }
+                    Err(error) => {
+                        ownership.placement = Some(WorkerGenerationPlacement::Registered);
+                        return retained_worker_generation(error, ownership);
+                    }
+                }
+            }
+            WorkerGenerationPlacement::Detached(detached) => detached,
+            WorkerGenerationPlacement::ReapedPendingPurge(detached) => {
+                ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+                return self.finish_reaped_generation_until(ownership, deadline);
+            }
+        };
+
+        let outcome = detached
+            .worker
+            .process
+            .liveness()
+            .termination_outcome_until(deadline);
+        match outcome {
+            TerminationOutcome::Reaped => {
+                ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+                #[cfg(test)]
+                if let Some(hook) = self
+                    .lifecycle_reaped_hook
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                {
+                    hook.reached.wait();
+                    hook.release.wait();
+                }
+                self.finish_reaped_generation_until(ownership, deadline)
+            }
+            TerminationOutcome::TimedOut => {
+                ownership.placement = Some(WorkerGenerationPlacement::Detached(detached));
+                retained_worker_generation(
+                    if ensure_worker_deadline(deadline).is_err() {
+                        WorkerV3Error::Deadline
+                    } else {
+                        WorkerV3Error::Ambiguous
+                    },
+                    ownership,
+                )
+            }
+            TerminationOutcome::Fatal => {
+                ownership.placement = Some(WorkerGenerationPlacement::Detached(detached));
+                retained_worker_generation(WorkerV3Error::Ambiguous, ownership)
+            }
+        }
+    }
+
+    fn finish_reaped_generation_until(
+        &self,
+        mut ownership: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> WorkerGenerationReap {
+        let Some(WorkerGenerationPlacement::ReapedPendingPurge(detached)) =
+            ownership.placement.take()
+        else {
+            return retained_worker_generation(WorkerV3Error::Conflict, ownership);
+        };
+        let mut registry = match lock_worker_registry_until(&self.registry, deadline) {
+            Ok(registry) => registry,
+            Err(error) => {
+                ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+                return retained_worker_generation(error, ownership);
+            }
+        };
+        #[cfg(test)]
+        self.reach_lifecycle_mutation_hook(LifecycleMutationPoint::Purge);
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+            return retained_worker_generation(error, ownership);
+        }
+        if let Some(reservation) = detached.reservation.as_ref() {
+            if registry.exact_lifecycle_reservation_present(reservation)
+                && registry.abandon_generation_ref(reservation).is_err()
+            {
+                ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+                return retained_worker_generation(WorkerV3Error::Ambiguous, ownership);
+            }
+        }
+        if let Err(error) = registry.purge_or_confirm_generation_absent(ownership.coordinates) {
+            ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+            return retained_worker_generation(error, ownership);
+        }
+        // Exact registry absence is proven while pidfd, proc-directory and netns pins are still
+        // owned by `detached`. A retry after this point observes the already-absent state
+        // idempotently and does not signal or wait for the worker again.
+        drop(registry);
+        if let Err(error) = detached
+            .worker
+            .process
+            .disarm_retirement_for_shutdown(deadline)
+        {
+            ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+            return retained_worker_generation(error, ownership);
+        }
+        drop(detached);
+        WorkerGenerationReap::Confirmed(ConfirmedWorkerGenerationAbsent {
+            coordinates: ownership.coordinates,
+        })
     }
 
     fn acquire_supervisor_permit(&self) -> Result<SupervisorPermit, WorkerV3Error> {
@@ -4178,6 +5070,51 @@ impl WorkerCoordinator {
             .supervisor_hook = Some(hook);
     }
 
+    #[cfg(test)]
+    fn set_lifecycle_post_reservation_delay(&self, delay: Duration) {
+        *self
+            .lifecycle_post_reservation_delay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(delay);
+    }
+
+    #[cfg(test)]
+    fn set_lifecycle_reaped_hook(&self, hook: LifecycleReapedHook) {
+        *self
+            .lifecycle_reaped_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn set_lifecycle_mutation_hook(&self, hook: Option<LifecycleMutationHook>) {
+        *self
+            .lifecycle_mutation_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    fn reach_lifecycle_mutation_hook(&self, point: LifecycleMutationPoint) {
+        let hook = self
+            .lifecycle_mutation_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook.filter(|hook| hook.point == point) {
+            hook.reached.wait();
+            hook.release.wait();
+        }
+    }
+
+    #[cfg(test)]
+    fn set_lifecycle_recovery_hook(&self, hook: Option<LifecycleRecoveryHook>) {
+        *self
+            .lifecycle_recovery_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
     fn shutdown(&self) -> impl Future<Output = bool> + Send + 'static {
         let deadline = HardDeadline::after(CHANNEL_TIMEOUT);
         let shutdown = deadline.ok().map(|deadline| self.shutdown_until(deadline));
@@ -4368,9 +5305,10 @@ impl WorkerCoordinator {
                 }
             }
 
-            let registry_empty = lock_worker_registry(&supervisor.registry)
-                .records
-                .is_empty();
+            let registry_empty = {
+                let registry = lock_worker_registry(&supervisor.registry);
+                registry.records.is_empty() && registry.reservations.is_empty()
+            };
             let exact_supervisor_state = {
                 let state = supervisors
                     .lock()
@@ -5148,6 +6086,28 @@ mod tests {
         }
     }
 
+    fn registered_lifecycle(admission: WorkerLifecycleAdmission) -> WorkerGenerationOwnership {
+        match admission {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("lifecycle admission was rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("lifecycle admission remained unresolved: {error}")
+            }
+        }
+    }
+
+    fn wait_until_deadline_elapsed(deadline: HardDeadline) {
+        if let Some(remaining) = deadline.expires_at().checked_duration_since(Instant::now()) {
+            thread::sleep(remaining);
+        }
+        while ensure_worker_deadline(deadline).is_ok() {
+            thread::yield_now();
+        }
+    }
+
     fn stop_and_purge(registry: &mut WorkerRegistry, detached: DetachedWorker) {
         assert!(
             detached.process.terminate_bounded(TERMINATION_TIMEOUT),
@@ -5489,6 +6449,1278 @@ mod tests {
     }
 
     #[test]
+    fn dormant_lifecycle_registers_without_dispatch_and_exposes_only_pinned_identity() {
+        let context_id = [70; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let deadline = HardDeadline::after(Duration::from_secs(5)).expect("lifecycle deadline");
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(4),
+            deadline,
+            |reservation, _deadline| spawn_reserved_fixture("connect", reservation),
+        ));
+        let coordinates = ownership.coordinates;
+        assert_eq!(coordinates.context_id, context_id);
+        assert_eq!(coordinates.worker_generation.get(), 1);
+        assert_eq!(
+            coordinator
+                .phase(context_id, coordinates.worker_generation.get())
+                .expect("no child request was dispatched"),
+            VisiblePhase::Stable(StablePhase::Starting)
+        );
+
+        let source = coordinator
+            .recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("identity deadline"),
+            )
+            .expect("source from exact authenticated pins");
+        assert_eq!(source.coordinates, coordinates);
+        assert_ne!(source.child_pid.get(), process::id());
+        assert_ne!(source.network_namespace_device.get(), 0);
+        assert_ne!(source.network_namespace_inode.get(), 0);
+        assert!(matches!(
+            source.require_complete_prepare_anchor(),
+            Err(WorkerV3Error::RecoveryIdentityIncomplete)
+        ));
+
+        let proof = match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(2)).expect("reap deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => proof,
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("exact lifecycle reap was not confirmed: {error}")
+            }
+        };
+        assert_eq!(proof.coordinates, coordinates);
+        assert!(lock_worker_registry(&coordinator.registry).exact_generation_absent(coordinates));
+        assert!(
+            source.authenticated_pins.ensure_alive().is_err(),
+            "the retained real pidfd must observe exact child exit"
+        );
+        assert_eq!(
+            source
+                .authenticated_pins
+                .network_namespace_pin_for_test()
+                .verified_identity_parts()
+                .expect("affine source keeps exact namespace pinned"),
+            (
+                source.network_namespace_device,
+                source.network_namespace_inode
+            )
+        );
+    }
+
+    #[test]
+    fn ambiguous_lifecycle_reap_retains_exact_owner_for_bounded_retry() {
+        let context_id = [71; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, alive, attempts) = fake_process_with_termination_results(
+            Duration::from_secs(1),
+            VecDeque::from([false, true]),
+            true,
+        );
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xa5; 32]),
+                })
+            },
+        ));
+        let coordinates = ownership.coordinates;
+
+        let retained = match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("first reap deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {
+                panic!("an ambiguous termination observation cannot prove absence")
+            }
+            WorkerGenerationReap::Retained { error, ownership } => {
+                assert!(matches!(error, WorkerV3Error::Ambiguous));
+                ownership
+            }
+        };
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(!lock_worker_registry(&coordinator.registry).exact_generation_absent(coordinates));
+        assert!(matches!(
+            retained.placement.as_ref(),
+            Some(WorkerGenerationPlacement::Detached(_))
+        ));
+
+        let proof = match coordinator.terminate_generation_until(
+            *retained,
+            HardDeadline::after(Duration::from_secs(1)).expect("retry reap deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => proof,
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("exact retry did not prove absence: {error}")
+            }
+        };
+        assert_eq!(proof.coordinates, coordinates);
+        assert!(!alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(lock_worker_registry(&coordinator.registry).exact_generation_absent(coordinates));
+    }
+
+    #[test]
+    fn ambiguous_spawn_returns_exact_owner_and_never_confirms_absence() {
+        let context_id = [72; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let result = coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("spawn deadline"),
+            |reservation, _deadline| {
+                Err(WorkerSpawnFailure {
+                    error: WorkerV3Error::Ambiguous,
+                    reservation,
+                })
+            },
+        );
+        let ownership = match result {
+            WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Ambiguous,
+                ownership,
+            } => ownership,
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected retained spawn result: {error}")
+            }
+            WorkerLifecycleAdmission::Registered(ownership) => {
+                drop(ownership);
+                panic!("ambiguous spawn registered")
+            }
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("ambiguous spawn was rejected without ownership: {error}")
+            }
+        };
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::SpawnAmbiguous(_))
+        ));
+        let mut registry = lock_worker_registry(&coordinator.registry);
+        let pending = registry
+            .reservations
+            .get(&context_id)
+            .expect("ambiguous spawn keeps its exact admission fence");
+        assert_eq!(pending.generation, 1);
+        assert_eq!(pending.phase, PendingGenerationPhase::LifecycleOwned);
+        assert!(Instant::now() < pending.expires_at);
+        registry.expire_reservations(Instant::now() + Duration::from_secs(60));
+        assert!(
+            !registry.exact_generation_absent(WorkerGenerationCoordinates {
+                context_id,
+                worker_generation: NonZeroU64::new(1).expect("nonzero fixture generation"),
+            })
+        );
+        drop(registry);
+        let ownership = match coordinator.settle_lifecycle_ownership_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("ambiguous retry deadline"),
+        ) {
+            WorkerLifecycleSettlement::Retained {
+                error: WorkerV3Error::Ambiguous,
+                ownership,
+            } => ownership,
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected ambiguous retry result: {error}")
+            }
+            WorkerLifecycleSettlement::Registered(ownership) => {
+                drop(ownership);
+                panic!("ambiguous spawn retry registered")
+            }
+            WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
+                panic!("ambiguous spawn retry falsely proved absence")
+            }
+        };
+        drop(ownership);
+    }
+
+    #[test]
+    fn post_reservation_deadline_retains_nonexpiring_owner_until_exact_abandon_retry() {
+        let context_id = [74; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        coordinator.set_lifecycle_post_reservation_delay(Duration::from_millis(30));
+        let spawn_called = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&spawn_called);
+        let admission = coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_millis(5),
+            HardDeadline::after(Duration::from_millis(10)).expect("short admission deadline"),
+            move |_reservation, _deadline| {
+                called.store(true, Ordering::SeqCst);
+                panic!("expired post-reservation admission must not spawn")
+            },
+        );
+        let ownership = match admission {
+            WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => ownership,
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected post-reservation result: {error}")
+            }
+            WorkerLifecycleAdmission::Registered(ownership) => {
+                drop(ownership);
+                panic!("expired admission registered")
+            }
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("post-reservation owner was lost: {error}")
+            }
+        };
+        assert!(!spawn_called.load(Ordering::SeqCst));
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::LifecycleReservation(_))
+        ));
+        {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            registry.expire_reservations(Instant::now() + Duration::from_secs(30));
+            assert!(registry.reservations.contains_key(&context_id));
+        }
+        let proof = match coordinator.settle_lifecycle_ownership_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("abandon retry deadline"),
+        ) {
+            WorkerLifecycleSettlement::ConfirmedAbsent(proof) => proof,
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("reservation abandon retry remained unresolved: {error}")
+            }
+            WorkerLifecycleSettlement::Registered(ownership) => {
+                drop(ownership);
+                panic!("unspawned reservation registered")
+            }
+        };
+        assert_eq!(proof.coordinates.context_id, context_id);
+        assert!(
+            lock_worker_registry(&coordinator.registry).exact_generation_absent(proof.coordinates)
+        );
+    }
+
+    #[test]
+    fn failed_abandon_registry_reacquire_returns_owner_for_exact_retry() {
+        let context_id = [75; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let registry = Arc::clone(&coordinator.registry);
+        let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+        let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(0);
+        let locker = thread::spawn(move || {
+            start_receiver.recv().expect("lock start");
+            let guard = lock_worker_registry(&registry);
+            locked_sender.send(()).expect("registry locked");
+            release_receiver.recv().expect("lock release");
+            drop(guard);
+        });
+        let admission = coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(1),
+            HardDeadline::after(Duration::from_millis(40)).expect("settlement deadline"),
+            move |reservation, _deadline| {
+                start_sender.send(()).expect("start registry locker");
+                locked_receiver.recv().expect("registry lock acquired");
+                Err(WorkerSpawnFailure {
+                    error: WorkerV3Error::Authentication,
+                    reservation,
+                })
+            },
+        );
+        let ownership = match admission {
+            WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => ownership,
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected failed-abandon result: {error}")
+            }
+            WorkerLifecycleAdmission::Registered(ownership) => {
+                drop(ownership);
+                panic!("failed spawn registered")
+            }
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("failed registry reacquire lost ownership: {error}")
+            }
+        };
+        release_sender.send(()).expect("release registry locker");
+        locker.join().expect("registry locker");
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::LifecycleReservation(_))
+        ));
+
+        let exact_expiry = match ownership.placement.as_ref() {
+            Some(WorkerGenerationPlacement::LifecycleReservation(reservation)) => {
+                reservation.expires_at
+            }
+            _ => unreachable!(),
+        };
+        lock_worker_registry(&coordinator.registry)
+            .reservations
+            .get_mut(&context_id)
+            .expect("retained reservation")
+            .expires_at = exact_expiry + Duration::from_millis(1);
+        let ownership = match coordinator.settle_lifecycle_ownership_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("mismatched abandon deadline"),
+        ) {
+            WorkerLifecycleSettlement::Retained {
+                error: WorkerV3Error::Stale,
+                ownership,
+            } => ownership,
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected mismatched-abandon result: {error}")
+            }
+            WorkerLifecycleSettlement::Registered(ownership) => {
+                drop(ownership);
+                panic!("mismatched reservation registered")
+            }
+            WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
+                panic!("mismatched reservation falsely confirmed absent")
+            }
+        };
+        lock_worker_registry(&coordinator.registry)
+            .reservations
+            .get_mut(&context_id)
+            .expect("retained reservation")
+            .expires_at = exact_expiry;
+        assert!(matches!(
+            coordinator.settle_lifecycle_ownership_until(
+                ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("retry deadline"),
+            ),
+            WorkerLifecycleSettlement::ConfirmedAbsent(_)
+        ));
+    }
+
+    #[test]
+    fn spawned_worker_registry_timeout_returns_process_and_reservation_for_registration_retry() {
+        let context_id = [76; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, alive) = fake_process(Duration::from_secs(1));
+        let registry = Arc::clone(&coordinator.registry);
+        let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+        let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(0);
+        let locker = thread::spawn(move || {
+            start_receiver.recv().expect("lock start");
+            let guard = lock_worker_registry(&registry);
+            locked_sender.send(()).expect("registry locked");
+            release_receiver.recv().expect("lock release");
+            drop(guard);
+        });
+        let admission = coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(1),
+            HardDeadline::after(Duration::from_millis(40)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                start_sender.send(()).expect("start registry locker");
+                locked_receiver.recv().expect("registry lock acquired");
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xa7; 32]),
+                })
+            },
+        );
+        let ownership = match admission {
+            WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => ownership,
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected registration contention result: {error}")
+            }
+            WorkerLifecycleAdmission::Registered(ownership) => {
+                drop(ownership);
+                panic!("contended registration unexpectedly completed")
+            }
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("spawned ownership was lost: {error}")
+            }
+        };
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::Spawned(_))
+        ));
+        assert!(alive.load(Ordering::SeqCst));
+        release_sender.send(()).expect("release registry locker");
+        locker.join().expect("registry locker");
+
+        let ownership = match coordinator.settle_lifecycle_ownership_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("registration retry deadline"),
+        ) {
+            WorkerLifecycleSettlement::Registered(ownership) => ownership,
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("registration retry remained unresolved: {error}")
+            }
+            WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
+                panic!("spawned worker was falsely reported absent")
+            }
+        };
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("registered retry cleanup failed: {error}")
+            }
+        }
+        assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn shutdown_during_spawn_keeps_lifecycle_fence_until_detached_reap() {
+        let context_id = [80; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let registry = Arc::clone(&coordinator.registry);
+        let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+        let (finished_sender, finished_receiver) = std::sync::mpsc::sync_channel(0);
+        let shutdown = thread::spawn(move || {
+            start_receiver.recv().expect("shutdown race start");
+            let mut registry = lock_worker_registry(&registry);
+            assert!(registry.begin_shutdown().is_empty());
+            assert!(registry.records.is_empty());
+            assert_eq!(registry.reservations.len(), 1);
+            finished_sender.send(()).expect("shutdown race complete");
+        });
+        let (mut process, _peer, alive) = fake_process(Duration::from_secs(1));
+        let admission = coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(2),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                start_sender.send(()).expect("begin concurrent shutdown");
+                finished_receiver.recv().expect("shutdown began");
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xab; 32]),
+                })
+            },
+        );
+        shutdown.join().expect("shutdown race thread");
+        let ownership = match admission {
+            WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::ShuttingDown,
+                ownership,
+            } => ownership,
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected shutdown-race admission result: {error}")
+            }
+            WorkerLifecycleAdmission::Registered(ownership) => {
+                drop(ownership);
+                panic!("worker registered after shutdown began")
+            }
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("shutdown race lost spawned ownership: {error}")
+            }
+        };
+        assert!(alive.load(Ordering::SeqCst));
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::Detached(detached))
+                if detached.reservation.is_some()
+        ));
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            assert!(registry.records.is_empty());
+            assert!(
+                registry.exact_lifecycle_reservation_present(match ownership.placement.as_ref() {
+                    Some(WorkerGenerationPlacement::Detached(detached)) => detached
+                        .reservation
+                        .as_ref()
+                        .expect("detached lifecycle reservation"),
+                    _ => unreachable!(),
+                })
+            );
+            assert!(
+                !(registry.records.is_empty() && registry.reservations.is_empty()),
+                "shutdown must not observe an empty registry while the detached child is alive"
+            );
+        }
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("detached reap deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("shutdown-race owner did not settle: {error}")
+            }
+        }
+        assert!(!alive.load(Ordering::SeqCst));
+        let registry = lock_worker_registry(&coordinator.registry);
+        assert!(registry.records.is_empty() && registry.reservations.is_empty());
+    }
+
+    #[test]
+    fn post_lock_commit_deadline_retains_spawned_owner_without_registry_mutation() {
+        let context_id = [81; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_mutation_hook(Some(LifecycleMutationHook {
+            point: LifecycleMutationPoint::Commit,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        }));
+        let (mut process, _peer, alive) = fake_process(Duration::from_secs(1));
+        let worker_coordinator = coordinator.clone();
+        let deadline = HardDeadline::after(Duration::from_millis(60)).expect("commit deadline");
+        let admission = thread::spawn(move || {
+            worker_coordinator.reserve_spawn_register_with_until(
+                context_id,
+                Duration::from_secs(2),
+                deadline,
+                move |reservation, _deadline| {
+                    process.binding = Some(reservation.binding());
+                    Ok(SpawnedWorker {
+                        reservation,
+                        process,
+                        bootstrap_challenge: BootstrapChallenge([0xac; 32]),
+                    })
+                },
+            )
+        });
+        reached.wait();
+        wait_until_deadline_elapsed(deadline);
+        release.wait();
+        let ownership = match admission.join().expect("commit deadline thread") {
+            WorkerLifecycleAdmission::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => ownership,
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected late-commit result: {error}")
+            }
+            WorkerLifecycleAdmission::Registered(ownership) => {
+                drop(ownership);
+                panic!("expired commit registered a worker")
+            }
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("expired commit lost spawned ownership: {error}")
+            }
+        };
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::Spawned(_))
+        ));
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            assert!(registry.records.is_empty());
+            assert_eq!(registry.reservations.len(), 1);
+        }
+        assert!(alive.load(Ordering::SeqCst));
+        coordinator.set_lifecycle_mutation_hook(None);
+        let ownership = match coordinator.settle_lifecycle_ownership_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("commit retry deadline"),
+        ) {
+            WorkerLifecycleSettlement::Registered(ownership) => ownership,
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("commit retry remained unresolved: {error}")
+            }
+            WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
+                panic!("spawned worker was falsely absent")
+            }
+        };
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("commit-deadline fixture cleanup failed: {error}")
+            }
+        }
+    }
+
+    #[test]
+    fn unspawned_settlement_deadline_preserves_fence_then_purges_order_residue() {
+        let context_id = [82; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let reservation = {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            let reservation = registry
+                .reserve_generation(context_id, Duration::from_secs(2), Instant::now())
+                .expect("reserve lifecycle generation");
+            registry
+                .retain_generation_for_lifecycle(&reservation)
+                .expect("retain lifecycle fence");
+            registry.cache_order.push_back(CacheKey {
+                context_id,
+                generation: reservation.generation,
+                request_id: [1; 16],
+                request_digest: [2; 32],
+            });
+            registry.tombstone_order.push_back(TombstoneKey {
+                context_id,
+                generation: reservation.generation,
+                request_id: [3; 16],
+            });
+            reservation
+        };
+        let coordinates = WorkerGenerationCoordinates {
+            context_id,
+            worker_generation: NonZeroU64::new(reservation.generation)
+                .expect("nonzero reservation generation"),
+        };
+        let ownership = WorkerGenerationOwnership {
+            registry: Arc::clone(&coordinator.registry),
+            coordinates,
+            placement: Some(WorkerGenerationPlacement::LifecycleReservation(reservation)),
+        };
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_mutation_hook(Some(LifecycleMutationHook {
+            point: LifecycleMutationPoint::Settlement,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let deadline = HardDeadline::after(Duration::from_millis(60)).expect("settlement deadline");
+        let settlement = thread::spawn(move || {
+            worker_coordinator.settle_lifecycle_ownership_until(ownership, deadline)
+        });
+        reached.wait();
+        wait_until_deadline_elapsed(deadline);
+        release.wait();
+        let ownership = match settlement.join().expect("settlement deadline thread") {
+            WorkerLifecycleSettlement::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => ownership,
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected late-settlement result: {error}")
+            }
+            WorkerLifecycleSettlement::Registered(ownership) => {
+                drop(ownership);
+                panic!("unspawned generation registered")
+            }
+            WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
+                panic!("expired settlement mutated the registry")
+            }
+        };
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            let Some(WorkerGenerationPlacement::LifecycleReservation(reservation)) =
+                ownership.placement.as_ref()
+            else {
+                unreachable!()
+            };
+            assert!(registry.exact_lifecycle_reservation_present(reservation));
+            assert!(!registry.exact_generation_absent(coordinates));
+            assert_eq!(registry.cache_order.len(), 1);
+            assert_eq!(registry.tombstone_order.len(), 1);
+        }
+        coordinator.set_lifecycle_mutation_hook(None);
+        match coordinator.settle_lifecycle_ownership_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("settlement retry deadline"),
+        ) {
+            WorkerLifecycleSettlement::ConfirmedAbsent(proof) => {
+                assert_eq!(proof.coordinates, coordinates);
+            }
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("residue settlement retry remained unresolved: {error}")
+            }
+            WorkerLifecycleSettlement::Registered(ownership) => {
+                drop(ownership);
+                panic!("unspawned residue retry registered")
+            }
+        }
+        assert!(lock_worker_registry(&coordinator.registry).exact_generation_absent(coordinates));
+    }
+
+    #[test]
+    fn recovery_source_revalidates_ttl_and_phase_after_pin_duplication() {
+        let context_id = [83; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(2),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xad; 32]),
+                })
+            },
+        ));
+
+        let pinned = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_recovery_hook(Some(LifecycleRecoveryHook {
+            pinned: Arc::clone(&pinned),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let recovery = thread::spawn(move || {
+            let result = worker_coordinator.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("recovery deadline"),
+            );
+            (result, ownership)
+        });
+        pinned.wait();
+        let expires_at = {
+            let expires_at = Instant::now() + Duration::from_millis(40);
+            lock_worker_registry(&coordinator.registry)
+                .records
+                .get_mut(&context_id)
+                .expect("registered worker")
+                .expires_at = expires_at;
+            expires_at
+        };
+        if let Some(remaining) = expires_at.checked_duration_since(Instant::now()) {
+            thread::sleep(remaining);
+        }
+        while Instant::now() < expires_at {
+            thread::yield_now();
+        }
+        release.wait();
+        let (result, ownership) = recovery.join().expect("TTL recovery thread");
+        assert!(matches!(result, Err(WorkerV3Error::Dead)));
+
+        {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            let record = registry
+                .records
+                .get_mut(&context_id)
+                .expect("worker record");
+            record.expires_at = Instant::now() + Duration::from_secs(1);
+            record.stable_phase = StablePhase::Starting;
+        }
+        let pinned = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_recovery_hook(Some(LifecycleRecoveryHook {
+            pinned: Arc::clone(&pinned),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let recovery = thread::spawn(move || {
+            let result = worker_coordinator.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("phase recovery deadline"),
+            );
+            (result, ownership)
+        });
+        pinned.wait();
+        lock_worker_registry(&coordinator.registry)
+            .records
+            .get_mut(&context_id)
+            .expect("worker record")
+            .stable_phase = StablePhase::Initialised;
+        release.wait();
+        let (result, ownership) = recovery.join().expect("phase recovery thread");
+        assert!(matches!(result, Err(WorkerV3Error::Conflict)));
+        coordinator.set_lifecycle_recovery_hook(None);
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("recovery revalidation fixture cleanup failed: {error}")
+            }
+        }
+    }
+
+    #[test]
+    fn post_lock_detach_deadline_preserves_registered_placement() {
+        let context_id = [84; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, alive, attempts) = fake_process_with_termination_results(
+            Duration::from_secs(1),
+            VecDeque::from([true]),
+            true,
+        );
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(2),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xae; 32]),
+                })
+            },
+        ));
+        let coordinates = ownership.coordinates;
+
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_mutation_hook(Some(LifecycleMutationHook {
+            point: LifecycleMutationPoint::Detach,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let deadline = HardDeadline::after(Duration::from_millis(60)).expect("detach deadline");
+        let reap = thread::spawn(move || {
+            worker_coordinator.terminate_generation_until(ownership, deadline)
+        });
+        reached.wait();
+        wait_until_deadline_elapsed(deadline);
+        release.wait();
+        let ownership = match reap.join().expect("detach deadline thread") {
+            WorkerGenerationReap::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => *ownership,
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected late-detach result: {error}")
+            }
+            WorkerGenerationReap::Confirmed(_) => {
+                panic!("expired detach falsely confirmed absence")
+            }
+        };
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::Registered)
+        ));
+        assert!(alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            let record = registry
+                .records
+                .get(&context_id)
+                .expect("registered worker");
+            assert!(!record.quarantined && record.process.is_some());
+        }
+
+        coordinator.set_lifecycle_mutation_hook(None);
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => assert_eq!(proof.coordinates, coordinates),
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("detach-deadline fixture cleanup failed: {error}")
+            }
+        }
+        assert!(!alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn post_lock_reaped_purge_deadline_preserves_reaped_placement() {
+        let context_id = [85; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, alive, attempts) = fake_process_with_termination_results(
+            Duration::from_secs(1),
+            VecDeque::from([true]),
+            true,
+        );
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(2),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xaf; 32]),
+                })
+            },
+        ));
+        let coordinates = ownership.coordinates;
+
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_mutation_hook(Some(LifecycleMutationHook {
+            point: LifecycleMutationPoint::Purge,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        }));
+        let worker_coordinator = coordinator.clone();
+        let deadline = HardDeadline::after(Duration::from_millis(60)).expect("purge deadline");
+        let reap = thread::spawn(move || {
+            worker_coordinator.terminate_generation_until(ownership, deadline)
+        });
+        reached.wait();
+        wait_until_deadline_elapsed(deadline);
+        release.wait();
+        let ownership = match reap.join().expect("purge deadline thread") {
+            WorkerGenerationReap::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => *ownership,
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected late-purge result: {error}")
+            }
+            WorkerGenerationReap::Confirmed(_) => {
+                panic!("expired purge falsely confirmed absence")
+            }
+        };
+        assert!(matches!(
+            ownership.placement.as_ref(),
+            Some(WorkerGenerationPlacement::ReapedPendingPurge(_))
+        ));
+        assert!(!alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(!lock_worker_registry(&coordinator.registry).exact_generation_absent(coordinates));
+
+        coordinator.set_lifecycle_mutation_hook(None);
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("purge retry deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => assert_eq!(proof.coordinates, coordinates),
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("purge retry remained unresolved: {error}")
+            }
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn registry_contention_after_reap_retains_pins_and_retry_skips_termination() {
+        let context_id = [77; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, alive, attempts) = fake_process_with_termination_results(
+            Duration::from_secs(1),
+            VecDeque::from([true]),
+            true,
+        );
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(2),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xa8; 32]),
+                })
+            },
+        ));
+        let coordinates = ownership.coordinates;
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_reaped_hook(LifecycleReapedHook {
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        let worker_coordinator = coordinator.clone();
+        let reap = thread::spawn(move || {
+            worker_coordinator.terminate_generation_until(
+                ownership,
+                HardDeadline::after(Duration::from_millis(80)).expect("reap deadline"),
+            )
+        });
+        reached.wait();
+        let registry_guard = lock_worker_registry(&coordinator.registry);
+        release.wait();
+        let retained = match reap.join().expect("reap thread") {
+            WorkerGenerationReap::Retained {
+                error: WorkerV3Error::Deadline,
+                ownership,
+            } => ownership,
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("unexpected post-reap contention result: {error}")
+            }
+            WorkerGenerationReap::Confirmed(_) => {
+                panic!("registry contention cannot confirm absence")
+            }
+        };
+        assert!(matches!(
+            retained.placement.as_ref(),
+            Some(WorkerGenerationPlacement::ReapedPendingPurge(_))
+        ));
+        let Some(WorkerGenerationPlacement::ReapedPendingPurge(detached)) =
+            retained.placement.as_ref()
+        else {
+            unreachable!()
+        };
+        assert!(
+            detached
+                .worker
+                .process
+                .retirement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(|retirement| retirement.kernel_pins.as_ref())
+                .is_some()
+        );
+        assert!(!alive.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(!registry_guard.exact_generation_absent(coordinates));
+        drop(registry_guard);
+
+        match coordinator.terminate_generation_until(
+            *retained,
+            HardDeadline::after(Duration::from_secs(1)).expect("purge retry deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => assert_eq!(proof.coordinates, coordinates),
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("reaped-purge retry remained unresolved: {error}")
+            }
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn reaped_partial_purge_is_idempotent_and_removes_order_only_residue() {
+        let context_id = [78; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, _alive, attempts) = fake_process_with_termination_results(
+            Duration::from_secs(1),
+            VecDeque::from([true]),
+            true,
+        );
+        let mut ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(2),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xa9; 32]),
+                })
+            },
+        ));
+        let coordinates = ownership.coordinates;
+        assert!(matches!(
+            ownership.placement.take(),
+            Some(WorkerGenerationPlacement::Registered)
+        ));
+        let detached = {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            let detached = registry
+                .report_dead(context_id, coordinates.worker_generation.get())
+                .expect("detach exact generation")
+                .expect("registered process owner");
+            assert_eq!(
+                detached.process.liveness().termination_outcome_until(
+                    HardDeadline::after(Duration::from_secs(1)).expect("termination deadline"),
+                ),
+                TerminationOutcome::Reaped
+            );
+            registry.records.remove(&context_id);
+            registry.cache_order.push_back(CacheKey {
+                context_id,
+                generation: coordinates.worker_generation.get(),
+                request_id: [1; 16],
+                request_digest: [2; 32],
+            });
+            registry.tombstone_order.push_back(TombstoneKey {
+                context_id,
+                generation: coordinates.worker_generation.get(),
+                request_id: [3; 16],
+            });
+            assert!(!registry.exact_generation_absent(coordinates));
+            detached
+        };
+        ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(Box::new(
+            LifecycleDetachedOwnership {
+                worker: detached,
+                reservation: None,
+            },
+        )));
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("partial purge deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(proof) => assert_eq!(proof.coordinates, coordinates),
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("partial purge did not settle: {error}")
+            }
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let mut registry = lock_worker_registry(&coordinator.registry);
+        assert!(registry.exact_generation_absent(coordinates));
+        registry
+            .purge_or_confirm_generation_absent(coordinates)
+            .expect("already-absent retry is idempotent");
+    }
+
+    #[test]
+    fn recovery_source_rejects_wrong_coordinator_phase_and_expired_ttl() {
+        let context_id = [79; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let other = WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(2),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xaa; 32]),
+                })
+            },
+        ));
+        assert!(matches!(
+            other.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("wrong-owner deadline"),
+            ),
+            Err(WorkerV3Error::Stale)
+        ));
+        {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            let record = registry
+                .records
+                .get_mut(&context_id)
+                .expect("worker record");
+            record.stable_phase = StablePhase::Initialised;
+        }
+        assert!(matches!(
+            coordinator.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("wrong-phase deadline"),
+            ),
+            Err(WorkerV3Error::Conflict)
+        ));
+        {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            let record = registry
+                .records
+                .get_mut(&context_id)
+                .expect("worker record");
+            record.stable_phase = StablePhase::Starting;
+            record.expires_at = Instant::now();
+        }
+        assert!(matches!(
+            coordinator.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("expired-source deadline"),
+            ),
+            Err(WorkerV3Error::Dead)
+        ));
+        {
+            let mut registry = lock_worker_registry(&coordinator.registry);
+            registry
+                .records
+                .get_mut(&context_id)
+                .expect("worker record")
+                .expires_at = Instant::now() + Duration::from_secs(1);
+        }
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("recovery-source fixture cleanup failed: {error}")
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_source_rejects_a_registered_process_without_authenticated_pins() {
+        let context_id = [73; 16];
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        process
+            .retirement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .expect("armed retirement")
+            .kernel_pins = None;
+        let ownership = registered_lifecycle(coordinator.reserve_spawn_register_with_until(
+            context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xa6; 32]),
+                })
+            },
+        ));
+        assert!(matches!(
+            coordinator.recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("identity deadline"),
+            ),
+            Err(WorkerV3Error::Authentication | WorkerV3Error::Sandbox(_))
+        ));
+        match coordinator.terminate_generation_until(
+            ownership,
+            HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("pinless fixture cleanup was not confirmed: {error}")
+            }
+        }
+    }
+
+    #[test]
     fn wrong_challenge_fails_closed_and_child_is_boundedly_reaped() {
         let (result, elapsed) = timed_spawn_fixture_after_lock("wrong-challenge", [2; 16], 1);
         assert!(matches!(result, Err(WorkerV3Error::Authentication)));
@@ -5785,6 +8017,7 @@ mod tests {
         let RegistrationFailure {
             error,
             process: second,
+            ..
         } = registry
             .register([4; 16], second, Duration::from_secs(2), now)
             .expect_err("capacity rejection");
@@ -5878,6 +8111,7 @@ mod tests {
         let RegistrationFailure {
             error,
             process: mismatched,
+            ..
         } = registry
             .commit_reserved(second, mismatched, now)
             .expect_err("post-spawn binding mismatch");
@@ -5903,6 +8137,7 @@ mod tests {
         let RegistrationFailure {
             error,
             process: stale,
+            ..
         } = registry
             .commit_reserved(expired, stale, now + Duration::from_secs(2))
             .expect_err("expired token cannot consume replacement");
@@ -5943,6 +8178,7 @@ mod tests {
         let RegistrationFailure {
             error,
             process: invalid,
+            ..
         } = invalid_registry
             .register([21; 16], invalid, Duration::ZERO, now)
             .expect_err("invalid rejection");
@@ -5960,6 +8196,7 @@ mod tests {
         let RegistrationFailure {
             error,
             process: conflict,
+            ..
         } = occupied_registry
             .register([22; 16], conflict, Duration::from_secs(1), now)
             .expect_err("conflict rejection");
@@ -5972,6 +8209,7 @@ mod tests {
         let RegistrationFailure {
             error,
             process: excess,
+            ..
         } = occupied_registry
             .register([23; 16], excess, Duration::from_secs(1), now)
             .expect_err("capacity rejection");
@@ -5986,6 +8224,7 @@ mod tests {
         let RegistrationFailure {
             error,
             process: mismatched,
+            ..
         } = binding_registry
             .register([25; 16], mismatched, Duration::from_secs(1), now)
             .expect_err("binding rejection");

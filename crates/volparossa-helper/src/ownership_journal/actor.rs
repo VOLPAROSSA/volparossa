@@ -8,6 +8,9 @@
 //! wait, admission becomes permanently ambiguous and the worker handle is detached instead of
 //! joined. The process-lifetime latch remains set, the journal lock remains held while the worker
 //! is stuck, and at most that already-accepted recovery may finish late; no later command runs.
+//! Deadlines are rechecked on the actor thread before startup touches the store and after every
+//! dequeue before journal work begins. An expired, not-yet-started command is mutation-free;
+//! journal I/O which already started always settles before its late result fences admission.
 
 use std::{
     fmt, fs,
@@ -18,10 +21,10 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU8, AtomicUsize, Ordering},
-        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[cfg(not(test))]
@@ -30,6 +33,8 @@ use std::sync::atomic::AtomicBool;
 use std::{collections::BTreeSet, sync::OnceLock};
 
 use volparossa_routing::PrepareIntent;
+
+use crate::deadline::HardDeadline;
 
 use super::{
     ClosedPlan, Id16, JournalConfig, JournalEpochId, JournalError, NewOwnershipIntent, OwnershipId,
@@ -83,6 +88,21 @@ pub(super) enum DurableOwnershipError {
     Ambiguous,
     #[error("this durable ownership store already started in this process")]
     AlreadyStarted,
+    #[error("durable ownership deadline elapsed before durable work began")]
+    DeadlineElapsed,
+}
+
+fn default_actor_deadline() -> Result<HardDeadline, DurableOwnershipError> {
+    let complete_wait = REPLY_WAIT_LIMIT
+        .checked_add(THREAD_COMPLETION_WAIT_LIMIT)
+        .ok_or(DurableOwnershipError::Unavailable)?;
+    HardDeadline::after(complete_wait).map_err(|_| DurableOwnershipError::Unavailable)
+}
+
+fn ensure_deadline_before_acceptance(deadline: HardDeadline) -> Result<(), DurableOwnershipError> {
+    deadline
+        .ensure_remaining()
+        .map_err(|_| DurableOwnershipError::DeadlineElapsed)
 }
 
 #[derive(Clone)]
@@ -261,7 +281,10 @@ impl LifecycleState {
     }
 
     fn mark_ambiguous(&self) {
-        self.transition(Lifecycle::Ambiguous);
+        // Ambiguity is the strongest terminal state: a timeout or lost completion can reveal
+        // uncertainty even after an earlier path tentatively classified the actor as stopped or
+        // unavailable.
+        self.0.store(Lifecycle::Ambiguous as u8, Ordering::Release);
     }
 
     fn admission_error(&self) -> DurableOwnershipError {
@@ -284,8 +307,10 @@ impl LifecycleState {
 }
 
 struct ReplySender<T> {
-    sender: SyncSender<T>,
+    sender: SyncSender<Result<T, DurableOwnershipError>>,
     lifecycle: Arc<LifecycleState>,
+    admission: Arc<Admission>,
+    deadline: HardDeadline,
     armed: bool,
 }
 
@@ -294,11 +319,29 @@ impl<T> ReplySender<T> {
         self.armed = true;
     }
 
-    fn complete(mut self, value: T) {
+    fn complete(mut self, value: Result<T, DurableOwnershipError>) {
         self.armed = false;
+        let value = if self.deadline.ensure_remaining().is_err() {
+            self.admission
+                .fence_terminal(&self.lifecycle, Lifecycle::Ambiguous);
+            Err(DurableOwnershipError::Ambiguous)
+        } else {
+            value
+        };
+        self.send_result(value);
+    }
+
+    fn complete_unstarted_deadline(mut self) {
+        self.armed = false;
+        self.send_result(Err(DurableOwnershipError::DeadlineElapsed));
+    }
+
+    fn send_result(&self, value: Result<T, DurableOwnershipError>) {
         match self.sender.try_send(value) {
             Ok(()) | Err(TrySendError::Disconnected(_)) => {}
-            Err(TrySendError::Full(_)) => self.lifecycle.mark_ambiguous(),
+            Err(TrySendError::Full(_)) => self
+                .admission
+                .fence_terminal(&self.lifecycle, Lifecycle::Ambiguous),
         }
     }
 }
@@ -306,7 +349,8 @@ impl<T> ReplySender<T> {
 impl<T> Drop for ReplySender<T> {
     fn drop(&mut self) {
         if self.armed {
-            self.lifecycle.mark_ambiguous();
+            self.admission
+                .fence_terminal(&self.lifecycle, Lifecycle::Ambiguous);
         }
     }
 }
@@ -315,6 +359,7 @@ struct PendingReply<T> {
     receiver: Receiver<Result<T, DurableOwnershipError>>,
     lifecycle: Arc<LifecycleState>,
     admission: Arc<Admission>,
+    deadline: HardDeadline,
 }
 
 struct ThreadCompletionGuard(Option<SyncSender<()>>);
@@ -329,7 +374,10 @@ impl Drop for ThreadCompletionGuard {
 
 impl<T> PendingReply<T> {
     fn wait(self) -> Result<T, DurableOwnershipError> {
-        match self.receiver.recv_timeout(REPLY_WAIT_LIMIT) {
+        let Ok(remaining) = self.deadline.remaining() else {
+            return self.resolve_after_deadline();
+        };
+        match self.receiver.recv_timeout(remaining) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
                 self.admission
@@ -343,26 +391,43 @@ impl<T> PendingReply<T> {
             }
         }
     }
+
+    fn resolve_after_deadline(&self) -> Result<T, DurableOwnershipError> {
+        match self.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                self.admission
+                    .fence_terminal(&self.lifecycle, Lifecycle::Ambiguous);
+                Err(DurableOwnershipError::Ambiguous)
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.admission
+                    .fence_terminal(&self.lifecycle, Lifecycle::Ambiguous);
+                Err(self.lifecycle.disconnected_error())
+            }
+        }
+    }
 }
 
 fn reply_pair<T>(
     lifecycle: &Arc<LifecycleState>,
     admission: &Arc<Admission>,
-) -> (
-    ReplySender<Result<T, DurableOwnershipError>>,
-    PendingReply<T>,
-) {
+    deadline: HardDeadline,
+) -> (ReplySender<T>, PendingReply<T>) {
     let (sender, receiver) = sync_channel(1);
     (
         ReplySender {
             sender,
             lifecycle: Arc::clone(lifecycle),
+            admission: Arc::clone(admission),
+            deadline,
             armed: false,
         },
         PendingReply {
             receiver,
             lifecycle: Arc::clone(lifecycle),
             admission: Arc::clone(admission),
+            deadline,
         },
     )
 }
@@ -384,7 +449,11 @@ impl Admission {
         match self.accepting.lock() {
             Ok(mut accepting) => {
                 *accepting = false;
-                lifecycle.transition(terminal);
+                if terminal == Lifecycle::Ambiguous {
+                    lifecycle.mark_ambiguous();
+                } else {
+                    lifecycle.transition(terminal);
+                }
             }
             Err(_) => lifecycle.mark_ambiguous(),
         }
@@ -402,37 +471,86 @@ impl Drop for AdmissionPermit {
 
 enum Operation {
     Register {
+        deadline: HardDeadline,
         intent: DurablePrepareIntent,
-        reply: ReplySender<Result<DurableOwnershipKey, DurableOwnershipError>>,
+        reply: ReplySender<DurableOwnershipKey>,
     },
     Arm {
+        deadline: HardDeadline,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
-        reply: ReplySender<Result<(), DurableOwnershipError>>,
+        reply: ReplySender<()>,
     },
     RetireNeverDispatched {
+        deadline: HardDeadline,
         key: OwnershipCoordinates,
-        reply: ReplySender<Result<(), DurableOwnershipError>>,
+        reply: ReplySender<()>,
     },
     ConfirmRecoveredAbsent {
+        deadline: HardDeadline,
         key: OwnershipCoordinates,
-        reply: ReplySender<Result<(), DurableOwnershipError>>,
+        reply: ReplySender<()>,
     },
     #[cfg(test)]
     PanicAfterRegister {
+        deadline: HardDeadline,
         intent: DurablePrepareIntent,
-        reply: ReplySender<Result<DurableOwnershipKey, DurableOwnershipError>>,
+        reply: ReplySender<DurableOwnershipKey>,
+    },
+    #[cfg(test)]
+    TestBarrier {
+        deadline: HardDeadline,
+        hook: Box<dyn FnOnce() + Send>,
+        reply: ReplySender<()>,
     },
 }
 
 enum Command {
     Operation {
+        deadline: HardDeadline,
         operation: Operation,
         _permit: AdmissionPermit,
     },
     Shutdown {
-        reply: ReplySender<Result<(), DurableOwnershipError>>,
+        deadline: HardDeadline,
+        reply: ReplySender<()>,
     },
+}
+
+impl Operation {
+    fn deadline(&self) -> HardDeadline {
+        match self {
+            Self::Register { deadline, .. }
+            | Self::Arm { deadline, .. }
+            | Self::RetireNeverDispatched { deadline, .. }
+            | Self::ConfirmRecoveredAbsent { deadline, .. } => *deadline,
+            #[cfg(test)]
+            Self::PanicAfterRegister { deadline, .. } | Self::TestBarrier { deadline, .. } => {
+                *deadline
+            }
+        }
+    }
+
+    fn complete_unstarted_deadline(self) {
+        match self {
+            Self::Register { reply, .. } => {
+                reply.complete_unstarted_deadline();
+            }
+            #[cfg(test)]
+            Self::PanicAfterRegister { reply, .. } => {
+                reply.complete_unstarted_deadline();
+            }
+            Self::Arm { reply, .. }
+            | Self::RetireNeverDispatched { reply, .. }
+            | Self::ConfirmRecoveredAbsent { reply, .. } => {
+                reply.complete_unstarted_deadline();
+            }
+            #[cfg(test)]
+            Self::TestBarrier { reply, .. } => {
+                reply.complete_unstarted_deadline();
+            }
+        }
+    }
 }
 
 #[cfg_attr(test, derive(Clone))]
@@ -445,8 +563,10 @@ struct ActorClient {
 impl ActorClient {
     fn submit<T>(
         &self,
-        build: impl FnOnce(ReplySender<Result<T, DurableOwnershipError>>) -> Operation,
+        deadline: HardDeadline,
+        build: impl FnOnce(ReplySender<T>) -> Operation,
     ) -> Result<PendingReply<T>, DurableOwnershipError> {
+        ensure_deadline_before_acceptance(deadline)?;
         let accepting = self.admission.accepting.lock().map_err(|_| {
             self.lifecycle.mark_ambiguous();
             DurableOwnershipError::Ambiguous
@@ -457,6 +577,9 @@ impl ActorClient {
         if self.lifecycle.load() != Lifecycle::Running {
             return Err(self.lifecycle.admission_error());
         }
+        // This is the admission linearization point. After this check succeeds and capacity is
+        // reserved, the operation is allowed to run even if its caller drops the reply receiver.
+        ensure_deadline_before_acceptance(deadline)?;
         self.admission
             .accepted
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |accepted| {
@@ -464,8 +587,9 @@ impl ActorClient {
             })
             .map_err(|_| DurableOwnershipError::Capacity)?;
         let permit = AdmissionPermit(Arc::clone(&self.admission));
-        let (reply, pending) = reply_pair(&self.lifecycle, &self.admission);
+        let (reply, pending) = reply_pair(&self.lifecycle, &self.admission, deadline);
         let command = Command::Operation {
+            deadline,
             operation: build(reply),
             _permit: permit,
         };
@@ -484,33 +608,87 @@ impl ActorClient {
         result
     }
 
+    #[cfg(test)]
     fn register_pending(
         &self,
         intent: DurablePrepareIntent,
     ) -> Result<PendingReply<DurableOwnershipKey>, DurableOwnershipError> {
-        self.submit(|reply| Operation::Register { intent, reply })
+        self.register_pending_until(intent, default_actor_deadline()?)
     }
 
+    fn register_pending_until(
+        &self,
+        intent: DurablePrepareIntent,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<DurableOwnershipKey>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::Register {
+            deadline,
+            intent,
+            reply,
+        })
+    }
+
+    #[cfg(test)]
     fn arm_pending(
         &self,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
     ) -> Result<PendingReply<()>, DurableOwnershipError> {
-        self.submit(|reply| Operation::Arm { key, anchor, reply })
+        self.arm_pending_until(key, anchor, default_actor_deadline()?)
     }
 
+    fn arm_pending_until(
+        &self,
+        key: OwnershipCoordinates,
+        anchor: DurablePrepareAnchor,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::Arm {
+            deadline,
+            key,
+            anchor,
+            reply,
+        })
+    }
+
+    #[cfg(test)]
     fn retire_pending(
         &self,
         key: OwnershipCoordinates,
     ) -> Result<PendingReply<()>, DurableOwnershipError> {
-        self.submit(|reply| Operation::RetireNeverDispatched { key, reply })
+        self.retire_pending_until(key, default_actor_deadline()?)
     }
 
+    fn retire_pending_until(
+        &self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::RetireNeverDispatched {
+            deadline,
+            key,
+            reply,
+        })
+    }
+
+    #[cfg(test)]
     fn confirm_pending(
         &self,
         key: OwnershipCoordinates,
     ) -> Result<PendingReply<()>, DurableOwnershipError> {
-        self.submit(|reply| Operation::ConfirmRecoveredAbsent { key, reply })
+        self.confirm_pending_until(key, default_actor_deadline()?)
+    }
+
+    fn confirm_pending_until(
+        &self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::ConfirmRecoveredAbsent {
+            deadline,
+            key,
+            reply,
+        })
     }
 
     #[cfg(test)]
@@ -518,10 +696,37 @@ impl ActorClient {
         &self,
         intent: DurablePrepareIntent,
     ) -> Result<PendingReply<DurableOwnershipKey>, DurableOwnershipError> {
-        self.submit(|reply| Operation::PanicAfterRegister { intent, reply })
+        let deadline = default_actor_deadline()?;
+        self.submit(deadline, |reply| Operation::PanicAfterRegister {
+            deadline,
+            intent,
+            reply,
+        })
     }
 
+    #[cfg(test)]
+    fn test_barrier_pending_until(
+        &self,
+        deadline: HardDeadline,
+        hook: impl FnOnce() + Send + 'static,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::TestBarrier {
+            deadline,
+            hook: Box::new(hook),
+            reply,
+        })
+    }
+
+    #[cfg(test)]
     fn fence_and_shutdown(&self) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.fence_and_shutdown_until(default_actor_deadline()?)
+    }
+
+    fn fence_and_shutdown_until(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        ensure_deadline_before_acceptance(deadline)?;
         let mut accepting = self.admission.accepting.lock().map_err(|_| {
             self.lifecycle.mark_ambiguous();
             DurableOwnershipError::Ambiguous
@@ -533,10 +738,11 @@ impl ActorClient {
             *accepting = false;
             return Err(self.lifecycle.admission_error());
         }
+        ensure_deadline_before_acceptance(deadline)?;
         *accepting = false;
         self.lifecycle.transition(Lifecycle::Closing);
-        let (reply, pending) = reply_pair(&self.lifecycle, &self.admission);
-        match self.sender.try_send(Command::Shutdown { reply }) {
+        let (reply, pending) = reply_pair(&self.lifecycle, &self.admission, deadline);
+        match self.sender.try_send(Command::Shutdown { deadline, reply }) {
             Ok(()) => Ok(pending),
             Err(TrySendError::Full(command) | TrySendError::Disconnected(command)) => {
                 drop(command);
@@ -555,6 +761,7 @@ pub(super) struct DurableOwnershipActor {
 }
 
 impl DurableOwnershipActor {
+    #[cfg(test)]
     pub(super) fn spawn_with_executor_factory<ExecutorFactory, Executor>(
         config: JournalConfig,
         executor_factory: ExecutorFactory,
@@ -563,7 +770,19 @@ impl DurableOwnershipActor {
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
         Executor: RecoveryExecutor + Send + 'static,
     {
-        Self::spawn_inner(config, || {}, executor_factory)
+        Self::spawn_with_executor_factory_until(config, executor_factory, default_actor_deadline()?)
+    }
+
+    pub(super) fn spawn_with_executor_factory_until<ExecutorFactory, Executor>(
+        config: JournalConfig,
+        executor_factory: ExecutorFactory,
+        deadline: HardDeadline,
+    ) -> Result<Self, DurableOwnershipError>
+    where
+        ExecutorFactory: FnOnce() -> Executor + Send + 'static,
+        Executor: RecoveryExecutor + Send + 'static,
+    {
+        Self::spawn_inner(config, || {}, || {}, executor_factory, deadline)
     }
 
     #[cfg(test)]
@@ -577,19 +796,58 @@ impl DurableOwnershipActor {
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
         Executor: RecoveryExecutor + Send + 'static,
     {
-        Self::spawn_inner(config, startup_hook, executor_factory)
+        Self::spawn_with_startup_hook_until(
+            config,
+            startup_hook,
+            executor_factory,
+            default_actor_deadline()?,
+        )
     }
 
-    fn spawn_inner<StartupHook, ExecutorFactory, Executor>(
+    #[cfg(test)]
+    fn spawn_with_startup_hook_until<StartupHook, ExecutorFactory, Executor>(
         config: JournalConfig,
         startup_hook: StartupHook,
         executor_factory: ExecutorFactory,
+        deadline: HardDeadline,
     ) -> Result<Self, DurableOwnershipError>
     where
         StartupHook: FnOnce() + Send + 'static,
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
         Executor: RecoveryExecutor + Send + 'static,
     {
+        Self::spawn_inner(config, || {}, startup_hook, executor_factory, deadline)
+    }
+
+    #[cfg(test)]
+    fn spawn_with_pre_startup_hook_until<PreStartupHook, ExecutorFactory, Executor>(
+        config: JournalConfig,
+        pre_startup_hook: PreStartupHook,
+        executor_factory: ExecutorFactory,
+        deadline: HardDeadline,
+    ) -> Result<Self, DurableOwnershipError>
+    where
+        PreStartupHook: FnOnce() + Send + 'static,
+        ExecutorFactory: FnOnce() -> Executor + Send + 'static,
+        Executor: RecoveryExecutor + Send + 'static,
+    {
+        Self::spawn_inner(config, pre_startup_hook, || {}, executor_factory, deadline)
+    }
+
+    fn spawn_inner<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
+        config: JournalConfig,
+        pre_startup_hook: PreStartupHook,
+        startup_hook: StartupHook,
+        executor_factory: ExecutorFactory,
+        deadline: HardDeadline,
+    ) -> Result<Self, DurableOwnershipError>
+    where
+        PreStartupHook: FnOnce() + Send + 'static,
+        StartupHook: FnOnce() + Send + 'static,
+        ExecutorFactory: FnOnce() -> Executor + Send + 'static,
+        Executor: RecoveryExecutor + Send + 'static,
+    {
+        ensure_deadline_before_acceptance(deadline)?;
         let lifecycle = Arc::new(LifecycleState::new());
         let admission = Arc::new(Admission::new());
         let (sender, receiver) = sync_channel(COMMAND_CHANNEL_CAPACITY);
@@ -598,10 +856,13 @@ impl DurableOwnershipActor {
             admission,
             lifecycle: Arc::clone(&lifecycle),
         };
-        let (startup_reply, startup_pending) = reply_pair(&lifecycle, &client.admission);
+        let (startup_reply, startup_pending) = reply_pair(&lifecycle, &client.admission, deadline);
         let (completion_sender, completion_receiver) = sync_channel(1);
         let thread_lifecycle = Arc::clone(&lifecycle);
         let thread_admission = Arc::clone(&client.admission);
+        // Thread creation is the startup admission point. Once this final deadline check passes,
+        // startup is allowed to finish even if the caller stops waiting.
+        ensure_deadline_before_acceptance(deadline)?;
         let join = thread::Builder::new()
             .name(ACTOR_THREAD_NAME.to_owned())
             .spawn(move || {
@@ -609,12 +870,16 @@ impl DurableOwnershipActor {
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
                     actor_thread(
                         config,
+                        pre_startup_hook,
                         startup_hook,
                         executor_factory,
-                        &receiver,
-                        startup_reply,
-                        &thread_lifecycle,
-                        &thread_admission,
+                        ActorThreadContext {
+                            receiver: &receiver,
+                            startup_reply,
+                            lifecycle: &thread_lifecycle,
+                            admission: &thread_admission,
+                            deadline,
+                        },
                     );
                 }));
                 if outcome.is_err() {
@@ -631,7 +896,7 @@ impl DurableOwnershipActor {
             }),
             Err(error) => {
                 drop(client);
-                if settle_thread(join, &completion_receiver, &lifecycle).is_err() {
+                if settle_thread_until(join, &completion_receiver, &lifecycle, deadline).is_err() {
                     Err(DurableOwnershipError::Ambiguous)
                 } else {
                     Err(error)
@@ -640,104 +905,170 @@ impl DurableOwnershipActor {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn register_intent(
         &self,
         intent: DurablePrepareIntent,
     ) -> Result<DurableOwnershipKey, DurableOwnershipError> {
+        self.register_intent_until(intent, default_actor_deadline()?)
+    }
+
+    pub(super) fn register_intent_until(
+        &self,
+        intent: DurablePrepareIntent,
+        deadline: HardDeadline,
+    ) -> Result<DurableOwnershipKey, DurableOwnershipError> {
         self.client
             .as_ref()
             .ok_or(DurableOwnershipError::Unavailable)?
-            .register_pending(intent)?
+            .register_pending_until(intent, deadline)?
             .wait()
     }
 
+    #[cfg(test)]
     pub(super) fn arm_prepare(
         &self,
         key: &DurableOwnershipKey,
         anchor: DurablePrepareAnchor,
     ) -> Result<(), DurableOwnershipError> {
+        self.arm_prepare_until(key, anchor, default_actor_deadline()?)
+    }
+
+    pub(super) fn arm_prepare_until(
+        &self,
+        key: &DurableOwnershipKey,
+        anchor: DurablePrepareAnchor,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
         self.client
             .as_ref()
             .ok_or(DurableOwnershipError::Unavailable)?
-            .arm_pending(key.coordinates, anchor)?
+            .arm_pending_until(key.coordinates, anchor, deadline)?
             .wait()
     }
 
+    #[cfg(test)]
     pub(super) fn retire_never_dispatched(
         &self,
         key: &DurableOwnershipKey,
     ) -> Result<(), DurableOwnershipError> {
-        self.client
-            .as_ref()
-            .ok_or(DurableOwnershipError::Unavailable)?
-            .retire_pending(key.coordinates)?
-            .wait()
+        self.retire_never_dispatched_until(key, default_actor_deadline()?)
     }
 
-    pub(super) fn confirm_recovered_absent(
+    pub(super) fn retire_never_dispatched_until(
         &self,
         key: &DurableOwnershipKey,
+        deadline: HardDeadline,
     ) -> Result<(), DurableOwnershipError> {
         self.client
             .as_ref()
             .ok_or(DurableOwnershipError::Unavailable)?
-            .confirm_pending(key.coordinates)?
+            .retire_pending_until(key.coordinates, deadline)?
             .wait()
     }
 
+    #[cfg(test)]
+    pub(super) fn confirm_recovered_absent(
+        &self,
+        key: &DurableOwnershipKey,
+    ) -> Result<(), DurableOwnershipError> {
+        self.confirm_recovered_absent_until(key, default_actor_deadline()?)
+    }
+
+    pub(super) fn confirm_recovered_absent_until(
+        &self,
+        key: &DurableOwnershipKey,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
+        self.client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?
+            .confirm_pending_until(key.coordinates, deadline)?
+            .wait()
+    }
+
+    #[cfg(test)]
     pub(super) fn shutdown(mut self) -> Result<(), DurableOwnershipError> {
+        self.shutdown_until(default_actor_deadline()?)
+    }
+
+    pub(super) fn shutdown_until(
+        &mut self,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
         let pending = self
             .client
             .as_ref()
             .ok_or(DurableOwnershipError::Unavailable)?
-            .fence_and_shutdown();
-        let reply = pending.and_then(PendingReply::wait);
+            .fence_and_shutdown_until(deadline)?;
+        let reply = pending.wait();
         self.client.take();
-        let settled = self.settle_thread();
-        reply.and(settled)
+        let settled = self.settle_thread_until(deadline);
+        combine_shutdown_results(reply, settled)
     }
 
-    fn settle_thread(&mut self) -> Result<(), DurableOwnershipError> {
+    fn settle_thread_until(&mut self, deadline: HardDeadline) -> Result<(), DurableOwnershipError> {
         let join = self.join.take().ok_or(DurableOwnershipError::Unavailable)?;
         let completion = self
             .completion
             .take()
             .ok_or(DurableOwnershipError::Unavailable)?;
-        settle_thread(join, &completion, &self.lifecycle)
+        settle_thread_until(join, &completion, &self.lifecycle, deadline)
+    }
+}
+
+fn combine_shutdown_results(
+    reply: Result<(), DurableOwnershipError>,
+    settled: Result<(), DurableOwnershipError>,
+) -> Result<(), DurableOwnershipError> {
+    if matches!(reply, Err(DurableOwnershipError::Ambiguous))
+        || matches!(settled, Err(DurableOwnershipError::Ambiguous))
+    {
+        Err(DurableOwnershipError::Ambiguous)
+    } else {
+        reply.and(settled)
     }
 }
 
 impl Drop for DurableOwnershipActor {
     fn drop(&mut self) {
-        let reply = self
-            .client
-            .as_ref()
-            .map_or(Ok(None), |client| client.fence_and_shutdown().map(Some));
+        let Ok(deadline) = default_actor_deadline() else {
+            self.lifecycle.mark_ambiguous();
+            self.client.take();
+            self.join.take();
+            self.completion.take();
+            return;
+        };
+        let reply = self.client.as_ref().map_or(Ok(None), |client| {
+            client.fence_and_shutdown_until(deadline).map(Some)
+        });
         if let Ok(Some(pending)) = reply {
             let _ = pending.wait();
         }
         self.client.take();
         if let (Some(join), Some(completion)) = (self.join.take(), self.completion.take()) {
-            let _ = settle_thread(join, &completion, &self.lifecycle);
+            let _ = settle_thread_until(join, &completion, &self.lifecycle, deadline);
         }
     }
 }
 
-fn settle_thread(
+fn settle_thread_until(
     join: JoinHandle<()>,
     completion: &Receiver<()>,
     lifecycle: &LifecycleState,
+    deadline: HardDeadline,
 ) -> Result<(), DurableOwnershipError> {
-    if completion
-        .recv_timeout(THREAD_COMPLETION_WAIT_LIMIT)
-        .is_err()
-    {
+    let Ok(remaining) = deadline.remaining() else {
+        lifecycle.mark_ambiguous();
+        drop(join);
+        return Err(DurableOwnershipError::Ambiguous);
+    };
+    if completion.recv_timeout(remaining).is_err() {
         lifecycle.mark_ambiguous();
         drop(join);
         return Err(DurableOwnershipError::Ambiguous);
     }
-    let deadline = Instant::now() + THREAD_COMPLETION_WAIT_LIMIT;
-    while !join.is_finished() && Instant::now() < deadline {
+    while !join.is_finished() && deadline.ensure_remaining().is_ok() {
         thread::yield_now();
     }
     if !join.is_finished() {
@@ -1056,45 +1387,63 @@ fn acquire_start_latch(
     Ok(())
 }
 
-fn actor_thread<StartupHook, ExecutorFactory, Executor>(
+struct ActorThreadContext<'a> {
+    receiver: &'a Receiver<Command>,
+    startup_reply: ReplySender<()>,
+    lifecycle: &'a Arc<LifecycleState>,
+    admission: &'a Arc<Admission>,
+    deadline: HardDeadline,
+}
+
+fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
     config: JournalConfig,
+    pre_startup_hook: PreStartupHook,
     startup_hook: StartupHook,
     executor_factory: ExecutorFactory,
-    receiver: &Receiver<Command>,
-    mut startup_reply: ReplySender<Result<(), DurableOwnershipError>>,
-    lifecycle: &Arc<LifecycleState>,
-    admission: &Arc<Admission>,
+    context: ActorThreadContext<'_>,
 ) where
+    PreStartupHook: FnOnce(),
     StartupHook: FnOnce(),
     ExecutorFactory: FnOnce() -> Executor,
     Executor: RecoveryExecutor,
 {
+    let ActorThreadContext {
+        receiver,
+        mut startup_reply,
+        lifecycle,
+        admission,
+        deadline,
+    } = context;
     startup_reply.arm();
+    pre_startup_hook();
+    if deadline.ensure_remaining().is_err() {
+        lifecycle.transition(Lifecycle::Unavailable);
+        startup_reply.complete_unstarted_deadline();
+        return;
+    }
     let parent_directory = match open_verified_parent(&config) {
         Ok(parent_directory) => parent_directory,
         Err(error) => {
             let failure = classify_startup_error(&error);
             let (error, terminal) = terminal_start_failure(failure);
-            lifecycle.transition(terminal);
-            startup_reply.complete(Err(error));
+            complete_startup_failure(startup_reply, error, terminal, lifecycle);
             return;
         }
     };
     let store = match derive_store_identity(&config, &parent_directory) {
         Ok(store) => store,
         Err(error) => {
-            lifecycle.transition(Lifecycle::Unavailable);
-            startup_reply.complete(Err(error));
+            complete_startup_failure(startup_reply, error, Lifecycle::Unavailable, lifecycle);
             return;
         }
     };
     if let Err(error) = acquire_start_latch(&store, &parent_directory) {
-        lifecycle.transition(if error == DurableOwnershipError::Ambiguous {
+        let terminal = if error == DurableOwnershipError::Ambiguous {
             Lifecycle::Ambiguous
         } else {
             Lifecycle::Unavailable
-        });
-        startup_reply.complete(Err(error));
+        };
+        complete_startup_failure(startup_reply, error, terminal, lifecycle);
         return;
     }
     startup_hook();
@@ -1103,8 +1452,7 @@ fn actor_thread<StartupHook, ExecutorFactory, Executor>(
         Err(error) => {
             let failure = classify_startup_error(&error);
             let (error, terminal) = terminal_start_failure(failure);
-            lifecycle.transition(terminal);
-            startup_reply.complete(Err(error));
+            complete_startup_failure(startup_reply, error, terminal, lifecycle);
             return;
         }
     };
@@ -1113,15 +1461,13 @@ fn actor_thread<StartupHook, ExecutorFactory, Executor>(
         Ok(core) => core,
         Err(failure) => {
             let (error, terminal) = terminal_start_failure(failure);
-            lifecycle.transition(terminal);
-            startup_reply.complete(Err(error));
+            complete_startup_failure(startup_reply, error, terminal, lifecycle);
             return;
         }
     };
     if let Err(failure) = core.startup_sweep() {
         let (error, terminal) = terminal_start_failure(failure);
-        lifecycle.transition(terminal);
-        startup_reply.complete(Err(error));
+        complete_startup_failure(startup_reply, error, terminal, lifecycle);
         return;
     }
     if core.confirm_complete_boundary().is_err() {
@@ -1137,15 +1483,44 @@ fn actor_thread<StartupHook, ExecutorFactory, Executor>(
     lifecycle.transition(Lifecycle::Running);
     startup_reply.complete(Ok(()));
 
+    run_actor_commands(&mut core, receiver, lifecycle, admission);
+}
+
+fn run_actor_commands<Executor: RecoveryExecutor>(
+    core: &mut ActorCore<Executor>,
+    receiver: &Receiver<Command>,
+    lifecycle: &Arc<LifecycleState>,
+    admission: &Arc<Admission>,
+) {
     while let Ok(command) = receiver.recv() {
         match command {
-            Command::Operation { operation, _permit } => {
-                if process_operation(&mut core, operation, lifecycle, admission) {
+            Command::Operation {
+                deadline,
+                operation,
+                _permit,
+            } => {
+                debug_assert_eq!(deadline, operation.deadline());
+                if deadline.ensure_remaining().is_err() {
+                    operation.complete_unstarted_deadline();
+                    if lifecycle.load() != Lifecycle::Running {
+                        return;
+                    }
+                    continue;
+                }
+                if process_operation(core, operation, lifecycle, admission) {
                     return;
                 }
             }
-            Command::Shutdown { mut reply } => {
+            Command::Shutdown {
+                deadline,
+                mut reply,
+            } => {
                 reply.arm();
+                if deadline.ensure_remaining().is_err() {
+                    lifecycle.transition(Lifecycle::Stopped);
+                    reply.complete_unstarted_deadline();
+                    return;
+                }
                 match core.confirm_complete_boundary() {
                     Ok(()) => {
                         lifecycle.transition(Lifecycle::Stopped);
@@ -1163,6 +1538,16 @@ fn actor_thread<StartupHook, ExecutorFactory, Executor>(
     admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
 }
 
+fn complete_startup_failure(
+    reply: ReplySender<()>,
+    error: DurableOwnershipError,
+    terminal: Lifecycle,
+    lifecycle: &LifecycleState,
+) {
+    lifecycle.transition(terminal);
+    reply.complete(Err(error));
+}
+
 fn terminal_start_failure(failure: FailureDisposition) -> (DurableOwnershipError, Lifecycle) {
     match failure {
         FailureDisposition::Continue(error) => (error, Lifecycle::Unavailable),
@@ -1177,11 +1562,16 @@ fn process_operation<Executor: RecoveryExecutor>(
     admission: &Arc<Admission>,
 ) -> bool {
     match operation {
-        Operation::Register { intent, mut reply } => {
+        Operation::Register {
+            deadline: _,
+            intent,
+            mut reply,
+        } => {
             reply.arm();
             finish_operation(reply, core.register(intent), lifecycle, admission)
         }
         Operation::Arm {
+            deadline: _,
             key,
             anchor,
             mut reply,
@@ -1189,16 +1579,28 @@ fn process_operation<Executor: RecoveryExecutor>(
             reply.arm();
             finish_operation(reply, core.arm(key, anchor), lifecycle, admission)
         }
-        Operation::RetireNeverDispatched { key, mut reply } => {
+        Operation::RetireNeverDispatched {
+            deadline: _,
+            key,
+            mut reply,
+        } => {
             reply.arm();
             finish_operation(reply, core.retire(key), lifecycle, admission)
         }
-        Operation::ConfirmRecoveredAbsent { key, mut reply } => {
+        Operation::ConfirmRecoveredAbsent {
+            deadline: _,
+            key,
+            mut reply,
+        } => {
             reply.arm();
             finish_operation(reply, core.confirm(key), lifecycle, admission)
         }
         #[cfg(test)]
-        Operation::PanicAfterRegister { intent, mut reply } => {
+        Operation::PanicAfterRegister {
+            deadline: _,
+            intent,
+            mut reply,
+        } => {
             reply.arm();
             match core.register(intent) {
                 OperationOutcome::Complete(Ok(_)) => {
@@ -1207,11 +1609,26 @@ fn process_operation<Executor: RecoveryExecutor>(
                 outcome => finish_operation(reply, outcome, lifecycle, admission),
             }
         }
+        #[cfg(test)]
+        Operation::TestBarrier {
+            deadline: _,
+            hook,
+            mut reply,
+        } => {
+            reply.arm();
+            hook();
+            finish_operation(
+                reply,
+                OperationOutcome::Complete(Ok(())),
+                lifecycle,
+                admission,
+            )
+        }
     }
 }
 
 fn finish_operation<T>(
-    reply: ReplySender<Result<T, DurableOwnershipError>>,
+    reply: ReplySender<T>,
     outcome: OperationOutcome<T>,
     lifecycle: &Arc<LifecycleState>,
     admission: &Arc<Admission>,
