@@ -24,19 +24,27 @@ usage() {
 print_plan() {
     printf '%s\n' \
         'VOLPAROSSA live worker-identity proof plan:' \
-        '  require a disposable Debian 13 amd64 VM, root, and the system systemd manager;' \
+        '  require a disposable Debian 13 amd64 VM, root, and the exact systemd v257 manager;' \
         '  copy the already-built real helper into one validated root-only temporary stage;' \
         '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
-        '  bind passwd, group, shadow, and nsswitch read-only inside one transient service;' \
+        '  bind account files and the system bus socket read-only inside one transient service;' \
+        '  pin its D-Bus system address to that verified socket inside the private /run;' \
         '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
+        '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
+        '    FileDescriptorStorePreserve=yes on that transient service;' \
         '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
         '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
         '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
-        '  invoke only --internal-worker-v3-live-proof and require its exact success record;' \
-        '  stop and collect the transient unit, remove the stage, and compare privacy-safe' \
-        '    before/after host account, resolver, mount, firewall, WireGuard, and network digests.' \
+        '  invoke only --internal-worker-v3-live-proof and require its exact two success records;' \
+        '  after main exit require exactly two descriptors in the systemd descriptor store;' \
+        '  bind normal retirement to the exact JSON InvocationID returned for that run;' \
+        '  recover tentative ownership only from its exact marker and current nonzero manager ID;' \
+        '  stop the exact random unit, clean only its fdstore, reset/collect it, and remove the stage;' \
+        '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
+        '    and network digests.' \
         'This stages only the helper identity component. It creates no host account, link,' \
-        'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.'
+        'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+        'It is not production-service, restart-recovery, datapath, or A01-A15 evidence.'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -132,11 +140,24 @@ do
         blocked "required Debian tool is unavailable: $command_name"
     fi
 done
+systemd_version_output=$(systemctl show --property=Version --value 2>/dev/null) \
+    || blocked 'the systemd manager version is unavailable'
+systemd_version=$(printf '%s\n' "$systemd_version_output" \
+    | sed -n '1{s/^\([0-9][0-9]*\).*$/\1/p;q;}')
+if [ "$systemd_version" != 257 ]; then
+    blocked 'execution requires exact systemd v257'
+fi
 manager_state=$(systemctl is-system-running 2>/dev/null || true)
 case $manager_state in
     running|degraded) ;;
     *) blocked 'the system systemd manager is not operational' ;;
 esac
+system_bus_socket=/run/dbus/system_bus_socket
+if [ ! -S "$system_bus_socket" ] || [ -L "$system_bus_socket" ] \
+    || [ "$(stat -Lc '%F:%u:%g' "$system_bus_socket" 2>/dev/null || true)" \
+        != 'socket:0:0' ]; then
+    blocked 'the canonical root-owned system bus socket is unavailable'
+fi
 
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
@@ -160,25 +181,287 @@ fi
 temporary_stage=
 temporary_stage_identity=
 unit_name=
+unit_owned=no
+unit_may_own=no
+unit_invocation_id=
+unit_ownership_marker=
 cleanup_error=no
 
+unit_name_is_safe() {
+    case $unit_name in
+        volparossa-helper-live-proof-[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9].service)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+unit_invocation_id_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    candidate_invocation_id=$1
+    [ "${#candidate_invocation_id}" -eq 32 ] || return 1
+    case $candidate_invocation_id in
+        *[!0-9a-f]*) return 1 ;;
+        00000000000000000000000000000000) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+unit_ownership_marker_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    candidate_ownership_marker=$1
+    ownership_marker_prefix=volparossa-helper-live-proof-owner-v1-
+    case $candidate_ownership_marker in
+        "$ownership_marker_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    ownership_marker_digest=${candidate_ownership_marker#"$ownership_marker_prefix"}
+    [ "${#ownership_marker_digest}" -eq 64 ] || return 1
+    case $ownership_marker_digest in
+        *[!0-9a-f]*|0000000000000000000000000000000000000000000000000000000000000000)
+            return 1
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+unit_description_matches_marker() {
+    unit_name_is_safe || return 1
+    unit_ownership_marker_is_safe "$unit_ownership_marker" || return 1
+    observed_unit_description=$(systemctl show --property=Description --value \
+        "$unit_name" 2>/dev/null) || return 1
+    [ "$observed_unit_description" = "$unit_ownership_marker" ]
+}
+
+unit_current_invocation_id() {
+    unit_name_is_safe || return 1
+    observed_unit_invocation_id=$(systemctl show --property=InvocationID --value \
+        "$unit_name" 2>/dev/null) || return 1
+    unit_invocation_id_is_safe "$observed_unit_invocation_id" || return 1
+    printf '%s\n' "$observed_unit_invocation_id"
+}
+
+unit_invocation_is_current() {
+    [ "$unit_owned" = yes ] || return 1
+    unit_invocation_id_is_safe "$unit_invocation_id" || return 1
+    observed_unit_invocation_id=$(unit_current_invocation_id) || return 1
+    [ "$observed_unit_invocation_id" = "$unit_invocation_id" ]
+}
+
+forget_unit_ownership() {
+    unit_owned=no
+    unit_may_own=no
+    unit_invocation_id=
+    unit_ownership_marker=
+    unit_name=
+}
+
 unit_load_state() {
-    systemctl show --property=LoadState --value "$unit_name" 2>/dev/null || printf '%s\n' unknown
+    unit_name_is_safe || return 1
+    unit_load_state_value=$(systemctl show --property=LoadState --value "$unit_name" 2>/dev/null) \
+        || return 1
+    case $unit_load_state_value in
+        loaded|not-found) printf '%s\n' "$unit_load_state_value" ;;
+        *) return 1 ;;
+    esac
+}
+
+unit_active_state() {
+    unit_name_is_safe || return 1
+    unit_active_state_value=$(systemctl show --property=ActiveState --value "$unit_name" 2>/dev/null) \
+        || return 1
+    case $unit_active_state_value in
+        active|activating|deactivating|failed|inactive|reloading)
+            printf '%s\n' "$unit_active_state_value"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+unit_job_is_absent() {
+    unit_name_is_safe || return 1
+    unit_job_value=$(systemctl show --property=Job --value "$unit_name" 2>/dev/null) \
+        || return 1
+    [ -z "$unit_job_value" ]
+}
+
+unit_fdstore_count() {
+    unit_name_is_safe || return 1
+    unit_fdstore_count_value=$(systemctl show --property=NFileDescriptorStore --value \
+        "$unit_name" 2>/dev/null) || return 1
+    case $unit_fdstore_count_value in
+        0|[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])
+            printf '%s\n' "$unit_fdstore_count_value"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+adopt_tentative_unit() {
+    [ "$unit_owned" = no ] || return 1
+    [ "$unit_may_own" = yes ] || return 1
+    unit_name_is_safe || return 1
+    unit_ownership_marker_is_safe "$unit_ownership_marker" || return 1
+
+    adopt_attempt=0
+    while :; do
+        adopt_load_state=$(unit_load_state) || return 1
+        if [ "$adopt_load_state" = not-found ]; then
+            forget_unit_ownership
+            return 0
+        fi
+        unit_description_matches_marker || return 1
+        adopted_invocation_id=$(unit_current_invocation_id 2>/dev/null) \
+            || adopted_invocation_id=
+        if unit_invocation_id_is_safe "$adopted_invocation_id"; then
+            unit_description_matches_marker || return 1
+            unit_invocation_id=$adopted_invocation_id
+            unit_owned=yes
+            unit_may_own=no
+            return 0
+        fi
+        adopt_active_state=$(unit_active_state) || return 1
+        case $adopt_active_state in
+            active|activating|deactivating|failed|inactive|reloading) ;;
+            *) return 1 ;;
+        esac
+        adopt_attempt=$((adopt_attempt + 1))
+        [ "$adopt_attempt" -lt 1000 ] || return 1
+        sleep 0.05
+    done
 }
 
 retire_unit() {
-    [ -n "$unit_name" ] || return 0
-    if [ "$(unit_load_state)" != not-found ]; then
-        if ! systemctl stop "$unit_name" >/dev/null 2>&1; then
-            systemctl kill --kill-who=all --signal=SIGKILL "$unit_name" >/dev/null 2>&1 || true
-            systemctl stop "$unit_name" >/dev/null 2>&1 || return 1
-        fi
-        systemctl reset-failed "$unit_name" >/dev/null 2>&1 || true
+    if [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ]; then
+        adopt_tentative_unit || return 1
     fi
-    attempt=0
-    while [ "$(unit_load_state)" != not-found ]; do
-        attempt=$((attempt + 1))
-        [ "$attempt" -le 100 ] || return 1
+    case $unit_owned in
+        no) return 0 ;;
+        yes) ;;
+        *) return 1 ;;
+    esac
+    unit_name_is_safe || return 1
+    unit_invocation_id_is_safe "$unit_invocation_id" || return 1
+    retire_load_state=$(unit_load_state) || return 1
+    if [ "$retire_load_state" = not-found ]; then
+        forget_unit_ownership
+        return 0
+    fi
+    unit_invocation_is_current || return 1
+    if ! systemctl stop --no-block "$unit_name" >/dev/null 2>&1; then
+        retire_load_state=$(unit_load_state) || return 1
+        if [ "$retire_load_state" = not-found ]; then
+            forget_unit_ownership
+            return 0
+        fi
+        unit_invocation_is_current || return 1
+        return 1
+    fi
+
+    retire_attempt=0
+    while :; do
+        retire_load_state=$(unit_load_state) || return 1
+        if [ "$retire_load_state" = not-found ]; then
+            forget_unit_ownership
+            return 0
+        fi
+        unit_invocation_is_current || return 1
+        retire_active_state=$(unit_active_state) || return 1
+        case $retire_active_state in
+            inactive|failed)
+                if unit_job_is_absent; then
+                    break
+                fi
+                ;;
+            active|activating|deactivating|reloading) ;;
+            *) return 1 ;;
+        esac
+        retire_attempt=$((retire_attempt + 1))
+        [ "$retire_attempt" -lt 400 ] || return 1
+        sleep 0.05
+    done
+
+    if [ "$retire_active_state" = failed ]; then
+        unit_invocation_is_current || return 1
+        if ! systemctl reset-failed "$unit_name" >/dev/null 2>&1; then
+            retire_load_state=$(unit_load_state) || return 1
+            if [ "$retire_load_state" = not-found ]; then
+                forget_unit_ownership
+                return 0
+            fi
+            unit_invocation_is_current || return 1
+            return 1
+        fi
+
+        retire_attempt=0
+        while :; do
+            retire_load_state=$(unit_load_state) || return 1
+            if [ "$retire_load_state" = not-found ]; then
+                forget_unit_ownership
+                return 0
+            fi
+            unit_invocation_is_current || return 1
+            retire_active_state=$(unit_active_state) || return 1
+            if [ "$retire_active_state" = inactive ] && unit_job_is_absent; then
+                break
+            fi
+            case $retire_active_state in
+                active|activating|deactivating|failed|inactive|reloading) ;;
+                *) return 1 ;;
+            esac
+            retire_attempt=$((retire_attempt + 1))
+            [ "$retire_attempt" -lt 400 ] || return 1
+            sleep 0.05
+        done
+    fi
+
+    [ "$retire_active_state" = inactive ] || return 1
+    unit_job_is_absent || return 1
+    unit_invocation_is_current || return 1
+    if ! systemctl clean --what=fdstore "$unit_name" >/dev/null 2>&1; then
+        retire_load_state=$(unit_load_state) || return 1
+        if [ "$retire_load_state" = not-found ]; then
+            forget_unit_ownership
+            return 0
+        fi
+        unit_invocation_is_current || return 1
+        return 1
+    fi
+    retire_load_state=$(unit_load_state) || return 1
+    if [ "$retire_load_state" = not-found ]; then
+        forget_unit_ownership
+        return 0
+    fi
+    unit_invocation_is_current || return 1
+    retire_fdstore_count=$(unit_fdstore_count) || return 1
+    [ "$retire_fdstore_count" -eq 0 ] || return 1
+
+    unit_invocation_is_current || return 1
+    if ! systemctl reset-failed "$unit_name" >/dev/null 2>&1; then
+        retire_load_state=$(unit_load_state) || return 1
+        if [ "$retire_load_state" = not-found ]; then
+            forget_unit_ownership
+            return 0
+        fi
+        unit_invocation_is_current || return 1
+        return 1
+    fi
+
+    retire_attempt=0
+    while :; do
+        retire_load_state=$(unit_load_state) || return 1
+        if [ "$retire_load_state" = not-found ]; then
+            forget_unit_ownership
+            return 0
+        fi
+        unit_invocation_is_current || return 1
+        retire_active_state=$(unit_active_state) || return 1
+        [ "$retire_active_state" = inactive ] || return 1
+        unit_job_is_absent || return 1
+        retire_fdstore_count=$(unit_fdstore_count) || return 1
+        [ "$retire_fdstore_count" -eq 0 ] || return 1
+        retire_attempt=$((retire_attempt + 1))
+        [ "$retire_attempt" -lt 400 ] || return 1
         sleep 0.05
     done
 }
@@ -231,9 +514,20 @@ case $stage_suffix in
     ''|*[!A-Za-z0-9]*) failed 'temporary stage suffix is non-canonical' ;;
 esac
 unit_name=volparossa-helper-live-proof-$stage_suffix.service
-if [ "$(unit_load_state)" != not-found ]; then
+initial_unit_load_state=$(unit_load_state) \
+    || failed 'random transient unit state could not be determined'
+if [ "$initial_unit_load_state" != not-found ]; then
     failed 'random transient unit name is already loaded'
 fi
+ownership_marker_line=$(printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA helper live proof transient ownership marker v1' \
+    "$unit_name" "$temporary_stage_identity" | sha256sum) \
+    || failed 'transient unit ownership marker could not be derived'
+ownership_marker_digest=$(vp_capture_checksum_from_line "$ownership_marker_line") \
+    || failed 'transient unit ownership marker is non-canonical'
+unit_ownership_marker=volparossa-helper-live-proof-owner-v1-$ownership_marker_digest
+unit_ownership_marker_is_safe "$unit_ownership_marker" \
+    || failed 'transient unit ownership marker is unsafe'
 
 entry_is_absent() {
     database=$1
@@ -588,14 +882,24 @@ before_digest=$(state_digest "$temporary_stage/before")
 capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'
 account_binds="$temporary_stage/passwd:/etc/passwd:norbind $temporary_stage/group:/etc/group:norbind $temporary_stage/shadow:/etc/shadow:norbind $temporary_stage/nsswitch.conf:/etc/nsswitch.conf:norbind"
 helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"
+system_bus_bind="$system_bus_socket:$system_bus_socket:norbind"
 
+# The helper owns a 30-second spawn budget followed by a separate five-second
+# FD-store publication budget and bounded local retirement. Keep PID1's outer
+# limits strictly wider so they cannot pre-empt that fail-closed cleanup path.
+unit_may_own=yes
 set +e
 systemd-run \
-    --quiet \
+    --json=short \
+    --ignore-failure \
     --collect \
     --unit="$unit_name" \
+    --description="$unit_ownership_marker" \
     --service-type=oneshot \
     --remain-after-exit \
+    --property=NotifyAccess=main \
+    --property=FileDescriptorStoreMax=128 \
+    --property=FileDescriptorStorePreserve=yes \
     --property=User=0 \
     --property=Group="$agent_gid" \
     --property=SupplementaryGroups= \
@@ -627,12 +931,12 @@ systemd-run \
     --property=SystemCallErrorNumber=EPERM \
     --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
     --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
-    --property="BindReadOnlyPaths=$helper_bind $account_binds" \
+    --property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind" \
+    --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     --property=KillMode=control-group \
     --property=SendSIGKILL=yes \
-    --property=TimeoutStartSec=30s \
+    --property=TimeoutStartSec=45s \
     --property=TimeoutStopSec=10s \
-    --property=RuntimeMaxSec=30s \
     --property=TasksMax=16 \
     --property=SetLoginEnvironment=no \
     --property="StandardOutput=file:$temporary_stage/proof.stdout" \
@@ -645,11 +949,52 @@ set -e
 proof_ok=yes
 if [ "$run_status" -ne 0 ]; then
     proof_ok=no
+elif ! vp_capture_file_is_safe "$temporary_stage/systemd-run.stdout" \
+    || ! vp_capture_file_is_safe "$temporary_stage/systemd-run.stderr"; then
+    proof_ok=no
+else
+    parsed_invocation_id=$(jq -ers --arg expected_unit "$unit_name" '
+        if length == 1
+            and (.[0] | type) == "object"
+            and (.[0] | keys) == ["invocation_id", "unit"]
+            and .[0].unit == $expected_unit
+            and (.[0].invocation_id | type) == "string"
+        then .[0].invocation_id
+        else empty
+        end
+    ' "$temporary_stage/systemd-run.stdout" 2>/dev/null) || parsed_invocation_id=
+    if ! unit_invocation_id_is_safe "$parsed_invocation_id" \
+        || [ -s "$temporary_stage/systemd-run.stderr" ]; then
+        proof_ok=no
+    else
+        observed_unit_invocation_id=$(unit_current_invocation_id) \
+            || observed_unit_invocation_id=
+        if ! unit_description_matches_marker \
+            || [ "$observed_unit_invocation_id" != "$parsed_invocation_id" ]; then
+            proof_ok=no
+        else
+            unit_invocation_id=$parsed_invocation_id
+            unit_owned=yes
+            unit_may_own=no
+        fi
+    fi
 fi
 poll_attempt=0
 while :; do
-    active_state=$(systemctl show --property=ActiveState --value "$unit_name" 2>/dev/null || true)
-    sub_state=$(systemctl show --property=SubState --value "$unit_name" 2>/dev/null || true)
+    if ! unit_invocation_is_current; then
+        proof_ok=no
+        break
+    fi
+    if ! active_state=$(systemctl show --property=ActiveState --value \
+        "$unit_name" 2>/dev/null); then
+        proof_ok=no
+        break
+    fi
+    if ! sub_state=$(systemctl show --property=SubState --value \
+        "$unit_name" 2>/dev/null); then
+        proof_ok=no
+        break
+    fi
     if [ "$active_state:$sub_state" = active:exited ]; then
         break
     fi
@@ -657,7 +1002,7 @@ while :; do
         failed|inactive) break ;;
     esac
     poll_attempt=$((poll_attempt + 1))
-    if [ "$poll_attempt" -ge 600 ]; then
+    if [ "$poll_attempt" -ge 1000 ]; then
         proof_ok=no
         break
     fi
@@ -665,6 +1010,8 @@ while :; do
 done
 capture_unit_property() {
     [ "$#" -eq 2 ] || return 1
+    unit_name_is_safe || return 1
+    unit_invocation_is_current || return 1
     vp_capture_run "$2" systemctl show --property="$1" --value "$unit_name"
 }
 if capture_unit_property ActiveState "$temporary_stage/unit-active-state"; then
@@ -695,7 +1042,54 @@ if [ "$active_state" != active ] || [ "$sub_state" != exited ] \
     || [ "$result" != success ] || [ "$exec_status" != 0 ]; then
     proof_ok=no
 fi
-printf '%s\n' 'VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass' \
+if capture_unit_property NotifyAccess "$temporary_stage/unit-notify-access"; then
+    observed_notify_access=$(cat "$temporary_stage/unit-notify-access") || proof_ok=no
+else
+    observed_notify_access=
+    proof_ok=no
+fi
+if capture_unit_property Description "$temporary_stage/unit-description"; then
+    observed_description=$(cat "$temporary_stage/unit-description") || proof_ok=no
+else
+    observed_description=
+    proof_ok=no
+fi
+if capture_unit_property Environment "$temporary_stage/unit-environment"; then
+    observed_environment=$(cat "$temporary_stage/unit-environment") || proof_ok=no
+else
+    observed_environment=
+    proof_ok=no
+fi
+if capture_unit_property FileDescriptorStoreMax "$temporary_stage/unit-fdstore-max"; then
+    observed_fdstore_max=$(cat "$temporary_stage/unit-fdstore-max") || proof_ok=no
+else
+    observed_fdstore_max=
+    proof_ok=no
+fi
+if capture_unit_property FileDescriptorStorePreserve \
+    "$temporary_stage/unit-fdstore-preserve"; then
+    observed_fdstore_preserve=$(cat "$temporary_stage/unit-fdstore-preserve") || proof_ok=no
+else
+    observed_fdstore_preserve=
+    proof_ok=no
+fi
+if capture_unit_property NFileDescriptorStore "$temporary_stage/unit-fdstore-count"; then
+    observed_fdstore_count=$(cat "$temporary_stage/unit-fdstore-count") || proof_ok=no
+else
+    observed_fdstore_count=
+    proof_ok=no
+fi
+if [ "$observed_notify_access" != main ] \
+    || [ "$observed_description" != "$unit_ownership_marker" ] \
+    || [ "$observed_environment" \
+        != DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ] \
+    || [ "$observed_fdstore_max" != 128 ] \
+    || [ "$observed_fdstore_preserve" != yes ] || [ "$observed_fdstore_count" != 2 ]; then
+    proof_ok=no
+fi
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass' \
+    'VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass' \
     >"$temporary_stage/expected.stdout"
 if ! cmp -s "$temporary_stage/expected.stdout" "$temporary_stage/proof.stdout" \
     || [ -s "$temporary_stage/proof.stderr" ]; then
@@ -771,11 +1165,11 @@ if [ -n "$changed_records" ] || [ "$before_digest" != "$after_digest" ]; then
     failed 'privacy-safe before/after host-state digests differ'
 fi
 if [ "$proof_ok" != yes ]; then
-    failed 'the staged helper did not produce the exact live identity/reap proof'
+    failed 'the staged helper did not produce the exact live identity/fdstore proof'
 fi
 
 printf '%s\n' \
-    'PASS: staged helper worker identity, confinement, confirmed reap, and pin release were proved.' \
+    'PASS: staged helper identity, exact two-FD systemd custody, confinement, reap, and pin release were proved.' \
     "HOST_STATE_BEFORE_SHA256=$before_digest" \
     "HOST_STATE_AFTER_SHA256=$after_digest" \
     'SCOPE=STAGED_HELPER_COMPONENT_ONLY' \

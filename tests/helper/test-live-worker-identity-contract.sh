@@ -246,13 +246,36 @@ if [ -s "$last_stderr" ]; then
     printf '%s\n' 'default preview wrote standard error' >&2
     exit 1
 fi
-grep -Fx 'VOLPAROSSA live worker-identity proof plan:' "$default_preview" >/dev/null
-grep -Fx '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
-    "$default_preview" >/dev/null
-grep -Fx '  invoke only --internal-worker-v3-live-proof and require its exact success record;' \
-    "$default_preview" >/dev/null
-grep -Fx 'PREVIEW ONLY: no file, account, service, or network state was changed.' \
-    "$default_preview" >/dev/null
+expected_preview=$temporary_directory/expected-preview
+printf '%s\n' \
+    'VOLPAROSSA live worker-identity proof plan:' \
+    '  require a disposable Debian 13 amd64 VM, root, and the exact systemd v257 manager;' \
+    '  copy the already-built real helper into one validated root-only temporary stage;' \
+    '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
+    '  bind account files and the system bus socket read-only inside one transient service;' \
+    '  pin its D-Bus system address to that verified socket inside the private /run;' \
+    '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
+    '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
+    '    FileDescriptorStorePreserve=yes on that transient service;' \
+    '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
+    '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
+    '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
+    '  invoke only --internal-worker-v3-live-proof and require its exact two success records;' \
+    '  after main exit require exactly two descriptors in the systemd descriptor store;' \
+    '  bind normal retirement to the exact JSON InvocationID returned for that run;' \
+    '  recover tentative ownership only from its exact marker and current nonzero manager ID;' \
+    '  stop the exact random unit, clean only its fdstore, reset/collect it, and remove the stage;' \
+    '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
+    '    and network digests.' \
+    'This stages only the helper identity component. It creates no host account, link,' \
+    'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+    'It is not production-service, restart-recovery, datapath, or A01-A15 evidence.' \
+    'PREVIEW ONLY: no file, account, service, or network state was changed.' \
+    >"$expected_preview"
+if ! cmp -s "$expected_preview" "$default_preview"; then
+    printf '%s\n' 'default preview does not match the exact reviewed plan' >&2
+    exit 1
+fi
 
 expect_status 0 "$gate" --preview
 if ! cmp -s "$default_preview" "$last_stdout" || [ -s "$last_stderr" ]; then
@@ -298,6 +321,24 @@ if ! awk '
     exit 1
 fi
 
+if ! awk '
+    /^adopt_tentative_unit\(\) \{$/ { in_adopt = 1; next }
+    in_adopt && /^\}$/ { in_adopt = 0 }
+    in_adopt && /adopted_invocation_id=\$\(unit_current_invocation_id/ { id_read = NR }
+    in_adopt && id_read > 0 && /unit_description_matches_marker \|\| return 1/ {
+        marker_after_id = NR
+    }
+    in_adopt && /unit_owned=yes/ { ownership_commit = NR }
+    END {
+        if (!(id_read > 0 && id_read < marker_after_id && marker_after_id < ownership_commit)) {
+            exit 1
+        }
+    }
+' "$gate"; then
+    printf '%s\n' 'tentative unit adoption does not recheck its marker after the ID read' >&2
+    exit 1
+fi
+
 # These are literal source contracts; expansion here would defeat the check.
 # shellcheck disable=SC2016
 for required_contract in \
@@ -305,17 +346,81 @@ for required_contract in \
     '--property=PrivateMounts=yes' \
     '--property=NoNewPrivileges=yes' \
     '--property=LimitCORE=0' \
+    '--property=NotifyAccess=main' \
+    '--property=FileDescriptorStoreMax=128' \
+    '--property=FileDescriptorStorePreserve=yes' \
+    '--property=TimeoutStartSec=45s' \
+    '--json=short' \
+    '--ignore-failure' \
+    '--description="$unit_ownership_marker"' \
     '--property="CapabilityBoundingSet=$capabilities"' \
     '--property="AmbientCapabilities=$capabilities"' \
-    '--property="BindReadOnlyPaths=$helper_bind $account_binds"' \
+    '--property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind"' \
+    '--property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket' \
+    'system_bus_socket=/run/dbus/system_bus_socket' \
+    'systemctl show --property=Version --value' \
+    "blocked 'execution requires exact systemd v257'" \
+    'capture_unit_property Environment "$temporary_stage/unit-environment"' \
+    '!= DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ]' \
+    'parsed_invocation_id=$(jq -ers --arg expected_unit "$unit_name"' \
+    'and (.[0] | keys) == ["invocation_id", "unit"]' \
+    'unit_invocation_id=$parsed_invocation_id' \
+    'unit_owned=yes' \
+    'unit_may_own=yes' \
+    'unit_may_own=no' \
+    'VOLPAROSSA helper live proof transient ownership marker v1' \
+    'unit_description_matches_marker' \
+    'adopt_tentative_unit' \
+    '[ "$adopt_attempt" -lt 1000 ]' \
+    'unit_invocation_is_current || return 1' \
+    'if ! unit_invocation_is_current; then' \
+    'forget_unit_ownership' \
+    'capture_unit_property Description "$temporary_stage/unit-description"' \
+    '[ "$observed_description" != "$unit_ownership_marker" ]' \
+    'capture_unit_property NFileDescriptorStore "$temporary_stage/unit-fdstore-count"' \
+    '[ "$observed_fdstore_count" != 2 ]' \
+    'systemctl stop --no-block "$unit_name"' \
+    'systemctl show --property=Job --value "$unit_name"' \
+    'systemctl clean --what=fdstore "$unit_name"' \
+    '[ "$retire_fdstore_count" -eq 0 ]' \
+    '[ "$retire_load_state" = not-found ]' \
+    '[ "$retire_attempt" -lt 400 ]' \
+    '[ "$poll_attempt" -ge 1000 ]' \
+    'systemctl reset-failed "$unit_name"' \
     '--internal-worker-v3-live-proof' \
-    'VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass'
+    'VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass' \
+    'VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass'
 do
     grep -F -- "$required_contract" "$gate" >/dev/null || {
         printf 'missing live helper proof contract: %s\n' "$required_contract" >&2
         exit 1
     }
 done
+if ! awk '
+    /VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass/ && worker_record == 0 {
+        worker_record = NR
+    }
+    /VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass/ && fdstore_record == 0 {
+        fdstore_record = NR
+    }
+    END {
+        if (!(worker_record > 0 && worker_record < fdstore_record)) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'live helper proof records are absent or not in exact order' >&2
+    exit 1
+fi
+# The descriptor-store target is a literal source contract, not this test's variable.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'systemctl clean --what=fdstore "$unit_name"' "$gate")" -ne 1 ]; then
+    printf '%s\n' 'live helper proof gate does not clean exactly one fdstore target' >&2
+    exit 1
+fi
+if grep -E 'systemctl[[:space:]]+(kill|clean[[:space:]]+--what=(all|cache|configuration|logs|runtime|state))' \
+    "$gate" >/dev/null; then
+    printf '%s\n' 'live helper proof gate has an over-broad or forced unit retirement path' >&2
+    exit 1
+fi
 grep -F \
     "capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'" \
     "$gate" >/dev/null
@@ -337,4 +442,4 @@ if grep -E '(^|[;&|[:space:]])sysctl[[:space:]]+-w([;&|[:space:]]|$)' "$gate" >/
 fi
 
 printf '%s\n' \
-    'PASS: live helper proof preview, approval, root refusal, confinement, and no-mutation contracts are exact.'
+    'PASS: live helper identity/fdstore preview, retirement, root refusal, confinement, and no-mutation contracts are exact.'

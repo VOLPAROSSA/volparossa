@@ -169,9 +169,10 @@ After a definite pre-rename I/O failure, another mutation is admitted only if a 
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
 temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the actor permanently.
 
-### Dormant systemd descriptor-store publication boundary
+### Production-dormant systemd descriptor-store publication boundary
 
-The helper contains a private, dormant adapter for the systemd v257 descriptor-store protocol. It
+The helper contains a private adapter for the systemd v257 descriptor-store protocol. Only the
+private live-proof selector calls it; no production worker, journal, server or engine path does. It
 validates one fixed-shape opaque custody name, borrows exactly two already-owned descriptors,
 snapshots their kernel identities and sends them together in one `SCM_RIGHTS` datagram containing
 only the required `FDSTORE=1`, `FDNAME=` and `FDPOLL=0` assignments. It then sends `BARRIER=1`
@@ -187,10 +188,10 @@ publication datagram may have been accepted is classified as manager-may-own. Ca
 their original affine descriptor owners; there is deliberately no automatic removal on an
 ambiguous path.
 
-This component is not called by the worker coordinator, journal actor, server or engine. It has no
-inherited-descriptor adoption, durable custody binding, reconciliation or restart reaper and has not
-yet been exercised inside the required disposable Debian 13 transient service. It therefore closes
-no production, crash-cleanup, datapath or acceptance milestone.
+This component has no inherited-descriptor adoption, durable custody binding, reconciliation or
+restart reaper. Its executable live-proof path has not yet produced a recorded result inside the
+required disposable Debian 13 transient service. It therefore closes no production,
+crash-cleanup, datapath or acceptance milestone.
 
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
 handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
@@ -386,13 +387,18 @@ Debian 13 live-root acceptance run.
 
 `tests/helper/require-live-worker-identity-proof.sh` now provides a preview-first, execute-gated
 driver for one real `--internal-worker-v3-live-proof` invocation. Execution is restricted to root
-inside a recognised disposable Debian 13 amd64 VM with the system systemd manager. It copies the
+inside a recognised disposable Debian 13 amd64 VM with the exact systemd v257 manager. It copies the
 already-built helper into a root-only stage, creates collision-free synthetic service identities,
 binds the staged passwd, group, shadow and nsswitch files read-only, and grants the helper parent
-exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes` and
-a private temporary `/run`, so the proof cannot create a host account or reach the host network
-namespace. Success requires the exact component record only after Ready, confirmed worker reap and
-pin release. Before and after the unit, the driver compares privacy-safe digests of account files,
+exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes`,
+`NotifyAccess=main`, `FileDescriptorStoreMax=128`, `FileDescriptorStorePreserve=yes`, and a private
+temporary `/run`. Only the canonical root-owned system bus socket is bound read-only into that
+private `/run`, and the unit pins `DBUS_SYSTEM_BUS_ADDRESS` to that verified path, so the
+live-proof-only adapter cannot follow a manager-provided alternate address for its uncached systemd
+inventory reads.
+Success requires the two exact ordered helper records, an externally observed post-exit
+`NFileDescriptorStore=2`, confirmed worker reap and pin release. Before and after the unit, the
+driver compares privacy-safe digests of account files,
 mounts, resolver configuration, sysctls, links, addresses, routes, rules, nexthops, qdiscs,
 nftables, optional legacy iptables/ip6tables state and optional WireGuard state. A WireGuard dump
 is streamed through a validated private FIFO into a separately checked SHA-256 consumer and is
@@ -406,7 +412,7 @@ observations reject unsafe ownership, writable path components, target replaceme
 The transient proof unit intentionally differs from the shipped production unit in every following
 respect:
 
-- it is a collected `Type=oneshot` with `RemainAfterExit=yes`, a 30-second runtime bound, no restart,
+- it is a collected `Type=oneshot` with `RemainAfterExit=yes`, a 45-second activation bound, no restart,
   and the private proof selector instead of the production no-argument server;
 - it uses a collision-free numeric staged primary group and requests no additional
   `SupplementaryGroups=` entries, rather than resolving the installed `volparossa` group from the
@@ -416,17 +422,39 @@ respect:
   GID; any additional group membership configured for host root blocks the proof;
 - it overlays four synthetic account files read-only, adds `PrivateNetwork=yes`, and replaces host
   `/run` with a 16 MiB private tmpfs; the root-owned staged helper image is also bound read-only into
-  that private `/run`. Consequently it does not use the production unit's host
+  that private `/run`, together with a read-only bind of the host system bus socket and an exact
+  `DBUS_SYSTEM_BUS_ADDRESS` pointing to it. Consequently it
+  does not use the production unit's host
   `ReadWritePaths=/run/volparossa -/run/netns` contract;
+- it retains the shipped unit's exact `NotifyAccess=main`, 128-entry descriptor-store maximum and
+  `FileDescriptorStorePreserve=yes` settings so the two published descriptors remain externally
+  observable after the one-shot main process exits;
 - it captures stdout and stderr in the root-only stage, sets `TasksMax=16` and
   `SetLoginEnvironment=no`, and omits the production config condition/environment, ordering,
   restart and install-target semantics that are irrelevant to the one-shot internal proof.
 
 The device policy, no-new-privileges setting, exact capability sets, system-call filter,
 namespace restriction, address-family restriction and remaining applicable hardening properties
-match the shipped helper unit. The driver has not yet produced evidence from the required
-disposable VM, and it does not validate an installed/staged package or the production systemd
-service lifecycle. It is therefore not live-root, package, datapath, A14 or A15 acceptance evidence.
+match the shipped helper unit. Retirement addresses only the exact random transient unit, waits
+boundedly for stop, and binds every stop, reset and clean operation to one exact current nonzero
+systemd v257 `InvocationID`. The normal route requires it to match the returned JSON ID; tentative
+recovery requires the exact per-stage marker before adopting the manager's current ID. A failed
+one-shot is reset to inactive before its descriptor store is cleaned. Retirement cleans only that
+unit's `fdstore`, requires either
+`NFileDescriptorStore=0` or `LoadState=not-found`, resets it when still present and waits boundedly
+for collection; any ambiguous observation fails the gate. The driver has not yet produced evidence
+from the required disposable VM, and it does not validate an installed/staged package, production
+systemd service lifecycle, inherited-descriptor restart adoption or recovery. It is therefore not
+live-root, package, production, datapath, A14 or A15 acceptance evidence.
+
+Before the blocking start call, the driver atomically supplies a `Description` containing a
+SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
+identity. Normal bounded retirement begins after `systemd-run` has returned one exact JSON object
+containing that unit name and a nonzero lowercase 128-bit `InvocationID`, and the manager reports
+the same marker and ID. During an interrupt or an invalid start reply, tentative ownership may be
+promoted only after bounded read-only observations prove the exact name, marker and nonzero current
+ID. If they cannot, the driver performs no unit mutation, fails the proof, and requires the
+disposable VM to be discarded. It never guesses that a same-named unit belongs to this run.
 
 The child still performs no link, WireGuard, route, nftables, sysctl, or socket-factory operation.
 It keeps only an in-memory context marker, accepts `Initialise` and `DestroyContext`, and returns

@@ -120,8 +120,20 @@ single clean-build A01--A15 run; the score is not a release claim.
   component in a transient `PrivateNetwork` systemd unit with synthetic read-only account overlays,
   a private `/run`, the exact seven-capability parent set, exact singleton staged-agent
   supplementary-group attestation (so inherited host-root groups fail closed), confirmed leader
-  reap and privacy-safe before/after host-state digests. It has not yet run in the required
-  disposable Debian 13 VM,
+  reap and privacy-safe before/after host-state digests. That driver now requires exact systemd
+  v257, retains the shipped `NotifyAccess=main`, 128-entry descriptor-store maximum and
+  preserve-on-stop setting, binds only the system bus socket read-only into its private `/run`, pins
+  `DBUS_SYSTEM_BUS_ADDRESS` to that verified socket path, and
+  accepts the live-proof-only publication path only when the two ordered proof records and external
+  post-exit `NFileDescriptorStore=2` agree. Its exact-unit retirement cleans only `fdstore`; the
+  normal route binds every mutation to the returned JSON ID, while tentative recovery may adopt a
+  current nonzero systemd v257 `InvocationID` only after exact per-stage marker proof. Failed units
+  are reset inactive before cleaning, and anything other than a bounded zero-count or
+  not-found result is failure. An interrupt window is covered by an atomically installed per-stage
+  SHA-256 `Description` marker: tentative ownership can become mutable only after bounded read-only
+  proof of the exact marker and a nonzero current ID. Remaining ambiguity causes zero unit mutation
+  and requires discarding the disposable VM. It has not yet run
+  in the required disposable Debian 13 VM,
   validates neither a staged package nor the production server lifecycle, and closes no checkbox.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
@@ -226,8 +238,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   the dormant handoff token. A separate dormant adapter now implements a bounded, typed protocol for
   publishing exactly that two-descriptor shape to systemd with `FDPOLL=0`, synchronising with a
   separate barrier and accepting success only after an exact complete descriptor-store inventory
-  attestation. The adapter has no worker, journal, server or engine caller, so the handoff does not
-  yet publish anything to PID 1. Ambiguous or partially observed publication remains fail-closed;
+  attestation. The adapter is called only by the private live-proof selector and has no production
+  worker, journal, server or engine caller, so the production handoff does not yet publish anything
+  to PID 1. Ambiguous or partially observed publication remains fail-closed;
   it is never treated as restart custody and is not removed automatically. Ambiguous spawn remains
   permanently fail-closed.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
@@ -291,8 +304,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
   From the first publish-send attempt, every non-success result remains manager-may-own until that
-  inventory proof, and no error path issues `FDSTOREREMOVE`. There is still no production caller or
-  live transient-unit proof. This is a fail-closed custody bootstrap and dormant publication
+  inventory proof, and no error path issues `FDSTOREREMOVE`. Only the private live-proof selector
+  calls it; there is still no production caller and no recorded live transient-unit result. This is
+  a fail-closed custody bootstrap and production-dormant publication
   foundation, not typed restart adoption, durable-journal binding, restart recovery, or crash
   cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver

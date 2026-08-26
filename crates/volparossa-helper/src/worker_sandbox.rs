@@ -16,7 +16,7 @@ use std::{
     fs::{self, File},
     io::{self, Read},
     num::{NonZeroU32, NonZeroU64},
-    os::fd::{AsFd, OwnedFd},
+    os::fd::{AsFd, BorrowedFd, OwnedFd},
     os::unix::ffi::OsStrExt,
     process::Child,
 };
@@ -301,6 +301,16 @@ pub(super) struct PinnedWorkerRestartCustody {
 }
 
 impl PinnedWorkerRestartCustody {
+    /// Borrow the exact pidfd cleanup capability without duplicating or transferring ownership.
+    pub(super) fn borrowed_pidfd(&self) -> BorrowedFd<'_> {
+        self.pidfd.as_fd()
+    }
+
+    /// Borrow the exact anonymous worker network-namespace cleanup capability.
+    pub(super) fn borrowed_network_namespace(&self) -> BorrowedFd<'_> {
+        self.network_namespace.descriptor.as_fd()
+    }
+
     pub(super) fn ensure_live_and_namespace_matches_anchor(
         &self,
         anchor: WorkerRecoveryAnchorParts,
@@ -2828,6 +2838,15 @@ mod tests {
             first
         );
         drop(recovery);
+        {
+            use std::os::fd::AsRawFd as _;
+
+            assert_ne!(
+                custody.borrowed_pidfd().as_raw_fd(),
+                custody.borrowed_network_namespace().as_raw_fd(),
+                "role-specific custody borrows must remain distinct"
+            );
+        }
         custody
             .ensure_live_and_namespace_matches_anchor(first)
             .expect("pidfd and namespace custody survive all pre-arm proof owners");

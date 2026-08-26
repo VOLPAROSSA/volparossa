@@ -79,6 +79,7 @@ pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-work
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
+const LIVE_FDSTORE_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const TERMINATION_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_MAX_WORKERS: usize = 64;
@@ -87,6 +88,9 @@ const DEFAULT_MAX_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_PROCESS_OWNERS: usize = DEFAULT_MAX_WORKERS;
 const MAX_SUPERVISORS: usize = DEFAULT_MAX_WORKERS;
 static WORKER_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+const LIVE_PROOF_CUSTODY_FD_NAME: &str =
+    "volparossa-custody-v1-4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c";
 
 type ContextId = [u8; 16];
 
@@ -138,6 +142,10 @@ enum WorkerV3Error {
     Transport(#[from] WorkerTransportError),
     #[error("worker sandbox failed")]
     Sandbox(#[from] crate::worker_sandbox::WorkerSandboxError),
+    #[error("worker systemd custody input is invalid")]
+    SystemdCustodyInput(#[from] crate::systemd_fdstore::FdStoreError),
+    #[error("worker systemd custody publication failed")]
+    SystemdCustodyPublication(#[from] crate::systemd_fdstore::PublicationFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -948,15 +956,67 @@ fn run_internal_worker_v3_live_proof_inner() -> Result<(), WorkerV3Error> {
         bootstrap_challenge: _bootstrap_challenge,
     } = spawned;
     let ready_and_pinned = process.probe_alive() && process.has_complete_kernel_pins();
+
+    // Capture every publication error inside this closure. Nothing may return from the outer live
+    // proof until the exact worker has received a bounded termination attempt and its reservation
+    // has received a settlement attempt.
+    let publication_result = (|| -> Result<(), WorkerV3Error> {
+        if !ready_and_pinned {
+            return Err(WorkerV3Error::Authentication);
+        }
+        let deadline = HardDeadline::after(LIVE_FDSTORE_PUBLICATION_TIMEOUT)?;
+        let coordinates = WorkerGenerationCoordinates {
+            context_id: reservation.context_id,
+            worker_generation: NonZeroU64::new(reservation.generation)
+                .ok_or(WorkerV3Error::Authentication)?,
+        };
+        let recovery_identity =
+            process.duplicate_recovery_identity_source_until(coordinates, deadline)?;
+        let (anchor, restart_custody) = recovery_identity
+            .authenticated_pins
+            .verified_anchor_with_restart_custody()?;
+        if anchor.pid != recovery_identity.expected_child_pid {
+            return Err(WorkerV3Error::Authentication);
+        }
+        restart_custody.ensure_live_and_namespace_matches_anchor(anchor)?;
+        deadline.ensure_remaining()?;
+
+        let custody_name =
+            crate::systemd_fdstore::CustodyFdName::parse(LIVE_PROOF_CUSTODY_FD_NAME)?;
+        let custody = crate::systemd_fdstore::BorrowedCustodyPair::new(
+            restart_custody.borrowed_pidfd(),
+            restart_custody.borrowed_network_namespace(),
+        )?;
+        let publication_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()?;
+        let attestation = publication_runtime.block_on(
+            crate::systemd_fdstore::publish_current_process_custody(
+                custody_name,
+                custody,
+                deadline,
+            ),
+        )?;
+        drop(attestation);
+        drop(publication_runtime);
+        drop(restart_custody);
+        drop(recovery_identity);
+        Ok(())
+    })();
+
     let reaped = process.terminate_bounded(TERMINATION_TIMEOUT);
     let released = process.retirement_released_after_confirmed_reap() && !process.probe_alive();
-    registry.abandon_generation(reservation)?;
+    let registry_cleanup = registry.abandon_generation(reservation);
     drop(runtime);
-    if ready_and_pinned && reaped && released {
-        Ok(())
-    } else {
-        Err(WorkerV3Error::Ambiguous)
-    }
+    let local_cleanup_result = registry_cleanup.and_then(|()| {
+        if reaped && released {
+            Ok(())
+        } else {
+            Err(WorkerV3Error::Ambiguous)
+        }
+    });
+    publication_result.and(local_cleanup_result)
 }
 
 pub(crate) fn run_internal_worker_v3_entry() -> bool {
@@ -7587,6 +7647,16 @@ mod tests {
     }
 
     #[test]
+    fn live_proof_custody_name_is_fixed_and_valid() {
+        assert_eq!(LIVE_FDSTORE_PUBLICATION_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(
+            LIVE_PROOF_CUSTODY_FD_NAME.len(),
+            crate::systemd_custody::CUSTODY_FD_NAME_BYTES
+        );
+        assert!(crate::systemd_fdstore::CustodyFdName::parse(LIVE_PROOF_CUSTODY_FD_NAME).is_ok());
+    }
+
+    #[test]
     fn live_proof_uses_only_the_production_spawn_and_confirmed_retirement_path() {
         let source = include_str!("worker_v3.rs");
         let start = source
@@ -7601,9 +7671,20 @@ mod tests {
             "validate_live_proof_parent_contract(effective_group)?",
             "prepare_production_runtime()?",
             "process.has_complete_kernel_pins()",
+            "let publication_result = (|| -> Result<(), WorkerV3Error> {",
+            "HardDeadline::after(LIVE_FDSTORE_PUBLICATION_TIMEOUT)?",
+            "process.duplicate_recovery_identity_source_until(coordinates, deadline)?",
+            ".verified_anchor_with_restart_custody()?",
+            "restart_custody.ensure_live_and_namespace_matches_anchor(anchor)?",
+            "crate::systemd_fdstore::BorrowedCustodyPair::new(",
+            "tokio::runtime::Builder::new_current_thread()",
+            "crate::systemd_fdstore::publish_current_process_custody(",
+            "drop(restart_custody)",
+            "drop(recovery_identity)",
             "process.terminate_bounded(TERMINATION_TIMEOUT)",
             "process.retirement_released_after_confirmed_reap()",
-            "registry.abandon_generation(reservation)?",
+            "let registry_cleanup = registry.abandon_generation(reservation)",
+            "publication_result.and(local_cleanup_result)",
         ] {
             assert!(
                 proof.contains(required),
@@ -7612,18 +7693,42 @@ mod tests {
         }
         let production_spawn = ["spawn_worker_", "v3(reservation)"].concat();
         assert!(proof.contains(&production_spawn));
+        assert_eq!(
+            proof.matches("HardDeadline::after(").count(),
+            1,
+            "the live FD-store transaction owns one absolute publication deadline"
+        );
         assert!(!proof.contains("Command::new"));
         assert!(!proof.contains("spawn_with_command_fixture"));
         let pinned = proof
             .find("process.has_complete_kernel_pins()")
             .expect("pin observation");
+        let publication = proof
+            .find("crate::systemd_fdstore::publish_current_process_custody(")
+            .expect("custody publication");
+        let local_custody_drop = proof
+            .find("drop(restart_custody)")
+            .expect("local custody release after attestation");
         let reaped = proof
             .find("process.terminate_bounded(TERMINATION_TIMEOUT)")
             .expect("confirmed reap");
         let released = proof
             .find("process.retirement_released_after_confirmed_reap()")
             .expect("retirement release");
-        assert!(pinned < reaped && reaped < released);
+        let registry_cleanup = proof
+            .find("let registry_cleanup = registry.abandon_generation(reservation)")
+            .expect("reservation cleanup");
+        let result_propagation = proof
+            .find("publication_result.and(local_cleanup_result)")
+            .expect("publication result after cleanup attempts");
+        assert!(
+            pinned < publication
+                && publication < local_custody_drop
+                && local_custody_drop < reaped
+                && reaped < released
+                && released < registry_cleanup
+                && registry_cleanup < result_propagation
+        );
     }
 
     #[test]
