@@ -223,8 +223,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   and the namespace FD preserves the exact anonymous cleanup target. The other retained pins remain
   pre-arm proof inputs rather than restart cleanup capabilities. The pair is rechecked against the
   same durable namespace coordinates during the final pre-arm revalidation and remains retained in
-  the dormant handoff token. It is not yet published to PID 1. Ambiguous spawn remains permanently
-  fail-closed.
+  the dormant handoff token. A separate dormant adapter now implements a bounded, typed protocol for
+  publishing exactly that two-descriptor shape to systemd with `FDPOLL=0`, synchronising with a
+  separate barrier and accepting success only after an exact complete descriptor-store inventory
+  attestation. The adapter has no worker, journal, server or engine caller, so the handoff does not
+  yet publish anything to PID 1. Ambiguous or partially observed publication remains fail-closed;
+  it is never treated as restart custody and is not removed automatically. Ambiguous spawn remains
+  permanently fail-closed.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
   transiently retain a `Registered` owner while record or detached process ownership remains; after
   confirmed reap and complete six-index purge, that same owner settles without a second signal or
@@ -281,9 +286,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   audited raw-FD boundary to seal the contiguous range `CLOEXEC` and duplicate it into independently
   owned descriptors, accepts only complete two-entry opaque digest groups, and refuses startup
   while any inherited group exists because no recovery executor can consume it yet. The snapshot
-  is process-latched and never claims ownership of possibly pre-owned raw descriptors. This is a
-  fail-closed custody bootstrap, not successful publication, typed restart adoption, durable-journal
-  binding, restart recovery, or crash cleanup. The child
+  is process-latched and never claims ownership of possibly pre-owned raw descriptors. A dormant
+  publication component sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
+  opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
+  pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
+  From the first publish-send attempt, every non-success result remains manager-may-own until that
+  inventory proof, and no error path issues `FDSTOREREMOVE`. There is still no production caller or
+  live transient-unit proof. This is a fail-closed custody bootstrap and dormant publication
+  foundation, not typed restart adoption, durable-journal binding, restart recovery, or crash
+  cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists, but staged-package and
   disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits

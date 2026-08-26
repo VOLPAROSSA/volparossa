@@ -81,6 +81,7 @@ uuid = { version = "1.16.0", features = ["serde", "v4", "v7"] }
 wireguard-uapi = "3.0.1"
 x25519-dalek = { version = "2.0.1", features = ["getrandom", "reusable_secrets", "serde", "static_secrets"] }
 zeroize = { version = "1.8.1", features = ["derive", "serde"] }
+zbus = { version = "=5.13.2", default-features = false, features = ["tokio"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

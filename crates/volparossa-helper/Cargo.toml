@@ -12,7 +12,7 @@ repository.workspace = true
 blake3.workspace = true
 libc.workspace = true
 netlink-sys.workspace = true
-nix = { workspace = true, features = ["sched"] }
+nix = { workspace = true, features = ["sched", "uio"] }
 prost.workspace = true
 socket2.workspace = true
 rand_core.workspace = true
@@ -27,6 +27,7 @@ volparossa-mptcp = { path = "../volparossa-mptcp", version = "=0.1.0" }
 volparossa-routing = { path = "../volparossa-routing", version = "=0.1.0" }
 volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
 zeroize.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

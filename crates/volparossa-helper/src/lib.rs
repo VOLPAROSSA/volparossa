@@ -30,6 +30,8 @@ mod relay_fence;
 mod runtime;
 mod server;
 mod systemd_custody;
+#[allow(dead_code)] // Dormant exact FD-store adapter; no production handoff caller exists yet.
+mod systemd_fdstore;
 #[allow(dead_code)] // Pure phase-1 policy; rtnetlink collection is wired in helper v3 phase 2.
 mod underlay;
 #[allow(dead_code)] // Narrow sandbox bootstrap; production engine still never spawns it.
