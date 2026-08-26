@@ -10,6 +10,15 @@
 
 mod actor;
 
+pub(crate) use actor::{DurablePrepareAnchor, DurablePrepareAnchorParts};
+
+/// Constructs one journal anchor without exposing actor-internal failure types outside this module.
+pub(crate) fn durable_prepare_anchor_from_parts(
+    parts: DurablePrepareAnchorParts,
+) -> Option<DurablePrepareAnchor> {
+    DurablePrepareAnchor::try_from_parts(parts).ok()
+}
+
 use rand_core::{OsRng, RngCore};
 use rustix::{
     fs::{

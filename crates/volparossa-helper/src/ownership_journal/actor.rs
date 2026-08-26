@@ -167,19 +167,19 @@ impl fmt::Debug for DurablePrepareIntent {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) struct DurablePrepareAnchorParts {
-    pub(super) boot_id: [u8; 16],
-    pub(super) pid: NonZeroU32,
-    pub(super) process_start_ticks: NonZeroU64,
-    pub(super) network_namespace_device: NonZeroU64,
-    pub(super) network_namespace_inode: NonZeroU64,
-    pub(super) executable_device: NonZeroU64,
-    pub(super) executable_inode: NonZeroU64,
-    pub(super) service_cgroup_inode: NonZeroU64,
+pub(crate) struct DurablePrepareAnchorParts {
+    pub(crate) boot_id: [u8; 16],
+    pub(crate) pid: NonZeroU32,
+    pub(crate) process_start_ticks: NonZeroU64,
+    pub(crate) network_namespace_device: NonZeroU64,
+    pub(crate) network_namespace_inode: NonZeroU64,
+    pub(crate) executable_device: NonZeroU64,
+    pub(crate) executable_inode: NonZeroU64,
+    pub(crate) service_cgroup_inode: NonZeroU64,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) struct DurablePrepareAnchor(PrepareRecoveryAnchorV1);
+pub(crate) struct DurablePrepareAnchor(PrepareRecoveryAnchorV1);
 
 impl DurablePrepareAnchor {
     pub(super) fn try_from_parts(

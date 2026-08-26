@@ -593,16 +593,28 @@ that detached process is reaped. Unspawned settlement removes secondary residue 
 the fence and abandons the reservation only as its final mutation.
 
 The corresponding recovery source is available only for the exact same coordinator and generation
-while the registered record is live, unquarantined, idle and still in `Starting`. After duplicating
-its authenticated pins and checking pidfd liveness, it revalidates the same process identity, phase
-and TTL under the same deadline. These pins still do not attest the boot ID, process start ticks,
-executable inode or service-cgroup inode, so conversion to a durable Prepare anchor explicitly
-returns `RecoveryIdentityIncomplete`. Ambiguous spawn has no low-level completion channel and
+while the registered record is live, unquarantined, idle and still in `Starting`. Bootstrap retains
+the exact pidfd and proc directory, boot-ID procfs file, process start ticks, executable `O_PATH`
+descriptor, cgroup namespace, cgroup2 root and service-cgroup descriptor, plus the typed network
+namespace. The child executable is matched to the parent's running image and the child unified
+cgroup is matched to the parent service cgroup. After independently observing that the fixed filter
+denies both exec entry points and later namespace transitions, the parent revalidates the protected
+procfs magic-link bindings before acknowledging the identity-drop barrier. Final post-drop
+observation requires exact `EACCES` for both magic links, then seals the anchor from its retained
+descriptors plus freshly read process-start and unified-cgroup records; `CAP_SYS_PTRACE` is neither
+required nor permitted.
+
+Recovery duplicates only affine descriptors and immutable snapshots while the registry record is
+locked. It then drops that lock, checks pidfd liveness and re-derives all eight durable coordinates
+from the retained objects under the caller's same deadline. Only after constructing the closed
+durable Prepare anchor does it reacquire the registry and revalidate generation, TTL, phase, binding,
+PID and process lifetime. An elapsed deadline or any substituted, moved, stale or unreadable object
+fails closed without returning an anchor. Ambiguous spawn has no low-level completion channel and
 therefore remains permanently fenced rather than falsely absent. Dropping or unwinding a retained
 lifecycle owner is fail-closed but not recoverable, and terminal shutdown may safely make a
-concurrently returning `Registered` marker stale. Production activation consequently requires an
-owned cancellation-safe settlement guard, lifecycle quiescence before shutdown, the complete
-durable anchor, and journal/reaper wiring.
+concurrently returning `Registered` marker stale. Production activation consequently still requires
+an owned cancellation-safe settlement guard, lifecycle quiescence before shutdown, and production
+journal/reaper wiring.
 
 Production wiring remains a separate audited change with these explicit blockers:
 

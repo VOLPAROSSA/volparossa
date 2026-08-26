@@ -85,7 +85,7 @@ const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-const WORKER_CONFINEMENT_FILTER_LENGTH: usize = 14;
+const WORKER_CONFINEMENT_FILTER_LENGTH: usize = 16;
 
 /// Duplicates one caller-retained descriptor into independent close-on-exec ownership.
 ///
@@ -494,13 +494,14 @@ const fn signal_bit(signal: libc::c_int) -> u64 {
     1_u64 << ((signal as u32) - 1)
 }
 
-/// Installs the fixed amd64 worker filter that prevents descendants and namespace changes.
+/// Installs the fixed amd64 worker filter that prevents descendants, re-exec and namespace changes.
 ///
 /// The caller must already have installed `PR_SET_NO_NEW_PRIVS`. One filter is applied to every
 /// current thread with `SECCOMP_FILTER_FLAG_TSYNC`; the only denied cases are an unexpected audit
 /// architecture, the x32 syscall ABI, `clone(2)`, `clone3(2)`, `fork(2)`, `vfork(2)`, `setns(2)`,
-/// or `unshare(2)`. Those cases return `EPERM`; all other syscalls are allowed. The fixed filter
-/// remains active across an `execve(2)`.
+/// `unshare(2)`, `execve(2)`, or `execveat(2)`. Those cases return `EPERM`; all other syscalls are
+/// allowed. The worker must install this filter after its one fixed bootstrap exec; denying both
+/// Linux execution entry points then prevents its authenticated executable image from changing.
 ///
 /// This API intentionally exposes no way to supply filter instructions or installation flags.
 /// It is supported only on the Debian 13 amd64 production target and fails closed elsewhere.
@@ -559,10 +560,12 @@ fn worker_confinement_filter() -> [libc::sock_filter; WORKER_CONFINEMENT_FILTER_
         bpf_statement(load_word_absolute, SECCOMP_DATA_SYSCALL_OFFSET),
         bpf_jump(jump_bits_set, X32_SYSCALL_BIT, 0, 1),
         bpf_statement(return_constant, denied),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_clone), 6, 0),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_clone3), 5, 0),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_fork), 4, 0),
-        bpf_jump(jump_equal, syscall_number(libc::SYS_vfork), 3, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_clone), 8, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_clone3), 7, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_fork), 6, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_vfork), 5, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_execve), 4, 0),
+        bpf_jump(jump_equal, syscall_number(libc::SYS_execveat), 3, 0),
         bpf_jump(jump_equal, syscall_number(libc::SYS_setns), 2, 0),
         bpf_jump(jump_equal, syscall_number(libc::SYS_unshare), 1, 0),
         bpf_statement(return_constant, libc::SECCOMP_RET_ALLOW),
@@ -2095,10 +2098,12 @@ mod tests {
                 (load_word_absolute, 0, 0, SECCOMP_DATA_SYSCALL_OFFSET),
                 (jump_bits_set, 0, 1, X32_SYSCALL_BIT),
                 (return_constant, 0, 0, denied),
-                (jump_equal, 6, 0, syscall_number(libc::SYS_clone)),
-                (jump_equal, 5, 0, syscall_number(libc::SYS_clone3)),
-                (jump_equal, 4, 0, syscall_number(libc::SYS_fork)),
-                (jump_equal, 3, 0, syscall_number(libc::SYS_vfork)),
+                (jump_equal, 8, 0, syscall_number(libc::SYS_clone)),
+                (jump_equal, 7, 0, syscall_number(libc::SYS_clone3)),
+                (jump_equal, 6, 0, syscall_number(libc::SYS_fork)),
+                (jump_equal, 5, 0, syscall_number(libc::SYS_vfork)),
+                (jump_equal, 4, 0, syscall_number(libc::SYS_execve)),
+                (jump_equal, 3, 0, syscall_number(libc::SYS_execveat)),
                 (jump_equal, 2, 0, syscall_number(libc::SYS_setns)),
                 (jump_equal, 1, 0, syscall_number(libc::SYS_unshare)),
                 (return_constant, 0, 0, libc::SECCOMP_RET_ALLOW),
@@ -2133,6 +2138,8 @@ mod tests {
             libc::SYS_clone3,
             libc::SYS_fork,
             libc::SYS_vfork,
+            libc::SYS_execve,
+            libc::SYS_execveat,
             libc::SYS_setns,
             libc::SYS_unshare,
         ] {
@@ -2197,6 +2204,8 @@ mod tests {
                 libc::SYS_clone,
                 libc::SYS_clone3,
                 libc::SYS_fork,
+                libc::SYS_execve,
+                libc::SYS_execveat,
                 libc::SYS_setns,
                 libc::SYS_unshare,
             ] {

@@ -143,13 +143,18 @@ Last updated: 2026-08-26
   failure keeps its reservation visible until detached reap, and `ReapedPendingPurge` retries only
   idempotent six-index registry cleanup without signalling the process twice. Commit, settlement,
   detach and purge recheck the deadline immediately before mutation. Its recovery source retains
-  duplicated pidfd, anchored proc-directory and typed network-namespace descriptors, then
-  revalidates exact process identity, `Starting`, TTL and liveness after pinning. It deliberately
-  returns `RecoveryIdentityIncomplete` because boot ID, process start ticks, executable inode and
-  service-cgroup inode are not yet attested. Ambiguous spawn therefore remains permanently
-  fail-closed. Dropped/unwound lifecycle ownership is not yet recoverable, concurrent terminal
-  shutdown can make a returning marker stale, and neither journal wiring nor a cancellation-safe
-  production settlement guard exists.
+  and revalidates the exact pidfd, proc directory, boot-ID source, PID/start ticks, executable,
+  cgroup namespace/root/service directory and typed network namespace. Bootstrap binds the child
+  executable to the parent image and its unified cgroup to the parent service cgroup. After the
+  fixed seccomp filter denies re-exec and later namespace transitions, the parent revalidates the
+  protected procfs links before identity drop; post-drop it requires exact `EACCES` on both and
+  seals only retained descriptors plus freshly read start-time and cgroup evidence, without
+  `CAP_SYS_PTRACE`. Recovery performs full proof I/O outside the registry lock, constructs all eight
+  durable Prepare-anchor fields, and then revalidates exact process identity, `Starting`, TTL and
+  liveness under the same hard deadline. Ambiguous spawn remains permanently fail-closed.
+  Dropped/unwound lifecycle ownership is not yet recoverable, concurrent terminal shutdown can make
+  a returning marker stale, and neither production journal/reaper wiring nor a cancellation-safe
+  production settlement guard exists. No datapath or acceptance checkbox closes.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
