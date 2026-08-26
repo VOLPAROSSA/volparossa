@@ -10,7 +10,13 @@
 
 mod actor;
 
-pub(crate) use actor::{DurablePrepareAnchor, DurablePrepareAnchorParts};
+// This affine surface is intentionally exported before its production composition is installed.
+#[allow(unused_imports)]
+pub(crate) use actor::{
+    DurableArmOutcome, DurableIntentRegistration, DurableMayOwnPrepare, DurableOwnershipActor,
+    DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
+    DurableRegistrationOutcome,
+};
 
 use crate::{deadline::HardDeadline, lease_spec::WireguardLeaseSpec};
 
@@ -40,6 +46,45 @@ use std::{
     path::{Path, PathBuf},
 };
 use subtle::ConstantTimeEq;
+
+/// Starts the dormant actor against a caller-owned temporary directory for cross-module tests.
+///
+/// The fixture never opens production paths and deliberately accepts one absolute outer deadline.
+/// Its recovery executor is a typed exact echo suitable only for deterministic unit tests.
+#[cfg(test)]
+pub(crate) fn spawn_test_durable_ownership_actor_until(
+    parent: &Path,
+    deadline: HardDeadline,
+) -> Result<DurableOwnershipActor, DurableOwnershipError> {
+    let metadata = fs::metadata(parent).map_err(|_| DurableOwnershipError::Unavailable)?;
+    let config = JournalConfig::for_test(
+        parent,
+        metadata.mode() & 0o7777,
+        metadata.uid(),
+        metadata.gid(),
+    );
+    DurableOwnershipActor::spawn_with_executor_factory_until(
+        config,
+        || ExactTestRecoveryExecutor,
+        deadline,
+    )
+}
+
+#[cfg(test)]
+struct ExactTestRecoveryExecutor;
+
+#[cfg(test)]
+impl RecoveryExecutor for ExactTestRecoveryExecutor {
+    type Error = std::convert::Infallible;
+
+    fn confirm_absent(
+        &mut self,
+        target: &RecoveryTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedAbsentProof, Self::Error> {
+        Ok(target.confirmed_absent())
+    }
+}
 
 const LEGACY_JOURNAL_PATH: &str = "/run/volparossa/helper.ownership-v1";
 const OWNERSHIP_JOURNAL_PATH: &str = "/run/volparossa/helper.ownership-v3";
@@ -1095,6 +1140,7 @@ impl fmt::Debug for JournalConfig {
 #[derive(Clone)]
 struct NewOwnershipIntent {
     origin_runtime_id: RuntimeId,
+    ownership_id: OwnershipId,
     context_id: Id16,
     prepare_request_id: Id16,
     prepare_operation_digest: [u8; DIGEST_BYTES],
@@ -1116,6 +1162,7 @@ impl fmt::Debug for NewOwnershipIntent {
 
 fn record_matches_intent(record: &OwnershipRecord, intent: &NewOwnershipIntent) -> bool {
     record.origin_runtime_id == intent.origin_runtime_id
+        && record.ownership_id == intent.ownership_id
         && record.context_id == intent.context_id
         && record.prepare_request_id == intent.prepare_request_id
         && record.prepare_operation_digest == intent.prepare_operation_digest
@@ -1142,6 +1189,22 @@ struct InsertedOwnership {
 impl fmt::Debug for InsertedOwnership {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("InsertedOwnership(<redacted>)")
+    }
+}
+
+/// Result of durably crossing the point after which Prepare may have created resources.
+///
+/// The descriptors are projected from the exact validated ownership record before persistence,
+/// but this value is constructed only after the transition is known durable. That ordering keeps
+/// callers from observing cleanup authority for a merely in-memory candidate.
+struct MarkedMayOwnPrepare {
+    revision: u64,
+    resources: Vec<DurableWireguardResource>,
+}
+
+impl fmt::Debug for MarkedMayOwnPrepare {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MarkedMayOwnPrepare(<redacted>)")
     }
 }
 
@@ -1320,12 +1383,10 @@ impl OwnershipJournal {
         self.ensure_expected_revision(expected_revision)?;
         // A durable insert may have completed after its reply was lost. Only the complete immutable
         // intent is an idempotency key; every partial match remains a conflicting new insert.
-        if let Some(record) = self
-            .snapshot
-            .records
-            .values()
-            .find(|record| record_matches_intent(record, &intent))
-        {
+        if let Some(record) = self.snapshot.records.get(&intent.ownership_id) {
+            if !record_matches_intent(record, &intent) {
+                return Err(JournalError::InvalidRecord);
+            }
             if !record_is_exact_post_insert(record, &intent) {
                 return Err(JournalError::InvalidTransition);
             }
@@ -1348,7 +1409,7 @@ impl OwnershipJournal {
         {
             return Err(JournalError::InvalidRecord);
         }
-        let ownership_id = random_ownership_id(&self.snapshot)?;
+        let ownership_id = intent.ownership_id;
         let mut next = self.snapshot.clone();
         let generation = next.mint_generation()?;
         let record = OwnershipRecord {
@@ -1417,7 +1478,7 @@ impl OwnershipJournal {
         ownership_id: OwnershipId,
         generation: NonZeroU64,
         anchor: PrepareRecoveryAnchorV1,
-    ) -> Result<u64, JournalError> {
+    ) -> Result<MarkedMayOwnPrepare, JournalError> {
         self.ensure_expected_revision(expected_revision)?;
         let record = self
             .snapshot
@@ -1435,8 +1496,12 @@ impl OwnershipJournal {
             {
                 return Err(JournalError::InvalidTransition);
             }
+            let resources = record.durable_wireguard_resources()?;
             self.ensure_durable_matches()?;
-            return Ok(self.snapshot.revision);
+            return Ok(MarkedMayOwnPrepare {
+                revision: self.snapshot.revision,
+                resources,
+            });
         }
         let mut next = self.snapshot.clone();
         let record = next
@@ -1450,7 +1515,12 @@ impl OwnershipJournal {
             return Err(JournalError::InvalidTransition);
         }
         record.advance(OwnershipPhase::MayOwnPrepare, Some(anchor), None)?;
-        self.compare_and_swap(expected_revision, next)
+        let resources = record.durable_wireguard_resources()?;
+        let revision = self.compare_and_swap(expected_revision, next)?;
+        Ok(MarkedMayOwnPrepare {
+            revision,
+            resources,
+        })
     }
 
     fn mark_intent_absent(
@@ -1909,19 +1979,17 @@ fn random_journal_epoch_id() -> Result<JournalEpochId, JournalError> {
     Err(JournalError::Random)
 }
 
-fn random_ownership_id(snapshot: &JournalSnapshot) -> Result<OwnershipId, JournalError> {
+fn random_ownership_id() -> Result<OwnershipId, JournalError> {
     for _ in 0..16 {
         let mut bytes = [0_u8; 32];
         OsRng
             .try_fill_bytes(&mut bytes)
             .map_err(|_| JournalError::Random)?;
         if let Ok(ownership_id) = OwnershipId::new(bytes) {
-            if !snapshot.records.contains_key(&ownership_id) {
-                return Ok(ownership_id);
-            }
+            return Ok(ownership_id);
         }
     }
-    Err(JournalError::Capacity)
+    Err(JournalError::Random)
 }
 
 fn request_id_in_use(snapshot: &JournalSnapshot, request_id: Id16) -> bool {
@@ -2497,6 +2565,7 @@ mod tests {
     fn intent(context_seed: u8, request_seed: u8) -> NewOwnershipIntent {
         NewOwnershipIntent {
             origin_runtime_id: runtime(8),
+            ownership_id: ownership(context_seed.wrapping_add(32)),
             context_id: id16(context_seed),
             prepare_request_id: id16(request_seed),
             prepare_operation_digest: [0; DIGEST_BYTES],
@@ -3372,6 +3441,9 @@ mod tests {
 
         let mut conflicts = Vec::new();
         let mut changed = exact_intent.clone();
+        changed.ownership_id = ownership(99);
+        conflicts.push(changed);
+        let mut changed = exact_intent.clone();
         changed.origin_runtime_id = runtime(9);
         conflicts.push(changed);
         let mut changed = exact_intent.clone();
@@ -3414,9 +3486,15 @@ mod tests {
         let inserted = journal
             .insert_intent(0, intent(2, 3))
             .expect("durable intent");
-        journal
+        let first_projection = journal
             .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, exact_anchor)
             .expect("durable arm whose reply is discarded");
+        let first_aliases = first_projection
+            .resources
+            .iter()
+            .map(|resource| resource.ownership_alias().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(first_projection.revision, 2);
         drop(journal);
 
         let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
@@ -3436,11 +3514,18 @@ mod tests {
             fs::read(&config.journal_path).expect("bytes after stale arm retry"),
             before
         );
+        let retried = journal
+            .mark_may_own_prepare(2, inserted.ownership_id, inserted.generation, exact_anchor)
+            .expect("exact arm retry at the current revision");
+        assert_eq!(retried.revision, 2);
         assert_eq!(
-            journal
-                .mark_may_own_prepare(2, inserted.ownership_id, inserted.generation, exact_anchor,)
-                .expect("exact arm retry at the current revision"),
-            2
+            retried
+                .resources
+                .iter()
+                .map(|resource| resource.ownership_alias().to_owned())
+                .collect::<Vec<_>>(),
+            first_aliases,
+            "an exact durable retry must return the identical ordered resource projection"
         );
         assert_eq!(
             fs::read(&config.journal_path).expect("bytes after exact arm retry"),
@@ -3708,7 +3793,8 @@ mod tests {
             .expect("durable intent");
         let may_own_revision = journal
             .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
-            .expect("durable MayOwnPrepare");
+            .expect("durable MayOwnPrepare")
+            .revision;
         assert_eq!(may_own_revision, 2);
         let before_snapshot = journal.snapshot().expect("usable snapshot").clone();
         let before_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");

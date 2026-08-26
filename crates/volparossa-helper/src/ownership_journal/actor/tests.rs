@@ -169,6 +169,11 @@ fn durable_intent(seed: u8) -> DurablePrepareIntent {
         .expect("valid durable intent")
 }
 
+fn durable_registration(seed: u8) -> DurableIntentRegistration {
+    DurableIntentRegistration::try_from_wire([seed.wrapping_add(96); 32], &wire_intent(seed))
+        .expect("valid durable registration")
+}
+
 fn durable_anchor(seed: u8) -> DurablePrepareAnchor {
     let seed_u64 = u64::from(seed);
     DurablePrepareAnchor::try_from_parts(DurablePrepareAnchorParts {
@@ -229,10 +234,12 @@ fn prepopulate(
                     inserted.generation,
                     anchor.0,
                 )
-                .expect("arm setup intent");
+                .expect("arm setup intent")
+                .revision;
         }
         coordinates.push(OwnershipCoordinates {
             journal_epoch_id: epoch,
+            context_id: intent.0.context_id,
             ownership_id: inserted.ownership_id,
             generation: inserted.generation,
         });
@@ -274,11 +281,34 @@ fn expired_deadline() -> HardDeadline {
     deadline
 }
 
+type ResourceProjection = ((u8, i32), String, String, std::net::Ipv6Addr);
+
+fn project_resources(resources: &[DurableWireguardResource]) -> Vec<ResourceProjection> {
+    resources
+        .iter()
+        .map(|resource| {
+            (
+                resource.key(),
+                resource.interface().to_owned(),
+                resource.ownership_alias().to_owned(),
+                resource.local_address(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn typed_inputs_validate_complete_wire_values_and_redact_debug_output() {
     let valid = wire_intent(1);
     let typed = DurablePrepareIntent::try_from_wire([2; 32], &valid).expect("valid intent");
     assert_eq!(format!("{typed:?}"), "DurablePrepareIntent(<redacted>)");
+    let registration =
+        DurableIntentRegistration::try_from_wire([2; 32], &valid).expect("valid registration");
+    assert_eq!(registration.context_id(), [1; 16]);
+    assert_eq!(
+        format!("{registration:?}"),
+        "DurableIntentRegistration(<redacted>)"
+    );
 
     assert_eq!(
         DurablePrepareIntent::try_from_wire([0; 32], &valid).unwrap_err(),
@@ -324,6 +354,178 @@ fn typed_inputs_validate_complete_wire_values_and_redact_debug_output() {
         format!("{:?}", durable_anchor(3)),
         "DurablePrepareAnchor(<redacted>)"
     );
+}
+
+#[test]
+fn affine_registration_retains_the_only_owner_and_rejects_an_independent_reparse() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let actor =
+        spawn_actor(config.clone(), ExecutorMode::Exact, &observations, None).expect("start actor");
+
+    let wire = wire_intent(31);
+    let first = DurableIntentRegistration::try_from_wire([127; 32], &wire)
+        .expect("first registration owner");
+    let second = DurableIntentRegistration::try_from_wire([127; 32], &wire)
+        .expect("independent registration owner");
+    assert_ne!(
+        first.0.0.ownership_id, second.0.0.ownership_id,
+        "independent parsing must mint a distinct durable issuance identity"
+    );
+
+    let first = match actor.register_until(first, expired_deadline()) {
+        DurableRegistrationOutcome::Retained {
+            error: DurableOwnershipError::DeadlineElapsed,
+            registration,
+        } => registration,
+        outcome => panic!("expired registration did not retain its owner: {outcome:?}"),
+    };
+    assert!(!config.journal_path.exists());
+
+    let key = match actor.register_until(
+        first,
+        HardDeadline::after(TEST_WAIT).expect("registration deadline"),
+    ) {
+        DurableRegistrationOutcome::Registered(key) => key,
+        outcome @ DurableRegistrationOutcome::Retained { .. } => {
+            panic!("retained registration retry did not succeed: {outcome:?}")
+        }
+    };
+    assert_eq!(key.coordinates.context_id.0, [31; 16]);
+    let before = fs::read(&config.journal_path).expect("durable registration bytes");
+    let revision = JournalSnapshot::decode(&before)
+        .expect("decode durable registration")
+        .revision;
+
+    let rejected = match actor.register_until(
+        second,
+        HardDeadline::after(TEST_WAIT).expect("duplicate deadline"),
+    ) {
+        DurableRegistrationOutcome::Retained {
+            error: DurableOwnershipError::Rejected,
+            registration,
+        } => registration,
+        outcome => panic!("independent duplicate was not retained and rejected: {outcome:?}"),
+    };
+    assert_eq!(rejected.context_id(), [31; 16]);
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes after rejected duplicate"),
+        before
+    );
+    assert_eq!(
+        JournalSnapshot::decode(
+            &fs::read(&config.journal_path).expect("bytes after rejected duplicate")
+        )
+        .expect("decode bytes after rejected duplicate")
+        .revision,
+        revision
+    );
+
+    actor
+        .retire_never_dispatched(&key)
+        .expect("retire registered fixture");
+    actor.shutdown().expect("clean actor shutdown");
+}
+
+#[test]
+fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identically() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let actor =
+        spawn_actor(config.clone(), ExecutorMode::Exact, &observations, None).expect("start actor");
+    let key = match actor.register_until(
+        durable_registration(28),
+        HardDeadline::after(TEST_WAIT).expect("registration deadline"),
+    ) {
+        DurableRegistrationOutcome::Registered(key) => key,
+        outcome @ DurableRegistrationOutcome::Retained { .. } => {
+            panic!("registration failed: {outcome:?}")
+        }
+    };
+    let original = key.coordinates;
+
+    let counterfeit = DurableOwnershipKey {
+        coordinates: OwnershipCoordinates {
+            context_id: Id16::new([99; 16]).expect("different context"),
+            ..original
+        },
+    };
+    let retained_counterfeit = match actor.arm_until(
+        counterfeit,
+        durable_anchor(28),
+        HardDeadline::after(TEST_WAIT).expect("counterfeit deadline"),
+    ) {
+        DurableArmOutcome::Retained {
+            error: DurableOwnershipError::Rejected,
+            key,
+        } => key,
+        outcome => panic!("context substitution was not retained and rejected: {outcome:?}"),
+    };
+    assert_eq!(retained_counterfeit.coordinates.context_id.0, [99; 16]);
+
+    let before = fs::read(&config.journal_path).expect("durable Intent bytes");
+    let key = match actor.arm_until(key, durable_anchor(28), expired_deadline()) {
+        DurableArmOutcome::Retained {
+            error: DurableOwnershipError::DeadlineElapsed,
+            key,
+        } => key,
+        outcome => panic!("pre-acceptance arm did not retain the key: {outcome:?}"),
+    };
+    assert!(key.coordinates == original);
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes after expired arm"),
+        before
+    );
+    assert_eq!(
+        JournalSnapshot::decode(
+            &fs::read(&config.journal_path).expect("bytes after retained expired arm")
+        )
+        .expect("decode retained expired arm")
+        .records
+        .get(&original.ownership_id)
+        .expect("registered record")
+        .phase,
+        OwnershipPhase::Intent,
+        "no MayOwn token may exist before a durable phase transition"
+    );
+
+    let may_own = match actor.arm_until(
+        key,
+        durable_anchor(28),
+        HardDeadline::after(TEST_WAIT).expect("arm deadline"),
+    ) {
+        DurableArmOutcome::Armed(may_own) => may_own,
+        outcome @ DurableArmOutcome::Retained { .. } => {
+            panic!("durable arm failed: {outcome:?}")
+        }
+    };
+    assert_eq!(may_own.context_id(), [28; 16]);
+    assert_eq!(format!("{may_own:?}"), "DurableMayOwnPrepare(<redacted>)");
+    assert_eq!(may_own.resources().len(), 1);
+    assert_eq!(may_own.resources()[0].key(), (1, WireRole::Client as i32));
+    let first_projection = project_resources(may_own.resources());
+    let armed_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");
+
+    let retried = actor
+        .client
+        .as_ref()
+        .expect("actor client")
+        .arm_pending(may_own.key.coordinates, durable_anchor(28))
+        .expect("admit exact raw test retry")
+        .wait()
+        .expect("exact durable retry");
+    assert_eq!(project_resources(&retried), first_projection);
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes after exact arm retry"),
+        armed_bytes
+    );
+
+    actor
+        .confirm_recovered_absent(&may_own.key)
+        .expect("recover armed fixture");
+    actor.shutdown().expect("clean actor shutdown");
 }
 
 #[test]
@@ -866,6 +1068,12 @@ fn interposed_transitions_and_wrong_keys_reject_without_changing_durable_bytes()
         },
         DurableOwnershipKey {
             coordinates: OwnershipCoordinates {
+                context_id: Id16::new([97; 16]).expect("different context"),
+                ..original
+            },
+        },
+        DurableOwnershipKey {
+            coordinates: OwnershipCoordinates {
                 ownership_id: OwnershipId::new([98; 32]).expect("different ownership"),
                 ..original
             },
@@ -891,6 +1099,10 @@ fn interposed_transitions_and_wrong_keys_reject_without_changing_durable_bytes()
     );
     assert_eq!(
         actor.confirm_recovered_absent(&wrong_keys[2]).unwrap_err(),
+        DurableOwnershipError::Rejected
+    );
+    assert_eq!(
+        actor.confirm_recovered_absent(&wrong_keys[3]).unwrap_err(),
         DurableOwnershipError::Rejected
     );
     assert_eq!(
@@ -1616,11 +1828,13 @@ fn definite_io_requires_health_confirmation_and_lifecycle_terminals_are_absorbin
 }
 
 #[test]
-fn actor_api_stays_private_bounded_synchronous_and_disconnected_from_production() {
+fn affine_actor_api_is_bounded_redacted_and_disconnected_from_production() {
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send::<DurableOwnershipActor>();
+    assert_send::<DurableIntentRegistration>();
     assert_send_sync::<DurableOwnershipKey>();
+    assert_send_sync::<DurableMayOwnPrepare>();
     let _: fn(
         &DurableOwnershipActor,
         &DurableOwnershipKey,
@@ -1630,16 +1844,15 @@ fn actor_api_stays_private_bounded_synchronous_and_disconnected_from_production(
         DurableOwnershipActor::retire_never_dispatched;
     let _: fn(
         &DurableOwnershipActor,
-        DurablePrepareIntent,
+        DurableIntentRegistration,
         HardDeadline,
-    ) -> Result<DurableOwnershipKey, DurableOwnershipError> =
-        DurableOwnershipActor::register_intent_until;
+    ) -> DurableRegistrationOutcome = DurableOwnershipActor::register_until;
     let _: fn(
         &DurableOwnershipActor,
-        &DurableOwnershipKey,
+        DurableOwnershipKey,
         DurablePrepareAnchor,
         HardDeadline,
-    ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::arm_prepare_until;
+    ) -> DurableArmOutcome = DurableOwnershipActor::arm_until;
     let _: fn(
         &DurableOwnershipActor,
         &DurableOwnershipKey,
@@ -1655,14 +1868,18 @@ fn actor_api_stays_private_bounded_synchronous_and_disconnected_from_production(
 
     let actor_source = include_str!("../actor.rs");
     let library_source = include_str!("../../lib.rs");
+    let main_source = include_str!("../../main.rs");
+    let server_source = include_str!("../../server.rs");
     assert!(actor_source.contains("sync_channel(COMMAND_CHANNEL_CAPACITY)"));
     assert!(actor_source.contains("recv_timeout(remaining)"));
     assert!(actor_source.contains("HardDeadline"));
     assert!(actor_source.contains("spawn_with_executor_factory_until"));
     for test_only_wrapper in [
         "#[cfg(test)]\n    pub(super) fn spawn_with_executor_factory",
-        "#[cfg(test)]\n    pub(super) fn register_intent(",
-        "#[cfg(test)]\n    pub(super) fn arm_prepare(",
+        "#[cfg(test)]\n    fn register_intent(",
+        "#[cfg(test)]\n    fn register_intent_until(",
+        "#[cfg(test)]\n    fn arm_prepare(",
+        "#[cfg(test)]\n    fn arm_prepare_until(",
         "#[cfg(test)]\n    pub(super) fn retire_never_dispatched(",
         "#[cfg(test)]\n    pub(super) fn confirm_recovered_absent(",
         "#[cfg(test)]\n    pub(super) fn shutdown(",
@@ -1679,18 +1896,69 @@ fn actor_api_stays_private_bounded_synchronous_and_disconnected_from_production(
     assert!(!actor_source.contains("pub struct "));
     assert!(!actor_source.contains("pub enum "));
     assert!(!actor_source.contains("expected_revision"));
-    assert!(!library_source.contains("DurableOwnershipActor"));
+    assert!(!actor_source.contains("pub(crate) fn register("));
+    assert!(!actor_source.contains("pub(crate) fn arm("));
+    assert!(actor_source.contains("pub(crate) fn register_until("));
+    assert!(actor_source.contains("pub(crate) fn arm_until("));
+    assert!(actor_source.contains("fn register_pending_until("));
+    assert!(actor_source.contains("fn arm_pending_until("));
 
-    let key_declaration = actor_source
-        .split("pub(super) struct DurableOwnershipKey")
+    for (name, source) in [
+        ("lib", library_source),
+        ("main", main_source),
+        ("server", server_source),
+    ] {
+        for affine_api in [
+            "DurableIntentRegistration",
+            "DurableOwnershipActor",
+            "DurableMayOwnPrepare",
+            "DurableRegistrationOutcome",
+            "DurableArmOutcome",
+        ] {
+            assert!(
+                !source.contains(affine_api),
+                "dormant affine API unexpectedly has a production caller in {name}: {affine_api}"
+            );
+        }
+    }
+}
+
+#[test]
+fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
+    let actor_source = include_str!("../actor.rs");
+    for declaration in [
+        "pub(crate) struct DurableIntentRegistration",
+        "pub(crate) struct DurableOwnershipKey",
+        "pub(crate) struct DurableMayOwnPrepare",
+    ] {
+        let attributes = actor_source
+            .split(declaration)
+            .next()
+            .expect("declaration prefix")
+            .rsplit("\n\n")
+            .next()
+            .expect("direct declaration attributes");
+        assert!(
+            attributes.contains("#[must_use"),
+            "missing must_use: {declaration}"
+        );
+        let derives = attributes
+            .lines()
+            .filter(|line| line.trim_start().starts_with("#[derive("))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!derives.contains("Clone"), "Clone authority: {declaration}");
+        assert!(!derives.contains("Copy"), "Copy authority: {declaration}");
+    }
+
+    let may_own_surface = actor_source
+        .split("impl DurableMayOwnPrepare {")
+        .nth(1)
+        .expect("MayOwn implementation")
+        .split("impl fmt::Debug for DurableMayOwnPrepare")
         .next()
-        .expect("key declaration prefix")
-        .rsplit("#[derive(")
-        .next()
-        .expect("key derive")
-        .split(')')
-        .next()
-        .expect("key derive contents");
-    assert!(!key_declaration.contains("Clone"));
-    assert!(!key_declaration.contains("Copy"));
+        .expect("bounded MayOwn implementation");
+    assert_eq!(may_own_surface.matches("pub(crate)").count(), 2);
+    assert!(may_own_surface.contains("context_id(&self)"));
+    assert!(may_own_surface.contains("resources(&self) -> &[DurableWireguardResource]"));
 }
