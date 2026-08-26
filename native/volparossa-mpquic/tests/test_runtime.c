@@ -33,6 +33,8 @@ typedef struct mock_transport {
     uint8_t receive_packet[64];
     size_t receive_packet_len;
     bool ready;
+    bool has_assignment;
+    vmp_tunnel_assignment_t assignment;
     bool pump_fails;
     vmp_transport_path_snapshot_t paths[VMP_MAX_PATHS];
     size_t path_count;
@@ -44,6 +46,12 @@ typedef struct mock_clock {
 
 static const uint8_t TEST_SECRET[VMP_AUTH_SECRET_LEN] =
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+static const uint8_t TEST_AUTH_COMMITMENT[VMP_AUTH_COMMITMENT_LEN] = {
+    0x2bU, 0x80U, 0x72U, 0x70U, 0xdbU, 0xd6U, 0x15U, 0x73U,
+    0xccU, 0x59U, 0x14U, 0x25U, 0x11U, 0x62U, 0x1eU, 0xd6U,
+    0xf3U, 0xc3U, 0x3dU, 0xd1U, 0x40U, 0x77U, 0x4cU, 0xc2U,
+    0x4aU, 0x04U, 0x12U, 0x71U, 0xc6U, 0x31U, 0x08U, 0x85U,
+};
 static const uint8_t TEST_TLS_SERVER_NAME[] = "exit.example";
 static const uint8_t TEST_TLS_CERTIFICATE[] =
     "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
@@ -51,11 +59,28 @@ static const uint8_t TEST_TLS_PRIVATE_KEY[] =
     "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
 #define TEST_NOW_MS UINT64_C(1000000)
 #define TEST_EXPIRY_MS (TEST_NOW_MS + UINT64_C(60000))
+static const uint8_t TEST_INSTANCE[VMP_NATIVE_INSTANCE_ID_LEN] = {
+    0x91U,
+};
+
+static void set_target(vmp_request_t *request)
+{
+    memcpy(request->target_native_instance_id, TEST_INSTANCE,
+           VMP_NATIVE_INSTANCE_ID_LEN);
+}
 
 static void init_mock(mock_transport_t *mock)
 {
     memset(mock, 0, sizeof(*mock));
     mock->receive_result = VMP_TRANSPORT_EMPTY;
+    mock->has_assignment = true;
+    mock->assignment.assigned_ipv4[0] = 10U;
+    mock->assignment.assigned_ipv4[3] = 2U;
+    mock->assignment.assigned_prefix_v4 = 32U;
+    mock->assignment.server_ipv4[0] = 10U;
+    mock->assignment.server_ipv4[3] = 1U;
+    mock->assignment.server_prefix_v4 = 32U;
+    mock->assignment.mtu = 1280U;
 }
 
 static vmp_transport_error_t mock_create(
@@ -135,13 +160,16 @@ static vmp_transport_error_t mock_pump(void *session)
 
 static vmp_transport_error_t mock_snapshot(
     void *session, vmp_transport_path_snapshot_t *out, size_t capacity,
-    size_t *out_count, bool *out_tunnel_ready)
+    size_t *out_count, bool *out_tunnel_ready, bool *out_has_assignment,
+    vmp_tunnel_assignment_t *out_assignment)
 {
     mock_transport_t *mock = session;
     if (capacity < mock->path_count) return VMP_TRANSPORT_RESOURCE;
     memcpy(out, mock->paths, mock->path_count * sizeof(*out));
     *out_count = mock->path_count;
     *out_tunnel_ready = mock->ready;
+    *out_has_assignment = mock->has_assignment;
+    *out_assignment = mock->assignment;
     return VMP_TRANSPORT_OK;
 }
 
@@ -198,11 +226,27 @@ static uint64_t mock_now_ms(void *context)
     return clock->now_ms;
 }
 
+static bool mock_auth_commitment(
+    void *context, const uint8_t *auth_secret, size_t auth_secret_len,
+    uint8_t out[VMP_AUTH_COMMITMENT_LEN])
+{
+    (void)context;
+    if (auth_secret == NULL || out == NULL ||
+        auth_secret_len != sizeof(TEST_SECRET) ||
+        memcmp(auth_secret, TEST_SECRET, sizeof(TEST_SECRET)) != 0) {
+        return false;
+    }
+    memcpy(out, TEST_AUTH_COMMITMENT, sizeof(TEST_AUTH_COMMITMENT));
+    return true;
+}
+
 static vmp_runtime_t *create_runtime(vmp_runtime_mode_t mode,
                                      mock_transport_t *mock,
                                      mock_clock_t *clock)
 {
-    return vmp_runtime_create(mode, &MOCK_OPS, mock, mock_now_ms, clock);
+    return vmp_runtime_create(mode, TEST_INSTANCE, &MOCK_OPS, mock,
+                              mock_auth_commitment, NULL, mock_now_ms,
+                              clock);
 }
 
 static vmp_request_t start_request(uint8_t context_byte, uint64_t masque,
@@ -212,6 +256,7 @@ static vmp_request_t start_request(uint8_t context_byte, uint64_t masque,
     vmp_request_t request;
     memset(&request, 0, sizeof(request));
     request.api_version = VMP_API_VERSION;
+    set_target(&request);
     request.operation = VMP_OPERATION_START_SESSION;
     memset(request.body.start_session.route_context_id, context_byte,
            VMP_CONTEXT_ID_LEN);
@@ -226,6 +271,18 @@ static vmp_request_t start_request(uint8_t context_byte, uint64_t masque,
     request.body.start_session.tls_server_name.len =
         sizeof(TEST_TLS_SERVER_NAME) - 1U;
     request.body.start_session.expires_at_ms = TEST_EXPIRY_MS;
+    memset(request.body.start_session.reservation_id, 0x31,
+           VMP_RESERVATION_ID_LEN);
+    memset(request.body.start_session.finalize_id, 0x32,
+           VMP_FINALIZE_ID_LEN);
+    memcpy(request.body.start_session.auth_commitment,
+           TEST_AUTH_COMMITMENT, VMP_AUTH_COMMITMENT_LEN);
+    memset(request.body.start_session.certificate_sha256, 0x34,
+           VMP_CERTIFICATE_SHA256_LEN);
+    memcpy(request.body.start_session.client_native_instance_id,
+           TEST_INSTANCE, VMP_NATIVE_INSTANCE_ID_LEN);
+    memset(request.body.start_session.exit_native_instance_id, 0x35,
+           VMP_NATIVE_INSTANCE_ID_LEN);
     return request;
 }
 
@@ -236,6 +293,7 @@ static vmp_request_t start_exit_request(
     vmp_request_t request;
     memset(&request, 0, sizeof(request));
     request.api_version = VMP_API_VERSION;
+    set_target(&request);
     request.operation = VMP_OPERATION_START_EXIT_SESSION;
     memset(request.body.start_exit_session.route_context_id, context_byte,
            VMP_CONTEXT_ID_LEN);
@@ -279,6 +337,18 @@ static vmp_request_t start_exit_request(
         TEST_TLS_PRIVATE_KEY;
     request.body.start_exit_session.tls_private_key_pem.len =
         sizeof(TEST_TLS_PRIVATE_KEY) - 1U;
+    memset(request.body.start_exit_session.reservation_id, 0x41,
+           VMP_RESERVATION_ID_LEN);
+    memset(request.body.start_exit_session.finalize_id, 0x42,
+           VMP_FINALIZE_ID_LEN);
+    memcpy(request.body.start_exit_session.auth_commitment,
+           TEST_AUTH_COMMITMENT, VMP_AUTH_COMMITMENT_LEN);
+    memset(request.body.start_exit_session.certificate_sha256, 0x44,
+           VMP_CERTIFICATE_SHA256_LEN);
+    memset(request.body.start_exit_session.client_native_instance_id, 0x45,
+           VMP_NATIVE_INSTANCE_ID_LEN);
+    memcpy(request.body.start_exit_session.exit_native_instance_id,
+           TEST_INSTANCE, VMP_NATIVE_INSTANCE_ID_LEN);
     return request;
 }
 
@@ -291,6 +361,7 @@ static vmp_request_t add_request(uint8_t context_byte, uint32_t path_id,
     vmp_request_t request;
     memset(&request, 0, sizeof(request));
     request.api_version = VMP_API_VERSION;
+    set_target(&request);
     request.operation = VMP_OPERATION_ADD_PATH;
     vmp_add_path_t *path = &request.body.add_path;
     memset(path->route_context_id, context_byte, VMP_CONTEXT_ID_LEN);
@@ -351,6 +422,10 @@ static vmp_response_t dispatch_with_fd(vmp_runtime_t *runtime,
     }
     assert(response.diagnostic_code != NULL);
     assert(response.diagnostic_code_len <= VMP_MAX_DIAGNOSTIC_CODE);
+    assert(response.native_process_identity.role == VMP_NATIVE_ROLE_CLIENT ||
+           response.native_process_identity.role == VMP_NATIVE_ROLE_EXIT);
+    assert(memcmp(response.native_process_identity.native_instance_id,
+                  TEST_INSTANCE, VMP_NATIVE_INSTANCE_ID_LEN) == 0);
     return response;
 }
 
@@ -375,6 +450,7 @@ static vmp_request_t context_request(vmp_operation_t operation,
     vmp_request_t request;
     memset(&request, 0, sizeof(request));
     request.api_version = VMP_API_VERSION;
+    set_target(&request);
     request.operation = operation;
     if (operation == VMP_OPERATION_GET_STATUS) {
         memset(request.body.get_status.route_context_id, context_byte,
@@ -393,6 +469,7 @@ static vmp_request_t send_request(uint8_t context_byte,
     vmp_request_t request;
     memset(&request, 0, sizeof(request));
     request.api_version = VMP_API_VERSION;
+    set_target(&request);
     request.operation = VMP_OPERATION_SEND_DATAGRAM;
     memset(request.body.send_datagram.route_context_id, context_byte,
            VMP_CONTEXT_ID_LEN);
@@ -408,11 +485,122 @@ static vmp_request_t receive_request(uint8_t context_byte,
     vmp_request_t request;
     memset(&request, 0, sizeof(request));
     request.api_version = VMP_API_VERSION;
+    set_target(&request);
     request.operation = VMP_OPERATION_RECEIVE_DATAGRAM;
     memset(request.body.receive_datagram.route_context_id, context_byte,
            VMP_CONTEXT_ID_LEN);
     request.body.receive_datagram.masque_context_id = masque_context_id;
     return request;
+}
+
+static vmp_request_t preflight_request(vmp_native_role_t expected_role)
+{
+    vmp_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.api_version = VMP_API_VERSION;
+    request.operation = VMP_OPERATION_PREFLIGHT;
+    request.body.preflight.expected_role = expected_role;
+    return request;
+}
+
+static void test_process_instance_preflight_and_restart_rejection(void)
+{
+    mock_transport_t mock;
+    init_mock(&mock);
+    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    vmp_runtime_t *client =
+        create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    vmp_runtime_t *exit = create_runtime(VMP_RUNTIME_EXIT, &mock, &clock);
+    assert(client != NULL && exit != NULL);
+
+    vmp_request_t preflight = preflight_request(VMP_NATIVE_ROLE_CLIENT);
+    vmp_response_t response = dispatch(client, &preflight);
+    assert(response.result == VMP_RESULT_OK);
+    assert(response.native_process_identity.role == VMP_NATIVE_ROLE_CLIENT);
+    response = dispatch(exit, &preflight);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(strcmp(response.diagnostic_code, "role_mismatch") == 0);
+    assert(response.native_process_identity.role == VMP_NATIVE_ROLE_EXIT);
+
+    preflight = preflight_request(VMP_NATIVE_ROLE_EXIT);
+    set_target(&preflight);
+    response = dispatch(exit, &preflight);
+    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(strcmp(response.diagnostic_code, "preflight_target") == 0);
+
+    vmp_request_t status =
+        context_request(VMP_OPERATION_GET_STATUS, 0x11U);
+    status.target_native_instance_id[0] ^= 1U;
+    response = dispatch(client, &status);
+    assert(response.result == VMP_RESULT_STALE_INSTANCE);
+    assert(strcmp(response.diagnostic_code, "stale_instance") == 0);
+
+    vmp_request_t start = start_request(
+        0x11U, 7U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    start.body.start_session.client_native_instance_id[0] ^= 1U;
+    response = dispatch(client, &start);
+    assert(response.result == VMP_RESULT_STALE_INSTANCE);
+    assert(strcmp(response.diagnostic_code,
+                  "signed_instance_mismatch") == 0);
+
+    start = start_request(
+        0x12U, 8U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    start.body.start_session.auth_commitment[0] ^= 1U;
+    response = dispatch(client, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code,
+                  "auth_commitment_mismatch") == 0);
+
+    vmp_request_t start_exit = start_exit_request(
+        0x13U, 9U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    start_exit.body.start_exit_session.auth_commitment[0] ^= 1U;
+    response = dispatch(exit, &start_exit);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code,
+                  "auth_commitment_mismatch") == 0);
+
+    start_exit = start_exit_request(
+        0x14U, 10U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    start_exit.body.start_exit_session.exit_native_instance_id[0] ^= 1U;
+    response = dispatch(exit, &start_exit);
+    assert(response.result == VMP_RESULT_STALE_INSTANCE);
+    assert(strcmp(response.diagnostic_code,
+                  "signed_instance_mismatch") == 0);
+
+    vmp_request_t add = add_request(0x11U, 1U, 1U);
+    add.target_native_instance_id[0] ^= 1U;
+    response = dispatch(client, &add);
+    assert(response.result == VMP_RESULT_STALE_INSTANCE);
+
+    const uint8_t zero_instance[VMP_NATIVE_INSTANCE_ID_LEN] = {0};
+    assert(vmp_runtime_create(VMP_RUNTIME_CLIENT, zero_instance, &MOCK_OPS,
+                              &mock, mock_auth_commitment, NULL,
+                              mock_now_ms, &clock) == NULL);
+    vmp_runtime_destroy(exit);
+    vmp_runtime_destroy(client);
+}
+
+static void test_ready_transport_without_assignment_fails_closed(void)
+{
+    mock_transport_t mock;
+    init_mock(&mock);
+    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    vmp_runtime_t *runtime =
+        create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    vmp_request_t start = start_request(
+        0x21U, 8U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    vmp_request_t add = add_request(0x21U, 1U, 2U);
+    assert(dispatch(runtime, &add).result == VMP_RESULT_OK);
+    mock.paths[0].state = VMP_TRANSPORT_PATH_ACTIVE;
+    mock.ready = true;
+    mock.has_assignment = false;
+    vmp_response_t response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_TRANSPORT);
+    assert(!response.has_tunnel_assignment);
+    vmp_runtime_destroy(runtime);
 }
 
 static void test_required_multipath_and_honest_failures(void)
@@ -484,6 +672,7 @@ static void test_required_multipath_and_honest_failures(void)
     vmp_request_t remove;
     memset(&remove, 0, sizeof(remove));
     remove.api_version = VMP_API_VERSION;
+    set_target(&remove);
     remove.operation = VMP_OPERATION_REMOVE_PATH;
     memset(remove.body.remove_path.route_context_id, 0x11,
            VMP_CONTEXT_ID_LEN);
@@ -510,8 +699,9 @@ static void test_explicit_modes_and_contexts(void)
     mock_transport_t mock;
     init_mock(&mock);
     mock_clock_t clock = {.now_ms = TEST_NOW_MS};
-    assert(vmp_runtime_create(VMP_RUNTIME_CLIENT, &MOCK_OPS, &mock,
-                              NULL, &clock) == NULL);
+    assert(vmp_runtime_create(VMP_RUNTIME_CLIENT, TEST_INSTANCE, &MOCK_OPS,
+                              &mock, mock_auth_commitment, NULL, NULL,
+                              &clock) == NULL);
 
     vmp_runtime_t *client =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
@@ -770,9 +960,9 @@ static void test_session_credentials_versions_and_expiry(void)
     changed.body.start_session.auth_secret.data = other_secret;
     changed.body.start_session.auth_secret.len = sizeof(other_secret);
     response = dispatch(runtime, &changed);
-    assert(response.result == VMP_RESULT_INVALID_REQUEST);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
     assert(strcmp(response.diagnostic_code,
-                  "session_parameters_changed") == 0);
+                  "auth_commitment_mismatch") == 0);
 
     memset(auth_secret, 0xa5, sizeof(auth_secret));
     memset(tls_server_name, 0x5a, sizeof(tls_server_name));
@@ -830,6 +1020,8 @@ static void test_pump_failure_is_session_scoped(void)
 
 int main(void)
 {
+    test_process_instance_preflight_and_restart_rejection();
+    test_ready_transport_without_assignment_fails_closed();
     test_required_multipath_and_honest_failures();
     test_explicit_modes_and_contexts();
     test_reverse_receive_and_overflow();

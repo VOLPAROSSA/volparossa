@@ -75,7 +75,9 @@ typedef struct vmp_transport_ops {
     vmp_transport_error_t (*pump)(void *session);
     vmp_transport_error_t (*snapshot)(
         void *session, vmp_transport_path_snapshot_t *out, size_t capacity,
-        size_t *out_count, bool *out_tunnel_ready);
+        size_t *out_count, bool *out_tunnel_ready,
+        bool *out_has_assignment,
+        vmp_tunnel_assignment_t *out_assignment);
     vmp_transport_error_t (*send_inner)(
         void *session, uint64_t masque_context_id, const uint8_t *packet,
         size_t packet_len);
@@ -87,13 +89,20 @@ typedef struct vmp_transport_ops {
 typedef struct vmp_runtime vmp_runtime_t;
 
 typedef uint64_t (*vmp_now_ms_fn)(void *context);
+typedef bool (*vmp_auth_commitment_fn)(
+    void *context, const uint8_t *auth_secret, size_t auth_secret_len,
+    uint8_t out[VMP_AUTH_COMMITMENT_LEN]);
 
 /* Creates an empty role-specific runtime. Authentication and TLS names arrive
  * only in bounded START requests and are copied into their exact route session.
  * The injected clock is required for short-lived authorization expiry. */
 vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
+                                  const uint8_t native_instance_id
+                                      [VMP_NATIVE_INSTANCE_ID_LEN],
                                   const vmp_transport_ops_t *transport,
                                   void *factory_context,
+                                  vmp_auth_commitment_fn auth_commitment,
+                                  void *auth_commitment_context,
                                   vmp_now_ms_fn now_ms,
                                   void *clock_context);
 

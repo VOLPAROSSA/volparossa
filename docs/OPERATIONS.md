@@ -143,16 +143,21 @@ Candidate units are installed as:
   non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity
   credential;
 - `volparossa-mpquic.service`: candidate unprivileged isolation only. It is not runnable yet.
-  API v5 accepts exact 43-character base64url client auth and TLS names only in bounded, expiring
-  route-session messages; this check proves syntax and length, not generator entropy.
+  API v6 preflights one client or exit role/process lifetime, targets that instance thereafter, and
+  correlates every response to the exact canonical request. It accepts exact 43-character
+  base64url client auth and TLS names only in bounded, signed-scope route-session messages; the
+  native commitment check proves bearer equality, not generator entropy or binary attestation.
   `AddPath` consumes exactly one request-bound UDP descriptor and native never creates or binds a
-  path socket, but the agent does not yet orchestrate separate role processes/control sockets and
-  production helper acquisition does not yet provide independently authenticated descriptor
-  provenance. `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and
-  consumes exactly one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags
-  are checked by Rust and native. Neither layer proves assigned-address state, network namespace,
-  signed reservation provenance, or replay freshness. The dormant exit runtime closes the descriptor
-  and fails closed because no reviewed exit backend exists. This blocks service enablement and package release;
+  path socket, but the agent does not yet call this API and production helper acquisition does not
+  provide independently authenticated descriptor provenance. The package also has only one
+  same-UID native unit/socket; separate client/exit service identities and role sockets remain
+  required before an untrusted agent can use this as an authenticated boundary.
+  `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and consumes exactly
+  one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags are checked by
+  Rust and native. Those descriptor checks do not prove assigned-address or network-namespace
+  state, and native does not independently verify the reservation signature or replay freshness.
+  The dormant exit runtime closes the descriptor and fails closed because no reviewed exit backend
+  exists. This blocks service enablement and package release;
   the unit must not be treated as operational.
 
 Review `systemd-analyze verify`, `systemd-analyze security`, and functional tests in an installed

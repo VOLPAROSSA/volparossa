@@ -107,6 +107,11 @@ static bool all_zero(const uint8_t *bytes, size_t len)
     return combined == 0;
 }
 
+static uint16_t read_be16(const uint8_t bytes[2])
+{
+    return (uint16_t)(((uint16_t)bytes[0] << 8U) | (uint16_t)bytes[1]);
+}
+
 static bool ascii_alphanumeric(uint8_t value)
 {
     return (value >= (uint8_t)'A' && value <= (uint8_t)'Z') ||
@@ -199,12 +204,9 @@ bool vmp_add_path_is_valid(const vmp_add_path_t *path)
         memcmp(path->local_ip, path->remote_ip, 14U) != 0) {
         return false;
     }
-    const uint16_t embedded_path =
-        ((uint16_t)path->local_ip[10] << 8U) | path->local_ip[11];
-    const uint16_t local_host =
-        ((uint16_t)path->local_ip[14] << 8U) | path->local_ip[15];
-    const uint16_t remote_host =
-        ((uint16_t)path->remote_ip[14] << 8U) | path->remote_ip[15];
+    const uint16_t embedded_path = read_be16(&path->local_ip[10]);
+    const uint16_t local_host = read_be16(&path->local_ip[14]);
+    const uint16_t remote_host = read_be16(&path->remote_ip[14]);
     return embedded_path == path->path_id && local_host == UINT16_C(1) &&
            remote_host == UINT16_C(4);
 }
@@ -226,6 +228,15 @@ bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start)
         start->path_id == 0U || start->path_id > VMP_MAX_PATHS ||
         start->listener_port == 0U || start->expected_client_port == 0U ||
         all_zero(start->reservation_hash, VMP_RESERVATION_HASH_LEN) ||
+        all_zero(start->reservation_id, VMP_RESERVATION_ID_LEN) ||
+        all_zero(start->finalize_id, VMP_FINALIZE_ID_LEN) ||
+        all_zero(start->auth_commitment, VMP_AUTH_COMMITMENT_LEN) ||
+        all_zero(start->certificate_sha256,
+                 VMP_CERTIFICATE_SHA256_LEN) ||
+        all_zero(start->client_native_instance_id,
+                 VMP_NATIVE_INSTANCE_ID_LEN) ||
+        all_zero(start->exit_native_instance_id,
+                 VMP_NATIVE_INSTANCE_ID_LEN) ||
         !valid_pem(start->tls_certificate_pem,
                    VMP_MAX_TLS_CERTIFICATE_PEM) ||
         !valid_pem(start->tls_private_key_pem,
@@ -237,15 +248,38 @@ bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start)
         memcmp(start->listener_ip, start->expected_client_ip, 14U) != 0) {
         return false;
     }
-    const uint16_t embedded_path =
-        ((uint16_t)start->listener_ip[10] << 8U) | start->listener_ip[11];
-    const uint16_t listener_host =
-        ((uint16_t)start->listener_ip[14] << 8U) | start->listener_ip[15];
+    const uint16_t embedded_path = read_be16(&start->listener_ip[10]);
+    const uint16_t listener_host = read_be16(&start->listener_ip[14]);
     const uint16_t expected_client_host =
-        ((uint16_t)start->expected_client_ip[14] << 8U) |
-        start->expected_client_ip[15];
+        read_be16(&start->expected_client_ip[14]);
     return embedded_path == start->path_id && listener_host == UINT16_C(4) &&
            expected_client_host == UINT16_C(1);
+}
+
+bool vmp_tunnel_assignment_is_valid(
+    const vmp_tunnel_assignment_t *assignment)
+{
+    if (assignment == NULL ||
+        all_zero(assignment->assigned_ipv4,
+                 sizeof(assignment->assigned_ipv4)) ||
+        all_zero(assignment->server_ipv4,
+                 sizeof(assignment->server_ipv4)) ||
+        memcmp(assignment->assigned_ipv4, assignment->server_ipv4,
+               sizeof(assignment->assigned_ipv4)) == 0 ||
+        assignment->assigned_prefix_v4 != 32U ||
+        assignment->server_prefix_v4 != 32U || assignment->mtu < 1280U ||
+        assignment->mtu > 9000U) {
+        return false;
+    }
+    if (!assignment->has_ipv6) {
+        return assignment->assigned_prefix_v6 == 0U &&
+               all_zero(assignment->assigned_ipv6,
+                        sizeof(assignment->assigned_ipv6));
+    }
+    return !all_zero(assignment->assigned_ipv6,
+                     sizeof(assignment->assigned_ipv6)) &&
+           assignment->assigned_prefix_v6 >= 96U &&
+           assignment->assigned_prefix_v6 <= 126U;
 }
 
 static vmp_protocol_error_t parse_context_only(decoder_t decoder,
@@ -282,20 +316,22 @@ static vmp_protocol_error_t parse_context_only(decoder_t decoder,
     return VMP_PROTOCOL_OK;
 }
 
-static vmp_protocol_error_t parse_start(decoder_t decoder, vmp_start_session_t *out)
+static vmp_protocol_error_t parse_start(decoder_t decoder,
+                                        vmp_start_session_t *out)
 {
-    unsigned seen = 0U;
+    uint32_t seen = 0U;
     while (decoder.cursor != decoder.end) {
         uint32_t field = 0U;
         uint8_t wire_type = 0U;
         vmp_protocol_error_t error = read_key(&decoder, &field, &wire_type);
         if (error != VMP_PROTOCOL_OK) return error;
-        if (field < 1U || field > 8U) return VMP_PROTOCOL_UNKNOWN_FIELD;
-        const unsigned bit = 1U << (field - 1U);
+        if (field < 1U || field > 14U) return VMP_PROTOCOL_UNKNOWN_FIELD;
+        const uint32_t bit = UINT32_C(1) << (field - 1U);
         if ((seen & bit) != 0U) return VMP_PROTOCOL_DUPLICATE_FIELD;
         seen |= bit;
 
-        if (field == 1U || field == 2U || field == 6U || field == 7U) {
+        if (field == 1U || field == 2U || field == 6U || field == 7U ||
+            (field >= 9U && field <= 14U)) {
             vmp_bytes_view_t value = {0};
             error = expect_bytes(&decoder, wire_type, &value);
             if (error != VMP_PROTOCOL_OK) return error;
@@ -307,8 +343,26 @@ static vmp_protocol_error_t parse_start(decoder_t decoder, vmp_start_session_t *
                                    VMP_SPKI_SHA256_LEN);
             } else if (field == 6U) {
                 out->auth_secret = value;
-            } else {
+            } else if (field == 7U) {
                 out->tls_server_name = value;
+            } else if (field == 9U) {
+                error = copy_exact(value, out->reservation_id,
+                                   VMP_RESERVATION_ID_LEN);
+            } else if (field == 10U) {
+                error = copy_exact(value, out->finalize_id,
+                                   VMP_FINALIZE_ID_LEN);
+            } else if (field == 11U) {
+                error = copy_exact(value, out->auth_commitment,
+                                   VMP_AUTH_COMMITMENT_LEN);
+            } else if (field == 12U) {
+                error = copy_exact(value, out->certificate_sha256,
+                                   VMP_CERTIFICATE_SHA256_LEN);
+            } else if (field == 13U) {
+                error = copy_exact(value, out->client_native_instance_id,
+                                   VMP_NATIVE_INSTANCE_ID_LEN);
+            } else {
+                error = copy_exact(value, out->exit_native_instance_id,
+                                   VMP_NATIVE_INSTANCE_ID_LEN);
             }
             if (error != VMP_PROTOCOL_OK) return error;
         } else {
@@ -338,9 +392,18 @@ static vmp_protocol_error_t parse_start(decoder_t decoder, vmp_start_session_t *
         (out->transport_mode ==
              VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP &&
          out->minimum_paths == 1U);
-    if (seen != UINT32_C(0xff) ||
+    if (seen != UINT32_C(0x3fff) ||
         all_zero(out->route_context_id, VMP_CONTEXT_ID_LEN) ||
         all_zero(out->exit_spki_sha256, VMP_SPKI_SHA256_LEN) ||
+        all_zero(out->reservation_id, VMP_RESERVATION_ID_LEN) ||
+        all_zero(out->finalize_id, VMP_FINALIZE_ID_LEN) ||
+        all_zero(out->auth_commitment, VMP_AUTH_COMMITMENT_LEN) ||
+        all_zero(out->certificate_sha256,
+                 VMP_CERTIFICATE_SHA256_LEN) ||
+        all_zero(out->client_native_instance_id,
+                 VMP_NATIVE_INSTANCE_ID_LEN) ||
+        all_zero(out->exit_native_instance_id,
+                 VMP_NATIVE_INSTANCE_ID_LEN) ||
         out->masque_context_id == 0U ||
         out->masque_context_id > VMP_MAX_MASQUE_CONTEXT_ID ||
         !valid_auth_secret(out->auth_secret) ||
@@ -602,14 +665,14 @@ static vmp_protocol_error_t parse_start_exit(
         uint8_t wire_type = 0U;
         vmp_protocol_error_t error = read_key(&decoder, &field, &wire_type);
         if (error != VMP_PROTOCOL_OK) return error;
-        if (field < 1U || field > 16U) return VMP_PROTOCOL_UNKNOWN_FIELD;
+        if (field < 1U || field > 22U) return VMP_PROTOCOL_UNKNOWN_FIELD;
         const uint32_t bit = UINT32_C(1) << (field - 1U);
         if ((seen & bit) != 0U) return VMP_PROTOCOL_DUPLICATE_FIELD;
         seen |= bit;
 
         if (field == 1U || field == 2U || field == 7U || field == 8U ||
             field == 10U || field == 12U || field == 14U || field == 15U ||
-            field == 16U) {
+            field == 16U || (field >= 17U && field <= 22U)) {
             vmp_bytes_view_t value = {0};
             error = expect_bytes(&decoder, wire_type, &value);
             if (error != VMP_PROTOCOL_OK) return error;
@@ -632,8 +695,26 @@ static vmp_protocol_error_t parse_start_exit(
                                    VMP_RESERVATION_HASH_LEN);
             } else if (field == 15U) {
                 out->tls_certificate_pem = value;
-            } else {
+            } else if (field == 16U) {
                 out->tls_private_key_pem = value;
+            } else if (field == 17U) {
+                error = copy_exact(value, out->reservation_id,
+                                   VMP_RESERVATION_ID_LEN);
+            } else if (field == 18U) {
+                error = copy_exact(value, out->finalize_id,
+                                   VMP_FINALIZE_ID_LEN);
+            } else if (field == 19U) {
+                error = copy_exact(value, out->auth_commitment,
+                                   VMP_AUTH_COMMITMENT_LEN);
+            } else if (field == 20U) {
+                error = copy_exact(value, out->certificate_sha256,
+                                   VMP_CERTIFICATE_SHA256_LEN);
+            } else if (field == 21U) {
+                error = copy_exact(value, out->client_native_instance_id,
+                                   VMP_NATIVE_INSTANCE_ID_LEN);
+            } else {
+                error = copy_exact(value, out->exit_native_instance_id,
+                                   VMP_NATIVE_INSTANCE_ID_LEN);
             }
             if (error != VMP_PROTOCOL_OK) return error;
         } else {
@@ -666,9 +747,33 @@ static vmp_protocol_error_t parse_start_exit(
             }
         }
     }
-    return seen == UINT32_C(0xffff) && vmp_start_exit_is_valid(out)
+    return seen == UINT32_C(0x3fffff) && vmp_start_exit_is_valid(out)
                ? VMP_PROTOCOL_OK
                : VMP_PROTOCOL_INVALID_VALUE;
+}
+
+static vmp_protocol_error_t parse_preflight(decoder_t decoder,
+                                            vmp_preflight_t *out)
+{
+    bool have_role = false;
+    while (decoder.cursor != decoder.end) {
+        uint32_t field = 0U;
+        uint8_t wire_type = 0U;
+        vmp_protocol_error_t error = read_key(&decoder, &field, &wire_type);
+        if (error != VMP_PROTOCOL_OK) return error;
+        if (field != 1U) return VMP_PROTOCOL_UNKNOWN_FIELD;
+        if (have_role) return VMP_PROTOCOL_DUPLICATE_FIELD;
+        uint64_t value = 0U;
+        error = expect_varint(&decoder, wire_type, &value);
+        if (error != VMP_PROTOCOL_OK) return error;
+        if (value < (uint64_t)VMP_NATIVE_ROLE_CLIENT ||
+            value > (uint64_t)VMP_NATIVE_ROLE_EXIT) {
+            return VMP_PROTOCOL_INVALID_VALUE;
+        }
+        out->expected_role = (vmp_native_role_t)value;
+        have_role = true;
+    }
+    return have_role ? VMP_PROTOCOL_OK : VMP_PROTOCOL_MISSING_FIELD;
 }
 
 static vmp_protocol_error_t parse_operation(vmp_operation_t operation,
@@ -695,6 +800,8 @@ static vmp_protocol_error_t parse_operation(vmp_operation_t operation,
     case VMP_OPERATION_START_EXIT_SESSION:
         return parse_start_exit(nested,
                                 &out->body.start_exit_session);
+    case VMP_OPERATION_PREFLIGHT:
+        return parse_preflight(nested, &out->body.preflight);
     case VMP_OPERATION_NONE:
     default: return VMP_PROTOCOL_INVALID_VALUE;
     }
@@ -716,6 +823,7 @@ vmp_protocol_error_t vmp_decode_request(const uint8_t *payload, size_t payload_l
     decoder_t decoder = {.cursor = payload, .end = payload + payload_len};
     bool have_version = false;
     bool have_nonce = false;
+    bool have_target_instance = false;
     bool have_operation = false;
 
     while (decoder.cursor != decoder.end) {
@@ -750,8 +858,20 @@ vmp_protocol_error_t vmp_decode_request(const uint8_t *payload, size_t payload_l
                 return error;
             }
             have_nonce = true;
+        } else if (field == 3) {
+            if (have_target_instance) {
+                return VMP_PROTOCOL_DUPLICATE_FIELD;
+            }
+            vmp_bytes_view_t value = {0};
+            error = expect_bytes(&decoder, wire_type, &value);
+            if (error == VMP_PROTOCOL_OK) {
+                error = copy_exact(value, out->target_native_instance_id,
+                                   VMP_NATIVE_INSTANCE_ID_LEN);
+            }
+            if (error != VMP_PROTOCOL_OK) return error;
+            have_target_instance = true;
         } else if (field >= VMP_OPERATION_START_SESSION &&
-                   field <= VMP_OPERATION_START_EXIT_SESSION) {
+                   field <= VMP_OPERATION_PREFLIGHT) {
             if (have_operation) {
                 return VMP_PROTOCOL_DUPLICATE_FIELD;
             }
@@ -774,8 +894,13 @@ vmp_protocol_error_t vmp_decode_request(const uint8_t *payload, size_t payload_l
     if (!have_version || !have_nonce || !have_operation) {
         return VMP_PROTOCOL_MISSING_FIELD;
     }
+    const bool preflight = out->operation == VMP_OPERATION_PREFLIGHT;
     if (out->api_version != VMP_API_VERSION ||
-        all_zero(out->request_nonce, VMP_REQUEST_NONCE_LEN)) {
+        all_zero(out->request_nonce, VMP_REQUEST_NONCE_LEN) ||
+        (preflight && have_target_instance) ||
+        (!preflight && (!have_target_instance ||
+                        all_zero(out->target_native_instance_id,
+                                 VMP_NATIVE_INSTANCE_ID_LEN)))) {
         return VMP_PROTOCOL_INVALID_VALUE;
     }
     return VMP_PROTOCOL_OK;
@@ -905,6 +1030,75 @@ static vmp_protocol_error_t write_received_datagram(
     return error;
 }
 
+static size_t encoded_identity_len(
+    const vmp_native_process_identity_t *identity)
+{
+    return 1U + varint_len((uint64_t)identity->role) +
+           1U + varint_len(VMP_NATIVE_INSTANCE_ID_LEN) +
+           VMP_NATIVE_INSTANCE_ID_LEN;
+}
+
+static vmp_protocol_error_t write_identity(
+    encoder_t *encoder, const vmp_native_process_identity_t *identity)
+{
+    const size_t nested_len = encoded_identity_len(identity);
+    vmp_protocol_error_t error = write_key(encoder, 7U, 2U);
+    if (error == VMP_PROTOCOL_OK) error = write_varint(encoder, nested_len);
+    if (error == VMP_PROTOCOL_OK)
+        error = write_varint_field(encoder, 1U, (uint64_t)identity->role);
+    if (error == VMP_PROTOCOL_OK)
+        error = write_len_field(encoder, 2U, identity->native_instance_id,
+                                VMP_NATIVE_INSTANCE_ID_LEN);
+    return error;
+}
+
+static size_t encoded_assignment_len(
+    const vmp_tunnel_assignment_t *assignment)
+{
+    size_t len = 1U + varint_len(sizeof(assignment->assigned_ipv4)) +
+                 sizeof(assignment->assigned_ipv4) +
+                 1U + varint_len(assignment->assigned_prefix_v4) +
+                 1U + varint_len(sizeof(assignment->server_ipv4)) +
+                 sizeof(assignment->server_ipv4) +
+                 1U + varint_len(assignment->server_prefix_v4) +
+                 1U + varint_len(assignment->mtu);
+    if (assignment->has_ipv6) {
+        len += 1U + varint_len(sizeof(assignment->assigned_ipv6)) +
+               sizeof(assignment->assigned_ipv6) +
+               1U + varint_len(assignment->assigned_prefix_v6);
+    }
+    return len;
+}
+
+static vmp_protocol_error_t write_assignment(
+    encoder_t *encoder, const vmp_tunnel_assignment_t *assignment)
+{
+    const size_t nested_len = encoded_assignment_len(assignment);
+    vmp_protocol_error_t error = write_key(encoder, 9U, 2U);
+    if (error == VMP_PROTOCOL_OK) error = write_varint(encoder, nested_len);
+    if (error == VMP_PROTOCOL_OK)
+        error = write_len_field(encoder, 1U, assignment->assigned_ipv4,
+                                sizeof(assignment->assigned_ipv4));
+    if (error == VMP_PROTOCOL_OK)
+        error = write_varint_field(encoder, 2U,
+                                   assignment->assigned_prefix_v4);
+    if (error == VMP_PROTOCOL_OK)
+        error = write_len_field(encoder, 3U, assignment->server_ipv4,
+                                sizeof(assignment->server_ipv4));
+    if (error == VMP_PROTOCOL_OK)
+        error = write_varint_field(encoder, 4U,
+                                   assignment->server_prefix_v4);
+    if (error == VMP_PROTOCOL_OK)
+        error = write_varint_field(encoder, 5U, assignment->mtu);
+    if (error == VMP_PROTOCOL_OK && assignment->has_ipv6)
+        error = write_len_field(encoder, 6U, assignment->assigned_ipv6,
+                                sizeof(assignment->assigned_ipv6));
+    if (error == VMP_PROTOCOL_OK && assignment->has_ipv6)
+        error = write_varint_field(encoder, 7U,
+                                   assignment->assigned_prefix_v6);
+    return error;
+}
+
 static bool diagnostic_valid(const vmp_response_t *response)
 {
     if (response->diagnostic_code_len == 0) {
@@ -934,8 +1128,23 @@ vmp_protocol_error_t vmp_encode_response_payload(const vmp_response_t *response,
         response->api_version != VMP_API_VERSION ||
         all_zero(response->request_nonce, VMP_REQUEST_NONCE_LEN) ||
         response->result < VMP_RESULT_OK ||
-        response->result > VMP_RESULT_QUEUE_OVERFLOW ||
+        response->result > VMP_RESULT_STALE_INSTANCE ||
         response->path_count > VMP_MAX_PATHS || !diagnostic_valid(response)) {
+        return VMP_PROTOCOL_INVALID_VALUE;
+    }
+    if ((response->native_process_identity.role != VMP_NATIVE_ROLE_CLIENT &&
+         response->native_process_identity.role != VMP_NATIVE_ROLE_EXIT) ||
+        all_zero(response->native_process_identity.native_instance_id,
+                 VMP_NATIVE_INSTANCE_ID_LEN) ||
+        (response->has_tunnel_assignment &&
+         (response->result != VMP_RESULT_OK ||
+          response->has_received_datagram ||
+          !vmp_tunnel_assignment_is_valid(
+              &response->tunnel_assignment))) ||
+        (!response->has_tunnel_assignment &&
+         memcmp(&response->tunnel_assignment,
+                &(const vmp_tunnel_assignment_t){0},
+                sizeof(response->tunnel_assignment)) != 0)) {
         return VMP_PROTOCOL_INVALID_VALUE;
     }
     if (response->has_received_datagram) {
@@ -983,6 +1192,15 @@ vmp_protocol_error_t vmp_encode_response_payload(const vmp_response_t *response,
     if (error == VMP_PROTOCOL_OK && response->has_received_datagram) {
         error = write_received_datagram(&encoder, &response->received_datagram);
     }
+    if (error == VMP_PROTOCOL_OK) {
+        error = write_identity(&encoder,
+                               &response->native_process_identity);
+    }
+    if (error == VMP_PROTOCOL_OK)
+        error = write_len_field(&encoder, 8U, response->request_sha256,
+                                VMP_REQUEST_SHA256_LEN);
+    if (error == VMP_PROTOCOL_OK && response->has_tunnel_assignment)
+        error = write_assignment(&encoder, &response->tunnel_assignment);
     if (error != VMP_PROTOCOL_OK) {
         return error;
     }

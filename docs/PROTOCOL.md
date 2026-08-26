@@ -28,7 +28,7 @@ is a 4-byte unsigned big-endian length followed by exactly one canonical envelop
 | Client-to-selected datapath relay | `/volparossa/datapath-relay/4` | 512 KiB canonical protobuf; authenticated selected relay |
 | CLI to agent | 1 | 256 KiB; Unix socket ownership and peer credentials |
 | Agent to helper | 3 | 128 KiB; root-owned Unix socket, peer credentials, typed allowlist |
-| Agent to native MPQUIC | 5 | 1 MiB; protected local Unix socket and typed allowlist |
+| Agent to native MPQUIC | 6 | 1 MiB; same-UID Unix socket, typed allowlist, process-instance and request correlation; separate production role identities remain required |
 
 The retired direct reservation identifiers
 `/volparossa/reservation/exit/2`, `/volparossa/reservation/relay/2`, and
@@ -322,8 +322,9 @@ one-shot exit authorization. Scope mismatch does not consume the owner, while su
 expiry, and purge remove it. This layer validates bounds, canonical public fields, PEM framing, and
 exact ownership scope. It does **not** yet prove certificate/private-key cryptographic consistency,
 translate wall expiry to a native monotonic deadline, activate a listener, or start an mqvpn
-backend. The production identity provider remains unavailable, and native API v5 cannot yet return
-the process-instance proof required by the dormant agent route; both sides therefore fail closed.
+backend. Native API v6 can return a channel-correlated role/process instance, but no production
+agent caller performs that preflight or feeds it into the dormant route. The production identity
+provider and separate role service identities remain unavailable, so both sides still fail closed.
 
 ## Hash and receipt binding
 
@@ -526,18 +527,32 @@ rollback, or live datapath is connected.
 
 ## Agent-to-native MPQUIC API
 
-`NativeRequest` contains canonical API version 5, a 16-byte nonce, and one operation. Versions 1
-through 4 and every future version are rejected before dispatch. One control-socket contact carries
-exactly one request, with one total deadline and a required client write-half close before dispatch:
+`NativeRequest` contains canonical API version 6, a nonzero 16-byte nonce, a target native-process
+instance, and one operation. Versions 1 through 5 and every future version are rejected before
+dispatch. One control-socket contact carries exactly one request, with one total deadline and a
+required client write-half close before dispatch. `Preflight` is the sole operation with an empty
+target: it names the expected client or exit role and returns the native process's fresh, nonzero
+32-byte per-start instance. Every later request targets that exact instance and fails with
+`StaleInstance` after a restart; the Rust client never hides this by automatically preflighting or
+retrying retained route authority. This is process-lifetime correlation over the current same-UID
+local channel, not binary attestation or authentication against an explicitly untrusted agent.
+Production packaging must still provide separate role sockets and service identities before this
+channel can carry trusted route authority.
+
+The route operations are:
 
 - `StartSession`: 16-byte context, 32-byte exit SPKI SHA-256 pin, minimum paths, non-zero MASQUE
   context ID, explicit multipath/single-path mode, an exact 43-character base64url per-route
-  credential, exact TLS server name, and an expiry no more than fifteen minutes ahead. The native
-  check establishes encoding syntax and length, not credential entropy;
+  credential, exact TLS server name, and an expiry no more than fifteen minutes ahead. It also
+  carries the signed reservation/finalize IDs, bearer commitment, certificate digest, and exact
+  client/exit native instances. The client instance must equal the request target. The native check
+  establishes credential encoding syntax and commitment equality, not generator entropy;
 - `StartExitSession`: the exact context, 43-character base64url credential, expiry, one-path
   `SinglePathGeneralUdp` shape, MASQUE context ID, nonzero exit-SPKI pin, TLS server name, path ID,
   exact exit-listener and expected-client IPv6 overlay tuples, nonzero reservation hash, and
-  in-memory certificate-chain/private-key PEM bounded to 64 KiB/16 KiB. No pathname is accepted;
+  in-memory certificate-chain/private-key PEM bounded to 64 KiB/16 KiB. It carries the same signed
+  reservation/finalize, commitment, certificate and process-instance scope as `StartSession`; the
+  exit instance must equal the request target. No pathname is accepted;
 - `AddPath`: context/path ID, exact IPv6 local/remote overlay addresses, local/remote UDP ports, and
   a 32-byte relay-reservation hash. The address pair must use `fd76:6f6c:7061::/48`, embed the path
   ID in segment six, share one `/112`, and use fixed client host `1` and exit host `4`;
@@ -546,7 +561,7 @@ exactly one request, with one total deadline and a required client write-half cl
   datagram;
 - `ReceiveDatagram`: exact context and MASQUE context ID for one bounded reverse poll.
 
-The canonical API-v5 `StartExitSession` field tags are deliberately append-only relative to its
+The canonical API-v6 `StartExitSession` field tags are deliberately append-only relative to its
 old six-field shape:
 
 | Tag | Field |
@@ -567,13 +582,19 @@ old six-field shape:
 | 14 | `reservation_hash` |
 | 15 | `tls_certificate_pem` |
 | 16 | `tls_private_key_pem` |
+| 17 | `reservation_id` |
+| 18 | `finalize_id` |
+| 19 | `auth_commitment` |
+| 20 | `certificate_sha256` |
+| 21 | `client_native_instance_id` |
+| 22 | `exit_native_instance_id` |
 
 Before the framed protobuf, every contact sends one fixed 32-byte binding as a stream prefix.
 Because `SOCK_STREAM` may split it across reads, native assembles the complete prefix; any
 descriptor must accompany its first received byte and later ancillary data is forbidden.
 `AddPath` and `StartExitSession` each bind exactly one `SCM_RIGHTS` UDP descriptor to the
-canonical request with SHA-256 over a separate NUL-terminated API-v5 domain
-(`VOLPAROSSA-MPQUIC-ADD-PATH-FD-V5` or `VOLPAROSSA-MPQUIC-START-EXIT-FD-V5`), the four-byte
+canonical request with SHA-256 over a separate NUL-terminated API-v6 domain
+(`VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6` or `VOLPAROSSA-MPQUIC-START-EXIT-FD-V6`), the four-byte
 big-endian canonical payload length, and the payload. All other operations require an all-zero
 binding and zero descriptors. Missing, extra, incomplete, late, cross-domain, wrongly bound, or
 otherwise unexpected ancillary data is rejected and every received descriptor is closed.
@@ -589,31 +610,39 @@ secret pathname, or falls back. Both descriptor hashes prove request correlation
 `AddPath` client backend checks a same-session namespace cookie; `StartExitSession` has no namespace
 cookie or helper-origin proof.
 Production adoption remains blocked until helper provenance and the reviewed exit backend exist.
-API v5 is intentionally incompatible with v4 and has no negotiation or downgrade. A consumed
+API v6 is intentionally incompatible with v5 and has no negotiation or downgrade. A consumed
 descriptor is never reused after success, rejection, timeout, or I/O failure; any caller-level
 retry requires a newly acquired listener, a fresh control connection and nonce, and a still-valid
 authorization. `exit_listener_orchestration_unavailable` is deterministic and must not be retried
 until a backend-capable native build is installed.
 
-The API-v5 exit boundary validates DNS syntax for the supplied TLS name, nonzero length for the
+The API-v6 exit boundary validates DNS syntax for the supplied TLS name, nonzero length for the
 SPKI pin, and only nonempty/NUL-free size bounds for the purported certificate/private-key PEM
 bytes. Before any exit session can become usable, the future backend must parse that material,
 verify that the key matches the certificate, and cryptographically bind the leaf certificate to
 both the exact DNS name and SPKI pin. No current success claim depends on that unfinished identity
 check.
-Likewise, the nonzero reservation hash, SPKI bytes, and request nonce are message-shape and
-single-exchange-correlation fields only. Native has no replay cache and does not derive this request
-from the signed final reservation bundle. Production handoff must be affine to that verified signed
+The bearer commitment, signed IDs, certificate digest, process instances and SPKI bytes are now
+carried together, but native still has no replay cache and does not itself verify the exit's signed
+final reservation bundle. Production handoff must remain affine to that already verified signed
 scope and fail closed on replay before the backend can be enabled. The current client runtime also
 compares accepted session expiry against `CLOCK_REALTIME`; before production adoption, it must
 convert the verified remaining wall-clock lifetime once into a monotonic deadline so a backward
 clock adjustment cannot extend an accepted authorization.
 
-`NativeResponse` echoes version/nonce and returns `Ok`, `Version`, `InvalidRequest`, `NotFound`,
+`NativeResponse` echoes version/nonce, requires the responding role/instance, and carries SHA-256
+over `"VOLPAROSSA-MPQUIC-REQUEST-V6\0"`, the four-byte big-endian canonical payload length, and the
+exact canonical unframed request. It returns `Ok`, `Version`, `InvalidRequest`, `NotFound`,
 `Unauthorised`, `Transport`, `InsufficientPaths`, `NoDatagram`, or `QueueOverflow`, plus a bounded
-code, an optional exactly correlated reverse datagram, and no more than eight path records. Each
-record reports path ID, smoothed RTT, loss, delivered unique bytes, congestion window, bytes in
-flight, delivery rate, and a flag that becomes true only after validation and real payload carriage.
+code, an optional exactly correlated reverse datagram, and no more than eight path records.
+`StaleInstance` is a separate typed result. Only a successful `StartSession` may carry a bounded
+IPv4/optional-IPv6 tunnel assignment; every other operation rejects one. The current mqvpn backend
+cannot produce that assignment, so production `StartSession` remains fail closed rather than
+returning a placeholder tunnel. API v6 currently validates only its canonical shape,
+nonzero/distinct IPv4 addresses, prefix bounds, and MTU; production must additionally prove the
+exact product pool, address types, namespace ownership, and durable backend retention. Each record
+reports path ID, smoothed RTT, loss, delivered unique bytes, congestion window, bytes in flight,
+delivery rate, and a flag that becomes true only after validation and real payload carriage.
 These fields are necessary to prevent a native process from falsely reporting mere path
 configuration as multipath operation.
 

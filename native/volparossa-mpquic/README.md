@@ -2,11 +2,15 @@
 
 This directory contains a bounded process boundary around exact, locally
 patched mqvpn/xquic source. The build produces a real `volparossa-mpquic`
-executable and links the pinned libraries from source. Native API version 5
+executable and links the pinned libraries from source. Native API version 6
 provides bounded request-driven bidirectional datagrams, per-route
 credentials and TLS server names, an independent local association identifier,
 explicit multipath and single-path modes, descriptor-only path adoption, and a
-fail-closed descriptor-bound single-path exit-listener contract.
+fail-closed descriptor-bound single-path exit-listener contract. API v6 also
+binds every operational request to a native-generated process incarnation,
+correlates responses to the exact canonical request digest, carries the
+exit-signed route scope, and reserves a strictly validated tunnel-assignment
+wire-shape contract.
 It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, exact scheduler, honest
 unique-payload metric, trusted helper origin for path descriptors, and
 disposable namespace acceptance remain incomplete and fail closed where
@@ -14,9 +18,9 @@ applicable.
 
 ## What is implemented and tested
 
-- An allocation-free, strict decoder for native API version 5 requests and a
+- An allocation-free, strict decoder for native API version 6 requests and a
   bounded request/response encoder compatible with the `volparossa-quic`
-  messages. Versions 1 through 4 and unknown versions are rejected. Canonical field
+  messages. Versions 1 through 5 and unknown versions are rejected. Canonical field
   order and minimal varints are required.
 - A fixed 32-byte descriptor-binding record followed by a four-byte big-endian
   frame boundary capped at 1 MiB before allocation. Each control-socket contact
@@ -47,7 +51,20 @@ applicable.
   without secret-length timing shortcuts, and wiped on retirement. The daemon
   accepts no static product credential or TLS name through argv, environment,
   or a pathname. This boundary check proves credential syntax and length, not
-  generator entropy.
+  generator entropy. Native recomputes the existing domain-separated v4
+  SHA-256 bearer commitment and compares it in constant time to the signed
+  request field; an arbitrary bearer/commitment pairing is rejected.
+- Before publishing its socket, each process obtains a nonzero 32-byte
+  incarnation from Linux `getrandom()`. `Preflight` returns that incarnation
+  and the explicit client/exit role. Every later request targets it exactly,
+  every response repeats it, and stale process authority receives the typed
+  `StaleInstance` result. This is channel-bound process-incarnation identity,
+  not executable measurement, binary attestation, or authentication against an
+  untrusted same-UID agent.
+- Every decodable response carries SHA-256 over
+  `VOLPAROSSA-MPQUIC-REQUEST-V6\0`, the four-byte canonical request length,
+  and the exact unframed request. Nonces, request hashes, role, and incarnation
+  therefore form one response-correlation contract.
 - A bounded runtime of 32 sessions and eight paths per session. `StartSession`
   is idempotent only for byte-identical requests, remains pending until the
   tunnel and requested active-path count are real, and otherwise reports
@@ -74,9 +91,9 @@ applicable.
   cookie consistently across a session. A matching cookie proves only session
   namespace consistency, not that the helper created the descriptor.
 - `AddPath` and `StartExitSession` each transfer exactly one descriptor only
-  with a 32-byte SHA-256 binding over their separate API-v5 domains,
-  `VOLPAROSSA-MPQUIC-ADD-PATH-FD-V5` and
-  `VOLPAROSSA-MPQUIC-START-EXIT-FD-V5`, plus canonical request length and
+  with a 32-byte SHA-256 binding over their separate API-v6 domains,
+  `VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6` and
+  `VOLPAROSSA-MPQUIC-START-EXIT-FD-V6`, plus canonical request length and
   canonical request. Every other operation requires the all-zero binding and
   zero descriptors. The fixed binding prefix may be fragmented by `SOCK_STREAM`
   and is assembled safely; missing, extra, incomplete, truncated, late,
@@ -120,10 +137,10 @@ volparossa-mpquic --mode client --socket ABSOLUTE_PATH
 volparossa-mpquic --mode exit --socket ABSOLUTE_PATH
 ~~~
 
-`--api-version` is a side-effect-free offline probe: it writes exactly `5\n`
+`--api-version` is a side-effect-free offline probe: it writes exactly `6\n`
 and opens no socket or runtime. The control socket path must satisfy the
 ownership and mode checks above. Authentication and the TLS server name arrive
-only in bounded API-v5 route-session messages. Client and exit roles are
+only in bounded API-v6 route-session messages. Client and exit roles are
 separate process modes; a node enabling both eventually needs two separately
 orchestrated instances and control sockets.
 
@@ -269,8 +286,10 @@ patches close six concrete integration seams:
    wipes both copied PEM buffers. No caller-supplied certificate or private-key
    pathname is required.
 
-API version 5 retains the bounded reverse/session contracts and adds a strict
-single-path exit-listener handoff while preserving the earlier six
+API version 6 retains the bounded reverse/session contracts and strict
+single-path exit-listener handoff while adding process-incarnation targeting,
+exact request-digest correlation, signed route-scope fields, and a canonical
+tunnel-assignment response shape. It preserves the earlier seven
 process-boundary seams:
 
 1. Reverse datagrams use bounded, request-driven polling with deterministic
@@ -285,7 +304,7 @@ process-boundary seams:
 4. Exact-length base64url client auth, TLS server name, and an
    at-most-fifteen-minute expiry are bound to one `StartSession`; no
    process-global product credential remains.
-5. Versions 1 through 4, unknown versions, non-minimal varints, reordered fields,
+5. Versions 1 through 5, unknown versions, non-minimal varints, reordered fields,
    duplicate fields, and unknown fields fail closed.
 6. `AddPath` consumes exactly one correlated UDP descriptor and native never
    opens or binds its own path socket. The descriptor and metadata are checked
@@ -297,13 +316,14 @@ process-boundary seams:
 
 The following gates remain hard blockers:
 
-1. **No trusted helper-origin proof for path or listener descriptors.** SCM_RIGHTS,
-   request hashes, strict private overlay shapes, and current socket checks prevent
-   several substitutions, but an untrusted agent can still create a conforming
-   socket. Only client `AddPath` checks a same-session namespace cookie; StartExit
-   lacks exact namespace and assigned-address proof. Production adoption remains
-   blocked until an affine helper-to-native capability binds each descriptor to
-   the attested helper acquisition.
+1. **No separate role service identity or trusted helper-origin proof.** The
+   current single same-UID socket correlates a process but cannot authenticate
+   native against an untrusted agent, and an agent can still create a conforming
+   descriptor. Packaging needs distinct client/exit service identities and
+   role sockets. Only client `AddPath` checks a same-session namespace cookie;
+   StartExit lacks exact namespace and assigned-address proof. Production
+   adoption remains blocked until an affine helper-to-native capability binds
+   each descriptor to the attested helper acquisition.
 2. **No unique payload-delivery metric.** xquic's counter includes QUIC
    transport overhead and retransmission. It cannot satisfy
    `NativePathStatus.delivered_bytes`, which promises uniquely delivered
@@ -312,7 +332,7 @@ The following gates remain hard blockers:
    session-correlated inbound packet and can initialize xquic from bounded
    in-memory TLS candidate material without a caller-supplied secret pathname.
    The native backend remains client-only, and the helper/agent does not yet provide the
-   end-to-end listener provenance/handoff to a reviewed exit factory. API v5
+   end-to-end listener provenance/handoff to a reviewed exit factory. API v6
    accepts and closes the descriptor and carries the TLS material in memory,
    but does not yet bind it cryptographically to the certificate key, DNS name,
    SPKI pin, signed reservation scope, or a replay decision. Valid
@@ -323,23 +343,29 @@ The following gates remain hard blockers:
    runtime compares expiry to `CLOCK_REALTIME`, so a backward clock adjustment
    can extend an accepted session. Production must consume verified signed scope
    affinely and convert its remaining lifetime once to a monotonic deadline.
-5. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
+5. **No retained or enforced production tunnel assignment.** API v6 strictly
+   encodes the upstream assignment shape and refuses a successful start without
+   one, but the mqvpn adapter deliberately reports no assignment until a later
+   slice deep-copies the callback, proves product-pool and address-type policy,
+   rejects changes, and enforces inner source and reverse-destination ownership.
+   Production client starts therefore remain fail closed.
+6. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
    is not the required replaceable delivery-time formula. FEC, XOR, and
    reinjection remain disabled; that does not make WLB an EDT implementation.
-6. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
+7. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
    framing, correlation, overflow, and wiping, but no disposable topology has
    yet proved an exit-originated inner datagram reaches the Rust client.
-7. **No end-to-end dynamic path removal or failover evidence.** The pinned
+8. **No end-to-end dynamic path removal or failover evidence.** The pinned
    upstream exposes these operations, but the VOLPAROSSA lifecycle has not
    exercised them across real relay paths.
-8. **No full acceptance evidence.** No disposable namespace test yet proves
+9. **No full acceptance evidence.** No disposable namespace test yet proves
    at least two data-carrying paths via distinct relays, bidirectional
    CONNECT-IP, loss-aware scheduling, failover, disabled duplication/FEC,
    privacy packet captures, and unchanged host routes, firewall, and DNS.
 
 The implementation-status dataplane items remain unchecked until these gates
-and the real namespace acceptance suite are complete. Focused API-v5 boundary
-tests and the full API-v5 sanitizer run alone must not be reported as A06/A07
+and the real namespace acceptance suite are complete. Focused API-v6 boundary
+tests and the full API-v6 sanitizer run alone must not be reported as A06/A07
 or full dataplane acceptance.
 
 ## Policy boundary

@@ -58,6 +58,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "native_control"
+path = "fuzz_targets/native_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "advertisement_v4"
 path = "fuzz_targets/advertisement_v4.rs"
 test = false

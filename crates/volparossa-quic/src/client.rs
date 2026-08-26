@@ -29,16 +29,16 @@ use tokio::{io::AsyncWriteExt, net::UnixStream, time::timeout};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    AddPath, GetStatus, NATIVE_API_VERSION, NativePathStatus, NativeRequest, NativeResponse,
-    NativeResultCode, ReceiveDatagram, ReceivedDatagram, RemovePath, SendDatagram,
-    StartExitSession, StartSession, StopSession,
+    AddPath, GetStatus, NATIVE_API_VERSION, NativePathStatus, NativeProcessRole, NativeRequest,
+    NativeResponse, NativeResultCode, Preflight, ReceiveDatagram, ReceivedDatagram, RemovePath,
+    SendDatagram, StartExitSession, StartSession, StopSession, TunnelAssignment,
     control::{validate_add_path, validate_start_exit},
-    encode_request, native_request, read_response,
+    encode_request, native_request, read_response, request_sha256,
 };
 
 const FD_BINDING_LEN: usize = 32;
-const ADD_PATH_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-ADD-PATH-FD-V5\0";
-const START_EXIT_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-START-EXIT-FD-V5\0";
+const ADD_PATH_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6\0";
+const START_EXIT_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-START-EXIT-FD-V6\0";
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SOCKET_PATH_BYTES: usize = 4_096;
 
@@ -55,6 +55,8 @@ pub struct NativeClient {
     socket: PathBuf,
     expected_uid: u32,
     operation_timeout: Duration,
+    role: Option<NativeProcessRole>,
+    native_instance_id: Option<[u8; 32]>,
 }
 
 impl NativeClient {
@@ -69,7 +71,73 @@ impl NativeClient {
             socket,
             expected_uid: geteuid().as_raw(),
             operation_timeout: NATIVE_TIMEOUT,
+            role: None,
+            native_instance_id: None,
         })
+    }
+
+    /// Selects one exact role and native process lifetime before any route operation.
+    ///
+    /// The returned client remains affined to the reported instance. A stale-instance response is
+    /// returned to the caller and is never hidden by an automatic preflight or retry.
+    ///
+    /// This local identity correlation does not attest the native binary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid role, repeated preflight, unsafe socket, timeout, response
+    /// correlation failure, or native rejection.
+    pub async fn preflight(
+        &self,
+        expected_role: NativeProcessRole,
+    ) -> Result<Self, NativeClientError> {
+        if self.role.is_some() || self.native_instance_id.is_some() {
+            return Err(NativeClientError::AlreadyPreflighted);
+        }
+        if expected_role == NativeProcessRole::Unspecified {
+            return Err(NativeClientError::InvalidRole);
+        }
+        let response = self
+            .exchange_target(
+                native_request::Operation::Preflight(Preflight {
+                    expected_role: expected_role as i32,
+                }),
+                None,
+                &[],
+                expected_role,
+                None,
+            )
+            .await?;
+        let result = response_result(&response)?;
+        if response.tunnel_assignment.is_some()
+            || response.received_datagram.is_some()
+            || !response.paths.is_empty()
+        {
+            return Err(NativeClientError::Correlation);
+        }
+        if result != NativeResultCode::Ok {
+            return Err(rejected(response, result));
+        }
+        let identity = response
+            .process_identity
+            .as_ref()
+            .ok_or(NativeClientError::Correlation)?;
+        let native_instance_id = <[u8; 32]>::try_from(identity.native_instance_id.as_slice())
+            .map_err(|_| NativeClientError::Correlation)?;
+        let mut bound = self.clone();
+        bound.role = Some(expected_role);
+        bound.native_instance_id = Some(native_instance_id);
+        Ok(bound)
+    }
+
+    /// Returns the selected native role after successful preflight.
+    pub const fn role(&self) -> Option<NativeProcessRole> {
+        self.role
+    }
+
+    /// Returns the selected per-start native instance after successful preflight.
+    pub const fn native_instance_id(&self) -> Option<&[u8; 32]> {
+        self.native_instance_id.as_ref()
     }
 
     /// Starts one pre-authorised genuine-multipath session.
@@ -78,9 +146,26 @@ impl NativeClient {
     ///
     /// Returns an error for an unsafe socket, timeout, framing/correlation failure, or a native
     /// rejection.
-    pub async fn start_session(&self, value: StartSession) -> Result<(), NativeClientError> {
-        self.execute_ok(native_request::Operation::StartSession(value), None)
-            .await
+    pub async fn start_session(
+        &self,
+        value: StartSession,
+    ) -> Result<TunnelAssignment, NativeClientError> {
+        let response = self
+            .exchange(native_request::Operation::StartSession(value), None)
+            .await?;
+        let result = response_result(&response)?;
+        if result != NativeResultCode::Ok {
+            if response.tunnel_assignment.is_some() {
+                return Err(NativeClientError::Correlation);
+            }
+            return Err(rejected(response, result));
+        }
+        if response.received_datagram.is_some() || !response.paths.is_empty() {
+            return Err(NativeClientError::Correlation);
+        }
+        response
+            .tunnel_assignment
+            .ok_or(NativeClientError::Correlation)
     }
 
     /// Submits one short-lived route authorization to an explicitly enabled exit.
@@ -169,6 +254,9 @@ impl NativeClient {
         let mut response = self
             .exchange(native_request::Operation::ReceiveDatagram(value), None)
             .await?;
+        if response.tunnel_assignment.is_some() {
+            return Err(NativeClientError::Correlation);
+        }
         let result = response_result(&response)?;
         if result == NativeResultCode::NoDatagram {
             if response.received_datagram.is_some() || !response.paths.is_empty() {
@@ -208,6 +296,9 @@ impl NativeClient {
         let response = self
             .exchange(native_request::Operation::GetStatus(value), None)
             .await?;
+        if response.tunnel_assignment.is_some() {
+            return Err(NativeClientError::Correlation);
+        }
         let result = response_result(&response)?;
         if result != NativeResultCode::Ok {
             return Err(rejected(response, result));
@@ -242,6 +333,9 @@ impl NativeClient {
         if response.received_datagram.is_some() || !response.paths.is_empty() {
             return Err(NativeClientError::Correlation);
         }
+        if response.tunnel_assignment.is_some() {
+            return Err(NativeClientError::Correlation);
+        }
         Ok(())
     }
 
@@ -249,6 +343,29 @@ impl NativeClient {
         &self,
         operation: native_request::Operation,
         descriptor: Option<Socket>,
+    ) -> Result<NativeResponse, NativeClientError> {
+        let role = self.role.ok_or(NativeClientError::PreflightRequired)?;
+        let native_instance_id = self
+            .native_instance_id
+            .as_ref()
+            .ok_or(NativeClientError::PreflightRequired)?;
+        self.exchange_target(
+            operation,
+            descriptor,
+            native_instance_id,
+            role,
+            Some(native_instance_id),
+        )
+        .await
+    }
+
+    async fn exchange_target(
+        &self,
+        operation: native_request::Operation,
+        descriptor: Option<Socket>,
+        target_native_instance_id: &[u8],
+        expected_role: NativeProcessRole,
+        expected_instance_id: Option<&[u8; 32]>,
     ) -> Result<NativeResponse, NativeClientError> {
         validate_socket(&self.socket, self.expected_uid)?;
         let mut nonce = Zeroizing::new([0_u8; 16]);
@@ -265,8 +382,10 @@ impl NativeClient {
         let mut request = NativeRequest {
             api_version: NATIVE_API_VERSION,
             request_nonce: nonce.to_vec(),
+            target_native_instance_id: target_native_instance_id.to_vec(),
             operation: Some(operation),
         };
+        let expected_request_sha256 = request_sha256(&request)?;
         let mut frame = Zeroizing::new(encode_request(&request)?);
         let binding = request_binding(frame.as_slice(), descriptor_purpose)?;
         zeroize_sensitive_request(&mut request);
@@ -288,6 +407,23 @@ impl NativeClient {
         frame.zeroize();
         if response.request_nonce.as_slice() != nonce.as_slice() {
             return Err(NativeClientError::Correlation);
+        }
+        if response.request_sha256.as_slice() != expected_request_sha256.as_slice() {
+            return Err(NativeClientError::Correlation);
+        }
+        let identity = response
+            .process_identity
+            .as_ref()
+            .ok_or(NativeClientError::Correlation)?;
+        let role = NativeProcessRole::try_from(identity.role)
+            .map_err(|_| NativeClientError::Correlation)?;
+        if role != expected_role {
+            return Err(NativeClientError::Correlation);
+        }
+        if expected_instance_id
+            .is_some_and(|expected| identity.native_instance_id.as_slice() != expected.as_slice())
+        {
+            return Err(NativeClientError::StaleInstance);
         }
         Ok(response)
     }
@@ -535,6 +671,15 @@ pub enum NativeClientError {
     /// The operation and exact descriptor bundle did not match.
     #[error("native descriptor bundle is invalid")]
     InvalidDescriptorBundle,
+    /// A route operation was attempted before selecting one native process lifetime.
+    #[error("native process preflight is required")]
+    PreflightRequired,
+    /// Preflight was requested on a client already affined to one process lifetime.
+    #[error("native process was already preflighted")]
+    AlreadyPreflighted,
+    /// The proto3 default is not a usable process role.
+    #[error("native process role is invalid")]
+    InvalidRole,
     /// Local socket I/O failed.
     #[error("native client I/O failed")]
     Io(#[from] std::io::Error),
@@ -547,6 +692,9 @@ pub enum NativeClientError {
     /// The response did not bind to the generated request nonce.
     #[error("native response correlation failed")]
     Correlation,
+    /// The process lifetime changed; callers must discard authority instead of retrying it.
+    #[error("native process instance is stale")]
+    StaleInstance,
     /// The native process safely rejected the typed operation.
     #[error("native operation rejected with {result:?}: {diagnostic_code}")]
     Rejected {
@@ -574,7 +722,77 @@ mod tests {
     use tokio::{io::AsyncReadExt, net::UnixListener};
 
     use super::*;
-    use crate::{NativeResponse, read_request};
+    use crate::{NativeProcessIdentity, NativeResponse, read_request};
+
+    const TEST_NATIVE_INSTANCE_ID: [u8; 32] = [9; 32];
+    const TEST_AUTH_SECRET: &[u8; 43] = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    fn bound_client(path: PathBuf, role: NativeProcessRole) -> NativeClient {
+        let mut client = NativeClient::new(path).expect("client");
+        client.role = Some(role);
+        client.native_instance_id = Some(TEST_NATIVE_INSTANCE_ID);
+        client
+    }
+
+    fn response_for(
+        request: &NativeRequest,
+        role: NativeProcessRole,
+        result: NativeResultCode,
+        diagnostic_code: &str,
+    ) -> NativeResponse {
+        NativeResponse {
+            api_version: NATIVE_API_VERSION,
+            request_nonce: request.request_nonce.clone(),
+            result: result as i32,
+            diagnostic_code: diagnostic_code.to_owned(),
+            paths: Vec::new(),
+            received_datagram: None,
+            process_identity: Some(NativeProcessIdentity {
+                role: role as i32,
+                native_instance_id: TEST_NATIVE_INSTANCE_ID.to_vec(),
+            }),
+            request_sha256: request_sha256(request).expect("request digest").to_vec(),
+            tunnel_assignment: None,
+        }
+    }
+
+    fn test_auth_commitment() -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"VOLPAROSSA-NATIVE-ROUTE-AUTH-COMMITMENT-V4\0");
+        hasher.update(TEST_AUTH_SECRET);
+        hasher.finalize().to_vec()
+    }
+
+    fn start_session() -> StartSession {
+        StartSession {
+            route_context_id: vec![1; 16],
+            exit_spki_sha256: vec![2; 32],
+            minimum_paths: 2,
+            masque_context_id: 19,
+            transport_mode: crate::TransportMode::MultipathQuic as i32,
+            auth_secret: TEST_AUTH_SECRET.to_vec(),
+            tls_server_name: b"exit.example".to_vec(),
+            expires_at_ms: 1_060_000,
+            reservation_id: vec![4; 16],
+            finalize_id: vec![5; 16],
+            auth_commitment: test_auth_commitment(),
+            certificate_sha256: vec![6; 32],
+            client_native_instance_id: TEST_NATIVE_INSTANCE_ID.to_vec(),
+            exit_native_instance_id: vec![8; 32],
+        }
+    }
+
+    fn tunnel_assignment() -> TunnelAssignment {
+        TunnelAssignment {
+            assigned_ipv4: [10, 76, 0, 2].to_vec(),
+            assigned_prefix_v4: 32,
+            server_ipv4: [10, 76, 0, 1].to_vec(),
+            server_prefix_v4: 32,
+            mtu: 1_280,
+            assigned_ipv6: Vec::new(),
+            assigned_prefix_v6: 0,
+        }
+    }
 
     fn secure_listener() -> (tempfile::TempDir, PathBuf, UnixListener) {
         let directory = tempdir().expect("tempdir");
@@ -727,7 +945,7 @@ mod tests {
         assert_eq!(local.ip(), IpAddr::V6(overlay_address(1, 4)));
         StartExitSession {
             route_context_id: vec![1; 16],
-            auth_secret: b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec(),
+            auth_secret: TEST_AUTH_SECRET.to_vec(),
             expires_at_ms: 1_060_000,
             minimum_paths: 1,
             masque_context_id: 19,
@@ -744,6 +962,12 @@ mod tests {
                 .to_vec(),
             tls_private_key_pem: b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n"
                 .to_vec(),
+            reservation_id: vec![4; 16],
+            finalize_id: vec![5; 16],
+            auth_commitment: test_auth_commitment(),
+            certificate_sha256: vec![6; 32],
+            client_native_instance_id: vec![8; 32],
+            exit_native_instance_id: TEST_NATIVE_INSTANCE_ID.to_vec(),
         }
     }
 
@@ -818,6 +1042,230 @@ mod tests {
         packet[3] = 20;
         packet
     }
+
+    #[tokio::test]
+    async fn preflight_selects_one_role_and_process_lifetime() {
+        let (_directory, path, listener) = secure_listener();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_regular_request(&mut stream).await;
+            assert!(request.target_native_instance_id.is_empty());
+            assert!(matches!(
+                request.operation,
+                Some(native_request::Operation::Preflight(Preflight {
+                    expected_role
+                })) if expected_role == NativeProcessRole::Client as i32
+            ));
+            let response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Ok,
+                "ready",
+            );
+            stream
+                .write_all(&crate::encode_response(&response).expect("response"))
+                .await
+                .expect("write");
+        });
+
+        let unbound = NativeClient::new(path).expect("client");
+        assert!(matches!(
+            unbound
+                .status(GetStatus {
+                    route_context_id: vec![1; 16],
+                })
+                .await,
+            Err(NativeClientError::PreflightRequired)
+        ));
+        let bound = unbound
+            .preflight(NativeProcessRole::Client)
+            .await
+            .expect("preflight");
+        assert_eq!(bound.role(), Some(NativeProcessRole::Client));
+        assert_eq!(bound.native_instance_id(), Some(&TEST_NATIVE_INSTANCE_ID));
+        assert!(matches!(
+            bound.preflight(NativeProcessRole::Client).await,
+            Err(NativeClientError::AlreadyPreflighted)
+        ));
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn response_digest_and_role_are_correlated() {
+        for mismatch in ["digest", "role"] {
+            let (_directory, path, listener) = secure_listener();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let request = read_regular_request(&mut stream).await;
+                let mut response = response_for(
+                    &request,
+                    NativeProcessRole::Client,
+                    NativeResultCode::Ok,
+                    "OK",
+                );
+                if mismatch == "digest" {
+                    response.request_sha256[0] ^= 1;
+                } else {
+                    response.process_identity.as_mut().expect("identity").role =
+                        NativeProcessRole::Exit as i32;
+                }
+                stream
+                    .write_all(&crate::encode_response(&response).expect("response"))
+                    .await
+                    .expect("write");
+            });
+            let error = bound_client(path, NativeProcessRole::Client)
+                .status(GetStatus {
+                    route_context_id: vec![1; 16],
+                })
+                .await
+                .expect_err("mismatch");
+            assert!(matches!(error, NativeClientError::Correlation));
+            server.await.expect("server");
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_instance_is_not_repreflighted_or_retried() {
+        let (_directory, path, listener) = secure_listener();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_regular_request(&mut stream).await;
+            let mut response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::StaleInstance,
+                "stale_instance",
+            );
+            response
+                .process_identity
+                .as_mut()
+                .expect("identity")
+                .native_instance_id = vec![10; 32];
+            stream
+                .write_all(&crate::encode_response(&response).expect("response"))
+                .await
+                .expect("write");
+            assert!(
+                timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err(),
+                "stale authority must not be automatically retried"
+            );
+        });
+        let error = bound_client(path, NativeProcessRole::Client)
+            .status(GetStatus {
+                route_context_id: vec![1; 16],
+            })
+            .await
+            .expect_err("stale instance");
+        assert!(matches!(error, NativeClientError::StaleInstance));
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn stale_instance_result_is_returned_without_retry() {
+        let (_directory, path, listener) = secure_listener();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_regular_request(&mut stream).await;
+            let response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::StaleInstance,
+                "stale_instance",
+            );
+            stream
+                .write_all(&crate::encode_response(&response).expect("response"))
+                .await
+                .expect("write");
+            assert!(
+                timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err(),
+                "stale native result must not trigger automatic preflight or retry"
+            );
+        });
+        let error = bound_client(path, NativeProcessRole::Client)
+            .status(GetStatus {
+                route_context_id: vec![1; 16],
+            })
+            .await
+            .expect_err("stale result");
+        assert!(matches!(
+            error,
+            NativeClientError::Rejected {
+                result: NativeResultCode::StaleInstance,
+                ..
+            }
+        ));
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn successful_client_start_requires_and_returns_tunnel_assignment() {
+        for assignment in [Some(tunnel_assignment()), None] {
+            let (_directory, path, listener) = secure_listener();
+            let expect_assignment = assignment.is_some();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let request = read_regular_request(&mut stream).await;
+                assert!(matches!(
+                    request.operation,
+                    Some(native_request::Operation::StartSession(_))
+                ));
+                let mut response = response_for(
+                    &request,
+                    NativeProcessRole::Client,
+                    NativeResultCode::Ok,
+                    "started",
+                );
+                response.tunnel_assignment = assignment;
+                stream
+                    .write_all(&crate::encode_response(&response).expect("response"))
+                    .await
+                    .expect("write");
+            });
+            let result = bound_client(path, NativeProcessRole::Client)
+                .start_session(start_session())
+                .await;
+            if expect_assignment {
+                assert_eq!(result.expect("assignment"), tunnel_assignment());
+            } else {
+                assert!(matches!(result, Err(NativeClientError::Correlation)));
+            }
+            server.await.expect("server");
+        }
+    }
+
+    #[tokio::test]
+    async fn non_start_operation_rejects_tunnel_assignment() {
+        let (_directory, path, listener) = secure_listener();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_regular_request(&mut stream).await;
+            let mut response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Ok,
+                "OK",
+            );
+            response.tunnel_assignment = Some(tunnel_assignment());
+            stream
+                .write_all(&crate::encode_response(&response).expect("response"))
+                .await
+                .expect("write");
+        });
+        let error = bound_client(path, NativeProcessRole::Client)
+            .status(GetStatus {
+                route_context_id: vec![1; 16],
+            })
+            .await
+            .expect_err("inappropriate assignment");
+        assert!(matches!(error, NativeClientError::Correlation));
+        server.await.expect("server");
+    }
+
     #[tokio::test]
     async fn status_exchange_checks_peer_and_nonce() {
         let (_directory, path, listener) = secure_listener();
@@ -828,30 +1276,28 @@ mod tests {
                 request.operation,
                 Some(native_request::Operation::GetStatus(_))
             ));
-            let response = NativeResponse {
-                api_version: NATIVE_API_VERSION,
-                request_nonce: request.request_nonce,
-                result: NativeResultCode::Ok as i32,
-                diagnostic_code: "OK".to_owned(),
-                paths: vec![NativePathStatus {
-                    path_id: 1,
-                    smoothed_rtt_us: 1_000,
-                    packets_lost: 0,
-                    delivered_bytes: 4_096,
-                    congestion_window_bytes: 64_000,
-                    bytes_in_flight: 512,
-                    delivery_rate_bps: 8_000_000,
-                    data_carrying: true,
-                }],
-                received_datagram: None,
-            };
+            let mut response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Ok,
+                "OK",
+            );
+            response.paths = vec![NativePathStatus {
+                path_id: 1,
+                smoothed_rtt_us: 1_000,
+                packets_lost: 0,
+                delivered_bytes: 4_096,
+                congestion_window_bytes: 64_000,
+                bytes_in_flight: 512,
+                delivery_rate_bps: 8_000_000,
+                data_carrying: true,
+            }];
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
                 .await
                 .expect("write");
         });
-        let statuses = NativeClient::new(path)
-            .expect("client")
+        let statuses = bound_client(path, NativeProcessRole::Client)
             .status(GetStatus {
                 route_context_id: vec![1; 16],
             })
@@ -867,22 +1313,20 @@ mod tests {
         let (_directory, path, listener) = secure_listener();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let _request = read_regular_request(&mut stream).await;
-            let response = NativeResponse {
-                api_version: NATIVE_API_VERSION,
-                request_nonce: vec![9; 16],
-                result: NativeResultCode::Ok as i32,
-                diagnostic_code: "OK".to_owned(),
-                paths: Vec::new(),
-                received_datagram: None,
-            };
+            let request = read_regular_request(&mut stream).await;
+            let mut response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Ok,
+                "OK",
+            );
+            response.request_nonce = vec![9; 16];
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
                 .await
                 .expect("write");
         });
-        let error = NativeClient::new(path)
-            .expect("client")
+        let error = bound_client(path, NativeProcessRole::Client)
             .status(GetStatus {
                 route_context_id: vec![1; 16],
             })
@@ -898,28 +1342,28 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let request = read_regular_request(&mut stream).await;
-            let Some(native_request::Operation::ReceiveDatagram(value)) = request.operation else {
+            let Some(native_request::Operation::ReceiveDatagram(value)) =
+                request.operation.as_ref()
+            else {
                 panic!("receive request");
             };
-            let response = NativeResponse {
-                api_version: NATIVE_API_VERSION,
-                request_nonce: request.request_nonce,
-                result: NativeResultCode::Ok as i32,
-                diagnostic_code: "datagram".to_owned(),
-                paths: Vec::new(),
-                received_datagram: Some(ReceivedDatagram {
-                    route_context_id: value.route_context_id,
-                    masque_context_id: value.masque_context_id,
-                    inner_ip_packet: ipv4_packet(),
-                }),
-            };
+            let mut response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Ok,
+                "datagram",
+            );
+            response.received_datagram = Some(ReceivedDatagram {
+                route_context_id: value.route_context_id.clone(),
+                masque_context_id: value.masque_context_id,
+                inner_ip_packet: ipv4_packet(),
+            });
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
                 .await
                 .expect("write");
         });
-        let datagram = NativeClient::new(path)
-            .expect("client")
+        let datagram = bound_client(path, NativeProcessRole::Client)
             .receive_datagram(ReceiveDatagram {
                 route_context_id: vec![1; 16],
                 masque_context_id: 17,
@@ -946,26 +1390,22 @@ mod tests {
                     request.operation,
                     Some(native_request::Operation::ReceiveDatagram(_))
                 ));
-                let response = NativeResponse {
-                    api_version: NATIVE_API_VERSION,
-                    request_nonce: request.request_nonce,
-                    result: expected_result as i32,
-                    diagnostic_code: if expected_result == NativeResultCode::NoDatagram {
+                let response = response_for(
+                    &request,
+                    NativeProcessRole::Client,
+                    expected_result,
+                    if expected_result == NativeResultCode::NoDatagram {
                         "no_datagram"
                     } else {
                         "reverse_queue_overflow"
-                    }
-                    .to_owned(),
-                    paths: Vec::new(),
-                    received_datagram: None,
-                };
+                    },
+                );
                 stream
                     .write_all(&crate::encode_response(&response).expect("response"))
                     .await
                     .expect("write");
             });
-            let result = NativeClient::new(path)
-                .expect("client")
+            let result = bound_client(path, NativeProcessRole::Client)
                 .receive_datagram(ReceiveDatagram {
                     route_context_id: vec![1; 16],
                     masque_context_id: 17,
@@ -992,25 +1432,23 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let request = read_regular_request(&mut stream).await;
-            let response = NativeResponse {
-                api_version: NATIVE_API_VERSION,
-                request_nonce: request.request_nonce,
-                result: NativeResultCode::Ok as i32,
-                diagnostic_code: "datagram".to_owned(),
-                paths: Vec::new(),
-                received_datagram: Some(ReceivedDatagram {
-                    route_context_id: vec![2; 16],
-                    masque_context_id: 18,
-                    inner_ip_packet: ipv4_packet(),
-                }),
-            };
+            let mut response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Ok,
+                "datagram",
+            );
+            response.received_datagram = Some(ReceivedDatagram {
+                route_context_id: vec![2; 16],
+                masque_context_id: 18,
+                inner_ip_packet: ipv4_packet(),
+            });
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
                 .await
                 .expect("write");
         });
-        let error = NativeClient::new(path)
-            .expect("client")
+        let error = bound_client(path, NativeProcessRole::Client)
             .receive_datagram(ReceiveDatagram {
                 route_context_id: vec![1; 16],
                 masque_context_id: 17,
@@ -1031,14 +1469,12 @@ mod tests {
                 request.operation,
                 Some(native_request::Operation::AddPath(_))
             ));
-            let response = NativeResponse {
-                api_version: NATIVE_API_VERSION,
-                request_nonce: request.request_nonce,
-                result: NativeResultCode::Ok as i32,
-                diagnostic_code: "path_registered".to_owned(),
-                paths: Vec::new(),
-                received_datagram: None,
-            };
+            let response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Ok,
+                "path_registered",
+            );
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
                 .await
@@ -1048,8 +1484,7 @@ mod tests {
         let (socket, local) = bound_overlay_socket(Type::DGRAM, Protocol::UDP, true);
         let descriptor: OwnedFd = socket.into();
         let probe = DescriptorProbe::new(&descriptor);
-        NativeClient::new(path)
-            .expect("client")
+        bound_client(path, NativeProcessRole::Client)
             .add_path(add_path_for(local), descriptor)
             .await
             .expect("add path");
@@ -1067,14 +1502,12 @@ mod tests {
                 request.operation,
                 Some(native_request::Operation::StartExitSession(_))
             ));
-            let response = NativeResponse {
-                api_version: NATIVE_API_VERSION,
-                request_nonce: request.request_nonce,
-                result: NativeResultCode::Transport as i32,
-                diagnostic_code: "exit_listener_orchestration_unavailable".to_owned(),
-                paths: Vec::new(),
-                received_datagram: None,
-            };
+            let response = response_for(
+                &request,
+                NativeProcessRole::Exit,
+                NativeResultCode::Transport,
+                "exit_listener_orchestration_unavailable",
+            );
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
                 .await
@@ -1084,8 +1517,7 @@ mod tests {
         let (socket, local) = bound_exit_listener_socket(true, false, false);
         let descriptor: OwnedFd = socket.into();
         let probe = DescriptorProbe::new(&descriptor);
-        let error = NativeClient::new(path)
-            .expect("client")
+        let error = bound_client(path, NativeProcessRole::Exit)
             .start_exit_session(start_exit_for(local), descriptor)
             .await
             .expect_err("runtime remains unavailable");
@@ -1102,14 +1534,33 @@ mod tests {
 
     #[test]
     fn descriptor_binding_domains_do_not_cross_correlate() {
+        const EXPECTED_ADD_PATH: [u8; FD_BINDING_LEN] = [
+            0x2d, 0xac, 0xd7, 0x22, 0xbe, 0x6f, 0x87, 0x3a, 0xe4, 0xa9, 0x27, 0x27, 0xad, 0x74,
+            0xd4, 0x66, 0x1d, 0x2e, 0x4c, 0x5a, 0xc8, 0x60, 0x0e, 0xca, 0xa1, 0xbe, 0x1d, 0x91,
+            0x81, 0xa1, 0xa9, 0xbd,
+        ];
+        const EXPECTED_START_EXIT: [u8; FD_BINDING_LEN] = [
+            0x6f, 0x6d, 0x88, 0xc3, 0x8f, 0x60, 0xac, 0x2b, 0xa7, 0x7f, 0x3f, 0x17, 0xf6, 0xe4,
+            0x36, 0xc1, 0x6e, 0x8e, 0xf1, 0x63, 0x64, 0x57, 0x59, 0x77, 0xab, 0x7d, 0x1f, 0xfd,
+            0xfc, 0xe1, 0x16, 0xf0,
+        ];
         let request = NativeRequest {
             api_version: NATIVE_API_VERSION,
             request_nonce: vec![7; 16],
+            target_native_instance_id: TEST_NATIVE_INSTANCE_ID.to_vec(),
             operation: Some(native_request::Operation::GetStatus(GetStatus {
                 route_context_id: vec![1; 16],
             })),
         };
         let frame = encode_request(&request).expect("canonical request");
+        assert_eq!(
+            request_binding(&frame, DescriptorPurpose::AddPath).expect("AddPath binding"),
+            EXPECTED_ADD_PATH
+        );
+        assert_eq!(
+            request_binding(&frame, DescriptorPurpose::StartExit).expect("StartExit binding"),
+            EXPECTED_START_EXIT
+        );
         assert_ne!(
             request_binding(&frame, DescriptorPurpose::AddPath).expect("AddPath binding"),
             request_binding(&frame, DescriptorPurpose::StartExit).expect("StartExit binding")
@@ -1126,14 +1577,12 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let request = read_descriptor_request(&mut stream, DescriptorPurpose::AddPath).await;
-            let response = NativeResponse {
-                api_version: NATIVE_API_VERSION,
-                request_nonce: request.request_nonce,
-                result: NativeResultCode::Transport as i32,
-                diagnostic_code: "path_rejected".to_owned(),
-                paths: Vec::new(),
-                received_datagram: None,
-            };
+            let response = response_for(
+                &request,
+                NativeProcessRole::Client,
+                NativeResultCode::Transport,
+                "path_rejected",
+            );
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
                 .await
@@ -1143,8 +1592,7 @@ mod tests {
         let (socket, local) = bound_overlay_socket(Type::DGRAM, Protocol::UDP, true);
         let descriptor: OwnedFd = socket.into();
         let probe = DescriptorProbe::new(&descriptor);
-        let error = NativeClient::new(path)
-            .expect("client")
+        let error = bound_client(path, NativeProcessRole::Client)
             .add_path(add_path_for(local), descriptor)
             .await
             .expect_err("native rejection");
@@ -1175,7 +1623,7 @@ mod tests {
         let (socket, local) = bound_overlay_socket(Type::DGRAM, Protocol::UDP, true);
         let descriptor: OwnedFd = socket.into();
         let probe = DescriptorProbe::new(&descriptor);
-        let mut client = NativeClient::new(path).expect("client");
+        let mut client = bound_client(path, NativeProcessRole::Client);
         client.operation_timeout = Duration::from_millis(20);
         assert!(matches!(
             client.add_path(add_path_for(local), descriptor).await,
@@ -1188,7 +1636,7 @@ mod tests {
     #[tokio::test]
     async fn local_path_descriptor_validation_fails_closed() {
         let (_directory, path, _listener) = secure_listener();
-        let client = NativeClient::new(path).expect("client");
+        let client = bound_client(path, NativeProcessRole::Client);
 
         let (blocking, local) = bound_overlay_socket(Type::DGRAM, Protocol::UDP, false);
         let descriptor: OwnedFd = blocking.into();
@@ -1265,7 +1713,7 @@ mod tests {
     #[tokio::test]
     async fn local_exit_listener_validation_fails_closed_and_consumes_descriptor() {
         let (_directory, path, _listener) = secure_listener();
-        let client = NativeClient::new(path).expect("client");
+        let client = bound_client(path, NativeProcessRole::Exit);
 
         let (blocking, local) = bound_exit_listener_socket(false, false, false);
         assert_exit_listener_rejected(&client, start_exit_for(local), blocking).await;
@@ -1341,8 +1789,7 @@ mod tests {
     async fn unsafe_socket_mode_is_rejected_before_exchange() {
         let (_directory, path, _listener) = secure_listener();
         fs::set_permissions(&path, Permissions::from_mode(0o660)).expect("unsafe mode");
-        let error = NativeClient::new(path)
-            .expect("client")
+        let error = bound_client(path, NativeProcessRole::Client)
             .status(GetStatus {
                 route_context_id: vec![1; 16],
             })

@@ -40,19 +40,22 @@ The audit records unresolved capabilities as `false`. The patches close SPKI
 pinning, explicit peer-tuple binding, honest path-metric, server session
 correlation, credential-retirement, and caller-supplied TLS-secret-path seams.
 The mqvpn server now accepts bounded in-memory PEM identity and uses sealed
-anonymous Linux memfds for its synchronous xquic import. Native API version 5
-implements bounded request-driven reverse polling, a nonzero local association identifier
-validated at the mqvpn boundary, separate multipath-at-least-two versus
+anonymous Linux memfds for its synchronous xquic import. Native API version 6
+implements role-specific preflight, a fresh per-start process instance, exact request-digest
+correlation, bounded request-driven reverse polling, and separate multipath-at-least-two versus
 single-path-exactly-one modes without downgrade, and route-scoped auth/TLS
-material with a bounded expiry. It consumes one operation-bound UDP descriptor
+material plus signed reservation/finalize, commitment, certificate and process-instance scope with
+a bounded expiry. It consumes one operation-bound UDP descriptor
 for `AddPath` and one listener-shaped descriptor for `StartExitSession`; Rust and
 the dormant C runtime check its current tuple/flags, but not helper origin,
 assigned-address state, or network namespace. The dormant C runtime closes that
 descriptor before failing closed. Versions
-1 through 4 and unknown versions fail closed. The local identifier does not change
+1 through 5 and unknown versions fail closed. The process instance does not change
 the RFC 9484 zero IP Datagram wire Context ID. SCM_RIGHTS proves request correlation;
 only active client `AddPath` checks a same-session namespace cookie. Production
-path adoption remains blocked until helper provenance and exact namespace are authenticated.
+path adoption remains blocked until separate role service identities, helper provenance, the exact
+namespace and product-pool assignment are authenticated and durably bound. The current same-UID
+socket is not attestation or authentication against an explicitly untrusted agent.
 
 Still unresolved are trusted helper-origin proof for client path descriptors,
 the unique delivered-payload metric, the operational exit listener plus

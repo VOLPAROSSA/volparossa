@@ -273,6 +273,8 @@ if(VMP_BUILD_FUZZER)
     if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR "VMP_BUILD_FUZZER requires Clang/libFuzzer")
     endif()
+    target_compile_options(volparossa_mpquic_protocol PRIVATE
+        -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)
     add_executable(fuzz_volparossa_mpquic_protocol fuzz/fuzz_protocol.c)
     target_link_libraries(fuzz_volparossa_mpquic_protocol
         PRIVATE volparossa_mpquic_protocol)

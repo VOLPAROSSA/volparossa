@@ -32,12 +32,24 @@ typedef struct runtime_session {
 
 struct vmp_runtime {
     vmp_runtime_mode_t mode;
+    uint8_t native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
     vmp_transport_ops_t transport;
     void *factory_context;
+    vmp_auth_commitment_fn auth_commitment;
+    void *auth_commitment_context;
     vmp_now_ms_fn now_ms;
     void *clock_context;
     runtime_session_t sessions[VMP_MAX_SESSIONS];
 };
+
+static bool all_zero(const uint8_t *bytes, size_t len)
+{
+    uint8_t combined = 0U;
+    for (size_t index = 0U; index < len; ++index) {
+        combined |= bytes[index];
+    }
+    return combined == 0U;
+}
 
 static void secure_zero(void *memory, size_t len)
 {
@@ -188,6 +200,25 @@ static bool constant_time_secret_equal(const vmp_bytes_view_t *left,
     return difference == 0U;
 }
 
+static bool valid_auth_commitment(
+    const vmp_runtime_t *runtime, const vmp_bytes_view_t *secret,
+    const uint8_t expected[VMP_AUTH_COMMITMENT_LEN])
+{
+    uint8_t actual[VMP_AUTH_COMMITMENT_LEN];
+    memset(actual, 0, sizeof(actual));
+    if (!runtime->auth_commitment(runtime->auth_commitment_context,
+                                  secret->data, secret->len, actual)) {
+        secure_zero(actual, sizeof(actual));
+        return false;
+    }
+    uint8_t difference = 0U;
+    for (size_t index = 0U; index < VMP_AUTH_COMMITMENT_LEN; ++index) {
+        difference |= actual[index] ^ expected[index];
+    }
+    secure_zero(actual, sizeof(actual));
+    return difference == 0U;
+}
+
 static bool valid_tls_name(const char *name)
 {
     if (name == NULL) return false;
@@ -272,6 +303,9 @@ static void set_result(vmp_response_t *response, vmp_result_t result,
     response->has_received_datagram = false;
     secure_zero(&response->received_datagram,
                 sizeof(response->received_datagram));
+    response->has_tunnel_assignment = false;
+    secure_zero(&response->tunnel_assignment,
+                sizeof(response->tunnel_assignment));
 }
 
 static bool valid_inner_packet(const uint8_t *packet, size_t packet_len)
@@ -349,6 +383,21 @@ static bool start_matches(const runtime_session_t *session,
            session->start.masque_context_id == start->masque_context_id &&
            session->start.transport_mode == start->transport_mode &&
            session->start.expires_at_ms == start->expires_at_ms &&
+           memcmp(session->start.reservation_id, start->reservation_id,
+                  VMP_RESERVATION_ID_LEN) == 0 &&
+           memcmp(session->start.finalize_id, start->finalize_id,
+                  VMP_FINALIZE_ID_LEN) == 0 &&
+           memcmp(session->start.auth_commitment, start->auth_commitment,
+                  VMP_AUTH_COMMITMENT_LEN) == 0 &&
+           memcmp(session->start.certificate_sha256,
+                  start->certificate_sha256,
+                  VMP_CERTIFICATE_SHA256_LEN) == 0 &&
+           memcmp(session->start.client_native_instance_id,
+                  start->client_native_instance_id,
+                  VMP_NATIVE_INSTANCE_ID_LEN) == 0 &&
+           memcmp(session->start.exit_native_instance_id,
+                  start->exit_native_instance_id,
+                  VMP_NATIVE_INSTANCE_ID_LEN) == 0 &&
            constant_time_secret_equal(&session->start.auth_secret,
                                       &start->auth_secret) &&
            session->start.tls_server_name.len == start->tls_server_name.len &&
@@ -378,6 +427,20 @@ static void copy_start(runtime_session_t *session,
     session->start.masque_context_id = start->masque_context_id;
     session->start.transport_mode = start->transport_mode;
     session->start.expires_at_ms = start->expires_at_ms;
+    memcpy(session->start.reservation_id, start->reservation_id,
+           VMP_RESERVATION_ID_LEN);
+    memcpy(session->start.finalize_id, start->finalize_id,
+           VMP_FINALIZE_ID_LEN);
+    memcpy(session->start.auth_commitment, start->auth_commitment,
+           VMP_AUTH_COMMITMENT_LEN);
+    memcpy(session->start.certificate_sha256, start->certificate_sha256,
+           VMP_CERTIFICATE_SHA256_LEN);
+    memcpy(session->start.client_native_instance_id,
+           start->client_native_instance_id,
+           VMP_NATIVE_INSTANCE_ID_LEN);
+    memcpy(session->start.exit_native_instance_id,
+           start->exit_native_instance_id,
+           VMP_NATIVE_INSTANCE_ID_LEN);
     memcpy(session->auth_secret, start->auth_secret.data,
            start->auth_secret.len);
     session->start.auth_secret.data = session->auth_secret;
@@ -436,10 +499,15 @@ static bool known_handle(const runtime_session_t *session, int64_t handle,
 static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
                                              runtime_session_t *session,
                                              size_t *out_active,
-                                             bool *out_ready)
+                                             bool *out_ready,
+                                             bool *out_has_assignment,
+                                             vmp_tunnel_assignment_t
+                                                 *out_assignment)
 {
     *out_active = 0U;
     *out_ready = false;
+    *out_has_assignment = false;
+    memset(out_assignment, 0, sizeof(*out_assignment));
     if (session->failed) return VMP_TRANSPORT_ENGINE;
     if (session->transport_session == NULL) return VMP_TRANSPORT_OK;
 
@@ -447,10 +515,17 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
     memset(snapshots, 0, sizeof(snapshots));
     size_t count = 0U;
     bool ready = false;
+    bool has_assignment = false;
+    vmp_tunnel_assignment_t assignment;
+    memset(&assignment, 0, sizeof(assignment));
     const vmp_transport_error_t error = runtime->transport.snapshot(
-        session->transport_session, snapshots, VMP_MAX_PATHS, &count, &ready);
-    if (error != VMP_TRANSPORT_OK || count > VMP_MAX_PATHS) {
+        session->transport_session, snapshots, VMP_MAX_PATHS, &count, &ready,
+        &has_assignment, &assignment);
+    if (error != VMP_TRANSPORT_OK || count > VMP_MAX_PATHS ||
+        (has_assignment && !vmp_tunnel_assignment_is_valid(&assignment)) ||
+        (ready && !has_assignment)) {
         session->failed = true;
+        secure_zero(&assignment, sizeof(assignment));
         return VMP_TRANSPORT_ENGINE;
     }
 
@@ -459,6 +534,7 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
         if (!known_handle(session, snapshots[index].handle, observed) ||
             snapshots[index].state > VMP_TRANSPORT_PATH_CLOSED) {
             session->failed = true;
+            secure_zero(&assignment, sizeof(assignment));
             return VMP_TRANSPORT_ENGINE;
         }
         if (snapshots[index].state == VMP_TRANSPORT_PATH_ACTIVE) {
@@ -467,9 +543,13 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
     }
     if (count != path_count(session)) {
         session->failed = true;
+        secure_zero(&assignment, sizeof(assignment));
         return VMP_TRANSPORT_ENGINE;
     }
     *out_ready = ready;
+    *out_has_assignment = has_assignment;
+    if (has_assignment) memcpy(out_assignment, &assignment, sizeof(assignment));
+    secure_zero(&assignment, sizeof(assignment));
     if (!ready || *out_active < session->start.minimum_paths) {
         session->started = false;
     }
@@ -494,20 +574,31 @@ static bool require_live(vmp_runtime_t *runtime, runtime_session_t *session,
 }
 
 vmp_runtime_t *vmp_runtime_create(vmp_runtime_mode_t mode,
+                                  const uint8_t native_instance_id
+                                      [VMP_NATIVE_INSTANCE_ID_LEN],
                                   const vmp_transport_ops_t *transport,
                                   void *factory_context,
+                                  vmp_auth_commitment_fn auth_commitment,
+                                  void *auth_commitment_context,
                                   vmp_now_ms_fn now_ms,
                                   void *clock_context)
 {
     if ((mode != VMP_RUNTIME_CLIENT && mode != VMP_RUNTIME_EXIT) ||
-        !valid_transport(transport) || now_ms == NULL) {
+        native_instance_id == NULL ||
+        all_zero(native_instance_id, VMP_NATIVE_INSTANCE_ID_LEN) ||
+        !valid_transport(transport) || auth_commitment == NULL ||
+        now_ms == NULL) {
         return NULL;
     }
     vmp_runtime_t *runtime = calloc(1U, sizeof(*runtime));
     if (runtime == NULL) return NULL;
     runtime->mode = mode;
+    memcpy(runtime->native_instance_id, native_instance_id,
+           VMP_NATIVE_INSTANCE_ID_LEN);
     runtime->transport = *transport;
     runtime->factory_context = factory_context;
+    runtime->auth_commitment = auth_commitment;
+    runtime->auth_commitment_context = auth_commitment_context;
     runtime->now_ms = now_ms;
     runtime->clock_context = clock_context;
     return runtime;
@@ -569,10 +660,24 @@ static void dispatch_start(vmp_runtime_t *runtime,
         start->masque_context_id == 0U ||
         start->masque_context_id > VMP_MAX_MASQUE_CONTEXT_ID ||
         !valid_secret(start->auth_secret.data, start->auth_secret.len) ||
+        all_zero(start->reservation_id, VMP_RESERVATION_ID_LEN) ||
+        all_zero(start->finalize_id, VMP_FINALIZE_ID_LEN) ||
+        all_zero(start->auth_commitment, VMP_AUTH_COMMITMENT_LEN) ||
+        all_zero(start->certificate_sha256,
+                 VMP_CERTIFICATE_SHA256_LEN) ||
+        all_zero(start->exit_native_instance_id,
+                 VMP_NATIVE_INSTANCE_ID_LEN) ||
         !copy_tls_name(&start->tls_server_name, tls_server_name)) {
         secure_zero(tls_server_name, sizeof(tls_server_name));
         set_result(response, VMP_RESULT_INVALID_REQUEST,
                    "session_parameters");
+        return;
+    }
+    if (!valid_auth_commitment(runtime, &start->auth_secret,
+                               start->auth_commitment)) {
+        secure_zero(tls_server_name, sizeof(tls_server_name));
+        set_result(response, VMP_RESULT_UNAUTHORISED,
+                   "auth_commitment_mismatch");
         return;
     }
     if (!valid_authorization_window(runtime, start->expires_at_ms)) {
@@ -610,18 +715,28 @@ static void dispatch_start(vmp_runtime_t *runtime,
 
     size_t active = 0U;
     bool ready = false;
-    if (snapshot_active(runtime, session, &active, &ready) !=
+    bool has_assignment = false;
+    vmp_tunnel_assignment_t assignment;
+    memset(&assignment, 0, sizeof(assignment));
+    if (snapshot_active(runtime, session, &active, &ready,
+                        &has_assignment, &assignment) !=
         VMP_TRANSPORT_OK) {
+        secure_zero(&assignment, sizeof(assignment));
         set_result(response, VMP_RESULT_TRANSPORT, "native_transport_failed");
         return;
     }
-    if (!ready || active < session->start.minimum_paths) {
+    if (!ready || !has_assignment ||
+        active < session->start.minimum_paths) {
+        secure_zero(&assignment, sizeof(assignment));
         set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
                    "required_paths_not_active");
         return;
     }
     session->started = true;
     set_result(response, VMP_RESULT_OK, "ok");
+    response->has_tunnel_assignment = true;
+    memcpy(&response->tunnel_assignment, &assignment, sizeof(assignment));
+    secure_zero(&assignment, sizeof(assignment));
 }
 
 static void dispatch_add_path(vmp_runtime_t *runtime,
@@ -759,12 +874,18 @@ static bool require_active(vmp_runtime_t *runtime, runtime_session_t *session,
 {
     size_t active = 0U;
     bool ready = false;
-    if (snapshot_active(runtime, session, &active, &ready) !=
+    bool has_assignment = false;
+    vmp_tunnel_assignment_t assignment;
+    memset(&assignment, 0, sizeof(assignment));
+    if (snapshot_active(runtime, session, &active, &ready,
+                        &has_assignment, &assignment) !=
         VMP_TRANSPORT_OK) {
+        secure_zero(&assignment, sizeof(assignment));
         set_result(response, VMP_RESULT_TRANSPORT, "native_transport_failed");
         return false;
     }
-    if (!session->started || !ready ||
+    secure_zero(&assignment, sizeof(assignment));
+    if (!session->started || !ready || !has_assignment ||
         active < session->start.minimum_paths) {
         set_result(response, VMP_RESULT_INSUFFICIENT_PATHS,
                    "required_paths_not_active");
@@ -915,13 +1036,19 @@ static void dispatch_start_exit(vmp_runtime_t *runtime,
                                   : "exit_listener_descriptor");
         return;
     }
+    if (!valid_auth_commitment(runtime, &start->auth_secret,
+                               start->auth_commitment)) {
+        set_result(response, VMP_RESULT_UNAUTHORISED,
+                   "auth_commitment_mismatch");
+        return;
+    }
     if (!valid_authorization_window(runtime, start->expires_at_ms)) {
         set_result(response, VMP_RESULT_UNAUTHORISED,
                    "authorization_window");
         return;
     }
 
-    /* API v5 has consumed a UDP descriptor whose current tuple and flags match
+    /* API v6 has consumed a UDP descriptor whose current tuple and flags match
      * the route request. Helper origin, assigned-address state and exact
      * network namespace remain unproven. Bounded certificate/key candidate PEM
      * is carried in memory, but this process boundary still has no reviewed
@@ -955,6 +1082,11 @@ vmp_server_error_t vmp_runtime_dispatch(void *context,
         if (request_fd >= 0) (void)close(request_fd);
         return VMP_SERVER_BACKEND;
     }
+    response->native_process_identity.role =
+        runtime->mode == VMP_RUNTIME_CLIENT ? VMP_NATIVE_ROLE_CLIENT
+                                            : VMP_NATIVE_ROLE_EXIT;
+    memcpy(response->native_process_identity.native_instance_id,
+           runtime->native_instance_id, VMP_NATIVE_INSTANCE_ID_LEN);
     const bool descriptor_operation =
         request->operation == VMP_OPERATION_ADD_PATH ||
         request->operation == VMP_OPERATION_START_EXIT_SESSION;
@@ -968,6 +1100,41 @@ vmp_server_error_t vmp_runtime_dispatch(void *context,
     if (request->api_version != VMP_API_VERSION) {
         if (request_fd >= 0) (void)close(request_fd);
         set_result(response, VMP_RESULT_VERSION, "api_version");
+        return VMP_SERVER_OK;
+    }
+    if (request->operation == VMP_OPERATION_PREFLIGHT) {
+        if (!all_zero(request->target_native_instance_id,
+                      VMP_NATIVE_INSTANCE_ID_LEN)) {
+            set_result(response, VMP_RESULT_INVALID_REQUEST,
+                       "preflight_target");
+        } else if (request->body.preflight.expected_role !=
+            response->native_process_identity.role) {
+            set_result(response, VMP_RESULT_INVALID_REQUEST,
+                       "role_mismatch");
+        } else {
+            set_result(response, VMP_RESULT_OK, "ok");
+        }
+        return VMP_SERVER_OK;
+    }
+    if (memcmp(request->target_native_instance_id,
+               runtime->native_instance_id,
+               VMP_NATIVE_INSTANCE_ID_LEN) != 0) {
+        if (request_fd >= 0) (void)close(request_fd);
+        set_result(response, VMP_RESULT_STALE_INSTANCE,
+                   "stale_instance");
+        return VMP_SERVER_OK;
+    }
+    if ((request->operation == VMP_OPERATION_START_SESSION &&
+         memcmp(request->body.start_session.client_native_instance_id,
+                runtime->native_instance_id,
+                VMP_NATIVE_INSTANCE_ID_LEN) != 0) ||
+        (request->operation == VMP_OPERATION_START_EXIT_SESSION &&
+         memcmp(request->body.start_exit_session.exit_native_instance_id,
+                runtime->native_instance_id,
+                VMP_NATIVE_INSTANCE_ID_LEN) != 0)) {
+        if (request_fd >= 0) (void)close(request_fd);
+        set_result(response, VMP_RESULT_STALE_INSTANCE,
+                   "signed_instance_mismatch");
         return VMP_SERVER_OK;
     }
 
@@ -998,6 +1165,10 @@ vmp_server_error_t vmp_runtime_dispatch(void *context,
         break;
     case VMP_OPERATION_STOP_SESSION:
         dispatch_stop(runtime, &request->body.stop_session, response);
+        break;
+    case VMP_OPERATION_PREFLIGHT:
+        /* Handled before target-instance validation. */
+        set_result(response, VMP_RESULT_INVALID_REQUEST, "operation");
         break;
     case VMP_OPERATION_NONE:
     default:

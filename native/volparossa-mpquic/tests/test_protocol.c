@@ -14,6 +14,13 @@ typedef struct test_encoder {
 
 static const uint8_t test_auth_secret[VMP_AUTH_SECRET_LEN] =
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+static const uint8_t test_auth_commitment[VMP_AUTH_COMMITMENT_LEN] = {
+    0x2bU, 0x80U, 0x72U, 0x70U, 0xdbU, 0xd6U, 0x15U, 0x73U,
+    0xccU, 0x59U, 0x14U, 0x25U, 0x11U, 0x62U, 0x1eU, 0xd6U,
+    0xf3U, 0xc3U, 0x3dU, 0xd1U, 0x40U, 0x77U, 0x4cU, 0xc2U,
+    0x4aU, 0x04U, 0x12U, 0x71U, 0xc6U, 0x31U, 0x08U, 0x85U,
+};
+static const uint8_t test_instance[VMP_NATIVE_INSTANCE_ID_LEN] = {0x66U};
 
 static void put_varint(test_encoder_t *encoder, uint64_t value)
 {
@@ -52,7 +59,7 @@ static size_t make_start(uint8_t *out, size_t capacity, uint32_t minimum_paths,
                          vmp_transport_mode_t transport_mode,
                          bool unknown_nested, bool duplicate_operation)
 {
-    uint8_t nested[256];
+    uint8_t nested[512];
     test_encoder_t child = {.cursor = nested, .end = nested + sizeof(nested)};
     uint8_t context[VMP_CONTEXT_ID_LEN];
     uint8_t pin[VMP_SPKI_SHA256_LEN];
@@ -67,13 +74,32 @@ static size_t make_start(uint8_t *out, size_t capacity, uint32_t minimum_paths,
     put_bytes(&child, 6, test_auth_secret, sizeof(test_auth_secret));
     put_bytes(&child, 7, tls_server_name, sizeof(tls_server_name) - 1U);
     put_uint(&child, 8, UINT64_C(1060000));
-    if (unknown_nested) put_uint(&child, 9, 1);
+    uint8_t reservation_id[VMP_RESERVATION_ID_LEN];
+    uint8_t finalize_id[VMP_FINALIZE_ID_LEN];
+    uint8_t auth_commitment[VMP_AUTH_COMMITMENT_LEN];
+    uint8_t certificate_sha256[VMP_CERTIFICATE_SHA256_LEN];
+    uint8_t exit_instance[VMP_NATIVE_INSTANCE_ID_LEN];
+    memset(reservation_id, 0x71, sizeof(reservation_id));
+    memset(finalize_id, 0x72, sizeof(finalize_id));
+    memcpy(auth_commitment, test_auth_commitment,
+           sizeof(auth_commitment));
+    memset(certificate_sha256, 0x74, sizeof(certificate_sha256));
+    memset(exit_instance, 0x75, sizeof(exit_instance));
+    put_bytes(&child, 9, reservation_id, sizeof(reservation_id));
+    put_bytes(&child, 10, finalize_id, sizeof(finalize_id));
+    put_bytes(&child, 11, auth_commitment, sizeof(auth_commitment));
+    put_bytes(&child, 12, certificate_sha256,
+              sizeof(certificate_sha256));
+    put_bytes(&child, 13, test_instance, sizeof(test_instance));
+    put_bytes(&child, 14, exit_instance, sizeof(exit_instance));
+    if (unknown_nested) put_uint(&child, 15, 1);
 
     test_encoder_t encoder = {.cursor = out, .end = out + capacity};
     uint8_t nonce[VMP_REQUEST_NONCE_LEN];
     memset(nonce, 0x33, sizeof(nonce));
     put_uint(&encoder, 1, VMP_API_VERSION);
     put_bytes(&encoder, 2, nonce, sizeof(nonce));
+    put_bytes(&encoder, 3, test_instance, sizeof(test_instance));
     put_bytes(&encoder, VMP_OPERATION_START_SESSION, nested,
               (size_t)(child.cursor - nested));
     if (duplicate_operation)
@@ -101,6 +127,7 @@ static size_t make_old_v2_start(uint8_t *out, size_t capacity)
     memset(nonce, 0x33, sizeof(nonce));
     put_uint(&encoder, 1, VMP_API_VERSION);
     put_bytes(&encoder, 2, nonce, sizeof(nonce));
+    put_bytes(&encoder, 3, test_instance, sizeof(test_instance));
     put_bytes(&encoder, VMP_OPERATION_START_SESSION, nested,
               (size_t)(child.cursor - nested));
     return (size_t)(encoder.cursor - out);
@@ -113,7 +140,7 @@ static size_t make_start_exit(uint8_t *out, size_t capacity)
         "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
     static const uint8_t private_key[] =
         "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
-    uint8_t nested[512];
+    uint8_t nested[768];
     test_encoder_t child = {.cursor = nested, .end = nested + sizeof(nested)};
     uint8_t context[VMP_CONTEXT_ID_LEN];
     uint8_t spki[VMP_SPKI_SHA256_LEN];
@@ -144,12 +171,31 @@ static size_t make_start_exit(uint8_t *out, size_t capacity)
     put_bytes(&child, 14, reservation, sizeof(reservation));
     put_bytes(&child, 15, certificate, sizeof(certificate) - 1U);
     put_bytes(&child, 16, private_key, sizeof(private_key) - 1U);
+    uint8_t reservation_id[VMP_RESERVATION_ID_LEN];
+    uint8_t finalize_id[VMP_FINALIZE_ID_LEN];
+    uint8_t auth_commitment[VMP_AUTH_COMMITMENT_LEN];
+    uint8_t certificate_sha256[VMP_CERTIFICATE_SHA256_LEN];
+    uint8_t client_instance[VMP_NATIVE_INSTANCE_ID_LEN];
+    memset(reservation_id, 0x51, sizeof(reservation_id));
+    memset(finalize_id, 0x52, sizeof(finalize_id));
+    memcpy(auth_commitment, test_auth_commitment,
+           sizeof(auth_commitment));
+    memset(certificate_sha256, 0x54, sizeof(certificate_sha256));
+    memset(client_instance, 0x55, sizeof(client_instance));
+    put_bytes(&child, 17, reservation_id, sizeof(reservation_id));
+    put_bytes(&child, 18, finalize_id, sizeof(finalize_id));
+    put_bytes(&child, 19, auth_commitment, sizeof(auth_commitment));
+    put_bytes(&child, 20, certificate_sha256,
+              sizeof(certificate_sha256));
+    put_bytes(&child, 21, client_instance, sizeof(client_instance));
+    put_bytes(&child, 22, test_instance, sizeof(test_instance));
 
     test_encoder_t encoder = {.cursor = out, .end = out + capacity};
     uint8_t nonce[VMP_REQUEST_NONCE_LEN];
     memset(nonce, 0x55, sizeof(nonce));
     put_uint(&encoder, 1, VMP_API_VERSION);
     put_bytes(&encoder, 2, nonce, sizeof(nonce));
+    put_bytes(&encoder, 3, test_instance, sizeof(test_instance));
     put_bytes(&encoder, VMP_OPERATION_START_EXIT_SESSION, nested,
               (size_t)(child.cursor - nested));
     return (size_t)(encoder.cursor - out);
@@ -172,6 +218,7 @@ static size_t make_old_v4_start_exit(uint8_t *out, size_t capacity)
     test_encoder_t encoder = {.cursor = out, .end = out + capacity};
     put_uint(&encoder, 1U, VMP_API_VERSION);
     put_bytes(&encoder, 2U, nonce, sizeof(nonce));
+    put_bytes(&encoder, 3U, test_instance, sizeof(test_instance));
     put_bytes(&encoder, VMP_OPERATION_START_EXIT_SESSION, nested,
               (size_t)(child.cursor - nested));
     return (size_t)(encoder.cursor - out);
@@ -247,6 +294,7 @@ static size_t make_add_path(uint8_t *out, size_t capacity,
     memset(nonce, 0x33, sizeof(nonce));
     put_uint(&encoder, 1, VMP_API_VERSION);
     put_bytes(&encoder, 2, nonce, sizeof(nonce));
+    put_bytes(&encoder, 3, test_instance, sizeof(test_instance));
     put_bytes(&encoder, VMP_OPERATION_ADD_PATH, nested,
               (size_t)(child.cursor - nested));
     return (size_t)(encoder.cursor - out);
@@ -273,6 +321,7 @@ static size_t make_datagram(uint8_t *out, size_t capacity, uint8_t *packet,
     memset(nonce, 0x33, sizeof(nonce));
     put_uint(&encoder, 1, VMP_API_VERSION);
     put_bytes(&encoder, 2, nonce, sizeof(nonce));
+    put_bytes(&encoder, 3, test_instance, sizeof(test_instance));
     put_bytes(&encoder, VMP_OPERATION_SEND_DATAGRAM, nested, nested_len);
     const size_t encoded_len = (size_t)(encoder.cursor - out);
     free(nested);
@@ -294,14 +343,34 @@ static size_t make_receive(uint8_t *out, size_t capacity,
     memset(nonce, 0x33, sizeof(nonce));
     put_uint(&encoder, 1, VMP_API_VERSION);
     put_bytes(&encoder, 2, nonce, sizeof(nonce));
+    put_bytes(&encoder, 3, test_instance, sizeof(test_instance));
     put_bytes(&encoder, VMP_OPERATION_RECEIVE_DATAGRAM, nested,
+              (size_t)(child.cursor - nested));
+    return (size_t)(encoder.cursor - out);
+}
+
+static size_t make_preflight(uint8_t *out, size_t capacity,
+                             vmp_native_role_t expected_role,
+                             bool include_target)
+{
+    uint8_t nested[16];
+    test_encoder_t child = {.cursor = nested, .end = nested + sizeof(nested)};
+    put_uint(&child, 1U, (uint64_t)expected_role);
+    test_encoder_t encoder = {.cursor = out, .end = out + capacity};
+    uint8_t nonce[VMP_REQUEST_NONCE_LEN];
+    memset(nonce, 0x61, sizeof(nonce));
+    put_uint(&encoder, 1U, VMP_API_VERSION);
+    put_bytes(&encoder, 2U, nonce, sizeof(nonce));
+    if (include_target)
+        put_bytes(&encoder, 3U, test_instance, sizeof(test_instance));
+    put_bytes(&encoder, VMP_OPERATION_PREFLIGHT, nested,
               (size_t)(child.cursor - nested));
     return (size_t)(encoder.cursor - out);
 }
 
 static void test_start_round_trip_shape(void)
 {
-    uint8_t payload[256];
+    uint8_t payload[1024];
     const size_t len = make_start(payload, sizeof(payload), 2U, 9U,
                                   VMP_TRANSPORT_MODE_MULTIPATH_QUIC,
                                   false, false);
@@ -322,6 +391,17 @@ static void test_start_round_trip_shape(void)
     assert(memcmp(request.body.start_session.tls_server_name.data,
                   "exit.example", 12U) == 0);
     assert(request.body.start_session.expires_at_ms == UINT64_C(1060000));
+    assert(request.body.start_session.reservation_id[0] == 0x71U);
+    assert(request.body.start_session.finalize_id[0] == 0x72U);
+    assert(memcmp(request.body.start_session.auth_commitment,
+                  test_auth_commitment,
+                  sizeof(test_auth_commitment)) == 0);
+    assert(request.body.start_session.certificate_sha256[0] == 0x74U);
+    assert(memcmp(request.target_native_instance_id, test_instance,
+                  sizeof(test_instance)) == 0);
+    assert(memcmp(request.body.start_session.client_native_instance_id,
+                  test_instance, sizeof(test_instance)) == 0);
+    assert(request.body.start_session.exit_native_instance_id[0] == 0x75U);
 
     uint8_t *decoded_secret =
         (uint8_t *)(uintptr_t)request.body.start_session.auth_secret.data;
@@ -363,6 +443,16 @@ static void test_v2_start_shape_and_start_exit_boundary(void)
     assert(request.body.start_exit_session.reservation_hash[0] == 0x46U);
     assert(request.body.start_exit_session.tls_certificate_pem.len != 0U);
     assert(request.body.start_exit_session.tls_private_key_pem.len != 0U);
+    assert(request.body.start_exit_session.reservation_id[0] == 0x51U);
+    assert(request.body.start_exit_session.finalize_id[0] == 0x52U);
+    assert(memcmp(request.body.start_exit_session.auth_commitment,
+                  test_auth_commitment,
+                  sizeof(test_auth_commitment)) == 0);
+    assert(request.body.start_exit_session.certificate_sha256[0] == 0x54U);
+    assert(request.body.start_exit_session.client_native_instance_id[0] ==
+           0x55U);
+    assert(memcmp(request.body.start_exit_session.exit_native_instance_id,
+                  test_instance, sizeof(test_instance)) == 0);
     assert(vmp_start_exit_is_valid(&request.body.start_exit_session));
 
     const vmp_start_exit_session_t valid = request.body.start_exit_session;
@@ -388,6 +478,13 @@ static void test_v2_start_shape_and_start_exit_boundary(void)
     memset(invalid.reservation_hash, 0, sizeof(invalid.reservation_hash));
     assert(!vmp_start_exit_is_valid(&invalid));
     invalid = valid;
+    memset(invalid.finalize_id, 0, sizeof(invalid.finalize_id));
+    assert(!vmp_start_exit_is_valid(&invalid));
+    invalid = valid;
+    memset(invalid.exit_native_instance_id, 0,
+           sizeof(invalid.exit_native_instance_id));
+    assert(!vmp_start_exit_is_valid(&invalid));
+    invalid = valid;
     invalid.tls_certificate_pem.len = VMP_MAX_TLS_CERTIFICATE_PEM + 1U;
     assert(!vmp_start_exit_is_valid(&invalid));
     invalid = valid;
@@ -397,7 +494,7 @@ static void test_v2_start_shape_and_start_exit_boundary(void)
 
 static void test_old_unknown_version_and_zero_nonce_are_rejected(void)
 {
-    uint8_t payload[256];
+    uint8_t payload[1024];
     const size_t len = make_start(payload, sizeof(payload), 2U, 9U,
                                   VMP_TRANSPORT_MODE_MULTIPATH_QUIC,
                                   false, false);
@@ -428,8 +525,8 @@ static void test_old_unknown_version_and_zero_nonce_are_rejected(void)
 
 static void test_noncanonical_wire_forms_are_rejected(void)
 {
-    uint8_t payload[320];
-    uint8_t reordered[320];
+    uint8_t payload[1024];
+    uint8_t reordered[1024];
     vmp_request_t request;
     size_t len = make_start(payload, sizeof(payload), 2U, 9U,
                             VMP_TRANSPORT_MODE_MULTIPATH_QUIC,
@@ -472,9 +569,45 @@ static void test_receive_is_context_correlated(void)
            VMP_PROTOCOL_INVALID_VALUE);
 }
 
+static void test_preflight_and_target_instance_are_exact(void)
+{
+    uint8_t payload[1024];
+    vmp_request_t request;
+    size_t len = make_preflight(payload, sizeof(payload),
+                                VMP_NATIVE_ROLE_CLIENT, false);
+    assert(vmp_decode_request(payload, len, &request) == VMP_PROTOCOL_OK);
+    assert(request.operation == VMP_OPERATION_PREFLIGHT);
+    assert(request.body.preflight.expected_role == VMP_NATIVE_ROLE_CLIENT);
+    assert(memcmp(request.target_native_instance_id,
+                  (const uint8_t[VMP_NATIVE_INSTANCE_ID_LEN]){0},
+                  VMP_NATIVE_INSTANCE_ID_LEN) == 0);
+
+    len = make_preflight(payload, sizeof(payload),
+                         VMP_NATIVE_ROLE_UNSPECIFIED, false);
+    assert(vmp_decode_request(payload, len, &request) ==
+           VMP_PROTOCOL_INVALID_VALUE);
+    len = make_preflight(payload, sizeof(payload), VMP_NATIVE_ROLE_EXIT,
+                         true);
+    assert(vmp_decode_request(payload, len, &request) ==
+           VMP_PROTOCOL_INVALID_VALUE);
+
+    len = make_receive(payload, sizeof(payload), 9U);
+    assert(payload[20] == 0x1aU && payload[21] ==
+           VMP_NATIVE_INSTANCE_ID_LEN);
+    memset(payload + 22U, 0, VMP_NATIVE_INSTANCE_ID_LEN);
+    assert(vmp_decode_request(payload, len, &request) ==
+           VMP_PROTOCOL_INVALID_VALUE);
+    len = make_receive(payload, sizeof(payload), 9U);
+    memmove(payload + 20U, payload + 20U + 2U + VMP_NATIVE_INSTANCE_ID_LEN,
+            len - 20U - 2U - VMP_NATIVE_INSTANCE_ID_LEN);
+    assert(vmp_decode_request(payload,
+                              len - 2U - VMP_NATIVE_INSTANCE_ID_LEN,
+                              &request) == VMP_PROTOCOL_INVALID_VALUE);
+}
+
 static void test_nonzero_masque_context_is_required(void)
 {
-    uint8_t payload[256];
+    uint8_t payload[1024];
     vmp_request_t request;
     size_t len = make_start(payload, sizeof(payload), 2U, 0U,
                             VMP_TRANSPORT_MODE_MULTIPATH_QUIC,
@@ -490,7 +623,7 @@ static void test_nonzero_masque_context_is_required(void)
 
 static void test_single_path_and_extensions_fail_closed(void)
 {
-    uint8_t payload[320];
+    uint8_t payload[1024];
     vmp_request_t request;
     size_t len = make_start(
         payload, sizeof(payload), 1U, 9U,
@@ -599,6 +732,44 @@ static void test_response_is_compatible_and_bounded(void)
     response.paths[0].smoothed_rtt_us = 1000;
     response.paths[0].delivery_rate_bps = 8000000;
     response.paths[0].data_carrying = true;
+    response.native_process_identity.role = VMP_NATIVE_ROLE_CLIENT;
+    memcpy(response.native_process_identity.native_instance_id,
+           test_instance, sizeof(test_instance));
+    memset(response.request_sha256, 0x77, sizeof(response.request_sha256));
+    vmp_response_t invalid_response = response;
+    invalid_response.native_process_identity.role =
+        VMP_NATIVE_ROLE_UNSPECIFIED;
+    assert(vmp_encode_response_frame(&invalid_response, frame,
+                                     sizeof(frame), &frame_len) ==
+           VMP_PROTOCOL_INVALID_VALUE);
+    invalid_response = response;
+    memset(invalid_response.native_process_identity.native_instance_id, 0,
+           VMP_NATIVE_INSTANCE_ID_LEN);
+    assert(vmp_encode_response_frame(&invalid_response, frame,
+                                     sizeof(frame), &frame_len) ==
+           VMP_PROTOCOL_INVALID_VALUE);
+    invalid_response = response;
+    memset(invalid_response.request_sha256, 0,
+           VMP_REQUEST_SHA256_LEN);
+    assert(vmp_encode_response_frame(&invalid_response, frame,
+                                     sizeof(frame), &frame_len) ==
+           VMP_PROTOCOL_OK);
+    bool found_zero_digest = false;
+    for (size_t index = 4U;
+         index + 2U + VMP_REQUEST_SHA256_LEN <= frame_len; ++index) {
+        if (frame[index] != 0x42U ||
+            frame[index + 1U] != VMP_REQUEST_SHA256_LEN) {
+            continue;
+        }
+        found_zero_digest = true;
+        for (size_t digest_index = 0U;
+             digest_index < VMP_REQUEST_SHA256_LEN; ++digest_index) {
+            if (frame[index + 2U + digest_index] != 0U) {
+                found_zero_digest = false;
+            }
+        }
+    }
+    assert(found_zero_digest);
     assert(vmp_encode_response_frame(&response, frame, sizeof(frame), &frame_len) ==
            VMP_PROTOCOL_OK);
     assert(frame_len > 4);
@@ -668,6 +839,51 @@ static void test_response_is_compatible_and_bounded(void)
     response.result = VMP_RESULT_QUEUE_OVERFLOW;
     assert(vmp_encode_response_frame(&response, frame, sizeof(frame),
                                      &frame_len) == VMP_PROTOCOL_OK);
+    response.result = VMP_RESULT_STALE_INSTANCE;
+    assert(vmp_encode_response_frame(&response, frame, sizeof(frame),
+                                     &frame_len) == VMP_PROTOCOL_OK);
+
+    response.result = VMP_RESULT_OK;
+    response.has_tunnel_assignment = true;
+    response.tunnel_assignment.assigned_ipv4[0] = 10U;
+    response.tunnel_assignment.assigned_ipv4[3] = 2U;
+    response.tunnel_assignment.assigned_prefix_v4 = 32U;
+    response.tunnel_assignment.server_ipv4[0] = 10U;
+    response.tunnel_assignment.server_ipv4[3] = 1U;
+    response.tunnel_assignment.server_prefix_v4 = 32U;
+    response.tunnel_assignment.mtu = 1280U;
+    assert(vmp_tunnel_assignment_is_valid(&response.tunnel_assignment));
+    assert(vmp_encode_response_frame(&response, frame, sizeof(frame),
+                                     &frame_len) == VMP_PROTOCOL_OK);
+    bool found_identity = false;
+    bool found_request_digest = false;
+    bool found_assignment = false;
+    for (size_t index = 4U; index < frame_len; ++index) {
+        if (frame[index] == 0x3aU) found_identity = true;
+        if (frame[index] == 0x42U) found_request_digest = true;
+        if (frame[index] == 0x4aU) found_assignment = true;
+    }
+    assert(found_identity && found_request_digest && found_assignment);
+    response.tunnel_assignment.mtu = 1279U;
+    assert(!vmp_tunnel_assignment_is_valid(&response.tunnel_assignment));
+    assert(vmp_encode_response_frame(&response, frame, sizeof(frame),
+                                     &frame_len) ==
+           VMP_PROTOCOL_INVALID_VALUE);
+    response.tunnel_assignment.mtu = 1280U;
+    response.result = VMP_RESULT_TRANSPORT;
+    assert(vmp_encode_response_frame(&response, frame, sizeof(frame),
+                                     &frame_len) ==
+           VMP_PROTOCOL_INVALID_VALUE);
+    response.result = VMP_RESULT_OK;
+    response.tunnel_assignment.has_ipv6 = true;
+    response.tunnel_assignment.assigned_prefix_v6 = 96U;
+    assert(!vmp_tunnel_assignment_is_valid(&response.tunnel_assignment));
+    response.tunnel_assignment.has_ipv6 = false;
+    response.tunnel_assignment.assigned_prefix_v6 = 0U;
+    response.has_tunnel_assignment = false;
+    assert(vmp_encode_response_frame(&response, frame, sizeof(frame),
+                                     &frame_len) ==
+           VMP_PROTOCOL_INVALID_VALUE);
 }
 
 int main(void)
@@ -677,6 +893,7 @@ int main(void)
     test_old_unknown_version_and_zero_nonce_are_rejected();
     test_noncanonical_wire_forms_are_rejected();
     test_receive_is_context_correlated();
+    test_preflight_and_target_instance_are_exact();
     test_nonzero_masque_context_is_required();
     test_single_path_and_extensions_fail_closed();
     test_path_is_typed_fd_bound_and_rejects_v3_shape();

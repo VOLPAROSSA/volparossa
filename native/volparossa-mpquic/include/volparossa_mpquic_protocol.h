@@ -12,10 +12,16 @@
 extern "C" {
 #endif
 
-#define VMP_API_VERSION UINT32_C(5)
+#define VMP_API_VERSION UINT32_C(6)
 #define VMP_MAX_CONTROL_FRAME (UINT32_C(1024) * UINT32_C(1024))
 #define VMP_CONTEXT_ID_LEN 16U
+#define VMP_RESERVATION_ID_LEN 16U
+#define VMP_FINALIZE_ID_LEN 16U
 #define VMP_REQUEST_NONCE_LEN 16U
+#define VMP_NATIVE_INSTANCE_ID_LEN 32U
+#define VMP_REQUEST_SHA256_LEN 32U
+#define VMP_AUTH_COMMITMENT_LEN 32U
+#define VMP_CERTIFICATE_SHA256_LEN 32U
 #define VMP_SPKI_SHA256_LEN 32U
 #define VMP_RESERVATION_HASH_LEN 32U
 #define VMP_FD_BINDING_LEN 32U
@@ -40,6 +46,7 @@ typedef enum vmp_result {
     VMP_RESULT_INSUFFICIENT_PATHS = 6,
     VMP_RESULT_NO_DATAGRAM = 7,
     VMP_RESULT_QUEUE_OVERFLOW = 8,
+    VMP_RESULT_STALE_INSTANCE = 9,
 } vmp_result_t;
 
 typedef enum vmp_operation {
@@ -52,7 +59,14 @@ typedef enum vmp_operation {
     VMP_OPERATION_STOP_SESSION = 15,
     VMP_OPERATION_RECEIVE_DATAGRAM = 16,
     VMP_OPERATION_START_EXIT_SESSION = 17,
+    VMP_OPERATION_PREFLIGHT = 18,
 } vmp_operation_t;
+
+typedef enum vmp_native_role {
+    VMP_NATIVE_ROLE_UNSPECIFIED = 0,
+    VMP_NATIVE_ROLE_CLIENT = 1,
+    VMP_NATIVE_ROLE_EXIT = 2,
+} vmp_native_role_t;
 
 typedef enum vmp_transport_mode {
     VMP_TRANSPORT_MODE_UNSPECIFIED = 0,
@@ -74,6 +88,12 @@ typedef struct vmp_start_session {
     vmp_bytes_view_t auth_secret;
     vmp_bytes_view_t tls_server_name;
     uint64_t expires_at_ms;
+    uint8_t reservation_id[VMP_RESERVATION_ID_LEN];
+    uint8_t finalize_id[VMP_FINALIZE_ID_LEN];
+    uint8_t auth_commitment[VMP_AUTH_COMMITMENT_LEN];
+    uint8_t certificate_sha256[VMP_CERTIFICATE_SHA256_LEN];
+    uint8_t client_native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
+    uint8_t exit_native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
 } vmp_start_session_t;
 
 typedef struct vmp_start_exit_session {
@@ -93,7 +113,17 @@ typedef struct vmp_start_exit_session {
     uint8_t reservation_hash[VMP_RESERVATION_HASH_LEN];
     vmp_bytes_view_t tls_certificate_pem;
     vmp_bytes_view_t tls_private_key_pem;
+    uint8_t reservation_id[VMP_RESERVATION_ID_LEN];
+    uint8_t finalize_id[VMP_FINALIZE_ID_LEN];
+    uint8_t auth_commitment[VMP_AUTH_COMMITMENT_LEN];
+    uint8_t certificate_sha256[VMP_CERTIFICATE_SHA256_LEN];
+    uint8_t client_native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
+    uint8_t exit_native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
 } vmp_start_exit_session_t;
+
+typedef struct vmp_preflight {
+    vmp_native_role_t expected_role;
+} vmp_preflight_t;
 
 typedef struct vmp_add_path {
     uint8_t route_context_id[VMP_CONTEXT_ID_LEN];
@@ -129,6 +159,7 @@ typedef struct vmp_context_request {
 typedef struct vmp_request {
     uint32_t api_version;
     uint8_t request_nonce[VMP_REQUEST_NONCE_LEN];
+    uint8_t target_native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
     vmp_operation_t operation;
     union {
         vmp_start_session_t start_session;
@@ -139,6 +170,7 @@ typedef struct vmp_request {
         vmp_context_request_t stop_session;
         vmp_receive_datagram_t receive_datagram;
         vmp_start_exit_session_t start_exit_session;
+        vmp_preflight_t preflight;
     } body;
 } vmp_request_t;
 
@@ -160,6 +192,22 @@ typedef struct vmp_received_datagram {
     size_t inner_ip_packet_len;
 } vmp_received_datagram_t;
 
+typedef struct vmp_native_process_identity {
+    vmp_native_role_t role;
+    uint8_t native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
+} vmp_native_process_identity_t;
+
+typedef struct vmp_tunnel_assignment {
+    uint8_t assigned_ipv4[4];
+    uint32_t assigned_prefix_v4;
+    uint8_t server_ipv4[4];
+    uint32_t server_prefix_v4;
+    uint32_t mtu;
+    bool has_ipv6;
+    uint8_t assigned_ipv6[16];
+    uint32_t assigned_prefix_v6;
+} vmp_tunnel_assignment_t;
+
 typedef struct vmp_response {
     uint32_t api_version;
     uint8_t request_nonce[VMP_REQUEST_NONCE_LEN];
@@ -170,6 +218,10 @@ typedef struct vmp_response {
     size_t path_count;
     bool has_received_datagram;
     vmp_received_datagram_t received_datagram;
+    vmp_native_process_identity_t native_process_identity;
+    uint8_t request_sha256[VMP_REQUEST_SHA256_LEN];
+    bool has_tunnel_assignment;
+    vmp_tunnel_assignment_t tunnel_assignment;
 } vmp_response_t;
 
 typedef enum vmp_protocol_error {
@@ -190,12 +242,19 @@ typedef enum vmp_protocol_error {
  * client/exit host identifiers 1 and 4. */
 bool vmp_add_path_is_valid(const vmp_add_path_t *path);
 
-/* Verifies the fail-closed API-v5 single-path exit request shape, including
+/* Verifies the fail-closed API-v6 single-path exit request shape, including
  * its canonical overlay tuple and bounded in-memory TLS material. This does
  * not parse or cryptographically bind the certificate, key, name, and SPKI.
  * Credential validation proves only base64url syntax and exact length; its
  * generator remains responsible for entropy. */
 bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start);
+
+/* Validates the exact API-v6 mqvpn tunnel assignment shape. The current
+ * pinned backend emits /32 IPv4 endpoints, an MTU in 1280..9000, and either
+ * no IPv6 assignment or one non-zero /96../126 client address. Product pool
+ * policy is deliberately a separate fail-closed activation prerequisite. */
+bool vmp_tunnel_assignment_is_valid(
+    const vmp_tunnel_assignment_t *assignment);
 
 /* Decodes one unframed protobuf payload without allocating. Packet views in
  * the result borrow from `payload` and remain valid only while it remains

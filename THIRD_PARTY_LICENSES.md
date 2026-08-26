@@ -218,40 +218,71 @@ assigned-address or network-namespace state, cryptographic consistency of the
 candidate TLS identity, the separate BoringSSL Go suite, the xquic CUnit
 suite, or disposable-network-namespace dataplane acceptance.
 
+The incompatible native API-v6 process-instance and request-correlation
+boundary was verified on Debian 13 amd64 on 2026-08-26:
+
+- `verify-upstream.sh` again accepted every locked commit, tree, tag, gitlink,
+  origin, license, bundled file, and local patch SHA-256 before compilation.
+- A newly replaced, offline full-graph build instrumented BoringSSL, xquic,
+  mqvpn/lwIP, the VOLPAROSSA wrapper, and the final daemon with AddressSanitizer
+  and UndefinedBehaviorSanitizer. All 33 mqvpn/lwIP and all 5 wrapper tests
+  passed with leak detection and halt/abort-on-error enabled.
+- The sanitized daemon's side-effect-free version probe wrote exactly `6\n`;
+  bounded SIGINT and SIGTERM lifecycle checks exited zero, removed their exact
+  mode-`0600` sockets, and produced no sanitizer finding.
+- Focused Rust/C tests share canonical request and descriptor-binding goldens
+  and cover role preflight, target/instance substitution, exact response
+  digest, stale-instance without automatic retry, signed Start scope, bearer
+  commitment recomputation, tunnel-assignment shape, descriptor ownership, and
+  fail-closed dormant exit dispatch.
+
+This API-v6 run does not prove separate role service identity, trusted-helper
+descriptor provenance, product-pool assignment or retention, namespace state,
+replay/monotonic expiry, cryptographic consistency of the candidate TLS
+identity, the separate BoringSSL Go suite, the xquic CUnit suite, or disposable
+network-namespace dataplane acceptance.
+
 This evidence proves reproducible source intake, compilation, and bounded
 native behavior. It is not namespace dataplane acceptance.
 
 ### Mandatory unresolved findings
 
-Native API version 5 keeps the bounded request-driven reverse channel, carries
-and validates a nonzero local association identifier, and represents multipath
-(at least two paths) separately from single-path general UDP (exactly one
-path). It binds auth, TLS server name, and a short expiry to one route session,
-sends no unsolicited native frames, and does not silently downgrade any
-mode. `AddPath` consumes one request-bound UDP descriptor, enforces the fixed
-private IPv6 overlay shape, and never creates or binds a path socket.
-`StartExitSession` consumes one separately domain-bound, listener-shaped descriptor,
-carries exact overlay peer metadata and bounded unparsed TLS candidate material, then closes the
-descriptor and fails closed while the exit backend remains dormant. Versions 1
-through 4 and future versions fail closed. The local identifier does not change
-the RFC 9484 zero Context ID for IP Datagrams. Both SCM_RIGHTS bindings prove
-request correlation only. The active client `AddPath` backend additionally checks
-one same-session namespace cookie; `StartExitSession` has no namespace or
-assigned-address provenance yet, and neither path proves privileged-helper origin.
+Native API version 6 preflights an exact client or exit role and fresh per-start
+process instance, then target-binds each later operation and correlates every
+response to its canonical request digest. It carries signed reservation/finalize
+IDs, bearer commitment, certificate digest, and both native instances together
+with route-scoped auth, TLS name, and short expiry. Native recomputes the bearer
+commitment for both Start roles. Multipath-at-least-two remains distinct from
+single-path general UDP, no mode silently downgrades, and no unsolicited frame
+is sent. `AddPath` consumes one request-bound UDP descriptor, enforces the fixed
+private IPv6 overlay, and never creates or binds a path socket.
+`StartExitSession` consumes one separately domain-bound listener-shaped
+descriptor, carries exact overlay peer metadata and bounded unparsed TLS
+candidate material, then closes the descriptor and fails closed while the exit
+backend remains dormant. Versions 1 through 5 and future versions fail closed.
+The process instance does not change the RFC 9484 zero Context ID for IP
+Datagrams. The current same-UID socket and both SCM_RIGHTS bindings prove local
+correlation only, not binary attestation, authentication against an untrusted
+agent, or privileged-helper origin. The active client `AddPath` backend also
+checks one same-session namespace cookie; `StartExitSession` has no namespace
+or assigned-address provenance. Tunnel assignment is a validated wire shape
+only and the current backend deliberately returns none.
 
 The following required contracts and evidence remain unresolved:
 
-1. trusted helper-origin, exact namespace, and assigned-address proof for each
-   client path and exit-listener descriptor;
-2. a unique delivered-payload counter rather than ACKed transport bytes;
-3. an operational exit backend with helper-to-native listener provenance,
+1. separate client/exit service identities and role sockets, followed by
+   production agent preflight and affine handoff into signed route setup;
+2. trusted helper-origin, exact namespace, product-pool address assignment and
+   durable retention proof for each client path and exit-listener descriptor;
+3. a unique delivered-payload counter rather than ACKed transport bytes;
+4. an operational exit backend with helper-to-native listener provenance,
    signed reservation/replay binding, monotonic expiry, and cryptographic
    certificate/key/name/SPKI consistency over the in-message TLS material;
-4. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
-5. disposable-topology proof that an exit-originated inner datagram traverses
+5. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
+6. disposable-topology proof that an exit-originated inner datagram traverses
    the native queue/poll boundary and reaches the Rust client;
-6. end-to-end dynamic path removal and failover across real relay paths; and
-7. disposable namespace evidence for at least two distinct data-carrying relay
+7. end-to-end dynamic path removal and failover across real relay paths; and
+8. disposable namespace evidence for at least two distinct data-carrying relay
    paths, bidirectional CONNECT-IP, loss-aware scheduling, privacy captures,
    disabled duplication/FEC, and unchanged host routes, firewall, and DNS.
 

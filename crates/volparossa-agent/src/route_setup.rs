@@ -226,9 +226,10 @@ struct PostProbeSelectionPolicy {
 
 /// Native-process scope required before any exit finalization may be dispatched.
 ///
-/// The current API-v5 native client cannot produce its process instance identifier, so production
-/// route construction deliberately leaves this absent. The next complete native API revision must
-/// fill it from an authenticated native response rather than minting it in the agent.
+/// API v6 can obtain this process instance through role-specific preflight, but the production
+/// route bridge is not wired to that client yet and therefore deliberately leaves this absent. A
+/// production caller must copy the channel-correlated native response rather than minting an
+/// identifier in the agent. This process incarnation is not binary attestation.
 #[derive(Clone, Debug)]
 struct ClientNativeRouteScope {
     masque_context_id: u64,
@@ -3230,6 +3231,7 @@ mod tests {
 
     const NOW_MS: u64 = 1_700_000_000_000;
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+    const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
 
     #[derive(Default)]
     #[allow(
@@ -4263,7 +4265,7 @@ mod tests {
                     tls_server_name: "route.exit.example".to_owned(),
                     masque_context_id: request.masque_context_id(),
                     client_native_instance_id: request.client_native_instance_id().to_vec(),
-                    exit_native_instance_id: vec![43; 32],
+                    exit_native_instance_id: TEST_EXIT_NATIVE_INSTANCE_ID.to_vec(),
                 },
                 b"-----BEGIN CERTIFICATE-----\ntest-certificate\n-----END CERTIFICATE-----\n"
                     .to_vec(),
@@ -4328,6 +4330,10 @@ mod tests {
             false
         }
 
+        #[allow(
+            clippy::too_many_lines,
+            reason = "the integration test double dispatches every typed exit operation"
+        )]
         async fn exit_forward(
             &mut self,
             _control: &DirectRelayCapability,
@@ -4396,6 +4402,7 @@ mod tests {
                             exit_public_key,
                             &verifier,
                             &mut identity_provider,
+                            TEST_EXIT_NATIVE_INSTANCE_ID,
                             move |path_id| real_exit_endpoint(route_context_id, path_id),
                             |message| Some(exit_key.sign(message).to_bytes()),
                         )

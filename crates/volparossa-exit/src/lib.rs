@@ -80,9 +80,11 @@ const MAX_TLS_PRIVATE_KEY_PEM: usize = 16 * 1024;
 pub struct ExitNativeRouteIdentityRequest {
     reservation_id: [u8; ID_BYTES],
     route_context_id: [u8; ID_BYTES],
+    finalize_id: [u8; ID_BYTES],
     auth_commitment: [u8; NODE_ID_BYTES],
     masque_context_id: u64,
     client_native_instance_id: [u8; NODE_ID_BYTES],
+    exit_native_instance_id: [u8; NODE_ID_BYTES],
 }
 
 impl ExitNativeRouteIdentityRequest {
@@ -94,16 +96,20 @@ impl ExitNativeRouteIdentityRequest {
     pub fn new(
         reservation_id: [u8; ID_BYTES],
         route_context_id: [u8; ID_BYTES],
+        finalize_id: [u8; ID_BYTES],
         auth_commitment: [u8; NODE_ID_BYTES],
         masque_context_id: u64,
         client_native_instance_id: [u8; NODE_ID_BYTES],
+        exit_native_instance_id: [u8; NODE_ID_BYTES],
     ) -> Result<Self, ExitNativeRouteIdentityError> {
         if reservation_id == [0; ID_BYTES]
             || route_context_id == [0; ID_BYTES]
+            || finalize_id == [0; ID_BYTES]
             || auth_commitment == [0; NODE_ID_BYTES]
             || masque_context_id == 0
             || masque_context_id > volparossa_protocol::MAX_MASQUE_CONTEXT_ID
             || client_native_instance_id == [0; NODE_ID_BYTES]
+            || exit_native_instance_id == [0; NODE_ID_BYTES]
         {
             return Err(ExitNativeRouteIdentityError::Rejected(
                 "invalid native route request scope",
@@ -112,9 +118,11 @@ impl ExitNativeRouteIdentityRequest {
         Ok(Self {
             reservation_id,
             route_context_id,
+            finalize_id,
             auth_commitment,
             masque_context_id,
             client_native_instance_id,
+            exit_native_instance_id,
         })
     }
 
@@ -128,6 +136,12 @@ impl ExitNativeRouteIdentityRequest {
     #[must_use]
     pub const fn route_context_id(&self) -> &[u8; ID_BYTES] {
         &self.route_context_id
+    }
+
+    /// Return the exact finalization identifier.
+    #[must_use]
+    pub const fn finalize_id(&self) -> &[u8; ID_BYTES] {
+        &self.finalize_id
     }
 
     /// Return the client-created native authentication commitment.
@@ -147,6 +161,12 @@ impl ExitNativeRouteIdentityRequest {
     pub const fn client_native_instance_id(&self) -> &[u8; NODE_ID_BYTES] {
         &self.client_native_instance_id
     }
+
+    /// Return the native-reported exit process incarnation.
+    #[must_use]
+    pub const fn exit_native_instance_id(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.exit_native_instance_id
+    }
 }
 
 /// Rejection reported by a native-route identity provider or owner constructor.
@@ -162,8 +182,9 @@ pub enum ExitNativeRouteIdentityError {
 
 /// Trusted producer of a route-scoped public TLS identity and its private owner.
 ///
-/// Implementations must create a distinct exit-native incarnation as required
-/// by their runtime. Returning a value does not activate or expose a listener.
+/// Implementations must use the native-reported exit incarnation supplied in
+/// the request and must not substitute or invent one. Returning a value does
+/// not activate or expose a listener.
 pub trait ExitNativeRouteIdentityProvider {
     /// Supply one non-cloneable identity owner bound to the exact request.
     ///
@@ -282,9 +303,11 @@ impl ExitNativeRouteAuthorizationScope {
         request: ExitNativeRouteIdentityRequest,
         exit_native_instance_id: [u8; NODE_ID_BYTES],
     ) -> Result<Self, ExitNativeRouteIdentityError> {
-        if exit_native_instance_id == [0; NODE_ID_BYTES] {
+        if exit_native_instance_id == [0; NODE_ID_BYTES]
+            || exit_native_instance_id != *request.exit_native_instance_id()
+        {
             return Err(ExitNativeRouteIdentityError::Rejected(
-                "invalid exit native instance",
+                "invalid native route authorization scope",
             ));
         }
         Ok(Self {
@@ -1785,6 +1808,7 @@ fn validate_native_route_identity(
     if identity.auth_commitment.as_slice() != request.auth_commitment
         || identity.masque_context_id != request.masque_context_id
         || identity.client_native_instance_id.as_slice() != request.client_native_instance_id
+        || exit_native_instance_id != request.exit_native_instance_id
         || certificate_sha256 == [0; NODE_ID_BYTES]
         || spki_sha256 == [0; NODE_ID_BYTES]
         || exit_native_instance_id == [0; NODE_ID_BYTES]
@@ -2021,6 +2045,7 @@ mod tests {
         b"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n";
     const TEST_TLS_PRIVATE_KEY_PEM: &[u8] =
         b"-----BEGIN PRIVATE KEY-----\nBAUG\n-----END PRIVATE KEY-----\n";
+    const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
 
     // Public RFC 9001 Appendix A QUIC v1 client-Initial test vector.
     const TEST_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
@@ -2121,19 +2146,60 @@ mod tests {
         }
     }
 
-    struct MismatchedNativeIdentityProvider;
+    #[derive(Clone, Copy)]
+    enum NativeIdentityRequestMismatch {
+        Reservation,
+        RouteContext,
+        Finalize,
+        Commitment,
+        MasqueContext,
+        ClientInstance,
+        ExitInstance,
+    }
+
+    struct MismatchedNativeIdentityProvider(NativeIdentityRequestMismatch);
 
     impl ExitNativeRouteIdentityProvider for MismatchedNativeIdentityProvider {
         fn provide(
             &mut self,
             request: &ExitNativeRouteIdentityRequest,
         ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError> {
+            let reservation_id = match self.0 {
+                NativeIdentityRequestMismatch::Reservation => [91; 16],
+                _ => *request.reservation_id(),
+            };
+            let route_context_id = match self.0 {
+                NativeIdentityRequestMismatch::RouteContext => [92; 16],
+                _ => *request.route_context_id(),
+            };
+            let finalize_id = match self.0 {
+                NativeIdentityRequestMismatch::Finalize => [93; 16],
+                _ => *request.finalize_id(),
+            };
+            let auth_commitment = match self.0 {
+                NativeIdentityRequestMismatch::Commitment => [94; 32],
+                _ => *request.auth_commitment(),
+            };
+            let masque_context_id = match self.0 {
+                NativeIdentityRequestMismatch::MasqueContext => request.masque_context_id() + 1,
+                _ => request.masque_context_id(),
+            };
+            let client_native_instance_id = match self.0 {
+                NativeIdentityRequestMismatch::ClientInstance => [95; 32],
+                _ => *request.client_native_instance_id(),
+            };
+            let exit_native_instance_id = match self.0 {
+                NativeIdentityRequestMismatch::ExitInstance => [96; 32],
+                _ => *request.exit_native_instance_id(),
+            };
             let mismatched = ExitNativeRouteIdentityRequest::new(
-                *request.reservation_id(),
-                [99; 16],
-                *request.auth_commitment(),
-                request.masque_context_id(),
-                *request.client_native_instance_id(),
+                reservation_id,
+                route_context_id,
+                finalize_id,
+                auth_commitment,
+                masque_context_id,
+                client_native_instance_id,
+                exit_native_instance_id,
             )?;
             test_native_identity_owner(mismatched)
         }
@@ -2162,7 +2228,7 @@ mod tests {
                 tls_server_name: "route.exit.example".to_owned(),
                 masque_context_id: request.masque_context_id(),
                 client_native_instance_id: request.client_native_instance_id().to_vec(),
-                exit_native_instance_id: vec![43; 32],
+                exit_native_instance_id: request.exit_native_instance_id().to_vec(),
             },
             TEST_TLS_CERTIFICATE_PEM.to_vec(),
             TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
@@ -2494,7 +2560,7 @@ mod tests {
                 ExitNativeRouteIdentityError::Unavailable
             ))
         ));
-        let mut mismatched_identity_provider = MismatchedNativeIdentityProvider;
+        let mut zero_instance_provider = PanickingNativeIdentityProvider;
         assert!(matches!(
             service.finalize_reservation_with_providers(
                 finalize_request.encoded(),
@@ -2503,18 +2569,51 @@ mod tests {
                 NOW_MS,
                 exit_key.verifying_key().to_bytes(),
                 &verifier,
-                &mut mismatched_identity_provider,
+                &mut zero_instance_provider,
+                [0; 32],
                 |_path_id| -> Option<ExitEndpointLease> {
-                    panic!("mismatched native identity must precede endpoint allocation")
+                    panic!("invalid native preflight must precede endpoint allocation")
                 },
                 |_message| -> Option<[u8; 64]> {
-                    panic!("mismatched native identity must precede signing")
+                    panic!("invalid native preflight must precede signing")
                 },
             ),
             Err(ExitError::NativeRouteIdentity(
-                ExitNativeRouteIdentityError::Rejected("native route identity provider scope")
+                ExitNativeRouteIdentityError::Rejected("invalid native route request scope")
             ))
         ));
+        for mismatch in [
+            NativeIdentityRequestMismatch::Reservation,
+            NativeIdentityRequestMismatch::RouteContext,
+            NativeIdentityRequestMismatch::Finalize,
+            NativeIdentityRequestMismatch::Commitment,
+            NativeIdentityRequestMismatch::MasqueContext,
+            NativeIdentityRequestMismatch::ClientInstance,
+            NativeIdentityRequestMismatch::ExitInstance,
+        ] {
+            let mut mismatched_identity_provider = MismatchedNativeIdentityProvider(mismatch);
+            assert!(matches!(
+                service.finalize_reservation_with_providers(
+                    finalize_request.encoded(),
+                    &control_relay_node_id,
+                    &control_relay_peer_id,
+                    NOW_MS,
+                    exit_key.verifying_key().to_bytes(),
+                    &verifier,
+                    &mut mismatched_identity_provider,
+                    TEST_EXIT_NATIVE_INSTANCE_ID,
+                    |_path_id| -> Option<ExitEndpointLease> {
+                        panic!("mismatched native identity must precede endpoint allocation")
+                    },
+                    |_message| -> Option<[u8; 64]> {
+                        panic!("mismatched native identity must precede signing")
+                    },
+                ),
+                Err(ExitError::NativeRouteIdentity(
+                    ExitNativeRouteIdentityError::Rejected("native route identity provider scope")
+                ))
+            ));
+        }
         let mut identity_provider = ExactNativeIdentityProvider::default();
         let bundle = service
             .finalize_reservation_with_providers(
@@ -2525,11 +2624,28 @@ mod tests {
                 exit_key.verifying_key().to_bytes(),
                 &verifier,
                 &mut identity_provider,
+                TEST_EXIT_NATIVE_INSTANCE_ID,
                 |path_id| exit_endpoint(route_context_id, path_id),
                 |message| Some(exit_key.sign(message).to_bytes()),
             )
             .unwrap();
         assert_eq!(identity_provider.calls, 1);
+        let native_scope = bundle.accepted().native_route_authorization_scope();
+        assert_eq!(
+            native_scope.request().finalize_id(),
+            finalize_request.finalize_id()
+        );
+        assert_eq!(
+            native_scope.request().exit_native_instance_id(),
+            &TEST_EXIT_NATIVE_INSTANCE_ID
+        );
+        assert_eq!(
+            bundle
+                .accepted()
+                .native_route_identity()
+                .exit_native_instance_id,
+            TEST_EXIT_NATIVE_INSTANCE_ID
+        );
         let verified_exit = coordinator
             .verify_finalize_response(
                 &intent,
@@ -2551,6 +2667,7 @@ mod tests {
                 exit_key.verifying_key().to_bytes(),
                 &verifier,
                 &mut retry_identity_provider,
+                TEST_EXIT_NATIVE_INSTANCE_ID,
                 |_path_id| -> Option<ExitEndpointLease> {
                     panic!("exact finalize retry must not allocate endpoints")
                 },
@@ -2942,8 +3059,10 @@ mod tests {
 
     #[test]
     fn native_route_owner_rejects_mismatched_public_scope_and_malformed_pem() {
-        let request =
-            ExitNativeRouteIdentityRequest::new([1; 16], [2; 16], [3; 32], 4, [5; 32]).unwrap();
+        let request = ExitNativeRouteIdentityRequest::new(
+            [1; 16], [2; 16], [3; 16], [4; 32], 5, [6; 32], [8; 32],
+        )
+        .unwrap();
         let identity = NativeRouteIdentity {
             auth_commitment: request.auth_commitment().to_vec(),
             certificate_sha256: vec![6; 32],
@@ -2951,7 +3070,7 @@ mod tests {
             tls_server_name: "route.exit.example".to_owned(),
             masque_context_id: request.masque_context_id(),
             client_native_instance_id: request.client_native_instance_id().to_vec(),
-            exit_native_instance_id: vec![8; 32],
+            exit_native_instance_id: request.exit_native_instance_id().to_vec(),
         };
         let owner = ExitNativeRouteIdentityOwner::new(
             request,
@@ -2970,6 +3089,30 @@ mod tests {
             ExitNativeRouteIdentityOwner::new(
                 request,
                 mismatched,
+                TEST_TLS_CERTIFICATE_PEM.to_vec(),
+                TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
+            ),
+            Err(ExitNativeRouteIdentityError::Rejected(_))
+        ));
+
+        let mut mismatched_client = identity.clone();
+        mismatched_client.client_native_instance_id = vec![10; 32];
+        assert!(matches!(
+            ExitNativeRouteIdentityOwner::new(
+                request,
+                mismatched_client,
+                TEST_TLS_CERTIFICATE_PEM.to_vec(),
+                TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
+            ),
+            Err(ExitNativeRouteIdentityError::Rejected(_))
+        ));
+
+        let mut mismatched_exit = identity.clone();
+        mismatched_exit.exit_native_instance_id = vec![11; 32];
+        assert!(matches!(
+            ExitNativeRouteIdentityOwner::new(
+                request,
+                mismatched_exit,
                 TEST_TLS_CERTIFICATE_PEM.to_vec(),
                 TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
             ),
@@ -2999,6 +3142,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the affine owner test exhaustively substitutes every exact authorization field"
+    )]
     fn native_route_authorization_mismatches_do_not_consume_and_exact_scope_is_one_shot() {
         let (mut service, route) = admit_route(
             1,
@@ -3008,36 +3155,93 @@ mod tests {
         );
         let exact = route.accepted.native_route_authorization_scope();
         let request = *exact.request();
+        let unknown_reservation_request = ExitNativeRouteIdentityRequest::new(
+            [70; 16],
+            *request.route_context_id(),
+            *request.finalize_id(),
+            *request.auth_commitment(),
+            request.masque_context_id(),
+            *request.client_native_instance_id(),
+            *request.exit_native_instance_id(),
+        )
+        .unwrap();
+        let unknown_reservation = ExitNativeRouteAuthorizationScope::new(
+            unknown_reservation_request,
+            *unknown_reservation_request.exit_native_instance_id(),
+        )
+        .unwrap();
+        assert!(matches!(
+            service.take_native_route_authorization(&unknown_reservation, NOW_MS),
+            Err(ExitError::NativeRouteAuthorizationUnavailable)
+        ));
+        assert_eq!(service.native_route_identity_owners.len(), 1);
+
         let mismatched_requests = [
             ExitNativeRouteIdentityRequest::new(
                 *request.reservation_id(),
                 [71; 16],
+                *request.finalize_id(),
                 *request.auth_commitment(),
                 request.masque_context_id(),
                 *request.client_native_instance_id(),
+                *request.exit_native_instance_id(),
             )
             .unwrap(),
             ExitNativeRouteIdentityRequest::new(
                 *request.reservation_id(),
                 *request.route_context_id(),
+                [72; 16],
+                *request.auth_commitment(),
+                request.masque_context_id(),
+                *request.client_native_instance_id(),
+                *request.exit_native_instance_id(),
+            )
+            .unwrap(),
+            ExitNativeRouteIdentityRequest::new(
+                *request.reservation_id(),
+                *request.route_context_id(),
+                *request.finalize_id(),
                 [72; 32],
                 request.masque_context_id(),
                 *request.client_native_instance_id(),
+                *request.exit_native_instance_id(),
             )
             .unwrap(),
             ExitNativeRouteIdentityRequest::new(
                 *request.reservation_id(),
                 *request.route_context_id(),
+                *request.finalize_id(),
+                *request.auth_commitment(),
+                request.masque_context_id() + 1,
+                *request.client_native_instance_id(),
+                *request.exit_native_instance_id(),
+            )
+            .unwrap(),
+            ExitNativeRouteIdentityRequest::new(
+                *request.reservation_id(),
+                *request.route_context_id(),
+                *request.finalize_id(),
                 *request.auth_commitment(),
                 request.masque_context_id(),
                 [73; 32],
+                *request.exit_native_instance_id(),
+            )
+            .unwrap(),
+            ExitNativeRouteIdentityRequest::new(
+                *request.reservation_id(),
+                *request.route_context_id(),
+                *request.finalize_id(),
+                *request.auth_commitment(),
+                request.masque_context_id(),
+                *request.client_native_instance_id(),
+                [74; 32],
             )
             .unwrap(),
         ];
         for mismatched_request in mismatched_requests {
             let mismatched = ExitNativeRouteAuthorizationScope::new(
                 mismatched_request,
-                *exact.exit_native_instance_id(),
+                *mismatched_request.exit_native_instance_id(),
             )
             .unwrap();
             assert!(matches!(
@@ -3046,10 +3250,9 @@ mod tests {
             ));
             assert_eq!(service.native_route_identity_owners.len(), 1);
         }
-        let mismatched_exit = ExitNativeRouteAuthorizationScope::new(request, [74; 32]).unwrap();
         assert!(matches!(
-            service.take_native_route_authorization(&mismatched_exit, NOW_MS),
-            Err(ExitError::NativeRouteAuthorizationMismatch)
+            ExitNativeRouteAuthorizationScope::new(request, [75; 32]),
+            Err(ExitNativeRouteIdentityError::Rejected(_))
         ));
         assert_eq!(service.native_route_identity_owners.len(), 1);
 

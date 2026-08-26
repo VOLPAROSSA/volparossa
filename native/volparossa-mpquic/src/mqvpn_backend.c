@@ -587,14 +587,18 @@ static vmp_transport_path_state_t map_path_state(mqvpn_path_status_t state)
 
 static vmp_transport_error_t backend_snapshot(
     void *session, vmp_transport_path_snapshot_t *out, size_t capacity,
-    size_t *out_count, bool *out_tunnel_ready)
+    size_t *out_count, bool *out_tunnel_ready, bool *out_has_assignment,
+    vmp_tunnel_assignment_t *out_assignment)
 {
     mqvpn_backend_t *backend = session;
     if (backend == NULL || out == NULL || out_count == NULL ||
-        out_tunnel_ready == NULL || capacity > VMP_MAX_PATHS ||
+        out_tunnel_ready == NULL || out_has_assignment == NULL ||
+        out_assignment == NULL || capacity > VMP_MAX_PATHS ||
         backend->client == NULL || backend->fatal) {
         return VMP_TRANSPORT_INVALID;
     }
+    *out_has_assignment = false;
+    memset(out_assignment, 0, sizeof(*out_assignment));
     mqvpn_path_info_t info[MQVPN_MAX_PATHS];
     memset(info, 0, sizeof(info));
     int info_count = 0;
@@ -633,9 +637,9 @@ static vmp_transport_error_t backend_snapshot(
     }
     backend->state = mqvpn_client_get_state(backend->client);
     *out_count = written;
-    *out_tunnel_ready =
-        backend->tunnel_configured &&
-        backend->state == MQVPN_STATE_ESTABLISHED && !backend->fatal;
+    /* API v6 does not expose an operational tunnel until the next isolated
+     * backend slice retains and enforces mqvpn_tunnel_info_t exactly. */
+    *out_tunnel_ready = false;
     return VMP_TRANSPORT_OK;
 }
 

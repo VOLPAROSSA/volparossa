@@ -51,6 +51,7 @@ esac
 TARGETS='node_advertisement
 policy_manifest
 control_plane
+native_control
 advertisement_v4
 forwarding_v4
 datapath_relay_v4

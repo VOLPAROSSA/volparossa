@@ -26,8 +26,9 @@ typedef enum vmp_server_error {
 
 typedef vmp_server_error_t (*vmp_pump_fn)(void *context);
 
-/* The server pre-populates version and echoed nonce. The dispatcher owns only
- * result, diagnostic_code, and paths. request_fd is exactly one descriptor
+/* The server pre-populates version, echoed nonce, and the exact canonical
+ * request digest. The dispatcher owns result, diagnostic_code, process
+ * identity, assignment, and paths. request_fd is exactly one descriptor
  * for ADD_PATH or START_EXIT_SESSION and -1 for every other operation. The dispatcher consumes
  * request_fd on every success and error path and must not retain borrowed
  * packet views after returning. */
@@ -36,12 +37,18 @@ typedef vmp_server_error_t (*vmp_dispatch_fn)(void *context,
                                               vmp_response_t *response,
                                               int request_fd);
 
-/* Computes SHA-256 over the operation-specific API-v5 descriptor domain, a
+/* Computes SHA-256 over the operation-specific API-v6 descriptor domain, a
  * four-byte big-endian payload length, and the canonical unframed
  * NativeRequest. Only ADD_PATH and START_EXIT_SESSION are accepted. */
 typedef bool (*vmp_request_binding_fn)(
     void *context, vmp_operation_t operation, const uint8_t *canonical_request,
     size_t canonical_request_len, uint8_t out[VMP_FD_BINDING_LEN]);
+
+/* Computes SHA-256 over the API-v6 request-correlation domain, a four-byte
+ * big-endian payload length, and the canonical unframed NativeRequest. */
+typedef bool (*vmp_request_digest_fn)(
+    void *context, const uint8_t *canonical_request,
+    size_t canonical_request_len, uint8_t out[VMP_REQUEST_SHA256_LEN]);
 
 typedef struct vmp_server_options {
     uid_t expected_peer_uid;
@@ -49,6 +56,8 @@ typedef struct vmp_server_options {
     uint32_t max_requests;
     vmp_request_binding_fn request_binding;
     void *request_binding_context;
+    vmp_request_digest_fn request_digest;
+    void *request_digest_context;
     uint32_t pump_interval_ms;
     vmp_pump_fn pump;
     void *pump_context;

@@ -866,7 +866,7 @@ impl ExitService {
         E: FnMut(u32) -> Option<ExitEndpointLease>,
         F: FnMut(&[u8]) -> Option<[u8; 64]>,
     {
-        self.finalize_reservation_with_providers(
+        self.finalize_reservation_with_optional_native_identity(
             encoded_request,
             authenticated_control_relay_node_id,
             authenticated_control_relay_peer_id,
@@ -874,6 +874,7 @@ impl ExitService {
             local_public_key,
             evidence_verifier,
             &mut UnavailableExitNativeRouteIdentityProvider,
+            None,
             endpoint_provider,
             signer,
         )
@@ -882,6 +883,8 @@ impl ExitService {
     /// Finalize with explicit probe evidence and native-route identity providers.
     ///
     /// This is the only finalization boundary that can retain TLS ownership.
+    /// `exit_native_instance_id` must be the exact non-zero process identity
+    /// returned by the native exit preflight for this attempt.
     /// Neither a returned authorization nor the signed public response activates
     /// a native backend or listener.
     ///
@@ -903,6 +906,45 @@ impl ExitService {
         local_public_key: [u8; NODE_ID_BYTES],
         evidence_verifier: &V,
         identity_provider: &mut P,
+        exit_native_instance_id: [u8; NODE_ID_BYTES],
+        endpoint_provider: E,
+        signer: F,
+    ) -> Result<AcceptedExitReservationBundle, ExitError>
+    where
+        V: ProbeEvidenceVerifier + ?Sized,
+        P: ExitNativeRouteIdentityProvider + ?Sized,
+        E: FnMut(u32) -> Option<ExitEndpointLease>,
+        F: FnMut(&[u8]) -> Option<[u8; 64]>,
+    {
+        self.finalize_reservation_with_optional_native_identity(
+            encoded_request,
+            authenticated_control_relay_node_id,
+            authenticated_control_relay_peer_id,
+            now_ms,
+            local_public_key,
+            evidence_verifier,
+            identity_provider,
+            Some(exit_native_instance_id),
+            endpoint_provider,
+            signer,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "single fail-atomic evidence, identity and finalize transaction"
+    )]
+    fn finalize_reservation_with_optional_native_identity<V, P, E, F>(
+        &mut self,
+        encoded_request: &[u8],
+        authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_control_relay_peer_id: &[u8],
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        evidence_verifier: &V,
+        identity_provider: &mut P,
+        exit_native_instance_id: Option<[u8; NODE_ID_BYTES]>,
         mut endpoint_provider: E,
         mut signer: F,
     ) -> Result<AcceptedExitReservationBundle, ExitError>
@@ -1020,16 +1062,6 @@ impl ExitService {
             }
 
             let finalize_id = fixed(&request.finalize_id, "finalize id")?;
-            let native_identity_request = ExitNativeRouteIdentityRequest::new(
-                reservation_id,
-                state.route_context_id,
-                fixed(&request.auth_commitment, "native auth commitment")?,
-                request.masque_context_id,
-                fixed(
-                    &request.client_native_instance_id,
-                    "client native instance id",
-                )?,
-            )?;
             if self
                 .native_route_identity_owners
                 .contains_key(&reservation_key)
@@ -1084,6 +1116,20 @@ impl ExitService {
                     .map_err(map_probe_evidence_error)?;
             }
 
+            let exit_native_instance_id =
+                exit_native_instance_id.ok_or(ExitNativeRouteIdentityError::Unavailable)?;
+            let native_identity_request = ExitNativeRouteIdentityRequest::new(
+                reservation_id,
+                state.route_context_id,
+                finalize_id,
+                fixed(&request.auth_commitment, "native auth commitment")?,
+                request.masque_context_id,
+                fixed(
+                    &request.client_native_instance_id,
+                    "client native instance id",
+                )?,
+                exit_native_instance_id,
+            )?;
             let identity_owner = identity_provider.provide(&native_identity_request)?;
             if identity_owner.request() != &native_identity_request {
                 return Err(ExitNativeRouteIdentityError::Rejected(
