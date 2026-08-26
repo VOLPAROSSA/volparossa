@@ -5,9 +5,11 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 use volparossa_protocol::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
-    AdvertisementQuality, AdvertisementRoles, ClientSessionCapability, ControlPayload,
-    ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation, ExitReservationConfirmation,
-    FinalizedRelayPath, ForwardedPreselectionAttestation, MAX_CONTROL_PAYLOAD_SIZE,
+    AdvertisementQuality, AdvertisementRoles, ClientSessionCapability, ControlMessageType,
+    ControlPayload, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
+    ExitReservationConfirmation, ExitReservationFinalizeRequest, FinalizedRelayPath,
+    ForwardedPreselectionAttestation, MAX_CONTROL_PAYLOAD_SIZE, MAX_MASQUE_CONTEXT_ID,
+    NATIVE_ROUTE_AUTH_BEARER_LENGTH, NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN, NativeRouteIdentity,
     NodeAdvertisement, ObservationAddressFamily, ObservationNetworkPrefix, OpenTcp,
     PROTOCOL_VERSION, PreselectionActorBinding, PreselectionObservationReceipt,
     PreselectionObservationRequest, PreselectionObservationRole, PreselectionObservationScope,
@@ -16,7 +18,7 @@ use volparossa_protocol::{
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
     decode_canonical, encode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, frame_control_message, generate_nonce,
-    node_id_from_public_key, preselection_observation_receipt_hash,
+    native_route_auth_commitment, node_id_from_public_key, preselection_observation_receipt_hash,
     preselection_observation_request_hash, sign_control_message, sign_control_message_with,
     unframe_control_message, verify_control_message, verify_direct_preselection_transcript,
     verify_forwarded_preselection_transcript, verify_relay_reservation,
@@ -44,17 +46,49 @@ fn generated_control_nonces_are_nonzero_and_fresh() {
 }
 
 #[test]
+fn native_route_auth_commitment_has_one_exact_canonical_vector() {
+    const BEARER: &[u8] = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const EXPECTED: [u8; 32] = [
+        0x2b, 0x80, 0x72, 0x70, 0xdb, 0xd6, 0x15, 0x73, 0xcc, 0x59, 0x14, 0x25, 0x11, 0x62, 0x1e,
+        0xd6, 0xf3, 0xc3, 0x3d, 0xd1, 0x40, 0x77, 0x4c, 0xc2, 0x4a, 0x04, 0x12, 0x71, 0xc6, 0x31,
+        0x08, 0x85,
+    ];
+
+    assert_eq!(NATIVE_ROUTE_AUTH_BEARER_LENGTH, 43);
+    assert_eq!(
+        NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN,
+        b"VOLPAROSSA-NATIVE-ROUTE-AUTH-COMMITMENT-V4\0"
+    );
+    assert_eq!(native_route_auth_commitment(BEARER).unwrap(), EXPECTED);
+
+    for malformed in [
+        &BEARER[..42],
+        b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".as_slice(),
+        b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".as_slice(),
+        b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/".as_slice(),
+        b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB".as_slice(),
+    ] {
+        assert!(matches!(
+            native_route_auth_commitment(malformed),
+            Err(ProtocolError::InvalidField(
+                "native route authentication bearer"
+            ))
+        ));
+    }
+}
+
+#[test]
 fn preselection_schema_tags_and_callerless_surface_are_exact() {
     assert_eq!(
-        volparossa_protocol::ControlMessageType::PreselectionObservationReceipt as i32,
+        ControlMessageType::PreselectionObservationReceipt as i32,
         17
     );
     assert_eq!(
-        volparossa_protocol::ControlMessageType::ForwardedPreselectionAttestation as i32,
+        ControlMessageType::ForwardedPreselectionAttestation as i32,
         18
     );
 
-    let schema = include_str!("../../../proto/volparossa/control/v3/control.proto");
+    let schema = include_str!("../../../proto/volparossa/control/v4/control.proto");
     let messages = include_str!("../src/messages.rs");
     assert_preselection_message_type_tags(schema, messages);
     assert_preselection_schema_fields(schema);
@@ -62,7 +96,7 @@ fn preselection_schema_tags_and_callerless_surface_are_exact() {
 }
 
 #[test]
-fn preselection_request_is_v3_role_exact_short_and_bounded() {
+fn preselection_request_is_v4_role_exact_short_and_bounded() {
     let relay_key = key(91);
     let actor = preselection_actor(&relay_key, 92, NOW + 60_000, NOW + 60_000);
     let mut request =
@@ -1032,7 +1066,7 @@ fn forwarded_signer_hash_and_nested_type_bindings_are_exact() {
         volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
     )
     .unwrap();
-    wrong_type.message_type = volparossa_protocol::ControlMessageType::NodeAdvertisement as i32;
+    wrong_type.message_type = ControlMessageType::NodeAdvertisement as i32;
     attestation.signed_exit_receipt = adversarially_resign_envelope(wrong_type, &exit_key);
     attestation.exit_receipt_hash = receipt_hash_for_test(&attestation.signed_exit_receipt);
     let wrong_type = resign_attestation(outer, &attestation, &control_key);
@@ -1200,15 +1234,15 @@ fn preselection_request_and_receipt_digests_are_domain_separated_and_exact() {
     assert_eq!(
         request_hash,
         [
-            231, 192, 201, 140, 17, 197, 177, 245, 182, 110, 190, 217, 130, 238, 220, 227, 7, 24,
-            112, 117, 37, 17, 30, 131, 158, 139, 243, 193, 166, 51, 112, 246,
+            216, 142, 65, 204, 34, 124, 56, 151, 79, 130, 129, 47, 88, 237, 192, 161, 21, 192, 95,
+            215, 53, 213, 137, 125, 66, 59, 175, 163, 197, 123, 49, 217,
         ]
     );
     assert_eq!(
         receipt_hash,
         [
-            185, 220, 190, 70, 235, 192, 150, 139, 30, 170, 172, 68, 185, 33, 108, 30, 180, 55,
-            140, 235, 56, 167, 199, 255, 221, 34, 202, 7, 220, 63, 37, 17,
+            22, 105, 28, 104, 225, 157, 217, 134, 82, 157, 168, 161, 61, 100, 157, 247, 35, 206,
+            110, 37, 165, 66, 129, 214, 26, 131, 90, 9, 35, 175, 211, 127,
         ]
     );
 
@@ -1260,7 +1294,7 @@ fn adversarially_resign_envelope(mut envelope: SignedEnvelope, key: &SigningKey)
         payload_hash: envelope.payload_hash.clone(),
     };
     let encoded_input = encode_canonical(&input, MAX_CONTROL_PAYLOAD_SIZE).unwrap();
-    let mut signed_input = b"volparossa/control-envelope/v3\0".to_vec();
+    let mut signed_input = b"volparossa/control-envelope/v4\0".to_vec();
     signed_input.extend_from_slice(&encoded_input);
     envelope.signature = key.sign(&signed_input).to_bytes().to_vec();
     encode_canonical(&envelope, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap()
@@ -1287,7 +1321,7 @@ fn resign_attestation(
 
 fn receipt_hash_for_test(encoded: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(b"volparossa/preselection-observation-receipt/v3\0");
+    hasher.update(b"volparossa/preselection-observation-receipt/v4\0");
     hasher.update(u32::try_from(encoded.len()).unwrap().to_be_bytes());
     hasher.update(encoded);
     hasher.finalize().to_vec()
@@ -2021,7 +2055,7 @@ fn assert_runtime_preselection_callerlessness(direct: &str, forwarded: &str) {
         include_str!("../../volparossa-discovery/src/peerlink.rs"),
         include_str!("../../volparossa-discovery/src/reservations.rs"),
         include_str!("../../volparossa-exit/src/lib.rs"),
-        include_str!("../../volparossa-exit/src/reservation_v3.rs"),
+        include_str!("../../volparossa-exit/src/reservation_v4.rs"),
         include_str!("../../volparossa-relay/src/lib.rs"),
     ]
     .concat();
@@ -2447,6 +2481,148 @@ fn capacity_hold(maximum_paths: u32, probe_permit_limit: u32) -> ExitCapacityHol
     }
 }
 
+fn structural_signed_type(message_type: ControlMessageType) -> Vec<u8> {
+    encode_canonical(
+        &SignedEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            message_type: message_type as i32,
+            ..SignedEnvelope::default()
+        },
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .unwrap()
+}
+
+fn finalize_request() -> ExitReservationFinalizeRequest {
+    let client_key = key(50);
+    let exit_key = key(51);
+    let capability = session_capability(1, 1);
+    let signed_capability = sign_control_message(
+        &capability,
+        &exit_key,
+        NOW,
+        EXPIRY,
+        [9; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    let hold = capacity_hold(1, 1);
+    let signed_hold = sign_control_message(
+        &hold,
+        &exit_key,
+        NOW,
+        NOW + 20_000,
+        [11; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+
+    ExitReservationFinalizeRequest {
+        reservation_id: vec![1; 16],
+        route_context_id: vec![2; 16],
+        exit_node_id: node_id(&exit_key),
+        client_session_id: node_id(&client_key),
+        client_session_capability: signed_capability,
+        exit_capacity_hold: signed_hold,
+        relay_paths: vec![FinalizedRelayPath {
+            path_id: 1,
+            relay_node_id: vec![12; 32],
+            relay_peer_id: vec![13; 38],
+            client_wireguard_public_key: vec![14; 32],
+            relay_probe_permit: structural_signed_type(ControlMessageType::RelayProbePermit),
+            relay_probe_result: structural_signed_type(ControlMessageType::RelayProbeResult),
+        }],
+        created_at_ms: NOW,
+        expires_at_ms: NOW + 20_000,
+        nonce: vec![15; 32],
+        control_relay_node_id: node_id(&key(52)),
+        control_relay_peer_id: vec![5; 38],
+        finalize_id: vec![16; 16],
+        exit_peer_id: vec![6; 38],
+        auth_commitment: vec![17; 32],
+        masque_context_id: 18,
+        client_native_instance_id: vec![19; 32],
+    }
+}
+
+#[test]
+fn finalize_request_requires_exact_native_auth_context_and_instance_binding() {
+    let client_key = key(50);
+    let request = finalize_request();
+    request.validate().unwrap();
+
+    for invalid in [Vec::new(), vec![0; 32], vec![1; 31], vec![1; 33]] {
+        let mut changed = request.clone();
+        changed.auth_commitment = invalid.clone();
+        assert!(matches!(
+            changed.validate(),
+            Err(ProtocolError::InvalidField(
+                "finalize_request.auth_commitment"
+            ))
+        ));
+
+        let mut changed = request.clone();
+        changed.client_native_instance_id = invalid;
+        assert!(matches!(
+            changed.validate(),
+            Err(ProtocolError::InvalidField(
+                "finalize_request.client_native_instance_id"
+            ))
+        ));
+    }
+    for invalid in [0, MAX_MASQUE_CONTEXT_ID + 1] {
+        let mut changed = request.clone();
+        changed.masque_context_id = invalid;
+        assert!(matches!(
+            changed.validate(),
+            Err(ProtocolError::InvalidField(
+                "finalize_request.masque_context_id"
+            ))
+        ));
+    }
+    let mut maximum_context = request.clone();
+    maximum_context.masque_context_id = MAX_MASQUE_CONTEXT_ID;
+    maximum_context.validate().unwrap();
+
+    let signed = sign_control_message(
+        &request,
+        &client_key,
+        NOW,
+        NOW + 20_000,
+        [15; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    let mut cache = ReplayCache::new(2).unwrap();
+    verify_control_message::<ExitReservationFinalizeRequest>(
+        &signed,
+        NOW + 1,
+        TimePolicy::default(),
+        &mut cache,
+    )
+    .unwrap();
+
+    let mut envelope: SignedEnvelope =
+        decode_canonical(&signed, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
+    let mut changed: ExitReservationFinalizeRequest =
+        decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).unwrap();
+    changed.client_native_instance_id[0] ^= 1;
+    envelope.payload = encode_canonical(&changed, MAX_CONTROL_PAYLOAD_SIZE).unwrap();
+    let tampered =
+        encode_canonical(&envelope, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
+    let mut tamper_cache = ReplayCache::new(2).unwrap();
+    assert!(matches!(
+        verify_control_message::<ExitReservationFinalizeRequest>(
+            &tampered,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut tamper_cache,
+        ),
+        Err(ProtocolError::PayloadHashMismatch)
+    ));
+    assert!(tamper_cache.is_empty());
+}
+
 #[test]
 fn prospective_probe_limit_is_mandatory_and_bounds_final_upper_count() {
     for (maximum_paths, probe_permit_limit) in [(1, 1), (1, 8), (3, 8), (8, 8)] {
@@ -2519,7 +2695,7 @@ fn old_v3_without_probe_limit_decodes_to_zero_and_is_rejected() {
 }
 
 #[test]
-fn checked_in_v3_schema_has_exact_probe_limit_tags() {
+fn retired_v3_schema_preserves_exact_probe_limit_tags() {
     let schema = include_str!("../../../proto/volparossa/control/v3/control.proto");
     for (message, tag) in [
         ("ExitCapacityHoldRequest", 20),
@@ -2538,6 +2714,96 @@ fn checked_in_v3_schema_has_exact_probe_limit_tags() {
             "{message} must expose probe_permit_limit at tag {tag}"
         );
     }
+}
+
+#[test]
+fn checked_in_v4_schema_has_exact_native_route_tags() {
+    let schema = include_str!("../../../proto/volparossa/control/v4/control.proto");
+    let identity = schema
+        .split_once("message NativeRouteIdentity {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    for (field, kind, tag) in [
+        ("auth_commitment", "bytes", 1),
+        ("certificate_sha256", "bytes", 2),
+        ("spki_sha256", "bytes", 3),
+        ("tls_server_name", "string", 4),
+        ("masque_context_id", "uint64", 5),
+        ("client_native_instance_id", "bytes", 6),
+        ("exit_native_instance_id", "bytes", 7),
+    ] {
+        assert!(
+            identity.contains(&format!("{kind} {field} = {tag};")),
+            "NativeRouteIdentity.{field} must retain tag {tag}"
+        );
+    }
+    assert_eq!(
+        identity
+            .lines()
+            .filter(|line| line.trim_end().ends_with(';'))
+            .count(),
+        7,
+        "NativeRouteIdentity must expose only its seven committed fields"
+    );
+
+    let reservation = schema
+        .split_once("message ExitReservation {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    assert!(reservation.contains("NativeRouteIdentity native_route_identity = 22;"));
+
+    let finalize = schema
+        .split_once("message ExitReservationFinalizeRequest {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    for (field, kind, tag) in [
+        ("auth_commitment", "bytes", 15),
+        ("masque_context_id", "uint64", 16),
+        ("client_native_instance_id", "bytes", 17),
+    ] {
+        assert!(
+            finalize.contains(&format!("{kind} {field} = {tag};")),
+            "ExitReservationFinalizeRequest.{field} must retain tag {tag}"
+        );
+    }
+    assert_eq!(
+        finalize
+            .lines()
+            .filter(|line| line.trim_end().ends_with(';'))
+            .count(),
+        17,
+        "ExitReservationFinalizeRequest must expose only its seventeen v4 fields"
+    );
+}
+
+#[test]
+fn v4_schemas_are_active_while_v3_remains_retired_evidence() {
+    let control_v3 = include_str!("../../../proto/volparossa/control/v3/control.proto");
+    let control_v4 = include_str!("../../../proto/volparossa/control/v4/control.proto");
+    let discovery_v3 = include_str!("../../../proto/volparossa/discovery/v3/discovery.proto");
+    let discovery_v4 = include_str!("../../../proto/volparossa/discovery/v4/discovery.proto");
+
+    assert!(control_v3.contains("package volparossa.control.v3;"));
+    assert!(!control_v3.contains("message NativeRouteIdentity {"));
+    assert!(control_v4.contains("package volparossa.control.v4;"));
+    assert!(control_v4.contains("Protocol v1, v2, v3,"));
+    assert!(control_v4.contains("volparossa/control-envelope/v4"));
+
+    assert!(discovery_v3.contains("package volparossa.discovery.v3;"));
+    assert!(discovery_v3.contains("/volparossa/advertisement/3"));
+    assert!(discovery_v4.contains("package volparossa.discovery.v4;"));
+    assert!(discovery_v4.contains("Protocol v1, v2, v3,"));
+    assert!(discovery_v4.contains("/volparossa/advertisement/4"));
+    assert!(discovery_v4.contains("volparossa.control.v4.SignedEnvelope"));
 }
 
 #[test]
@@ -2627,7 +2893,7 @@ fn signature_ttl_replay_and_payload_hash_are_enforced() {
 }
 
 #[test]
-fn control_envelopes_reject_v1_v2_and_future_versions_before_signature_use() {
+fn control_envelopes_reject_v1_v2_v3_and_future_versions_before_signature_use() {
     let signing_key = key(8);
     let message = open_tcp(&signing_key, [9; 32]);
     let encoded = sign_control_message(
@@ -2641,7 +2907,7 @@ fn control_envelopes_reject_v1_v2_and_future_versions_before_signature_use() {
     .unwrap();
     let mut envelope: SignedEnvelope =
         decode_canonical(&encoded, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
-    for version in [1, 2, PROTOCOL_VERSION + 1] {
+    for version in [1, 2, 3, PROTOCOL_VERSION + 1] {
         envelope.protocol_version = version;
         let changed =
             encode_canonical(&envelope, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
@@ -2920,6 +3186,19 @@ fn relay_authorization(exit_key: &SigningKey, relay_key: &SigningKey) -> RelayAu
         exit_peer_id: vec![16; 38],
     }
 }
+
+fn native_route_identity() -> NativeRouteIdentity {
+    NativeRouteIdentity {
+        auth_commitment: vec![20; 32],
+        certificate_sha256: vec![21; 32],
+        spki_sha256: vec![22; 32],
+        tls_server_name: "exit.example".to_owned(),
+        masque_context_id: 23,
+        client_native_instance_id: vec![24; 32],
+        exit_native_instance_id: vec![25; 32],
+    }
+}
+
 #[test]
 fn finalized_bundle_hash_is_domain_separated_framed_and_ordered() {
     let exit_key = key(20);
@@ -2971,6 +3250,7 @@ fn finalized_bundle_hash_is_domain_separated_framed_and_ordered() {
         control_relay_node_id: first.control_relay_node_id.clone(),
         control_relay_peer_id: first.control_relay_peer_id.clone(),
         exit_peer_id: first.exit_peer_id.clone(),
+        native_route_identity: Some(native_route_identity()),
     };
     let signed_exit = sign_control_message(
         &exit_grant,
@@ -2985,12 +3265,32 @@ fn finalized_bundle_hash_is_domain_separated_framed_and_ordered() {
     let actual = finalized_reservation_bundle_hash(&signed_exit, &authorizations).unwrap();
 
     let mut expected = Sha256::new();
-    expected.update(b"volparossa/finalized-reservation-bundle/v3\0");
+    expected.update(b"volparossa/finalized-reservation-bundle/v4\0");
     for member in std::iter::once(&signed_exit).chain(authorizations.iter()) {
         expected.update(u32::try_from(member.len()).unwrap().to_be_bytes());
         expected.update(member);
     }
     assert_eq!(actual.as_slice(), expected.finalize().as_slice());
+
+    let mut changed_identity = exit_grant.clone();
+    changed_identity
+        .native_route_identity
+        .as_mut()
+        .unwrap()
+        .tls_server_name = "other.example".to_owned();
+    let changed_signed_exit = sign_control_message(
+        &changed_identity,
+        &exit_key,
+        NOW,
+        EXPIRY,
+        [18; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    assert_ne!(
+        finalized_reservation_bundle_hash(&changed_signed_exit, &authorizations).unwrap(),
+        actual
+    );
 
     let reversed = vec![authorizations[1].clone(), authorizations[0].clone()];
     assert!(matches!(
@@ -3158,10 +3458,9 @@ fn wireguard_endpoint_rejects_private_loopback_and_iana_special_ranges() {
     }
 }
 
-#[test]
-fn exit_reservation_transports_are_known_sorted_and_unique() {
+fn exit_reservation_for_identity() -> ExitReservation {
     let exit_key = key(30);
-    let mut reservation = ExitReservation {
+    ExitReservation {
         reservation_id: vec![1; 16],
         route_context_id: vec![2; 16],
         exit_node_id: node_id(&exit_key),
@@ -3186,7 +3485,23 @@ fn exit_reservation_transports_are_known_sorted_and_unique() {
         control_relay_node_id: vec![11; 32],
         control_relay_peer_id: vec![12; 38],
         exit_peer_id: vec![13; 38],
-    };
+        native_route_identity: Some(native_route_identity()),
+    }
+}
+
+fn assert_invalid_native_identity(identity: NativeRouteIdentity, expected_field: &'static str) {
+    let mut reservation = exit_reservation_for_identity();
+    reservation.native_route_identity = Some(identity);
+    assert!(matches!(
+        reservation.validate(),
+        Err(ProtocolError::InvalidField(field)) if field == expected_field
+    ));
+}
+
+#[test]
+fn exit_reservation_transports_are_known_sorted_and_unique() {
+    let exit_key = key(30);
+    let mut reservation = exit_reservation_for_identity();
     let signed = sign_control_message(
         &reservation,
         &exit_key,
@@ -3203,6 +3518,112 @@ fn exit_reservation_transports_are_known_sorted_and_unique() {
     reservation.allowed_transports =
         vec![Transport::UdpSinglePath as i32, Transport::TcpMptcp as i32];
     assert!(reservation.validate().is_err());
+}
+
+#[test]
+fn signed_native_route_identity_is_required_canonical_and_tamper_evident() {
+    let exit_key = key(30);
+    let reservation = exit_reservation_for_identity();
+    reservation.validate().unwrap();
+
+    let mut missing = reservation.clone();
+    missing.native_route_identity = None;
+    assert!(matches!(
+        sign_control_message(
+            &missing,
+            &exit_key,
+            NOW,
+            EXPIRY,
+            [4; 32],
+            TimePolicy::default(),
+        ),
+        Err(ProtocolError::InvalidField(
+            "exit_reservation.native_route_identity"
+        ))
+    ));
+
+    for invalid in [Vec::new(), vec![0; 32], vec![1; 31], vec![1; 33]] {
+        let mut identity = native_route_identity();
+        identity.auth_commitment = invalid.clone();
+        assert_invalid_native_identity(identity, "native_route_identity.auth_commitment");
+
+        let mut identity = native_route_identity();
+        identity.certificate_sha256 = invalid.clone();
+        assert_invalid_native_identity(identity, "native_route_identity.certificate_sha256");
+
+        let mut identity = native_route_identity();
+        identity.spki_sha256 = invalid.clone();
+        assert_invalid_native_identity(identity, "native_route_identity.spki_sha256");
+
+        let mut identity = native_route_identity();
+        identity.client_native_instance_id = invalid.clone();
+        assert_invalid_native_identity(identity, "native_route_identity.client_native_instance_id");
+
+        let mut identity = native_route_identity();
+        identity.exit_native_instance_id = invalid;
+        assert_invalid_native_identity(identity, "native_route_identity.exit_native_instance_id");
+    }
+
+    for invalid in [
+        "",
+        "exit",
+        "EXIT.example",
+        "exit.example.",
+        "-exit.example",
+        "exit-.example",
+        "exit_name.example",
+        "192.0.2.1",
+        "exit.exämple",
+    ] {
+        let mut identity = native_route_identity();
+        identity.tls_server_name = invalid.to_owned();
+        assert_invalid_native_identity(identity, "native_route_identity.tls_server_name");
+    }
+    for invalid in [0, MAX_MASQUE_CONTEXT_ID + 1] {
+        let mut identity = native_route_identity();
+        identity.masque_context_id = invalid;
+        assert_invalid_native_identity(identity, "native_route_identity.masque_context_id");
+    }
+    let mut maximum_context = reservation.clone();
+    maximum_context
+        .native_route_identity
+        .as_mut()
+        .unwrap()
+        .masque_context_id = MAX_MASQUE_CONTEXT_ID;
+    maximum_context.validate().unwrap();
+
+    let signed = sign_control_message(
+        &reservation,
+        &exit_key,
+        NOW,
+        EXPIRY,
+        [4; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    let mut envelope: SignedEnvelope =
+        decode_canonical(&signed, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
+    let mut changed: ExitReservation =
+        decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).unwrap();
+    changed
+        .native_route_identity
+        .as_mut()
+        .unwrap()
+        .certificate_sha256[0] ^= 1;
+    envelope.payload = encode_canonical(&changed, MAX_CONTROL_PAYLOAD_SIZE).unwrap();
+    let tampered =
+        encode_canonical(&envelope, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
+    let mut cache = ReplayCache::new(2).unwrap();
+    assert!(matches!(
+        verify_control_message::<ExitReservation>(
+            &tampered,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut cache,
+        ),
+        Err(ProtocolError::PayloadHashMismatch)
+    ));
+    assert!(cache.is_empty());
 }
 
 #[test]
@@ -3285,8 +3706,7 @@ fn confirmation_hash_binds_exact_canonical_envelope_bytes() {
     .unwrap();
     let mut first: SignedEnvelope =
         decode_canonical(&signed, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
-    first.message_type =
-        volparossa_protocol::ControlMessageType::ExitReservationConfirmation as i32;
+    first.message_type = ControlMessageType::ExitReservationConfirmation as i32;
     let first = encode_canonical(&first, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();
     let mut second: SignedEnvelope =
         decode_canonical(&first, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE).unwrap();

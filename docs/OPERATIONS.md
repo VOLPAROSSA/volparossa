@@ -106,8 +106,8 @@ The packaged example keeps client on, relay and exit off, the kill switch on, di
 plain-TCP fallback off, required MPQUIC paths at two or more, and policy fail-closed. An empty policy
 path means connections fail closed; it is not an allow-all policy.
 
-Privacy-v3 is a hard-incompatible migration: set `network.protocol_version: 3`. Signed peer
-control and `/volparossa/advertisement/3` accept exactly v3; v1, v2, zero, and future values are
+Privacy-v4 is a hard-incompatible migration: set `network.protocol_version: 4`. Signed peer
+control and `/volparossa/advertisement/4` accept exactly v4; v1, v2, v3, zero, and future values are
 rejected without negotiation or fallback. The retired direct exit/relay/confirmation v2 protocol
 IDs are never registered. This does not retire the independently versioned threshold policy
 manifest v2 or libp2p Circuit Relay v2, which remains control-plane connectivity only.
@@ -122,13 +122,13 @@ The agent never substitutes a static or placeholder WireGuard key, listen port, 
 receipt.
 
 The intended client chooses a directly verified control relay before any exit. Direct
-`/volparossa/advertisement/3` retrieval may establish relay/control-relay provenance only. A
+`/volparossa/advertisement/4` retrieval may establish relay/control-relay provenance only. A
 combined-role node may be an exit only from exclusively forwarded provenance:
 direct-then-forwarded is rejected, while forwarded-then-direct withdraws and quarantines exit
 capability for the advertisement lifetime. Exit advertisement lookup and every exit hold, permit,
-finalize, and confirmation RPC must traverse `/volparossa/exit-forward/3` and
-`/volparossa/exit-forward-upstream/3`. Selected datapath relays are contacted directly only on
-`/volparossa/datapath-relay/3`. Within one route the exit differs by node ID and Peer ID from the
+finalize, and confirmation RPC must traverse `/volparossa/exit-forward/4` and
+`/volparossa/exit-forward-upstream/4`. Selected datapath relays are contacted directly only on
+`/volparossa/datapath-relay/4`. Within one route the exit differs by node ID and Peer ID from the
 control relay and every datapath relay; the control relay needs its own probe and grant before it
 can also carry a datapath.
 
@@ -192,7 +192,7 @@ separate user bytes from tunnel bytes. Output never contains private keys.
 
 At present, a production `connect` cannot complete: real two-leg probe production, helper
 `Prepare`, complete agent orchestration, and client ingress all return or remain
-`Unavailable`/blocked. Operators must not interpret successful configuration, v3 codec tests, or
+`Unavailable`/blocked. Operators must not interpret successful configuration, v4 peer-codec tests, or
 service role state as an active route.
 
 ## Crash and cleanup

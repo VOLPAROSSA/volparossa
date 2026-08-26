@@ -15,7 +15,7 @@ use volparossa_protocol::{
 use crate::forwarding::ForwardStatus;
 
 /// Direct client-to-datapath-relay protocol.
-pub const DATAPATH_RELAY_PROTOCOL: &str = "/volparossa/datapath-relay/3";
+pub const DATAPATH_RELAY_PROTOCOL: &str = "/volparossa/datapath-relay/4";
 /// Retired direct client-to-exit v2 protocol, retained only for refusal tests.
 pub const LEGACY_EXIT_RESERVATION_PROTOCOL_V2: &str = "/volparossa/reservation/exit/2";
 /// Retired direct client-to-relay v2 protocol, retained only for refusal tests.
@@ -24,7 +24,7 @@ pub const LEGACY_RELAY_RESERVATION_PROTOCOL_V2: &str = "/volparossa/reservation/
 pub const LEGACY_EXIT_CONFIRMATION_PROTOCOL_V2: &str =
     "/volparossa/reservation/exit-confirmation/2";
 /// Exact datapath-relay RPC schema version.
-pub const DATAPATH_RELAY_RPC_VERSION: u32 = 3;
+pub const DATAPATH_RELAY_RPC_VERSION: u32 = 4;
 /// Fixed direct datapath-relay transport timeout.
 pub const DATAPATH_RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum combined inbound and outbound datapath-relay streams.
@@ -303,7 +303,7 @@ impl DatapathRelayResponse {
     ///
     /// # Errors
     ///
-    /// Returns an error for a malformed, ambiguous, oversized, or non-v3 response.
+    /// Returns an error for a malformed, ambiguous, oversized, or non-v4 response.
     pub fn validate(&self) -> Result<(), DatapathRelayRpcError> {
         validate_version(self.rpc_version)?;
         validate_fixed_nonzero::<REQUEST_ID_LENGTH>(&self.request_id)?;
@@ -565,7 +565,7 @@ mod tests {
     const DEADLINE: u64 = 1_700_000_005_000;
 
     #[tokio::test]
-    async fn codec_is_canonical_bounded_and_refuses_every_v2_reservation_protocol() {
+    async fn codec_is_canonical_bounded_and_refuses_retired_protocol_names() {
         let protocol = StreamProtocol::new(DATAPATH_RELAY_PROTOCOL);
         let mut codec = DatapathRelayCodec;
         let request = reserve_request();
@@ -589,6 +589,7 @@ mod tests {
             LEGACY_EXIT_CONFIRMATION_PROTOCOL_V2,
             "/volparossa/datapath-relay/1",
             "/volparossa/datapath-relay/2",
+            "/volparossa/datapath-relay/3",
         ] {
             assert!(
                 codec
@@ -663,7 +664,7 @@ mod tests {
     #[test]
     fn versions_unknown_discriminators_and_wrong_envelope_types_fail_closed() {
         let mut request = reserve_request();
-        for version in [1, 2, 4] {
+        for version in [1, 2, 3, 5] {
             request.rpc_version = version;
             assert!(matches!(
                 request.validate(),

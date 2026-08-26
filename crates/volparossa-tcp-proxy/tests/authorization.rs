@@ -9,9 +9,10 @@ use volparossa_policy::{
     TrustedMaintainer, VerificationPolicy, VerifiedManifest, sign_manifest, verify_manifest,
 };
 use volparossa_protocol::{
-    ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, OpenTcp, ProtocolError,
-    RelayAuthorization, RelayReservation, ReplayCache, SignedEnvelope, TimePolicy, Transport,
-    WireguardEndpoint, decode_canonical, node_id_from_public_key, sign_control_message,
+    ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteIdentity,
+    OpenTcp, ProtocolError, RelayAuthorization, RelayReservation, ReplayCache, SignedEnvelope,
+    TimePolicy, Transport, WireguardEndpoint, decode_canonical, node_id_from_public_key,
+    sign_control_message,
 };
 use volparossa_tcp_proxy::{
     TcpAuthorizationScope, TcpProxyError, VerifiedMptcpRoute, read_authorized_open_tcp,
@@ -22,7 +23,7 @@ const NOW: u64 = 1_700_000_000_000;
 const EXPIRY: u64 = NOW + 60_000;
 const PERMANENT_CLIENT_PEER_ID: [u8; 32] = [0xa5; 32];
 
-struct V3GrantScope {
+struct V4GrantScope {
     client_session_id: Vec<u8>,
     client_session_public_key: Vec<u8>,
     capability_id: Vec<u8>,
@@ -48,12 +49,12 @@ fn peer_id(key: &SigningKey) -> Vec<u8> {
     peer_id
 }
 
-fn v3_grant_scope(
+fn v4_grant_scope(
     exit: &SigningKey,
     client_session: &SigningKey,
     control_relay: &SigningKey,
-) -> V3GrantScope {
-    V3GrantScope {
+) -> V4GrantScope {
+    V4GrantScope {
         client_session_id: node_id(client_session),
         client_session_public_key: client_session.verifying_key().to_bytes().to_vec(),
         capability_id: vec![4; 16],
@@ -100,11 +101,11 @@ fn policy_for_domain(domain: &str) -> VerifiedManifest {
     .unwrap()
 }
 
-fn signed_exit(exit: &SigningKey, scope: &V3GrantScope) -> Vec<u8> {
+fn signed_exit(exit: &SigningKey, scope: &V4GrantScope) -> Vec<u8> {
     signed_exit_with(exit, scope, |_| {})
 }
 
-fn signed_exit_with<F>(exit: &SigningKey, scope: &V3GrantScope, mutate: F) -> Vec<u8>
+fn signed_exit_with<F>(exit: &SigningKey, scope: &V4GrantScope, mutate: F) -> Vec<u8>
 where
     F: FnOnce(&mut ExitReservation),
 {
@@ -129,6 +130,15 @@ where
         control_relay_node_id: scope.control_relay_node_id.clone(),
         control_relay_peer_id: scope.control_relay_peer_id.clone(),
         exit_peer_id: scope.exit_peer_id.clone(),
+        native_route_identity: Some(NativeRouteIdentity {
+            auth_commitment: vec![11; 32],
+            certificate_sha256: vec![12; 32],
+            spki_sha256: vec![13; 32],
+            tls_server_name: "exit.volparossa.test".to_owned(),
+            masque_context_id: 1,
+            client_native_instance_id: vec![14; 32],
+            exit_native_instance_id: vec![15; 32],
+        }),
     };
     mutate(&mut message);
     sign_control_message(
@@ -145,7 +155,7 @@ where
 fn signed_relay(
     exit: &SigningKey,
     relay: &SigningKey,
-    scope: &V3GrantScope,
+    scope: &V4GrantScope,
     path_id: u32,
 ) -> Vec<u8> {
     let nonce_discriminator = u8::try_from(path_id).unwrap();
@@ -155,7 +165,7 @@ fn signed_relay(
 fn signed_relay_with<F>(
     exit: &SigningKey,
     relay: &SigningKey,
-    scope: &V3GrantScope,
+    scope: &V4GrantScope,
     path_id: u32,
     nonce_discriminator: u8,
     mutate: F,
@@ -264,7 +274,7 @@ async fn signed_open_frame_is_bound_to_multipath_route_and_policy() {
     let relay_two = key(52);
     let client = key(53);
     let client_id = node_id(&client);
-    let scope = v3_grant_scope(&exit, &client, &control_relay);
+    let scope = v4_grant_scope(&exit, &client, &control_relay);
     let signed_exit = signed_exit(&exit, &scope);
     let signed_relay_one = signed_relay(&exit, &relay_one, &scope, 1);
     let signed_relay_two = signed_relay(&exit, &relay_two, &scope, 2);
@@ -344,7 +354,7 @@ fn route_rejects_reusing_one_relay_for_two_paths() {
     let exit = key(70);
     let relay = key(71);
     let client = key(72);
-    let scope = v3_grant_scope(&exit, &client, &control_relay);
+    let scope = v4_grant_scope(&exit, &client, &control_relay);
     let signed_exit = signed_exit(&exit, &scope);
     let first = signed_relay(&exit, &relay, &scope, 1);
     let second = signed_relay(&exit, &relay, &scope, 2);
@@ -457,7 +467,7 @@ fn assert_scope_substitution_rejected(
     exit: &SigningKey,
     first_relay: &SigningKey,
     second_relay: &SigningKey,
-    scope: &V3GrantScope,
+    scope: &V4GrantScope,
     substitution: GrantSubstitution,
     expected: &str,
 ) {
@@ -491,7 +501,7 @@ fn route_rejects_every_substituted_final_scope_field() {
     let second_relay = key(102);
     let client = key(103);
     let control_relay = key(104);
-    let scope = v3_grant_scope(&exit, &client, &control_relay);
+    let scope = v4_grant_scope(&exit, &client, &control_relay);
     for (substitution, expected) in [
         (GrantSubstitution::ReservationId, "reservation id"),
         (GrantSubstitution::RouteContext, "route context"),
@@ -556,7 +566,7 @@ fn route_requires_exact_final_path_cardinality() {
     let relays = [key(110), key(111), key(112)];
     let client = key(113);
     let control_relay = key(114);
-    let scope = v3_grant_scope(&exit, &client, &control_relay);
+    let scope = v4_grant_scope(&exit, &client, &control_relay);
     let three_path_exit = signed_exit_with(&exit, &scope, |grant| {
         grant.maximum_paths = 3;
     });
@@ -598,7 +608,7 @@ fn route_requires_unique_path_ids_and_relay_peer_ids() {
     let second_relay = key(117);
     let client = key(118);
     let control_relay = key(119);
-    let scope = v3_grant_scope(&exit, &client, &control_relay);
+    let scope = v4_grant_scope(&exit, &client, &control_relay);
     let signed_exit = signed_exit(&exit, &scope);
     let first = signed_relay(&exit, &first_relay, &scope, 1);
     let duplicate_path = signed_relay_with(&exit, &second_relay, &scope, 1, 2, |_| {});
@@ -634,12 +644,12 @@ fn route_requires_unique_path_ids_and_relay_peer_ids() {
 }
 
 #[test]
-fn v3_route_grants_reject_retired_permanent_client_peer_id_tags() {
+fn v4_route_grants_reject_retired_permanent_client_peer_id_tags() {
     let control_relay = key(79);
     let exit = key(80);
     let relay = key(81);
     let client = key(82);
-    let scope = v3_grant_scope(&exit, &client, &control_relay);
+    let scope = v4_grant_scope(&exit, &client, &control_relay);
 
     let exit_envelope: SignedEnvelope =
         decode_canonical(&signed_exit(&exit, &scope), MAX_CONTROL_MESSAGE_SIZE).unwrap();

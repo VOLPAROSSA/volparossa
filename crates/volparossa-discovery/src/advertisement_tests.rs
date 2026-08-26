@@ -21,7 +21,7 @@ use crate::{
 
 #[tokio::test]
 #[allow(clippy::too_many_lines, reason = "complete adversarial codec matrix")]
-async fn codec_is_canonical_v3_refuses_other_versions_and_enforces_exact_bounds() {
+async fn codec_is_canonical_v4_refuses_other_versions_and_enforces_exact_bounds() {
     let protocol = StreamProtocol::new(ADVERTISEMENT_PROTOCOL);
     let request_bound = usize::try_from(MAX_ADVERTISEMENT_REQUEST_FRAME_BYTES)
         .expect("request frame bound fits usize");
@@ -46,7 +46,7 @@ async fn codec_is_canonical_v3_refuses_other_versions_and_enforces_exact_bounds(
         .write_request(&protocol, &mut encoded_request, AdvertisementRequest::new())
         .await
         .expect("encode bounded request");
-    assert_eq!(encoded_request.get_ref(), &[0x08, 0x03]);
+    assert_eq!(encoded_request.get_ref(), &[0x08, 0x04]);
     assert!(encoded_request.get_ref().len() <= request_bound);
     let mut encoded_request = Cursor::new(encoded_request.into_inner());
     assert_eq!(
@@ -61,10 +61,10 @@ async fn codec_is_canonical_v3_refuses_other_versions_and_enforces_exact_bounds(
     for raw in [
         vec![0x08, 0x01],
         vec![0x08, 0x02],
-        vec![0x08, 0x04],
-        vec![0x08, 0x83, 0x00],
-        vec![0x08, 0x03, 0x10, 0x01],
-        vec![0x08, 0x03, 0x08, 0x03],
+        vec![0x08, 0x03],
+        vec![0x08, 0x84, 0x00],
+        vec![0x08, 0x04, 0x10, 0x01],
+        vec![0x08, 0x04, 0x08, 0x04],
     ] {
         assert!(
             codec
@@ -76,7 +76,7 @@ async fn codec_is_canonical_v3_refuses_other_versions_and_enforces_exact_bounds(
     for unsupported in [
         LEGACY_ADVERTISEMENT_PROTOCOL_V1,
         LEGACY_ADVERTISEMENT_PROTOCOL_V2,
-        "/volparossa/advertisement/4",
+        "/volparossa/advertisement/3",
     ] {
         assert!(
             codec

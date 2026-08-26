@@ -58,22 +58,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "advertisement_v3"
-path = "fuzz_targets/advertisement_v3.rs"
+name = "advertisement_v4"
+path = "fuzz_targets/advertisement_v4.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "forwarding_v3"
-path = "fuzz_targets/forwarding_v3.rs"
+name = "forwarding_v4"
+path = "fuzz_targets/forwarding_v4.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "datapath_relay_v3"
-path = "fuzz_targets/datapath_relay_v3.rs"
+name = "datapath_relay_v4"
+path = "fuzz_targets/datapath_relay_v4.rs"
 test = false
 doc = false
 bench = false

@@ -1,4 +1,4 @@
-//! Hard-incompatible v3 exit reservation phases.
+//! Hard-incompatible v4 exit reservation phases.
 
 use sha2::{Digest as _, Sha256};
 use volparossa_protocol::{
@@ -238,6 +238,17 @@ struct UnavailableProbeEvidenceVerifier;
 impl ProbeEvidenceVerifier for UnavailableProbeEvidenceVerifier {
     fn verify(&self, _evidence: &ProbeEvidence<'_>) -> Result<(), ProbeEvidenceError> {
         Err(ProbeEvidenceError::Unavailable)
+    }
+}
+
+struct UnavailableExitNativeRouteIdentityProvider;
+
+impl ExitNativeRouteIdentityProvider for UnavailableExitNativeRouteIdentityProvider {
+    fn provide(
+        &mut self,
+        _request: &ExitNativeRouteIdentityRequest,
+    ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError> {
+        Err(ExitNativeRouteIdentityError::Unavailable)
     }
 }
 
@@ -847,11 +858,57 @@ impl ExitService {
         now_ms: u64,
         local_public_key: [u8; NODE_ID_BYTES],
         evidence_verifier: &V,
+        endpoint_provider: E,
+        signer: F,
+    ) -> Result<AcceptedExitReservationBundle, ExitError>
+    where
+        V: ProbeEvidenceVerifier + ?Sized,
+        E: FnMut(u32) -> Option<ExitEndpointLease>,
+        F: FnMut(&[u8]) -> Option<[u8; 64]>,
+    {
+        self.finalize_reservation_with_providers(
+            encoded_request,
+            authenticated_control_relay_node_id,
+            authenticated_control_relay_peer_id,
+            now_ms,
+            local_public_key,
+            evidence_verifier,
+            &mut UnavailableExitNativeRouteIdentityProvider,
+            endpoint_provider,
+            signer,
+        )
+    }
+
+    /// Finalize with explicit probe evidence and native-route identity providers.
+    ///
+    /// This is the only finalization boundary that can retain TLS ownership.
+    /// Neither a returned authorization nor the signed public response activates
+    /// a native backend or listener.
+    ///
+    /// # Errors
+    ///
+    /// In addition to all normal finalization failures, rejects unavailable,
+    /// malformed or request-mismatched native-route identity ownership.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "single fail-atomic evidence, identity and finalize transaction"
+    )]
+    pub fn finalize_reservation_with_providers<V, P, E, F>(
+        &mut self,
+        encoded_request: &[u8],
+        authenticated_control_relay_node_id: &[u8; NODE_ID_BYTES],
+        authenticated_control_relay_peer_id: &[u8],
+        now_ms: u64,
+        local_public_key: [u8; NODE_ID_BYTES],
+        evidence_verifier: &V,
+        identity_provider: &mut P,
         mut endpoint_provider: E,
         mut signer: F,
     ) -> Result<AcceptedExitReservationBundle, ExitError>
     where
         V: ProbeEvidenceVerifier + ?Sized,
+        P: ExitNativeRouteIdentityProvider + ?Sized,
         E: FnMut(u32) -> Option<ExitEndpointLease>,
         F: FnMut(&[u8]) -> Option<[u8; 64]>,
     {
@@ -963,6 +1020,22 @@ impl ExitService {
             }
 
             let finalize_id = fixed(&request.finalize_id, "finalize id")?;
+            let native_identity_request = ExitNativeRouteIdentityRequest::new(
+                reservation_id,
+                state.route_context_id,
+                fixed(&request.auth_commitment, "native auth commitment")?,
+                request.masque_context_id,
+                fixed(
+                    &request.client_native_instance_id,
+                    "client native instance id",
+                )?,
+            )?;
+            if self
+                .native_route_identity_owners
+                .contains_key(&reservation_key)
+            {
+                return Err(ExitError::LeaseInvariant);
+            }
             let mut artifacts = Vec::with_capacity(request.relay_paths.len());
             for path in &request.relay_paths {
                 let stored = state
@@ -1009,6 +1082,14 @@ impl ExitService {
                 evidence_verifier
                     .verify(&artifact.evidence()?)
                     .map_err(map_probe_evidence_error)?;
+            }
+
+            let identity_owner = identity_provider.provide(&native_identity_request)?;
+            if identity_owner.request() != &native_identity_request {
+                return Err(ExitNativeRouteIdentityError::Rejected(
+                    "native route identity provider scope",
+                )
+                .into());
             }
 
             let mut helper_handles = self
@@ -1122,6 +1203,7 @@ impl ExitService {
                 control_relay_node_id: state.control_relay_node_id.to_vec(),
                 control_relay_peer_id: state.control_relay_peer_id.clone(),
                 exit_peer_id: state.exit_peer_id.clone(),
+                native_route_identity: Some(identity_owner.public_identity().clone()),
             };
             let signed_exit_reservation = sign_control_message_with(
                 &exit_reservation,
@@ -1196,6 +1278,8 @@ impl ExitService {
                 allowed_transports: state.allowed_transports.clone(),
                 maximum_paths: final_path_count,
                 expires_at_ms: state.expires_at_ms,
+                native_route_identity: identity_owner.public_identity().clone(),
+                native_route_authorization_scope: identity_owner.authorization_scope(),
             };
             let response = AcceptedExitReservationBundle {
                 accepted,
@@ -1217,14 +1301,18 @@ impl ExitService {
             live.finalized_bundle_hash = Some(bundle_hash);
             live.paths = path_states;
             live.permits.clear();
-            Ok(response)
+            Ok((response, reservation_key, identity_owner))
         })();
 
         match outcome {
-            Ok(response) => {
+            Ok((response, reservation_key, identity_owner)) => {
                 let reservation_id = *response.reservation_id();
                 self.permit_response_cache
                     .retain(|_, cached| cached.response.reservation_id() != &reservation_id);
+                let previous_owner = self
+                    .native_route_identity_owners
+                    .insert(reservation_key, identity_owner);
+                debug_assert!(previous_owner.is_none(), "checked unique owner insertion");
                 self.finalize_response_cache.insert(
                     request_hash,
                     CachedControlResponse {

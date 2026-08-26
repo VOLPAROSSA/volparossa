@@ -1,4 +1,4 @@
-//! Hard-incompatible v3 reservation intents and proof-carrying phase messages.
+//! Hard-incompatible v4 reservation intents and proof-carrying phase messages.
 
 use std::collections::HashSet;
 
@@ -368,6 +368,12 @@ pub struct ExitReservationFinalizeRequest {
     pub finalize_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "14")]
     pub exit_peer_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "15")]
+    pub auth_commitment: Vec<u8>,
+    #[prost(uint64, tag = "16")]
+    pub masque_context_id: u64,
+    #[prost(bytes = "vec", tag = "17")]
+    pub client_native_instance_id: Vec<u8>,
 }
 
 /// Client-session-signed relay request carrying exit capability and final grants.
@@ -735,6 +741,12 @@ impl ControlPayload for ExitReservationFinalizeRequest {
             "finalize_request.exit_capacity_hold",
         )?;
         validate_finalized_paths(&self.relay_paths)?;
+        require_nonzero::<KEY_LENGTH>(&self.auth_commitment, "finalize_request.auth_commitment")?;
+        validate_masque_context(self.masque_context_id)?;
+        require_nonzero::<KEY_LENGTH>(
+            &self.client_native_instance_id,
+            "finalize_request.client_native_instance_id",
+        )?;
         require_nonzero::<NONCE_LENGTH>(&self.nonce, "finalize_request.nonce")?;
         validate_lifetime(
             self.created_at_ms,
@@ -921,6 +933,15 @@ fn validate_session_key(session_id: &[u8], public_key: &[u8]) -> Result<(), Prot
 fn validate_control_relay(node_id: &[u8], peer_id: &[u8]) -> Result<(), ProtocolError> {
     require_nonzero::<KEY_LENGTH>(node_id, "control_relay_node_id")?;
     validate_peer_id(peer_id, "control_relay_peer_id")
+}
+
+fn validate_masque_context(value: u64) -> Result<(), ProtocolError> {
+    if value == 0 || value > crate::MAX_MASQUE_CONTEXT_ID {
+        return Err(ProtocolError::InvalidField(
+            "finalize_request.masque_context_id",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_nested(

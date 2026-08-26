@@ -1,4 +1,4 @@
-//! Real libp2p privacy-v3 discovery, forwarding, and verified peerstore ingestion.
+//! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
 mod preselection_observation;
 
@@ -100,7 +100,7 @@ pub(crate) struct DiscoveryControlHandle {
 
 #[allow(
     dead_code,
-    reason = "the typed v3 route boundary is consumed by the route-orchestrator slice"
+    reason = "the typed v4 route boundary is consumed by the route-orchestrator slice"
 )]
 impl DiscoveryControlHandle {
     fn from_sender(sender: mpsc::Sender<DiscoveryCommand>) -> Self {
@@ -2631,7 +2631,7 @@ impl DiscoveryRuntime {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "one exhaustive v3 swarm dispatcher keeps every protocol direction fail closed"
+        reason = "one exhaustive v4 swarm dispatcher keeps every protocol direction fail closed"
     )]
     async fn handle_event(
         &mut self,

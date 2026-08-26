@@ -523,13 +523,13 @@ pub enum DiscoveryError {
     /// A peer address is empty, oversized, self-referential, or identity-inconsistent.
     #[error("invalid discovery peer address")]
     PeerAddress,
-    /// A direct-advertisement frame violates its canonical v3 bounds.
+    /// A direct-advertisement frame violates its canonical v4 bounds.
     #[error(transparent)]
     AdvertisementRpc(#[from] AdvertisementRpcError),
-    /// A forwarding-hop frame violates its canonical v3 bounds.
+    /// A forwarding-hop frame violates its canonical v4 bounds.
     #[error(transparent)]
     ForwardingRpc(#[from] ForwardingRpcError),
-    /// A datapath-relay frame violates its canonical v3 bounds.
+    /// A datapath-relay frame violates its canonical v4 bounds.
     #[error(transparent)]
     DatapathRelayRpc(#[from] DatapathRelayRpcError),
     /// The requested protocol direction is disabled for the immutable local roles.
@@ -985,7 +985,7 @@ impl DiscoveryService {
     /// # Errors
     ///
     /// Returns an error when the local role cannot serve advertisements or the
-    /// envelope is not a canonical signed v3 node advertisement.
+    /// envelope is not a canonical signed v4 node advertisement.
     pub fn set_local_advertisement(&mut self, envelope: Vec<u8>) -> Result<(), DiscoveryError> {
         if !self.protocol_roles.relay() && !self.protocol_roles.exit() {
             return Err(DiscoveryError::ProtocolRole);

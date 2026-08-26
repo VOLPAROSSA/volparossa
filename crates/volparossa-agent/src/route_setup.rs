@@ -1,4 +1,4 @@
-//! Bounded, actor-authorized, hard-incompatible privacy-v3 client route setup.
+//! Bounded, actor-authorized, hard-incompatible privacy-v4 client route setup.
 //!
 //! Stored advertisements may nominate identities for selection, but they never authorize an RPC.
 //! Every control relay, forwarded exit, and prospective datapath relay is resolved again through
@@ -224,6 +224,17 @@ struct PostProbeSelectionPolicy {
     relay_policy: RelaySelectionPolicy,
 }
 
+/// Native-process scope required before any exit finalization may be dispatched.
+///
+/// The current API-v5 native client cannot produce its process instance identifier, so production
+/// route construction deliberately leaves this absent. The next complete native API revision must
+/// fill it from an authenticated native response rather than minting it in the agent.
+#[derive(Clone, Debug)]
+struct ClientNativeRouteScope {
+    masque_context_id: u64,
+    client_native_instance_id: [u8; 32],
+}
+
 #[derive(Clone, Debug)]
 struct RouteSetupParameters {
     reservation_id: [u8; ID_BYTES],
@@ -238,6 +249,7 @@ struct RouteSetupParameters {
     expires_at_ms: u64,
     setup_expires_at_unix: u64,
     hard_expires_at_unix: u64,
+    client_native_route_scope: Option<ClientNativeRouteScope>,
 }
 
 struct RouteSetupPath {
@@ -374,6 +386,11 @@ impl RouteSetupRequest {
         if hold_expires_at_ms <= self.parameters.created_at_ms {
             return Err(RouteSetupError::Invalid("hold expiry"));
         }
+        let native_scope = self
+            .parameters
+            .client_native_route_scope
+            .as_ref()
+            .ok_or(RouteSetupError::NativeRouteScopeUnavailable)?;
         Ok(ExitReservationIntent {
             reservation_id: self.parameters.reservation_id,
             route_context_id: self.parameters.route_context_id,
@@ -390,6 +407,8 @@ impl RouteSetupRequest {
             created_at_ms: self.parameters.created_at_ms,
             hold_expires_at_ms,
             reservation_expires_at_ms: self.parameters.expires_at_ms,
+            masque_context_id: native_scope.masque_context_id,
+            client_native_instance_id: native_scope.client_native_instance_id,
         })
     }
 
@@ -419,7 +438,7 @@ impl RouteSetupRequest {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the incompatible v3 route policy is validated as one atomic cross-field contract"
+    reason = "the incompatible v4 route policy is validated as one atomic cross-field contract"
 )]
 fn validate_parameters(parameters: &RouteSetupParameters) -> Result<(), RouteSetupError> {
     if parameters.reservation_id.iter().all(|byte| *byte == 0)
@@ -665,6 +684,8 @@ enum RouteSetupError {
     Invalid(&'static str),
     #[error("current actor-minted route authority is unavailable or mismatched")]
     Capability,
+    #[error("native process route scope is unavailable before reservation dispatch")]
+    NativeRouteScopeUnavailable,
     #[error("route setup reservation expired")]
     Expired,
     #[error("route setup was cancelled")]
@@ -3183,13 +3204,16 @@ mod tests {
         NodeRoles, PeerId as CorePeerId, PolicyHash, UnixTime,
     };
     use volparossa_exit::{
-        ExitService, ExitServiceConfig, ProbeEvidence, ProbeEvidenceError, ProbeEvidenceVerifier,
+        ExitNativeRouteIdentityError, ExitNativeRouteIdentityOwner,
+        ExitNativeRouteIdentityProvider, ExitNativeRouteIdentityRequest, ExitService,
+        ExitServiceConfig, ProbeEvidence, ProbeEvidenceError, ProbeEvidenceVerifier,
     };
     use volparossa_protocol::{
         ControlMessageType, ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
-        PROTOCOL_VERSION, RelayAuthorization, RelayProbePermit, RelayProbeResult, ReplayCache,
-        SignedEnvelope, TimePolicy, decode_canonical, encode_canonical, generate_nonce,
-        node_id_from_public_key, sign_control_message, verify_control_message,
+        NativeRouteIdentity, PROTOCOL_VERSION, RelayAuthorization, RelayProbePermit,
+        RelayProbeResult, ReplayCache, SignedEnvelope, TimePolicy, decode_canonical,
+        encode_canonical, generate_nonce, node_id_from_public_key, sign_control_message,
+        verify_control_message,
     };
     use volparossa_relay::{RelayService, RelayServiceConfig};
     use volparossa_routing::{
@@ -4223,6 +4247,32 @@ mod tests {
         expected: Vec<(Vec<u8>, Vec<u8>)>,
     }
 
+    struct ExactTestNativeIdentityProvider;
+
+    impl ExitNativeRouteIdentityProvider for ExactTestNativeIdentityProvider {
+        fn provide(
+            &mut self,
+            request: &ExitNativeRouteIdentityRequest,
+        ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError> {
+            ExitNativeRouteIdentityOwner::new(
+                *request,
+                NativeRouteIdentity {
+                    auth_commitment: request.auth_commitment().to_vec(),
+                    certificate_sha256: vec![41; 32],
+                    spki_sha256: vec![42; 32],
+                    tls_server_name: "route.exit.example".to_owned(),
+                    masque_context_id: request.masque_context_id(),
+                    client_native_instance_id: request.client_native_instance_id().to_vec(),
+                    exit_native_instance_id: vec![43; 32],
+                },
+                b"-----BEGIN CERTIFICATE-----\ntest-certificate\n-----END CERTIFICATE-----\n"
+                    .to_vec(),
+                b"-----BEGIN PRIVATE KEY-----\ntest-private-key\n-----END PRIVATE KEY-----\n"
+                    .to_vec(),
+            )
+        }
+    }
+
     impl ProbeEvidenceVerifier for ExactProbeVerifier {
         fn verify(&self, evidence: &ProbeEvidence<'_>) -> Result<(), ProbeEvidenceError> {
             let exact = self.expected.iter().any(|(permit, result)| {
@@ -4333,17 +4383,19 @@ mod tests {
                     let verifier = ExactProbeVerifier {
                         expected: self.exact_probe_evidence.clone(),
                     };
+                    let mut identity_provider = ExactTestNativeIdentityProvider;
                     let exit_key = &self.exit_key;
                     let route_context_id = self.route_context_id;
                     let accepted = self
                         .exit
-                        .finalize_reservation_with_evidence_verifier(
+                        .finalize_reservation_with_providers(
                             request.canonical_request(),
                             &self.control_node_id,
                             &self.control_peer_id,
                             NOW_MS,
                             exit_public_key,
                             &verifier,
+                            &mut identity_provider,
                             move |path_id| real_exit_endpoint(route_context_id, path_id),
                             |message| Some(exit_key.sign(message).to_bytes()),
                         )
@@ -5148,7 +5200,7 @@ mod tests {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "one complete actor-bound real v3 service topology"
+        reason = "one complete actor-bound real v4 service topology"
     )]
     fn real_service_fixture() -> RealServiceFixture {
         let shared = Arc::new(FakeShared::default());
@@ -5257,6 +5309,10 @@ mod tests {
             expires_at_ms: NOW_MS + 60_000,
             setup_expires_at_unix: NOW_MS / 1_000 + 20,
             hard_expires_at_unix: NOW_MS / 1_000 + 60,
+            client_native_route_scope: Some(ClientNativeRouteScope {
+                masque_context_id: 71,
+                client_native_instance_id: [73; 32],
+            }),
         };
         let relay_binding = relay_binding(
             &relay_capability,
@@ -5337,12 +5393,12 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_lines, reason = "complete bounded v3 test topology")]
+    #[allow(clippy::too_many_lines, reason = "complete bounded v4 test topology")]
     fn fixture(retirement_capacity: usize) -> Fixture {
         fixture_with_helper_timeout(retirement_capacity, Duration::from_secs(1))
     }
 
-    #[allow(clippy::too_many_lines, reason = "complete bounded v3 test topology")]
+    #[allow(clippy::too_many_lines, reason = "complete bounded v4 test topology")]
     fn fixture_with_helper_timeout(
         retirement_capacity: usize,
         helper_call_timeout: Duration,
@@ -5430,6 +5486,10 @@ mod tests {
             expires_at_ms: NOW_MS + 60_000,
             setup_expires_at_unix: NOW_MS / 1_000 + 20,
             hard_expires_at_unix: NOW_MS / 1_000 + 60,
+            client_native_route_scope: Some(ClientNativeRouteScope {
+                masque_context_id: 72,
+                client_native_instance_id: [74; 32],
+            }),
         };
         let relay_bindings = datapath_relays
             .iter()
@@ -5886,7 +5946,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "the full phase-order test also proves one signed frame across exact retries"
     )]
-    async fn v3_phase_order_uses_real_probes_noncontiguous_subset_and_exact_retry_bytes() {
+    async fn v4_phase_order_uses_real_probes_noncontiguous_subset_and_exact_retry_bytes() {
         let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
         {
             fixture
@@ -6746,7 +6806,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_v3_services_and_scope_validators_complete_udp_with_exact_test_probe_evidence() {
+    async fn missing_native_process_scope_fails_before_any_route_dispatch() {
+        let mut fixture = real_service_fixture();
+        fixture
+            .transaction
+            .transaction
+            .request
+            .parameters
+            .client_native_route_scope = None;
+        let failure = fixture
+            .manager
+            .spawn(fixture.transaction, fixture.transport, fixture.clock)
+            .wait()
+            .await
+            .expect_err("missing native process identity must fail closed");
+
+        assert_eq!(failure.cause, RouteSetupError::NativeRouteScopeUnavailable);
+        assert_eq!(failure.cleanup, CleanupStatus::NotRequired);
+        assert!(fixture.shared.events().is_empty());
+        assert!(
+            fixture
+                .scope_events
+                .lock()
+                .expect("scope events")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn real_v4_services_and_scope_validators_complete_udp_with_exact_test_probe_evidence() {
         // The exact-match verifier below is test-only. Production intentionally remains
         // ProbeEvidenceUnavailable until helper-proven, exit-participating probes are wired.
         let fixture = real_service_fixture();
@@ -6757,7 +6845,7 @@ mod tests {
         let established = handle
             .wait()
             .await
-            .expect("real signed v3 UDP orchestration");
+            .expect("real signed v4 UDP orchestration");
 
         assert_eq!(established.active_path_ids, [1]);
         assert!(established.warm_path_ids.is_empty());

@@ -2,7 +2,7 @@ runtime_mode: production
 
 network:
   name: VOLPAROSSA
-  protocol_version: 3
+  protocol_version: 4
   operator_id: null
   listen_addresses: []
   bootstrap_peers: []

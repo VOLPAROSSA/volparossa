@@ -12,9 +12,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod reservation_v3;
+mod reservation_v4;
 
-pub use reservation_v3::{
+pub use reservation_v4::{
     AcceptedExitCapacityHold, AcceptedExitConfirmation, AcceptedRelayProbePermit, ProbeEvidence,
     ProbeEvidenceError, ProbeEvidenceVerifier,
 };
@@ -43,8 +43,9 @@ use volparossa_inspection::{
 use volparossa_metrics::MetricsRegistry;
 use volparossa_policy::{PolicyError, VerifiedManifest, normalize_domain};
 use volparossa_protocol::{
-    MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, ProtocolError, ReplayCache, SignedEnvelope,
-    TimePolicy, Transport, UdpFlowAuthorization, decode_canonical, node_id_from_public_key,
+    MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteIdentity, ProtocolError,
+    ReplayCache, SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, decode_canonical,
+    node_id_from_public_key,
 };
 use volparossa_reservation::{
     AuthorizedReservation, AvailableCapacity, CapacityLedger, LedgerLimits, ReservationError,
@@ -60,6 +61,7 @@ use volparossa_udp::{
 use volparossa_wireguard::{
     ExitEndpointLease, HelperContextHandle, PublicWireGuardEndpoint, WireGuardPublicKey,
 };
+use zeroize::Zeroizing;
 
 const ID_BYTES: usize = 16;
 const NODE_ID_BYTES: usize = 32;
@@ -70,6 +72,288 @@ const MAX_DNS_RESULTS: usize = 16;
 const MAX_CLIENT_HELLO_BYTES: usize = 64 * 1024;
 const CLIENT_HELLO_CHUNK_BYTES: usize = 4 * 1024;
 const MAX_EGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_TLS_CERTIFICATE_PEM: usize = 64 * 1024;
+const MAX_TLS_PRIVATE_KEY_PEM: usize = 16 * 1024;
+
+/// Exact public scope presented to a native-route identity provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExitNativeRouteIdentityRequest {
+    reservation_id: [u8; ID_BYTES],
+    route_context_id: [u8; ID_BYTES],
+    auth_commitment: [u8; NODE_ID_BYTES],
+    masque_context_id: u64,
+    client_native_instance_id: [u8; NODE_ID_BYTES],
+}
+
+impl ExitNativeRouteIdentityRequest {
+    /// Construct one exact, non-zero finalization scope.
+    ///
+    /// # Errors
+    ///
+    /// Zero identifiers and out-of-range MASQUE context identifiers are rejected.
+    pub fn new(
+        reservation_id: [u8; ID_BYTES],
+        route_context_id: [u8; ID_BYTES],
+        auth_commitment: [u8; NODE_ID_BYTES],
+        masque_context_id: u64,
+        client_native_instance_id: [u8; NODE_ID_BYTES],
+    ) -> Result<Self, ExitNativeRouteIdentityError> {
+        if reservation_id == [0; ID_BYTES]
+            || route_context_id == [0; ID_BYTES]
+            || auth_commitment == [0; NODE_ID_BYTES]
+            || masque_context_id == 0
+            || masque_context_id > volparossa_protocol::MAX_MASQUE_CONTEXT_ID
+            || client_native_instance_id == [0; NODE_ID_BYTES]
+        {
+            return Err(ExitNativeRouteIdentityError::Rejected(
+                "invalid native route request scope",
+            ));
+        }
+        Ok(Self {
+            reservation_id,
+            route_context_id,
+            auth_commitment,
+            masque_context_id,
+            client_native_instance_id,
+        })
+    }
+
+    /// Return the exact reservation identifier.
+    #[must_use]
+    pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
+        &self.reservation_id
+    }
+
+    /// Return the exact route-context identifier.
+    #[must_use]
+    pub const fn route_context_id(&self) -> &[u8; ID_BYTES] {
+        &self.route_context_id
+    }
+
+    /// Return the client-created native authentication commitment.
+    #[must_use]
+    pub const fn auth_commitment(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.auth_commitment
+    }
+
+    /// Return the exact RFC 9484 MASQUE context identifier.
+    #[must_use]
+    pub const fn masque_context_id(&self) -> u64 {
+        self.masque_context_id
+    }
+
+    /// Return the exact client native-process incarnation.
+    #[must_use]
+    pub const fn client_native_instance_id(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.client_native_instance_id
+    }
+}
+
+/// Rejection reported by a native-route identity provider or owner constructor.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ExitNativeRouteIdentityError {
+    /// No production identity and secret owner is available.
+    #[error("native route identity provider is unavailable")]
+    Unavailable,
+    /// The provider rejected or contradicted the exact request scope.
+    #[error("native route identity rejected: {0}")]
+    Rejected(&'static str),
+}
+
+/// Trusted producer of a route-scoped public TLS identity and its private owner.
+///
+/// Implementations must create a distinct exit-native incarnation as required
+/// by their runtime. Returning a value does not activate or expose a listener.
+pub trait ExitNativeRouteIdentityProvider {
+    /// Supply one non-cloneable identity owner bound to the exact request.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when no production producer exists, or rejected
+    /// when the requested route cannot receive a valid identity.
+    fn provide(
+        &mut self,
+        request: &ExitNativeRouteIdentityRequest,
+    ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError>;
+}
+
+/// Non-cloneable owner of one native route's public identity and TLS secrets.
+pub struct ExitNativeRouteIdentityOwner {
+    request: ExitNativeRouteIdentityRequest,
+    exit_native_instance_id: [u8; NODE_ID_BYTES],
+    public_identity: NativeRouteIdentity,
+    tls_certificate_pem: Zeroizing<Vec<u8>>,
+    tls_private_key_pem: Zeroizing<Vec<u8>>,
+}
+
+impl ExitNativeRouteIdentityOwner {
+    /// Construct and validate one route-scoped secret owner.
+    ///
+    /// This validates bounds, canonical public fields and exact request
+    /// binding. It deliberately does not claim cryptographic certificate/key
+    /// consistency; that remains the trusted provider's responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Invalid public fields, mismatched scope, embedded NUL bytes or malformed
+    /// bounded PEM framing are rejected.
+    pub fn new(
+        request: ExitNativeRouteIdentityRequest,
+        public_identity: NativeRouteIdentity,
+        tls_certificate_pem: Vec<u8>,
+        tls_private_key_pem: Vec<u8>,
+    ) -> Result<Self, ExitNativeRouteIdentityError> {
+        let tls_certificate_pem = Zeroizing::new(tls_certificate_pem);
+        let tls_private_key_pem = Zeroizing::new(tls_private_key_pem);
+        let exit_native_instance_id = validate_native_route_identity(&request, &public_identity)?;
+        if !valid_pem(
+            &tls_certificate_pem,
+            MAX_TLS_CERTIFICATE_PEM,
+            b"-----BEGIN CERTIFICATE-----",
+            b"-----END CERTIFICATE-----",
+        ) || !valid_pem(
+            &tls_private_key_pem,
+            MAX_TLS_PRIVATE_KEY_PEM,
+            b"-----BEGIN PRIVATE KEY-----",
+            b"-----END PRIVATE KEY-----",
+        ) {
+            return Err(ExitNativeRouteIdentityError::Rejected(
+                "invalid native route TLS PEM",
+            ));
+        }
+        Ok(Self {
+            request,
+            exit_native_instance_id,
+            public_identity,
+            tls_certificate_pem,
+            tls_private_key_pem,
+        })
+    }
+
+    /// Return the exact request scope this owner is bound to.
+    #[must_use]
+    pub const fn request(&self) -> &ExitNativeRouteIdentityRequest {
+        &self.request
+    }
+
+    /// Return the exact public identity that may be signed into a reservation.
+    #[must_use]
+    pub const fn public_identity(&self) -> &NativeRouteIdentity {
+        &self.public_identity
+    }
+
+    fn authorization_scope(&self) -> ExitNativeRouteAuthorizationScope {
+        ExitNativeRouteAuthorizationScope {
+            request: self.request,
+            exit_native_instance_id: self.exit_native_instance_id,
+        }
+    }
+
+    fn matches_scope(&self, scope: &ExitNativeRouteAuthorizationScope) -> bool {
+        self.authorization_scope() == *scope
+    }
+}
+
+impl fmt::Debug for ExitNativeRouteIdentityOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExitNativeRouteIdentityOwner")
+            .field("request", &self.request)
+            .field("tls_server_name", &self.public_identity.tls_server_name)
+            .field("tls_material", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Exact public scope required to consume one stored native-route owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExitNativeRouteAuthorizationScope {
+    request: ExitNativeRouteIdentityRequest,
+    exit_native_instance_id: [u8; NODE_ID_BYTES],
+}
+
+impl ExitNativeRouteAuthorizationScope {
+    /// Bind a finalization request to one exact exit native-process incarnation.
+    ///
+    /// # Errors
+    ///
+    /// A zero exit native-process incarnation is rejected.
+    pub fn new(
+        request: ExitNativeRouteIdentityRequest,
+        exit_native_instance_id: [u8; NODE_ID_BYTES],
+    ) -> Result<Self, ExitNativeRouteIdentityError> {
+        if exit_native_instance_id == [0; NODE_ID_BYTES] {
+            return Err(ExitNativeRouteIdentityError::Rejected(
+                "invalid exit native instance",
+            ));
+        }
+        Ok(Self {
+            request,
+            exit_native_instance_id,
+        })
+    }
+
+    /// Return the exact finalized request scope.
+    #[must_use]
+    pub const fn request(&self) -> &ExitNativeRouteIdentityRequest {
+        &self.request
+    }
+
+    /// Return the exact exit native-process incarnation.
+    #[must_use]
+    pub const fn exit_native_instance_id(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.exit_native_instance_id
+    }
+}
+
+/// One-shot, non-cloneable authorization carrying native route TLS ownership.
+pub struct ExitNativeRouteAuthorization {
+    owner: ExitNativeRouteIdentityOwner,
+    expires_at_ms: u64,
+}
+
+impl ExitNativeRouteAuthorization {
+    /// Return the exact public authorization scope.
+    #[must_use]
+    pub fn scope(&self) -> ExitNativeRouteAuthorizationScope {
+        self.owner.authorization_scope()
+    }
+
+    /// Return the signed public native-route identity.
+    #[must_use]
+    pub const fn public_identity(&self) -> &NativeRouteIdentity {
+        self.owner.public_identity()
+    }
+
+    /// Borrow the bounded certificate chain PEM for the native runtime.
+    #[must_use]
+    pub fn tls_certificate_pem(&self) -> &[u8] {
+        &self.owner.tls_certificate_pem
+    }
+
+    /// Borrow the bounded private-key PEM for the native runtime.
+    #[must_use]
+    pub fn tls_private_key_pem(&self) -> &[u8] {
+        &self.owner.tls_private_key_pem
+    }
+
+    /// Return the exclusive signed reservation expiry in Unix milliseconds.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+}
+
+impl fmt::Debug for ExitNativeRouteAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExitNativeRouteAuthorization")
+            .field("scope", &self.scope())
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("tls_material", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Immutable operator limits for one explicitly enabled or disabled exit.
 #[derive(Clone, Debug)]
@@ -200,6 +484,7 @@ pub struct ExitService {
     response_cache_capacity: usize,
     activated: HashSet<ReservationId>,
     endpoint_states: HashMap<ReservationId, ExitReservationState>,
+    native_route_identity_owners: HashMap<ReservationId, ExitNativeRouteIdentityOwner>,
     metrics: Option<MetricsRegistry>,
 }
 
@@ -222,7 +507,7 @@ impl ExitService {
             config,
             policy,
             metrics,
-            reservation_v3::fresh_exit_boot_id(),
+            reservation_v4::fresh_exit_boot_id(),
         )
     }
 
@@ -291,6 +576,7 @@ impl ExitService {
             ledger,
             activated: HashSet::new(),
             endpoint_states: HashMap::new(),
+            native_route_identity_owners: HashMap::new(),
             metrics,
         };
         service.sync_metrics();
@@ -597,6 +883,56 @@ impl ExitService {
         }
         Ok(statistics)
     }
+    /// Consume the exact stored native-route TLS owner once.
+    ///
+    /// All relay-to-exit paths must already be confirmed. This method only
+    /// transfers typed ownership to a future native backend; it does not start
+    /// a listener or authorize a direct client-to-exit datapath.
+    ///
+    /// # Errors
+    ///
+    /// Disabled, expired, unconfirmed, mismatched, unknown or already-consumed
+    /// ownership is rejected without consuming a different owner.
+    pub fn take_native_route_authorization(
+        &mut self,
+        scope: &ExitNativeRouteAuthorizationScope,
+        now_ms: u64,
+    ) -> Result<ExitNativeRouteAuthorization, ExitError> {
+        self.require_enabled()?;
+        self.purge_expired(now_ms);
+        self.policy.ensure_active_at(now_ms)?;
+        let reservation_key = text_id::<ReservationId>(scope.request.reservation_id())?;
+        let state = self
+            .endpoint_states
+            .get(&reservation_key)
+            .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+        if state.phase != ExitReservationPhase::Finalized
+            || state.expires_at_ms <= now_ms
+            || state.paths.is_empty()
+            || state.paths.iter().any(|path| {
+                path.relay_exit_endpoint.is_none() || path.relay_reservation_hash.is_none()
+            })
+        {
+            return Err(ExitError::ConfirmationRequired);
+        }
+        let expires_at_ms = state.expires_at_ms;
+        let owner = self
+            .native_route_identity_owners
+            .get(&reservation_key)
+            .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+        if !owner.matches_scope(scope) {
+            return Err(ExitError::NativeRouteAuthorizationMismatch);
+        }
+        let owner = self
+            .native_route_identity_owners
+            .remove(&reservation_key)
+            .ok_or(ExitError::NativeRouteAuthorizationUnavailable)?;
+        Ok(ExitNativeRouteAuthorization {
+            owner,
+            expires_at_ms,
+        })
+    }
+
     /// Explicitly release one route allocation.
     ///
     /// # Errors
@@ -607,6 +943,7 @@ impl ExitService {
         self.ledger_mut()?.release(&key)?;
         self.activated.remove(&key);
         self.endpoint_states.remove(&key);
+        self.native_route_identity_owners.remove(&key);
         self.sync_metrics();
         self.hold_response_cache
             .retain(|_, cached| cached.response.reservation_id() != reservation_id);
@@ -637,6 +974,7 @@ impl ExitService {
             }
             self.activated.remove(&reservation_id);
             self.endpoint_states.remove(&reservation_id);
+            self.native_route_identity_owners.remove(&reservation_id);
             removed.insert(reservation_id);
         }
 
@@ -646,6 +984,8 @@ impl ExitService {
         for allocation in ledger_expired {
             self.activated.remove(&allocation.reservation_id);
             self.endpoint_states.remove(&allocation.reservation_id);
+            self.native_route_identity_owners
+                .remove(&allocation.reservation_id);
             removed.insert(allocation.reservation_id);
         }
         let removed_ids = removed
@@ -917,6 +1257,8 @@ pub struct AcceptedExitReservation {
     allowed_transports: Vec<i32>,
     maximum_paths: u32,
     expires_at_ms: u64,
+    native_route_identity: NativeRouteIdentity,
+    native_route_authorization_scope: ExitNativeRouteAuthorizationScope,
 }
 
 impl AcceptedExitReservation {
@@ -936,6 +1278,18 @@ impl AcceptedExitReservation {
     #[must_use]
     pub const fn route_context_id(&self) -> &[u8; ID_BYTES] {
         &self.route_context_id
+    }
+
+    /// Return the signed public native-route identity.
+    #[must_use]
+    pub const fn native_route_identity(&self) -> &NativeRouteIdentity {
+        &self.native_route_identity
+    }
+
+    /// Return the exact scope required for one-shot local TLS-owner consumption.
+    #[must_use]
+    pub fn native_route_authorization_scope(&self) -> ExitNativeRouteAuthorizationScope {
+        self.native_route_authorization_scope
     }
 
     /// Return the signed maximum relay-path count.
@@ -1414,6 +1768,85 @@ fn fixed<const N: usize>(bytes: &[u8], name: &'static str) -> Result<[u8; N], Ex
     bytes.try_into().map_err(|_| ExitError::InvalidGrant(name))
 }
 
+fn validate_native_route_identity(
+    request: &ExitNativeRouteIdentityRequest,
+    identity: &NativeRouteIdentity,
+) -> Result<[u8; NODE_ID_BYTES], ExitNativeRouteIdentityError> {
+    let certificate_sha256 = <[u8; NODE_ID_BYTES]>::try_from(&identity.certificate_sha256[..])
+        .map_err(|_| {
+            ExitNativeRouteIdentityError::Rejected("invalid native route certificate hash")
+        })?;
+    let spki_sha256 = <[u8; NODE_ID_BYTES]>::try_from(&identity.spki_sha256[..]).map_err(|_| {
+        ExitNativeRouteIdentityError::Rejected("invalid native route public-key hash")
+    })?;
+    let exit_native_instance_id =
+        <[u8; NODE_ID_BYTES]>::try_from(&identity.exit_native_instance_id[..])
+            .map_err(|_| ExitNativeRouteIdentityError::Rejected("invalid exit native instance"))?;
+    if identity.auth_commitment.as_slice() != request.auth_commitment
+        || identity.masque_context_id != request.masque_context_id
+        || identity.client_native_instance_id.as_slice() != request.client_native_instance_id
+        || certificate_sha256 == [0; NODE_ID_BYTES]
+        || spki_sha256 == [0; NODE_ID_BYTES]
+        || exit_native_instance_id == [0; NODE_ID_BYTES]
+        || !canonical_dns_name(&identity.tls_server_name)
+    {
+        return Err(ExitNativeRouteIdentityError::Rejected(
+            "invalid or mismatched native route public identity",
+        ));
+    }
+    Ok(exit_native_instance_id)
+}
+
+fn canonical_dns_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > 253
+        || name.ends_with('.')
+        || name.bytes().any(|byte| byte.is_ascii_uppercase())
+        || name.parse::<IpAddr>().is_ok()
+        || !name.contains('.')
+    {
+        return false;
+    }
+    name.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+fn valid_pem(bytes: &[u8], maximum: usize, begin: &[u8], end: &[u8]) -> bool {
+    if bytes.is_empty()
+        || bytes.len() > maximum
+        || bytes.contains(&0)
+        || bytes.contains(&b'\r')
+        || !bytes.starts_with(begin)
+    {
+        return false;
+    }
+    let Some(after_begin) = bytes.get(begin.len()..) else {
+        return false;
+    };
+    if !after_begin.starts_with(b"\n") {
+        return false;
+    }
+    let without_final_newline = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let Some(before_end) = without_final_newline.strip_suffix(end) else {
+        return false;
+    };
+    let Some(body) = before_end.get(begin.len() + 1..) else {
+        return false;
+    };
+    !body.is_empty()
+        && body.iter().any(|byte| (0x21..=0x7e).contains(byte))
+        && body
+            .iter()
+            .all(|byte| *byte == b'\n' || (0x21..=0x7e).contains(byte))
+}
+
 fn wire_endpoint(endpoint: PublicWireGuardEndpoint) -> volparossa_protocol::WireguardEndpoint {
     let underlay_ip = match endpoint.underlay_ip() {
         IpAddr::V4(address) => address.octets().to_vec(),
@@ -1482,6 +1915,15 @@ pub enum ExitError {
     /// A configured external probe evidence verifier rejected an exact artifact.
     #[error("probe evidence rejected: {0}")]
     ProbeEvidenceRejected(&'static str),
+    /// Native route public identity or private ownership was unavailable or invalid.
+    #[error("exit native route identity failed: {0}")]
+    NativeRouteIdentity(#[from] ExitNativeRouteIdentityError),
+    /// The route-scoped native authorization was absent or already consumed.
+    #[error("exit native route authorization is unavailable or already consumed")]
+    NativeRouteAuthorizationUnavailable,
+    /// The requested native authorization did not exactly match its stored owner.
+    #[error("exit native route authorization scope mismatch")]
+    NativeRouteAuthorizationMismatch,
     /// A signed route or reservation did not match local state.
     #[error("invalid exit grant: {0}")]
     InvalidGrant(&'static str),
@@ -1552,8 +1994,8 @@ mod tests {
     use volparossa_metrics::MetricsRegistry;
     use volparossa_policy::{DestinationRule, ProtocolPort, TransportProtocol};
     use volparossa_protocol::{
-        ProbeAddressFamily, ProbeLegEvidence, ProtocolError, RelayProbePermit, RelayProbeResult,
-        RelayReservation, ReplayCache, TimePolicy, Transport, generate_nonce,
+        NativeRouteIdentity, ProbeAddressFamily, ProbeLegEvidence, ProtocolError, RelayProbePermit,
+        RelayProbeResult, RelayReservation, ReplayCache, TimePolicy, Transport, generate_nonce,
         node_id_from_public_key, sign_control_message, verify_control_message,
     };
     use volparossa_relay::{RelayService, RelayServiceConfig};
@@ -1563,9 +2005,11 @@ mod tests {
     use volparossa_test_support::{ephemeral_signing_key, verified_development_manifest};
 
     use super::{
-        AcceptedExitReservation, ExitError, ExitService, ExitServiceConfig, PendingQuicUdpFlow,
-        ProbeEvidence, ProbeEvidenceError, ProbeEvidenceVerifier, Udp443InspectionProgress,
-        inspect_tls_client_hello,
+        AcceptedExitReservation, ExitError, ExitNativeRouteAuthorizationScope,
+        ExitNativeRouteIdentityError, ExitNativeRouteIdentityOwner,
+        ExitNativeRouteIdentityProvider, ExitNativeRouteIdentityRequest, ExitService,
+        ExitServiceConfig, PendingQuicUdpFlow, ProbeEvidence, ProbeEvidenceError,
+        ProbeEvidenceVerifier, Udp443InspectionProgress, inspect_tls_client_hello,
     };
     use volparossa_wireguard::{
         ClientEndpointLease, EndpointRole, ExitEndpointLease, HelperContextHandle,
@@ -1573,6 +2017,10 @@ mod tests {
     };
 
     const NOW_MS: u64 = 1_700_000_000_000;
+    const TEST_TLS_CERTIFICATE_PEM: &[u8] =
+        b"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n";
+    const TEST_TLS_PRIVATE_KEY_PEM: &[u8] =
+        b"-----BEGIN PRIVATE KEY-----\nBAUG\n-----END PRIVATE KEY-----\n";
 
     // Public RFC 9001 Appendix A QUIC v1 client-Initial test vector.
     const TEST_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
@@ -1658,6 +2106,69 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ExactNativeIdentityProvider {
+        calls: usize,
+    }
+
+    impl ExitNativeRouteIdentityProvider for ExactNativeIdentityProvider {
+        fn provide(
+            &mut self,
+            request: &ExitNativeRouteIdentityRequest,
+        ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError> {
+            self.calls += 1;
+            test_native_identity_owner(*request)
+        }
+    }
+
+    struct MismatchedNativeIdentityProvider;
+
+    impl ExitNativeRouteIdentityProvider for MismatchedNativeIdentityProvider {
+        fn provide(
+            &mut self,
+            request: &ExitNativeRouteIdentityRequest,
+        ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError> {
+            let mismatched = ExitNativeRouteIdentityRequest::new(
+                *request.reservation_id(),
+                [99; 16],
+                *request.auth_commitment(),
+                request.masque_context_id(),
+                *request.client_native_instance_id(),
+            )?;
+            test_native_identity_owner(mismatched)
+        }
+    }
+
+    struct PanickingNativeIdentityProvider;
+
+    impl ExitNativeRouteIdentityProvider for PanickingNativeIdentityProvider {
+        fn provide(
+            &mut self,
+            _request: &ExitNativeRouteIdentityRequest,
+        ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError> {
+            panic!("exact finalize retry must not request or clone TLS ownership")
+        }
+    }
+
+    fn test_native_identity_owner(
+        request: ExitNativeRouteIdentityRequest,
+    ) -> Result<ExitNativeRouteIdentityOwner, ExitNativeRouteIdentityError> {
+        ExitNativeRouteIdentityOwner::new(
+            request,
+            NativeRouteIdentity {
+                auth_commitment: request.auth_commitment().to_vec(),
+                certificate_sha256: vec![41; 32],
+                spki_sha256: vec![42; 32],
+                tls_server_name: "route.exit.example".to_owned(),
+                masque_context_id: request.masque_context_id(),
+                client_native_instance_id: request.client_native_instance_id().to_vec(),
+                exit_native_instance_id: vec![43; 32],
+            },
+            TEST_TLS_CERTIFICATE_PEM.to_vec(),
+            TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
+        )
+    }
+
     fn probe_leg(rtt_micros: u64) -> ProbeLegEvidence {
         ProbeLegEvidence {
             up_capacity_mbps: 100,
@@ -1691,7 +2202,7 @@ mod tests {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "the test deliberately exercises the full v3 hold, probe, finalize, relay and receipt transaction"
+        reason = "the test deliberately exercises the full v4 hold, probe, finalize, relay and receipt transaction"
     )]
     fn admit_route_with_probe_selection(
         probe_permit_limit: usize,
@@ -1754,6 +2265,8 @@ mod tests {
             created_at_ms,
             hold_expires_at_ms,
             reservation_expires_at_ms: expires_at_ms,
+            masque_context_id: 7,
+            client_native_instance_id: [83; 32],
         };
         let mut coordinator = ReservationCoordinator::new(128).unwrap();
         let signed_hold_request = coordinator.sign_hold_request(&intent).unwrap();
@@ -1962,18 +2475,61 @@ mod tests {
         let verifier = ExactProbeVerifier {
             expected: exact_evidence,
         };
-        let bundle = service
-            .finalize_reservation_with_evidence_verifier(
+        assert!(matches!(
+            service.finalize_reservation_with_evidence_verifier(
                 finalize_request.encoded(),
                 &control_relay_node_id,
                 &control_relay_peer_id,
                 NOW_MS,
                 exit_key.verifying_key().to_bytes(),
                 &verifier,
+                |_path_id| -> Option<ExitEndpointLease> {
+                    panic!("unavailable native identity must precede endpoint allocation")
+                },
+                |_message| -> Option<[u8; 64]> {
+                    panic!("unavailable native identity must precede signing")
+                },
+            ),
+            Err(ExitError::NativeRouteIdentity(
+                ExitNativeRouteIdentityError::Unavailable
+            ))
+        ));
+        let mut mismatched_identity_provider = MismatchedNativeIdentityProvider;
+        assert!(matches!(
+            service.finalize_reservation_with_providers(
+                finalize_request.encoded(),
+                &control_relay_node_id,
+                &control_relay_peer_id,
+                NOW_MS,
+                exit_key.verifying_key().to_bytes(),
+                &verifier,
+                &mut mismatched_identity_provider,
+                |_path_id| -> Option<ExitEndpointLease> {
+                    panic!("mismatched native identity must precede endpoint allocation")
+                },
+                |_message| -> Option<[u8; 64]> {
+                    panic!("mismatched native identity must precede signing")
+                },
+            ),
+            Err(ExitError::NativeRouteIdentity(
+                ExitNativeRouteIdentityError::Rejected("native route identity provider scope")
+            ))
+        ));
+        let mut identity_provider = ExactNativeIdentityProvider::default();
+        let bundle = service
+            .finalize_reservation_with_providers(
+                finalize_request.encoded(),
+                &control_relay_node_id,
+                &control_relay_peer_id,
+                NOW_MS,
+                exit_key.verifying_key().to_bytes(),
+                &verifier,
+                &mut identity_provider,
                 |path_id| exit_endpoint(route_context_id, path_id),
                 |message| Some(exit_key.sign(message).to_bytes()),
             )
             .unwrap();
+        assert_eq!(identity_provider.calls, 1);
         let verified_exit = coordinator
             .verify_finalize_response(
                 &intent,
@@ -1985,13 +2541,16 @@ mod tests {
                 NOW_MS,
             )
             .unwrap();
+        let mut retry_identity_provider = PanickingNativeIdentityProvider;
         let finalize_retry = service
-            .finalize_reservation_with(
+            .finalize_reservation_with_providers(
                 finalize_request.encoded(),
                 &control_relay_node_id,
                 &control_relay_peer_id,
                 NOW_MS,
                 exit_key.verifying_key().to_bytes(),
+                &verifier,
+                &mut retry_identity_provider,
                 |_path_id| -> Option<ExitEndpointLease> {
                     panic!("exact finalize retry must not allocate endpoints")
                 },
@@ -2014,6 +2573,13 @@ mod tests {
         assert!(finalized_state.permits.is_empty());
         assert!(service.permit_response_cache.is_empty());
         assert_eq!(service.finalize_response_cache.len(), 1);
+        assert_eq!(service.native_route_identity_owners.len(), 1);
+        let native_scope = bundle.accepted().native_route_authorization_scope();
+        assert!(matches!(
+            service.take_native_route_authorization(&native_scope, NOW_MS),
+            Err(ExitError::ConfirmationRequired)
+        ));
+        assert_eq!(service.native_route_identity_owners.len(), 1);
 
         let final_path_count = selected_path_ids.len();
         let mut signed_relays = Vec::with_capacity(final_path_count);
@@ -2335,6 +2901,7 @@ mod tests {
         let available = released.available(NOW_MS).unwrap();
         assert_eq!(available.bandwidth, Bandwidth::new(400, 400).unwrap());
         assert_eq!(available.free_slots, 3);
+        assert_eq!(released.native_route_identity_owners.len(), 1);
         released.release(&route.accepted.reservation_id).unwrap();
         assert!(
             released
@@ -2344,6 +2911,7 @@ mod tests {
         let available = released.available(NOW_MS).unwrap();
         assert_eq!(available.bandwidth, Bandwidth::new(500, 500).unwrap());
         assert_eq!(available.free_slots, 4);
+        assert!(released.native_route_identity_owners.is_empty());
 
         let (mut expired, route) = admit_route(
             1,
@@ -2369,6 +2937,149 @@ mod tests {
         assert!(expired.permit_response_cache.is_empty());
         assert!(expired.finalize_response_cache.is_empty());
         assert!(expired.confirmation_response_cache.is_empty());
+        assert!(expired.native_route_identity_owners.is_empty());
+    }
+
+    #[test]
+    fn native_route_owner_rejects_mismatched_public_scope_and_malformed_pem() {
+        let request =
+            ExitNativeRouteIdentityRequest::new([1; 16], [2; 16], [3; 32], 4, [5; 32]).unwrap();
+        let identity = NativeRouteIdentity {
+            auth_commitment: request.auth_commitment().to_vec(),
+            certificate_sha256: vec![6; 32],
+            spki_sha256: vec![7; 32],
+            tls_server_name: "route.exit.example".to_owned(),
+            masque_context_id: request.masque_context_id(),
+            client_native_instance_id: request.client_native_instance_id().to_vec(),
+            exit_native_instance_id: vec![8; 32],
+        };
+        let owner = ExitNativeRouteIdentityOwner::new(
+            request,
+            identity.clone(),
+            TEST_TLS_CERTIFICATE_PEM.to_vec(),
+            TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
+        )
+        .unwrap();
+        let debug = format!("{owner:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("BAUG"));
+
+        let mut mismatched = identity.clone();
+        mismatched.auth_commitment = vec![9; 32];
+        assert!(matches!(
+            ExitNativeRouteIdentityOwner::new(
+                request,
+                mismatched,
+                TEST_TLS_CERTIFICATE_PEM.to_vec(),
+                TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
+            ),
+            Err(ExitNativeRouteIdentityError::Rejected(_))
+        ));
+
+        let mut invalid_name = identity.clone();
+        invalid_name.tls_server_name = "Route.Exit.Example".to_owned();
+        assert!(matches!(
+            ExitNativeRouteIdentityOwner::new(
+                request,
+                invalid_name,
+                TEST_TLS_CERTIFICATE_PEM.to_vec(),
+                TEST_TLS_PRIVATE_KEY_PEM.to_vec(),
+            ),
+            Err(ExitNativeRouteIdentityError::Rejected(_))
+        ));
+        assert!(matches!(
+            ExitNativeRouteIdentityOwner::new(
+                request,
+                identity,
+                TEST_TLS_CERTIFICATE_PEM.to_vec(),
+                b"-----BEGIN PRIVATE KEY-----\nBAD\0KEY\n-----END PRIVATE KEY-----\n".to_vec(),
+            ),
+            Err(ExitNativeRouteIdentityError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn native_route_authorization_mismatches_do_not_consume_and_exact_scope_is_one_shot() {
+        let (mut service, route) = admit_route(
+            1,
+            &[Transport::UdpSinglePath],
+            Vec::new(),
+            MetricsRegistry::new(),
+        );
+        let exact = route.accepted.native_route_authorization_scope();
+        let request = *exact.request();
+        let mismatched_requests = [
+            ExitNativeRouteIdentityRequest::new(
+                *request.reservation_id(),
+                [71; 16],
+                *request.auth_commitment(),
+                request.masque_context_id(),
+                *request.client_native_instance_id(),
+            )
+            .unwrap(),
+            ExitNativeRouteIdentityRequest::new(
+                *request.reservation_id(),
+                *request.route_context_id(),
+                [72; 32],
+                request.masque_context_id(),
+                *request.client_native_instance_id(),
+            )
+            .unwrap(),
+            ExitNativeRouteIdentityRequest::new(
+                *request.reservation_id(),
+                *request.route_context_id(),
+                *request.auth_commitment(),
+                request.masque_context_id(),
+                [73; 32],
+            )
+            .unwrap(),
+        ];
+        for mismatched_request in mismatched_requests {
+            let mismatched = ExitNativeRouteAuthorizationScope::new(
+                mismatched_request,
+                *exact.exit_native_instance_id(),
+            )
+            .unwrap();
+            assert!(matches!(
+                service.take_native_route_authorization(&mismatched, NOW_MS),
+                Err(ExitError::NativeRouteAuthorizationMismatch)
+            ));
+            assert_eq!(service.native_route_identity_owners.len(), 1);
+        }
+        let mismatched_exit = ExitNativeRouteAuthorizationScope::new(request, [74; 32]).unwrap();
+        assert!(matches!(
+            service.take_native_route_authorization(&mismatched_exit, NOW_MS),
+            Err(ExitError::NativeRouteAuthorizationMismatch)
+        ));
+        assert_eq!(service.native_route_identity_owners.len(), 1);
+
+        assert!(std::mem::needs_drop::<super::ExitNativeRouteAuthorization>());
+        let authorization = service
+            .take_native_route_authorization(&exact, NOW_MS)
+            .unwrap();
+        assert_eq!(authorization.scope(), exact);
+        assert_eq!(
+            authorization.public_identity(),
+            route.accepted.native_route_identity()
+        );
+        assert_eq!(
+            authorization.tls_certificate_pem(),
+            TEST_TLS_CERTIFICATE_PEM
+        );
+        assert_eq!(
+            authorization.tls_private_key_pem(),
+            TEST_TLS_PRIVATE_KEY_PEM
+        );
+        assert_eq!(authorization.expires_at_ms(), route.expires_at_ms);
+        let debug = format!("{authorization:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("BAUG"));
+        drop(authorization);
+        assert!(service.native_route_identity_owners.is_empty());
+        assert!(matches!(
+            service.take_native_route_authorization(&exact, NOW_MS),
+            Err(ExitError::NativeRouteAuthorizationUnavailable)
+        ));
     }
 
     #[test]
@@ -2560,6 +3271,8 @@ mod tests {
             created_at_ms: NOW_MS - 1,
             hold_expires_at_ms,
             reservation_expires_at_ms: NOW_MS + 60_000,
+            masque_context_id: 8,
+            client_native_instance_id: [95; 32],
         };
         let config = ExitServiceConfig::enabled(
             exit_node_id,
@@ -2666,7 +3379,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_exit_rejects_signed_v3_capacity_hold() {
+    fn disabled_exit_rejects_signed_v4_capacity_hold() {
         let policy = verified_development_manifest(NOW_MS, Vec::new()).unwrap();
         let policy_hash = *policy.policy_hash();
         let exit_key = ephemeral_signing_key();
@@ -2691,6 +3404,8 @@ mod tests {
             created_at_ms: NOW_MS - 1,
             hold_expires_at_ms: NOW_MS + 20_000,
             reservation_expires_at_ms: NOW_MS + 60_000,
+            masque_context_id: 9,
+            client_native_instance_id: [96; 32],
         };
         let signed_request = coordinator.sign_hold_request(&intent).unwrap();
         let mut service =

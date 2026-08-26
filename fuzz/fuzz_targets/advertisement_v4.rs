@@ -1,5 +1,7 @@
 #![no_main]
 
+//! Active advertisement-v4 canonical codec target.
+
 mod support;
 
 use libfuzzer_sys::fuzz_target;
@@ -51,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = response.validate();
     });
 
-    for protocol_version in [0, 1, 2, 4, u32::MAX] {
+    for protocol_version in [0, 1, 2, 3, 5, u32::MAX] {
         exercise_request(&RawAdvertisementRequest { protocol_version }.encode_to_vec());
     }
 
@@ -61,7 +63,7 @@ fuzz_target!(|data: &[u8]| {
     exercise_request(&encoded);
     assert!(
         volparossa_protocol::decode_canonical::<AdvertisementRequest>(&encoded, request_limit())
-            .expect("canonical v3 request")
+            .expect("canonical v4 request")
             .validate()
             .is_ok()
     );

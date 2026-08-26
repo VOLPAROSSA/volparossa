@@ -14,18 +14,18 @@ The current discovery crate composes:
 - mDNS for local bootstrap;
 - AutoNAT and DCUtR for reachability and direct control-plane upgrades;
 - Circuit Relay v2 client/server for control-plane connectivity only;
-- canonical protobuf request-response on `/volparossa/advertisement/3` for direct retrieval of
+- canonical protobuf request-response on `/volparossa/advertisement/4` for direct retrieval of
   relay/control-relay advertisements only;
-- canonical protobuf request-response on `/volparossa/exit-forward/3` for the client-to-control-
-  relay hop and `/volparossa/exit-forward-upstream/3` for the control-relay-to-exit hop;
-- canonical protobuf request-response on `/volparossa/datapath-relay/3` for direct operations with
+- canonical protobuf request-response on `/volparossa/exit-forward/4` for the client-to-control-
+  relay hop and `/volparossa/exit-forward-upstream/4` for the control-relay-to-exit hop;
+- canonical protobuf request-response on `/volparossa/datapath-relay/4` for direct operations with
   one prospective or selected datapath relay;
-- canonical-byte request-response on `/volparossa/preselection-observation/3` for the
-  client-to-control/direct-relay hop and `/volparossa/preselection-observation-upstream/3` for the
+- canonical-byte request-response on `/volparossa/preselection-observation/4` for the
+  client-to-control/direct-relay hop and `/volparossa/preselection-observation-upstream/4` for the
   control-relay-to-exit hop; the client-facing behaviour has a dormant one-at-a-time affine
   dispatch/bind/cancel seam, while upstream remains callerless and neither hop has an application
   handler or responder;
-- refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2 and the
+- refusal-test constants, but no registered behaviour or fallback, for advertisement v1/v2/v3 and the
   retired direct reservation v2 identifiers; and
 - a process-local MemoryTransport used by hermetic swarm integration tests, not as a network or
   dataplane route.
@@ -38,7 +38,7 @@ values are resource bounds, not trust guarantees.
 Nodes announce only recognized capability keys such as relay, exit, MPTCP, MPQUIC, bounded region,
 and exact policy hash. Provider records contain provider identity/reachability, not a full node
 catalogue or browsing metadata. The client first queries relay capability, directly fetches a
-peer-bound v3 advertisement, and chooses a control relay. It then queries exit capability and asks
+peer-bound v4 advertisement, and chooses a control relay. It then queries exit capability and asks
 that relay to fetch each candidate exit advertisement over the two-hop forwarding protocols. The
 client never dials an exit provider to retrieve its advertisement.
 
@@ -66,7 +66,7 @@ authority. Acceptance test A01 disables each bootstrap in turn.
 
 ## Inbound validation and limits
 
-Peers and DHT records are adversarial. The direct-advertisement v3 codec limits a request to 64 bytes
+Peers and DHT records are adversarial. The direct-advertisement v4 codec limits a request to 64 bytes
 and the canonical protobuf response frame to 512 KiB; the contained signed envelope is separately
 limited to 256 KiB. The behaviour permits at most 64 combined inbound and outbound streams.
 Process-local bookkeeping admits at most 16 distinct outstanding provider queries and 256
@@ -94,13 +94,13 @@ as transport ambiguity or evidence of work.
 The reservation order is hold, per-candidate permit, real controlled two-leg probe, final datapath-
 relay selection, helper `Prepare`, exit finalization, direct selected-relay grants, exit confirmation
 receipt for every path, then helper `Activate` and `Commit`. The direct relay protocol authenticates
-the selected relay and exact signed session request. No v3 reservation artifact exposes the
+the selected relay and exact signed session request. No v4 reservation artifact exposes the
 client's permanent node ID or Peer ID to the exit. Expiry removes capacity and cached success
 responses; setup and teardown retain local Destroy authority until the helper proves cleanup.
 
 Circuit Relay v2 is never a WireGuard or Internet dataplane fallback. A peer that cannot establish
 an authorized direct UDP/WireGuard path may still be reachable for discovery, but is unsuitable for
-that dataplane path. Its name is independent of the hard-incompatible VOLPAROSSA privacy-v3 control
+that dataplane path. Its name is independent of the hard-incompatible VOLPAROSSA privacy-v4 control
 protocol.
 
 Advertisements contain only non-secret, static selection metadata. They never publish per-route or
@@ -112,13 +112,13 @@ useless service provider record.
 
 ## Current evidence boundary
 
-The crate contains the v3 codecs, role-aware behaviours, capability namespace, peerlink validation,
+The crate contains the v4 codecs, role-aware behaviours, capability namespace, peerlink validation,
 and process-local swarm tests. One three-peer test proves an exit advertisement request cannot be
 sent directly to the exit and that the byte-identical request/response crosses exactly one control
 relay. Another proves the `ExecuteProbe` frame is valid while its production handler returns
 `Unavailable` without exposing a fake probe event. Unit tests cover canonical encoding, exact
 bounds, role direction, identity contradictions, response shapes, and refusal of advertisement
-v1/v2 and retired direct-reservation v2 identifiers.
+v1/v2/v3 and retired direct-reservation v2 identifiers.
 
 The unprivileged discovery actor also has a dormant, crate-private route-candidate snapshot
 command. It captures one lower-bound timestamp, purges expired actor entries, copies the exact
@@ -240,7 +240,7 @@ signed receipt, each at most 4096 bytes. Both behaviours have an exact five-seco
 timeout, 64 concurrent streams each, no legacy protocol aliases, and no retry. A shorter unchanged
 A0/A1a absolute request expiry remains authoritative.
 
-The codecs revalidate canonical encoding, v3 and hop-specific type/role shape, payload-local
+The codecs revalidate canonical encoding, v4 and hop-specific type/role shape, payload-local
 invariants, and typed payload-to-envelope fields on both read and write. They neither verify a
 signature nor mutate replay state, correlate a response with a request, derive a connection
 witness/request ID, sign or forward a response, or claim origin/reachability. The two event

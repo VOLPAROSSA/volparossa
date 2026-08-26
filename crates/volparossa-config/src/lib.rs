@@ -7,7 +7,7 @@ use thiserror::Error;
 use volparossa_core::OperatorId;
 
 /// Wire protocol version implemented by this release.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Maximum number of addresses a node may listen on.
 pub const MAX_LISTEN_ADDRESSES: usize = 16;
@@ -777,10 +777,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_safe_and_match_wire_v3() {
+    fn defaults_are_safe_and_match_wire_v4() {
         let config = Config::default();
         config.validate().expect("defaults must validate");
-        assert_eq!(config.network.protocol_version, 3);
+        assert_eq!(config.network.protocol_version, 4);
         assert_eq!(config.network.operator_id, None);
         assert!(config.roles.client);
         assert!(!config.roles.relay);
@@ -809,8 +809,8 @@ mod tests {
     }
 
     #[test]
-    fn v1_v2_and_unknown_wire_versions_are_rejected() {
-        for version in [1, 2, 4] {
+    fn v1_v2_v3_and_unknown_wire_versions_are_rejected() {
+        for version in [1, 2, 3, 5] {
             let yaml = format!("network:\n  protocol_version: {version}\n");
             assert!(matches!(
                 Config::from_yaml(&yaml),

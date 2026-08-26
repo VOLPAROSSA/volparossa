@@ -1,5 +1,7 @@
 #![no_main]
 
+//! Active two-hop forwarding-v4 canonical codec target.
+
 mod support;
 
 use ed25519_dalek::SigningKey;
@@ -195,7 +197,7 @@ fuzz_target!(|data: &[u8]| {
     exercise_request(&fetch_bytes);
     let mut raw_request =
         RawExitForwardRequest::decode(fetch_bytes.as_slice()).expect("request mirror parity");
-    for version in [0, 1, 2, 4, u32::MAX] {
+    for version in [0, 1, 2, 3, 5, u32::MAX] {
         raw_request.rpc_version = version;
         assert_invalid_request(&raw_request);
     }
@@ -221,7 +223,7 @@ fuzz_target!(|data: &[u8]| {
 
     let mut raw_response = RawExitForwardResponse::decode(unavailable.encode_to_vec().as_slice())
         .expect("response mirror parity");
-    for version in [0, 1, 2, 4, u32::MAX] {
+    for version in [0, 1, 2, 3, 5, u32::MAX] {
         raw_response.rpc_version = version;
         assert_invalid_response(&raw_response);
     }

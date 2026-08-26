@@ -9,10 +9,10 @@ Last updated: 2026-08-26
 - [x] Workspace is a Git repository.
 - [x] Durable repository rules are recorded in `AGENTS.md`.
 - [x] The Rust workspace and required crate layout compile on stable Rust after the
-  hard-incompatible privacy-v3 discovery and route-setup migration.
+  hard-incompatible privacy-v4 discovery and route-setup migration.
 - [x] GPL-3.0-only licensing, including the standalone fuzz package and new
   local mqvpn patch files, and compatible third-party notices are complete.
-- [ ] Workspace formatting, strict Clippy, and tests pass after the privacy-v3 migration; the
+- [ ] Workspace formatting, strict Clippy, and tests pass after the privacy-v4 migration; the
   required all-in-one dependency-deny gate remains blocked as documented below, so the combined
   gate stays unchecked.
 - [ ] The Debian-compatible Cargo-deny 0.18.3 cannot parse current CVSS 4.0 advisory metadata
@@ -32,7 +32,7 @@ Last updated: 2026-08-26
 - [x] Unsafe combinations, invalid bounds, and unknown safety-sensitive fields fail closed.
 - [ ] `routing.direct_exit_debug` defaults off and production rejects it; explicit development
   configuration accepts it, but no debug datapath or prominent runtime warning is implemented.
-- [ ] A private atomic role store initializes startup roles. Privacy-v3 protocol directions are
+- [ ] A private atomic role store initializes startup roles. Privacy-v4 protocol directions are
   immutable after process start; runtime changes return restart-required without mutation or
   persistence. No controlled apply/restart workflow or live service-readiness proof exists.
 - [ ] Route-context TTL, flow pinning, maximum contexts, and LRU cleanup exist as tested cache
@@ -197,7 +197,7 @@ Last updated: 2026-08-26
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   but live namespace/kernel cleanup proof does not.
 - [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v2 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. The disconnected coordinator duplicates the already attested worker namespace pin affinely before this Acquire request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. Production still returns `Unavailable` before network work; committed child Acquire dispatch, datapath adoption and live route proof remain.
-- [ ] Native MPQUIC API v5 consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero descriptors otherwise. Focused tests cover independent Rust/C exit socket tuple/flag checks, Rust/C binding-domain and ownership behavior, C stream-fragment assembly with exactly-one ancillary transfer, incomplete/late/extra descriptors, received-FD timeout cleanup, and the dormant exit runtime closing its listener before returning `exit_listener_orchestration_unavailable`. The clean full-graph API-v5 ASan+UBSan gate passes. Assigned-address and exact-namespace proof, the disposable namespace gate, signed reservation provenance/replay binding, monotonic expiry conversion, certificate/name/SPKI/key consistency, trusted helper provenance, and the actual exit backend remain incomplete, so production path adoption and the launcher stay blocked.
+- [ ] Native MPQUIC API v5 consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero descriptors otherwise. Focused tests cover independent Rust/C exit socket tuple/flag checks, Rust/C binding-domain and ownership behavior, C stream-fragment assembly with exactly-one ancillary transfer, incomplete/late/extra descriptors, received-FD timeout cleanup, and the dormant exit runtime closing its listener before returning `exit_listener_orchestration_unavailable`. The clean full-graph API-v5 ASan+UBSan gate passes. Peer-control v4 now signs the route-bearer commitment, certificate/SPKI/name, MASQUE context, and both native-process instances; client and exit retain separate zeroizing, non-cloneable one-shot authorizations. Production still lacks native instance reporting, assigned-address and exact-namespace proof, the disposable namespace gate, monotonic expiry conversion, certificate/name/SPKI/key consistency, trusted helper provenance, and the actual exit backend, so route setup and the launcher remain blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 
 ## Identity and signed protocol
@@ -214,8 +214,8 @@ Last updated: 2026-08-26
 - [ ] rust-libp2p QUIC transport is integrated with Identify and Ping.
 - [ ] VOLPAROSSA-specific Kademlia protocol and capability provider records are integrated.
 - [ ] mDNS, AutoNAT, DCUtR/hole punching, and Circuit Relay v2 control-plane support are integrated.
-- [ ] Versioned `/advertisement/3` fetches relay advertisements directly, while exit advertisements
-  use only `/exit-forward/3` plus `/exit-forward-upstream/3`; the discovery crate proves the
+- [ ] Versioned `/advertisement/4` fetches relay advertisements directly, while exit advertisements
+  use only `/exit-forward/4` plus `/exit-forward-upstream/4`; the discovery crate proves the
   three-hop shape. The live single-owner agent actor now serializes policy application and
   cross-ledger revocation before reply, and linearizes freshness, current policy/authority, replay,
   and peerstore mutation in one synchronous advertisement commit before successful completion is
@@ -223,7 +223,7 @@ Last updated: 2026-08-26
   in-process snapshot only after production signature revalidation and exact persisted
   fingerprint/actor capability/policy joins. Expired, conflicted, self, pending-direct, unpaired,
   direct-only exit, and multiply-control-paired exit records fail closed. The snapshot has no
-  production caller, serialization, or dispatch authority. Control-v3 tags 17 and 18 now define a
+  production caller, serialization, or dispatch authority. Control-v4 tags 17 and 18 now define a
   protocol precursor with no production/network caller for an actor-signed direct observation
   transcript or an exit-signed receipt nested in a control-signed public-prefix claim. The
   dedicated verifiers are transactional and return opaque affine transcripts. A separate dormant
@@ -243,7 +243,7 @@ Last updated: 2026-08-26
   retains the original non-cloned candidate snapshot as a sibling, never inside that endpoint-free
   transcript batch, so a later exact-set owner need not reconstruct the candidate union. Any
   advertised control endpoints in that existing actor-private snapshot never enter the transcript
-  batch or opaque transport proof. Discovery now composes two role-gated v3 request-response wire
+  batch or opaque transport proof. Discovery now composes two role-gated v4 request-response wire
   behaviours over unchanged exact A0 canonical bytes: Client outbound/Relay inbound for direct
   Relay receipts or forwarded Exit attestations,
   and Relay outbound/Exit inbound for forwarded Exit requests and Exit receipts. Requests and
@@ -284,7 +284,7 @@ Last updated: 2026-08-26
 - [ ] Signed advertisement schema contains the required bounded fields, but production currently
   signs only client advertisements and withdraws provider state whenever relay or exit is enabled;
   no usable service capability is published.
-- [x] Advertisement TTL, monotonic sequence, signature, consistency, v3 protocol, active-policy,
+- [x] Advertisement TTL, monotonic sequence, signature, consistency, v4 protocol, active-policy,
   current-authority, and replay checks fail closed at one synchronous commit boundary.
 - [ ] SQLite has bounded schema/APIs for advertisements, endpoints, reachability, path measurements,
   delivery history, uptime, failures, policy hash, and last success; the agent discovery actor
@@ -388,10 +388,10 @@ Last updated: 2026-08-26
 
 ## Reservations and path lifecycle
 
-- [ ] Hard-incompatible reservation/control v3 uses a fresh session key/ID and signed, bounded
+- [ ] Hard-incompatible reservation/control v4 uses a fresh session key/ID and signed, bounded
   capacity-hold -> probe-permit/evidence -> exact relay-set finalize -> relay-grant -> exact
-  confirmation-receipt phases; v3 wire/package types remove permanent client Peer-ID fields and
-  reject v1/v2/future envelopes without fallback. The hold separately binds a final path-count
+  confirmation-receipt phases; v4 wire/package types remove permanent client Peer-ID fields and
+  reject v1/v2/v3/future envelopes without fallback. The hold separately binds a final path-count
   upper bound and a prospective permit limit with `1 <= maximum_paths <= probe_permit_limit <= 8`;
   protocol, coordinator, exit, relay, fixture, and agent route tests cover missing-field rejection
   and a non-contiguous 2/5/8 final subset. The migrated route coordinator remains private/dormant
@@ -420,12 +420,21 @@ Last updated: 2026-08-26
   retirement RAII. It does not own/start/shut down the manager, and a future production lifecycle
   must drain it before manager shutdown. It has no production caller, so admission-before-spawn,
   production lifecycle integration and end-to-end route ownership remain incomplete.
-- [ ] Every exit-facing v3 scope binds the chosen control-relay node/Peer ID, exit node/Peer ID and
+- [ ] Every exit-facing v4 scope binds the chosen control-relay node/Peer ID, exit node/Peer ID and
   boot incarnation, policy, capacity, session key/ID, hold/finalize IDs and expiries; final bundle and
-  confirmation hashes bind exact canonical frames and ordered authorizations. The discovery crate
+  confirmation hashes bind exact canonical frames and ordered authorizations. Finalization also
+  signs only a domain-separated commitment to the affine 43-byte route bearer plus the MASQUE
+  context and client-native process instance. The final exit grant signs the exact echo together
+  with certificate/SPKI hashes, canonical TLS name, and exit-native instance. Client release is
+  gated by the exact full confirmation-receipt path set; exit TLS ownership is separately
+  zeroizing, absent from response caches, confirmation-gated, and one-shot. Release, purge, and expiry wipe pending
+  ownership, and scope mismatch does not consume a legitimate retry. The discovery crate
   exposes no client-to-exit RPC; the migrated route coordinator resolves actor-minted capabilities
   and dispatches every exit phase only through the selected control relay. The coordinator remains
-  private/test-only and has no live network or packet-capture proof.
+  private/test-only and has no live network or packet-capture proof. Its production bridge has no
+  native API-v5 instance proof and therefore rejects before signing a hold or dispatching any
+  reservation/helper operation; certificate/key consistency and native backend adoption remain
+  incomplete.
 - [ ] Exit/relay services reserve and roll back capacity through bounded idempotent state machines.
   Prospective permits cause no additional ledger debit; successful subset finalization clears
   unused permits and their response cache while retaining only the exact finalize retry response,

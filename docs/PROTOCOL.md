@@ -1,13 +1,13 @@
 # VOLPAROSSA v1 protocol reference
 
 This reference describes the currently implemented wire types and their fail-closed boundaries.
-The peer control envelope is hard-incompatible version 3. Envelope versions 1, 2, zero, and every
-future version are rejected without fallback. The historical v2 schema is retained only for tag
-archaeology and refusal tests; it is not registered or negotiated.
+The peer control envelope is hard-incompatible version 4. Envelope versions 1, 2, 3, zero, and
+every future version are rejected without fallback. Historical schemas are retained only for tag
+archaeology and refusal tests; they are not registered or negotiated.
 
-The checked-in [control-v3 schema](../proto/volparossa/control/v3/control.proto) covers
+The checked-in [control-v4 schema](../proto/volparossa/control/v4/control.proto) covers
 `SignedEnvelope` and all eighteen signed `ControlPayload` messages. The separate checked-in
-[discovery-v3 schema](../proto/volparossa/discovery/v3/discovery.proto) mirrors the hand-written
+[discovery-v4 schema](../proto/volparossa/discovery/v4/discovery.proto) mirrors the hand-written
 advertisement, exit-forwarding, and datapath-relay request-response wrappers. Descriptor and fuzz
 gates verify tag/enum parity; the two forwarding-hop Rust marker types remain distinct even though
 their canonical wire bytes are deliberately identical.
@@ -21,14 +21,14 @@ is a 4-byte unsigned big-endian length followed by exactly one canonical envelop
 
 | Channel | Active version or protocol ID | Bound and authentication |
 |---|---|---|
-| Signed peer control | 3 | 256 KiB envelope; 192 KiB inner payload; Ed25519 |
-| Direct relay/control-relay advertisement retrieval | `/volparossa/advertisement/3` | canonical protobuf; authenticated provider peer plus peer-bound signed advertisement |
-| Client-to-control-relay exit forwarding | `/volparossa/exit-forward/3` | 512 KiB canonical protobuf; authenticated control relay |
-| Control-relay-to-exit forwarding | `/volparossa/exit-forward-upstream/3` | 512 KiB canonical protobuf; authenticated exit and relay peers |
-| Client-to-selected datapath relay | `/volparossa/datapath-relay/3` | 512 KiB canonical protobuf; authenticated selected relay |
+| Signed peer control | 4 | 256 KiB envelope; 192 KiB inner payload; Ed25519 |
+| Direct relay/control-relay advertisement retrieval | `/volparossa/advertisement/4` | canonical protobuf; authenticated provider peer plus peer-bound signed advertisement |
+| Client-to-control-relay exit forwarding | `/volparossa/exit-forward/4` | 512 KiB canonical protobuf; authenticated control relay |
+| Control-relay-to-exit forwarding | `/volparossa/exit-forward-upstream/4` | 512 KiB canonical protobuf; authenticated exit and relay peers |
+| Client-to-selected datapath relay | `/volparossa/datapath-relay/4` | 512 KiB canonical protobuf; authenticated selected relay |
 | CLI to agent | 1 | 256 KiB; Unix socket ownership and peer credentials |
 | Agent to helper | 3 | 128 KiB; root-owned Unix socket, peer credentials, typed allowlist |
-| Agent to native MPQUIC | 4 | 1 MiB; protected local Unix socket and typed allowlist |
+| Agent to native MPQUIC | 5 | 1 MiB; protected local Unix socket and typed allowlist |
 
 The retired direct reservation identifiers
 `/volparossa/reservation/exit/2`, `/volparossa/reservation/relay/2`, and
@@ -43,7 +43,7 @@ retry.
 
 `SignedEnvelope` commits:
 
-1. `protocol_version = 3`;
+1. `protocol_version = 4`;
 2. the 32-byte sender node ID and 32-byte Ed25519 public key;
 3. creation and expiry timestamps;
 4. a fresh 32-byte nonce;
@@ -51,7 +51,7 @@ retry.
 6. canonical payload bytes and their SHA-256 digest;
 7. a 64-byte Ed25519 signature.
 
-The signature input uses `volparossa/control-envelope/v3\0`. Verification checks version before
+The signature input uses `volparossa/control-envelope/v4\0`. Verification checks version before
 signature use, sender/key binding, canonical encoding, payload hash, type, signature, lifetime,
 payload-specific scope, and replay. The default envelope ceiling is 15 minutes with at most 60
 seconds of future clock skew. Reservation phase messages impose the shorter bounds described below.
@@ -61,7 +61,7 @@ one.
 ## Identity and privacy bindings
 
 Each route attempt uses a fresh Ed25519 session key. Its `client_session_id` is derived from that
-key. No v3 hold, capability, permit, probe result, final grant, relay request, relay authorization,
+key. No v4 hold, capability, permit, probe result, final grant, relay request, relay authorization,
 relay reservation, confirmation, or receipt contains the client's permanent node ID or libp2p Peer
 ID. Retired client-Peer-ID tags remain reserved and raw occurrences are non-canonical.
 
@@ -73,7 +73,7 @@ invalidates every earlier capability, hold, permit, finalization, grant, and con
 
 ## Signed message types
 
-The v3 discriminators are fixed:
+The v4 discriminators are fixed:
 
 | ID | Signed payload | Purpose |
 |---:|---|---|
@@ -105,7 +105,7 @@ evidence and cannot by themselves create a production route candidate.
 ### Dormant preselection-observation precursor
 
 Tags 17 and 18 are protocol-only primitives for a future phase-A observation producer. A
-`PreselectionObservationRequest` is unsigned, version 3, at most 4096 bytes, and live for at most
+`PreselectionObservationRequest` is unsigned, version 4, at most 4096 bytes, and live for at most
 five seconds. A future caller MUST CSPRNG-generate a fresh unique 32-byte challenge for every
 observation request, challenged subject (a direct relay or forwarded exit), and attempt, and MUST
 never reuse it across requests, subjects, or attempts. This module checks only the challenge's
@@ -166,9 +166,9 @@ failure always attempts inner cleanup before outer cleanup and reports an invari
 after both attempts.
 
 The exact request digest is SHA-256 over ASCII
-`volparossa/preselection-observation-request/v3`, one NUL byte, the unsigned 32-bit big-endian
+`volparossa/preselection-observation-request/v4`, one NUL byte, the unsigned 32-bit big-endian
 canonical-request length, and the exact canonical unsigned request bytes. The exact receipt digest
-uses ASCII `volparossa/preselection-observation-receipt/v3`, one NUL byte, the unsigned 32-bit
+uses ASCII `volparossa/preselection-observation-receipt/v4`, one NUL byte, the unsigned 32-bit
 big-endian nested-envelope length, and the exact canonical signed receipt-envelope bytes.
 
 Only `verify_direct_preselection_transcript` and
@@ -216,14 +216,14 @@ production owner, request-response handler, transport caller, or network produce
 does not alter production discovery behavior.
 
 Discovery now composes a dormant A1c wire shell without changing A0 or adding a protobuf wrapper.
-`/volparossa/preselection-observation/3` carries an exact canonical Relay or forwarded
+`/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
 Exit request (at most 4096 bytes) from Client to Relay and returns either the exact Relay signed
 receipt (at most 4096 bytes) or exact control-signed forwarded Exit attestation (at most 8192
-bytes). `/volparossa/preselection-observation-upstream/3` carries only the same forwarded Exit
+bytes). `/volparossa/preselection-observation-upstream/4` carries only the same forwarded Exit
 request from Relay to Exit and returns only the exact Exit signed receipt (both at most 4096
 bytes). Each libp2p substream is one EOF-delimited canonical protobuf value with no additional
 length prefix. The protocols are separate behaviours and event/request-ID domains, use an exact
-five-second transport timeout and 64 streams per behaviour, register no v1/v2 aliases, and perform
+five-second transport timeout and 64 streams per behaviour, register no v1/v2/v3 aliases, and perform
 no retry.
 
 The opaque hop wrappers admit bytes only after state-free canonical, version, hop type/role,
@@ -247,7 +247,7 @@ Tags removed during the hard migration are permanently reserved: hold-request ta
 relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7
 and 15, confirmation tag 7, finalized-path tag 5, and advertisement tag 7. The corresponding old
 names (`client_peer_id`, `relay_paths`, `overlay_prefixes`, and `wireguard`) are reserved in
-the v3 schema.
+the v4 schema.
 
 ## Reservation state machine
 
@@ -299,15 +299,41 @@ An ambiguous forwarding outcome permits only an exact-byte retry of the same ope
 identifier. A detail-free rejection is definitive failure; it never substitutes for a signed
 positive response.
 
+### Signed native-route identity and affine secret ownership
+
+Protocol v4 adds one native-route scope to finalization without exposing the route bearer to a
+relay. The client CSPRNG-generates exactly 32 bearer bytes, encodes them as one canonical 43-byte
+unpadded base64url value, and signs only
+`SHA-256("VOLPAROSSA-NATIVE-ROUTE-AUTH-COMMITMENT-V4\0" || exact_bearer_bytes)` in the finalize
+request. That request also binds the non-zero MASQUE context and the exact 32-byte client-native
+process instance. The raw bearer never enters a peer-control protobuf, signed envelope, response
+cache, or `Debug` output.
+
+The exit signs a nested `NativeRouteIdentity` into the final `ExitReservation`. It exactly echoes
+the commitment, MASQUE context, and client-native instance and additionally binds the certificate
+SHA-256, SPKI SHA-256, canonical TLS server name, and exit-native process instance. The client
+retains the zeroizing bearer affinely across a corrected exact retry, accepts only that exact signed
+identity echo, and releases a non-cloneable client authorization exactly once and only after every
+path in the finalized bundle has an exact confirmation receipt.
+
+The exit keeps certificate and private-key PEM in a separate non-cloneable zeroizing owner; cached
+finalization replies clone only public signed bytes. Exact full-path confirmation gates a separate
+one-shot exit authorization. Scope mismatch does not consume the owner, while success, release,
+expiry, and purge remove it. This layer validates bounds, canonical public fields, PEM framing, and
+exact ownership scope. It does **not** yet prove certificate/private-key cryptographic consistency,
+translate wall expiry to a native monotonic deadline, activate a listener, or start an mqvpn
+backend. The production identity provider remains unavailable, and native API v5 cannot yet return
+the process-instance proof required by the dormant agent route; both sides therefore fail closed.
+
 ## Hash and receipt binding
 
 `finalized_bundle_hash` is SHA-256 over
-`volparossa/finalized-reservation-bundle/v3\0`, followed by the canonical signed
+`volparossa/finalized-reservation-bundle/v4\0`, followed by the canonical signed
 `ExitReservation` and each canonical signed `RelayAuthorization` in strictly increasing path
 order. Every member is prefixed by its unsigned 32-bit big-endian byte length.
 
 `confirmation_envelope_hash` is SHA-256 over
-`volparossa/exit-confirmation-envelope/v3\0`, one unsigned 32-bit big-endian length, and the
+`volparossa/exit-confirmation-envelope/v4\0`, one unsigned 32-bit big-endian length, and the
 exact canonical client-signed confirmation envelope. The receipt additionally binds reservation,
 context, session, capability, hold, finalize ID, path, control-relay node/Peer ID, exit node/Peer
 ID, exit boot incarnation, creation, expiry, and nonce. A receipt for byte-different confirmation
@@ -327,7 +353,7 @@ attempt with real evidence and capacity is not reserved twice. Tests use an expl
 matches exact expected permit/result bytes after normal cryptographic and scope verification;
 there is no accept-all production or test provider.
 
-The `/volparossa/datapath-relay/3` ExecuteProbe wrapper is framing only and does not change this
+The `/volparossa/datapath-relay/4` ExecuteProbe wrapper is framing only and does not change this
 boundary. Likewise, signed route binding is not helper/kernel tunnel evidence and does not mark the
 capacity ledger tunnel-established. Real helper-owned endpoint preparation, readiness,
 activation, handshake/counter proof, route supervision, and cleanup remain required before a
@@ -345,7 +371,7 @@ and nested-signature substitution fails without producing a projected value.
 `ControlRequest` contains version 1, a 16-byte random request ID, and exactly one operation:
 `Status`, `Connect`, `Disconnect`, `Peers`, `Paths`, `Sessions`, `PolicyStatus`, `SetRole`, `Roles`,
 or `Logs(maximum_records)` (1–1000). Relay and exit configuration persists independently and
-client remains the safe default. Privacy-v3 protocol directions are immutable after process start;
+client remains the safe default. Privacy-v4 protocol directions are immutable after process start;
 a real runtime role change fails closed as restart-required rather than silently changing live
 request-response exposure.
 

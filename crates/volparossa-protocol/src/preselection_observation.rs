@@ -1,4 +1,4 @@
-//! Callerless v3 primitives for short-lived preselection observations.
+//! Callerless v4 primitives for short-lived preselection observations.
 //!
 //! An observation challenge is unsigned. A future caller must CSPRNG-generate a
 //! fresh unique challenge for every observation request, challenged subject
@@ -32,8 +32,8 @@ pub const MAX_PRESELECTION_RECEIPT_SIZE: usize = 4 * 1024;
 pub const MAX_FORWARDED_ATTESTATION_SIZE: usize = 8 * 1024;
 const MAX_CHALLENGE_LIFETIME_MS: u64 = 5 * 1_000;
 const MAX_OBSERVATION_LIFETIME_MS: u64 = 60 * 1_000;
-const REQUEST_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-request/v3\0";
-const RECEIPT_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-receipt/v3\0";
+const REQUEST_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-request/v4\0";
+const RECEIPT_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-receipt/v4\0";
 
 /// Actor role addressed by one preselection observation challenge.
 #[allow(missing_docs)]

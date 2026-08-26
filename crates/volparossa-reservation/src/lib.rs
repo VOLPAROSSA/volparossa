@@ -9,9 +9,10 @@
 mod coordinator;
 
 pub use coordinator::{
-    CoordinatorError, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
-    SignedExitFinalizeRequest, SignedProbePermitRequest, VerifiedExitCapacityHold,
-    VerifiedFinalizedExitBundle, VerifiedProbePermit, VerifiedRelayGrant, VerifiedRelayProbe,
+    ClientNativeRouteAuthorization, CoordinatorError, ExitReservationIntent, RelayPathIntent,
+    ReservationCoordinator, SignedExitFinalizeRequest, SignedProbePermitRequest,
+    VerifiedExitCapacityHold, VerifiedFinalizedExitBundle, VerifiedProbePermit, VerifiedRelayGrant,
+    VerifiedRelayProbe,
 };
 
 use serde::{Deserialize, Serialize};

@@ -1,4 +1,4 @@
-//! In-memory privacy-v3 discovery transport regressions.
+//! In-memory privacy-v4 discovery transport regressions.
 
 use std::time::Duration;
 

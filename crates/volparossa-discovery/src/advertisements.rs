@@ -13,13 +13,13 @@ use volparossa_protocol::{
 };
 
 /// Direct signed-advertisement request protocol.
-pub const ADVERTISEMENT_PROTOCOL: &str = "/volparossa/advertisement/3";
+pub const ADVERTISEMENT_PROTOCOL: &str = "/volparossa/advertisement/4";
 /// Unsupported v1 protocol identifier, retained only for raw refusal tests.
 pub const LEGACY_ADVERTISEMENT_PROTOCOL_V1: &str = "/volparossa/advertisement/1";
 /// Unsupported v2 protocol identifier, retained only for raw refusal tests.
 pub const LEGACY_ADVERTISEMENT_PROTOCOL_V2: &str = "/volparossa/advertisement/2";
 /// Exact advertisement RPC schema version.
-pub const ADVERTISEMENT_RPC_VERSION: u32 = 3;
+pub const ADVERTISEMENT_RPC_VERSION: u32 = 4;
 /// Largest signed advertisement envelope accepted through discovery.
 pub const MAX_ADVERTISEMENT_BYTES: usize = MAX_CONTROL_MESSAGE_SIZE;
 /// Maximum encoded direct-advertisement request frame.
@@ -56,7 +56,7 @@ impl AdvertisementRequest {
     ///
     /// # Errors
     ///
-    /// Returns an unsupported-version error unless this is exactly a v3 request.
+    /// Returns an unsupported-version error unless this is exactly a v4 request.
     pub fn validate(&self) -> Result<(), AdvertisementRpcError> {
         if self.protocol_version != ADVERTISEMENT_RPC_VERSION {
             return Err(AdvertisementRpcError::UnsupportedVersion(
@@ -99,7 +99,7 @@ impl AdvertisementResponse {
         self.signed_envelope
     }
 
-    /// Enforce the fixed signed-envelope allocation bound and v3 advertisement type.
+    /// Enforce the fixed signed-envelope allocation bound and v4 advertisement type.
     ///
     /// # Errors
     ///
@@ -134,7 +134,7 @@ pub enum AdvertisementRpcError {
     InvalidFrame,
 }
 
-/// Canonical protobuf codec for the advertisement v3 request-response protocol.
+/// Canonical protobuf codec for the advertisement v4 request-response protocol.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AdvertisementCodec;
 
@@ -170,7 +170,7 @@ impl request_response::Codec for AdvertisementCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        require_v3_protocol(protocol)?;
+        require_v4_protocol(protocol)?;
         let encoded = read_bounded(io, MAX_ADVERTISEMENT_REQUEST_FRAME_BYTES).await?;
         let request = decode_canonical::<AdvertisementRequest>(
             &encoded,
@@ -189,7 +189,7 @@ impl request_response::Codec for AdvertisementCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        require_v3_protocol(protocol)?;
+        require_v4_protocol(protocol)?;
         let encoded = read_bounded(io, MAX_ADVERTISEMENT_RESPONSE_FRAME_BYTES).await?;
         let response = decode_canonical::<AdvertisementResponse>(
             &encoded,
@@ -209,7 +209,7 @@ impl request_response::Codec for AdvertisementCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        require_v3_protocol(protocol)?;
+        require_v4_protocol(protocol)?;
         request.validate().map_err(invalid_data)?;
         let encoded = encode_canonical(
             &request,
@@ -228,7 +228,7 @@ impl request_response::Codec for AdvertisementCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        require_v3_protocol(protocol)?;
+        require_v4_protocol(protocol)?;
         response.validate().map_err(invalid_data)?;
         let encoded = encode_canonical(
             &response,
@@ -253,7 +253,7 @@ where
     Ok(encoded)
 }
 
-fn require_v3_protocol(protocol: &StreamProtocol) -> io::Result<()> {
+fn require_v4_protocol(protocol: &StreamProtocol) -> io::Result<()> {
     if protocol.as_ref() != ADVERTISEMENT_PROTOCOL {
         return Err(invalid_data(AdvertisementRpcError::UnsupportedVersion(0)));
     }

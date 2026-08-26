@@ -9,6 +9,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 serde.workspace = true
@@ -16,9 +17,9 @@ thiserror.workspace = true
 volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
 volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }
 volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }
+zeroize.workspace = true
 
 [dev-dependencies]
 
 [lints]
 workspace = true
-

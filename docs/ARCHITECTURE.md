@@ -7,7 +7,7 @@ for test-backed completion evidence.
 ## Trust and process boundaries
 
 The permanent Ed25519 identity anchors the node's libp2p Peer ID and signed advertisements. A route
-attempt uses a fresh Ed25519 client-session identity and fresh WireGuard keys; no exit-facing v3
+attempt uses a fresh Ed25519 client-session identity and fresh WireGuard keys; no exit-facing v4
 reservation artifact contains the client's permanent node ID or Peer ID. The unprivileged agent
 treats peers, DHT data, advertisements, policy files, native transport responses, and the local CLI
 as untrusted. Only the helper runs with networking capabilities, and it accepts a versioned Protocol
@@ -27,9 +27,9 @@ flowchart TB
 
 Kademlia provider records are capability indexes, never a central catalogue. Relay candidates and
 prospective control relays are fetched directly from their providers on
-`/volparossa/advertisement/3` and independently verified. Exit provider IDs are only targets: an
+`/volparossa/advertisement/4` and independently verified. Exit provider IDs are only targets: an
 exit advertisement is fetched through one already selected control relay on
-`/volparossa/exit-forward/3` and `/volparossa/exit-forward-upstream/3`, never by a client-to-exit
+`/volparossa/exit-forward/4` and `/volparossa/exit-forward-upstream/4`, never by a client-to-exit
 connection. A bootstrap peer supplies initial reachability only and has no policy or naming
 authority.
 
@@ -39,7 +39,7 @@ an exit candidate only when this client process learned its advertisement exclus
 selected control relay. Direct-then-forwarded provenance is rejected; forwarded-then-direct
 provenance withdraws and quarantines the exit capability for the advertisement lifetime. Within one
 route, the exit must differ by node ID and Peer ID from the control relay and every datapath relay.
-The control relay may also become one datapath relay only after its own v3 probe and grant.
+The control relay may also become one datapath relay only after its own v4 probe and grant.
 
 ```mermaid
 sequenceDiagram
@@ -50,19 +50,19 @@ sequenceDiagram
     C->>D: bootstrap /volparossa/kad/1
     C->>D: get_providers(relay)
     D-->>C: bounded relay provider Peer IDs
-    C->>R: /volparossa/advertisement/3
+    C->>R: /volparossa/advertisement/4
     R-->>C: peer-bound signed relay advertisement
     C->>C: verify relay-only provenance, version, signature, TTL, limits
     C->>D: get_providers(exit + policy)
     D-->>C: bounded exit provider Peer IDs
-    C->>R: /volparossa/exit-forward/3 FetchExitAdvertisement
-    R->>E: /volparossa/exit-forward-upstream/3 unchanged request
+    C->>R: /volparossa/exit-forward/4 FetchExitAdvertisement
+    R->>E: /volparossa/exit-forward-upstream/4 unchanged request
     E-->>R: peer-bound signed exit advertisement
     R-->>C: unchanged signed response
     C->>C: verify exit provenance and relay/exit separation
 ```
 
-## Exit selection and privacy-v3 reservation
+## Exit selection and privacy-v4 reservation
 
 Within a route attempt, the control relay is already selected. The client next chooses one exit
 whose exact active policy hash and usable capacity fit the request. It obtains a hold before
@@ -78,8 +78,8 @@ sequenceDiagram
     participant R as Prospective/selected datapath relay
     participant H as Privileged helper
     Note over C,E: every exit RPC crosses exactly this control relay
-    C->>CR: /volparossa/exit-forward/3 capacity hold
-    CR->>E: /volparossa/exit-forward-upstream/3 unchanged request
+    C->>CR: /volparossa/exit-forward/4 capacity hold
+    CR->>E: /volparossa/exit-forward-upstream/4 unchanged request
     E-->>CR: signed session capability + capacity hold
     CR-->>C: unchanged signed response
     loop each prospective relay
@@ -87,7 +87,7 @@ sequenceDiagram
         CR->>E: unchanged upstream request
         E-->>CR: signed exact-relay permit
         CR-->>C: unchanged signed permit
-        C->>R: /volparossa/datapath-relay/3 controlled two-leg probe
+        C->>R: /volparossa/datapath-relay/4 controlled two-leg probe
         R-->>C: signed measured result
     end
     C->>C: select datapath relays from verified proof
@@ -96,7 +96,7 @@ sequenceDiagram
     CR->>E: unchanged upstream request
     E-->>CR: final exit grant + relay authorizations
     CR-->>C: unchanged signed response
-    C->>R: /volparossa/datapath-relay/3 reserve authorized path
+    C->>R: /volparossa/datapath-relay/4 reserve authorized path
     R-->>C: signed relay grant
     C->>CR: confirm exact relay grant
     CR->>E: unchanged upstream confirmation
@@ -119,14 +119,14 @@ volparossa_wireguard::overlay_prefix derivation for the exact private IPv6 /112;
 assigns only fixed role-specific host addresses. Canonical decoding rejects the reserved legacy
 prefix tags instead of silently accepting and discarding them.
 
-Discovery uses role-aware transport support. `/volparossa/exit-forward/3` is outbound for clients
-and inbound for relays; `/volparossa/exit-forward-upstream/3` is outbound for relays and inbound for
-exits; `/volparossa/datapath-relay/3` is outbound for clients and inbound for relays. No client
-behaviour registers a direct exit-reservation method or a v1/v2 fallback. The control relay
+Discovery uses role-aware transport support. `/volparossa/exit-forward/4` is outbound for clients
+and inbound for relays; `/volparossa/exit-forward-upstream/4` is outbound for relays and inbound for
+exits; `/volparossa/datapath-relay/4` is outbound for clients and inbound for relays. No client
+behaviour registers a direct exit-reservation method or a peer-control v1/v2/v3 fallback. The control relay
 authenticates the client hop, requires the wrapper to name itself, forwards the same bounded bytes
 upstream without an internal retry, and reveals only its own authenticated connection to the exit.
 The exit verifies that relay plus the signed client-session scope. A datapath relay separately
-authenticates only its direct, explicitly authorized v3 request.
+authenticates only its direct, explicitly authorized v4 request.
 
 The wire codecs and services have bounded unit and in-memory transport evidence, but the production
 agent does not yet orchestrate this complete state machine. `ExecuteProbe`, helper-backed endpoint
