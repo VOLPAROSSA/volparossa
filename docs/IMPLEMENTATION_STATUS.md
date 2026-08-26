@@ -223,8 +223,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   endpoints before affine handles can be paired. A worker `CleanupIncomplete` result now
   quarantines and detaches that exact generation instead of caching an apparently stable failure.
   The inactive kernel layer preflights a complete batch as fresh, DOWN, exact-name/alias/kind
-  WireGuard links before key/address mutation, and has exact-owned delete plus absence proof. The
-  alias is not yet bound to durable journal ownership, so these primitives remain disconnected.
+  WireGuard links before key/address mutation, and has exact-owned delete plus absence proof.
+  Validated journal records now deterministically project non-`Clone` per-link resources whose
+  public `ownership-v1` marker commits the immutable ownership-record fields, closed plan, and exact
+  resource identity without exposing raw ownership coordinates. Mutable lifecycle evidence does
+  not change it. Owner-sensitive kernel entry points accept only that typed resource and reject any
+  non-exact marker. The underlay parser independently enforces exact helper grammar and interface
+  binding and rejects malformed, legacy, or mismatched helper aliases in pure tests. The marker is
+  evidence rather than current journal-phase or cleanup authority and has no production call site,
+  so these primitives remain disconnected.
   Production still installs only the `Unavailable` backend. This lifecycle settlement remains
   private and dormant: there is no production journal writer or restart reaper, no production worker
   or host-network mutation, and no datapath evidence. Production adapter wiring, durable

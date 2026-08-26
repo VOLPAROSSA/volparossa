@@ -75,9 +75,16 @@ order; the external engine also rejects duplicate public keys and public endpoin
 affine handles. `NamespaceKernel` contains inactive v3 prepare, peer-activation, and probe
 primitives plus a complete-batch preflight that requires exact name, current ownership alias,
 WireGuard kind and fresh DOWN/key-zero/port-zero/fwmark-zero/peerless state before mutation. Its
-exact-owned delete re-proves absence. The current alias is still deterministic rather than bound to
-a durable journal ownership ID, and these operations are not connected to a production child
-lifecycle or transaction-wide rollback. The production `HelperEngine::new` backend therefore
+exact-owned delete re-proves absence. A validated journal record now deterministically projects a
+non-`Clone` resource for each exact link. Its public `ownership-v1` alias commits the immutable
+ownership-record fields, closed plan, and per-link identity without exposing raw ownership
+coordinates; lifecycle phase and reconciliation evidence do not change it. Every inactive
+owner-sensitive kernel entry point consumes that typed resource and rejects any non-exact marker.
+The underlay parser independently accepts only the exact helper grammar and interface binding,
+rejecting malformed, legacy, or mismatched helper aliases. The marker is evidence, not current
+journal-phase or cleanup authority, and has no production call site. These operations are not
+connected to a production child lifecycle or transaction-wide rollback. The production
+`HelperEngine::new` backend therefore
 returns the explicit `Unavailable`
 / `PREPARE_FAILED` result and creates no context. It never returns an agent-supplied address,
 placeholder address, guessed port, public key, or endpoint.
@@ -103,6 +110,12 @@ before opening the lock, sweeps every startup `Intent` and `MayOwnPrepare`, rech
 durable boundary, and only then reports ready. Its non-blocking admission accepts at most four
 operations while reserving channel capacity for shutdown; opaque non-`Clone` keys expose neither
 the journal revision nor raw ownership coordinates.
+
+Validated records and private recovery targets now deterministically rederive the same non-`Clone`
+per-link resources. Focused tests fix the public alias grammar and cover every immutable field
+class, mutable-field exclusion, redacted debug output, canonical codec/reopen stability, a lost
+insert reply, and recovery projection. This dormant projection exposes no production issuance API
+and does not authorize a kernel operation.
 
 The actor remains disconnected from the server, engine, and worker coordinator. There is no
 production recovery executor and no server-wired startup/restart reaper; any private startup-sweep
@@ -635,9 +648,12 @@ Production wiring remains a separate audited change with these explicit blockers
 
 - No production adapter maps `BackendLineage`/`OperationBinding` and a durable ownership key to the
   dormant lifecycle owner, or carries that owner from journal Intent through authenticated anchor,
-  durable MayOwn, child dispatch and exact settlement. It also does not carry the engine's exact
-  deadline through the complete lifecycle and into `execute_until`. Before returning success it
-  must also revalidate every adopted kernel object
+  durable MayOwn, child dispatch and exact settlement. No adapter obtains a phase-authorized
+  per-link resource after durable `MayOwnPrepare` or carries it through birth-link creation,
+  namespace movement, mutation, cleanup, and exact settlement; the typed resource deliberately
+  proves neither current journal phase nor cleanup authority. The adapter also does not carry the
+  engine's exact deadline through the complete lifecycle and into `execute_until`. Before returning
+  success it must also revalidate every adopted kernel object
   against the requested socket kind, protocol, local/remote tuple, nonblocking/listening state and
   genuine MPTCP evidence. The implemented deadline, adoption and retryable-shutdown machinery
   therefore remains disconnected from `HelperEngine`.
@@ -843,9 +859,10 @@ remain:
   full rollback or quarantine;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - capture activation baselines and perform correlated handshake/RX/TX commit probes;
-- connect the dormant secret-free ownership store only after a real cleanup backend can prove
-  reaper cleanup; bind each link alias to the durable journal epoch, ownership ID and generation so
-  an old same-name/same-static-alias link can never be adopted;
+- connect the dormant secret-free ownership store and its typed per-link marker projection only
+  after a real cleanup backend can prove reaper cleanup; the pure-tested typed marker/kernel
+  foundation rejects an old same-name link carrying a non-exact marker but grants no journal-phase
+  or cleanup authority;
 - add the production tag-35/tag-28 writer plus restart reaper; until then a runtime mismatch must
   remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
 - invoke the implemented factories inside the correct committed child namespace and feed their
