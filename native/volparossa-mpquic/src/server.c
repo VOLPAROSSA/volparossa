@@ -292,6 +292,7 @@ static bool options_valid(const vmp_server_options_t *options)
            options->frame_timeout_ms <= 60000 &&
            options->max_requests == VMP_MAX_REQUESTS_PER_CONNECTION &&
            options->request_binding != NULL &&
+           options->request_digest != NULL &&
            ((options->pump == NULL && options->pump_interval_ms == 0) ||
             (options->pump != NULL && options->pump_interval_ms >= 1 &&
              options->pump_interval_ms <= 1000));
@@ -454,9 +455,28 @@ vmp_server_error_t vmp_serve_connection(int connection_fd,
     response.api_version = VMP_API_VERSION;
     memcpy(response.request_nonce, request.request_nonce,
            VMP_REQUEST_NONCE_LEN);
+    if (!options->request_digest(options->request_digest_context, frame,
+                                 frame_len, response.request_sha256)) {
+        vmp_wipe_secret(&request, sizeof(request));
+        vmp_wipe_secret(frame, frame_len);
+        free(frame);
+        vmp_wipe_secret(&response, sizeof(response));
+        return VMP_SERVER_BACKEND;
+    }
     error = dispatch(dispatch_context, &request, &response, request_fd);
     request_fd = -1;
     if (error != VMP_SERVER_OK) {
+        vmp_wipe_secret(&request, sizeof(request));
+        vmp_wipe_secret(frame, frame_len);
+        free(frame);
+        vmp_wipe_secret(&response, sizeof(response));
+        return VMP_SERVER_BACKEND;
+    }
+    if ((request.operation == VMP_OPERATION_START_SESSION &&
+         response.result == VMP_RESULT_OK &&
+         !response.has_tunnel_assignment) ||
+        (request.operation != VMP_OPERATION_START_SESSION &&
+         response.has_tunnel_assignment)) {
         vmp_wipe_secret(&request, sizeof(request));
         vmp_wipe_secret(frame, frame_len);
         free(frame);

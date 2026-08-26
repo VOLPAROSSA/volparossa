@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/random.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -87,6 +88,36 @@ static uint64_t realtime_ms(void *context)
     return seconds * UINT64_C(1000) + milliseconds;
 }
 
+static bool random_native_instance(
+    uint8_t out[VMP_NATIVE_INSTANCE_ID_LEN])
+{
+    memset(out, 0, VMP_NATIVE_INSTANCE_ID_LEN);
+    size_t offset = 0U;
+    while (offset < VMP_NATIVE_INSTANCE_ID_LEN) {
+        const ssize_t received =
+            getrandom(out + offset, VMP_NATIVE_INSTANCE_ID_LEN - offset, 0U);
+        if (received < 0) {
+            if (errno == EINTR) continue;
+            vmp_wipe_secret(out, VMP_NATIVE_INSTANCE_ID_LEN);
+            return false;
+        }
+        if (received == 0) {
+            vmp_wipe_secret(out, VMP_NATIVE_INSTANCE_ID_LEN);
+            return false;
+        }
+        offset += (size_t)received;
+    }
+    uint8_t combined = 0U;
+    for (size_t index = 0U; index < VMP_NATIVE_INSTANCE_ID_LEN; ++index) {
+        combined |= out[index];
+    }
+    if (combined == 0U) {
+        vmp_wipe_secret(out, VMP_NATIVE_INSTANCE_ID_LEN);
+        return false;
+    }
+    return true;
+}
+
 static bool install_signal_handlers(void)
 {
     struct sigaction action;
@@ -106,6 +137,8 @@ static int serve(vmp_runtime_t *runtime, vmp_control_socket_t *control)
         .max_requests = 1U,
         .request_binding = vmp_sha256_request_binding,
         .request_binding_context = NULL,
+        .request_digest = vmp_sha256_request_digest,
+        .request_digest_context = NULL,
         .pump_interval_ms = 10U,
         .pump = vmp_runtime_pump,
         .pump_context = runtime,
@@ -149,8 +182,16 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    uint8_t native_instance_id[VMP_NATIVE_INSTANCE_ID_LEN];
+    if (!random_native_instance(native_instance_id)) {
+        fputs("volparossa-mpquic: native instance generation failed\n",
+              stderr);
+        return 1;
+    }
     vmp_runtime_t *runtime = vmp_runtime_create(
-        arguments.mode, vmp_mqvpn_transport_ops(), NULL, realtime_ms, NULL);
+        arguments.mode, native_instance_id, vmp_mqvpn_transport_ops(), NULL,
+        vmp_sha256_auth_commitment, NULL, realtime_ms, NULL);
+    vmp_wipe_secret(native_instance_id, sizeof(native_instance_id));
     if (runtime == NULL) {
         fputs("volparossa-mpquic: invalid runtime configuration\n", stderr);
         return 1;

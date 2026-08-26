@@ -67,14 +67,17 @@ production-service, datapath, A14 or A15 evidence.
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
 See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
 
-The packaged native systemd unit is not operational yet. API v5 moves client auth, TLS names, and
-the exit's bounded, unparsed in-memory PEM candidate material into expiring route-session messages and accepts no
-static product secret from the launcher. `AddPath` and `StartExitSession` each consume exactly one
+The packaged native systemd unit is not operational yet. API v6 adds role/process-instance
+preflight and exact request correlation, and moves client auth, TLS names, signed reservation scope,
+and the exit's bounded, unparsed in-memory PEM candidate material into expiring route-session
+messages. It accepts no static product secret from the launcher. `AddPath` and
+`StartExitSession` each consume exactly one
 operation-bound UDP descriptor, but SCM_RIGHTS and its
 request hash do not authenticate privileged-helper origin. A reviewed launcher remains blocked
-until the agent orchestrates separate role-specific processes/control sockets, helper acquisition
-binds trusted descriptor namespace and assigned-address provenance end to end, and a reviewed exit
-backend cryptographically validates and consumes the supplied listener and in-memory material
-without secret argv, environment, or files. Until then, `--build`
+until the agent orchestrates separate role-specific service identities and control sockets (the
+current single same-UID unit/socket is correlation, not authentication against the agent), helper
+acquisition binds trusted descriptor namespace and assigned-address provenance end to end, and a
+reviewed exit backend cryptographically validates and consumes the supplied listener and in-memory
+material without secret argv, environment, or files. Until then, `--build`
 exits 77 before compilation, no candidate package is created, and the installed service set must
 not be enabled.

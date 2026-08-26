@@ -12,20 +12,30 @@ DATAGRAM over one outer Multipath QUIC connection to the selected exit. At least
 paths bind to different selected WireGuard interface indexes/addresses, traverse different relays,
 terminate at the same exit, and carry unique payload bytes.
 
-No native source is currently pinned or vendored. Provenance requirements are tracked in
-`THIRD_PARTY_LICENSES.md`; the API in `volparossa-quic` is not a transport implementation.
+Exact recursive upstream revisions and local patch hashes are pinned in
+`third_party/upstream.lock.json`; verified source exports and build trees remain ignored rather than
+vendored into Git. Provenance, licenses, patches, sanitizer evidence, and unresolved findings are
+tracked in `THIRD_PARTY_LICENSES.md`. The API in `volparossa-quic` remains a process boundary, not
+proof of a production transport datapath.
 
 ## Process API and containment
 
-The unprivileged Rust agent talks to an isolated native process over a protected Unix socket with a
-versioned, 1 MiB bounded Protocol Buffers API. Operations are limited to starting/stopping a context,
-adding/removing a path by kernel interface index and fixed addresses, sending an already-authorized
-inner IP datagram, and retrieving bounded status. There is no free-form interface name, path,
-command, configuration text, or arbitrary destination.
+The version-6, 1 MiB bounded Protocol Buffers API first preflights an exact client or exit process
+role and fresh per-start instance. Later operations target that instance and are correlated by
+nonce plus an exact canonical-request digest. They are limited to starting/stopping a client or
+exit context, adopting one request-bound UDP descriptor for a fixed path or exit listener,
+adding/removing a fixed overlay path, sending/polling an already-authorized inner IP datagram, and
+retrieving bounded status. There is no free-form interface name, pathname, command, configuration
+text, or arbitrary destination. The current same-UID socket provides channel correlation, not
+binary attestation or authentication against a compromised agent; separate client/exit service
+identities and role sockets remain required.
 
-The exit SPKI pin, MASQUE context, route context, path/reservation proof, destination policy, and
-minimum-path count are fixed before native activation. Rust treats all native results as untrusted
-and cross-checks them with interface, reservation, and byte-counter evidence.
+The exit SPKI/certificate hashes, TLS name, MASQUE context, route context, signed reservation and
+finalize IDs, bearer commitment, both native instances, path/reservation proof, destination policy,
+and minimum-path count are fixed before native activation. Rust validates response identity,
+request correlation, and bounded tunnel-assignment shape. No production caller or backend
+assignment exists yet, and helper provenance, product-pool addresses, namespace ownership, replay/monotonic
+expiry, certificate/key consistency, and byte-counter evidence remain fail-closed requirements.
 
 ## Scheduling
 

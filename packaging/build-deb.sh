@@ -75,11 +75,11 @@ if [ -x "$native_launcher" ]; then
 else
     printf '%s\n' 'BLOCKER: packaging/volparossa-mpquic-launch is absent; --build will refuse before compiling.'
     printf '%s\n' \
-        'The launcher must orchestrate separate role processes and control sockets' \
+        'The launcher must orchestrate separate role service identities and control sockets' \
         'with the agent. It remains blocked until trusted helper origin for' \
         'request-bound route UDP FDs and exit' \
         'listener and in-memory TLS identity are wired end to end.' \
-        'API-v5 session secrets arrive over the control socket, never through' \
+        'API-v6 session secrets arrive over the control socket, never through' \
         'launcher argv, environment, or files.'
 fi
 

@@ -21,10 +21,18 @@ typedef struct test_encoder {
 typedef struct dispatch_state {
     unsigned calls;
     vmp_operation_t operation;
+    bool inject_assignment;
 } dispatch_state_t;
 
 static int injected_recvmsg_flags;
 static size_t injected_recvmsg_capacity;
+static const uint8_t test_instance[VMP_NATIVE_INSTANCE_ID_LEN] = {0x61U};
+static const uint8_t test_auth_commitment[VMP_AUTH_COMMITMENT_LEN] = {
+    0x2bU, 0x80U, 0x72U, 0x70U, 0xdbU, 0xd6U, 0x15U, 0x73U,
+    0xccU, 0x59U, 0x14U, 0x25U, 0x11U, 0x62U, 0x1eU, 0xd6U,
+    0xf3U, 0xc3U, 0x3dU, 0xd1U, 0x40U, 0x77U, 0x4cU, 0xc2U,
+    0x4aU, 0x04U, 0x12U, 0x71U, 0xc6U, 0x31U, 0x08U, 0x85U,
+};
 
 ssize_t __real_recvmsg(int socket, struct msghdr *message, int flags);
 
@@ -98,7 +106,56 @@ static size_t make_status_frame(uint8_t *frame, size_t capacity)
     test_encoder_t parent = {.cursor = frame + 4U, .end = frame + capacity};
     put_uint(&parent, 1U, VMP_API_VERSION);
     put_bytes(&parent, 2U, nonce, sizeof(nonce));
+    put_bytes(&parent, 3U, test_instance, sizeof(test_instance));
     put_bytes(&parent, VMP_OPERATION_GET_STATUS, nested,
+              (size_t)(child.cursor - nested));
+    return finish_frame(frame, &parent);
+}
+
+static size_t make_start_frame(uint8_t *frame, size_t capacity)
+{
+    static const uint8_t auth[VMP_AUTH_SECRET_LEN] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    static const uint8_t tls_name[] = "exit.example";
+    uint8_t nested[512];
+    uint8_t nonce[VMP_REQUEST_NONCE_LEN];
+    uint8_t context[VMP_CONTEXT_ID_LEN];
+    uint8_t spki[VMP_SPKI_SHA256_LEN];
+    uint8_t reservation_id[VMP_RESERVATION_ID_LEN];
+    uint8_t finalize_id[VMP_FINALIZE_ID_LEN];
+    uint8_t auth_commitment[VMP_AUTH_COMMITMENT_LEN];
+    uint8_t certificate_sha256[VMP_CERTIFICATE_SHA256_LEN];
+    uint8_t exit_instance[VMP_NATIVE_INSTANCE_ID_LEN];
+    memset(nonce, 0x30, sizeof(nonce));
+    memset(context, 0x40, sizeof(context));
+    memset(spki, 0x41, sizeof(spki));
+    memset(reservation_id, 0x42, sizeof(reservation_id));
+    memset(finalize_id, 0x43, sizeof(finalize_id));
+    memcpy(auth_commitment, test_auth_commitment,
+           sizeof(auth_commitment));
+    memset(certificate_sha256, 0x45, sizeof(certificate_sha256));
+    memset(exit_instance, 0x46, sizeof(exit_instance));
+    test_encoder_t child = {.cursor = nested, .end = nested + sizeof(nested)};
+    put_bytes(&child, 1U, context, sizeof(context));
+    put_bytes(&child, 2U, spki, sizeof(spki));
+    put_uint(&child, 3U, 1U);
+    put_uint(&child, 4U, 9U);
+    put_uint(&child, 5U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP);
+    put_bytes(&child, 6U, auth, sizeof(auth));
+    put_bytes(&child, 7U, tls_name, sizeof(tls_name) - 1U);
+    put_uint(&child, 8U, UINT64_C(1060000));
+    put_bytes(&child, 9U, reservation_id, sizeof(reservation_id));
+    put_bytes(&child, 10U, finalize_id, sizeof(finalize_id));
+    put_bytes(&child, 11U, auth_commitment, sizeof(auth_commitment));
+    put_bytes(&child, 12U, certificate_sha256,
+              sizeof(certificate_sha256));
+    put_bytes(&child, 13U, test_instance, sizeof(test_instance));
+    put_bytes(&child, 14U, exit_instance, sizeof(exit_instance));
+    test_encoder_t parent = {.cursor = frame + 4U, .end = frame + capacity};
+    put_uint(&parent, 1U, VMP_API_VERSION);
+    put_bytes(&parent, 2U, nonce, sizeof(nonce));
+    put_bytes(&parent, 3U, test_instance, sizeof(test_instance));
+    put_bytes(&parent, VMP_OPERATION_START_SESSION, nested,
               (size_t)(child.cursor - nested));
     return finish_frame(frame, &parent);
 }
@@ -136,6 +193,7 @@ static size_t make_add_path_frame_for(uint8_t *frame, size_t capacity,
     test_encoder_t parent = {.cursor = frame + 4U, .end = frame + capacity};
     put_uint(&parent, 1U, VMP_API_VERSION);
     put_bytes(&parent, 2U, nonce, sizeof(nonce));
+    put_bytes(&parent, 3U, test_instance, sizeof(test_instance));
     put_bytes(&parent, VMP_OPERATION_ADD_PATH, nested,
               (size_t)(child.cursor - nested));
     return finish_frame(frame, &parent);
@@ -155,7 +213,7 @@ static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
         "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
     static const uint8_t private_key[] =
         "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
-    uint8_t nested[512];
+    uint8_t nested[768];
     uint8_t nonce[VMP_REQUEST_NONCE_LEN];
     uint8_t context[VMP_CONTEXT_ID_LEN];
     uint8_t spki[VMP_SPKI_SHA256_LEN];
@@ -189,9 +247,28 @@ static size_t make_start_exit_frame(uint8_t *frame, size_t capacity)
     put_bytes(&child, 14U, reservation, sizeof(reservation));
     put_bytes(&child, 15U, certificate, sizeof(certificate) - 1U);
     put_bytes(&child, 16U, private_key, sizeof(private_key) - 1U);
+    uint8_t reservation_id[VMP_RESERVATION_ID_LEN];
+    uint8_t finalize_id[VMP_FINALIZE_ID_LEN];
+    uint8_t auth_commitment[VMP_AUTH_COMMITMENT_LEN];
+    uint8_t certificate_sha256[VMP_CERTIFICATE_SHA256_LEN];
+    uint8_t client_instance[VMP_NATIVE_INSTANCE_ID_LEN];
+    memset(reservation_id, 0x51, sizeof(reservation_id));
+    memset(finalize_id, 0x52, sizeof(finalize_id));
+    memcpy(auth_commitment, test_auth_commitment,
+           sizeof(auth_commitment));
+    memset(certificate_sha256, 0x54, sizeof(certificate_sha256));
+    memset(client_instance, 0x55, sizeof(client_instance));
+    put_bytes(&child, 17U, reservation_id, sizeof(reservation_id));
+    put_bytes(&child, 18U, finalize_id, sizeof(finalize_id));
+    put_bytes(&child, 19U, auth_commitment, sizeof(auth_commitment));
+    put_bytes(&child, 20U, certificate_sha256,
+              sizeof(certificate_sha256));
+    put_bytes(&child, 21U, client_instance, sizeof(client_instance));
+    put_bytes(&child, 22U, test_instance, sizeof(test_instance));
     test_encoder_t parent = {.cursor = frame + 4U, .end = frame + capacity};
     put_uint(&parent, 1U, VMP_API_VERSION);
     put_bytes(&parent, 2U, nonce, sizeof(nonce));
+    put_bytes(&parent, 3U, test_instance, sizeof(test_instance));
     put_bytes(&parent, VMP_OPERATION_START_EXIT_SESSION, nested,
               (size_t)(child.cursor - nested));
     return finish_frame(frame, &parent);
@@ -217,6 +294,33 @@ static bool test_request_binding(void *context, vmp_operation_t operation,
         out[index % VMP_FD_BINDING_LEN] ^= request[index];
     }
     return true;
+}
+
+static bool test_request_digest(void *context, const uint8_t *request,
+                                size_t request_len,
+                                uint8_t out[VMP_REQUEST_SHA256_LEN])
+{
+    (void)context;
+    if (request == NULL || request_len == 0U || out == NULL) return false;
+    for (size_t index = 0U; index < VMP_REQUEST_SHA256_LEN; ++index) {
+        out[index] = (uint8_t)(UINT8_C(0x6d) ^ (uint8_t)index);
+    }
+    out[0] ^= (uint8_t)request_len;
+    for (size_t index = 0U; index < request_len; ++index) {
+        out[index % VMP_REQUEST_SHA256_LEN] ^= request[index];
+    }
+    return true;
+}
+
+static bool reject_request_digest(void *context, const uint8_t *request,
+                                  size_t request_len,
+                                  uint8_t out[VMP_REQUEST_SHA256_LEN])
+{
+    (void)context;
+    (void)request;
+    (void)request_len;
+    memset(out, 0, VMP_REQUEST_SHA256_LEN);
+    return false;
 }
 
 static void binding_for_frame(const uint8_t *frame, size_t frame_len,
@@ -248,10 +352,26 @@ static vmp_server_error_t test_dispatch(void *context,
     response->result = VMP_RESULT_OK;
     response->diagnostic_code = "ok";
     response->diagnostic_code_len = 2U;
+    response->native_process_identity.role =
+        request->operation == VMP_OPERATION_START_EXIT_SESSION
+            ? VMP_NATIVE_ROLE_EXIT
+            : VMP_NATIVE_ROLE_CLIENT;
+    memcpy(response->native_process_identity.native_instance_id,
+           test_instance, sizeof(test_instance));
     if (request->operation == VMP_OPERATION_GET_STATUS) {
         response->path_count = 1U;
         response->paths[0].path_id = 1U;
         response->paths[0].smoothed_rtt_us = 5000U;
+    }
+    if (state->inject_assignment) {
+        response->has_tunnel_assignment = true;
+        response->tunnel_assignment.assigned_ipv4[0] = 10U;
+        response->tunnel_assignment.assigned_ipv4[3] = 2U;
+        response->tunnel_assignment.assigned_prefix_v4 = 32U;
+        response->tunnel_assignment.server_ipv4[0] = 10U;
+        response->tunnel_assignment.server_ipv4[3] = 1U;
+        response->tunnel_assignment.server_prefix_v4 = 32U;
+        response->tunnel_assignment.mtu = 1280U;
     }
     return VMP_SERVER_OK;
 }
@@ -270,6 +390,7 @@ static vmp_server_options_t options(void)
         .frame_timeout_ms = 1000U,
         .max_requests = VMP_MAX_REQUESTS_PER_CONNECTION,
         .request_binding = test_request_binding,
+        .request_digest = test_request_digest,
     };
     return value;
 }
@@ -483,6 +604,65 @@ static void test_authenticated_framed_exchange(void)
     assert(response_len > 0U && response_len < 256U);
     uint8_t response[256];
     read_exact_test(sockets[0], response, response_len);
+    uint8_t expected_digest[VMP_REQUEST_SHA256_LEN];
+    assert(test_request_digest(NULL, request + 4U, request_len - 4U,
+                               expected_digest));
+    bool found_digest = false;
+    for (size_t index = 0U;
+         index + 2U + VMP_REQUEST_SHA256_LEN <= response_len; ++index) {
+        if (response[index] == 0x42U &&
+            response[index + 1U] == VMP_REQUEST_SHA256_LEN &&
+            memcmp(response + index + 2U, expected_digest,
+                   VMP_REQUEST_SHA256_LEN) == 0) {
+            found_digest = true;
+        }
+    }
+    assert(found_digest);
+    close_pair(sockets);
+}
+
+static void test_request_digest_and_assignment_shape_fail_closed(void)
+{
+    const uint8_t binding[VMP_FD_BINDING_LEN] = {0};
+    uint8_t request[1024];
+    int sockets[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    size_t request_len = make_status_frame(request, sizeof(request));
+    send_binding(sockets[0], binding, NULL, 0U);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    dispatch_state_t state = {0};
+    vmp_server_options_t configuration = options();
+    configuration.request_digest = reject_request_digest;
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) == VMP_SERVER_BACKEND);
+    assert(state.calls == 0U);
+    close_pair(sockets);
+
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    request_len = make_start_frame(request, sizeof(request));
+    send_binding(sockets[0], binding, NULL, 0U);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    state = (dispatch_state_t){0};
+    configuration = options();
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) == VMP_SERVER_BACKEND);
+    assert(state.calls == 1U &&
+           state.operation == VMP_OPERATION_START_SESSION);
+    close_pair(sockets);
+
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    request_len = make_status_frame(request, sizeof(request));
+    send_binding(sockets[0], binding, NULL, 0U);
+    write_exact_test(sockets[0], request, request_len);
+    assert(shutdown(sockets[0], SHUT_WR) == 0);
+    state = (dispatch_state_t){.inject_assignment = true};
+    configuration = options();
+    assert(vmp_serve_connection(sockets[1], &configuration, test_dispatch,
+                                &state) == VMP_SERVER_BACKEND);
+    assert(state.calls == 1U &&
+           state.operation == VMP_OPERATION_GET_STATUS);
     close_pair(sockets);
 }
 
@@ -858,6 +1038,7 @@ static void test_secret_fd_is_bounded_and_wiped(void)
 int main(void)
 {
     test_authenticated_framed_exchange();
+    test_request_digest_and_assignment_shape_fail_closed();
     test_exact_add_path_fd_and_binding_succeeds();
     test_exact_start_exit_fd_uses_distinct_binding_domain();
     test_fragmented_binding_recvmsg_is_reassembled();
