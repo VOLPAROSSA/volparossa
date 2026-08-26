@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "audited_at": "2026-08-06",
+  "audited_at": "2026-08-26",
   "native_component": "volparossa-mpquic",
   "source_policy": {
     "prebuilt_binaries_allowed": false,
@@ -125,14 +125,19 @@
       "target": "mqvpn",
       "applies_to_commit": "607c0df921e2c23bae8bea21cb3c6f2acb2db275",
       "file": "patches/volparossa-mqvpn.patch",
-      "sha256": "dfeffe71a9db187a700a078f0f9f427a57f7eb69bfae2ba1b974a556bd22719d",
+      "sha256": "91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887",
       "purpose": [
         "enforce a caller-supplied leaf SPKI SHA-256 pin",
         "carry explicit per-path local and remote socket tuples into xquic",
         "surface real path congestion, loss, RTT, rate, and ACKed transport counters",
         "attach a stable server session ID to client-originated inner-packet delivery",
         "accept bounded in-memory server TLS identity and synchronously initialize xquic through sealed anonymous Linux memfds",
-        "wipe copied authentication, TLS-name, user-slot, client, server, and temporary SPKI material"
+        "wipe copied authentication, TLS-name, user-slot, client, server, and temporary SPKI material",
+        "honour the server multipath configuration without an implicit enable override",
+        "bound every app-accepted and pre-H3 server QUIC connection with exact-once teardown accounting",
+        "pin server UDP ingress and egress to one canonical caller-supplied remote peer",
+        "bind each H3 connection to one lifetime-affine CONNECT-IP claim with idempotent request-close and connection-close session teardown",
+        "exercise duplicate-stream bodies and owner-sensitive Datagram IDs, pre-H3 MaxClients refusal and reuse, and unsupported-ALPN cb_refuse capacity reuse through raw QUIC/H3 integration tests without hard-coding VOLPAROSSA's separate MaxClients=1 product policy"
       ]
     }
   ],
@@ -152,6 +157,12 @@
     "credential_material_zeroized_on_replace_retire_destroy": true,
     "public_server_bounded_tls_identity_pem_api": true,
     "linux_server_tls_identity_sealed_memfd_handoff": true,
+    "server_respects_multipath_config": true,
+    "server_pre_auth_connection_admission_bounded": true,
+    "server_single_connect_ip_claim_per_connection": true,
+    "server_request_and_connection_session_teardown_idempotent": true,
+    "server_max_clients_raw_h3_lifecycle_tested": true,
+    "public_server_exact_udp_peer_pin_api": true,
     "native_api_v3_bounded_reverse_inner_datagram_poll": true,
     "native_api_v3_nonzero_local_masque_association_context": true,
     "native_api_v3_single_path_general_udp_mode": true,

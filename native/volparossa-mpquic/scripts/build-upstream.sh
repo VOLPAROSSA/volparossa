@@ -13,7 +13,7 @@ native_build="$component_root/build/native-cmake"
 jobs=${VMP_BUILD_JOBS:-2}
 mqvpn_patch="$repo_root/patches/volparossa-mqvpn.patch"
 xquic_patch="$repo_root/patches/volparossa-xquic.patch"
-mqvpn_patch_sha256=dfeffe71a9db187a700a078f0f9f427a57f7eb69bfae2ba1b974a556bd22719d
+mqvpn_patch_sha256=91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887
 xquic_patch_sha256=acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b
 
 "$script_dir/verify-upstream.sh"

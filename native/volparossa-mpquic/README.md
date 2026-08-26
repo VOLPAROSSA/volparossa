@@ -191,7 +191,7 @@ The two reviewed source patches are also content-addressed:
 
 | Target | Patch | SHA-256 |
 |---|---|---|
-| mqvpn | `patches/volparossa-mqvpn.patch` | `dfeffe71a9db187a700a078f0f9f427a57f7eb69bfae2ba1b974a556bd22719d` |
+| mqvpn | `patches/volparossa-mqvpn.patch` | `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887` |
 | xquic | `patches/volparossa-xquic.patch` | `acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b` |
 
 Fetch source explicitly, then verify and build it:
@@ -216,7 +216,7 @@ or loaded at runtime.
 
 The host build requires CMake, Make, C/C++ compilers, `pkg-config`,
 `libevent-dev`, and the other repository build dependencies. It runs the
-patched upstream tests followed by the seven bounded native tests and writes
+patched upstream tests followed by the nine bounded native tests and writes
 the executable to:
 
 ~~~text
@@ -260,8 +260,8 @@ the ignored, separate
 
 The recipe audits every C/C++ compile command and executable/shared-library
 link command, checks sanitizer references in each production archive, runs
-the mqvpn/lwIP suite with exactly 33 tests and the wrapper suite with exactly
-5 tests, and performs sanitized daemon lifecycle smoke tests for both SIGINT
+the mqvpn/lwIP suite with exactly 35 tests and the wrapper suite with exactly
+9 tests, and performs sanitized daemon lifecycle smoke tests for both SIGINT
 and SIGTERM. Each shutdown is bounded by a five-second watchdog and must exit
 zero and remove the exact Unix socket it created.
 `ASAN_OPTIONS` and `UBSAN_OPTIONS` halt on the first finding; leak detection
@@ -279,7 +279,7 @@ The libFuzzer target additionally requires Clang and
 
 The locked mqvpn/xquic revisions genuinely implement RFC 9484 CONNECT-IP,
 QUIC DATAGRAM, and draft-ietf-quic-multipath-21 path creation. The local
-patches close six concrete integration seams:
+patches close ten concrete integration seams:
 
 1. A caller-supplied leaf-SPKI SHA-256 pin is mandatory and checked on every
    handshake. Chain-validation hard failures remain hard failures; only the
@@ -299,6 +299,24 @@ patches close six concrete integration seams:
    engine initialization, closes the descriptors immediately afterwards, and
    wipes both copied PEM buffers. No caller-supplied certificate or private-key
    pathname is required.
+7. Server `multipath=false` is honoured without an implicit enable override.
+8. Every app-accepted, pre-H3 server QUIC connection consumes one bounded
+   `MaxClients` slot before mqvpn's per-connection context allocation and H3
+   authentication, and releases it exactly once across refusal, failure,
+   close, and destroy paths. xquic has already allocated its transport/TLS
+   connection state when this application callback runs.
+   The upstream patch deliberately does not hard-code VOLPAROSSA's product
+   `MaxClients=1` policy; applying that value remains a wrapper/runtime
+   configuration non-goal for this upstream hardening patch.
+9. A dedicated server socket API pins one canonical caller-supplied UDP peer.
+   Off-peer ingress is rejected before xquic; egress tuple mismatches fail and
+   every send uses only the retained peer. The legacy unpinned API remains an
+   upstream compatibility surface and is not sufficient for VOLPAROSSA.
+10. Each H3 connection has one monotonic, lifetime-affine CONNECT-IP claim.
+    Concurrent and sequential duplicates receive 409 and cannot parse owner
+    capsules or inject through another stream's Datagram quarter-stream ID.
+    Request close, H3 close, refusal, and defensive destroy share idempotent
+    session-table, address, callback, and admission cleanup.
 
 API version 6 retains the bounded reverse/session contracts and strict
 single-path exit-listener handoff while adding process-incarnation targeting,
@@ -328,6 +346,12 @@ earlier seven process-boundary seams:
    candidate material, and closes the descriptor before the intentionally dormant backend returns
    unavailable. Every remaining operation carries no descriptor.
 
+Two additional native tests cover a bounded, externally serialized exit-session
+state machine and bounded-chain leaf identity consistency, canonical DER and pin
+verification. These are still isolated foundations: the runtime does not start
+mqvpn's exit server, and they prove neither helper descriptor provenance nor a
+client-to-relay-to-exit datapath.
+
 The following gates remain hard blockers:
 
 1. **No separate role service identity or trusted helper-origin proof.** The
@@ -348,8 +372,13 @@ The following gates remain hard blockers:
    The native backend remains client-only, and the helper/agent does not yet provide the
    end-to-end listener provenance/handoff to a reviewed exit factory. API v6
    accepts and closes the descriptor and carries the TLS material in memory,
-   but does not yet bind it cryptographically to the certificate key, DNS name,
-   SPKI pin, or independently verify the signed reservation scope. Valid
+   while a separate callerless foundation verifies bounded-chain leaf/key,
+   a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics,
+   trusted interval, canonical complete-leaf DER and DER-SPKI consistency.
+   Runtime wiring remains blocked on affine helper provenance, exact signed
+   millisecond conversion, a fixed independent Rust/C digest vector, parser
+   fuzzing and trust/usage enforcement; native also does not independently
+   verify the signed reservation scope. Valid
    `StartExitSession` requests still return
    `exit_listener_orchestration_unavailable`; no launcher is shipped.
 4. **Process-local replay and BOOTTIME admission are not a production

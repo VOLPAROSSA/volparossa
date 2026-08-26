@@ -311,7 +311,10 @@ cache, or `Debug` output.
 
 The exit signs a nested `NativeRouteIdentity` into the final `ExitReservation`. It exactly echoes
 the commitment, MASQUE context, and client-native instance and additionally binds the certificate
-SHA-256, SPKI SHA-256, canonical TLS server name, and exit-native process instance. The client
+SHA-256, SPKI SHA-256, canonical TLS server name, and exit-native process instance. The certificate
+digest is SHA-256 over the leaf X.509 certificate's complete DER encoding; the SPKI digest is
+SHA-256 over that same leaf's DER-encoded `SubjectPublicKeyInfo`. Neither digest hashes PEM text,
+base64 spelling, surrounding whitespace, or any additional chain certificate. The client
 retains the zeroizing bearer affinely across a corrected exact retry, accepts only that exact signed
 identity echo, and releases a non-cloneable client authorization exactly once and only after every
 path in the finalized bundle has an exact confirmation receipt.
@@ -620,10 +623,15 @@ commitment consumes its reservation/finalize pair before returning
 
 The API-v6 exit boundary validates DNS syntax for the supplied TLS name, nonzero length for the
 SPKI pin, and only nonempty/NUL-free size bounds for the purported certificate/private-key PEM
-bytes. Before any exit session can become usable, the future backend must parse that material,
-verify that the key matches the certificate, and cryptographically bind the leaf certificate to
-both the exact DNS name and SPKI pin. No current success claim depends on that unfinished identity
-check.
+bytes. A separate, callerless native foundation strictly parses a bounded certificate chain and
+private key, treats the first certificate as the leaf, and verifies leaf-key consistency, an exact
+non-wildcard DNS hostname match under case-insensitive X.509 DNS semantics, a caller-supplied
+trusted interval, canonical complete-leaf DER SHA-256, and leaf-SPKI DER SHA-256. Additional chain
+certificates must be canonical DER and parse completely but are not trust-path validated.
+The runtime does not call this verifier. Production integration remains blocked on an affine expiry
+handoff with overflow-safe floor-now/ceil-expiry conversion from signed Unix milliseconds, an
+independent fixed Rust/C DER-SPKI vector, parser fuzzing, and TLS trust/usage enforcement. No
+current session or datapath success claim depends on this isolated identity check.
 The bearer commitment, signed IDs, certificate digest, process instances and SPKI bytes are now
 carried together, but native does not itself verify the exit's signed final reservation bundle.
 After shape and bearer-commitment validation, native uses a fixed 128-record, no-live-eviction

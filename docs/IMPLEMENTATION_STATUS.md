@@ -4,6 +4,53 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-08-26
 
+## Fixed alpha v1 scorecard
+
+This scorecard measures progress toward a **working alpha**, separately from
+the detailed implementation checklist below. Within alpha v1, the rows, names,
+IDs, criteria, weights, 100-point threshold, and A01--A15 definitions are frozen
+as of 2026-08-26; only State and supporting evidence may change. The normative
+baseline is repository commit `14d7f2b02a70dd626b5f6b7ba06348ac3dd48b9c`
+with `AGENTS.md` SHA-256
+`4c766b1f81c428f5862557c1c4d3c1cc0fbdd308f7944c2dd92e9d6a64dbee75`.
+A fully tested,
+explicitly named foundation, core, or boundary may earn only its own points
+before it has a production caller. Partial work, mocks, and dormant code earn
+no downstream production or dataplane points. An earned milestone can lose
+points only when a regression invalidates its evidence, not because the work is
+later estimated with a different ruler. Any future scope change must publish a
+visibly versioned replacement table instead of silently changing this one.
+The short milestone labels incorporate all corresponding normative-baseline
+privacy, policy, host-safety, cryptographic, path-count, no-fallback, and
+evidence requirements; their omission from a short label never relaxes an
+invariant.
+
+| ID | Milestone | Points | State | Evidence |
+| --- | --- | ---: | --- | --- |
+| AV1-01 | GPL source/licensing, pinned native provenance and separate RustSec audit gates | 3 | Earned | [Repository baseline](#repository-and-engineering-baseline), [testing](#testing-and-fuzzing) |
+| AV1-02 | Validated configuration/default roles and encrypted permanent node identity | 3 | Earned | [Configuration](#configuration-and-roles), [identity](#identity-and-signed-protocol) |
+| AV1-03 | Threshold-signed whitelist manifest and fail-closed matching core | 3 | Earned | [Policy](#policy-and-whitelist-enforcement) |
+| AV1-04 | Native API-v6 process, framing, descriptor, replay and client-assignment boundary | 2 | Earned | [Native boundary](#genuine-multipath-quic--masque), [testing](#testing-and-fuzzing) |
+| AV1-05 | Canonical signed control envelopes, replay/TTL and compromise recovery | 3 | Open | — |
+| AV1-06 | Live libp2p discovery, capability indexes and replaceable bootstrap | 5 | Open | — |
+| AV1-07 | Exit-first path selection, measurements, capacity and diversity | 5 | Open | — |
+| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |
+| AV1-09 | Production helper identity, authenticated IPC and operation allowlist | 6 | Open | — |
+| AV1-10 | Durable helper ownership journal, restart reaper and crash settlement | 5 | Open | — |
+| AV1-11 | Ephemeral-key two-leg WireGuard paths, relay fence/no relay egress or host access, exit-only egress | 9 | Open | — |
+| AV1-12 | Route orchestration, descriptor handoff, expiry and complete cleanup | 5 | Open | — |
+| AV1-13 | Transparent ingress, kill switch, DNS routing and loop prevention | 6 | Open | — |
+| AV1-14 | Live exit resolution/SNI/QUIC/general-UDP whitelist enforcement | 6 | Open | — |
+| AV1-15 | Single-path QUIC MASQUE UDP through exactly one relay | 6 | Open | — |
+| AV1-16 | Transparent TLS 1.3 framing over real multi-subflow kernel MPTCP, without ordinary-TCP fallback | 9 | Open | — |
+| AV1-17 | Browser QUIC over genuine MPQUIC/MASQUE on at least two data-carrying distinct-relay paths, fail closed/failover | 10 | Open | — |
+| AV1-18 | Debian 13 doctor, hardened services, privacy-safe logs/retention, reproducible package and operations | 3 | Open | — |
+| AV1-19 | Disposable full-topology runner and machine-readable evidence | 3 | Open | — |
+| AV1-20 | One unchanged clean build passes all required quality gates and A01--A15, including privacy and host safety | 3 | Open | — |
+
+Current fixed alpha score: **11/100 (11%)**. Alpha requires **100/100** and the
+single clean-build A01--A15 run; the score is not a release claim.
+
 ## Repository and engineering baseline
 
 - [x] Workspace is a Git repository.
@@ -197,7 +244,7 @@ Last updated: 2026-08-26
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   but live namespace/kernel cleanup proof does not.
 - [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v2 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. The disconnected coordinator duplicates the already attested worker namespace pin affinely before this Acquire request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. Production still returns `Unavailable` before network work; committed child Acquire dispatch, datapath adoption and live route proof remain.
-- [ ] Native MPQUIC API v6 preflights an exact role/process lifetime, targets every later operation to that instance, requires nonce plus canonical-request digest response correlation, and consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero otherwise. Start requests bind reservation/finalize IDs derived from the signed scope, bearer commitment, certificate digest, and both process instances; Rust and C share exact request/descriptor hash vectors and independently reject bearer/commitment mismatch. Native samples BOOTTIME before REALTIME, maintains a monotone wall floor, converts accepted wall expiry once to a BOOTTIME deadline, and fails closed on clock failure, regression, or overflow. A fixed 128-record process-local ledger has no live eviction, rejects exact pair replay and half-key scope reuse, permits only byte-identical live client retries, and tombstones stop, expiry, and valid exit attempts before the dormant backend boundary. Rust and two independent C boundaries enforce server `10.76.0.1/32`, client `10.76.0.2/32` through `10.76.0.254/32`, optional client `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`, and MTU 1280--1420. The native client deep-copies one assignment, permits only an identical active duplicate, exposes it only after `ESTABLISHED`, enforces outbound source and reverse-destination ownership, and wipes it on fatal transport failure. Focused tests cover these clock/replay/capacity and assignment-state rules, exact current-path projection with retired closed records only, typed terminal reverse-queue overflow, distinct framed exit nonces, stale-instance without hidden retry, response/assignment shape, socket tuple/flag checks, binding and ownership behavior, digest-failure FD cleanup, stream fragmentation with exactly-one ancillary transfer, incomplete/late/extra descriptors, timeout cleanup, and the dormant exit runtime closing its listener before `exit_listener_orchestration_unavailable`. The clean full-graph API-v6 ASan+UBSan gate passes. Peer-control v4 retains separate zeroizing, non-cloneable one-shot client/exit authorizations. Native does not verify the signed bundle, cache general request nonces, or retain ledger state across restart; production still lacks a preverified affine handoff through the agent, separate role service identities/sockets, server-side pool allocation/uniqueness/lifetime binding plus exact-namespace assigned-address proof, disposable-topology evidence, certificate/name/SPKI/key consistency, trusted helper provenance, and the actual exit backend, so route setup and the launcher remain blocked.
+- [ ] Native MPQUIC API v6 preflights an exact role/process lifetime, targets every later operation to that instance, requires nonce plus canonical-request digest response correlation, and consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero otherwise. Start requests bind reservation/finalize IDs derived from the signed scope, bearer commitment, certificate digest, and both process instances; Rust and C share exact request/descriptor hash vectors and independently reject bearer/commitment mismatch. Native samples BOOTTIME before REALTIME, maintains a monotone wall floor, converts accepted wall expiry once to a BOOTTIME deadline, and fails closed on clock failure, regression, or overflow. A fixed 128-record process-local ledger has no live eviction, rejects exact pair replay and half-key scope reuse, permits only byte-identical live client retries, and tombstones stop, expiry, and valid exit attempts before the dormant backend boundary. Rust and two independent C boundaries enforce server `10.76.0.1/32`, client `10.76.0.2/32` through `10.76.0.254/32`, optional client `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`, and MTU 1280--1420. The native client deep-copies one assignment, permits only an identical active duplicate, exposes it only after `ESTABLISHED`, enforces outbound source and reverse-destination ownership, and wipes it on fatal transport failure. Focused tests cover these clock/replay/capacity and assignment-state rules, exact current-path projection with retired closed records only, typed terminal reverse-queue overflow, distinct framed exit nonces, stale-instance without hidden retry, response/assignment shape, socket tuple/flag checks, binding and ownership behavior, digest-failure FD cleanup, stream fragmentation with exactly-one ancillary transfer, incomplete/late/extra descriptors, timeout cleanup, and the dormant exit runtime closing its listener before `exit_listener_orchestration_unavailable`. The clean full-graph API-v6 ASan+UBSan gate passes. Peer-control v4 retains separate zeroizing, non-cloneable one-shot client/exit authorizations. Isolated native foundations now model one bounded, externally serialized exit session and validate the leaf identity in a bounded PEM certificate chain against its private key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval, canonical complete-leaf DER digest, and DER SPKI digest. They have no runtime caller and do not perform trust-chain validation. Native still does not verify the signed bundle, cache general request nonces, or retain ledger state across restart; production also lacks a preverified affine handoff through the agent, separate role service identities/sockets, exact helper-derived millisecond-to-trusted-interval conversion, a fixed independent Rust/C DER-SPKI vector, parser fuzzing, server-side pool allocation/uniqueness/lifetime binding plus exact-namespace assigned-address proof, disposable-topology evidence, trusted helper provenance, and the actual exit backend, so route setup and the launcher remain blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 
 ## Identity and signed protocol
@@ -500,7 +547,7 @@ Last updated: 2026-08-26
 - [ ] UDP/443 classification recognises valid QUIC Initial packets and policy-verifiable SNI.
 - [ ] Required-multipath mode defaults to at least two paths and fails closed without an unsafe downgrade.
 - [x] Native upstream and the current API-v6 sanitizer gates pass: the pinned
-  graph passed 33/33 upstream and 7/7 wrapper tests under ASan+UBSan with
+  graph passed 35/35 upstream and 9/9 wrapper tests under ASan+UBSan with
   bounded SIGINT/SIGTERM lifecycle smokes; the earlier recorded release
   Valgrind gate also passed.
 

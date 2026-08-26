@@ -30,16 +30,21 @@ text, or arbitrary destination. The current same-UID socket provides channel cor
 binary attestation or authentication against a compromised agent; separate client/exit service
 identities and role sockets remain required.
 
-The exit SPKI/certificate hashes, TLS name, MASQUE context, route context, signed reservation and
+The exit SPKI/certificate hashes (SHA-256 over the leaf's DER `SubjectPublicKeyInfo` and complete
+leaf-certificate DER, respectively), TLS name, MASQUE context, route context, signed reservation and
 finalize IDs, bearer commitment, both native instances, path/reservation proof, destination policy,
 and minimum-path count are fixed before native activation. Rust validates response identity,
 request correlation, and the exact tunnel-assignment policy. The native client retains a valid
 assignment immutably, publishes it only after `ESTABLISHED`, and independently checks outbound
-source and reverse destination ownership. No production caller or disposable datapath proof exists
-yet, and helper provenance, server-side pool configuration, assigned-address and namespace
-ownership, independent signed-bundle replay verification plus affine handoff, certificate/key
-consistency, and byte-counter evidence remain fail-closed requirements. Native's process-local
-pair ledger and BOOTTIME deadline do not replace that missing production authority.
+source and reverse destination ownership. A callerless native foundation verifies bounded-chain
+leaf/key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval,
+canonical complete-leaf DER and DER-SPKI consistency, but is not wired into the runtime and does
+not validate chain trust. No production caller or disposable
+datapath proof exists yet, and helper provenance, server-side pool configuration, assigned-address
+and namespace ownership, independent signed-bundle replay verification plus affine handoff,
+millisecond conversion, a fixed Rust/C digest vector, parser fuzzing, trust/usage enforcement, and
+byte-counter evidence remain fail-closed requirements. Native's process-local pair ledger and
+BOOTTIME deadline do not replace that missing production authority.
 
 ## Scheduling
 
