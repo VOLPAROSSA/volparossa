@@ -178,6 +178,9 @@ snapshots their kernel identities and sends them together in one `SCM_RIGHTS` da
 only the required `FDSTORE=1`, `FDNAME=` and `FDPOLL=0` assignments. It then sends `BARRIER=1`
 separately with exactly one pipe descriptor and carries one absolute monotonic deadline through
 every send, barrier wait and inventory read. It never sends `READY=1` or `FDSTOREREMOVE=1`.
+Before the first send it rejects an existing exact name and any partial or complete reuse of either
+role identity elsewhere in the bounded descriptor-store inventory, including reuse under a
+different name.
 
 A successful notify send is not an acknowledgement that either descriptor was stored, and a
 successful barrier proves only that systemd processed earlier notifications. The adapter therefore
@@ -188,10 +191,14 @@ publication datagram may have been accepted is classified as manager-may-own. Ca
 their original affine descriptor owners; there is deliberately no automatic removal on an
 ambiguous path.
 
-This component has no inherited-descriptor adoption, durable custody binding, reconciliation or
-restart reaper. Its executable live-proof path has not yet produced a recorded result inside the
-required disposable Debian 13 transient service. It therefore closes no production,
-crash-cleanup, datapath or acceptance milestone.
+The journal key now derives an opaque, domain-separated fixed custody name from its exact journal
+epoch, context, ownership ID and generation without exposing those coordinates. A private dormant
+worker typestate binds that name to the exact pidfd/network-namespace role identities and consumes
+the resulting inventory attestation only after fencing the original absolute deadline. This is not
+production composition: there is no inherited-descriptor adoption, non-cancellable publication
+supervisor, reconciliation, restart reaper or request-path caller. Its executable live-proof path
+has not yet produced a recorded result inside the required disposable Debian 13 transient service.
+It therefore closes no production, crash-cleanup, datapath or acceptance milestone.
 
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
 handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
@@ -712,16 +719,27 @@ generation, then authenticates one child in an anonymous `NEWNET` namespace and 
 exact passive `Starting` worker under an atomically installed `DurableHandoffPending` dispatch
 fence and the same caller-supplied absolute deadline. Normal planning rejects that generation
 before cloning its channel or mutating in-flight, cache, tombstone, or phase state. The handoff
-derives and revalidates the worker's complete recovery anchor immediately before durable arming.
-Success keeps the durable `MayOwnPrepare` token, registered worker owner, affine fence owner, and
-recovery-pin source together; its owner-bound per-link resources remain borrowed. The pending fence
-deliberately remains closed after arming: this slice has no transition which consumes the composite
-authority and opens child dispatch. Every failure outcome retains all affine owners which exist at
-that point. The handoff dispatches no child operation, sends zero protocol-request bytes, and
+derives and revalidates the worker's complete recovery anchor, derives the deterministic custody
+name from the exact durable key and then stops with one affine publication owner retaining that key,
+worker, recovery-pin source, pidfd/network-namespace pair and original deadline. It does not call
+the descriptor-store adapter or arm the journal. A separate synchronous dormant transition fences
+the deadline, verifies the exact role-ordered inventory attestation, fences the deadline again,
+revalidates the complete worker recovery identity and only then arms `MayOwnPrepare`. Success keeps
+the durable token, registered worker owner, affine fence owner, recovery-pin source, custody name
+and attestation together. Every pre-arm failure retains or reconstructs the publication owner plus
+attestation; the defensive post-arm context-mismatch path retains the `MayOwnPrepare` composite,
+custody name and attestation. The pending fence deliberately remains closed after arming: this slice
+has no transition which consumes the composite authority and opens child dispatch. The handoff
+dispatches no child operation, sends zero protocol-request bytes, and
 performs no WireGuard link/address, route, firewall, or dataplane configuration. Worker launch still
 creates the deliberately isolated process and anonymous `NEWNET`, without altering host-network
 state. The handoff remains private and dormant, with no server or engine caller, no restart reaper,
-and no cancellation-safe production settlement.
+and no cancellation-safe production settlement. A production publisher cannot safely be attached
+yet: once its future is first polled, neither a reported pre-send failure nor caller cancellation
+proves that an older deterministic-name attempt did not publish. Moreover, the current startup
+sweep treats journal `Intent` as never dispatched. Production therefore needs a non-cancellable
+supervisor and a durable publication-pending/adoption phase which reconciles inherited descriptors
+before that sweep.
 
 Production wiring remains a separate audited change with these explicit blockers:
 

@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
 ## Fixed alpha v1 scorecard
 
@@ -234,11 +234,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   affine pidfd plus typed `CLONE_NEWNET` pair: the pidfd preserves non-retargetable task continuity
   and the namespace FD preserves the exact anonymous cleanup target. The other retained pins remain
   pre-arm proof inputs rather than restart cleanup capabilities. The pair is rechecked against the
-  same durable namespace coordinates during the final pre-arm revalidation and remains retained in
-  the dormant handoff token. A separate dormant adapter now implements a bounded, typed protocol for
+  same durable namespace coordinates during the final pre-publication revalidation and remains
+  retained in the dormant handoff token. A separate dormant adapter now implements a bounded, typed protocol for
   publishing exactly that two-descriptor shape to systemd with `FDPOLL=0`, synchronising with a
   separate barrier and accepting success only after an exact complete descriptor-store inventory
-  attestation. The adapter is called only by the private live-proof selector and has no production
+  attestation. Before its first send it also rejects the target name or either role identity already
+  present anywhere in the bounded inventory, including identity reuse under another name. The
+  adapter is called only by the private live-proof selector and has no production
   worker, journal, server or engine caller, so the production handoff does not yet publish anything
   to PID 1. Ambiguous or partially observed publication remains fail-closed;
   it is never treated as restart custody and is not removed automatically. Ambiguous spawn remains
@@ -250,18 +252,27 @@ single clean-build A01--A15 run; the score is not a release claim.
   generation, authenticates one anonymous-`NEWNET` child as an exact passive `Starting` worker, and
   atomically installs a `DurableHandoffPending` dispatch fence at registration. Normal planning
   rejects that generation before channel, in-flight, cache, tombstone, or phase mutation. The seam
-  revalidates the complete recovery anchor and only then durably arms `MayOwnPrepare`, carrying the
-  same caller-supplied absolute deadline throughout. Success retains the durable token, registered
-  worker owner, affine fence owner, recovery pins, and only borrowed owner-bound resources together;
-  every failure retains all affine owners which exist at that point. The fence remains closed after
-  arming because this slice has no authority-consuming transition that opens child dispatch. It
+  revalidates the complete recovery anchor, derives one domain-separated deterministic custody name
+  from the exact durable journal epoch/context/ownership/generation, and returns an affine
+  publication owner carrying the original absolute deadline, journal key, registered worker,
+  recovery pins, pidfd and network-namespace FD. It does not publish or arm. A separate synchronous
+  dormant transition fences that same deadline before and after exact role-ordered name/descriptor
+  attestation, revalidates the complete worker recovery identity once more, and only then consumes
+  the journal key into `MayOwnPrepare`. Success and every failure retain all authority and inventory
+  evidence which exists at that point. The fence remains closed after arming because this slice has
+  no authority-consuming transition that opens child dispatch. It
   dispatches no child operation, sends zero protocol-request bytes, and performs no WireGuard
   link/address, route, firewall, or dataplane configuration. Worker launch still creates the
   deliberately isolated process and anonymous `NEWNET`, without altering host-network state. This
   seam remains private and dormant with no server or engine caller. The production journal actor
-  owns startup/shutdown and may settle only never-dispatched `Intent`; no request-path
+  owns startup/shutdown and may settle only never-dispatched `Intent`. Production publication is
+  deliberately still disconnected: the first descriptor send would otherwise precede durable
+  `MayOwnPrepare`, while startup currently retires `Intent` as never dispatched. A future
+  non-cancellable custody supervisor must own the affine token before its first poll, retain both
+  adapter failure classes as unresolved, durably reconcile inherited descriptors before the startup
+  sweep, and store its terminal owner outcome before notifying a caller. No request-path
   issuance/arming writer, `MayOwnPrepare` reaper, or cancellation-safe production settlement guard
-  exists. No datapath or acceptance checkbox closes.
+  exists. No scorecard, datapath, or acceptance checkbox closes.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
@@ -306,9 +317,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   From the first publish-send attempt, every non-success result remains manager-may-own until that
   inventory proof, and no error path issues `FDSTOREREMOVE`. Only the private live-proof selector
   calls it; there is still no production caller and no recorded live transient-unit result. This is
-  a fail-closed custody bootstrap and production-dormant publication
-  foundation, not typed restart adoption, durable-journal binding, restart recovery, or crash
-  cleanup. The child
+  a fail-closed custody bootstrap, dormant durable-journal/name/attestation binding and
+  production-dormant publication foundation, not composed production publication, typed restart
+  adoption, restart recovery, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists, but staged-package and
   disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits

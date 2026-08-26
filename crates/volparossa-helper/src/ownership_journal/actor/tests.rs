@@ -1839,8 +1839,11 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send::<DurableOwnershipActor>();
     assert_send::<DurableIntentRegistration>();
+    assert_send_sync::<DurableCustodyNameDigest>();
     assert_send_sync::<DurableOwnershipKey>();
     assert_send_sync::<DurableMayOwnPrepare>();
+    let _: fn(&DurableOwnershipKey) -> DurableCustodyNameDigest =
+        DurableOwnershipKey::custody_name_digest;
     let _: fn(
         &DurableOwnershipActor,
         &DurableOwnershipKey,
@@ -1921,6 +1924,7 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
             "DurableMayOwnPrepare",
             "DurableRegistrationOutcome",
             "DurableArmOutcome",
+            "DurableCustodyNameDigest",
         ] {
             assert!(
                 !source.contains(affine_api),
@@ -1968,4 +1972,36 @@ fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
     assert_eq!(may_own_surface.matches("pub(crate)").count(), 2);
     assert!(may_own_surface.contains("context_id(&self)"));
     assert!(may_own_surface.contains("resources(&self) -> &[DurableWireguardResource]"));
+
+    let key_surface = actor_source
+        .split("impl DurableOwnershipKey {")
+        .nth(1)
+        .expect("durable key implementation")
+        .split("/// Durable evidence that Prepare may own")
+        .next()
+        .expect("bounded durable key implementation");
+    assert_eq!(key_surface.matches("pub(crate) fn").count(), 1);
+    assert!(key_surface.contains("custody_name_digest(&self) -> DurableCustodyNameDigest"));
+
+    let digest_surface = actor_source
+        .split("impl DurableCustodyNameDigest {")
+        .nth(1)
+        .expect("custody digest implementation")
+        .split("impl fmt::Debug for DurableCustodyNameDigest")
+        .next()
+        .expect("bounded custody digest implementation");
+    assert_eq!(digest_surface.matches("pub(crate) fn").count(), 1);
+    assert!(digest_surface.contains("encode_lower_hex(self) -> [u8;"));
+    for forbidden in ["as_bytes", "as_ref", "to_vec", "to_string", "Display"] {
+        assert!(
+            !digest_surface.contains(forbidden),
+            "custody digest exposed raw or variable-size material: {forbidden}"
+        );
+    }
+    assert_eq!(
+        actor_source
+            .matches("VOLPAROSSA helper durable systemd custody name v1")
+            .count(),
+        1
+    );
 }
