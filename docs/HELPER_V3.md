@@ -596,6 +596,15 @@ indexes. Registration failure keeps the `LifecycleOwned` reservation visible to 
 that detached process is reaped. Unspawned settlement removes secondary residue while retaining
 the fence and abandons the reservation only as its final mutation.
 
+If a successful terminal supervisor `DestroyContext` has already confirmed worker reap and purged
+the exact generation from all six registry locations, a separately retained affine `Registered`
+owner may prove that complete absence under the registry lock and settle idempotently to
+`ConfirmedWorkerGenerationAbsent`. That settlement neither signals nor waits for the process a
+second time. Any remaining record, reservation, cache entry, tombstone or ordering-index entry, or
+an elapsed hard deadline, fails closed while retaining the affine owner for exact retry. This seam
+remains private and dormant: it adds no production journal writer or restart reaper, performs no
+host-network mutation, and is not datapath or acceptance evidence.
+
 The corresponding recovery source is available only for the exact same coordinator and generation
 while the registered record is live, unquarantined, idle and still in `Starting`. Bootstrap retains
 the exact pidfd and proc directory, boot-ID procfs file, process start ticks, executable `O_PATH`
@@ -615,9 +624,11 @@ durable Prepare anchor does it reacquire the registry and revalidate generation,
 PID and process lifetime. An elapsed deadline or any substituted, moved, stale or unreadable object
 fails closed without returning an anchor. Ambiguous spawn has no low-level completion channel and
 therefore remains permanently fenced rather than falsely absent. Dropping or unwinding a retained
-lifecycle owner is fail-closed but not recoverable, and terminal shutdown may safely make a
-concurrently returning `Registered` marker stale. Production activation consequently still requires
-an owned cancellation-safe settlement guard, lifecycle quiescence before shutdown, and production
+lifecycle owner is fail-closed but not recoverable. Concurrent terminal retirement may transiently
+return a retained `Registered` owner while the record or detached process ownership is still
+present; after confirmed reap and complete six-index purge, that same affine owner settles
+idempotently without another signal or wait. Production activation consequently still requires an
+owned cancellation-safe settlement guard, lifecycle quiescence before shutdown, and production
 journal/reaper wiring.
 
 Production wiring remains a separate audited change with these explicit blockers:

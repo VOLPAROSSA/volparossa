@@ -144,8 +144,13 @@ Last updated: 2026-08-26
   deadline, and registers it in `Starting` without dispatching any child operation. Every
   post-reservation uncertain outcome returns a non-`Clone` exact-placement owner; registration
   failure keeps its reservation visible until detached reap, and `ReapedPendingPurge` retries only
-  idempotent six-index registry cleanup without signalling the process twice. Commit, settlement,
-  detach and purge recheck the deadline immediately before mutation. Its recovery source retains
+  idempotent six-index registry cleanup without signalling the process twice. If a successful
+  terminal supervisor `DestroyContext` has already confirmed reap and removed that exact generation
+  from all six registry locations, a separately retained affine `Registered` owner proves complete
+  absence under the registry lock and settles idempotently to `ConfirmedWorkerGenerationAbsent`
+  without a second signal or wait. Partial registry residue or deadline expiry fails closed with
+  that owner retained for exact retry. Commit, settlement, detach and purge recheck the deadline
+  immediately before mutation. Its recovery source retains
   and revalidates the exact pidfd, proc directory, boot-ID source, PID/start ticks, executable,
   cgroup namespace/root/service directory and typed network namespace. Bootstrap binds the child
   executable to the parent image and its unified cgroup to the parent service cgroup. After the
@@ -155,9 +160,11 @@ Last updated: 2026-08-26
   `CAP_SYS_PTRACE`. Recovery performs full proof I/O outside the registry lock, constructs all eight
   durable Prepare-anchor fields, and then revalidates exact process identity, `Starting`, TTL and
   liveness under the same hard deadline. Ambiguous spawn remains permanently fail-closed.
-  Dropped/unwound lifecycle ownership is not yet recoverable, concurrent terminal shutdown can make
-  a returning marker stale, and neither production journal/reaper wiring nor a cancellation-safe
-  production settlement guard exists. No datapath or acceptance checkbox closes.
+  Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
+  transiently retain a `Registered` owner while record or detached process ownership remains; after
+  confirmed reap and complete six-index purge, that same owner settles without a second signal or
+  wait. Neither production journal/reaper wiring nor a cancellation-safe production settlement
+  guard exists. No datapath or acceptance checkbox closes.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
@@ -171,9 +178,11 @@ Last updated: 2026-08-26
   The inactive kernel layer preflights a complete batch as fresh, DOWN, exact-name/alias/kind
   WireGuard links before key/address mutation, and has exact-owned delete plus absence proof. The
   alias is not yet bound to durable journal ownership, so these primitives remain disconnected.
-  Production still installs only the `Unavailable` backend and performs no worker or network
-  mutation. Production adapter wiring, durable journal/reaper integration, and the separate
-  Add/Remove MPTCP endpoint seam remain required; no datapath or acceptance checkbox closes.
+  Production still installs only the `Unavailable` backend. This lifecycle settlement remains
+  private and dormant: there is no production journal writer or restart reaper, no production worker
+  or host-network mutation, and no datapath evidence. Production adapter wiring, durable
+  journal/reaper integration, and the separate Add/Remove MPTCP endpoint seam remain required; this
+  status and every datapath or acceptance checkbox remain open.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
   and doctor contract now require exactly the reviewed seven-capability bootstrap set
