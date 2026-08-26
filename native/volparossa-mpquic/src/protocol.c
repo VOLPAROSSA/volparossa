@@ -107,6 +107,82 @@ static bool all_zero(const uint8_t *bytes, size_t len)
     return combined == 0;
 }
 
+static bool ascii_alphanumeric(uint8_t value)
+{
+    return (value >= (uint8_t)'A' && value <= (uint8_t)'Z') ||
+           (value >= (uint8_t)'a' && value <= (uint8_t)'z') ||
+           (value >= (uint8_t)'0' && value <= (uint8_t)'9');
+}
+
+static bool canonical_base64url_final(uint8_t value)
+{
+    switch (value) {
+    case (uint8_t)'A':
+    case (uint8_t)'E':
+    case (uint8_t)'I':
+    case (uint8_t)'M':
+    case (uint8_t)'Q':
+    case (uint8_t)'U':
+    case (uint8_t)'Y':
+    case (uint8_t)'c':
+    case (uint8_t)'g':
+    case (uint8_t)'k':
+    case (uint8_t)'o':
+    case (uint8_t)'s':
+    case (uint8_t)'w':
+    case (uint8_t)'0':
+    case (uint8_t)'4':
+    case (uint8_t)'8': return true;
+    default: return false;
+    }
+}
+
+static bool valid_auth_secret(vmp_bytes_view_t secret)
+{
+    if (secret.data == NULL || secret.len != VMP_AUTH_SECRET_LEN) return false;
+    for (size_t index = 0U; index < secret.len; ++index) {
+        const uint8_t value = secret.data[index];
+        if (!ascii_alphanumeric(value) && value != (uint8_t)'_' &&
+            value != (uint8_t)'-') {
+            return false;
+        }
+    }
+    return canonical_base64url_final(secret.data[secret.len - 1U]);
+}
+
+static bool valid_tls_server_name(vmp_bytes_view_t name)
+{
+    if (name.data == NULL || name.len == 0U ||
+        name.len > VMP_MAX_TLS_SERVER_NAME) {
+        return false;
+    }
+    size_t label_start = 0U;
+    for (size_t index = 0U; index <= name.len; ++index) {
+        if (index != name.len && name.data[index] != (uint8_t)'.') continue;
+        const size_t label_len = index - label_start;
+        if (label_len == 0U || label_len > 63U ||
+            !ascii_alphanumeric(name.data[label_start]) ||
+            !ascii_alphanumeric(name.data[index - 1U])) {
+            return false;
+        }
+        for (size_t label_index = label_start; label_index < index;
+             ++label_index) {
+            const uint8_t value = name.data[label_index];
+            if (!ascii_alphanumeric(value) && value != (uint8_t)'-') {
+                return false;
+            }
+        }
+        label_start = index + 1U;
+    }
+    return true;
+}
+
+static bool valid_pem(vmp_bytes_view_t pem, size_t maximum)
+{
+    return pem.data != NULL && pem.len != 0U && pem.len <= maximum &&
+           memchr(pem.data, 0, pem.len) == NULL;
+}
+
 bool vmp_add_path_is_valid(const vmp_add_path_t *path)
 {
     static const uint8_t overlay_prefix[] = {
@@ -131,6 +207,45 @@ bool vmp_add_path_is_valid(const vmp_add_path_t *path)
         ((uint16_t)path->remote_ip[14] << 8U) | path->remote_ip[15];
     return embedded_path == path->path_id && local_host == UINT16_C(1) &&
            remote_host == UINT16_C(4);
+}
+
+bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start)
+{
+    static const uint8_t overlay_prefix[] = {
+        UINT8_C(0xfd), UINT8_C(0x76), UINT8_C(0x6f),
+        UINT8_C(0x6c), UINT8_C(0x70), UINT8_C(0x61),
+    };
+    if (start == NULL ||
+        all_zero(start->route_context_id, VMP_CONTEXT_ID_LEN) ||
+        !valid_auth_secret(start->auth_secret) || start->expires_at_ms == 0U ||
+        start->minimum_paths != 1U || start->masque_context_id == 0U ||
+        start->masque_context_id > VMP_MAX_MASQUE_CONTEXT_ID ||
+        start->transport_mode != VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP ||
+        all_zero(start->exit_spki_sha256, VMP_SPKI_SHA256_LEN) ||
+        !valid_tls_server_name(start->tls_server_name) ||
+        start->path_id == 0U || start->path_id > VMP_MAX_PATHS ||
+        start->listener_port == 0U || start->expected_client_port == 0U ||
+        all_zero(start->reservation_hash, VMP_RESERVATION_HASH_LEN) ||
+        !valid_pem(start->tls_certificate_pem,
+                   VMP_MAX_TLS_CERTIFICATE_PEM) ||
+        !valid_pem(start->tls_private_key_pem,
+                   VMP_MAX_TLS_PRIVATE_KEY_PEM) ||
+        memcmp(start->listener_ip, overlay_prefix,
+               sizeof(overlay_prefix)) != 0 ||
+        memcmp(start->expected_client_ip, overlay_prefix,
+               sizeof(overlay_prefix)) != 0 ||
+        memcmp(start->listener_ip, start->expected_client_ip, 14U) != 0) {
+        return false;
+    }
+    const uint16_t embedded_path =
+        ((uint16_t)start->listener_ip[10] << 8U) | start->listener_ip[11];
+    const uint16_t listener_host =
+        ((uint16_t)start->listener_ip[14] << 8U) | start->listener_ip[15];
+    const uint16_t expected_client_host =
+        ((uint16_t)start->expected_client_ip[14] << 8U) |
+        start->expected_client_ip[15];
+    return embedded_path == start->path_id && listener_host == UINT16_C(4) &&
+           expected_client_host == UINT16_C(1);
 }
 
 static vmp_protocol_error_t parse_context_only(decoder_t decoder,
@@ -228,25 +343,10 @@ static vmp_protocol_error_t parse_start(decoder_t decoder, vmp_start_session_t *
         all_zero(out->exit_spki_sha256, VMP_SPKI_SHA256_LEN) ||
         out->masque_context_id == 0U ||
         out->masque_context_id > VMP_MAX_MASQUE_CONTEXT_ID ||
-        out->auth_secret.len == 0U ||
-        out->auth_secret.len > VMP_MAX_AUTH_SECRET ||
-        out->tls_server_name.len == 0U ||
-        out->tls_server_name.len > VMP_MAX_TLS_SERVER_NAME ||
+        !valid_auth_secret(out->auth_secret) ||
+        !valid_tls_server_name(out->tls_server_name) ||
         out->expires_at_ms == 0U || !valid_shape) {
         return VMP_PROTOCOL_INVALID_VALUE;
-    }
-    for (size_t index = 0U; index < out->auth_secret.len; ++index) {
-        const uint8_t value = out->auth_secret.data[index];
-        if (value == 0U || value == (uint8_t)'\n' ||
-            value == (uint8_t)'\r') {
-            return VMP_PROTOCOL_INVALID_VALUE;
-        }
-    }
-    for (size_t index = 0U; index < out->tls_server_name.len; ++index) {
-        const uint8_t value = out->tls_server_name.data[index];
-        if (value < UINT8_C(0x21) || value > UINT8_C(0x7e)) {
-            return VMP_PROTOCOL_INVALID_VALUE;
-        }
     }
     return VMP_PROTOCOL_OK;
 }
@@ -496,27 +596,46 @@ static vmp_protocol_error_t parse_receive_datagram(
 static vmp_protocol_error_t parse_start_exit(
     decoder_t decoder, vmp_start_exit_session_t *out)
 {
-    unsigned seen = 0U;
+    uint32_t seen = 0U;
     while (decoder.cursor != decoder.end) {
         uint32_t field = 0U;
         uint8_t wire_type = 0U;
         vmp_protocol_error_t error = read_key(&decoder, &field, &wire_type);
         if (error != VMP_PROTOCOL_OK) return error;
-        if (field < 1U || field > 6U) return VMP_PROTOCOL_UNKNOWN_FIELD;
-        const unsigned bit = 1U << (field - 1U);
+        if (field < 1U || field > 16U) return VMP_PROTOCOL_UNKNOWN_FIELD;
+        const uint32_t bit = UINT32_C(1) << (field - 1U);
         if ((seen & bit) != 0U) return VMP_PROTOCOL_DUPLICATE_FIELD;
         seen |= bit;
-        if (field == 1U || field == 2U) {
+
+        if (field == 1U || field == 2U || field == 7U || field == 8U ||
+            field == 10U || field == 12U || field == 14U || field == 15U ||
+            field == 16U) {
             vmp_bytes_view_t value = {0};
             error = expect_bytes(&decoder, wire_type, &value);
             if (error != VMP_PROTOCOL_OK) return error;
             if (field == 1U) {
                 error = copy_exact(value, out->route_context_id,
                                    VMP_CONTEXT_ID_LEN);
-                if (error != VMP_PROTOCOL_OK) return error;
-            } else {
+            } else if (field == 2U) {
                 out->auth_secret = value;
+            } else if (field == 7U) {
+                error = copy_exact(value, out->exit_spki_sha256,
+                                   VMP_SPKI_SHA256_LEN);
+            } else if (field == 8U) {
+                out->tls_server_name = value;
+            } else if (field == 10U) {
+                error = copy_exact(value, out->listener_ip, 16U);
+            } else if (field == 12U) {
+                error = copy_exact(value, out->expected_client_ip, 16U);
+            } else if (field == 14U) {
+                error = copy_exact(value, out->reservation_hash,
+                                   VMP_RESERVATION_HASH_LEN);
+            } else if (field == 15U) {
+                out->tls_certificate_pem = value;
+            } else {
+                out->tls_private_key_pem = value;
             }
+            if (error != VMP_PROTOCOL_OK) return error;
         } else {
             uint64_t value = 0U;
             error = expect_varint(&decoder, wire_type, &value);
@@ -528,38 +647,28 @@ static vmp_protocol_error_t parse_start_exit(
                 out->minimum_paths = (uint32_t)value;
             } else if (field == 5U) {
                 out->masque_context_id = value;
-            } else {
+            } else if (field == 6U) {
                 if (value >
                     (uint64_t)VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP) {
                     return VMP_PROTOCOL_INVALID_VALUE;
                 }
                 out->transport_mode = (vmp_transport_mode_t)value;
+            } else if (field == 9U) {
+                if (value > UINT32_MAX) return VMP_PROTOCOL_INVALID_VALUE;
+                out->path_id = (uint32_t)value;
+            } else {
+                if (value > UINT16_MAX) return VMP_PROTOCOL_INVALID_VALUE;
+                if (field == 11U) {
+                    out->listener_port = (uint16_t)value;
+                } else {
+                    out->expected_client_port = (uint16_t)value;
+                }
             }
         }
     }
-    const bool valid_shape =
-        (out->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC &&
-         out->minimum_paths >= 2U &&
-         out->minimum_paths <= VMP_MAX_PATHS) ||
-        (out->transport_mode ==
-             VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP &&
-         out->minimum_paths == 1U);
-    if (seen != UINT32_C(0x3f) ||
-        all_zero(out->route_context_id, VMP_CONTEXT_ID_LEN) ||
-        out->auth_secret.len == 0U ||
-        out->auth_secret.len > VMP_MAX_AUTH_SECRET ||
-        out->expires_at_ms == 0U || out->masque_context_id == 0U ||
-        out->masque_context_id > VMP_MAX_MASQUE_CONTEXT_ID ||
-        !valid_shape) {
-        return VMP_PROTOCOL_INVALID_VALUE;
-    }
-    for (size_t index = 0U; index < out->auth_secret.len; ++index) {
-        const uint8_t value = out->auth_secret.data[index];
-        if (value == 0U || value == UINT8_C(10) || value == UINT8_C(13)) {
-            return VMP_PROTOCOL_INVALID_VALUE;
-        }
-    }
-    return VMP_PROTOCOL_OK;
+    return seen == UINT32_C(0xffff) && vmp_start_exit_is_valid(out)
+               ? VMP_PROTOCOL_OK
+               : VMP_PROTOCOL_INVALID_VALUE;
 }
 
 static vmp_protocol_error_t parse_operation(vmp_operation_t operation,

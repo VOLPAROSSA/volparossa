@@ -23,7 +23,7 @@ use nix::{
 };
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
-use socket2::{Protocol, Socket, Type};
+use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, net::UnixStream, time::timeout};
 use zeroize::{Zeroize, Zeroizing};
@@ -31,14 +31,23 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     AddPath, GetStatus, NATIVE_API_VERSION, NativePathStatus, NativeRequest, NativeResponse,
     NativeResultCode, ReceiveDatagram, ReceivedDatagram, RemovePath, SendDatagram,
-    StartExitSession, StartSession, StopSession, control::validate_add_path, encode_request,
-    native_request, read_response,
+    StartExitSession, StartSession, StopSession,
+    control::{validate_add_path, validate_start_exit},
+    encode_request, native_request, read_response,
 };
 
 const FD_BINDING_LEN: usize = 32;
-const ADD_PATH_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-ADD-PATH-FD-V4\0";
+const ADD_PATH_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-ADD-PATH-FD-V5\0";
+const START_EXIT_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-START-EXIT-FD-V5\0";
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SOCKET_PATH_BYTES: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DescriptorPurpose {
+    None,
+    AddPath,
+    StartExit,
+}
 
 /// Strict client for the unprivileged native process boundary.
 #[derive(Clone, Debug)]
@@ -79,15 +88,23 @@ impl NativeClient {
     /// # Errors
     ///
     /// Returns an error for an unsafe socket, timeout, framing/correlation failure, or a native
-    /// rejection. The current native implementation fails closed until the helper and agent supply
-    /// route-scoped listener and TLS certificate/key descriptors and the native boundary has a
-    /// descriptor-consuming exit transport factory.
+    /// rejection. The descriptor is consumed on every success and failure path. It must be the
+    /// exact unconnected, bound, nonblocking UDP listener named by the canonical request, with
+    /// close-on-exec set and address/port reuse disabled. These current socket checks do not prove
+    /// helper origin, assigned-address state, or network-namespace identity. The current native
+    /// implementation still fails closed after consuming the listener until a descriptor-consuming
+    /// exit transport factory is implemented.
     pub async fn start_exit_session(
         &self,
         value: StartExitSession,
+        listener: OwnedFd,
     ) -> Result<(), NativeClientError> {
-        self.execute_ok(native_request::Operation::StartExitSession(value), None)
-            .await
+        let listener = validate_exit_listener_descriptor(&value, listener)?;
+        self.execute_ok(
+            native_request::Operation::StartExitSession(value),
+            Some(listener),
+        )
+        .await
     }
 
     /// Adds one candidate route-namespace path socket.
@@ -235,9 +252,13 @@ impl NativeClient {
     ) -> Result<NativeResponse, NativeClientError> {
         validate_socket(&self.socket, self.expected_uid)?;
         let mut nonce = Zeroizing::new([0_u8; 16]);
-        let is_add_path = matches!(&operation, native_request::Operation::AddPath(_));
-        if is_add_path != descriptor.is_some() {
-            return Err(NativeClientError::InvalidPathDescriptor);
+        let descriptor_purpose = match &operation {
+            native_request::Operation::AddPath(_) => DescriptorPurpose::AddPath,
+            native_request::Operation::StartExitSession(_) => DescriptorPurpose::StartExit,
+            _ => DescriptorPurpose::None,
+        };
+        if (descriptor_purpose != DescriptorPurpose::None) != descriptor.is_some() {
+            return Err(NativeClientError::InvalidDescriptorBundle);
         }
 
         OsRng.fill_bytes(nonce.as_mut());
@@ -247,7 +268,7 @@ impl NativeClient {
             operation: Some(operation),
         };
         let mut frame = Zeroizing::new(encode_request(&request)?);
-        let binding = request_binding(frame.as_slice(), is_add_path)?;
+        let binding = request_binding(frame.as_slice(), descriptor_purpose)?;
         zeroize_sensitive_request(&mut request);
         let response = timeout(self.operation_timeout, async {
             let mut stream = UnixStream::connect(&self.socket).await?;
@@ -277,17 +298,22 @@ fn response_result(response: &NativeResponse) -> Result<NativeResultCode, Native
 }
 fn request_binding(
     frame: &[u8],
-    is_add_path: bool,
+    purpose: DescriptorPurpose,
 ) -> Result<[u8; FD_BINDING_LEN], NativeClientError> {
-    if !is_add_path {
-        return Ok([0_u8; FD_BINDING_LEN]);
-    }
+    let domain = match purpose {
+        DescriptorPurpose::None => return Ok([0_u8; FD_BINDING_LEN]),
+        DescriptorPurpose::AddPath => ADD_PATH_FD_DOMAIN,
+        DescriptorPurpose::StartExit => START_EXIT_FD_DOMAIN,
+    };
     let payload = frame.get(4..).ok_or(crate::ControlError::Invalid(
         "missing canonical request payload",
     ))?;
+    if payload.is_empty() {
+        return Err(crate::ControlError::Invalid("empty canonical request payload").into());
+    }
     let payload_len = u32::try_from(payload.len()).map_err(|_| crate::ControlError::TooLarge)?;
     let mut hasher = Sha256::new();
-    hasher.update(ADD_PATH_FD_DOMAIN);
+    hasher.update(domain);
     hasher.update(payload_len.to_be_bytes());
     hasher.update(payload);
     Ok(hasher.finalize().into())
@@ -380,6 +406,49 @@ fn validate_path_descriptor(
     Ok(socket)
 }
 
+fn validate_exit_listener_descriptor(
+    start: &StartExitSession,
+    descriptor: OwnedFd,
+) -> Result<Socket, NativeClientError> {
+    let socket = Socket::from(descriptor);
+    validate_start_exit(start).map_err(|_| NativeClientError::InvalidExitListenerDescriptor)?;
+    let listener_ip =
+        decode_ip(&start.listener_ip).ok_or(NativeClientError::InvalidExitListenerDescriptor)?;
+    let listener_port = u16::try_from(start.listener_port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(NativeClientError::InvalidExitListenerDescriptor)?;
+    if listener_ip.is_unspecified()
+        || !listener_ip.is_ipv6()
+        || socket.domain()? != Domain::IPV6
+        || socket.r#type()? != Type::DGRAM
+        || socket.protocol()? != Some(Protocol::UDP)
+        || getsockopt(&socket, sockopt::AcceptConn)
+            .map_err(|error| NativeClientError::Io(error.into()))?
+        || socket.take_error()?.is_some()
+        || !socket.only_v6()?
+        || socket.reuse_address()?
+        || socket.reuse_port()?
+        || socket.local_addr()?.as_socket() != Some(SocketAddr::new(listener_ip, listener_port))
+    {
+        return Err(NativeClientError::InvalidExitListenerDescriptor);
+    }
+    match socket.peer_addr() {
+        Err(error) if error.raw_os_error() == Some(nix::libc::ENOTCONN) => {}
+        _ => return Err(NativeClientError::InvalidExitListenerDescriptor),
+    }
+    let descriptor_flags = FdFlag::from_bits_truncate(
+        fcntl(&socket, FcntlArg::F_GETFD).map_err(|error| NativeClientError::Io(error.into()))?,
+    );
+    let status_flags = OFlag::from_bits_truncate(
+        fcntl(&socket, FcntlArg::F_GETFL).map_err(|error| NativeClientError::Io(error.into()))?,
+    );
+    if !descriptor_flags.contains(FdFlag::FD_CLOEXEC) || !status_flags.contains(OFlag::O_NONBLOCK) {
+        return Err(NativeClientError::InvalidExitListenerDescriptor);
+    }
+    Ok(socket)
+}
+
 fn decode_ip(bytes: &[u8]) -> Option<IpAddr> {
     match bytes.len() {
         4 => <[u8; 4]>::try_from(bytes).ok().map(IpAddr::from),
@@ -402,7 +471,7 @@ fn zeroize_sensitive_request(request: &mut NativeRequest) {
             value.tls_server_name.zeroize();
         }
         Some(native_request::Operation::StartExitSession(value)) => {
-            value.auth_secret.zeroize();
+            value.zeroize();
         }
         Some(native_request::Operation::SendDatagram(value)) => {
             value.inner_ip_packet.zeroize();
@@ -460,6 +529,12 @@ pub enum NativeClientError {
     /// The supplied path socket failed strict local validation.
     #[error("path socket is invalid")]
     InvalidPathDescriptor,
+    /// The supplied exit-listener socket failed strict local validation.
+    #[error("exit listener socket is invalid")]
+    InvalidExitListenerDescriptor,
+    /// The operation and exact descriptor bundle did not match.
+    #[error("native descriptor bundle is invalid")]
+    InvalidDescriptorBundle,
     /// Local socket I/O failed.
     #[error("native client I/O failed")]
     Io(#[from] std::io::Error),
@@ -487,7 +562,7 @@ mod tests {
     use std::{
         fs::Permissions,
         io::IoSliceMut,
-        net::Ipv6Addr,
+        net::{Ipv4Addr, Ipv6Addr},
         os::{fd::RawFd, unix::fs::PermissionsExt},
         time::Instant,
     };
@@ -519,7 +594,10 @@ mod tests {
         request
     }
 
-    async fn read_add_path_request(stream: &mut UnixStream) -> NativeRequest {
+    async fn read_descriptor_request(
+        stream: &mut UnixStream,
+        purpose: DescriptorPurpose,
+    ) -> NativeRequest {
         let mut binding = [0_u8; FD_BINDING_LEN];
         let descriptors = loop {
             stream.readable().await.expect("readable");
@@ -565,7 +643,7 @@ mod tests {
         let frame = encode_request(&request).expect("canonical request");
         assert_eq!(
             binding,
-            request_binding(&frame, true).expect("request binding")
+            request_binding(&frame, purpose).expect("request binding")
         );
         close(descriptors[0]).expect("close received descriptor");
         request
@@ -602,6 +680,36 @@ mod tests {
         (socket, local)
     }
 
+    fn bound_exit_listener_socket(
+        nonblocking: bool,
+        reuse_address: bool,
+        reuse_port: bool,
+    ) -> (Socket, SocketAddr) {
+        let socket = Socket::new(Domain::IPV6, Type::DGRAM.cloexec(), Some(Protocol::UDP))
+            .expect("IPv6 socket");
+        socket.set_only_v6(true).expect("IPv6-only state");
+        socket
+            .set_reuse_address(reuse_address)
+            .expect("address-reuse state");
+        socket.set_reuse_port(reuse_port).expect("port-reuse state");
+        socket.set_freebind_v6(true).expect("IPv6 FREEBIND");
+        socket
+            .bind(&SockAddr::from(SocketAddr::new(
+                IpAddr::V6(overlay_address(1, 4)),
+                0,
+            )))
+            .expect("exit overlay bind");
+        socket
+            .set_nonblocking(nonblocking)
+            .expect("nonblocking state");
+        let local = socket
+            .local_addr()
+            .expect("local address")
+            .as_socket()
+            .expect("IP socket");
+        (socket, local)
+    }
+
     fn add_path_for(local: SocketAddr) -> AddPath {
         assert_eq!(local.ip(), IpAddr::V6(overlay_address(1, 1)));
         AddPath {
@@ -613,6 +721,48 @@ mod tests {
             reservation_hash: vec![2; 32],
             local_port: u32::from(local.port()),
         }
+    }
+
+    fn start_exit_for(local: SocketAddr) -> StartExitSession {
+        assert_eq!(local.ip(), IpAddr::V6(overlay_address(1, 4)));
+        StartExitSession {
+            route_context_id: vec![1; 16],
+            auth_secret: b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec(),
+            expires_at_ms: 1_060_000,
+            minimum_paths: 1,
+            masque_context_id: 19,
+            transport_mode: crate::TransportMode::SinglePathGeneralUdp as i32,
+            exit_spki_sha256: vec![2; 32],
+            tls_server_name: b"exit.example".to_vec(),
+            path_id: 1,
+            listener_ip: overlay_address(1, 4).octets().to_vec(),
+            listener_port: u32::from(local.port()),
+            expected_client_ip: overlay_address(1, 1).octets().to_vec(),
+            expected_client_port: 51_820,
+            reservation_hash: vec![3; 32],
+            tls_certificate_pem: b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n"
+                .to_vec(),
+            tls_private_key_pem: b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n"
+                .to_vec(),
+        }
+    }
+
+    async fn assert_exit_listener_rejected(
+        client: &NativeClient,
+        request: StartExitSession,
+        socket: Socket,
+    ) {
+        let descriptor: OwnedFd = socket.into();
+        let probe = DescriptorProbe::new(&descriptor);
+        let result = client.start_exit_session(request, descriptor).await;
+        assert!(
+            matches!(
+                result,
+                Err(NativeClientError::InvalidExitListenerDescriptor)
+            ),
+            "unexpected listener-validation result"
+        );
+        probe.assert_consumed();
     }
 
     fn public_underlay_path(local: SocketAddr) -> AddPath {
@@ -876,7 +1026,7 @@ mod tests {
         let (_directory, path, listener) = secure_listener();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let request = read_add_path_request(&mut stream).await;
+            let request = read_descriptor_request(&mut stream, DescriptorPurpose::AddPath).await;
             assert!(matches!(
                 request.operation,
                 Some(native_request::Operation::AddPath(_))
@@ -908,11 +1058,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_exit_sends_one_listener_shaped_fd_with_distinct_canonical_binding() {
+        let (_directory, path, listener) = secure_listener();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_descriptor_request(&mut stream, DescriptorPurpose::StartExit).await;
+            assert!(matches!(
+                request.operation,
+                Some(native_request::Operation::StartExitSession(_))
+            ));
+            let response = NativeResponse {
+                api_version: NATIVE_API_VERSION,
+                request_nonce: request.request_nonce,
+                result: NativeResultCode::Transport as i32,
+                diagnostic_code: "exit_listener_orchestration_unavailable".to_owned(),
+                paths: Vec::new(),
+                received_datagram: None,
+            };
+            stream
+                .write_all(&crate::encode_response(&response).expect("response"))
+                .await
+                .expect("write");
+        });
+
+        let (socket, local) = bound_exit_listener_socket(true, false, false);
+        let descriptor: OwnedFd = socket.into();
+        let probe = DescriptorProbe::new(&descriptor);
+        let error = NativeClient::new(path)
+            .expect("client")
+            .start_exit_session(start_exit_for(local), descriptor)
+            .await
+            .expect_err("runtime remains unavailable");
+        assert!(matches!(
+            error,
+            NativeClientError::Rejected {
+                result: NativeResultCode::Transport,
+                ..
+            }
+        ));
+        probe.assert_consumed();
+        server.await.expect("server");
+    }
+
+    #[test]
+    fn descriptor_binding_domains_do_not_cross_correlate() {
+        let request = NativeRequest {
+            api_version: NATIVE_API_VERSION,
+            request_nonce: vec![7; 16],
+            operation: Some(native_request::Operation::GetStatus(GetStatus {
+                route_context_id: vec![1; 16],
+            })),
+        };
+        let frame = encode_request(&request).expect("canonical request");
+        assert_ne!(
+            request_binding(&frame, DescriptorPurpose::AddPath).expect("AddPath binding"),
+            request_binding(&frame, DescriptorPurpose::StartExit).expect("StartExit binding")
+        );
+        assert_eq!(
+            request_binding(&frame, DescriptorPurpose::None).expect("unbound operation"),
+            [0; FD_BINDING_LEN]
+        );
+    }
+
+    #[tokio::test]
     async fn add_path_consumes_descriptor_on_native_rejection() {
         let (_directory, path, listener) = secure_listener();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let request = read_add_path_request(&mut stream).await;
+            let request = read_descriptor_request(&mut stream, DescriptorPurpose::AddPath).await;
             let response = NativeResponse {
                 api_version: NATIVE_API_VERSION,
                 request_nonce: request.request_nonce,
@@ -951,7 +1164,7 @@ mod tests {
         let (_directory, path, listener) = secure_listener();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let request = read_add_path_request(&mut stream).await;
+            let request = read_descriptor_request(&mut stream, DescriptorPurpose::AddPath).await;
             assert!(matches!(
                 request.operation,
                 Some(native_request::Operation::AddPath(_))
@@ -1047,6 +1260,81 @@ mod tests {
             Err(NativeClientError::InvalidPathDescriptor)
         ));
         probe.assert_consumed();
+    }
+
+    #[tokio::test]
+    async fn local_exit_listener_validation_fails_closed_and_consumes_descriptor() {
+        let (_directory, path, _listener) = secure_listener();
+        let client = NativeClient::new(path).expect("client");
+
+        let (blocking, local) = bound_exit_listener_socket(false, false, false);
+        assert_exit_listener_rejected(&client, start_exit_for(local), blocking).await;
+
+        let (wrong_tuple, local) = bound_exit_listener_socket(true, false, false);
+        let mut request = start_exit_for(local);
+        request.listener_port = request.listener_port.saturating_add(1);
+        assert_exit_listener_rejected(&client, request, wrong_tuple).await;
+
+        let (connected, local) = bound_exit_listener_socket(true, false, false);
+        connected
+            .connect(&SockAddr::from(SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                9,
+            )))
+            .expect("UDP connect");
+        assert_exit_listener_rejected(&client, start_exit_for(local), connected).await;
+
+        let (reusable, local) = bound_exit_listener_socket(true, true, false);
+        assert_exit_listener_rejected(&client, start_exit_for(local), reusable).await;
+
+        let expected = SocketAddr::new(IpAddr::V6(overlay_address(1, 4)), 45_443);
+
+        let wrong_family = Socket::new(Domain::IPV4, Type::DGRAM.cloexec(), Some(Protocol::UDP))
+            .expect("IPv4 UDP socket");
+        wrong_family
+            .bind(&SockAddr::from(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                0,
+            )))
+            .expect("IPv4 bind");
+        wrong_family
+            .set_nonblocking(true)
+            .expect("IPv4 nonblocking");
+        assert_exit_listener_rejected(&client, start_exit_for(expected), wrong_family).await;
+
+        let wrong_type = Socket::new(Domain::IPV6, Type::STREAM.cloexec(), Some(Protocol::TCP))
+            .expect("IPv6 TCP socket");
+        wrong_type.set_nonblocking(true).expect("TCP nonblocking");
+        assert_exit_listener_rejected(&client, start_exit_for(expected), wrong_type).await;
+
+        let wrong_protocol =
+            Socket::new(Domain::UNIX, Type::DGRAM.cloexec(), None).expect("Unix datagram socket");
+        wrong_protocol
+            .set_nonblocking(true)
+            .expect("Unix nonblocking");
+        assert_exit_listener_rejected(&client, start_exit_for(expected), wrong_protocol).await;
+
+        let dual_stack = Socket::new(Domain::IPV6, Type::DGRAM.cloexec(), Some(Protocol::UDP))
+            .expect("dual-stack UDP socket");
+        dual_stack.set_only_v6(false).expect("dual-stack state");
+        dual_stack
+            .set_nonblocking(true)
+            .expect("dual-stack nonblocking");
+        assert_exit_listener_rejected(&client, start_exit_for(expected), dual_stack).await;
+
+        let (reusable_port, local) = bound_exit_listener_socket(true, false, true);
+        assert_exit_listener_rejected(&client, start_exit_for(local), reusable_port).await;
+
+        let (without_cloexec, local) = bound_exit_listener_socket(true, false, false);
+        fcntl(&without_cloexec, FcntlArg::F_SETFD(FdFlag::empty())).expect("clear close-on-exec");
+        assert_exit_listener_rejected(&client, start_exit_for(local), without_cloexec).await;
+
+        let (wrong_address, local) = bound_exit_listener_socket(true, false, false);
+        let mut request = start_exit_for(local);
+        request.path_id = 2;
+        request.listener_ip = overlay_address(2, 4).octets().to_vec();
+        request.expected_client_ip = overlay_address(2, 1).octets().to_vec();
+        assert_exit_listener_rejected(&client, request, wrong_address).await;
     }
 
     #[tokio::test]

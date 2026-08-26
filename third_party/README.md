@@ -40,16 +40,19 @@ The audit records unresolved capabilities as `false`. The patches close SPKI
 pinning, explicit peer-tuple binding, honest path-metric, server session
 correlation, credential-retirement, and caller-supplied TLS-secret-path seams.
 The mqvpn server now accepts bounded in-memory PEM identity and uses sealed
-anonymous Linux memfds for its synchronous xquic import. Native API version 4
+anonymous Linux memfds for its synchronous xquic import. Native API version 5
 implements bounded request-driven reverse polling, a nonzero local association identifier
 validated at the mqvpn boundary, separate multipath-at-least-two versus
 single-path-exactly-one modes without downgrade, and route-scoped auth/TLS
-material with a bounded expiry. It also consumes exactly one request-bound UDP
-descriptor for `AddPath`; native never creates or binds a path socket. Versions
-1, 2, 3, and unknown versions fail closed. The local identifier does not change
-the RFC 9484 zero IP Datagram wire Context ID. SCM_RIGHTS correlation and a
-same-session namespace cookie do not prove privileged-helper origin, so
-production path adoption remains blocked until that provenance is authenticated.
+material with a bounded expiry. It consumes one operation-bound UDP descriptor
+for `AddPath` and one listener-shaped descriptor for `StartExitSession`; Rust and
+the dormant C runtime check its current tuple/flags, but not helper origin,
+assigned-address state, or network namespace. The dormant C runtime closes that
+descriptor before failing closed. Versions
+1 through 4 and unknown versions fail closed. The local identifier does not change
+the RFC 9484 zero IP Datagram wire Context ID. SCM_RIGHTS proves request correlation;
+only active client `AddPath` checks a same-session namespace cookie. Production
+path adoption remains blocked until helper provenance and exact namespace are authenticated.
 
 Still unresolved are trusted helper-origin proof for client path descriptors,
 the unique delivered-payload metric, the operational exit listener plus

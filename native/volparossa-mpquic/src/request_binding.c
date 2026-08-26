@@ -7,15 +7,30 @@
 #include <string.h>
 
 static const uint8_t vmp_add_path_binding_domain[] =
-    "VOLPAROSSA-MPQUIC-ADD-PATH-FD-V4";
+    "VOLPAROSSA-MPQUIC-ADD-PATH-FD-V5";
+static const uint8_t vmp_start_exit_binding_domain[] =
+    "VOLPAROSSA-MPQUIC-START-EXIT-FD-V5";
 
 bool vmp_sha256_request_binding(
-    void *context, const uint8_t *canonical_request,
+    void *context, vmp_operation_t operation, const uint8_t *canonical_request,
     size_t canonical_request_len, uint8_t out[VMP_FD_BINDING_LEN])
 {
     (void)context;
+    if (out == NULL) return false;
+    memset(out, 0, VMP_FD_BINDING_LEN);
+    const uint8_t *domain = NULL;
+    size_t domain_len = 0U;
+    if (operation == VMP_OPERATION_ADD_PATH) {
+        domain = vmp_add_path_binding_domain;
+        domain_len = sizeof(vmp_add_path_binding_domain);
+    } else if (operation == VMP_OPERATION_START_EXIT_SESSION) {
+        domain = vmp_start_exit_binding_domain;
+        domain_len = sizeof(vmp_start_exit_binding_domain);
+    } else {
+        return false;
+    }
     if (canonical_request == NULL || canonical_request_len == 0U ||
-        canonical_request_len > VMP_MAX_CONTROL_FRAME || out == NULL) {
+        canonical_request_len > VMP_MAX_CONTROL_FRAME) {
         return false;
     }
     const uint32_t length = (uint32_t)canonical_request_len;
@@ -29,8 +44,7 @@ bool vmp_sha256_request_binding(
     memset(&digest, 0, sizeof(digest));
     const bool ok =
         SHA256_Init(&digest) == 1 &&
-        SHA256_Update(&digest, vmp_add_path_binding_domain,
-                      sizeof(vmp_add_path_binding_domain)) == 1 &&
+        SHA256_Update(&digest, domain, domain_len) == 1 &&
         SHA256_Update(&digest, encoded_length, sizeof(encoded_length)) == 1 &&
         SHA256_Update(&digest, canonical_request, canonical_request_len) == 1 &&
         SHA256_Final(out, &digest) == 1;

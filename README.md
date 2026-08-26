@@ -97,10 +97,12 @@ uninstall guidance is in [OPERATIONS.md](docs/OPERATIONS.md).
 ## Security warnings and known limitations
 
 - This repository has not yet produced evidence for real MPTCP or Multipath QUIC data carriage.
-- The native mqvpn/xquic component is pinned, source-integrated, and clean full-graph
-  ASan+UBSan-tested behind a bounded API-v4 process boundary. `AddPath` consumes one correlated
-  route-socket descriptor and never opens a path socket itself, but trusted helper provenance,
-  exit FD orchestration, and disposable dataplane acceptance remain incomplete.
+- The native mqvpn/xquic component is pinned, source-integrated, and has passed a clean full-graph
+  API-v5 ASan+UBSan run behind a bounded process boundary. API v5 request-binds one route socket for
+  `AddPath` and one listener-shaped descriptor for `StartExitSession`; Rust and the dormant native
+  runtime validate its current socket flags and tuple before native closes it and fails closed. This
+  does not prove helper origin, assigned-address state, or the descriptor's network namespace. The
+  exit backend and disposable dataplane acceptance also remain incomplete.
 - Do not rely on the kill switch, whitelist enforcement, crash cleanup, or privacy properties until
   their acceptance checks are marked complete.
 - Anti-Sybil diversity and local performance history can raise an attacker's cost but cannot

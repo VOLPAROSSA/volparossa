@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define VMP_API_VERSION UINT32_C(4)
+#define VMP_API_VERSION UINT32_C(5)
 #define VMP_MAX_CONTROL_FRAME (UINT32_C(1024) * UINT32_C(1024))
 #define VMP_CONTEXT_ID_LEN 16U
 #define VMP_REQUEST_NONCE_LEN 16U
@@ -22,8 +22,11 @@ extern "C" {
 #define VMP_MAX_PATHS 8U
 #define VMP_MAX_INNER_PACKET 65535U
 #define VMP_MAX_DIAGNOSTIC_CODE 64U
-#define VMP_MAX_AUTH_SECRET 255U
+#define VMP_AUTH_SECRET_LEN 43U
+#define VMP_MAX_AUTH_SECRET VMP_AUTH_SECRET_LEN
 #define VMP_MAX_TLS_SERVER_NAME 253U
+#define VMP_MAX_TLS_CERTIFICATE_PEM (64U * 1024U)
+#define VMP_MAX_TLS_PRIVATE_KEY_PEM (16U * 1024U)
 #define VMP_MAX_AUTHORIZATION_FUTURE_MS UINT64_C(900000)
 #define VMP_MAX_MASQUE_CONTEXT_ID ((UINT64_C(1) << 62) - UINT64_C(1))
 
@@ -80,6 +83,16 @@ typedef struct vmp_start_exit_session {
     uint32_t minimum_paths;
     uint64_t masque_context_id;
     vmp_transport_mode_t transport_mode;
+    uint8_t exit_spki_sha256[VMP_SPKI_SHA256_LEN];
+    vmp_bytes_view_t tls_server_name;
+    uint32_t path_id;
+    uint8_t listener_ip[16];
+    uint16_t listener_port;
+    uint8_t expected_client_ip[16];
+    uint16_t expected_client_port;
+    uint8_t reservation_hash[VMP_RESERVATION_HASH_LEN];
+    vmp_bytes_view_t tls_certificate_pem;
+    vmp_bytes_view_t tls_private_key_pem;
 } vmp_start_exit_session_t;
 
 typedef struct vmp_add_path {
@@ -176,6 +189,13 @@ typedef enum vmp_protocol_error {
  * fd76:6f6c:7061::/48, path ID in segment six, one shared /112, and fixed
  * client/exit host identifiers 1 and 4. */
 bool vmp_add_path_is_valid(const vmp_add_path_t *path);
+
+/* Verifies the fail-closed API-v5 single-path exit request shape, including
+ * its canonical overlay tuple and bounded in-memory TLS material. This does
+ * not parse or cryptographically bind the certificate, key, name, and SPKI.
+ * Credential validation proves only base64url syntax and exact length; its
+ * generator remains responsible for entropy. */
+bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start);
 
 /* Decodes one unframed protobuf payload without allocating. Packet views in
  * the result borrow from `payload` and remain valid only while it remains

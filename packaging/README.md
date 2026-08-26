@@ -67,12 +67,14 @@ production-service, datapath, A14 or A15 evidence.
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
 See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
 
-The packaged native systemd unit is not operational yet. API v4 moves client auth and the TLS
-server name into bounded, expiring route-session messages and accepts no static product secret from
-the launcher. `AddPath` consumes exactly one request-bound UDP descriptor, but SCM_RIGHTS and its
+The packaged native systemd unit is not operational yet. API v5 moves client auth, TLS names, and
+the exit's bounded, unparsed in-memory PEM candidate material into expiring route-session messages and accepts no
+static product secret from the launcher. `AddPath` and `StartExitSession` each consume exactly one
+operation-bound UDP descriptor, but SCM_RIGHTS and its
 request hash do not authenticate privileged-helper origin. A reviewed launcher remains blocked
 until the agent orchestrates separate role-specific processes/control sockets, helper acquisition
-binds trusted descriptor provenance end to end, and the exit receives its listener plus TLS
-certificate/key descriptors without secret argv, environment, or files. Until then, `--build`
+binds trusted descriptor namespace and assigned-address provenance end to end, and a reviewed exit
+backend cryptographically validates and consumes the supplied listener and in-memory material
+without secret argv, environment, or files. Until then, `--build`
 exits 77 before compilation, no candidate package is created, and the installed service set must
 not be enabled.

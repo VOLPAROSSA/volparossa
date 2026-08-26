@@ -412,8 +412,8 @@ verify_link_flags VOLPAROSSA-wrapper "$wrapper_build"
 run_ctest_suite VOLPAROSSA-wrapper "$wrapper_build" 5
 api_version=$(ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     "$wrapper_build/bin/volparossa-mpquic" --api-version)
-[ "$api_version" = "4" ] ||
-    die "native daemon reported API version ${api_version:-none}, expected 4"
+[ "$api_version" = "5" ] ||
+    die "native daemon reported API version ${api_version:-none}, expected 5"
 echo "sanitized daemon side-effect-free API version probe passed"
 run_daemon_smoke "$wrapper_build/bin/volparossa-mpquic" INT
 run_daemon_smoke "$wrapper_build/bin/volparossa-mpquic" TERM

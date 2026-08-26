@@ -143,12 +143,16 @@ Candidate units are installed as:
   non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity
   credential;
 - `volparossa-mpquic.service`: candidate unprivileged isolation only. It is not runnable yet.
-  API v4 accepts client auth and TLS name only in bounded, expiring route-session messages.
+  API v5 accepts exact 43-character base64url client auth and TLS names only in bounded, expiring
+  route-session messages; this check proves syntax and length, not generator entropy.
   `AddPath` consumes exactly one request-bound UDP descriptor and native never creates or binds a
   path socket, but the agent does not yet orchestrate separate role processes/control sockets and
   production helper acquisition does not yet provide independently authenticated descriptor
-  provenance. The exit also lacks inherited listener plus TLS certificate/key descriptors.
-  `StartExitSession` therefore fails closed. This blocks service enablement and package release;
+  provenance. `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and
+  consumes exactly one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags
+  are checked by Rust and native. Neither layer proves assigned-address state, network namespace,
+  signed reservation provenance, or replay freshness. The dormant exit runtime closes the descriptor
+  and fails closed because no reviewed exit backend exists. This blocks service enablement and package release;
   the unit must not be treated as operational.
 
 Review `systemd-analyze verify`, `systemd-analyze security`, and functional tests in an installed

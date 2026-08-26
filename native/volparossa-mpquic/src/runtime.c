@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#define _GNU_SOURCE
+
 #include "volparossa_mpquic_runtime.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 typedef struct runtime_path {
@@ -42,16 +48,129 @@ static void secure_zero(void *memory, size_t len)
     }
 }
 
+static bool canonical_base64url_final(uint8_t value)
+{
+    switch (value) {
+    case (uint8_t)'A':
+    case (uint8_t)'E':
+    case (uint8_t)'I':
+    case (uint8_t)'M':
+    case (uint8_t)'Q':
+    case (uint8_t)'U':
+    case (uint8_t)'Y':
+    case (uint8_t)'c':
+    case (uint8_t)'g':
+    case (uint8_t)'k':
+    case (uint8_t)'o':
+    case (uint8_t)'s':
+    case (uint8_t)'w':
+    case (uint8_t)'0':
+    case (uint8_t)'4':
+    case (uint8_t)'8': return true;
+    default: return false;
+    }
+}
+
 static bool valid_secret(const uint8_t *secret, size_t len)
 {
-    if (secret == NULL || len == 0U || len > VMP_MAX_AUTH_SECRET) {
+    if (secret == NULL || len != VMP_AUTH_SECRET_LEN) {
         return false;
     }
     for (size_t index = 0; index < len; ++index) {
-        if (secret[index] == 0U || secret[index] == (uint8_t)'\n' ||
-            secret[index] == (uint8_t)'\r') {
+        const uint8_t value = secret[index];
+        const bool alphanumeric =
+            (value >= (uint8_t)'A' && value <= (uint8_t)'Z') ||
+            (value >= (uint8_t)'a' && value <= (uint8_t)'z') ||
+            (value >= (uint8_t)'0' && value <= (uint8_t)'9');
+        if (!alphanumeric && value != (uint8_t)'_' &&
+            value != (uint8_t)'-') {
             return false;
         }
+    }
+    return canonical_base64url_final(secret[len - 1U]);
+}
+
+static bool exact_exit_listener(int listener_fd,
+                                const vmp_start_exit_session_t *start)
+{
+    if (listener_fd < 0 || start == NULL) return false;
+
+    const int descriptor_flags = fcntl(listener_fd, F_GETFD);
+    const int status_flags = fcntl(listener_fd, F_GETFL);
+    if (descriptor_flags < 0 || status_flags < 0 ||
+        (descriptor_flags & FD_CLOEXEC) == 0 ||
+        (status_flags & O_NONBLOCK) == 0) {
+        return false;
+    }
+
+    int socket_type = 0;
+    int protocol = 0;
+    int accepting = 0;
+    int socket_error = 0;
+    int only_v6 = 0;
+    int reuse_address = 0;
+    int reuse_port = 0;
+    socklen_t option_len = sizeof(int);
+    if (getsockopt(listener_fd, SOL_SOCKET, SO_TYPE, &socket_type,
+                   &option_len) != 0 ||
+        option_len != sizeof(int) || socket_type != SOCK_DGRAM) {
+        return false;
+    }
+    option_len = sizeof(int);
+    if (getsockopt(listener_fd, SOL_SOCKET, SO_PROTOCOL, &protocol,
+                   &option_len) != 0 ||
+        option_len != sizeof(int) || protocol != IPPROTO_UDP) {
+        return false;
+    }
+    option_len = sizeof(int);
+    if (getsockopt(listener_fd, SOL_SOCKET, SO_ACCEPTCONN, &accepting,
+                   &option_len) != 0 ||
+        option_len != sizeof(int) || accepting != 0) {
+        return false;
+    }
+    option_len = sizeof(int);
+    if (getsockopt(listener_fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                   &option_len) != 0 ||
+        option_len != sizeof(int) || socket_error != 0) {
+        return false;
+    }
+    option_len = sizeof(int);
+    if (getsockopt(listener_fd, IPPROTO_IPV6, IPV6_V6ONLY, &only_v6,
+                   &option_len) != 0 ||
+        option_len != sizeof(int) || only_v6 != 1) {
+        return false;
+    }
+    option_len = sizeof(int);
+    if (getsockopt(listener_fd, SOL_SOCKET, SO_REUSEADDR, &reuse_address,
+                   &option_len) != 0 ||
+        option_len != sizeof(int) || reuse_address != 0) {
+        return false;
+    }
+    option_len = sizeof(int);
+    if (getsockopt(listener_fd, SOL_SOCKET, SO_REUSEPORT, &reuse_port,
+                   &option_len) != 0 ||
+        option_len != sizeof(int) || reuse_port != 0) {
+        return false;
+    }
+
+    struct sockaddr_in6 local;
+    memset(&local, 0, sizeof(local));
+    socklen_t local_len = sizeof(local);
+    if (getsockname(listener_fd, (struct sockaddr *)&local, &local_len) != 0 ||
+        local_len != sizeof(local) || local.sin6_family != AF_INET6 ||
+        ntohs(local.sin6_port) != start->listener_port ||
+        memcmp(&local.sin6_addr, start->listener_ip,
+               sizeof(start->listener_ip)) != 0) {
+        return false;
+    }
+
+    struct sockaddr_in6 peer;
+    memset(&peer, 0, sizeof(peer));
+    socklen_t peer_len = sizeof(peer);
+    errno = 0;
+    if (getpeername(listener_fd, (struct sockaddr *)&peer, &peer_len) == 0 ||
+        errno != ENOTCONN) {
+        return false;
     }
     return true;
 }
@@ -779,19 +898,21 @@ static void dispatch_status(vmp_runtime_t *runtime,
 
 static void dispatch_start_exit(vmp_runtime_t *runtime,
                                 const vmp_start_exit_session_t *start,
-                                vmp_response_t *response)
+                                vmp_response_t *response,
+                                int listener_fd)
 {
     if (runtime->mode != VMP_RUNTIME_EXIT) {
+        if (listener_fd >= 0) (void)close(listener_fd);
         set_result(response, VMP_RESULT_INVALID_REQUEST,
                    "operation_for_role");
         return;
     }
-    if (!valid_mode(start->minimum_paths, start->transport_mode) ||
-        start->masque_context_id == 0U ||
-        start->masque_context_id > VMP_MAX_MASQUE_CONTEXT_ID ||
-        !valid_secret(start->auth_secret.data, start->auth_secret.len)) {
+    const bool valid_listener = exact_exit_listener(listener_fd, start);
+    if (listener_fd >= 0) (void)close(listener_fd);
+    if (!vmp_start_exit_is_valid(start) || !valid_listener) {
         set_result(response, VMP_RESULT_INVALID_REQUEST,
-                   "session_parameters");
+                   valid_listener ? "session_parameters"
+                                  : "exit_listener_descriptor");
         return;
     }
     if (!valid_authorization_window(runtime, start->expires_at_ms)) {
@@ -800,11 +921,12 @@ static void dispatch_start_exit(vmp_runtime_t *runtime,
         return;
     }
 
-    /* The pinned mqvpn patch exposes session-correlated server delivery, but
-     * this process boundary has no exit transport factory and the privileged
-     * helper does not yet hand it a route-scoped listener socket plus TLS
-     * certificate/key descriptors. Starting a host-local listener or reading
-     * secret paths here would violate the product privilege boundary. */
+    /* API v5 has consumed a UDP descriptor whose current tuple and flags match
+     * the route request. Helper origin, assigned-address state and exact
+     * network namespace remain unproven. Bounded certificate/key candidate PEM
+     * is carried in memory, but this process boundary still has no reviewed
+     * exit transport factory. Starting a replacement host-local listener,
+     * reading secret paths, or falling back is forbidden. */
     set_result(response, VMP_RESULT_TRANSPORT,
                "exit_listener_orchestration_unavailable");
 }
@@ -833,8 +955,11 @@ vmp_server_error_t vmp_runtime_dispatch(void *context,
         if (request_fd >= 0) (void)close(request_fd);
         return VMP_SERVER_BACKEND;
     }
-    const bool add_path = request->operation == VMP_OPERATION_ADD_PATH;
-    if ((add_path && request_fd < 0) || (!add_path && request_fd >= 0)) {
+    const bool descriptor_operation =
+        request->operation == VMP_OPERATION_ADD_PATH ||
+        request->operation == VMP_OPERATION_START_EXIT_SESSION;
+    if ((descriptor_operation && request_fd < 0) ||
+        (!descriptor_operation && request_fd >= 0)) {
         if (request_fd >= 0) (void)close(request_fd);
         set_result(response, VMP_RESULT_INVALID_REQUEST,
                    "descriptor_for_operation");
@@ -852,7 +977,7 @@ vmp_server_error_t vmp_runtime_dispatch(void *context,
         break;
     case VMP_OPERATION_START_EXIT_SESSION:
         dispatch_start_exit(runtime, &request->body.start_exit_session,
-                            response);
+                            response, request_fd);
         break;
     case VMP_OPERATION_ADD_PATH:
         dispatch_add_path(runtime, &request->body.add_path, response,

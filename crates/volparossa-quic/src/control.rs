@@ -14,11 +14,23 @@ pub const MAX_INNER_PACKET: usize = 65_535;
 /// Largest valid RFC 9484 context identifier (a 62-bit integer).
 pub const MAX_MASQUE_CONTEXT_ID: u64 = (1_u64 << 62) - 1;
 
-/// Maximum bounded per-route mqvpn credential length.
-pub const MAX_AUTH_SECRET: usize = 255;
+/// Exact unpadded base64url length of one 256-bit per-route mqvpn credential.
+///
+/// Validation here proves only canonical syntax and length; the credential generator is
+/// responsible for supplying 256 bits of entropy.
+pub const AUTH_SECRET_LEN: usize = 43;
+
+/// Backwards source-compatible name for the exact v5 credential bound.
+pub const MAX_AUTH_SECRET: usize = AUTH_SECRET_LEN;
 
 /// Maximum RFC DNS name length accepted for TLS server-name verification.
 pub const MAX_TLS_SERVER_NAME: usize = 253;
+
+/// Maximum bounded in-memory server certificate chain accepted by the patched mqvpn API.
+pub const MAX_TLS_CERTIFICATE_PEM: usize = 64 * 1024;
+
+/// Maximum bounded in-memory server private key accepted by the patched mqvpn API.
+pub const MAX_TLS_PRIVATE_KEY_PEM: usize = 16 * 1024;
 
 /// Longest accepted native route authorization window, in milliseconds.
 pub const MAX_AUTHORIZATION_FUTURE_MS: u64 = 15 * 60 * 1_000;
@@ -129,6 +141,36 @@ pub struct StartExitSession {
     /// Explicit transport mode; zero/unknown values are rejected.
     #[prost(enumeration = "TransportMode", tag = "6")]
     pub transport_mode: i32,
+    /// Exact SPKI SHA-256 pin the client must use for this route identity.
+    #[prost(bytes = "vec", tag = "7")]
+    pub exit_spki_sha256: Vec<u8>,
+    /// Expected DNS name the exit backend must bind to the parsed route identity.
+    #[prost(bytes = "vec", tag = "8")]
+    pub tls_server_name: Vec<u8>,
+    /// Non-zero path-local identifier embedded in both overlay addresses.
+    #[prost(uint32, tag = "9")]
+    pub path_id: u32,
+    /// Exact sixteen-byte exit overlay address already bound on the listener descriptor.
+    #[prost(bytes = "vec", tag = "10")]
+    pub listener_ip: Vec<u8>,
+    /// Exact non-zero UDP listener port already bound on the descriptor.
+    #[prost(uint32, tag = "11")]
+    pub listener_port: u32,
+    /// Exact sixteen-byte client overlay address authorised to reach this listener.
+    #[prost(bytes = "vec", tag = "12")]
+    pub expected_client_ip: Vec<u8>,
+    /// Exact client UDP source port authorised for this route.
+    #[prost(uint32, tag = "13")]
+    pub expected_client_port: u32,
+    /// Relay reservation proof hash bound to this exact single path.
+    #[prost(bytes = "vec", tag = "14")]
+    pub reservation_hash: Vec<u8>,
+    /// Bounded in-memory PEM certificate chain; never a pathname.
+    #[prost(bytes = "vec", tag = "15")]
+    pub tls_certificate_pem: Vec<u8>,
+    /// Bounded in-memory PEM private key; never a pathname.
+    #[prost(bytes = "vec", tag = "16")]
+    pub tls_private_key_pem: Vec<u8>,
 }
 
 /// Exact native transport shape. No mode permits an implicit downgrade.
@@ -487,14 +529,7 @@ fn validate_request(request: &NativeRequest) -> Result<(), ControlError> {
             validate_expiry(value.expires_at_ms)?;
         }
         Operation::StartExitSession(value) => {
-            validate_context(&value.route_context_id)?;
-            validate_session_shape(
-                value.minimum_paths,
-                value.masque_context_id,
-                value.transport_mode,
-            )?;
-            validate_auth_secret(&value.auth_secret)?;
-            validate_expiry(value.expires_at_ms)?;
+            validate_start_exit(value)?;
         }
         Operation::AddPath(value) => {
             validate_add_path(value)?;
@@ -592,11 +627,17 @@ fn validate_session_shape(
 }
 
 fn validate_auth_secret(value: &[u8]) -> Result<(), ControlError> {
-    if value.is_empty()
-        || value.len() > MAX_AUTH_SECRET
-        || value.iter().any(|byte| matches!(*byte, 0 | 10 | 13))
+    if value.len() != AUTH_SECRET_LEN
+        || !value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
+        || !value
+            .last()
+            .is_some_and(|byte| b"AEIMQUYcgkosw048".contains(byte))
     {
-        return Err(ControlError::Invalid("invalid per-route auth credential"));
+        return Err(ControlError::Invalid(
+            "per-route auth credential must be canonical unpadded base64url for 32 bytes",
+        ));
     }
     Ok(())
 }
@@ -664,6 +705,82 @@ pub(crate) fn validate_add_path(value: &AddPath) -> Result<(), ControlError> {
     Ok(())
 }
 
+pub(crate) fn validate_start_exit(value: &StartExitSession) -> Result<(), ControlError> {
+    validate_context(&value.route_context_id)?;
+    validate_session_shape(
+        value.minimum_paths,
+        value.masque_context_id,
+        value.transport_mode,
+    )?;
+    if !matches!(
+        TransportMode::try_from(value.transport_mode),
+        Ok(TransportMode::SinglePathGeneralUdp)
+    ) || value.minimum_paths != 1
+    {
+        return Err(ControlError::Invalid(
+            "v5 exit listener supports exactly one general-UDP path",
+        ));
+    }
+    validate_auth_secret(&value.auth_secret)?;
+    validate_expiry(value.expires_at_ms)?;
+    if value.exit_spki_sha256.len() != 32 || value.exit_spki_sha256.iter().all(|byte| *byte == 0) {
+        return Err(ControlError::Invalid(
+            "SPKI pin must be a non-zero 32-byte value",
+        ));
+    }
+    validate_tls_server_name(&value.tls_server_name)?;
+    validate_exit_overlay_tuple(value)?;
+    validate_pem(
+        &value.tls_certificate_pem,
+        MAX_TLS_CERTIFICATE_PEM,
+        "invalid in-memory TLS certificate",
+    )?;
+    validate_pem(
+        &value.tls_private_key_pem,
+        MAX_TLS_PRIVATE_KEY_PEM,
+        "invalid in-memory TLS private key",
+    )?;
+    Ok(())
+}
+
+fn validate_exit_overlay_tuple(value: &StartExitSession) -> Result<(), ControlError> {
+    const OVERLAY_PREFIX: [u8; 6] = [0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x61];
+
+    let valid_overlay = value.listener_ip.len() == 16
+        && value.expected_client_ip.len() == 16
+        && value.listener_ip.starts_with(&OVERLAY_PREFIX)
+        && value.expected_client_ip.starts_with(&OVERLAY_PREFIX)
+        && value.listener_ip[..14] == value.expected_client_ip[..14]
+        && u16::from_be_bytes([value.listener_ip[10], value.listener_ip[11]])
+            == u16::try_from(value.path_id).unwrap_or(0)
+        && u16::from_be_bytes([value.listener_ip[14], value.listener_ip[15]]) == 4
+        && u16::from_be_bytes([value.expected_client_ip[14], value.expected_client_ip[15]]) == 1;
+    if value.path_id == 0
+        || value.path_id > 8
+        || !valid_overlay
+        || !(1..=65_535).contains(&value.listener_port)
+        || !(1..=65_535).contains(&value.expected_client_port)
+        || value.reservation_hash.len() != 32
+        || value.reservation_hash.iter().all(|byte| *byte == 0)
+    {
+        return Err(ControlError::Invalid(
+            "StartExitSession must name one canonical client-to-exit overlay listener",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pem(
+    value: &[u8],
+    maximum: usize,
+    diagnostic: &'static str,
+) -> Result<(), ControlError> {
+    if value.is_empty() || value.len() > maximum || value.contains(&0) {
+        return Err(ControlError::Invalid(diagnostic));
+    }
+    Ok(())
+}
+
 fn validate_masque_context(value: u64) -> Result<(), ControlError> {
     if value == 0 || value > MAX_MASQUE_CONTEXT_ID {
         return Err(ControlError::Invalid(
@@ -703,6 +820,8 @@ fn validate_ip_packet(packet: &[u8]) -> Result<(), ControlError> {
 mod tests {
     use super::*;
 
+    const TEST_AUTH_SECRET: &[u8; AUTH_SECRET_LEN] = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
     fn request(operation: native_request::Operation) -> NativeRequest {
         NativeRequest {
             api_version: NATIVE_API_VERSION,
@@ -718,7 +837,7 @@ mod tests {
             minimum_paths,
             masque_context_id: context,
             transport_mode: mode as i32,
-            auth_secret: b"test-secret".to_vec(),
+            auth_secret: TEST_AUTH_SECRET.to_vec(),
             tls_server_name: b"exit.example".to_vec(),
             expires_at_ms: 1_060_000,
         }
@@ -727,11 +846,23 @@ mod tests {
     fn start_exit(mode: TransportMode, minimum_paths: u32, context: u64) -> StartExitSession {
         StartExitSession {
             route_context_id: vec![1; 16],
-            auth_secret: b"test-secret".to_vec(),
+            auth_secret: TEST_AUTH_SECRET.to_vec(),
             expires_at_ms: 1_060_000,
             minimum_paths,
             masque_context_id: context,
             transport_mode: mode as i32,
+            exit_spki_sha256: vec![2; 32],
+            tls_server_name: b"exit.example".to_vec(),
+            path_id: 1,
+            listener_ip: overlay_ip(1, 4),
+            listener_port: 443,
+            expected_client_ip: overlay_ip(1, 1),
+            expected_client_port: 51_820,
+            reservation_hash: vec![3; 32],
+            tls_certificate_pem: b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n"
+                .to_vec(),
+            tls_private_key_pem: b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n"
+                .to_vec(),
         }
     }
 
@@ -743,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn request_round_trip_is_v4_framed_and_validated() {
+    fn request_round_trip_is_v5_framed_and_validated() {
         let request = request(native_request::Operation::StartSession(start(
             TransportMode::MultipathQuic,
             2,
@@ -763,10 +894,10 @@ mod tests {
             3,
         )))
         .encode_to_vec();
-        assert_eq!(valid[..2], [0x08, 0x04]);
+        assert_eq!(valid[..2], [0x08, 0x05]);
 
         let mut overlong_version = valid.clone();
-        overlong_version.splice(1..2, [0x84, 0x00]);
+        overlong_version.splice(1..2, [0x85, 0x00]);
         assert!(decode_request(&overlong_version).is_err());
 
         let mut unknown = valid.clone();
@@ -774,7 +905,7 @@ mod tests {
         assert!(decode_request(&unknown).is_err());
 
         let mut duplicate = valid;
-        duplicate.extend_from_slice(&[0x08, 0x04]);
+        duplicate.extend_from_slice(&[0x08, 0x05]);
         assert!(decode_request(&duplicate).is_err());
     }
 
@@ -795,8 +926,8 @@ mod tests {
         assert!(decode_request(&legacy_bytes).is_err());
 
         let start_exit = request(native_request::Operation::StartExitSession(start_exit(
-            TransportMode::MultipathQuic,
-            2,
+            TransportMode::SinglePathGeneralUdp,
+            1,
             19,
         )));
         let frame = encode_request(&start_exit).expect("start exit encode");
@@ -817,6 +948,12 @@ mod tests {
             encode_request(&request(native_request::Operation::StartSession(invalid))).is_err()
         );
 
+        let mut invalid = start(TransportMode::MultipathQuic, 2, 3);
+        invalid.auth_secret[AUTH_SECRET_LEN - 1] = b'B';
+        assert!(
+            encode_request(&request(native_request::Operation::StartSession(invalid))).is_err()
+        );
+
         for name in [b"-bad.example".as_slice(), b"bad..example", b"bad_name"] {
             let mut invalid = start(TransportMode::MultipathQuic, 2, 3);
             invalid.tls_server_name = name.to_vec();
@@ -825,7 +962,7 @@ mod tests {
             );
         }
 
-        let mut invalid_exit = start_exit(TransportMode::MultipathQuic, 2, 19);
+        let mut invalid_exit = start_exit(TransportMode::SinglePathGeneralUdp, 1, 19);
         invalid_exit.expires_at_ms = 0;
         assert!(
             encode_request(&request(native_request::Operation::StartExitSession(
@@ -871,7 +1008,7 @@ mod tests {
             2,
             3,
         )));
-        for version in [1, 2, 3, 99] {
+        for version in [1, 2, 3, 4, 99] {
             invalid.api_version = version;
             assert!(encode_request(&invalid).is_err());
         }

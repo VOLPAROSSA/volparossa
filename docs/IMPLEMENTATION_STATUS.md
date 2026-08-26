@@ -197,7 +197,7 @@ Last updated: 2026-08-26
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   but live namespace/kernel cleanup proof does not.
 - [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v2 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. The disconnected coordinator duplicates the already attested worker namespace pin affinely before this Acquire request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. Production still returns `Unavailable` before network work; committed child Acquire dispatch, datapath adoption and live route proof remain.
-- [ ] Native MPQUIC API v4 consumes exactly one request-bound UDP descriptor for `AddPath` and zero descriptors otherwise; release, negative ancillary/tuple/ownership tests and the clean full-graph ASan+UBSan gate pass, but SCM_RIGHTS, its request hash and a same-session namespace cookie do not authenticate helper origin, so production path adoption and the launcher remain blocked.
+- [ ] Native MPQUIC API v5 consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero descriptors otherwise. Focused tests cover independent Rust/C exit socket tuple/flag checks, Rust/C binding-domain and ownership behavior, C stream-fragment assembly with exactly-one ancillary transfer, incomplete/late/extra descriptors, received-FD timeout cleanup, and the dormant exit runtime closing its listener before returning `exit_listener_orchestration_unavailable`. The clean full-graph API-v5 ASan+UBSan gate passes. Assigned-address and exact-namespace proof, the disposable namespace gate, signed reservation provenance/replay binding, monotonic expiry conversion, certificate/name/SPKI/key consistency, trusted helper provenance, and the actual exit backend remain incomplete, so production path adoption and the launcher stay blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 
 ## Identity and signed protocol
@@ -490,9 +490,10 @@ Last updated: 2026-08-26
 - [ ] No duplication, FEC, or false multipath reporting exists.
 - [ ] UDP/443 classification recognises valid QUIC Initial packets and policy-verifiable SNI.
 - [ ] Required-multipath mode defaults to at least two paths and fails closed without an unsafe downgrade.
-- [x] Native upstream, sanitizer, and Valgrind/ASan tests pass: the pinned
-  graph passed 33/33 upstream and 5/5 wrapper tests under ASan+UBSan, bounded
-  SIGINT/SIGTERM lifecycle smokes, and the recorded release Valgrind gate.
+- [x] Native upstream and the current API-v5 sanitizer gates pass: the pinned
+  graph passed 33/33 upstream and 5/5 wrapper tests under ASan+UBSan with
+  bounded SIGINT/SIGTERM lifecycle smokes; the earlier recorded release
+  Valgrind gate also passed.
 
 ## Logging, metrics, and operations
 
