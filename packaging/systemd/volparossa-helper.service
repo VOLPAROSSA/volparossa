@@ -16,9 +16,14 @@ Environment=VOLPAROSSA_HELPER_SOCKET=/run/volparossa/helper.sock
 ExecStart=/usr/libexec/volparossa/volparossa-helper
 Restart=on-failure
 RestartSec=3s
+KillMode=control-group
+SendSIGKILL=yes
 TimeoutStartSec=30s
 TimeoutStopSec=45s
 LimitCORE=0
+NotifyAccess=main
+FileDescriptorStoreMax=128
+FileDescriptorStorePreserve=yes
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN

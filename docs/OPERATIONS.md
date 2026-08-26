@@ -137,7 +137,13 @@ can also carry a datapath.
 Candidate units are installed as:
 
 - `volparossa-helper.service`: root, only the bounded networking capabilities/address families and
-  `/run/volparossa`; creates a root-owned `helper.sock` with group `volparossa` and mode 0660;
+  `/run/volparossa`; creates a root-owned `helper.sock` with group `volparossa` and mode 0660. Its
+  main process is the only accepted systemd notifier, and PID 1 accepts at most 128 preserved
+  descriptors for at most 64 future pidfd/network-namespace custody pairs. Production currently seals,
+  duplicates and structurally validates inherited activation groups before Tokio, then refuses
+  startup because typed journal-bound adoption and the restart reaper are not installed; no
+  FD-store publication path is enabled yet. A future publisher must use `FDPOLL=0`, a manager
+  barrier and a complete post-barrier store-inventory attestation before arming;
 - `volparossa-agent.service`: user/group `volparossa`, no capabilities, persistent state/config,
   control-plane network access, the helper socket, and an agent-owned mode-0660 socket under a
   non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity

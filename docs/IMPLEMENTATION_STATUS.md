@@ -175,7 +175,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   key, arming consumes that key into a `MayOwnPrepare` token with only borrowed owner-bound
   resources, and every error retains the exact affine owner which still exists. Raw codec,
   issuance, arming and recovery authority remain private; no production request-path
-  issuance/arming writer, restart-stable pidfd/network-namespace vault, absence-proving
+  issuance/arming writer, inventory-attested pidfd/network-namespace publication, absence-proving
   `MayOwnPrepare` recovery executor, restart reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live-root production lifecycle proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
@@ -218,7 +218,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   seals only retained descriptors plus freshly read start-time and cgroup evidence, without
   `CAP_SYS_PTRACE`. Recovery performs full proof I/O outside the registry lock, constructs all eight
   durable Prepare-anchor fields, and then revalidates exact process identity, `Starting`, TTL and
-  liveness under the same hard deadline. Ambiguous spawn remains permanently fail-closed.
+  liveness under the same hard deadline. Only after that complete proof it duplicates a separate
+  affine pidfd plus typed `CLONE_NEWNET` pair: the pidfd preserves non-retargetable task continuity
+  and the namespace FD preserves the exact anonymous cleanup target. The other retained pins remain
+  pre-arm proof inputs rather than restart cleanup capabilities. The pair is rechecked against the
+  same durable namespace coordinates during the final pre-arm revalidation and remains retained in
+  the dormant handoff token. It is not yet published to PID 1. Ambiguous spawn remains permanently
+  fail-closed.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
   transiently retain a `Registered` owner while record or detached process ownership remains; after
   confirmed reap and complete six-index purge, that same owner settles without a second signal or
@@ -268,8 +274,17 @@ single clean-build A01--A15 run; the score is not a release claim.
   and doctor contract now require exactly the reviewed seven-capability bootstrap set
   (`CAP_KILL`, `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SETGID`, `CAP_SETPCAP`, `CAP_SETUID`,
   `CAP_SYS_ADMIN`) and
-  reject `CAP_SYS_PTRACE`; they also require `LimitCORE=0`, while the child independently disables
-  process dumpability after parent attestation and before Ready. The component-only transient driver
+  reject `CAP_SYS_PTRACE`; they also require `LimitCORE=0`, `NotifyAccess=main`, a 128-entry
+  descriptor store (two descriptors for each of at most 64 workers), preserve that store while the
+  unit is retained, and explicitly keep control-group kill escalation. Before constructing Tokio,
+  production parses the exact PID/count/name activation tuple, caps it at 128, uses a one-shot
+  audited raw-FD boundary to seal the contiguous range `CLOEXEC` and duplicate it into independently
+  owned descriptors, accepts only complete two-entry opaque digest groups, and refuses startup
+  while any inherited group exists because no recovery executor can consume it yet. The snapshot
+  is process-latched and never claims ownership of possibly pre-owned raw descriptors. This is a
+  fail-closed custody bootstrap, not successful publication, typed restart adoption, durable-journal
+  binding, restart recovery, or crash cleanup. The child
+  independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists, but staged-package and
   disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits
   only `CAP_NET_ADMIN`.

@@ -31,6 +31,7 @@ use crate::{
         SOCKET_PATH, SocketPathGuard, bind_guarded_nonblocking_socket,
         prepare_production_runtime_identity, remove_stale_socket, secure_socket,
     },
+    systemd_custody::refuse_unrecoverable_inherited_custody,
 };
 
 const MAX_CONNECTIONS: usize = 32;
@@ -82,6 +83,9 @@ pub enum ServerError {
     /// Durable ownership startup or shutdown did not reach a proven boundary.
     #[error("helper durable ownership lifecycle was incomplete")]
     OwnershipIncomplete,
+    /// PID 1 returned restart custody which this build cannot yet recover exactly.
+    #[error("helper inherited restart custody is not recoverable")]
+    InheritedCustody,
     /// The synchronous production owner cannot be nested in another Tokio runtime.
     #[error("helper production runtime context is already active")]
     RuntimeContextConflict,
@@ -95,12 +99,14 @@ pub enum ServerError {
 ///
 /// # Errors
 ///
-/// Returns an error when runtime construction, protected helper startup, service I/O, in-memory
-/// cleanup, or durable ownership shutdown cannot be completed.
+/// Returns an error when inherited custody cannot be recovered, runtime construction, protected
+/// helper startup, service I/O, in-memory cleanup, or durable ownership shutdown cannot be
+/// completed.
 pub fn run_production_server() -> Result<(), ServerError> {
     if Handle::try_current().is_ok() {
         return Err(ServerError::RuntimeContextConflict);
     }
+    refuse_unrecoverable_inherited_custody().map_err(|_| ServerError::InheritedCustody)?;
     let runtime = Builder::new_multi_thread().enable_all().build()?;
     let server = bind_production_socket()?;
     runtime.block_on(run_server(server))
@@ -433,6 +439,8 @@ mod tests {
     };
 
     use super::*;
+
+    const INHERITED_CUSTODY_FIXTURE: &str = "VOLPAROSSA_INHERITED_CUSTODY_FIXTURE";
 
     #[tokio::test]
     async fn peer_credentials_and_bounded_frame_work_without_network_changes() {
@@ -776,6 +784,9 @@ mod tests {
         let preflight = entry
             .find("Handle::try_current().is_ok()")
             .expect("nested-runtime preflight");
+        let custody = entry
+            .find("refuse_unrecoverable_inherited_custody()")
+            .expect("inherited custody preflight");
         let runtime = entry
             .find("Builder::new_multi_thread().enable_all().build()?")
             .expect("owned I/O-enabled Tokio runtime");
@@ -785,7 +796,8 @@ mod tests {
         let drive = entry
             .find("runtime.block_on(run_server(server))")
             .expect("private future driven to completion");
-        assert!(preflight < runtime);
+        assert!(preflight < custody);
+        assert!(custody < runtime);
         assert!(runtime < bind);
         assert!(bind < drive);
         assert!(source.contains("async fn run_server"));
@@ -798,6 +810,40 @@ mod tests {
         assert!(library.contains("run_production_server"));
         assert!(!library.contains("bind_production_socket"));
         assert!(!library.contains("run_server"));
+    }
+
+    #[test]
+    fn inherited_custody_subprocess_fixture() {
+        if std::env::var_os(INHERITED_CUSTODY_FIXTURE).is_none() {
+            return;
+        }
+        let result = run_production_server();
+        assert!(matches!(result, Err(ServerError::InheritedCustody)));
+    }
+
+    #[test]
+    fn inherited_custody_is_refused_through_real_fd_three_and_four() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let name = format!("volparossa-custody-v1-{}", "0".repeat(64));
+        let names = format!("{name}:{name}");
+        let script = r#"
+exec 3</dev/null
+exec 4</dev/null
+exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES="$1" VOLPAROSSA_INHERITED_CUSTODY_FIXTURE=1 "$0" --exact server::tests::inherited_custody_subprocess_fixture --nocapture
+"#;
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-eu")
+            .arg("-c")
+            .arg(script)
+            .arg(executable)
+            .arg(names)
+            .output()
+            .expect("run inherited-custody subprocess");
+        assert!(
+            output.status.success(),
+            "subprocess failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

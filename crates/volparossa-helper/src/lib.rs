@@ -29,6 +29,7 @@ mod ownership_journal;
 mod relay_fence;
 mod runtime;
 mod server;
+mod systemd_custody;
 #[allow(dead_code)] // Pure phase-1 policy; rtnetlink collection is wired in helper v3 phase 2.
 mod underlay;
 #[allow(dead_code)] // Narrow sandbox bootstrap; production engine still never spawns it.

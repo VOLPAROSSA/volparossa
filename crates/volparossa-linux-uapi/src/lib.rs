@@ -3,7 +3,8 @@
 //! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], the fixed
 //! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], the fixed
 //! [`socket_network_namespace`] and close-on-exec duplication wrappers, taking immediate RAII
-//! ownership of descriptors installed by the bounded receive helpers, the
+//! ownership of descriptors installed by the bounded receive helpers, the one-shot bounded
+//! [`duplicate_systemd_listen_descriptors`] startup snapshot, the
 //! [`install_close_range_on_exec`] process hook, the read-only
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
@@ -36,6 +37,7 @@ use std::{
         unix::process::CommandExt,
     },
     process::Command,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
@@ -61,6 +63,7 @@ const MAX_HANDOFF_FDS: usize = 2;
 const MAX_HANDOFF_BINDING_BYTES: usize = 256;
 const MAX_SEQPACKET_BYTES: usize = 1024 * 1024;
 const MIN_PRIVATE_DESCRIPTOR: RawFd = 3;
+const MAX_SYSTEMD_INHERITED_DESCRIPTORS: usize = 128;
 const CLOSE_RANGE_UNSHARE_AND_CLOEXEC: libc::c_uint =
     libc::CLOSE_RANGE_UNSHARE | libc::CLOSE_RANGE_CLOEXEC;
 const PID_ONE_LIFECYCLE_SIGNALS: [libc::c_int; 3] = [libc::SIGHUP, libc::SIGINT, libc::SIGTERM];
@@ -68,6 +71,7 @@ const PID_ONE_LIFECYCLE_MASK_BITS: u64 = signal_bit(libc::SIGHUP)
     | signal_bit(libc::SIGINT)
     | signal_bit(libc::SIGTERM)
     | signal_bit(libc::SIGCHLD);
+static SYSTEMD_DESCRIPTORS_SNAPSHOTTED: AtomicBool = AtomicBool::new(false);
 
 // glibc's amd64 `sigaction(2)` trampoline adds this Linux-internal flag to the action returned by
 // an exact readback. It is not caller selectable through this API and does not alter delivery.
@@ -130,6 +134,111 @@ pub fn duplicate_descriptor_cloexec<Fd: AsRawFd + ?Sized>(source: &Fd) -> io::Re
         return Err(invalid_data("duplicated descriptor is not close-on-exec"));
     }
     Ok(duplicate)
+}
+
+/// Takes a one-time owned snapshot of systemd's contiguous descriptor range.
+///
+/// The range starts at descriptor three as required by `sd_listen_fds(3)`. Every descriptor is
+/// preflighted and changed to close-on-exec, then duplicated with `F_DUPFD_CLOEXEC`. The returned
+/// descriptors are therefore newly created kernel objects with exactly one Rust owner; this safe
+/// API never claims ownership of a raw descriptor that another safe caller might already own.
+/// Storage is reserved before duplication. At most 128 descriptors (two per bounded helper worker)
+/// are accepted.
+///
+/// This process-global operation may succeed or fail only once. A second attempt is rejected so a
+/// startup caller cannot accidentally treat a later descriptor-table state as the same activation
+/// snapshot. On error after the one-time latch is acquired, the process must terminate rather than
+/// retry.
+///
+/// # Errors
+///
+/// Returns an error for a zero or excessive count, repeated adoption, allocation failure, a gap
+/// or invalid descriptor in the advertised range, or failed close-on-exec duplication/readback.
+pub fn duplicate_systemd_listen_descriptors(count: usize) -> io::Result<Vec<OwnedFd>> {
+    duplicate_contiguous_descriptors_once(
+        MIN_PRIVATE_DESCRIPTOR,
+        count,
+        &SYSTEMD_DESCRIPTORS_SNAPSHOTTED,
+    )
+}
+
+fn duplicate_contiguous_descriptors_once(
+    start: RawFd,
+    count: usize,
+    latch: &AtomicBool,
+) -> io::Result<Vec<OwnedFd>> {
+    if start < MIN_PRIVATE_DESCRIPTOR || count == 0 || count > MAX_SYSTEMD_INHERITED_DESCRIPTORS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited descriptor range is invalid",
+        ));
+    }
+    let count_raw = RawFd::try_from(count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited descriptor count overflows",
+        )
+    })?;
+    let end = start.checked_add(count_raw).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited descriptor range overflows",
+        )
+    })?;
+    latch
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "inherited descriptors were already adopted",
+            )
+        })?;
+
+    let mut descriptors = Vec::new();
+    descriptors
+        .try_reserve_exact(count)
+        .map_err(|_| io::Error::other("inherited descriptor owner allocation failed"))?;
+    for descriptor in start..end {
+        seal_raw_descriptor_cloexec(descriptor)?;
+    }
+    for descriptor in start..end {
+        let duplicate = retry_raw_fcntl(descriptor, libc::F_DUPFD_CLOEXEC, MIN_PRIVATE_DESCRIPTOR)?;
+        // SAFETY: `F_DUPFD_CLOEXEC` returned a newly allocated descriptor. No pre-existing Rust
+        // owner can refer to that new table entry, and it moves immediately into RAII ownership.
+        descriptors.push(unsafe { OwnedFd::from_raw_fd(duplicate) });
+    }
+    Ok(descriptors)
+}
+
+fn seal_raw_descriptor_cloexec(descriptor: RawFd) -> io::Result<()> {
+    let flags = retry_raw_fcntl(descriptor, libc::F_GETFD, 0)?;
+    let _ = retry_raw_fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC)?;
+    let sealed = retry_raw_fcntl(descriptor, libc::F_GETFD, 0)?;
+    if sealed & libc::FD_CLOEXEC == 0 {
+        return Err(invalid_data("inherited descriptor is not close-on-exec"));
+    }
+    Ok(())
+}
+
+fn retry_raw_fcntl(
+    descriptor: RawFd,
+    operation: libc::c_int,
+    argument: libc::c_int,
+) -> io::Result<libc::c_int> {
+    loop {
+        // SAFETY: the wrapper admits only the fixed `F_GETFD`, `F_SETFD` and `F_DUPFD_CLOEXEC`
+        // operations above. None dereferences caller memory. `F_SETFD` receives only previously
+        // observed flags plus `FD_CLOEXEC`; `F_DUPFD_CLOEXEC` creates a fresh descriptor at or
+        // above the fixed private-descriptor floor.
+        let result = unsafe { libc::fcntl(descriptor, operation, argument) };
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 /// Returns the Linux clone flag identifying an nsfs namespace descriptor.
@@ -1616,6 +1725,61 @@ mod tests {
         peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .expect("peer read timeout");
         assert_eq!(peer.read(&mut byte).expect("last owner closes"), 0);
+    }
+
+    #[test]
+    fn systemd_descriptor_snapshot_is_bounded_sealed_owned_and_one_shot() {
+        let (first, second) = UnixStream::pair().expect("open inherited descriptor pair");
+        let start = first.as_raw_fd();
+        let latch = AtomicBool::new(false);
+        fcntl(&first, FcntlArg::F_SETFD(FdFlag::empty()))
+            .expect("model inheritable systemd descriptor");
+
+        let snapshot = duplicate_contiguous_descriptors_once(start, 1, &latch)
+            .expect("snapshot contiguous inherited descriptors");
+        assert_eq!(snapshot.len(), 1);
+        assert_ne!(snapshot[0].as_raw_fd(), start);
+        for descriptor in [&first, &second] {
+            let flags = FdFlag::from_bits_truncate(
+                fcntl(descriptor, FcntlArg::F_GETFD).expect("read inherited descriptor flags"),
+            );
+            assert_eq!(flags, FdFlag::FD_CLOEXEC);
+        }
+        drop(snapshot);
+        first
+            .set_nonblocking(true)
+            .expect("original first owner remains valid");
+        second
+            .set_nonblocking(true)
+            .expect("original second owner remains valid");
+        assert_eq!(
+            duplicate_contiguous_descriptors_once(start, 1, &latch)
+                .expect_err("second ownership attempt must fail")
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn systemd_descriptor_snapshot_rejects_counts_before_consuming_latch() {
+        let latch = AtomicBool::new(false);
+        assert_eq!(
+            duplicate_contiguous_descriptors_once(MIN_PRIVATE_DESCRIPTOR, 0, &latch)
+                .expect_err("empty inheritance rejected")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            duplicate_contiguous_descriptors_once(
+                MIN_PRIVATE_DESCRIPTOR,
+                MAX_SYSTEMD_INHERITED_DESCRIPTORS + 1,
+                &latch,
+            )
+            .expect_err("excess inheritance rejected")
+            .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!latch.load(Ordering::Acquire));
     }
 
     #[test]
