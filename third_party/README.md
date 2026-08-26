@@ -21,7 +21,7 @@ directory. Only those exports receive the two reviewed patches:
 
 | Target | Patch | SHA-256 |
 |---|---|---|
-| mqvpn | `patches/volparossa-mqvpn.patch` | `dfeffe71a9db187a700a078f0f9f427a57f7eb69bfae2ba1b974a556bd22719d` |
+| mqvpn | `patches/volparossa-mqvpn.patch` | `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887` |
 | xquic | `patches/volparossa-xquic.patch` | `acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b` |
 
 The builder runs `git apply --check` before applying each patch and refuses a
@@ -40,7 +40,17 @@ The audit records unresolved capabilities as `false`. The patches close SPKI
 pinning, explicit peer-tuple binding, honest path-metric, server session
 correlation, credential-retirement, and caller-supplied TLS-secret-path seams.
 The mqvpn server now accepts bounded in-memory PEM identity and uses sealed
-anonymous Linux memfds for its synchronous xquic import. Native API version 6
+anonymous Linux memfds for its synchronous xquic import. The patched server
+also honours multipath=false, bounds app-accepted/pre-H3 QUIC connections by
+the validated MaxClients limit, and can pin all UDP ingress and egress to one
+exact canonical caller-supplied peer. Each H3 connection can claim only one
+lifetime-affine CONNECT-IP session; duplicate bodies and Datagram stream IDs
+cannot borrow the primary assignment, and all close/destroy paths share
+idempotent session cleanup. Raw lifecycle tests prove both N/N+1 admission and
+unsupported-ALPN pre-H3 cleanup release capacity for reuse. The patch
+intentionally leaves VOLPAROSSA's
+separate `MaxClients=1` product setting as a wrapper/runtime configuration
+non-goal instead of hard-coding it into general-purpose upstream mqvpn. Native API version 6
 implements role-specific preflight, a fresh per-process-start instance, exact request-digest
 correlation, bounded request-driven reverse polling, and separate multipath-at-least-two versus
 single-path-exactly-one modes without downgrade, and route-scoped auth/TLS

@@ -51,12 +51,15 @@ legal advice.
 
 | Target | Patch and SHA-256 | Purpose and security effect |
 |---|---|---|
-| mqvpn | `patches/volparossa-mqvpn.patch`; `dfeffe71a9db187a700a078f0f9f427a57f7eb69bfae2ba1b974a556bd22719d` | Requires a caller-supplied leaf-SPKI SHA-256 pin, parses and compares it in constant time, propagates explicit path tuples, exposes honest path counters, attaches a stable server session ID to client-originated inner packets, accepts bounded in-memory server PEM identity through sealed anonymous Linux memfds for synchronous xquic import, and wipes copied credentials, identity PEM, and temporary pin material. |
+| mqvpn | `patches/volparossa-mqvpn.patch`; `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887` | Requires a caller-supplied leaf-SPKI SHA-256 pin, propagates explicit path tuples and honest counters, accepts bounded in-memory server PEM identity through sealed anonymous Linux memfds, wipes copied secrets, honours `multipath=false`, bounds pre-H3 mqvpn admission, pins one exact UDP peer, and enforces one lifetime-affine CONNECT-IP claim with idempotent request/connection teardown and duplicate body/Datagram isolation. |
 | xquic | `patches/volparossa-xquic.patch`; `acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b` | Invokes the requested certificate callback for every handshake, creates paths with explicit local and remote tuples, labels ACKed transport bytes without claiming unique payload delivery, avoids zero-length null-pointer copies during initial ALPN, empty session-ticket setup, and bodiless stream FIN handling, and returns overflow-checked, `XQC_ALIGNMENT`-aligned large pool allocations. |
 
-The mqvpn patch adds `src/spki_pin.c`, `src/spki_pin.h`, and
-`tests/test_spki_pin.c` as GPL-3.0-only files. Its changes to existing
-Apache-2.0 upstream files preserve their upstream license and notices.
+The mqvpn patch adds `src/spki_pin.c`, `src/spki_pin.h`,
+`src/server_hardening.c`, `src/server_hardening.h`,
+`tests/test_spki_pin.c`, `tests/test_server_hardening.c`, and
+`tests/test_server_adversarial.c` as GPL-3.0-only files. Its changes to
+existing Apache-2.0 upstream files preserve their upstream license and
+notices.
 
 No local patch is applied to lwIP or BoringSSL. The builder checks both patch
 hashes, runs `git apply --check`, and applies them only to fresh
@@ -255,6 +258,35 @@ network-namespace dataplane acceptance. The proven replay ledger is
 process-local and the accepted wall lifetime is converted once to a
 `CLOCK_BOOTTIME` deadline; neither claim supplies the missing production
 verifier and affine handoff.
+
+The current mqvpn connection/session hardening patch was then reverified from
+fresh locked-tree exports on Debian 13 amd64 on 2026-08-26:
+
+- `verify-upstream.sh` accepted every locked commit, tree, tag, gitlink,
+  origin, license, bundled file, and the mqvpn patch SHA-256
+  `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887`;
+  `git apply --check` also accepted the patch directly against mqvpn commit
+  `607c0df921e2c23bae8bea21cb3c6f2acb2db275`.
+- The ordinary patched mqvpn/lwIP suite passed all 35 tests. Its raw QUIC/H3
+  adversarial test covers concurrent and sequential duplicate CONNECT-IP
+  requests, rejected-stream ADDRESS_REQUEST bodies and Datagram IDs,
+  owner-only close, request-close and connection-close teardown, mixed server
+  destroy, pre-H3 `MaxClients` N/N+1 refusal plus capacity reuse, and
+  app-admitted unsupported-ALPN cleanup plus capacity reuse through
+  `cb_refuse`. Mutation checks proved both the owner-QSID and `cb_refuse`
+  assertions fail when their respective production checks are removed.
+- A fresh offline ASan+UBSan graph instrumented 350 BoringSSL, 156 xquic, 150
+  mqvpn/lwIP, and 20 wrapper C/C++ compile commands; audited link counts were
+  1, 1, 34, and 10. All 35 mqvpn/lwIP and all 9 wrapper tests passed with leak
+  detection and halt/abort-on-error enabled.
+- The sanitized daemon's side-effect-free API-v6 probe and bounded SIGINT and
+  SIGTERM lifecycle checks passed and removed their exact mode-`0600` sockets.
+
+This run proves the bounded upstream connection/session lifecycle and native
+unit boundaries only. It does not hard-code VOLPAROSSA's separate
+`MaxClients=1` product policy and does not prove helper provenance, a usable
+exit lifecycle, the separate BoringSSL Go or xquic CUnit suites, or disposable
+network-namespace dataplane acceptance.
 
 This evidence proves reproducible source intake, compilation, and bounded
 native behavior. It is not namespace dataplane acceptance.

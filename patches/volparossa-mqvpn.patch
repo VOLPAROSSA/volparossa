@@ -1,8 +1,8 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 99fcc0f..b7e50c5 100644
+index 99fcc0f..3e9a37e 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -209,10 +209,19 @@ else()
+@@ -209,11 +209,21 @@ else()
  endif()
  message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
  
@@ -20,9 +20,11 @@ index 99fcc0f..b7e50c5 100644
      src/mqvpn_client.c
 +    src/spki_pin.c
      src/mqvpn_server.c
++    src/server_hardening.c
      src/mqvpn_conn_settings.c
      src/mqvpn_util.c
-@@ -387,7 +396,7 @@ else()
+     src/path_state_machine.c
+@@ -387,7 +397,7 @@ else()
  endif()
  target_include_directories(mqvpn_lib
      PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -31,7 +33,7 @@ index 99fcc0f..b7e50c5 100644
  )
  if(ANDROID_CROSS_COMPILE)
      # Android NDK: pthread is in libc, no separate -lpthread
-@@ -556,7 +565,7 @@ set_target_properties(mqvpn_shared PROPERTIES
+@@ -556,7 +566,7 @@ set_target_properties(mqvpn_shared PROPERTIES
  )
  target_include_directories(mqvpn_shared
      PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -40,7 +42,7 @@ index 99fcc0f..b7e50c5 100644
  )
  # Shared lib links shared xquic, same as Linux (static .a is unusable there
  # for -fPIC reasons; kept symmetric here even though clang on Darwin emits
-@@ -675,7 +684,7 @@ set_target_properties(mqvpn_shared PROPERTIES
+@@ -675,7 +685,7 @@ set_target_properties(mqvpn_shared PROPERTIES
  )
  target_include_directories(mqvpn_shared
      PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -49,7 +51,7 @@ index 99fcc0f..b7e50c5 100644
  )
  # Shared lib needs shared xquic (static .a lacks -fPIC)
  target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
-@@ -764,7 +773,15 @@ if(BUILD_TESTING)
+@@ -764,7 +774,18 @@ if(BUILD_TESTING)
      # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
      # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
      add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
@@ -59,27 +61,61 @@ index 99fcc0f..b7e50c5 100644
 +    target_compile_definitions(test_spki_pin PRIVATE
 +        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt")
 +    target_link_libraries(test_spki_pin ${CRYPTO_LIB} pthread dl stdc++)
++    add_executable(test_server_hardening tests/test_server_hardening.c
++                   src/server_hardening.c)
 +    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check
 +        test_flow_sched test_status test_path_state_machine test_control_response_bound
 +        test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config
-+        test_classifier test_icmp test_reorder_gate test_spki_pin)
++        test_classifier test_icmp test_reorder_gate test_spki_pin
++        test_server_hardening)
  
      # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
      # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
+@@ -904,6 +925,20 @@ if(BUILD_TESTING)
+     # regression fails fast rather than stalling the suite for ctest's default.
+     set_tests_properties(test_server_preaccept_dos PROPERTIES TIMEOUT 60)
+ 
++    # Raw H3 adversarial lifecycle test: concurrent/sequential duplicate
++    # CONNECT-IP streams, request/connection/mixed destroy cleanup, and a
++    # pre-auth MaxClients N/N+1 refusal/reuse sequence.
++    add_executable(test_server_adversarial tests/test_server_adversarial.c)
++    target_link_libraries(test_server_adversarial mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
++    target_include_directories(test_server_adversarial PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
++    target_compile_definitions(test_server_adversarial PRIVATE
++        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
++        TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
++    )
++    set_target_properties(test_server_adversarial PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
++    add_test(NAME test_server_adversarial COMMAND test_server_adversarial)
++    set_tests_properties(test_server_adversarial PROPERTIES TIMEOUT 60)
++
+     # Scheduler dispatch test (xquic-dependent — needs XQUIC_INCLUDE_DIR)
+     add_executable(test_scheduler tests/test_scheduler.c)
+     target_link_libraries(test_scheduler mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
 diff --git a/include/libmqvpn.h b/include/libmqvpn.h
-index 8b5151f..9424e36 100644
+index 8b5151f..c7fedee 100644
 --- a/include/libmqvpn.h
 +++ b/include/libmqvpn.h
-@@ -50,6 +50,8 @@ extern "C" {
+@@ -49,7 +49,10 @@ extern "C" {
+ 
  #define MQVPN_MAX_USERS            64
  #define MQVPN_MAX_PATHS            8
++#define MQVPN_SERVER_CONNECTION_LIMIT_MAX 254U
  #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
 +#define MQVPN_TLS_CERTIFICATE_PEM_MAX (64U * 1024U)
 +#define MQVPN_TLS_PRIVATE_KEY_PEM_MAX (16U * 1024U)
  
  /* ─── Opaque handles ─── */
  
-@@ -300,6 +302,18 @@ typedef struct {
+@@ -76,6 +79,7 @@ typedef enum {
+     MQVPN_ERR_ABI_MISMATCH = -11,  /* callback ABI version mismatch */
+     MQVPN_ERR_TIMEOUT = -12,       /* connection timeout */
+     MQVPN_ERR_INVALID_STATE = -13, /* operation not valid in current state */
++    MQVPN_ERR_PEER_MISMATCH = -14, /* server: datagram is not from pinned peer */
+ } mqvpn_error_t;
+ 
+ /* ─── Enumerations ─── */
+@@ -300,6 +304,18 @@ typedef struct {
      uint64_t raw_markers_active;
  } mqvpn_stats_t;
  
@@ -98,7 +134,7 @@ index 8b5151f..9424e36 100644
  typedef struct {
      uint32_t struct_size;
      mqvpn_path_handle_t handle;
-@@ -308,6 +322,14 @@ typedef struct {
+@@ -308,6 +324,14 @@ typedef struct {
      int srtt_ms;
      uint64_t bytes_tx;
      uint64_t bytes_rx;
@@ -113,7 +149,7 @@ index 8b5151f..9424e36 100644
  } mqvpn_path_info_t;
  
  typedef struct {
-@@ -351,12 +373,21 @@ typedef struct {
+@@ -351,12 +375,21 @@ typedef struct {
      uint32_t local_addr_len;
      int64_t platform_net_id; /* Android: Network handle */
      uint32_t flags;
@@ -135,7 +171,7 @@ index 8b5151f..9424e36 100644
  typedef void (*mqvpn_tunnel_config_ready_fn)(const mqvpn_tunnel_info_t *info,
                                               void *user_ctx);
  
-@@ -458,6 +489,9 @@ typedef struct {
+@@ -458,6 +491,9 @@ typedef struct {
      void (*egress_fd_register)(int fd, int want_read, int want_write, void *fd_ctx,
                                 void *user_ctx);
      void (*egress_fd_unregister)(int fd, void *user_ctx);
@@ -145,7 +181,7 @@ index 8b5151f..9424e36 100644
  } mqvpn_server_callbacks_t;
  
  #define MQVPN_SERVER_CALLBACKS_INIT                      \
-@@ -477,6 +511,13 @@ MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
+@@ -477,6 +513,13 @@ MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
  MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port);
  MQVPN_API int mqvpn_config_set_tls_server_name(mqvpn_config_t *cfg, const char *name);
  MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key);
@@ -159,7 +195,7 @@ index 8b5151f..9424e36 100644
  MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,
                                      const char *key);
  MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username);
-@@ -613,6 +654,17 @@ MQVPN_API int mqvpn_config_set_subnet(mqvpn_config_t *cfg, const char *cidr);
+@@ -613,6 +656,19 @@ MQVPN_API int mqvpn_config_set_subnet(mqvpn_config_t *cfg, const char *cidr);
  MQVPN_API int mqvpn_config_set_subnet6(mqvpn_config_t *cfg, const char *cidr6);
  MQVPN_API int mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert,
                                          const char *key);
@@ -174,9 +210,28 @@ index 8b5151f..9424e36 100644
 +    mqvpn_config_t *cfg, const uint8_t *certificate_pem,
 +    size_t certificate_pem_len, const uint8_t *private_key_pem,
 +    size_t private_key_pem_len);
++/* Bounds authenticated sessions and all accepted/pre-auth QUIC connections.
++ * Valid range is 1..MQVPN_SERVER_CONNECTION_LIMIT_MAX. */
  MQVPN_API int mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max);
  
  /* ─── Client API ─── */
+@@ -768,6 +824,16 @@ MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
+ MQVPN_API int mqvpn_server_set_socket_fd(mqvpn_server_t *server, int fd,
+                                          const struct sockaddr *local_addr,
+                                          socklen_t local_addrlen);
++/* Atomically installs the UDP fd/local tuple and a mandatory exact remote
++ * peer pin. peer_addr must be a concrete unicast IPv4/IPv6 address with a
++ * non-zero port. Once configured, off-peer ingress is rejected before xquic
++ * packet processing and every send is checked against, then directed to, the
++ * stored canonical peer. The peer can be changed only before start and while
++ * no accepted or pre-authenticated QUIC connection exists. */
++MQVPN_API int mqvpn_server_set_socket_fd_pinned_peer(
++    mqvpn_server_t *server, int fd, const struct sockaddr *local_addr,
++    socklen_t local_addrlen, const struct sockaddr *peer_addr,
++    socklen_t peer_addrlen);
+ MQVPN_API int mqvpn_server_start(mqvpn_server_t *server);
+ MQVPN_API int mqvpn_server_stop(mqvpn_server_t *server);
+ 
 diff --git a/src/mqvpn_client.c b/src/mqvpn_client.c
 index c79c535..44199d4 100644
 --- a/src/mqvpn_client.c
@@ -404,7 +459,7 @@ index c79c535..44199d4 100644
      }
      *n_paths = count;
 diff --git a/src/mqvpn_config.c b/src/mqvpn_config.c
-index f14f760..4cf3fc2 100644
+index f14f760..df64fdc 100644
 --- a/src/mqvpn_config.c
 +++ b/src/mqvpn_config.c
 @@ -164,6 +164,7 @@ void
@@ -478,7 +533,7 @@ index f14f760..4cf3fc2 100644
          mqvpn_copy_str(cfg->tls_key, sizeof(cfg->tls_key), tmp);
      }
  
-@@ -569,11 +589,44 @@ int
+@@ -569,15 +589,51 @@ int
  mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert, const char *key)
  {
      if (!cfg || !cert || !key) return MQVPN_ERR_INVALID_ARG;
@@ -523,6 +578,58 @@ index f14f760..4cf3fc2 100644
  int
  mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max)
  {
+-    if (!cfg) return MQVPN_ERR_INVALID_ARG;
++    if (!cfg || max <= 0 ||
++        (uint32_t)max > MQVPN_SERVER_CONNECTION_LIMIT_MAX) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
+     cfg->max_clients = max;
+     return MQVPN_OK;
+ }
+diff --git a/src/mqvpn_conn_settings.c b/src/mqvpn_conn_settings.c
+index 34257b9..5ac1b59 100644
+--- a/src/mqvpn_conn_settings.c
++++ b/src/mqvpn_conn_settings.c
+@@ -158,18 +158,18 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
+         break;
+     }
+ 
+-    /* --- intentional client/server asymmetry (4) ---
++    /* --- intentional client/server asymmetry ---
+      * Each branch documents why these fields differ between sides. Do not
+      * collapse without revisiting tests/test_conn_settings.c
+      * test_asymmetry_server_vs_client. */
+     if (in->is_server) {
+-        /* server allows multipath unconditionally; client side gates on
+-         * cfg->multipath. draft-21 §3.2.1 ¶7 PATHS_BLOCKED auto-grant
+-         * (max_path_id_grant_max_value) is server-only because mqvpn's
+-         * client is the active path creator. */
+-        out->enable_multipath = 1;
+-        out->mp_ping_on = 1;
+-        out->max_path_id_grant_max_value = 128;
++        /* The server honours the same explicit multipath switch as the
++         * client. draft-21 PATHS_BLOCKED auto-grant is relevant only when
++         * multipath is enabled; mqvpn's client remains the active path
++         * creator. */
++        out->enable_multipath = in->enable_multipath ? 1 : 0;
++        out->mp_ping_on = in->enable_multipath ? 1 : 0;
++        out->max_path_id_grant_max_value = in->enable_multipath ? 128 : 0;
+     } else {
+         /* client carries the keep-alive role (ping_on=1) and gates MP on
+          * cfg->multipath. */
+diff --git a/src/mqvpn_conn_settings.h b/src/mqvpn_conn_settings.h
+index b401fd5..0cdec60 100644
+--- a/src/mqvpn_conn_settings.h
++++ b/src/mqvpn_conn_settings.h
+@@ -19,7 +19,7 @@
+  * `is_server` flag) so each call site documents its intent. */
+ typedef struct {
+     bool is_server;
+-    bool enable_multipath; /* server callers pass true */
++    bool enable_multipath; /* honoured on both client and server */
+     mqvpn_scheduler_t scheduler;
+     mqvpn_cc_t cc;                    /* congestion control algorithm */
+     uint64_t init_max_path_id;        /* 0 = leave xquic default */
 diff --git a/src/mqvpn_internal.h b/src/mqvpn_internal.h
 index 93e7317..f0dba4b 100644
 --- a/src/mqvpn_internal.h
@@ -587,7 +694,7 @@ index 93e7317..f0dba4b 100644
  
  int mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to);
 diff --git a/src/mqvpn_server.c b/src/mqvpn_server.c
-index c80bf4f..559d197 100644
+index c80bf4f..548f220 100644
 --- a/src/mqvpn_server.c
 +++ b/src/mqvpn_server.c
 @@ -4,9 +4,15 @@
@@ -619,7 +726,15 @@ index c80bf4f..559d197 100644
  #  include <pthread.h>
  #endif
  #ifndef _WIN32
-@@ -66,6 +77,96 @@
+@@ -56,6 +67,7 @@
+ #include "reorder_gate.h"
+ #include "reorder_rx.h"
+ #include "reorder_tx.h"
++#include "server_hardening.h"
+ #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
+ #  include "hybrid/tcp_egress.h"
+ #endif
+@@ -66,6 +78,96 @@
  #define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
  #define MAX_CAPSULE_BUF  65536
  
@@ -716,7 +831,32 @@ index c80bf4f..559d197 100644
  /* ─── Forward declarations ─── */
  
  typedef struct svr_conn_s svr_conn_t;
-@@ -92,6 +193,7 @@ struct svr_conn_s {
+@@ -75,6 +177,9 @@ typedef struct svr_stream_s svr_stream_t;
+ 
+ struct svr_conn_s {
+     mqvpn_server_t *server;
++    svr_conn_t *admission_prev;
++    svr_conn_t *admission_next;
++    int admission_reserved;
+     xqc_h3_conn_t *h3_conn;
+     xqc_cid_t cid;
+     struct sockaddr_storage peer_addr;
+@@ -82,6 +187,14 @@ struct svr_conn_s {
+ 
+     /* MASQUE session */
+     uint64_t masque_stream_id;
++    /* A QUIC connection may own exactly one CONNECT-IP request for its
++     * entire lifetime. connect_ip_claimed is intentionally never cleared:
++     * a peer cannot close/reset a tunnel stream and then reuse the same
++     * authenticated connection for a fresh address/session. The owner pointer
++     * distinguishes that request from rejected duplicate streams during
++     * close callbacks. */
++    int connect_ip_claimed;
++    svr_stream_t *connect_ip_owner;
+     struct in_addr assigned_ip;
+     struct in6_addr assigned_ip6;
+     int has_v6;
+@@ -92,6 +205,7 @@ struct svr_conn_s {
  
      /* Auth identity (set on CONNECT-IP auth success) */
      char username[64];
@@ -724,7 +864,192 @@ index c80bf4f..559d197 100644
      uint64_t connected_at_us;
  
      /* Flow-aware reorder shim (§5). Created on accept when cfg.reorder.mode
-@@ -647,6 +749,7 @@ svr_conn_free(svr_conn_t *conn)
+@@ -122,6 +236,10 @@ static void svr_conn_free(svr_conn_t *conn);
+ typedef enum {
+     SVR_STREAM_ROLE_UNKNOWN = 0,
+     SVR_STREAM_ROLE_CONNECT_IP,
++    /* A syntactically valid CONNECT-IP request that lost the connection's
++     * lifetime-affine one-claim race. It may be drained and closed, but must
++     * never reach owner body/write/teardown handling. */
++    SVR_STREAM_ROLE_REJECTED_CONNECT_IP,
+ #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
+     SVR_STREAM_ROLE_CONNECT_TCP,
+ #endif
+@@ -160,6 +278,7 @@ struct mqvpn_server_s {
+     int udp_fd;
+     struct sockaddr_storage local_addr;
+     socklen_t local_addrlen;
++    mqvpn_server_peer_pin_t peer_pin;
+ 
+     /* Address pool */
+     mqvpn_addr_pool_t pool;
+@@ -168,6 +287,8 @@ struct mqvpn_server_s {
+     svr_conn_t *sessions[MQVPN_ADDR_POOL_MAX + 1];
+     int n_sessions;
+     int max_clients;
++    mqvpn_server_admission_t admission;
++    svr_conn_t *admission_head;
+ 
+     /* Backpressure */
+     int tun_paused;
+@@ -451,15 +572,58 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
+ 
+ /* ─── UDP send helper ─── */
+ 
++static void
++svr_admission_link(mqvpn_server_t *server, svr_conn_t *conn)
++{
++    conn->admission_prev = NULL;
++    conn->admission_next = server->admission_head;
++    if (server->admission_head != NULL) {
++        server->admission_head->admission_prev = conn;
++    }
++    server->admission_head = conn;
++    conn->admission_reserved = 1;
++}
++
++static void
++svr_admission_unlink(svr_conn_t *conn)
++{
++    if (conn == NULL || !conn->admission_reserved) return;
++    mqvpn_server_t *server = conn->server;
++    if (conn->admission_prev != NULL) {
++        conn->admission_prev->admission_next = conn->admission_next;
++    } else if (server != NULL && server->admission_head == conn) {
++        server->admission_head = conn->admission_next;
++    }
++    if (conn->admission_next != NULL) {
++        conn->admission_next->admission_prev = conn->admission_prev;
++    }
++    conn->admission_prev = NULL;
++    conn->admission_next = NULL;
++    conn->admission_reserved = 0;
++    if (server != NULL) {
++        (void)mqvpn_server_admission_release(&server->admission);
++    }
++}
++
+ static ssize_t
+ svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
+             const struct sockaddr *peer, socklen_t peerlen)
+ {
+     if (s->udp_fd < 0) return XQC_SOCKET_ERROR;
++    const struct sockaddr *destination = peer;
++    socklen_t destination_len = peerlen;
++    if (s->peer_pin.configured) {
++        if (!mqvpn_server_peer_pin_matches(&s->peer_pin, peer, peerlen)) {
++            LOG_W(s, "blocked xquic send to off-pin UDP peer");
++            return XQC_SOCKET_ERROR;
++        }
++        destination = mqvpn_server_peer_pin_addr(&s->peer_pin, &destination_len);
++        if (destination == NULL) return XQC_SOCKET_ERROR;
++    }
+     ssize_t res;
+     do {
+         /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
+-        res = sendto(s->udp_fd, buf, (int)size, 0, peer, peerlen);
++        res = sendto(s->udp_fd, buf, (int)size, 0, destination, destination_len);
+     } while (res < 0 && errno == EINTR);
+     if (res < 0) {
+         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
+@@ -503,6 +667,17 @@ cb_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
+     (void)engine;
+     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
+ 
++    /* Reserve at the first application callback, before mqvpn's per-connection
++     * context allocation and H3 authentication. xquic has already allocated
++     * transport/TLS connection state at this point. This makes max_clients a
++     * hard bound on every app-accepted QUIC connection, including connections
++     * stalled before H3 authentication. */
++    if (mqvpn_server_admission_reserve(&s->admission) != 0) {
++        LOG_W(s, "connection limit reached (%u), refusing pre-auth peer",
++              s->admission.limit);
++        return -1;
++    }
++
+     /* Allocate the per-connection context at the headmost server callback and
+      * bind it as the transport user_data NOW. Immediately after this returns,
+      * xquic sets SERVER_ACCEPT and every server->client send switches to
+@@ -516,10 +691,12 @@ cb_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
+      * closed before H3). */
+     svr_conn_t *conn_ctx = calloc(1, sizeof(*conn_ctx));
+     if (!conn_ctx) {
++        (void)mqvpn_server_admission_release(&s->admission);
+         LOG_E(s, "accept: connection context alloc failed");
+         return -1; /* refuse: SERVER_ACCEPT is not set, nothing to free */
+     }
+     conn_ctx->server = s;
++    svr_admission_link(s, conn_ctx);
+     /* cid may be misaligned inside xquic's internal structures */
+     memcpy(&conn_ctx->cid, (const void *)cid, sizeof(conn_ctx->cid));
+     xqc_conn_set_transport_user_data(conn, conn_ctx);
+@@ -629,16 +806,59 @@ cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_
+     return 0;
+ }
+ 
+-/* Full per-conn teardown: free the reorder shim engines (allocated in
+- * cb_h3_conn_create) and the svr_conn_t itself. Shared by cb_h3_conn_close and
+- * the mqvpn_server_destroy defensive sweep so the two sites cannot drift and
+- * leak the reorder engines. Does NOT touch the session table / addr pool /
+- * disconnect callback — that bookkeeping is close-callback-specific and runs
+- * before this is called. */
++/* Idempotent teardown for the CONNECT-IP session owned by conn. This is the
++ * sole place that removes the session-table entry, decrements n_sessions,
++ * releases an assigned address and reports disconnection. It is called both
++ * when the request stream closes and when the whole H3 connection is freed;
++ * the second call is deliberately a no-op for already-cleared state. */
++static void
++svr_session_teardown(svr_conn_t *conn, mqvpn_error_t reason)
++{
++    if (!conn || !conn->server) return;
++
++    mqvpn_server_t *s = conn->server;
++    uint32_t session_id = conn->session_id;
++    int registered =
++        session_id > 0 && session_id <= MQVPN_ADDR_POOL_MAX &&
++        s->sessions[session_id] == conn;
++
++    if (registered) {
++        s->sessions[session_id] = NULL;
++        if (s->n_sessions > 0) s->n_sessions--;
++
++        char ip_str[INET_ADDRSTRLEN] = "?";
++        (void)inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
++        LOG_I(s, "session removed: %s (active=%d)", ip_str, s->n_sessions);
++
++        if (s->cbs.on_client_disconnected) {
++            s->cbs.on_client_disconnected(session_id, reason, s->user_ctx);
++        }
++    }
++
++    if (conn->assigned_ip.s_addr != 0) {
++        mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
++    }
++    memset(&conn->assigned_ip, 0, sizeof(conn->assigned_ip));
++    memset(&conn->assigned_ip6, 0, sizeof(conn->assigned_ip6));
++    conn->has_v6 = 0;
++    conn->session_id = 0;
++    conn->masque_stream_id = 0;
++    conn->tunnel_established = 0;
++    conn->connect_ip_owner = NULL;
++}
++
++/* Full per-conn teardown: centrally tear down any CONNECT-IP session, free
++ * the reorder shim engines (allocated in cb_h3_conn_create), release the
++ * pre-auth admission reservation, and free the context. Shared by H3 close,
++ * pre-H3 refusal and the mqvpn_server_destroy defensive sweep. */
+ static void
+ svr_conn_free(svr_conn_t *conn)
+ {
+     if (!conn) return;
++    svr_session_teardown(conn, MQVPN_ERR_CLOSED);
++    /* Exactly-once admission release for every H3 close, pre-H3 refusal,
++     * engine failure teardown, and the server-destroy defensive sweep. */
++    svr_admission_unlink(conn);
+     if (conn->reorder_tx) {
+         mqvpn_reorder_tx_free(conn->reorder_tx);
+         conn->reorder_tx = NULL;
+@@ -647,6 +867,7 @@ svr_conn_free(svr_conn_t *conn)
          mqvpn_reorder_rx_free(conn->reorder_rx);
          conn->reorder_rx = NULL;
      }
@@ -732,7 +1057,52 @@ index c80bf4f..559d197 100644
      free(conn);
  }
  
-@@ -911,6 +1014,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
+@@ -662,21 +883,6 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
+     LOG_I(s, "server dgram summary: acked=%" PRIu64 " lost=%" PRIu64,
+           conn->dgram_acked_cnt, conn->dgram_lost_cnt);
+ 
+-    if (conn->assigned_ip.s_addr) {
+-        uint32_t offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
+-        if (offset > 0 && offset <= MQVPN_ADDR_POOL_MAX && s->sessions[offset] == conn) {
+-            s->sessions[offset] = NULL;
+-            s->n_sessions--;
+-            char ip_str[INET_ADDRSTRLEN];
+-            inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
+-            LOG_I(s, "session removed: %s (active=%d)", ip_str, s->n_sessions);
+-
+-            if (s->cbs.on_client_disconnected)
+-                s->cbs.on_client_disconnected(offset, MQVPN_ERR_CLOSED, s->user_ctx);
+-        }
+-        mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
+-    }
+-
+     LOG_I(s, "H3 connection closed");
+     svr_conn_free(conn);
+     return 0;
+@@ -710,6 +916,22 @@ svr_masque_send_403(xqc_h3_request_t *h3_request)
+     return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
+ }
+ 
++/* A connection already owns (or previously owned) its one permitted
++ * CONNECT-IP request. End only this duplicate response stream; returning 0
++ * from the read callback keeps the legitimate tunnel on the H3 connection
++ * alive. */
++static int
++svr_masque_send_409(xqc_h3_request_t *h3_request)
++{
++    xqc_http_header_t resp[] = {
++        {.name = {.iov_base = ":status", .iov_len = 7},
++         .value = {.iov_base = "409", .iov_len = 3},
++         .flags = 0},
++    };
++    xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
++    return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
++}
++
+ /* Unrecognized :protocol (or missing Extended CONNECT framing entirely):
+  * explicit 501, replacing the historical silent capsule fall-through. */
+ static int
+@@ -911,6 +1133,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
      /* Register in session table */
      uint32_t ip_off = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
      if (ip_off > 0 && ip_off <= MQVPN_ADDR_POOL_MAX) {
@@ -740,7 +1110,135 @@ index c80bf4f..559d197 100644
          s->sessions[ip_off] = conn;
          s->n_sessions++;
      }
-@@ -1587,7 +1691,13 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
+@@ -988,13 +1211,13 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
+     (void)h3_request;
+     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
+     if (stream) {
+-        /* Only the CONNECT-IP tunnel stream owns tunnel_established — a
+-         * closing non-tunnel stream (per-flow connect-tcp, or a 501'd
+-         * unknown request) on the same H3 connection must not flip the
+-         * tunnel dead. Mirrors the client-side role gate in
+-         * mqvpn_client.c's cb_request_close. */
+-        if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
+-            stream->conn->tunnel_established = 0;
++        /* Only the uniquely claimed CONNECT-IP request owns the session.
++         * A rejected duplicate is also tagged CONNECT_IP for dispatch, but
++         * must never tear down the primary request's table entry/address. */
++        if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP &&
++            stream->conn->connect_ip_owner == stream) {
++            svr_session_teardown(stream->conn, MQVPN_ERR_CLOSED);
++        }
+ #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
+         /* A connect-tcp stream can close (client resets it, or the H3
+          * connection itself is torn down) while its egress flow is still
+@@ -1021,8 +1244,9 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
+  * mqvpn_server_internal.h (see that header for why only this struct + two
+  * accessor functions moved, not the rest of this file's internals). */
+ 
+-/* Walks the header list; also sets conn->peer_reorder_supported on the
+- * mqvpn-reorder echo (deliberate side effect). */
++/* Walks the header list without mutating connection state. CONNECT-IP commits
++ * negotiation fields only after it has atomically claimed the connection's
++ * single request slot. */
+ static void
+ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
+                           xqc_http_headers_t *headers, svr_req_headers_t *out)
+@@ -1066,8 +1290,7 @@ svr_parse_request_headers(mqvpn_server_t *s, svr_stream_t *stream,
+         /* §19.3: client advertised mqvpn-reorder → it supports the shim. */
+         if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
+                                        h->value.iov_base, h->value.iov_len)) {
+-            stream->conn->peer_reorder_supported = 1;
+-            LOG_I(s, "client advertised mqvpn-reorder");
++            out->has_reorder_support = 1;
+         }
+     }
+ }
+@@ -1141,6 +1364,8 @@ static int
+ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
+                           xqc_h3_request_t *h3_request, const svr_req_headers_t *hdrs)
+ {
++    char username[sizeof(stream->conn->username)] = {0};
++
+     if (!hdrs->has_scheme_https || !hdrs->has_valid_path || !hdrs->has_capsule_proto) {
+         LOG_W(s,
+               "rejecting CONNECT-IP: missing headers "
+@@ -1150,8 +1375,6 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
+     }
+ 
+     if (svr_auth_required(s)) {
+-        char username[sizeof(stream->conn->username)];
+-
+         if (svr_auth_check(s, hdrs->auth_token, hdrs->auth_token_len, username,
+                            sizeof(username)) != 0) {
+             LOG_W(s, "authentication failed: invalid or missing PSK");
+@@ -1159,11 +1382,32 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
+             return -1;
+         }
+ 
++    }
++
++    /* Claim before any success response or address/session allocation. The
++     * claimed bit is lifetime-affine and never cleared, including after
++     * request close, so one QUIC connection can never acquire two tunnel
++     * identities sequentially or concurrently. */
++    if (stream->conn->connect_ip_claimed) {
++        LOG_W(s, "rejecting duplicate CONNECT-IP request on one connection");
++        stream->role = SVR_STREAM_ROLE_REJECTED_CONNECT_IP;
++        /* A transient failure to write the 409 must not escalate a duplicate
++         * request into an H3 connection error that tears down the legitimate
++         * primary tunnel. The request remains unclaimed and cannot allocate
++         * any session resources either way. */
++        (void)svr_masque_send_409(h3_request);
++        return 0;
++    }
++    stream->conn->connect_ip_claimed = 1;
++    stream->conn->connect_ip_owner = stream;
++
++    if (svr_auth_required(s)) {
+         stream->conn->connected_at_us = now_us();
+         snprintf(stream->conn->username, sizeof(stream->conn->username), "%s", username);
+-
+         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
+     }
++    stream->conn->peer_reorder_supported = hdrs->has_reorder_support;
++    if (hdrs->has_reorder_support) LOG_I(s, "client advertised mqvpn-reorder");
+ 
+     LOG_I(s, "Extended CONNECT for connect-ip received");
+     if (svr_masque_send_response(h3_request, stream) < 0) return -1;
+@@ -1301,6 +1545,16 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
+     unsigned char fin = 0;
+     unsigned char buf[4096];
+     ssize_t n;
++
++    /* Defense in depth: only the exact claimed request may parse capsules or
++     * answer ADDRESS_REQUEST using connection-owned assignment state. A
++     * rejected duplicate remains a bidirectional stream even after the 409
++     * response FIN, so an adversary can still upload a body on it. */
++    if (!stream->conn || stream->conn->connect_ip_owner != stream) {
++        while (xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin) > 0) {
++        }
++        return 0;
++    }
+     do {
+         n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
+         if (n <= 0) break;
+@@ -1446,6 +1700,15 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
+         switch (stream->role) {
+         case SVR_STREAM_ROLE_CONNECT_IP:
+             return svr_connect_ip_on_body(s, stream, h3_request);
++        case SVR_STREAM_ROLE_REJECTED_CONNECT_IP: {
++            /* The 409 ended the response direction only. Drain hostile upload
++             * data without parsing capsules or consulting primary assignment
++             * state, preserving flow-control progress for the real owner. */
++            unsigned char drain[4096];
++            while (xqc_h3_request_recv_body(h3_request, drain, sizeof(drain), &fin) > 0) {
++            }
++            return 0;
++        }
+ #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
+         case SVR_STREAM_ROLE_CONNECT_TCP:
+             /* Handled above in the CONNECT_TCP-scoped block
+@@ -1587,7 +1850,13 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
  
      s->bytes_rx += len;
      s->dgram_recv++;
@@ -755,7 +1253,19 @@ index c80bf4f..559d197 100644
  }
  
  /* Reorder RX deliver() trampoline: routes in-order packets from the reorder
-@@ -1698,8 +1808,12 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+@@ -1615,6 +1884,11 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
+     xqc_int_t xret = xqc_h3_ext_masque_unframe_udp((const uint8_t *)data, data_len, &qsid,
+                                                    &ctx_id, &payload, &payload_len);
+     if (xret != XQC_OK) return;
++    /* HTTP Datagrams are connection callbacks in xquic, so explicitly bind
++     * them back to the sole claimed CONNECT-IP request. Otherwise a rejected
++     * duplicate stream's quarter-stream ID could inject into the primary
++     * session despite never owning an address. CONNECT-IP uses context ID 0. */
++    if (qsid != conn->masque_stream_id / 4 || ctx_id != 0) return;
+     if (payload_len < 1) return;
+ 
+     /* §5/§8.1 self-describing dispatch on payload[0]. */
+@@ -1698,8 +1972,12 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
  
      mqvpn_server_t *s = calloc(1, sizeof(*s));
      if (!s) return NULL;
@@ -768,7 +1278,26 @@ index c80bf4f..559d197 100644
      /* Clamp to the caller's struct_size: a platform built against an older
       * (shorter) callbacks struct must not be over-read — appended fields
       * stay NULL (s is calloc'd), which is the "callback unset" state. */
-@@ -1775,8 +1889,10 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+@@ -1711,7 +1989,17 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+     s->log_level = cfg->log_level;
+     /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
+     s->udp_fd = -1;
+-    s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
++    if (cfg->max_clients <= 0 ||
++        (uint32_t)cfg->max_clients > MQVPN_SERVER_CONNECTION_LIMIT_MAX) {
++        LOG_E(s, "max_clients must be in [1,%u]",
++              MQVPN_SERVER_CONNECTION_LIMIT_MAX);
++        goto cleanup;
++    }
++    s->max_clients = cfg->max_clients;
++    if (mqvpn_server_admission_init(&s->admission,
++                                    (uint32_t)s->max_clients) != 0) {
++        goto cleanup;
++    }
+     mqvpn_ptb_bucket_init(&s->ptb_bucket);
+     s->boot_us = now_us();
+     /* Sanitize the [Hybrid] block at its consumer (validate-at-consumer
+@@ -1775,8 +2063,10 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
      /* ── xquic engine setup ── */
      xqc_engine_ssl_config_t engine_ssl;
      memset(&engine_ssl, 0, sizeof(engine_ssl));
@@ -781,7 +1310,7 @@ index c80bf4f..559d197 100644
      engine_ssl.ciphers = XQC_TLS_CIPHERS;
      engine_ssl.groups = XQC_TLS_GROUPS;
  
-@@ -1820,6 +1936,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+@@ -1820,6 +2110,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
  
      s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
                                    &tcbs, s);
@@ -790,7 +1319,16 @@ index c80bf4f..559d197 100644
      if (!s->engine) goto cleanup;
  
          /* Connection settings — see src/mqvpn_conn_settings.c for the full body. */
-@@ -1907,10 +2025,12 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+@@ -1832,7 +2124,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
+     xqc_conn_settings_t conn_settings;
+     mqvpn_conn_settings_input_t cs_input = {
+         .is_server = true,
+-        .enable_multipath = true, /* server: always on, see mqvpn_conn_settings.c */
++        .enable_multipath = cfg->multipath != 0,
+         .scheduler = cfg->scheduler,
+         .cc = cfg->cc,
+         .init_max_path_id = cfg->init_max_path_id,
+@@ -1907,10 +2199,12 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
      return s;
  
  cleanup:
@@ -803,9 +1341,26 @@ index c80bf4f..559d197 100644
      free(s);
      return NULL;
  }
-@@ -1950,7 +2070,8 @@ mqvpn_server_destroy(mqvpn_server_t *s)
-         }
-     }
+@@ -1940,17 +2234,16 @@ mqvpn_server_destroy(mqvpn_server_t *s)
+     svr_tcp_egress_destroy_all(s);
+ #endif
+ 
+-    /* Step 3: Defensive sweep — free any sessions not freed by engine callbacks.
+-     * Uses svr_conn_free so the reorder engines are freed here too (the close
+-     * callback that would normally free them did not fire for these conns). */
+-    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+-        if (s->sessions[i]) {
+-            svr_conn_free(s->sessions[i]);
+-            s->sessions[i] = NULL;
+-        }
+-    }
++    /* Step 3: Defensive sweep over every accepted connection, not only
++     * authenticated sessions. Normal xquic close/refuse callbacks unlink the
++     * entries first; anything left here represents a failed callback path and
++     * must still release its pre-auth admission reservation. */
++    while (s->admission_head != NULL) svr_conn_free(s->admission_head);
++    memset(s->sessions, 0, sizeof(s->sessions));
++    s->n_sessions = 0;
  
 -    /* Step 4: free server handle */
 +    /* Step 4: wipe credentials and free server handle. */
@@ -813,7 +1368,87 @@ index c80bf4f..559d197 100644
      free(s);
  }
  
-@@ -2522,6 +2643,8 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
+@@ -1959,6 +2252,9 @@ mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd, const struct sockaddr *loc
+                            socklen_t local_addrlen)
+ {
+     if (!s || fd < 0) return MQVPN_ERR_INVALID_ARG;
++    /* A pinned socket can only be replaced atomically through the pinned API;
++     * this legacy setter must never create a mixed fd/local/remote state. */
++    if (s->peer_pin.configured) return MQVPN_ERR_INVALID_STATE;
+     s->udp_fd = fd;
+     if (local_addr && local_addrlen > 0) {
+         if (local_addrlen > sizeof(s->local_addr)) local_addrlen = sizeof(s->local_addr);
+@@ -1968,6 +2264,51 @@ mqvpn_server_set_socket_fd(mqvpn_server_t *s, int fd, const struct sockaddr *loc
+     return MQVPN_OK;
+ }
+ 
++int
++mqvpn_server_set_socket_fd_pinned_peer(
++    mqvpn_server_t *s, int fd, const struct sockaddr *local_addr,
++    socklen_t local_addrlen, const struct sockaddr *peer_addr,
++    socklen_t peer_addrlen)
++{
++    if (!s || fd < 0 || s->started || s->admission.in_use != 0 ||
++        !local_addr || local_addrlen == 0 ||
++        local_addrlen > (socklen_t)sizeof(s->local_addr)) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
++
++    mqvpn_server_peer_pin_t candidate_pin;
++    memset(&candidate_pin, 0, sizeof(candidate_pin));
++    if (mqvpn_server_peer_pin_set(&candidate_pin, peer_addr,
++                                  peer_addrlen) != 0) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
++
++    struct sockaddr_storage candidate_local;
++    memset(&candidate_local, 0, sizeof(candidate_local));
++    memcpy(&candidate_local, local_addr, local_addrlen);
++    if ((candidate_local.ss_family != AF_INET ||
++         local_addrlen != (socklen_t)sizeof(struct sockaddr_in)) &&
++        (candidate_local.ss_family != AF_INET6 ||
++         local_addrlen != (socklen_t)sizeof(struct sockaddr_in6))) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
++    if (candidate_local.ss_family != candidate_pin.addr.ss_family) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
++    if ((candidate_local.ss_family == AF_INET &&
++         ((const struct sockaddr_in *)&candidate_local)->sin_port == 0) ||
++        (candidate_local.ss_family == AF_INET6 &&
++         ((const struct sockaddr_in6 *)&candidate_local)->sin6_port == 0)) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
++
++    s->udp_fd = fd;
++    s->local_addr = candidate_local;
++    s->local_addrlen = local_addrlen;
++    s->peer_pin = candidate_pin;
++    return MQVPN_OK;
++}
++
+ int
+ mqvpn_server_start(mqvpn_server_t *s)
+ {
+@@ -2020,9 +2361,16 @@ int
+ mqvpn_server_on_socket_recv(mqvpn_server_t *s, const uint8_t *pkt, size_t len,
+                             const struct sockaddr *peer, socklen_t peer_len)
+ {
+-    if (!s || !pkt || len == 0 || len > 65536) return MQVPN_ERR_INVALID_ARG;
++    if (!s || !pkt || len == 0 || len > 65536 || !peer || peer_len == 0) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
+     ASSERT_TICK_THREAD(s);
+     if (!s->engine) return MQVPN_ERR_ENGINE;
++    if (s->peer_pin.configured &&
++        !mqvpn_server_peer_pin_matches(&s->peer_pin, peer, peer_len)) {
++        LOG_W(s, "blocked UDP datagram from off-pin peer");
++        return MQVPN_ERR_PEER_MISMATCH;
++    }
+ 
+     uint64_t recv_time = now_us();
+     xqc_int_t ret = xqc_engine_packet_process(
+@@ -2522,6 +2870,8 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
  
      for (int i = 0; i < s->config.n_users; i++) {
          if (strcmp(s->config.user_names[i], username) == 0) {
@@ -822,7 +1457,7 @@ index c80bf4f..559d197 100644
              snprintf(s->config.user_keys[i], sizeof(s->config.user_keys[i]), "%s", key);
              return MQVPN_OK;
          }
-@@ -2552,6 +2675,10 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
+@@ -2552,6 +2902,10 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
                         sizeof(s->config.user_keys[j - 1]));
              }
              s->config.n_users--;
@@ -833,6 +1468,30 @@ index c80bf4f..559d197 100644
              found = 1;
              break;
          }
+diff --git a/src/mqvpn_server_internal.h b/src/mqvpn_server_internal.h
+index 215e053..0e09932 100644
+--- a/src/mqvpn_server_internal.h
++++ b/src/mqvpn_server_internal.h
+@@ -40,6 +40,7 @@ typedef struct {
+     size_t path_len;
+     const char *auth_token; /* Bearer payload, not NUL-terminated */
+     size_t auth_token_len;
++    int has_reorder_support; /* mqvpn-reorder: ?1 was advertised */
+ } svr_req_headers_t;
+ 
+ /* Whether request-level auth (Bearer PSK) must be checked before granting a
+diff --git a/src/mqvpn_util.c b/src/mqvpn_util.c
+index d61a1b2..05dff8a 100644
+--- a/src/mqvpn_util.c
++++ b/src/mqvpn_util.c
+@@ -32,6 +32,7 @@ mqvpn_error_string(mqvpn_error_t err)
+     case MQVPN_ERR_ABI_MISMATCH: return "ABI mismatch";
+     case MQVPN_ERR_TIMEOUT: return "connection timeout";
+     case MQVPN_ERR_INVALID_STATE: return "invalid state";
++    case MQVPN_ERR_PEER_MISMATCH: return "UDP peer mismatch";
+     }
+     return "unknown error";
+ }
 diff --git a/src/path_entry_internal.h b/src/path_entry_internal.h
 index 4185f79..7cec6e5 100644
 --- a/src/path_entry_internal.h
@@ -846,6 +1505,185 @@ index 4185f79..7cec6e5 100644
      int64_t platform_net_id;
      uint32_t flags;
      uint64_t xqc_path_id;
+diff --git a/src/server_hardening.c b/src/server_hardening.c
+new file mode 100644
+index 0000000..24eec0f
+--- /dev/null
++++ b/src/server_hardening.c
+@@ -0,0 +1,127 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++#include "server_hardening.h"
++
++#include <string.h>
++
++int
++mqvpn_server_admission_init(mqvpn_server_admission_t *admission,
++                            uint32_t limit)
++{
++    if (admission == NULL || limit == 0 ||
++        limit > MQVPN_SERVER_CONNECTION_LIMIT_MAX) {
++        return -1;
++    }
++    admission->limit = limit;
++    admission->in_use = 0;
++    return 0;
++}
++
++int
++mqvpn_server_admission_reserve(mqvpn_server_admission_t *admission)
++{
++    if (admission == NULL || admission->limit == 0 ||
++        admission->in_use >= admission->limit) {
++        return -1;
++    }
++    admission->in_use++;
++    return 0;
++}
++
++int
++mqvpn_server_admission_release(mqvpn_server_admission_t *admission)
++{
++    if (admission == NULL || admission->in_use == 0) return -1;
++    admission->in_use--;
++    return 0;
++}
++
++static int
++mqvpn_server_peer_canonicalize(struct sockaddr_storage *out,
++                               socklen_t *out_len,
++                               const struct sockaddr *peer,
++                               socklen_t peer_len)
++{
++    if (out == NULL || out_len == NULL || peer == NULL) return -1;
++    memset(out, 0, sizeof(*out));
++
++    if (peer->sa_family == AF_INET) {
++        if (peer_len != (socklen_t)sizeof(struct sockaddr_in)) return -1;
++        const struct sockaddr_in *source =
++            (const struct sockaddr_in *)peer;
++        if (source->sin_port == 0 ||
++            source->sin_addr.s_addr == htonl(INADDR_ANY) ||
++            source->sin_addr.s_addr == htonl(INADDR_BROADCAST) ||
++            IN_MULTICAST(ntohl(source->sin_addr.s_addr))) {
++            return -1;
++        }
++        struct sockaddr_in *destination = (struct sockaddr_in *)out;
++        destination->sin_family = AF_INET;
++        destination->sin_port = source->sin_port;
++        destination->sin_addr = source->sin_addr;
++        *out_len = (socklen_t)sizeof(*destination);
++        return 0;
++    }
++
++    if (peer->sa_family == AF_INET6) {
++        if (peer_len != (socklen_t)sizeof(struct sockaddr_in6)) return -1;
++        const struct sockaddr_in6 *source =
++            (const struct sockaddr_in6 *)peer;
++        if (source->sin6_port == 0 ||
++            IN6_IS_ADDR_UNSPECIFIED(&source->sin6_addr) ||
++            IN6_IS_ADDR_MULTICAST(&source->sin6_addr)) {
++            return -1;
++        }
++        struct sockaddr_in6 *destination = (struct sockaddr_in6 *)out;
++        destination->sin6_family = AF_INET6;
++        destination->sin6_port = source->sin6_port;
++        destination->sin6_addr = source->sin6_addr;
++        destination->sin6_scope_id = source->sin6_scope_id;
++        *out_len = (socklen_t)sizeof(*destination);
++        return 0;
++    }
++
++    return -1;
++}
++
++int
++mqvpn_server_peer_pin_set(mqvpn_server_peer_pin_t *pin,
++                          const struct sockaddr *peer,
++                          socklen_t peer_len)
++{
++    if (pin == NULL) return -1;
++    mqvpn_server_peer_pin_t candidate;
++    memset(&candidate, 0, sizeof(candidate));
++    if (mqvpn_server_peer_canonicalize(&candidate.addr, &candidate.addrlen,
++                                       peer, peer_len) != 0) {
++        return -1;
++    }
++    candidate.configured = 1;
++    *pin = candidate;
++    return 0;
++}
++
++int
++mqvpn_server_peer_pin_matches(const mqvpn_server_peer_pin_t *pin,
++                              const struct sockaddr *peer,
++                              socklen_t peer_len)
++{
++    if (pin == NULL || !pin->configured) return 0;
++    struct sockaddr_storage candidate;
++    socklen_t candidate_len = 0;
++    if (mqvpn_server_peer_canonicalize(&candidate, &candidate_len, peer,
++                                       peer_len) != 0 ||
++        candidate_len != pin->addrlen) {
++        return 0;
++    }
++    return memcmp(&candidate, &pin->addr, candidate_len) == 0;
++}
++
++const struct sockaddr *
++mqvpn_server_peer_pin_addr(const mqvpn_server_peer_pin_t *pin,
++                           socklen_t *peer_len)
++{
++    if (pin == NULL || !pin->configured || peer_len == NULL) return NULL;
++    *peer_len = pin->addrlen;
++    return (const struct sockaddr *)&pin->addr;
++}
+diff --git a/src/server_hardening.h b/src/server_hardening.h
+new file mode 100644
+index 0000000..06f99e9
+--- /dev/null
++++ b/src/server_hardening.h
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++#ifndef MQVPN_SERVER_HARDENING_H
++#define MQVPN_SERVER_HARDENING_H
++
++#include "libmqvpn.h"
++
++#include <stdint.h>
++#ifndef _WIN32
++#  include <arpa/inet.h>
++#  include <netinet/in.h>
++#endif
++
++typedef struct {
++    uint32_t limit;
++    uint32_t in_use;
++} mqvpn_server_admission_t;
++
++typedef struct {
++    struct sockaddr_storage addr;
++    socklen_t addrlen;
++    int configured;
++} mqvpn_server_peer_pin_t;
++
++int mqvpn_server_admission_init(mqvpn_server_admission_t *admission,
++                                uint32_t limit);
++int mqvpn_server_admission_reserve(mqvpn_server_admission_t *admission);
++int mqvpn_server_admission_release(mqvpn_server_admission_t *admission);
++
++int mqvpn_server_peer_pin_set(mqvpn_server_peer_pin_t *pin,
++                              const struct sockaddr *peer,
++                              socklen_t peer_len);
++int mqvpn_server_peer_pin_matches(const mqvpn_server_peer_pin_t *pin,
++                                  const struct sockaddr *peer,
++                                  socklen_t peer_len);
++const struct sockaddr *
++mqvpn_server_peer_pin_addr(const mqvpn_server_peer_pin_t *pin,
++                           socklen_t *peer_len);
++
++#endif /* MQVPN_SERVER_HARDENING_H */
 diff --git a/src/spki_pin.c b/src/spki_pin.c
 new file mode 100644
 index 0000000..bb7ec91
@@ -952,7 +1790,7 @@ index 0000000..45b186b
 +
 +#endif
 diff --git a/tests/test_api.c b/tests/test_api.c
-index 6d103b6..38052d1 100644
+index 6d103b6..973b386 100644
 --- a/tests/test_api.c
 +++ b/tests/test_api.c
 @@ -103,10 +103,25 @@ TEST(config_set_auth_key)
@@ -1002,7 +1840,7 @@ index 6d103b6..38052d1 100644
      ASSERT_EQ(mqvpn_config_remove_user(cfg, "missing"), MQVPN_ERR_INVALID_ARG);
      ASSERT_EQ(mqvpn_config_add_user(NULL, "alice", "k"), MQVPN_ERR_INVALID_ARG);
      ASSERT_EQ(mqvpn_config_add_user(cfg, "", "k"), MQVPN_ERR_INVALID_ARG);
-@@ -507,6 +533,113 @@ TEST(config_set_tls_cert)
+@@ -507,11 +533,123 @@ TEST(config_set_tls_cert)
      mqvpn_config_free(cfg);
  }
  
@@ -1116,7 +1954,26 @@ index 6d103b6..38052d1 100644
  TEST(config_set_max_clients)
  {
      mqvpn_config_t *cfg = mqvpn_config_new();
-@@ -2752,6 +2885,7 @@ main(void)
+     ASSERT_EQ(mqvpn_config_set_max_clients(cfg, 128), MQVPN_OK);
+     ASSERT_EQ(cfg->max_clients, 128);
++    ASSERT_EQ(mqvpn_config_set_max_clients(cfg, 0), MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(mqvpn_config_set_max_clients(
++                  cfg, (int)MQVPN_SERVER_CONNECTION_LIMIT_MAX + 1),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(cfg->max_clients, 128);
+     ASSERT_EQ(mqvpn_config_set_max_clients(NULL, 128), MQVPN_ERR_INVALID_ARG);
+     mqvpn_config_free(cfg);
+ }
+@@ -609,6 +747,8 @@ TEST(error_string)
+     ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_AGAIN), "back-pressure");
+     ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_ABI_MISMATCH), "ABI mismatch");
+     ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_INVALID_STATE), "invalid state");
++    ASSERT_STR_EQ(mqvpn_error_string(MQVPN_ERR_PEER_MISMATCH),
++                  "UDP peer mismatch");
+     /* Unknown error code */
+     ASSERT_NOT_NULL(mqvpn_error_string((mqvpn_error_t)-99));
+ }
+@@ -2752,6 +2892,7 @@ main(void)
      run_config_free_null();
      run_config_set_server();
      run_config_set_auth_key();
@@ -1124,7 +1981,7 @@ index 6d103b6..38052d1 100644
      run_config_add_remove_user();
      run_config_add_user_max_capacity();
      run_config_load_json();
-@@ -2774,6 +2908,7 @@ main(void)
+@@ -2774,6 +2915,7 @@ main(void)
      run_config_set_listen();
      run_config_set_subnet();
      run_config_set_tls_cert();
@@ -1132,8 +1989,98 @@ index 6d103b6..38052d1 100644
      run_config_set_max_clients();
      run_config_set_multipath();
      run_config_set_hybrid();
+diff --git a/tests/test_conn_settings.c b/tests/test_conn_settings.c
+index c9908fe..a0a87d6 100644
+--- a/tests/test_conn_settings.c
++++ b/tests/test_conn_settings.c
+@@ -41,7 +41,7 @@
+ static int
+ test_asymmetry_server_vs_client(void)
+ {
+-    xqc_conn_settings_t srv, cli_mp_on, cli_mp_off;
++    xqc_conn_settings_t srv_mp_on, srv_mp_off, cli_mp_on, cli_mp_off;
+ 
+     mqvpn_conn_settings_input_t s = {
+         .is_server = true,
+@@ -49,7 +49,11 @@ test_asymmetry_server_vs_client(void)
+         .scheduler = MQVPN_SCHED_WLB,
+         .init_max_path_id = 0,
+     };
+-    mqvpn_build_conn_settings(&s, &srv);
++    mqvpn_build_conn_settings(&s, &srv_mp_on);
++
++    mqvpn_conn_settings_input_t s_off = s;
++    s_off.enable_multipath = false;
++    mqvpn_build_conn_settings(&s_off, &srv_mp_off);
+ 
+     mqvpn_conn_settings_input_t c_on = {
+         .is_server = false,
+@@ -63,11 +67,17 @@ test_asymmetry_server_vs_client(void)
+     c_off.enable_multipath = false;
+     mqvpn_build_conn_settings(&c_off, &cli_mp_off);
+ 
+-    /* Server side: MP always on, grant capped at 64, ping_on absent. */
+-    ASSERT_EQ(srv.enable_multipath, 1);
+-    ASSERT_EQ(srv.mp_ping_on, 1);
+-    ASSERT_EQ(srv.max_path_id_grant_max_value, 128);
+-    ASSERT_EQ(srv.ping_on, 0);
++    /* Server side mp-on: explicit MP gate, server-only grant, no keepalive. */
++    ASSERT_EQ(srv_mp_on.enable_multipath, 1);
++    ASSERT_EQ(srv_mp_on.mp_ping_on, 1);
++    ASSERT_EQ(srv_mp_on.max_path_id_grant_max_value, 128);
++    ASSERT_EQ(srv_mp_on.ping_on, 0);
++
++    /* Server side mp-off: no hidden override or path-ID grant survives. */
++    ASSERT_EQ(srv_mp_off.enable_multipath, 0);
++    ASSERT_EQ(srv_mp_off.mp_ping_on, 0);
++    ASSERT_EQ(srv_mp_off.max_path_id_grant_max_value, 0);
++    ASSERT_EQ(srv_mp_off.ping_on, 0);
+ 
+     /* Client side mp-on: MP gated, ping_on set, no grant cap. */
+     ASSERT_EQ(cli_mp_on.enable_multipath, 1);
+@@ -171,32 +181,6 @@ test_propagation_init_max_path_id(void)
+     return 0;
+ }
+ 
+-/* The server forces multipath ON unconditionally — mqvpn's client is the active
+- * path creator, so the server allows MP regardless of its input flag
+- * (src/mqvpn_conn_settings.c:88-95). test_asymmetry_server_vs_client only feeds
+- * the server enable_multipath=true; this pins the "ignore the input flag" half,
+- * so a regression that made the server honour in->enable_multipath (silently
+- * disabling server-side multipath when a caller passes false) fails here. */
+-static int
+-test_server_forces_multipath_regardless_of_input(void)
+-{
+-    xqc_conn_settings_t cs;
+-    mqvpn_conn_settings_input_t in = {
+-        .is_server = true,
+-        .enable_multipath = false, /* client-style "off" — the server must ignore it */
+-        .scheduler = MQVPN_SCHED_WLB,
+-        .init_max_path_id = 0,
+-    };
+-
+-    mqvpn_build_conn_settings(&in, &cs);
+-
+-    ASSERT_EQ(cs.enable_multipath, 1);
+-    ASSERT_EQ(cs.mp_ping_on, 1);
+-    ASSERT_EQ(cs.max_path_id_grant_max_value, 128);
+-    ASSERT_EQ(cs.ping_on, 0); /* server never takes the client keep-alive role */
+-    return 0;
+-}
+-
+ static int
+ test_recv_rate_limit_wiring(void)
+ {
+@@ -313,7 +297,6 @@ main(void)
+     failed += test_propagation_scheduler();
+     failed += test_propagation_cc();
+     failed += test_propagation_init_max_path_id();
+-    failed += test_server_forces_multipath_regardless_of_input();
+     failed += test_recv_rate_limit_wiring();
+     failed += test_reinjection_mapping();
+     if (failed) {
 diff --git a/tests/test_server.c b/tests/test_server.c
-index 51918a1..c025f6f 100644
+index 51918a1..68ebb43 100644
 --- a/tests/test_server.c
 +++ b/tests/test_server.c
 @@ -91,6 +91,10 @@ static int g_tun_output_called = 0;
@@ -1279,7 +2226,75 @@ index 51918a1..c025f6f 100644
  TEST(server_destroy_null)
  {
      /* Must not crash */
-@@ -732,6 +833,7 @@ TEST(server_session_quic_loopback)
+@@ -370,6 +471,67 @@ TEST(server_set_socket_fd)
+     mqvpn_server_destroy(s);
+ }
+ 
++TEST(server_set_socket_fd_pinned_peer)
++{
++    reset_mocks();
++    mqvpn_config_t *cfg = make_server_config();
++    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
++    cbs.tun_output = mock_tun_output;
++    cbs.tunnel_config_ready = mock_tunnel_config_ready;
++
++    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
++    mqvpn_config_free(cfg);
++    ASSERT_NOT_NULL(s);
++
++    struct sockaddr_in local;
++    struct sockaddr_in peer;
++    struct sockaddr_in off_peer;
++    memset(&local, 0, sizeof(local));
++    memset(&peer, 0, sizeof(peer));
++    local.sin_family = AF_INET;
++    local.sin_port = htons(443);
++    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    peer.sin_family = AF_INET;
++    peer.sin_port = htons(50000);
++    peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    off_peer = peer;
++    off_peer.sin_port = htons(50001);
++
++    ASSERT_EQ(mqvpn_server_set_socket_fd_pinned_peer(
++                  s, 42, (const struct sockaddr *)&local, sizeof(local),
++                  (const struct sockaddr *)&peer, sizeof(peer)),
++              MQVPN_OK);
++    ASSERT_EQ(mqvpn_server_set_socket_fd(
++                  s, 43, (const struct sockaddr *)&local, sizeof(local)),
++              MQVPN_ERR_INVALID_STATE);
++
++    uint8_t packet[20] = {0xc0};
++    ASSERT_EQ(mqvpn_server_on_socket_recv(
++                  s, packet, sizeof(packet),
++                  (const struct sockaddr *)&off_peer, sizeof(off_peer)),
++              MQVPN_ERR_PEER_MISMATCH);
++
++    struct sockaddr_in invalid_peer = peer;
++    invalid_peer.sin_port = 0;
++    ASSERT_EQ(mqvpn_server_set_socket_fd_pinned_peer(
++                  s, 43, (const struct sockaddr *)&local, sizeof(local),
++                  (const struct sockaddr *)&invalid_peer,
++                  sizeof(invalid_peer)),
++              MQVPN_ERR_INVALID_ARG);
++    /* Failed replacement is atomic: the original pin remains authoritative. */
++    ASSERT_EQ(mqvpn_server_on_socket_recv(
++                  s, packet, sizeof(packet),
++                  (const struct sockaddr *)&off_peer, sizeof(off_peer)),
++              MQVPN_ERR_PEER_MISMATCH);
++
++    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
++    ASSERT_EQ(mqvpn_server_set_socket_fd_pinned_peer(
++                  s, 44, (const struct sockaddr *)&local, sizeof(local),
++                  (const struct sockaddr *)&peer, sizeof(peer)),
++              MQVPN_ERR_INVALID_ARG);
++    mqvpn_server_destroy(s);
++}
++
+ /* Query function null-safety tests */
+ 
+ TEST(server_get_stats_null)
+@@ -732,13 +894,16 @@ TEST(server_session_quic_loopback)
      svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
      svr_cbs.on_client_connected = mock_on_client_connected;
      svr_cbs.on_client_disconnected = mock_on_client_disconnected;
@@ -1287,7 +2302,18 @@ index 51918a1..c025f6f 100644
  
      mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
      ASSERT_NOT_NULL(svr);
-@@ -810,7 +912,38 @@ TEST(server_session_quic_loopback)
+     mqvpn_config_free(svr_cfg);
+ 
+-    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+-                                         sizeof(svr_addr)),
++    ASSERT_EQ(mqvpn_server_set_socket_fd_pinned_peer(
++                  svr, svr_fd, (const struct sockaddr *)&svr_addr,
++                  sizeof(svr_addr), (const struct sockaddr *)&cli_addr,
++                  sizeof(cli_addr)),
+               MQVPN_OK);
+     ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
+ 
+@@ -810,7 +975,38 @@ TEST(server_session_quic_loopback)
      mqvpn_client_set_tun_active(cli, 1, -1);
      ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_ESTABLISHED);
  
@@ -1327,7 +2353,23 @@ index 51918a1..c025f6f 100644
      /* Build IPv4 packet destined for client's assigned IP */
      uint8_t tun_pkt[40];
      memset(tun_pkt, 0, sizeof(tun_pkt));
-@@ -927,6 +1060,7 @@ main(void)
+@@ -906,9 +1102,12 @@ TEST(server_max_clients_config)
+     mqvpn_config_set_max_clients(cfg, 1);
+     ASSERT_EQ(cfg->max_clients, 1);
+ 
+-    /* Setter stores value as-is (no clamp) */
+-    mqvpn_config_set_max_clients(cfg, 0);
+-    ASSERT_EQ(cfg->max_clients, 0);
++    ASSERT_EQ(mqvpn_config_set_max_clients(cfg, 0), MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(cfg->max_clients, 1);
++    ASSERT_EQ(mqvpn_config_set_max_clients(
++                  cfg, (int)MQVPN_SERVER_CONNECTION_LIMIT_MAX + 1),
++              MQVPN_ERR_INVALID_ARG);
++    ASSERT_EQ(cfg->max_clients, 1);
+ 
+     mqvpn_config_free(cfg);
+ }
+@@ -927,6 +1126,7 @@ main(void)
      run_server_new_missing_tun_output();
      run_server_new_missing_tunnel_config_ready();
      run_server_new_destroy();
@@ -1335,6 +2377,1067 @@ index 51918a1..c025f6f 100644
      run_server_destroy_null();
      run_server_egress_fd_budget();
  
+@@ -938,6 +1138,7 @@ main(void)
+ 
+     /* set_socket_fd */
+     run_server_set_socket_fd();
++    run_server_set_socket_fd_pinned_peer();
+ 
+     /* Null safety */
+     run_server_get_stats_null();
+diff --git a/tests/test_server_adversarial.c b/tests/test_server_adversarial.c
+new file mode 100644
+index 0000000..1af7ce3
+--- /dev/null
++++ b/tests/test_server_adversarial.c
+@@ -0,0 +1,903 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++/*
++ * Real QUIC/H3 adversarial lifecycle coverage for server admission and
++ * CONNECT-IP ownership. This deliberately uses raw xquic H3 clients rather
++ * than mqvpn's one-request client wrapper, so one connection can attempt
++ * concurrent and sequential duplicate CONNECT-IP streams and another can
++ * remain handshaken but unauthenticated at the MaxClients boundary.
++ *
++ * VOLPAROSSA's product configuration will use one exact pinned peer and
++ * MaxClients=1 per exit association. Hard-coding that product policy into
++ * general-purpose upstream mqvpn is explicitly not this patch's job; this
++ * test uses the legacy unpinned compatibility socket solely to exercise the
++ * upstream N/N+1 admission invariant with independent loopback peers.
++ */
++
++#include "libmqvpn.h"
++#include "mqvpn_conn_settings.h"
++
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <poll.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <unistd.h>
++
++#include <xquic/xqc_http3.h>
++#include <xquic/xquic.h>
++#include <xquic/xquic_typedef.h>
++
++#define MAX_TEST_CLIENTS 4
++#define MAX_TEST_REQUESTS 5
++#define PUMP_LIMIT 5000
++
++#define CHECK(condition)                                                        \
++    do {                                                                        \
++        if (!(condition)) {                                                     \
++            fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__,          \
++                    #condition);                                                \
++            return -1;                                                          \
++        }                                                                       \
++    } while (0)
++
++typedef struct test_env_s test_env_t;
++typedef struct raw_client_s raw_client_t;
++
++typedef struct {
++    raw_client_t *client;
++    xqc_h3_request_t *request;
++    int status;
++    int response_headers;
++    size_t response_body_bytes;
++    int closed;
++    uint64_t stream_id;
++} raw_request_t;
++
++struct raw_client_s {
++    test_env_t *env;
++    xqc_engine_t *engine;
++    int fd;
++    struct sockaddr_in local_addr;
++    xqc_cid_t cid;
++    xqc_h3_conn_t *h3_conn;
++    int handshake_finished;
++    int closed;
++    raw_request_t requests[MAX_TEST_REQUESTS];
++    int n_requests;
++};
++
++struct test_env_s {
++    mqvpn_server_t *server;
++    int server_fd;
++    struct sockaddr_in server_addr;
++    int connected;
++    int disconnected;
++    uint32_t last_session_id;
++    uint8_t last_assigned_ip[4];
++    int inner_packets;
++};
++
++static xqc_usec_t
++test_now_us(void)
++{
++    struct timeval time_value;
++    gettimeofday(&time_value, NULL);
++    return (xqc_usec_t)time_value.tv_sec * 1000000 + (xqc_usec_t)time_value.tv_usec;
++}
++
++static int
++make_loopback_socket(struct sockaddr_in *addr)
++{
++    int fd = socket(AF_INET, SOCK_DGRAM, 0);
++    if (fd < 0) return -1;
++    int flags = fcntl(fd, F_GETFL, 0);
++    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
++        close(fd);
++        return -1;
++    }
++
++    memset(addr, 0, sizeof(*addr));
++    addr->sin_family = AF_INET;
++    addr->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    addr->sin_port = 0;
++    if (bind(fd, (struct sockaddr *)addr, sizeof(*addr)) != 0) {
++        close(fd);
++        return -1;
++    }
++    socklen_t len = sizeof(*addr);
++    if (getsockname(fd, (struct sockaddr *)addr, &len) != 0) {
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++
++static void
++server_tun_output(const uint8_t *packet, size_t length, void *user_ctx)
++{
++    (void)packet;
++    (void)length;
++    (void)user_ctx;
++}
++
++static void
++server_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
++{
++    (void)info;
++    (void)user_ctx;
++}
++
++static void
++server_session_tun_output(const uint8_t *packet, size_t length, uint32_t session_id,
++                          void *user_ctx)
++{
++    test_env_t *env = (test_env_t *)user_ctx;
++    (void)packet;
++    (void)length;
++    (void)session_id;
++    env->inner_packets++;
++}
++
++static void
++server_client_connected(const mqvpn_tunnel_info_t *info, uint32_t session_id,
++                        void *user_ctx)
++{
++    test_env_t *env = (test_env_t *)user_ctx;
++    env->connected++;
++    env->last_session_id = session_id;
++    if (info) memcpy(env->last_assigned_ip, info->assigned_ip, 4);
++}
++
++static void
++server_client_disconnected(uint32_t session_id, mqvpn_error_t reason, void *user_ctx)
++{
++    test_env_t *env = (test_env_t *)user_ctx;
++    (void)session_id;
++    (void)reason;
++    env->disconnected++;
++}
++
++static int
++env_start(test_env_t *env, int max_clients)
++{
++    memset(env, 0, sizeof(*env));
++    env->server_fd = -1;
++    env->server_fd = make_loopback_socket(&env->server_addr);
++    CHECK(env->server_fd >= 0);
++
++    mqvpn_config_t *config = mqvpn_config_new();
++    CHECK(config != NULL);
++    CHECK(mqvpn_config_set_listen(config, "127.0.0.1",
++                                  ntohs(env->server_addr.sin_port)) == MQVPN_OK);
++    CHECK(mqvpn_config_set_subnet(config, "10.77.0.0/24") == MQVPN_OK);
++    CHECK(mqvpn_config_set_tls_cert(config, TEST_CERT_FILE, TEST_KEY_FILE) == MQVPN_OK);
++    CHECK(mqvpn_config_set_max_clients(config, max_clients) == MQVPN_OK);
++    CHECK(mqvpn_config_set_log_level(config, MQVPN_LOG_ERROR) == MQVPN_OK);
++
++    mqvpn_server_callbacks_t callbacks = MQVPN_SERVER_CALLBACKS_INIT;
++    callbacks.tun_output = server_tun_output;
++    callbacks.tunnel_config_ready = server_tunnel_config_ready;
++    callbacks.session_tun_output = server_session_tun_output;
++    callbacks.on_client_connected = server_client_connected;
++    callbacks.on_client_disconnected = server_client_disconnected;
++    env->server = mqvpn_server_new(config, &callbacks, env);
++    mqvpn_config_free(config);
++    CHECK(env->server != NULL);
++    CHECK(mqvpn_server_set_socket_fd(env->server, env->server_fd,
++                                     (struct sockaddr *)&env->server_addr,
++                                     sizeof(env->server_addr)) == MQVPN_OK);
++    CHECK(mqvpn_server_start(env->server) == MQVPN_OK);
++    return 0;
++}
++
++static void
++client_set_timer(xqc_usec_t wake_after, void *engine_user_data)
++{
++    (void)wake_after;
++    (void)engine_user_data;
++}
++
++static void
++client_log(xqc_log_level_t level, const void *buffer, size_t size,
++           void *engine_user_data)
++{
++    (void)level;
++    (void)buffer;
++    (void)size;
++    (void)engine_user_data;
++}
++
++static ssize_t
++client_write_socket(const unsigned char *buffer, size_t size,
++                    const struct sockaddr *peer, socklen_t peer_len,
++                    void *conn_user_data)
++{
++    raw_client_t *client = (raw_client_t *)conn_user_data;
++    if (!client || client->fd < 0) return XQC_SOCKET_ERROR;
++    ssize_t written;
++    do {
++        written = sendto(client->fd, buffer, size, 0, peer, peer_len);
++    } while (written < 0 && errno == EINTR);
++    if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        return XQC_SOCKET_EAGAIN;
++    }
++    return written < 0 ? XQC_SOCKET_ERROR : written;
++}
++
++static ssize_t
++client_write_socket_ex(uint64_t path_id, const unsigned char *buffer, size_t size,
++                       const struct sockaddr *peer, socklen_t peer_len,
++                       void *conn_user_data)
++{
++    (void)path_id;
++    return client_write_socket(buffer, size, peer, peer_len, conn_user_data);
++}
++
++static int
++client_cert_verify(const unsigned char *certs[], const size_t cert_lengths[],
++                   size_t cert_count, void *conn_user_data)
++{
++    (void)certs;
++    (void)cert_lengths;
++    (void)cert_count;
++    (void)conn_user_data;
++    return 0;
++}
++
++static void
++client_save_token(const unsigned char *token, unsigned token_len, void *user_data)
++{
++    (void)token;
++    (void)token_len;
++    (void)user_data;
++}
++
++static void
++client_save_session(const char *data, size_t data_len, void *user_data)
++{
++    (void)data;
++    (void)data_len;
++    (void)user_data;
++}
++
++static void
++client_save_transport_parameters(const char *data, size_t data_len, void *user_data)
++{
++    (void)data;
++    (void)data_len;
++    (void)user_data;
++}
++
++static int
++client_h3_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
++{
++    raw_client_t *client = (raw_client_t *)user_data;
++    (void)cid;
++    client->h3_conn = h3_conn;
++    return 0;
++}
++
++static int
++client_h3_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
++{
++    raw_client_t *client = (raw_client_t *)user_data;
++    (void)h3_conn;
++    (void)cid;
++    client->h3_conn = NULL;
++    client->closed = 1;
++    return 0;
++}
++
++static int
++client_generic_create(xqc_connection_t *connection, const xqc_cid_t *cid,
++                      void *connection_user_data, void *protocol_user_data)
++{
++    (void)connection;
++    (void)cid;
++    (void)protocol_user_data;
++    return connection_user_data != NULL ? 0 : -1;
++}
++
++static int
++client_generic_close(xqc_connection_t *connection, const xqc_cid_t *cid,
++                     void *connection_user_data, void *protocol_user_data)
++{
++    raw_client_t *client = (raw_client_t *)connection_user_data;
++    (void)connection;
++    (void)cid;
++    (void)protocol_user_data;
++    if (client) client->closed = 1;
++    return 0;
++}
++
++static void
++client_h3_handshake(xqc_h3_conn_t *h3_conn, void *user_data)
++{
++    raw_client_t *client = (raw_client_t *)user_data;
++    (void)h3_conn;
++    client->handshake_finished = 1;
++}
++
++static int
++client_request_close(xqc_h3_request_t *request, void *user_data)
++{
++    raw_request_t *test_request = (raw_request_t *)user_data;
++    (void)request;
++    if (test_request) {
++        test_request->request = NULL;
++        test_request->closed = 1;
++    }
++    return 0;
++}
++
++static int
++client_request_read(xqc_h3_request_t *request, xqc_request_notify_flag_t flag,
++                    void *user_data)
++{
++    raw_request_t *test_request = (raw_request_t *)user_data;
++    if (!test_request) return -1;
++
++    if (flag & XQC_REQ_NOTIFY_READ_HEADER) {
++        unsigned char fin = 0;
++        xqc_http_headers_t *headers = xqc_h3_request_recv_headers(request, &fin);
++        if (!headers) return -1;
++        test_request->response_headers++;
++        for (size_t i = 0; i < headers->count; i++) {
++            xqc_http_header_t *header = &headers->headers[i];
++            if (header->name.iov_len == 7 &&
++                memcmp(header->name.iov_base, ":status", 7) == 0 &&
++                header->value.iov_len == 3) {
++                const unsigned char *value = header->value.iov_base;
++                if (value[0] >= '0' && value[0] <= '9' && value[1] >= '0' &&
++                    value[1] <= '9' && value[2] >= '0' && value[2] <= '9') {
++                    test_request->status =
++                        (value[0] - '0') * 100 + (value[1] - '0') * 10 +
++                        (value[2] - '0');
++                }
++            }
++        }
++    }
++
++    if (flag & XQC_REQ_NOTIFY_READ_BODY) {
++        unsigned char body[2048];
++        unsigned char fin = 0;
++        for (;;) {
++            ssize_t count = xqc_h3_request_recv_body(request, body, sizeof(body), &fin);
++            if (count <= 0) break;
++            test_request->response_body_bytes += (size_t)count;
++        }
++    }
++    return 0;
++}
++
++static int
++client_request_write(xqc_h3_request_t *request, void *user_data)
++{
++    (void)request;
++    (void)user_data;
++    return 0;
++}
++
++static int
++client_start(raw_client_t *client, test_env_t *env)
++{
++    memset(client, 0, sizeof(*client));
++    client->env = env;
++    client->fd = -1;
++    client->fd = make_loopback_socket(&client->local_addr);
++    CHECK(client->fd >= 0);
++
++    xqc_engine_callback_t engine_callbacks;
++    memset(&engine_callbacks, 0, sizeof(engine_callbacks));
++    engine_callbacks.set_event_timer = client_set_timer;
++    engine_callbacks.log_callbacks.xqc_log_write_err = client_log;
++    engine_callbacks.log_callbacks.xqc_log_write_stat = client_log;
++
++    xqc_transport_callbacks_t transport_callbacks;
++    memset(&transport_callbacks, 0, sizeof(transport_callbacks));
++    transport_callbacks.write_socket = client_write_socket;
++    transport_callbacks.write_socket_ex = client_write_socket_ex;
++    transport_callbacks.save_token = client_save_token;
++    transport_callbacks.save_session_cb = client_save_session;
++    transport_callbacks.save_tp_cb = client_save_transport_parameters;
++    transport_callbacks.cert_verify_cb = client_cert_verify;
++
++    xqc_config_t xquic_config;
++    CHECK(xqc_engine_get_default_config(&xquic_config, XQC_ENGINE_CLIENT) == XQC_OK);
++    xquic_config.cfg_log_level = XQC_LOG_ERROR;
++    xqc_engine_ssl_config_t engine_ssl;
++    memset(&engine_ssl, 0, sizeof(engine_ssl));
++    engine_ssl.ciphers = XQC_TLS_CIPHERS;
++    engine_ssl.groups = XQC_TLS_GROUPS;
++    client->engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xquic_config, &engine_ssl,
++                                       &engine_callbacks, &transport_callbacks, client);
++    CHECK(client->engine != NULL);
++
++    xqc_h3_callbacks_t h3_callbacks;
++    memset(&h3_callbacks, 0, sizeof(h3_callbacks));
++    h3_callbacks.h3c_cbs.h3_conn_create_notify = client_h3_create;
++    h3_callbacks.h3c_cbs.h3_conn_close_notify = client_h3_close;
++    h3_callbacks.h3c_cbs.h3_conn_handshake_finished = client_h3_handshake;
++    h3_callbacks.h3r_cbs.h3_request_close_notify = client_request_close;
++    h3_callbacks.h3r_cbs.h3_request_read_notify = client_request_read;
++    h3_callbacks.h3r_cbs.h3_request_write_notify = client_request_write;
++    CHECK(xqc_h3_ctx_init(client->engine, &h3_callbacks) == XQC_OK);
++
++    xqc_h3_conn_settings_t h3_settings = {
++        .max_field_section_size = 32 * 1024,
++        .qpack_blocked_streams = 64,
++        .qpack_enc_max_table_capacity = 16 * 1024,
++        .qpack_dec_max_table_capacity = 16 * 1024,
++        .enable_connect_protocol = 1,
++        .h3_datagram = 1,
++    };
++    xqc_h3_engine_set_local_settings(client->engine, &h3_settings);
++
++    xqc_conn_settings_t settings;
++    mqvpn_conn_settings_input_t settings_input = {
++        .is_server = false,
++        .enable_multipath = false,
++        .scheduler = MQVPN_SCHED_MINRTT,
++        .cc = MQVPN_CC_BBR2,
++        .init_max_path_id = 0,
++    };
++    mqvpn_build_conn_settings(&settings_input, &settings);
++    xqc_conn_ssl_config_t connection_ssl;
++    memset(&connection_ssl, 0, sizeof(connection_ssl));
++    connection_ssl.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
++
++    const void *cid = xqc_h3_connect(
++        client->engine, &settings, NULL, 0, "mqvpn.invalid", 0, &connection_ssl,
++        (struct sockaddr *)&env->server_addr, sizeof(env->server_addr), client);
++    CHECK(cid != NULL);
++    memcpy(&client->cid, cid, sizeof(client->cid));
++    return 0;
++}
++
++static int
++client_start_unsupported_alpn(raw_client_t *client, test_env_t *env)
++{
++    static const char unsupported_alpn[] = "volparossa-test-unsupported";
++
++    memset(client, 0, sizeof(*client));
++    client->env = env;
++    client->fd = -1;
++    client->fd = make_loopback_socket(&client->local_addr);
++    CHECK(client->fd >= 0);
++
++    xqc_engine_callback_t engine_callbacks;
++    memset(&engine_callbacks, 0, sizeof(engine_callbacks));
++    engine_callbacks.set_event_timer = client_set_timer;
++    engine_callbacks.log_callbacks.xqc_log_write_err = client_log;
++    engine_callbacks.log_callbacks.xqc_log_write_stat = client_log;
++
++    xqc_transport_callbacks_t transport_callbacks;
++    memset(&transport_callbacks, 0, sizeof(transport_callbacks));
++    transport_callbacks.write_socket = client_write_socket;
++    transport_callbacks.write_socket_ex = client_write_socket_ex;
++    transport_callbacks.save_token = client_save_token;
++    transport_callbacks.save_session_cb = client_save_session;
++    transport_callbacks.save_tp_cb = client_save_transport_parameters;
++    transport_callbacks.cert_verify_cb = client_cert_verify;
++
++    xqc_config_t xquic_config;
++    CHECK(xqc_engine_get_default_config(&xquic_config, XQC_ENGINE_CLIENT) == XQC_OK);
++    xquic_config.cfg_log_level = XQC_LOG_ERROR;
++    xqc_engine_ssl_config_t engine_ssl;
++    memset(&engine_ssl, 0, sizeof(engine_ssl));
++    engine_ssl.ciphers = XQC_TLS_CIPHERS;
++    engine_ssl.groups = XQC_TLS_GROUPS;
++    client->engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xquic_config, &engine_ssl,
++                                       &engine_callbacks, &transport_callbacks, client);
++    CHECK(client->engine != NULL);
++
++    xqc_app_proto_callbacks_t application_callbacks;
++    memset(&application_callbacks, 0, sizeof(application_callbacks));
++    application_callbacks.conn_cbs.conn_create_notify = client_generic_create;
++    application_callbacks.conn_cbs.conn_close_notify = client_generic_close;
++    CHECK(xqc_engine_register_alpn(client->engine, unsupported_alpn,
++                                   sizeof(unsupported_alpn) - 1U,
++                                   &application_callbacks, NULL) == XQC_OK);
++
++    xqc_conn_settings_t settings;
++    mqvpn_conn_settings_input_t settings_input = {
++        .is_server = false,
++        .enable_multipath = false,
++        .scheduler = MQVPN_SCHED_MINRTT,
++        .cc = MQVPN_CC_BBR2,
++        .init_max_path_id = 0,
++    };
++    mqvpn_build_conn_settings(&settings_input, &settings);
++    xqc_conn_ssl_config_t connection_ssl;
++    memset(&connection_ssl, 0, sizeof(connection_ssl));
++    connection_ssl.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
++
++    const xqc_cid_t *cid = xqc_connect(
++        client->engine, &settings, NULL, 0, "mqvpn.invalid", 0,
++        &connection_ssl, (struct sockaddr *)&env->server_addr,
++        sizeof(env->server_addr), unsupported_alpn, client);
++    CHECK(cid != NULL);
++    memcpy(&client->cid, cid, sizeof(client->cid));
++    return 0;
++}
++
++static raw_request_t *
++client_open_connect_ip(raw_client_t *client)
++{
++    if (!client || !client->engine || !client->handshake_finished ||
++        client->n_requests >= MAX_TEST_REQUESTS)
++        return NULL;
++
++    raw_request_t *test_request = &client->requests[client->n_requests++];
++    memset(test_request, 0, sizeof(*test_request));
++    test_request->client = client;
++    test_request->request =
++        xqc_h3_request_create(client->engine, &client->cid, NULL, test_request);
++    if (!test_request->request) return NULL;
++    test_request->stream_id = xqc_h3_stream_id(test_request->request);
++
++    xqc_http_header_t headers[] = {
++        {.name = {.iov_base = ":method", .iov_len = 7},
++         .value = {.iov_base = "CONNECT", .iov_len = 7}},
++        {.name = {.iov_base = ":protocol", .iov_len = 9},
++         .value = {.iov_base = "connect-ip", .iov_len = 10}},
++        {.name = {.iov_base = ":scheme", .iov_len = 7},
++         .value = {.iov_base = "https", .iov_len = 5}},
++        {.name = {.iov_base = ":authority", .iov_len = 10},
++         .value = {.iov_base = "mqvpn.invalid", .iov_len = 13}},
++        {.name = {.iov_base = ":path", .iov_len = 5},
++         .value = {.iov_base = "/.well-known/masque/ip/example.test/443/",
++                   .iov_len = sizeof("/.well-known/masque/ip/example.test/443/") - 1}},
++        {.name = {.iov_base = "capsule-protocol", .iov_len = 16},
++         .value = {.iov_base = "?1", .iov_len = 2}},
++    };
++    xqc_http_headers_t request_headers = {
++        .headers = headers,
++        .count = sizeof(headers) / sizeof(headers[0]),
++        .capacity = sizeof(headers) / sizeof(headers[0]),
++    };
++    if (xqc_h3_request_send_headers(test_request->request, &request_headers, 0) < 0) {
++        return NULL;
++    }
++    return test_request;
++}
++
++static int
++client_send_address_request(raw_request_t *request)
++{
++    uint8_t requested_ip[4] = {0};
++    uint8_t payload[64];
++    size_t payload_len = 0;
++    if (!request || !request->request ||
++        xqc_h3_ext_connectip_build_address_request(
++            payload, sizeof(payload), &payload_len, 7, 4, requested_ip, 0) != XQC_OK) {
++        return -1;
++    }
++    uint8_t capsule[128];
++    size_t capsule_len = 0;
++    if (xqc_h3_ext_capsule_encode(capsule, sizeof(capsule), &capsule_len,
++                                  XQC_H3_CAPSULE_ADDRESS_REQUEST, payload,
++                                  payload_len) != XQC_OK) {
++        return -1;
++    }
++    return xqc_h3_request_send_body(request->request, capsule, capsule_len, 0) < 0
++               ? -1
++               : 0;
++}
++
++static int
++client_send_inner_datagram(raw_request_t *request)
++{
++    if (!request || !request->client || !request->client->h3_conn) return -1;
++    uint8_t inner[20] = {0x45};
++    inner[2] = 0;
++    inner[3] = sizeof(inner);
++    inner[8] = 64;
++    inner[9] = 17;
++    memcpy(&inner[12], request->client->env->last_assigned_ip,
++           sizeof(request->client->env->last_assigned_ip));
++    inner[16] = 192;
++    inner[17] = 0;
++    inner[18] = 2;
++    inner[19] = 1;
++    uint8_t framed[128];
++    size_t framed_len = 0;
++    if (xqc_h3_ext_masque_frame_udp(framed, sizeof(framed), &framed_len,
++                                    request->stream_id, inner, sizeof(inner)) != XQC_OK) {
++        return -1;
++    }
++    uint64_t datagram_id = 0;
++    return xqc_h3_ext_datagram_send(request->client->h3_conn, framed, framed_len,
++                                    &datagram_id, XQC_DATA_QOS_HIGH) == XQC_OK
++               ? 0
++               : -1;
++}
++
++static void
++pump_once(test_env_t *env, raw_client_t *clients[], size_t client_count)
++{
++    unsigned char packet[65536];
++    for (size_t i = 0; i < client_count; i++) {
++        if (clients[i] && clients[i]->engine) xqc_engine_main_logic(clients[i]->engine);
++    }
++
++    if (env->server) {
++        for (;;) {
++            struct sockaddr_storage peer;
++            socklen_t peer_len = sizeof(peer);
++            ssize_t count = recvfrom(env->server_fd, packet, sizeof(packet), MSG_DONTWAIT,
++                                     (struct sockaddr *)&peer, &peer_len);
++            if (count <= 0) break;
++            (void)mqvpn_server_on_socket_recv(env->server, packet, (size_t)count,
++                                              (struct sockaddr *)&peer, peer_len);
++        }
++        (void)mqvpn_server_tick(env->server);
++    }
++
++    for (size_t i = 0; i < client_count; i++) {
++        raw_client_t *client = clients[i];
++        if (!client || !client->engine) continue;
++        int received = 0;
++        for (;;) {
++            struct sockaddr_storage peer;
++            socklen_t peer_len = sizeof(peer);
++            ssize_t count = recvfrom(client->fd, packet, sizeof(packet), MSG_DONTWAIT,
++                                     (struct sockaddr *)&peer, &peer_len);
++            if (count <= 0) break;
++            received = 1;
++            (void)xqc_engine_packet_process(
++                client->engine, packet, (size_t)count,
++                (struct sockaddr *)&client->local_addr, sizeof(client->local_addr),
++                (struct sockaddr *)&peer, peer_len, test_now_us(), NULL);
++        }
++        if (received) xqc_engine_finish_recv(client->engine);
++        xqc_engine_main_logic(client->engine);
++    }
++
++    struct pollfd descriptors[MAX_TEST_CLIENTS + 1];
++    nfds_t descriptor_count = 0;
++    if (env->server) {
++        descriptors[descriptor_count++] =
++            (struct pollfd){.fd = env->server_fd, .events = POLLIN};
++    }
++    for (size_t i = 0; i < client_count; i++) {
++        if (clients[i] && clients[i]->engine) {
++            descriptors[descriptor_count++] =
++                (struct pollfd){.fd = clients[i]->fd, .events = POLLIN};
++        }
++    }
++    if (descriptor_count > 0) (void)poll(descriptors, descriptor_count, 1);
++}
++
++static int
++pump_until_int(test_env_t *env, raw_client_t *clients[], size_t client_count,
++               const int *value, int expected)
++{
++    for (int i = 0; i < PUMP_LIMIT; i++) {
++        if (*value == expected) return 0;
++        pump_once(env, clients, client_count);
++    }
++    return *value == expected ? 0 : -1;
++}
++
++static void
++client_destroy(raw_client_t *client)
++{
++    if (!client) return;
++    if (client->engine) {
++        xqc_engine_destroy(client->engine);
++        client->engine = NULL;
++    }
++    if (client->fd >= 0) {
++        close(client->fd);
++        client->fd = -1;
++    }
++}
++
++static void
++env_destroy(test_env_t *env)
++{
++    if (env->server) {
++        mqvpn_server_destroy(env->server);
++        env->server = NULL;
++    }
++    if (env->server_fd >= 0) {
++        close(env->server_fd);
++        env->server_fd = -1;
++    }
++}
++
++static int
++test_duplicate_and_mixed_teardown(void)
++{
++    test_env_t env;
++    raw_client_t first, replacement, idle, active;
++    raw_client_t *clients[MAX_TEST_CLIENTS] = {&first, &replacement, &idle, &active};
++    CHECK(env_start(&env, 2) == 0);
++    CHECK(client_start(&first, &env) == 0);
++    CHECK(pump_until_int(&env, clients, 1, &first.handshake_finished, 1) == 0);
++
++    raw_request_t *primary = client_open_connect_ip(&first);
++    CHECK(primary != NULL);
++    CHECK(pump_until_int(&env, clients, 1, &primary->status, 200) == 0);
++    CHECK(env.connected == 1);
++    CHECK(env.disconnected == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 1);
++
++    raw_request_t *duplicate = client_open_connect_ip(&first);
++    CHECK(duplicate != NULL);
++    CHECK(pump_until_int(&env, clients, 1, &duplicate->status, 409) == 0);
++    CHECK(env.connected == 1 && env.disconnected == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 1);
++
++    /* A rejected bidi stream can still upload after its 409 response. Its
++     * ADDRESS_REQUEST body and stream-scoped datagram must be drained/dropped,
++     * never answered or attributed to the primary owner's assignment. */
++    CHECK(client_send_address_request(duplicate) == 0);
++    CHECK(client_send_inner_datagram(duplicate) == 0);
++    for (int i = 0; i < 100; i++) pump_once(&env, clients, 1);
++    CHECK(duplicate->response_body_bytes == 0);
++    CHECK(env.inner_packets == 0);
++    CHECK(env.connected == 1 && env.disconnected == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 1);
++
++    CHECK(xqc_h3_request_close(duplicate->request) == XQC_OK);
++    CHECK(pump_until_int(&env, clients, 1, &duplicate->closed, 1) == 0);
++    CHECK(env.connected == 1 && env.disconnected == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 1);
++
++    CHECK(xqc_h3_request_close(primary->request) == XQC_OK);
++    CHECK(pump_until_int(&env, clients, 1, &env.disconnected, 1) == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 0);
++
++    /* The owner/resource teardown above must not clear the lifetime claim. */
++    raw_request_t *sequential = client_open_connect_ip(&first);
++    CHECK(sequential != NULL);
++    CHECK(pump_until_int(&env, clients, 1, &sequential->status, 409) == 0);
++    CHECK(env.connected == 1 && env.disconnected == 1);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 0);
++
++    CHECK(xqc_h3_conn_close(first.engine, &first.cid) == XQC_OK);
++    CHECK(pump_until_int(&env, clients, 1, &first.closed, 1) == 0);
++    client_destroy(&first);
++
++    /* A new QUIC connection may consume the released admission/session
++     * capacity. The address pool deliberately advances its cursor, so exact
++     * immediate address equality is not part of its reuse contract. */
++    CHECK(client_start(&replacement, &env) == 0);
++    CHECK(pump_until_int(&env, clients + 1, 1, &replacement.handshake_finished, 1) ==
++          0);
++    raw_request_t *replacement_request = client_open_connect_ip(&replacement);
++    CHECK(replacement_request != NULL);
++    CHECK(pump_until_int(&env, clients + 1, 1, &replacement_request->status, 200) == 0);
++    CHECK(env.connected == 2 && env.disconnected == 1);
++    CHECK(env.last_session_id != 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 1);
++
++    /* Connection-close is the second route into the same central teardown. */
++    CHECK(xqc_h3_conn_close(replacement.engine, &replacement.cid) == XQC_OK);
++    CHECK(pump_until_int(&env, clients + 1, 1, &env.disconnected, 2) == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 0);
++    client_destroy(&replacement);
++
++    /* Mixed destroy: one admitted H3-only connection plus one live session. */
++    CHECK(client_start(&idle, &env) == 0);
++    CHECK(pump_until_int(&env, clients + 2, 1, &idle.handshake_finished, 1) == 0);
++    CHECK(client_start(&active, &env) == 0);
++    CHECK(pump_until_int(&env, clients + 3, 1, &active.handshake_finished, 1) == 0);
++    raw_request_t *active_request = client_open_connect_ip(&active);
++    CHECK(active_request != NULL);
++    CHECK(pump_until_int(&env, clients + 3, 1, &active_request->status, 200) == 0);
++    CHECK(env.connected == 3 && mqvpn_server_get_n_clients(env.server) == 1);
++
++    mqvpn_server_destroy(env.server);
++    env.server = NULL;
++    CHECK(env.disconnected == 3);
++    client_destroy(&active);
++    client_destroy(&idle);
++    env_destroy(&env);
++    return 0;
++}
++
++static int
++test_max_clients_pre_auth_refuse_and_reuse(void)
++{
++    test_env_t env;
++    raw_client_t admitted, refused, reused;
++    raw_client_t *clients[MAX_TEST_CLIENTS] = {&admitted, &refused, &reused, NULL};
++    CHECK(env_start(&env, 1) == 0);
++
++    /* N=1: a handshaken H3 connection with no CONNECT request owns the slot. */
++    CHECK(client_start(&admitted, &env) == 0);
++    CHECK(pump_until_int(&env, clients, 1, &admitted.handshake_finished, 1) == 0);
++    CHECK(env.connected == 0 && mqvpn_server_get_n_clients(env.server) == 0);
++
++    /* N+1: refusal happens before H3/auth/session callbacks. */
++    CHECK(client_start(&refused, &env) == 0);
++    /* xquic's server_accept refusal is pre-H3 and may silently discard rather
++     * than reliably delivering an H3 close notify to the client. What is
++     * protocol-observable and stable is that repeated Initial/PTO traffic on
++     * loopback can never finish the second handshake while N is occupied. */
++    for (int i = 0; i < 1000 && !refused.handshake_finished; i++) {
++        pump_once(&env, clients, 2);
++    }
++    CHECK(refused.handshake_finished == 0);
++    CHECK(env.connected == 0 && env.disconnected == 0);
++    client_destroy(&refused);
++
++    /* Close the admitted pre-auth connection; the exact slot must be reusable. */
++    CHECK(xqc_h3_conn_close(admitted.engine, &admitted.cid) == XQC_OK);
++    CHECK(pump_until_int(&env, clients, 1, &admitted.closed, 1) == 0);
++    client_destroy(&admitted);
++
++    CHECK(client_start(&reused, &env) == 0);
++    CHECK(pump_until_int(&env, clients + 2, 1, &reused.handshake_finished, 1) == 0);
++    raw_request_t *request = client_open_connect_ip(&reused);
++    CHECK(request != NULL);
++    CHECK(pump_until_int(&env, clients + 2, 1, &request->status, 200) == 0);
++    CHECK(env.connected == 1 && mqvpn_server_get_n_clients(env.server) == 1);
++
++    CHECK(xqc_h3_conn_close(reused.engine, &reused.cid) == XQC_OK);
++    CHECK(pump_until_int(&env, clients + 2, 1, &env.disconnected, 1) == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 0);
++    client_destroy(&reused);
++    env_destroy(&env);
++    return 0;
++}
++
++static int
++test_pre_h3_alpn_refuse_releases_capacity(void)
++{
++    test_env_t env;
++    raw_client_t unsupported, reused;
++    raw_client_t *clients[MAX_TEST_CLIENTS] = {&unsupported, &reused, NULL, NULL};
++    CHECK(env_start(&env, 1) == 0);
++
++    /* server_accept reserves the only slot and binds mqvpn's context. The
++     * unsupported ALPN then closes before H3 exists, so only cb_refuse can
++     * release that reservation/context. */
++    CHECK(client_start_unsupported_alpn(&unsupported, &env) == 0);
++    CHECK(pump_until_int(&env, clients, 1, &unsupported.closed, 1) == 0);
++    CHECK(env.connected == 0 && env.disconnected == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 0);
++    client_destroy(&unsupported);
++
++    /* If cb_refuse leaked the admission slot, this ordinary H3 handshake can
++     * never complete at MaxClients=1. Reaching a CONNECT-IP 200 proves reuse. */
++    CHECK(client_start(&reused, &env) == 0);
++    CHECK(pump_until_int(&env, clients + 1, 1, &reused.handshake_finished, 1) == 0);
++    raw_request_t *request = client_open_connect_ip(&reused);
++    CHECK(request != NULL);
++    CHECK(pump_until_int(&env, clients + 1, 1, &request->status, 200) == 0);
++    CHECK(env.connected == 1 && mqvpn_server_get_n_clients(env.server) == 1);
++
++    CHECK(xqc_h3_conn_close(reused.engine, &reused.cid) == XQC_OK);
++    CHECK(pump_until_int(&env, clients + 1, 1, &env.disconnected, 1) == 0);
++    CHECK(mqvpn_server_get_n_clients(env.server) == 0);
++    client_destroy(&reused);
++    env_destroy(&env);
++    return 0;
++}
++
++int
++main(void)
++{
++    setvbuf(stdout, NULL, _IONBF, 0);
++    setvbuf(stderr, NULL, _IONBF, 0);
++    printf("test_server_adversarial: raw QUIC/H3 lifecycle regressions\n");
++    if (test_duplicate_and_mixed_teardown() != 0 ||
++        test_max_clients_pre_auth_refuse_and_reuse() != 0 ||
++        test_pre_h3_alpn_refuse_releases_capacity() != 0) {
++        fprintf(stderr, "test_server_adversarial: FAILED\n");
++        return 1;
++    }
++    printf("test_server_adversarial: PASS\n");
++    return 0;
++}
+diff --git a/tests/test_server_hardening.c b/tests/test_server_hardening.c
+new file mode 100644
+index 0000000..e57010f
+--- /dev/null
++++ b/tests/test_server_hardening.c
+@@ -0,0 +1,138 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++#include "server_hardening.h"
++
++#include <stdio.h>
++#include <string.h>
++
++#define ASSERT_TRUE(condition)                                              \
++    do {                                                                    \
++        if (!(condition)) {                                                 \
++            fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__,       \
++                    #condition);                                            \
++            return 1;                                                       \
++        }                                                                   \
++    } while (0)
++
++static int
++test_pending_connection_cap(void)
++{
++    mqvpn_server_admission_t admission;
++    ASSERT_TRUE(mqvpn_server_admission_init(&admission, 1) == 0);
++    ASSERT_TRUE(mqvpn_server_admission_reserve(&admission) == 0);
++    ASSERT_TRUE(admission.in_use == 1);
++    ASSERT_TRUE(mqvpn_server_admission_reserve(&admission) != 0);
++    ASSERT_TRUE(admission.in_use == 1);
++    ASSERT_TRUE(mqvpn_server_admission_release(&admission) == 0);
++    ASSERT_TRUE(admission.in_use == 0);
++    ASSERT_TRUE(mqvpn_server_admission_release(&admission) != 0);
++    ASSERT_TRUE(admission.in_use == 0);
++    ASSERT_TRUE(mqvpn_server_admission_reserve(&admission) == 0);
++    ASSERT_TRUE(admission.in_use == 1);
++    return 0;
++}
++
++static int
++test_connection_cap_bounds(void)
++{
++    mqvpn_server_admission_t admission;
++    ASSERT_TRUE(mqvpn_server_admission_init(NULL, 1) != 0);
++    ASSERT_TRUE(mqvpn_server_admission_init(&admission, 0) != 0);
++    ASSERT_TRUE(mqvpn_server_admission_init(
++                    &admission, MQVPN_SERVER_CONNECTION_LIMIT_MAX + 1U) != 0);
++    ASSERT_TRUE(mqvpn_server_admission_init(
++                    &admission, MQVPN_SERVER_CONNECTION_LIMIT_MAX) == 0);
++    for (uint32_t i = 0; i < MQVPN_SERVER_CONNECTION_LIMIT_MAX; i++) {
++        ASSERT_TRUE(mqvpn_server_admission_reserve(&admission) == 0);
++    }
++    ASSERT_TRUE(mqvpn_server_admission_reserve(&admission) != 0);
++    return 0;
++}
++
++static int
++test_ipv4_peer_pin(void)
++{
++    mqvpn_server_peer_pin_t pin;
++    memset(&pin, 0, sizeof(pin));
++    struct sockaddr_in peer;
++    memset(&peer, 0, sizeof(peer));
++    peer.sin_family = AF_INET;
++    peer.sin_port = htons(443);
++    peer.sin_addr.s_addr = htonl(0xc0000201U);
++
++    ASSERT_TRUE(mqvpn_server_peer_pin_set(&pin, (const struct sockaddr *)&peer,
++                                          sizeof(peer)) == 0);
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(
++                    &pin, (const struct sockaddr *)&peer, sizeof(peer)) == 1);
++
++    struct sockaddr_in other = peer;
++    other.sin_port = htons(444);
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(
++                    &pin, (const struct sockaddr *)&other, sizeof(other)) == 0);
++    other = peer;
++    other.sin_addr.s_addr = htonl(0xc0000202U);
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(
++                    &pin, (const struct sockaddr *)&other, sizeof(other)) == 0);
++
++    peer.sin_port = 0;
++    ASSERT_TRUE(mqvpn_server_peer_pin_set(&pin, (const struct sockaddr *)&peer,
++                                          sizeof(peer)) != 0);
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(
++                    &pin, (const struct sockaddr *)&other, sizeof(other)) == 0);
++    return 0;
++}
++
++static int
++test_ipv6_peer_pin(void)
++{
++    mqvpn_server_peer_pin_t pin;
++    memset(&pin, 0, sizeof(pin));
++    struct sockaddr_in6 peer;
++    memset(&peer, 0, sizeof(peer));
++    peer.sin6_family = AF_INET6;
++    peer.sin6_port = htons(8443);
++    peer.sin6_scope_id = 7;
++    peer.sin6_addr.s6_addr[0] = 0x20;
++    peer.sin6_addr.s6_addr[1] = 0x01;
++    peer.sin6_addr.s6_addr[2] = 0x0d;
++    peer.sin6_addr.s6_addr[3] = 0xb8;
++    peer.sin6_addr.s6_addr[15] = 1;
++
++    ASSERT_TRUE(mqvpn_server_peer_pin_set(&pin, (const struct sockaddr *)&peer,
++                                          sizeof(peer)) == 0);
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(
++                    &pin, (const struct sockaddr *)&peer, sizeof(peer)) == 1);
++
++    struct sockaddr_in6 other = peer;
++    other.sin6_scope_id = 8;
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(
++                    &pin, (const struct sockaddr *)&other, sizeof(other)) == 0);
++    other = peer;
++    other.sin6_addr.s6_addr[15] = 2;
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(
++                    &pin, (const struct sockaddr *)&other, sizeof(other)) == 0);
++
++    socklen_t selected_len = 0;
++    const struct sockaddr *selected =
++        mqvpn_server_peer_pin_addr(&pin, &selected_len);
++    ASSERT_TRUE(selected != NULL);
++    ASSERT_TRUE(selected_len == sizeof(struct sockaddr_in6));
++    ASSERT_TRUE(mqvpn_server_peer_pin_matches(&pin, selected, selected_len) == 1);
++    return 0;
++}
++
++int
++main(void)
++{
++    int failed = 0;
++    failed += test_pending_connection_cap();
++    failed += test_connection_cap_bounds();
++    failed += test_ipv4_peer_pin();
++    failed += test_ipv6_peer_pin();
++    if (failed != 0) {
++        fprintf(stderr, "test_server_hardening: FAILED\n");
++        return 1;
++    }
++    printf("test_server_hardening: PASS\n");
++    return 0;
++}
 diff --git a/tests/test_spki_pin.c b/tests/test_spki_pin.c
 new file mode 100644
 index 0000000..77b9a8d

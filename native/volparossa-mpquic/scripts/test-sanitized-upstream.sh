@@ -384,7 +384,9 @@ verify_archive_instrumented "$mqvpn_build/liblwip_core.a"
 require_ctest_name "$mqvpn_build" test_spki_pin
 require_ctest_name "$mqvpn_build" test_xquic_abi_pin
 require_ctest_name "$mqvpn_build" test_tcp_lane
-run_ctest_suite mqvpn-lwIP "$mqvpn_build" 33
+require_ctest_name "$mqvpn_build" test_server_hardening
+require_ctest_name "$mqvpn_build" test_server_adversarial
+run_ctest_suite mqvpn-lwIP "$mqvpn_build" 35
 
 cmake -G "Unix Makefiles" -S "$component_root" -B "$wrapper_build" \
     -DCMAKE_BUILD_TYPE=Debug \
@@ -409,7 +411,9 @@ cmake -G "Unix Makefiles" -S "$component_root" -B "$wrapper_build" \
 cmake --build "$wrapper_build" --parallel "$jobs"
 verify_compile_flags VOLPAROSSA-wrapper "$wrapper_build"
 verify_link_flags VOLPAROSSA-wrapper "$wrapper_build"
-run_ctest_suite VOLPAROSSA-wrapper "$wrapper_build" 7
+require_ctest_name "$wrapper_build" volparossa_mpquic_mqvpn_exit_backend_state
+require_ctest_name "$wrapper_build" volparossa_mpquic_tls_identity
+run_ctest_suite VOLPAROSSA-wrapper "$wrapper_build" 9
 api_version=$(ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     "$wrapper_build/bin/volparossa-mpquic" --api-version)
 [ "$api_version" = "6" ] ||
@@ -420,8 +424,8 @@ run_daemon_smoke "$wrapper_build/bin/volparossa-mpquic" TERM
 
 echo "full pinned ASan+UBSan graph passed"
 echo "build root: $build_root"
-echo "mqvpn/lwIP tests: 33"
-echo "VOLPAROSSA wrapper tests: 7"
+echo "mqvpn/lwIP tests: 35"
+echo "VOLPAROSSA wrapper tests: 9"
 echo "ASAN_OPTIONS=$asan_options"
 echo "UBSAN_OPTIONS=$ubsan_options"
 echo "BoringSSL and xquic are covered here through sanitized archives, mqvpn"
