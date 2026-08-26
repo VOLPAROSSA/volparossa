@@ -263,6 +263,14 @@ fn expect_error<T>(result: &Result<T, DurableOwnershipError>) -> DurableOwnershi
     }
 }
 
+fn expired_deadline() -> HardDeadline {
+    let deadline = HardDeadline::after(Duration::from_millis(1)).expect("short deadline");
+    while deadline.ensure_remaining().is_ok() {
+        thread::yield_now();
+    }
+    deadline
+}
+
 #[test]
 fn typed_inputs_validate_complete_wire_values_and_redact_debug_output() {
     let valid = wire_intent(1);
@@ -313,6 +321,275 @@ fn typed_inputs_validate_complete_wire_values_and_redact_debug_output() {
         format!("{:?}", durable_anchor(3)),
         "DurablePrepareAnchor(<redacted>)"
     );
+}
+
+#[test]
+fn deadline_expiry_before_startup_acceptance_is_mutation_free_and_does_not_latch_store() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_calls_capture = Arc::clone(&factory_calls);
+
+    let expired = DurableOwnershipActor::spawn_with_executor_factory_until(
+        config.clone(),
+        move || {
+            factory_calls_capture.fetch_add(1, Ordering::AcqRel);
+            executor(ExecutorMode::Exact, &observations_capture, None)
+        },
+        expired_deadline(),
+    );
+    assert_eq!(
+        expect_error(&expired),
+        DurableOwnershipError::DeadlineElapsed
+    );
+    assert_eq!(factory_calls.load(Ordering::Acquire), 0);
+    assert!(!config.journal_path.exists());
+    assert!(!config.next_path.exists());
+    assert!(!config.lock_path.exists());
+
+    spawn_actor(config, ExecutorMode::Exact, &observations, None)
+        .expect("expired startup did not acquire the process latch")
+        .shutdown()
+        .expect("clean actor shutdown");
+}
+
+#[test]
+fn deadline_expiry_on_delayed_actor_start_is_mutation_free_and_does_not_latch_store() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_calls_capture = Arc::clone(&factory_calls);
+    let gate = Arc::new(ExecutorGate::default());
+    let hook_gate = Arc::clone(&gate);
+    let release_gate = Arc::clone(&gate);
+    let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short startup deadline");
+    let releaser = thread::spawn(move || {
+        release_gate.wait_entered();
+        while deadline.ensure_remaining().is_ok() {
+            thread::yield_now();
+        }
+        release_gate.release();
+    });
+
+    let delayed = DurableOwnershipActor::spawn_with_pre_startup_hook_until(
+        config.clone(),
+        move || hook_gate.block(),
+        move || {
+            factory_calls_capture.fetch_add(1, Ordering::AcqRel);
+            executor(ExecutorMode::Exact, &observations_capture, None)
+        },
+        deadline,
+    );
+    assert_eq!(expect_error(&delayed), DurableOwnershipError::Ambiguous);
+    releaser.join().expect("startup deadline releaser");
+    gate.wait_returned();
+    assert_eq!(factory_calls.load(Ordering::Acquire), 0);
+    assert!(!config.journal_path.exists());
+    assert!(!config.next_path.exists());
+    assert!(!config.lock_path.exists());
+
+    spawn_actor(config, ExecutorMode::Exact, &observations, None)
+        .expect("delayed expired startup did not acquire the process latch")
+        .shutdown()
+        .expect("clean actor shutdown");
+}
+
+#[test]
+fn queued_expiry_is_observed_before_core_mutation_and_keeps_exact_journal_bytes() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let actor =
+        spawn_actor(config.clone(), ExecutorMode::Exact, &observations, None).expect("start actor");
+    let client = actor.client.as_ref().expect("actor client");
+    let gate = Arc::new(ExecutorGate::default());
+    let barrier_gate = Arc::clone(&gate);
+    let barrier = client
+        .test_barrier_pending_until(
+            HardDeadline::after(TEST_WAIT).expect("barrier deadline"),
+            move || barrier_gate.block(),
+        )
+        .expect("admit blocking barrier");
+    gate.wait_entered();
+    assert!(!config.journal_path.exists());
+    assert!(!config.next_path.exists());
+
+    let expired_at_dequeue =
+        HardDeadline::after(Duration::from_millis(20)).expect("queued deadline");
+    let expired = client
+        .register_pending_until(durable_intent(27), expired_at_dequeue)
+        .expect("admit queued registration");
+    let trailing = client
+        .test_barrier_pending_until(
+            HardDeadline::after(TEST_WAIT).expect("trailing barrier deadline"),
+            || {},
+        )
+        .expect("admit trailing barrier");
+    while expired_at_dequeue.ensure_remaining().is_ok() {
+        thread::yield_now();
+    }
+    gate.release();
+    assert_eq!(barrier.wait(), Ok(()));
+    assert_eq!(trailing.wait(), Ok(()));
+    assert_eq!(expired.wait(), Err(DurableOwnershipError::DeadlineElapsed));
+    assert!(!config.journal_path.exists());
+    assert!(!config.next_path.exists());
+
+    let key = actor
+        .register_intent(durable_intent(27))
+        .expect("expired queued command did not fence admission");
+    actor
+        .retire_never_dispatched(&key)
+        .expect("retire post-expiry fixture");
+    actor.shutdown().expect("clean actor shutdown");
+}
+
+#[test]
+fn ambiguous_shutdown_settlement_dominates_queued_deadline_reply() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let mut actor = spawn_actor(config, ExecutorMode::Exact, &observations, None)
+        .expect("start shutdown-boundary actor");
+    let client = actor.client.as_ref().expect("actor client").clone();
+    let gate = Arc::new(ExecutorGate::default());
+    let barrier_gate = Arc::clone(&gate);
+    let barrier = client
+        .test_barrier_pending_until(
+            HardDeadline::after(TEST_WAIT).expect("barrier deadline"),
+            move || barrier_gate.block(),
+        )
+        .expect("admit blocking barrier");
+    gate.wait_entered();
+
+    let shutdown_deadline =
+        HardDeadline::after(Duration::from_millis(20)).expect("queued shutdown deadline");
+    let shutdown_reply = client
+        .fence_and_shutdown_until(shutdown_deadline)
+        .expect("queue shutdown behind barrier");
+    while shutdown_deadline.ensure_remaining().is_ok() {
+        thread::yield_now();
+    }
+    gate.release();
+
+    let finish_deadline = Instant::now() + TEST_WAIT;
+    while !actor
+        .join
+        .as_ref()
+        .expect("actor join handle")
+        .is_finished()
+    {
+        assert!(
+            Instant::now() < finish_deadline,
+            "expired queued shutdown did not finish"
+        );
+        thread::yield_now();
+    }
+    assert_eq!(barrier.wait(), Ok(()));
+    let reply = shutdown_reply.wait();
+    assert_eq!(reply, Err(DurableOwnershipError::DeadlineElapsed));
+
+    actor.client.take();
+    let settled = actor.settle_thread_until(shutdown_deadline);
+    assert_eq!(settled, Err(DurableOwnershipError::Ambiguous));
+    assert_eq!(
+        combine_shutdown_results(reply, settled),
+        Err(DurableOwnershipError::Ambiguous),
+        "join ambiguity must dominate the weaker no-mutation deadline reply"
+    );
+    assert_eq!(actor.lifecycle.load(), Lifecycle::Ambiguous);
+}
+
+#[test]
+fn deadline_expiry_before_operation_acceptance_is_truthful_and_mutation_free() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let mut actor =
+        spawn_actor(config.clone(), ExecutorMode::Exact, &observations, None).expect("start actor");
+    let expired = expired_deadline();
+
+    assert!(!config.journal_path.exists());
+    assert_eq!(
+        actor
+            .register_intent_until(durable_intent(22), expired)
+            .unwrap_err(),
+        DurableOwnershipError::DeadlineElapsed
+    );
+    assert!(!config.journal_path.exists());
+
+    let recovered = actor
+        .register_intent(durable_intent(22))
+        .expect("register recovery fixture");
+    let before = fs::read(&config.journal_path).expect("registered journal bytes");
+    assert_eq!(
+        actor
+            .arm_prepare_until(&recovered, durable_anchor(22), expired)
+            .unwrap_err(),
+        DurableOwnershipError::DeadlineElapsed
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("journal bytes"),
+        before
+    );
+    actor
+        .arm_prepare(&recovered, durable_anchor(22))
+        .expect("arm recovery fixture");
+
+    let before = fs::read(&config.journal_path).expect("armed journal bytes");
+    assert_eq!(
+        actor
+            .confirm_recovered_absent_until(&recovered, expired)
+            .unwrap_err(),
+        DurableOwnershipError::DeadlineElapsed
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("journal bytes"),
+        before
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+    actor
+        .confirm_recovered_absent(&recovered)
+        .expect("recover armed fixture");
+
+    let retired = actor
+        .register_intent(durable_intent(23))
+        .expect("register retire fixture");
+    let before = fs::read(&config.journal_path).expect("retire journal bytes");
+    assert_eq!(
+        actor
+            .retire_never_dispatched_until(&retired, expired)
+            .unwrap_err(),
+        DurableOwnershipError::DeadlineElapsed
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("journal bytes"),
+        before
+    );
+    actor
+        .retire_never_dispatched(&retired)
+        .expect("retire fixture after expired attempt");
+
+    let before = fs::read(&config.journal_path).expect("pre-shutdown journal bytes");
+    assert_eq!(
+        actor.shutdown_until(expired).unwrap_err(),
+        DurableOwnershipError::DeadlineElapsed
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("journal bytes"),
+        before
+    );
+    let still_running = actor
+        .register_intent(durable_intent(24))
+        .expect("expired shutdown leaves actor running");
+    actor
+        .retire_never_dispatched(&still_running)
+        .expect("retire post-expiry fixture");
+    actor.shutdown().expect("clean actor shutdown");
 }
 
 #[test]
@@ -417,6 +694,60 @@ fn dropped_replies_do_not_cancel_durable_transitions_and_exact_retries_recover()
         .expect("exact retire retry succeeds");
     assert_eq!(observations.lock().expect("executor observations").calls, 1);
     actor.shutdown().expect("clean actor shutdown");
+}
+
+#[test]
+fn accepted_recovery_survives_caller_drop_and_late_completion_fences_admission() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let gate = Arc::new(ExecutorGate::default());
+    let actor = spawn_actor(
+        config.clone(),
+        ExecutorMode::Exact,
+        &observations,
+        Some(Arc::clone(&gate)),
+    )
+    .expect("start actor");
+    let key = actor
+        .register_intent(durable_intent(25))
+        .expect("register late fixture");
+    actor
+        .arm_prepare(&key, durable_anchor(25))
+        .expect("arm late fixture");
+    let client = actor.client.as_ref().expect("actor client");
+    let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short deadline");
+    let pending = client
+        .confirm_pending_until(key.coordinates, deadline)
+        .expect("accept recovery before deadline");
+    gate.wait_entered();
+    drop(pending);
+    while deadline.ensure_remaining().is_ok() {
+        thread::yield_now();
+    }
+    gate.release();
+    gate.wait_returned();
+    wait_until_fenced(client);
+
+    assert_eq!(
+        expect_error(&client.register_pending(durable_intent(26))),
+        DurableOwnershipError::Ambiguous
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 1);
+    let snapshot = JournalSnapshot::decode(
+        &fs::read(&config.journal_path).expect("late-completion journal bytes"),
+    )
+    .expect("decode late-completion snapshot");
+    assert_eq!(
+        snapshot
+            .records
+            .get(&key.coordinates.ownership_id)
+            .expect("late recovery record")
+            .phase,
+        OwnershipPhase::Absent,
+        "the accepted recovery must finish even after its caller drops"
+    );
+    drop(actor);
 }
 
 #[test]
@@ -935,8 +1266,10 @@ fn timed_out_operation_fences_queue_and_drop_never_waits_forever_for_executor() 
         .arm_prepare(&second, durable_anchor(12))
         .expect("arm second intent");
     let client = actor.client.as_ref().expect("actor client");
+    let first_deadline =
+        HardDeadline::after(Duration::from_millis(20)).expect("short recovery deadline");
     let first_reply = client
-        .confirm_pending(first.coordinates)
+        .confirm_pending_until(first.coordinates, first_deadline)
         .expect("admit blocked recovery");
     gate.wait_entered();
     let second_reply = client
@@ -1198,11 +1531,50 @@ fn actor_api_stays_private_bounded_synchronous_and_disconnected_from_production(
     ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::arm_prepare;
     let _: fn(&DurableOwnershipActor, &DurableOwnershipKey) -> Result<(), DurableOwnershipError> =
         DurableOwnershipActor::retire_never_dispatched;
+    let _: fn(
+        &DurableOwnershipActor,
+        DurablePrepareIntent,
+        HardDeadline,
+    ) -> Result<DurableOwnershipKey, DurableOwnershipError> =
+        DurableOwnershipActor::register_intent_until;
+    let _: fn(
+        &DurableOwnershipActor,
+        &DurableOwnershipKey,
+        DurablePrepareAnchor,
+        HardDeadline,
+    ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::arm_prepare_until;
+    let _: fn(
+        &DurableOwnershipActor,
+        &DurableOwnershipKey,
+        HardDeadline,
+    ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::retire_never_dispatched_until;
+    let _: fn(
+        &DurableOwnershipActor,
+        &DurableOwnershipKey,
+        HardDeadline,
+    ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::confirm_recovered_absent_until;
+    let _: fn(&mut DurableOwnershipActor, HardDeadline) -> Result<(), DurableOwnershipError> =
+        DurableOwnershipActor::shutdown_until;
 
     let actor_source = include_str!("../actor.rs");
     let library_source = include_str!("../../lib.rs");
     assert!(actor_source.contains("sync_channel(COMMAND_CHANNEL_CAPACITY)"));
-    assert!(actor_source.contains("recv_timeout(REPLY_WAIT_LIMIT)"));
+    assert!(actor_source.contains("recv_timeout(remaining)"));
+    assert!(actor_source.contains("HardDeadline"));
+    assert!(actor_source.contains("spawn_with_executor_factory_until"));
+    for test_only_wrapper in [
+        "#[cfg(test)]\n    pub(super) fn spawn_with_executor_factory",
+        "#[cfg(test)]\n    pub(super) fn register_intent(",
+        "#[cfg(test)]\n    pub(super) fn arm_prepare(",
+        "#[cfg(test)]\n    pub(super) fn retire_never_dispatched(",
+        "#[cfg(test)]\n    pub(super) fn confirm_recovered_absent(",
+        "#[cfg(test)]\n    pub(super) fn shutdown(",
+    ] {
+        assert!(
+            actor_source.contains(test_only_wrapper),
+            "deadline-resetting wrapper must stay test-only: {test_only_wrapper}"
+        );
+    }
     assert!(actor_source.contains("confirm_retry_safe_after_definite_failure"));
     assert!(!actor_source.contains("open_production"));
     assert!(!actor_source.contains("tokio::"));
