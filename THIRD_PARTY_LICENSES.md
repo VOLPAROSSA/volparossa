@@ -234,28 +234,40 @@ boundary was verified on Debian 13 amd64 on 2026-08-26:
   and cover role preflight, target/instance substitution, exact response
   digest, stale-instance without automatic retry, signed Start scope, bearer
   commitment recomputation, tunnel-assignment shape, descriptor ownership, and
-  fail-closed dormant exit dispatch.
+  fail-closed dormant exit dispatch. Native tests additionally cover
+  BOOTTIME/REALTIME admission, rollback/forward-jump/overflow behavior,
+  bounded no-eviction reservation/finalize replay tombstones, same-pair exit
+  consumption through the framed server boundary, and FD cleanup when request
+  digest generation fails.
 
 This API-v6 run does not prove separate role service identity, trusted-helper
 descriptor provenance, product-pool assignment or retention, namespace state,
-replay/monotonic expiry, cryptographic consistency of the candidate TLS
-identity, the separate BoringSSL Go suite, the xquic CUnit suite, or disposable
-network-namespace dataplane acceptance.
+independent signed-bundle verification or durable/general-nonce replay
+authority, cryptographic consistency of the candidate TLS identity, the
+separate BoringSSL Go suite, the xquic CUnit suite, or disposable
+network-namespace dataplane acceptance. The proven replay ledger is
+process-local and the accepted wall lifetime is converted once to a
+`CLOCK_BOOTTIME` deadline; neither claim supplies the missing production
+verifier and affine handoff.
 
 This evidence proves reproducible source intake, compilation, and bounded
 native behavior. It is not namespace dataplane acceptance.
 
 ### Mandatory unresolved findings
 
-Native API version 6 preflights an exact client or exit role and fresh per-start
-process instance, then target-binds each later operation and correlates every
+Native API version 6 preflights an exact client or exit role and a fresh instance
+per process start, then target-binds each later operation and correlates every
 response to its canonical request digest. It carries signed reservation/finalize
 IDs, bearer commitment, certificate digest, and both native instances together
 with route-scoped auth, TLS name, and short expiry. Native recomputes the bearer
 commitment for both Start roles. Multipath-at-least-two remains distinct from
 single-path general UDP, no mode silently downgrades, and no unsolicited frame
-is sent. `AddPath` consumes one request-bound UDP descriptor, enforces the fixed
-private IPv6 overlay, and never creates or binds a path socket.
+is sent. Native converts an accepted wall expiry once to BOOTTIME and keeps a
+fixed 128-record, no-live-eviction process-local ledger that rejects exact
+reservation/finalize replay and one-ID scope collisions; it does not verify the
+signed bundle or retain replay state across restart. `AddPath` consumes one
+request-bound UDP descriptor, enforces the fixed private IPv6 overlay, and
+never creates or binds a path socket.
 `StartExitSession` consumes one separately domain-bound listener-shaped
 descriptor, carries exact overlay peer metadata and bounded unparsed TLS
 candidate material, then closes the descriptor and fails closed while the exit
@@ -276,8 +288,9 @@ The following required contracts and evidence remain unresolved:
    durable retention proof for each client path and exit-listener descriptor;
 3. a unique delivered-payload counter rather than ACKed transport bytes;
 4. an operational exit backend with helper-to-native listener provenance,
-   signed reservation/replay binding, monotonic expiry, and cryptographic
-   certificate/key/name/SPKI consistency over the in-message TLS material;
+   independent signed-reservation verification, preverified affine replay
+   handoff, and cryptographic certificate/key/name/SPKI consistency over the
+   in-message TLS material;
 5. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
 6. disposable-topology proof that an exit-originated inner datagram traverses
    the native queue/poll boundary and reaches the Rust client;

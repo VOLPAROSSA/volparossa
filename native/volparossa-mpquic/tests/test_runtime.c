@@ -41,7 +41,12 @@ typedef struct mock_transport {
 } mock_transport_t;
 
 typedef struct mock_clock {
-    uint64_t now_ms;
+    uint64_t boottime_ms;
+    uint64_t realtime_ms;
+    bool fail_snapshot;
+    bool fail_boottime;
+    unsigned snapshot_calls;
+    unsigned boottime_calls;
 } mock_clock_t;
 
 static const uint8_t TEST_SECRET[VMP_AUTH_SECRET_LEN] =
@@ -58,6 +63,7 @@ static const uint8_t TEST_TLS_CERTIFICATE[] =
 static const uint8_t TEST_TLS_PRIVATE_KEY[] =
     "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
 #define TEST_NOW_MS UINT64_C(1000000)
+#define TEST_BOOTTIME_MS UINT64_C(500000)
 #define TEST_EXPIRY_MS (TEST_NOW_MS + UINT64_C(60000))
 static const uint8_t TEST_INSTANCE[VMP_NATIVE_INSTANCE_ID_LEN] = {
     0x91U,
@@ -220,10 +226,24 @@ static const vmp_transport_ops_t MOCK_OPS = {
     .receive_inner = mock_receive,
 };
 
-static uint64_t mock_now_ms(void *context)
+static bool mock_clock_snapshot(void *context, uint64_t *out_boottime_ms,
+                                uint64_t *out_realtime_ms)
 {
-    const mock_clock_t *clock = context;
-    return clock->now_ms;
+    mock_clock_t *clock = context;
+    ++clock->snapshot_calls;
+    if (clock->fail_snapshot) return false;
+    *out_boottime_ms = clock->boottime_ms;
+    *out_realtime_ms = clock->realtime_ms;
+    return true;
+}
+
+static bool mock_boottime_ms(void *context, uint64_t *out_boottime_ms)
+{
+    mock_clock_t *clock = context;
+    ++clock->boottime_calls;
+    if (clock->fail_boottime) return false;
+    *out_boottime_ms = clock->boottime_ms;
+    return true;
 }
 
 static bool mock_auth_commitment(
@@ -245,8 +265,8 @@ static vmp_runtime_t *create_runtime(vmp_runtime_mode_t mode,
                                      mock_clock_t *clock)
 {
     return vmp_runtime_create(mode, TEST_INSTANCE, &MOCK_OPS, mock,
-                              mock_auth_commitment, NULL, mock_now_ms,
-                              clock);
+                              mock_auth_commitment, NULL,
+                              mock_clock_snapshot, mock_boottime_ms, clock);
 }
 
 static vmp_request_t start_request(uint8_t context_byte, uint64_t masque,
@@ -350,6 +370,21 @@ static vmp_request_t start_exit_request(
     memcpy(request.body.start_exit_session.exit_native_instance_id,
            TEST_INSTANCE, VMP_NATIVE_INSTANCE_ID_LEN);
     return request;
+}
+
+static void set_authorization_pair(uint8_t reservation_id
+                                       [VMP_RESERVATION_ID_LEN],
+                                   uint8_t finalize_id[VMP_FINALIZE_ID_LEN],
+                                   uint16_t sequence)
+{
+    memset(reservation_id, 0x51, VMP_RESERVATION_ID_LEN);
+    memset(finalize_id, 0x52, VMP_FINALIZE_ID_LEN);
+    reservation_id[VMP_RESERVATION_ID_LEN - 2U] =
+        (uint8_t)(sequence >> 8U);
+    reservation_id[VMP_RESERVATION_ID_LEN - 1U] = (uint8_t)sequence;
+    finalize_id[VMP_FINALIZE_ID_LEN - 2U] =
+        (uint8_t)(sequence >> 8U);
+    finalize_id[VMP_FINALIZE_ID_LEN - 1U] = (uint8_t)sequence;
 }
 
 static vmp_request_t add_request(uint8_t context_byte, uint32_t path_id,
@@ -507,7 +542,10 @@ static void test_process_instance_preflight_and_restart_rejection(void)
 {
     mock_transport_t mock;
     init_mock(&mock);
-    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
     vmp_runtime_t *client =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
     vmp_runtime_t *exit = create_runtime(VMP_RUNTIME_EXIT, &mock, &clock);
@@ -575,7 +613,8 @@ static void test_process_instance_preflight_and_restart_rejection(void)
     const uint8_t zero_instance[VMP_NATIVE_INSTANCE_ID_LEN] = {0};
     assert(vmp_runtime_create(VMP_RUNTIME_CLIENT, zero_instance, &MOCK_OPS,
                               &mock, mock_auth_commitment, NULL,
-                              mock_now_ms, &clock) == NULL);
+                              mock_clock_snapshot, mock_boottime_ms,
+                              &clock) == NULL);
     vmp_runtime_destroy(exit);
     vmp_runtime_destroy(client);
 }
@@ -584,7 +623,10 @@ static void test_ready_transport_without_assignment_fails_closed(void)
 {
     mock_transport_t mock;
     init_mock(&mock);
-    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
     vmp_runtime_t *runtime =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
     assert(runtime != NULL);
@@ -607,7 +649,10 @@ static void test_required_multipath_and_honest_failures(void)
 {
     mock_transport_t mock;
     init_mock(&mock);
-    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
     vmp_runtime_t *runtime =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
     assert(runtime != NULL);
@@ -698,10 +743,13 @@ static void test_explicit_modes_and_contexts(void)
 {
     mock_transport_t mock;
     init_mock(&mock);
-    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
     assert(vmp_runtime_create(VMP_RUNTIME_CLIENT, TEST_INSTANCE, &MOCK_OPS,
                               &mock, mock_auth_commitment, NULL, NULL,
-                              &clock) == NULL);
+                              mock_boottime_ms, &clock) == NULL);
 
     vmp_runtime_t *client =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
@@ -793,7 +841,8 @@ static void test_explicit_modes_and_contexts(void)
     response = dispatch(exit_runtime, &rejected_exit);
     assert(response.result == VMP_RESULT_INVALID_REQUEST);
     rejected_exit = start_exit;
-    rejected_exit.body.start_exit_session.expires_at_ms = clock.now_ms;
+    rejected_exit.body.start_exit_session.expires_at_ms =
+        clock.realtime_ms;
     response = dispatch(exit_runtime, &rejected_exit);
     assert(response.result == VMP_RESULT_UNAUTHORISED);
     int invalid_descriptors[2];
@@ -849,7 +898,10 @@ static void test_reverse_receive_and_overflow(void)
 {
     mock_transport_t mock;
     init_mock(&mock);
-    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
     vmp_runtime_t *runtime =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
     assert(runtime != NULL);
@@ -914,7 +966,10 @@ static void test_session_credentials_versions_and_expiry(void)
 {
     mock_transport_t mock;
     init_mock(&mock);
-    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
     vmp_runtime_t *runtime =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
     assert(runtime != NULL);
@@ -929,7 +984,8 @@ static void test_session_credentials_versions_and_expiry(void)
     start.body.start_session.tls_server_name.data = tls_server_name;
     start.body.start_session.tls_server_name.len =
         sizeof(tls_server_name) - 1U;
-    start.body.start_session.expires_at_ms = clock.now_ms + UINT64_C(1000);
+    start.body.start_session.expires_at_ms =
+        clock.realtime_ms + UINT64_C(1000);
 
     const uint32_t rejected_versions[] = {1U, 2U, 3U, 4U, 99U};
     for (size_t index = 0U;
@@ -971,7 +1027,7 @@ static void test_session_credentials_versions_and_expiry(void)
     assert(response.result == VMP_RESULT_OK);
     assert(mock.create_calls == 1U);
 
-    clock.now_ms = start.body.start_session.expires_at_ms;
+    clock.boottime_ms += UINT64_C(1000);
     uint8_t packet[20] = {0x45U};
     packet[3] = (uint8_t)sizeof(packet);
     vmp_request_t send =
@@ -987,10 +1043,11 @@ static void test_session_credentials_versions_and_expiry(void)
 
     vmp_request_t expired = start_request(
         0x77U, 17U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
-    expired.body.start_session.expires_at_ms = clock.now_ms;
+    clock.realtime_ms += UINT64_C(1000);
+    expired.body.start_session.expires_at_ms = clock.realtime_ms;
     assert(dispatch(runtime, &expired).result == VMP_RESULT_UNAUTHORISED);
     expired.body.start_session.expires_at_ms =
-        clock.now_ms + VMP_MAX_AUTHORIZATION_FUTURE_MS + UINT64_C(1);
+        clock.realtime_ms + VMP_MAX_AUTHORIZATION_FUTURE_MS + UINT64_C(1);
     assert(dispatch(runtime, &expired).result == VMP_RESULT_UNAUTHORISED);
 
     vmp_runtime_destroy(runtime);
@@ -1001,7 +1058,10 @@ static void test_pump_failure_is_session_scoped(void)
 {
     mock_transport_t mock;
     init_mock(&mock);
-    mock_clock_t clock = {.now_ms = TEST_NOW_MS};
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
     vmp_runtime_t *runtime =
         create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
     assert(runtime != NULL);
@@ -1018,6 +1078,295 @@ static void test_pump_failure_is_session_scoped(void)
     vmp_runtime_destroy(runtime);
 }
 
+static void test_boottime_deadline_and_monotonic_wall_anchor(void)
+{
+    mock_transport_t mock;
+    init_mock(&mock);
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
+    vmp_runtime_t *runtime =
+        create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    assert(clock.snapshot_calls == 1U);
+
+    vmp_request_t start = start_request(
+        0x81U, 21U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    start.body.start_session.expires_at_ms =
+        TEST_NOW_MS + UINT64_C(1000);
+    vmp_response_t response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+    assert(clock.snapshot_calls == 2U);
+
+    /* An exact live retry uses only the converted BOOTTIME deadline. */
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+    assert(clock.snapshot_calls == 2U);
+    assert(clock.boottime_calls == 1U);
+
+    /* A wall-clock rollback cannot extend or revive the authorization. */
+    clock.realtime_ms = 1U;
+    clock.boottime_ms += UINT64_C(999);
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+    assert(clock.snapshot_calls == 2U);
+
+    ++clock.boottime_ms;
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "session_expired") == 0);
+
+    /* The tombstone is purgeable at its deadline, but the monotone wall
+     * anchor still rejects the expired bearer after rollback. */
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_window") == 0);
+    assert(clock.snapshot_calls == 3U);
+    vmp_runtime_destroy(runtime);
+
+    /* A forward wall jump conservatively shortens a newly admitted lifetime;
+     * a later rollback cannot undo that one-time conversion. */
+    clock.boottime_ms = TEST_BOOTTIME_MS;
+    clock.realtime_ms = TEST_NOW_MS;
+    clock.snapshot_calls = 0U;
+    clock.boottime_calls = 0U;
+    runtime = create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    start = start_request(
+        0x87U, 27U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    set_authorization_pair(start.body.start_session.reservation_id,
+                           start.body.start_session.finalize_id, 3U);
+    start.body.start_session.expires_at_ms =
+        TEST_NOW_MS + UINT64_C(1000);
+    clock.realtime_ms += UINT64_C(500);
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+    clock.realtime_ms = 1U;
+    clock.boottime_ms += UINT64_C(499);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    ++clock.boottime_ms;
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "session_expired") == 0);
+    vmp_runtime_destroy(runtime);
+}
+
+static void test_authorization_replay_scope_and_exit_consumption(void)
+{
+    mock_transport_t mock;
+    init_mock(&mock);
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
+    vmp_runtime_t *client =
+        create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(client != NULL);
+
+    vmp_request_t start = start_request(
+        0x82U, 22U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    vmp_response_t response = dispatch(client, &start);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+    response = dispatch(client, &start);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+
+    vmp_request_t other_context = start_request(
+        0x83U, 23U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    response = dispatch(client, &other_context);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_replay") == 0);
+
+    other_context.body.start_session.finalize_id[0] ^= 1U;
+    response = dispatch(client, &other_context);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code,
+                  "authorization_scope_reuse") == 0);
+
+    other_context = start_request(
+        0x83U, 23U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    other_context.body.start_session.reservation_id[0] ^= 1U;
+    response = dispatch(client, &other_context);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code,
+                  "authorization_scope_reuse") == 0);
+
+    vmp_request_t stop =
+        context_request(VMP_OPERATION_STOP_SESSION, 0x82U);
+    assert(dispatch(client, &stop).result == VMP_RESULT_OK);
+    response = dispatch(client, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_replay") == 0);
+    vmp_runtime_destroy(client);
+
+    vmp_runtime_t *exit = create_runtime(VMP_RUNTIME_EXIT, &mock, &clock);
+    assert(exit != NULL);
+    vmp_request_t exit_start = start_exit_request(
+        0x84U, 24U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    vmp_request_t invalid = exit_start;
+    invalid.body.start_exit_session.auth_commitment[0] ^= 1U;
+    response = dispatch(exit, &invalid);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code,
+                  "auth_commitment_mismatch") == 0);
+
+    response = dispatch(exit, &exit_start);
+    assert(response.result == VMP_RESULT_TRANSPORT);
+    assert(strcmp(response.diagnostic_code,
+                  "exit_listener_orchestration_unavailable") == 0);
+    response = dispatch(exit, &exit_start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_replay") == 0);
+    vmp_runtime_destroy(exit);
+}
+
+static void test_authorization_clock_failures_fail_closed(void)
+{
+    mock_transport_t mock;
+    init_mock(&mock);
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+        .fail_snapshot = true,
+    };
+    assert(create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock) == NULL);
+
+    clock.fail_snapshot = false;
+    clock.boottime_ms = UINT64_MAX;
+    assert(create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock) == NULL);
+    clock.boottime_ms = TEST_BOOTTIME_MS;
+    clock.realtime_ms = TEST_NOW_MS;
+    vmp_runtime_t *runtime =
+        create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+
+    vmp_request_t start = start_request(
+        0x85U, 25U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    clock.fail_snapshot = true;
+    vmp_response_t response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_clock") == 0);
+
+    clock.fail_snapshot = false;
+    --clock.boottime_ms;
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_clock") == 0);
+    ++clock.boottime_ms;
+
+    /* Anchor-plus-elapsed overflow is a clock failure and changes no state. */
+    clock.boottime_ms = UINT64_MAX - UINT64_C(1);
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_clock") == 0);
+    clock.boottime_ms = TEST_BOOTTIME_MS;
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_INSUFFICIENT_PATHS);
+
+    clock.fail_boottime = true;
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_clock") == 0);
+    clock.fail_boottime = false;
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_replay") == 0);
+    vmp_runtime_destroy(runtime);
+
+    clock.boottime_ms = TEST_BOOTTIME_MS;
+    clock.realtime_ms = TEST_NOW_MS;
+    runtime = create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    start = start_request(
+        0x86U, 26U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    set_authorization_pair(start.body.start_session.reservation_id,
+                           start.body.start_session.finalize_id, 2U);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    vmp_request_t add = add_request(0x86U, 1U, 60U);
+    assert(dispatch(runtime, &add).result == VMP_RESULT_OK);
+    clock.fail_boottime = true;
+    assert(vmp_runtime_pump(runtime) == VMP_SERVER_BACKEND);
+    assert(mock.destroy_calls == 1U);
+    vmp_request_t status =
+        context_request(VMP_OPERATION_GET_STATUS, 0x86U);
+    assert(dispatch(runtime, &status).result == VMP_RESULT_NOT_FOUND);
+    vmp_runtime_destroy(runtime);
+
+    /* Even with a valid near-maximum anchor, BOOTTIME plus remaining lifetime
+     * is checked instead of wrapping. */
+    clock.fail_boottime = false;
+    clock.boottime_ms = UINT64_MAX - UINT64_C(10);
+    clock.realtime_ms = TEST_NOW_MS;
+    runtime = create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    start = start_request(
+        0x88U, 28U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    set_authorization_pair(start.body.start_session.reservation_id,
+                           start.body.start_session.finalize_id, 4U);
+    start.body.start_session.expires_at_ms =
+        TEST_NOW_MS + UINT64_C(20);
+    response = dispatch(runtime, &start);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_window") == 0);
+    vmp_runtime_destroy(runtime);
+}
+
+static void test_authorization_capacity_has_no_eviction(void)
+{
+    mock_transport_t mock;
+    init_mock(&mock);
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
+    vmp_runtime_t *runtime =
+        create_runtime(VMP_RUNTIME_EXIT, &mock, &clock);
+    assert(runtime != NULL);
+
+    vmp_request_t first;
+    memset(&first, 0, sizeof(first));
+    for (size_t index = 0U; index < VMP_MAX_AUTHORIZATION_RECORDS;
+         ++index) {
+        const uint16_t sequence = (uint16_t)(index + 1U);
+        vmp_request_t request = start_exit_request(
+            (uint8_t)sequence, UINT64_C(100) + sequence,
+            VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+        set_authorization_pair(
+            request.body.start_exit_session.reservation_id,
+            request.body.start_exit_session.finalize_id, sequence);
+        const vmp_response_t response = dispatch(runtime, &request);
+        assert(response.result == VMP_RESULT_TRANSPORT);
+        assert(strcmp(response.diagnostic_code,
+                      "exit_listener_orchestration_unavailable") == 0);
+        if (index == 0U) first = request;
+    }
+
+    vmp_request_t extra = start_exit_request(
+        0x90U, 999U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    set_authorization_pair(extra.body.start_exit_session.reservation_id,
+                           extra.body.start_exit_session.finalize_id,
+                           (uint16_t)(VMP_MAX_AUTHORIZATION_RECORDS + 1U));
+    vmp_response_t response = dispatch(runtime, &extra);
+    assert(response.result == VMP_RESULT_TRANSPORT);
+    assert(strcmp(response.diagnostic_code, "authorization_capacity") == 0);
+
+    response = dispatch(runtime, &first);
+    assert(response.result == VMP_RESULT_UNAUTHORISED);
+    assert(strcmp(response.diagnostic_code, "authorization_replay") == 0);
+
+    clock.boottime_ms += UINT64_C(60000);
+    clock.realtime_ms += UINT64_C(60000);
+    extra.body.start_exit_session.expires_at_ms =
+        clock.realtime_ms + UINT64_C(60000);
+    response = dispatch(runtime, &extra);
+    assert(response.result == VMP_RESULT_TRANSPORT);
+    assert(strcmp(response.diagnostic_code,
+                  "exit_listener_orchestration_unavailable") == 0);
+    vmp_runtime_destroy(runtime);
+}
+
 int main(void)
 {
     test_process_instance_preflight_and_restart_rejection();
@@ -1027,6 +1376,10 @@ int main(void)
     test_reverse_receive_and_overflow();
     test_session_credentials_versions_and_expiry();
     test_pump_failure_is_session_scoped();
+    test_boottime_deadline_and_monotonic_wall_anchor();
+    test_authorization_replay_scope_and_exit_consumption();
+    test_authorization_clock_failures_fail_closed();
+    test_authorization_capacity_has_no_eviction();
     puts("runtime gate tests passed");
     return 0;
 }

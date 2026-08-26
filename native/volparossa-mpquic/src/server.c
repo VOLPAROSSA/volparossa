@@ -457,6 +457,7 @@ vmp_server_error_t vmp_serve_connection(int connection_fd,
            VMP_REQUEST_NONCE_LEN);
     if (!options->request_digest(options->request_digest_context, frame,
                                  frame_len, response.request_sha256)) {
+        if (request_fd >= 0) (void)close(request_fd);
         vmp_wipe_secret(&request, sizeof(request));
         vmp_wipe_secret(frame, frame_len);
         free(frame);

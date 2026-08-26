@@ -21,9 +21,9 @@ proof of a production transport datapath.
 ## Process API and containment
 
 The version-6, 1 MiB bounded Protocol Buffers API first preflights an exact client or exit process
-role and fresh per-start instance. Later operations target that instance and are correlated by
-nonce plus an exact canonical-request digest. They are limited to starting/stopping a client or
-exit context, adopting one request-bound UDP descriptor for a fixed path or exit listener,
+role and a fresh instance per process start. Later operations target that instance and are
+correlated by nonce plus an exact canonical-request digest. They are limited to starting/stopping a
+client or exit context, adopting one request-bound UDP descriptor for a fixed path or exit listener,
 adding/removing a fixed overlay path, sending/polling an already-authorized inner IP datagram, and
 retrieving bounded status. There is no free-form interface name, pathname, command, configuration
 text, or arbitrary destination. The current same-UID socket provides channel correlation, not
@@ -34,8 +34,10 @@ The exit SPKI/certificate hashes, TLS name, MASQUE context, route context, signe
 finalize IDs, bearer commitment, both native instances, path/reservation proof, destination policy,
 and minimum-path count are fixed before native activation. Rust validates response identity,
 request correlation, and bounded tunnel-assignment shape. No production caller or backend
-assignment exists yet, and helper provenance, product-pool addresses, namespace ownership, replay/monotonic
-expiry, certificate/key consistency, and byte-counter evidence remain fail-closed requirements.
+assignment exists yet, and helper provenance, product-pool addresses, namespace ownership,
+independent signed-bundle replay verification plus affine handoff, certificate/key consistency,
+and byte-counter evidence remain fail-closed requirements. Native's process-local pair ledger and
+BOOTTIME deadline do not replace that missing production authority.
 
 ## Scheduling
 
