@@ -249,10 +249,10 @@ bool vmp_add_path_is_valid(const vmp_add_path_t *path);
  * generator remains responsible for entropy. */
 bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start);
 
-/* Validates the exact API-v6 mqvpn tunnel assignment shape. The current
- * pinned backend emits /32 IPv4 endpoints, an MTU in 1280..9000, and either
- * no IPv6 assignment or one non-zero /96../126 client address. Product pool
- * policy is deliberately a separate fail-closed activation prerequisite. */
+/* Validates the exact API-v6 VOLPAROSSA tunnel-assignment policy: server
+ * 10.76.0.1/32, client 10.76.0.2/32 through 10.76.0.254/32, MTU 1280..1420,
+ * and either no IPv6 assignment or fd76:6f6c:7062::2/112 through
+ * fd76:6f6c:7062::fe/112. */
 bool vmp_tunnel_assignment_is_valid(
     const vmp_tunnel_assignment_t *assignment);
 

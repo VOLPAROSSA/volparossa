@@ -259,16 +259,26 @@ bool vmp_start_exit_is_valid(const vmp_start_exit_session_t *start)
 bool vmp_tunnel_assignment_is_valid(
     const vmp_tunnel_assignment_t *assignment)
 {
+    static const uint8_t server_ipv4[] = {
+        UINT8_C(10), UINT8_C(76), UINT8_C(0), UINT8_C(1),
+    };
+    static const uint8_t client_ipv4_prefix[] = {
+        UINT8_C(10), UINT8_C(76), UINT8_C(0),
+    };
+    static const uint8_t client_ipv6_prefix[] = {
+        UINT8_C(0xfd), UINT8_C(0x76), UINT8_C(0x6f),
+        UINT8_C(0x6c), UINT8_C(0x70), UINT8_C(0x62),
+    };
     if (assignment == NULL ||
-        all_zero(assignment->assigned_ipv4,
-                 sizeof(assignment->assigned_ipv4)) ||
-        all_zero(assignment->server_ipv4,
-                 sizeof(assignment->server_ipv4)) ||
-        memcmp(assignment->assigned_ipv4, assignment->server_ipv4,
-               sizeof(assignment->assigned_ipv4)) == 0 ||
+        memcmp(assignment->assigned_ipv4, client_ipv4_prefix,
+               sizeof(client_ipv4_prefix)) != 0 ||
+        assignment->assigned_ipv4[3] < 2U ||
+        assignment->assigned_ipv4[3] > 254U ||
+        memcmp(assignment->server_ipv4, server_ipv4,
+               sizeof(server_ipv4)) != 0 ||
         assignment->assigned_prefix_v4 != 32U ||
         assignment->server_prefix_v4 != 32U || assignment->mtu < 1280U ||
-        assignment->mtu > 9000U) {
+        assignment->mtu > 1420U) {
         return false;
     }
     if (!assignment->has_ipv6) {
@@ -276,10 +286,12 @@ bool vmp_tunnel_assignment_is_valid(
                all_zero(assignment->assigned_ipv6,
                         sizeof(assignment->assigned_ipv6));
     }
-    return !all_zero(assignment->assigned_ipv6,
-                     sizeof(assignment->assigned_ipv6)) &&
-           assignment->assigned_prefix_v6 >= 96U &&
-           assignment->assigned_prefix_v6 <= 126U;
+    return memcmp(assignment->assigned_ipv6, client_ipv6_prefix,
+                  sizeof(client_ipv6_prefix)) == 0 &&
+           all_zero(&assignment->assigned_ipv6[6], 9U) &&
+           assignment->assigned_ipv6[15] >= 2U &&
+           assignment->assigned_ipv6[15] <= 254U &&
+           assignment->assigned_prefix_v6 == 112U;
 }
 
 static vmp_protocol_error_t parse_context_only(decoder_t decoder,

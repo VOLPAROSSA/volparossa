@@ -399,9 +399,11 @@ static vmp_server_error_t test_dispatch(void *context,
     if (state->inject_assignment) {
         response->has_tunnel_assignment = true;
         response->tunnel_assignment.assigned_ipv4[0] = 10U;
+        response->tunnel_assignment.assigned_ipv4[1] = 76U;
         response->tunnel_assignment.assigned_ipv4[3] = 2U;
         response->tunnel_assignment.assigned_prefix_v4 = 32U;
         response->tunnel_assignment.server_ipv4[0] = 10U;
+        response->tunnel_assignment.server_ipv4[1] = 76U;
         response->tunnel_assignment.server_ipv4[3] = 1U;
         response->tunnel_assignment.server_prefix_v4 = 32U;
         response->tunnel_assignment.mtu = 1280U;

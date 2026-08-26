@@ -716,6 +716,84 @@ static void test_complete_ip_datagram_is_required(void)
     free(large_packet);
 }
 
+static vmp_tunnel_assignment_t valid_tunnel_assignment(void)
+{
+    vmp_tunnel_assignment_t assignment;
+    memset(&assignment, 0, sizeof(assignment));
+    assignment.assigned_ipv4[0] = 10U;
+    assignment.assigned_ipv4[1] = 76U;
+    assignment.assigned_ipv4[3] = 2U;
+    assignment.assigned_prefix_v4 = 32U;
+    assignment.server_ipv4[0] = 10U;
+    assignment.server_ipv4[1] = 76U;
+    assignment.server_ipv4[3] = 1U;
+    assignment.server_prefix_v4 = 32U;
+    assignment.mtu = 1280U;
+    return assignment;
+}
+
+static void test_exact_tunnel_assignment_policy(void)
+{
+    assert(!vmp_tunnel_assignment_is_valid(NULL));
+
+    vmp_tunnel_assignment_t assignment = valid_tunnel_assignment();
+    assert(vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.mtu = 1420U;
+    assert(vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.mtu = 1421U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+
+    assignment = valid_tunnel_assignment();
+    assignment.assigned_ipv4[3] = 1U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_ipv4[3] = 255U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment = valid_tunnel_assignment();
+    assignment.assigned_ipv4[1] = 75U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment = valid_tunnel_assignment();
+    assignment.server_ipv4[3] = 2U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment = valid_tunnel_assignment();
+    assignment.assigned_prefix_v4 = 24U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment = valid_tunnel_assignment();
+    assignment.server_prefix_v4 = 24U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+
+    assignment = valid_tunnel_assignment();
+    assignment.assigned_ipv6[15] = 2U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_ipv6[15] = 0U;
+    assignment.assigned_prefix_v6 = 112U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+
+    assignment = valid_tunnel_assignment();
+    assignment.has_ipv6 = true;
+    const uint8_t ipv6_prefix[] = {
+        0xfdU, 0x76U, 0x6fU, 0x6cU, 0x70U, 0x62U,
+    };
+    memcpy(assignment.assigned_ipv6, ipv6_prefix, sizeof(ipv6_prefix));
+    assignment.assigned_ipv6[15] = 2U;
+    assignment.assigned_prefix_v6 = 112U;
+    assert(vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_ipv6[15] = 254U;
+    assert(vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_ipv6[15] = 1U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_ipv6[15] = 255U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_ipv6[15] = 2U;
+    assignment.assigned_ipv6[14] = 1U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_ipv6[14] = 0U;
+    assignment.assigned_prefix_v6 = 111U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+    assignment.assigned_prefix_v6 = 112U;
+    assignment.assigned_ipv6[5] = 0x61U;
+    assert(!vmp_tunnel_assignment_is_valid(&assignment));
+}
+
 static void test_response_is_compatible_and_bounded(void)
 {
     vmp_response_t response;
@@ -846,9 +924,11 @@ static void test_response_is_compatible_and_bounded(void)
     response.result = VMP_RESULT_OK;
     response.has_tunnel_assignment = true;
     response.tunnel_assignment.assigned_ipv4[0] = 10U;
+    response.tunnel_assignment.assigned_ipv4[1] = 76U;
     response.tunnel_assignment.assigned_ipv4[3] = 2U;
     response.tunnel_assignment.assigned_prefix_v4 = 32U;
     response.tunnel_assignment.server_ipv4[0] = 10U;
+    response.tunnel_assignment.server_ipv4[1] = 76U;
     response.tunnel_assignment.server_ipv4[3] = 1U;
     response.tunnel_assignment.server_prefix_v4 = 32U;
     response.tunnel_assignment.mtu = 1280U;
@@ -898,6 +978,7 @@ int main(void)
     test_single_path_and_extensions_fail_closed();
     test_path_is_typed_fd_bound_and_rejects_v3_shape();
     test_complete_ip_datagram_is_required();
+    test_exact_tunnel_assignment_policy();
     test_response_is_compatible_and_bounded();
     puts("protocol tests passed");
     return 0;

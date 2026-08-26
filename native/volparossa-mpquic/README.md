@@ -10,8 +10,9 @@ fail-closed descriptor-bound single-path exit-listener contract. API v6 also
 binds every operational request to a native-generated process incarnation,
 correlates responses to the exact canonical request digest, carries the
 fields derived from the exit-signed route scope without verifying that
-signature itself, and reserves a strictly validated tunnel-assignment
-wire-shape contract.
+signature itself. The client adapter retains a strictly validated
+tunnel assignment, exposes it only after `ESTABLISHED`, and enforces packet
+address ownership.
 It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, exact scheduler, honest
 unique-payload metric, trusted helper origin for path descriptors, and
 disposable namespace acceptance remain incomplete and fail closed where
@@ -215,7 +216,7 @@ or loaded at runtime.
 
 The host build requires CMake, Make, C/C++ compilers, `pkg-config`,
 `libevent-dev`, and the other repository build dependencies. It runs the
-patched upstream tests followed by the five bounded native tests and writes
+patched upstream tests followed by the seven bounded native tests and writes
 the executable to:
 
 ~~~text
@@ -302,8 +303,8 @@ patches close six concrete integration seams:
 API version 6 retains the bounded reverse/session contracts and strict
 single-path exit-listener handoff while adding process-incarnation targeting,
 exact request-digest correlation, signed route-scope fields, and a canonical
-tunnel-assignment response shape. It preserves the earlier seven
-process-boundary seams:
+tunnel-assignment response plus client retention policy. It preserves the
+earlier seven process-boundary seams:
 
 1. Reverse datagrams use bounded, request-driven polling with deterministic
    overflow and explicit memory wiping; the native process never pushes an
@@ -359,12 +360,15 @@ The following gates remain hard blockers:
    new scope, tombstones expire, and process restart clears the table.
    Production still needs cryptographic verification and a preverified affine
    handoff bound to both process instances.
-5. **No retained or enforced production tunnel assignment.** API v6 strictly
-   encodes the upstream assignment shape and refuses a successful start without
-   one, but the mqvpn adapter deliberately reports no assignment until a later
-   slice deep-copies the callback, proves product-pool and address-type policy,
-   rejects changes, and enforces inner source and reverse-destination ownership.
-   Production client starts therefore remain fail closed.
+5. **Client assignment still lacks production provenance.** The mqvpn adapter
+   now deep-copies exactly one callback assignment, independently enforces the
+   fixed VOLPAROSSA IPv4/optional-IPv6 pools and MTU, rejects changes, publishes
+   only after `ESTABLISHED`, and checks inner source and reverse-destination
+   ownership. Focused C tests prove the pure state and packet policy. There is
+   still no production exit configuring that pool, helper proof that the address
+   belongs to the exact namespace, production caller, or disposable-topology
+   packet evidence, so this client-side state must not be reported as an
+   operational tunnel.
 6. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
    is not the required replaceable delivery-time formula. FEC, XOR, and
    reinjection remain disabled; that does not make WLB an EDT implementation.

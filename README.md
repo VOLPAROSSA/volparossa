@@ -105,8 +105,12 @@ uninstall guidance is in [OPERATIONS.md](docs/OPERATIONS.md).
   runtime converts accepted wall expiry to a BOOTTIME deadline and uses a bounded, no-live-eviction
   process-local reservation/finalize ledger to reject pair replay and scope collisions. That ledger
   does not verify the signed bundle, cache general nonces, or survive process restart. The current
-  same-UID socket is not authentication against an untrusted agent, no production caller or tunnel
-  assignment exists, and helper origin, product-pool address state, namespace provenance, exit
+  same-UID socket is not authentication against an untrusted agent and no production caller exists.
+  The native client now retains one immutable assignment with server `10.76.0.1/32`, client
+  `10.76.0.2/32` through `10.76.0.254/32`, and optional client
+  `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`; it caps the MTU at 1280--1420 and
+  independently enforces outbound-source and reverse-destination ownership. Helper origin,
+  server-side allocation uniqueness/lifetime, assigned-address and namespace provenance, the exit
   backend, and disposable dataplane acceptance remain incomplete.
 - Do not rely on the kill switch, whitelist enforcement, crash cleanup, or privacy properties until
   their acceptance checks are marked complete.

@@ -49,6 +49,30 @@ set_target_properties(volparossa_mpquic_daemon_socket PROPERTIES
     C_EXTENSIONS OFF
     POSITION_INDEPENDENT_CODE ON)
 
+add_library(volparossa_mpquic_tunnel_assignment STATIC
+    src/tunnel_assignment.c)
+target_include_directories(volparossa_mpquic_tunnel_assignment
+    PUBLIC
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+target_compile_features(volparossa_mpquic_tunnel_assignment PUBLIC c_std_11)
+set_target_properties(volparossa_mpquic_tunnel_assignment PROPERTIES
+    C_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON)
+
+add_library(volparossa_mpquic_mqvpn_backend_state STATIC
+    src/mqvpn_backend_state.c)
+target_include_directories(volparossa_mpquic_mqvpn_backend_state
+    PUBLIC
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+target_compile_features(volparossa_mpquic_mqvpn_backend_state PUBLIC c_std_11)
+target_link_libraries(volparossa_mpquic_mqvpn_backend_state
+    PUBLIC volparossa_mpquic_tunnel_assignment)
+set_target_properties(volparossa_mpquic_mqvpn_backend_state PROPERTIES
+    C_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON)
+
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(volparossa_mpquic_protocol PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
@@ -60,6 +84,12 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
         -Werror)
     target_compile_options(volparossa_mpquic_daemon_socket PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
+        -Werror)
+    target_compile_options(volparossa_mpquic_tunnel_assignment PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
+        -Werror)
+    target_compile_options(volparossa_mpquic_mqvpn_backend_state PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
         -Werror)
 endif()
@@ -77,6 +107,14 @@ if(VMP_ENABLE_ASAN)
     target_compile_options(volparossa_mpquic_daemon_socket PUBLIC
         -fsanitize=address -fno-omit-frame-pointer)
     target_link_options(volparossa_mpquic_daemon_socket PUBLIC -fsanitize=address)
+    target_compile_options(volparossa_mpquic_tunnel_assignment PUBLIC
+        -fsanitize=address -fno-omit-frame-pointer)
+    target_link_options(volparossa_mpquic_tunnel_assignment PUBLIC
+        -fsanitize=address)
+    target_compile_options(volparossa_mpquic_mqvpn_backend_state PUBLIC
+        -fsanitize=address -fno-omit-frame-pointer)
+    target_link_options(volparossa_mpquic_mqvpn_backend_state PUBLIC
+        -fsanitize=address)
 endif()
 
 if(VMP_ENABLE_UBSAN)
@@ -92,6 +130,14 @@ if(VMP_ENABLE_UBSAN)
     target_compile_options(volparossa_mpquic_daemon_socket PUBLIC
         -fsanitize=undefined -fno-omit-frame-pointer)
     target_link_options(volparossa_mpquic_daemon_socket PUBLIC -fsanitize=undefined)
+    target_compile_options(volparossa_mpquic_tunnel_assignment PUBLIC
+        -fsanitize=undefined -fno-omit-frame-pointer)
+    target_link_options(volparossa_mpquic_tunnel_assignment PUBLIC
+        -fsanitize=undefined)
+    target_compile_options(volparossa_mpquic_mqvpn_backend_state PUBLIC
+        -fsanitize=undefined -fno-omit-frame-pointer)
+    target_link_options(volparossa_mpquic_mqvpn_backend_state PUBLIC
+        -fsanitize=undefined)
 endif()
 
 if(VMP_BUILD_DAEMON)
@@ -173,6 +219,8 @@ if(VMP_BUILD_DAEMON)
         volparossa_mpquic_runtime
         volparossa_mpquic_request_binding
         volparossa_mpquic_daemon_socket
+        volparossa_mpquic_mqvpn_backend_state
+        volparossa_mpquic_tunnel_assignment
         "${VMP_MQVPN_LIBRARY}"
         "${VMP_LWIP_LIBRARY}"
         "${VMP_XQUIC_LIBRARY}"
@@ -267,6 +315,30 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME volparossa_mpquic_daemon_socket
              COMMAND test_volparossa_mpquic_daemon_socket)
+
+    add_executable(test_volparossa_mpquic_tunnel_assignment
+        tests/test_tunnel_assignment.c)
+    target_link_libraries(test_volparossa_mpquic_tunnel_assignment
+        PRIVATE volparossa_mpquic_tunnel_assignment)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_volparossa_mpquic_tunnel_assignment PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
+            -Werror -UNDEBUG)
+    endif()
+    add_test(NAME volparossa_mpquic_tunnel_assignment
+             COMMAND test_volparossa_mpquic_tunnel_assignment)
+
+    add_executable(test_volparossa_mpquic_mqvpn_backend_state
+        tests/test_mqvpn_backend_state.c)
+    target_link_libraries(test_volparossa_mpquic_mqvpn_backend_state
+        PRIVATE volparossa_mpquic_mqvpn_backend_state)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(test_volparossa_mpquic_mqvpn_backend_state PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes
+            -Werror -UNDEBUG)
+    endif()
+    add_test(NAME volparossa_mpquic_mqvpn_backend_state
+             COMMAND test_volparossa_mpquic_mqvpn_backend_state)
 endif()
 
 if(VMP_BUILD_FUZZER)

@@ -33,11 +33,13 @@ identities and role sockets remain required.
 The exit SPKI/certificate hashes, TLS name, MASQUE context, route context, signed reservation and
 finalize IDs, bearer commitment, both native instances, path/reservation proof, destination policy,
 and minimum-path count are fixed before native activation. Rust validates response identity,
-request correlation, and bounded tunnel-assignment shape. No production caller or backend
-assignment exists yet, and helper provenance, product-pool addresses, namespace ownership,
-independent signed-bundle replay verification plus affine handoff, certificate/key consistency,
-and byte-counter evidence remain fail-closed requirements. Native's process-local pair ledger and
-BOOTTIME deadline do not replace that missing production authority.
+request correlation, and the exact tunnel-assignment policy. The native client retains a valid
+assignment immutably, publishes it only after `ESTABLISHED`, and independently checks outbound
+source and reverse destination ownership. No production caller or disposable datapath proof exists
+yet, and helper provenance, server-side pool configuration, assigned-address and namespace
+ownership, independent signed-bundle replay verification plus affine handoff, certificate/key
+consistency, and byte-counter evidence remain fail-closed requirements. Native's process-local
+pair ledger and BOOTTIME deadline do not replace that missing production authority.
 
 ## Scheduling
 
