@@ -638,6 +638,13 @@ static vmp_transport_error_t snapshot_active(vmp_runtime_t *runtime,
     const vmp_transport_error_t error = runtime->transport.snapshot(
         session->transport_session, snapshots, VMP_MAX_PATHS, &count, &ready,
         &has_assignment, &assignment);
+    if (error == VMP_TRANSPORT_OVERFLOW) {
+        session->reverse_overflow = true;
+        session->failed = true;
+        session->started = false;
+        secure_zero(&assignment, sizeof(assignment));
+        return VMP_TRANSPORT_OVERFLOW;
+    }
     if (error != VMP_TRANSPORT_OK || count > VMP_MAX_PATHS ||
         (has_assignment && !vmp_tunnel_assignment_is_valid(&assignment)) ||
         (ready && !has_assignment)) {
@@ -859,8 +866,12 @@ vmp_server_error_t vmp_runtime_pump(void *context)
         runtime_session_t *session = &runtime->sessions[index];
         if (!session->used) continue;
         if (session->failed || session->transport_session == NULL) continue;
-        if (runtime->transport.pump(session->transport_session) !=
-            VMP_TRANSPORT_OK) {
+        const vmp_transport_error_t error =
+            runtime->transport.pump(session->transport_session);
+        if (error != VMP_TRANSPORT_OK) {
+            if (error == VMP_TRANSPORT_OVERFLOW) {
+                session->reverse_overflow = true;
+            }
             session->failed = true;
             session->started = false;
         }
@@ -982,11 +993,17 @@ static void dispatch_start(vmp_runtime_t *runtime,
     bool has_assignment = false;
     vmp_tunnel_assignment_t assignment;
     memset(&assignment, 0, sizeof(assignment));
-    if (snapshot_active(runtime, session, &active, &ready,
-                        &has_assignment, &assignment) !=
-        VMP_TRANSPORT_OK) {
+    const vmp_transport_error_t snapshot_error = snapshot_active(
+        runtime, session, &active, &ready, &has_assignment, &assignment);
+    if (snapshot_error != VMP_TRANSPORT_OK) {
         secure_zero(&assignment, sizeof(assignment));
-        set_result(response, VMP_RESULT_TRANSPORT, "native_transport_failed");
+        set_result(response,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? VMP_RESULT_QUEUE_OVERFLOW
+                       : VMP_RESULT_TRANSPORT,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? "reverse_queue_overflow"
+                       : "native_transport_failed");
         return;
     }
     if (!ready || !has_assignment ||
@@ -1023,6 +1040,12 @@ static void dispatch_add_path(vmp_runtime_t *runtime,
     }
     if (!require_live(runtime, session, response)) {
         (void)close(path_fd);
+        return;
+    }
+    if (session->reverse_overflow) {
+        (void)close(path_fd);
+        set_result(response, VMP_RESULT_QUEUE_OVERFLOW,
+                   "reverse_queue_overflow");
         return;
     }
     if (session->failed) {
@@ -1089,11 +1112,22 @@ static void dispatch_add_path(vmp_runtime_t *runtime,
     const vmp_transport_error_t add_error = runtime->transport.add_path(
         session->transport_session, request, path_fd, &handle);
     if (add_error != VMP_TRANSPORT_OK || handle < 0) {
+        if (add_error == VMP_TRANSPORT_OVERFLOW) {
+            session->reverse_overflow = true;
+            session->failed = true;
+            session->started = false;
+        }
         if (created) {
             runtime->transport.destroy(session->transport_session);
             session->transport_session = NULL;
         }
-        set_result(response, VMP_RESULT_TRANSPORT, "path_activation_failed");
+        set_result(response,
+                   add_error == VMP_TRANSPORT_OVERFLOW
+                       ? VMP_RESULT_QUEUE_OVERFLOW
+                       : VMP_RESULT_TRANSPORT,
+                   add_error == VMP_TRANSPORT_OVERFLOW
+                       ? "reverse_queue_overflow"
+                       : "path_activation_failed");
         return;
     }
     memset(path, 0, sizeof(*path));
@@ -1119,13 +1153,32 @@ static void dispatch_remove_path(vmp_runtime_t *runtime,
         set_result(response, VMP_RESULT_NOT_FOUND, "path_not_found");
         return;
     }
-    if (session->failed ||
+    if (session->reverse_overflow) {
+        set_result(response, VMP_RESULT_QUEUE_OVERFLOW,
+                   "reverse_queue_overflow");
+        return;
+    }
+    if (session->failed) {
+        set_result(response, VMP_RESULT_TRANSPORT,
+                   "native_transport_failed");
+        return;
+    }
+    const vmp_transport_error_t remove_error =
         runtime->transport.remove_path(session->transport_session,
-                                       path->transport_handle) !=
-            VMP_TRANSPORT_OK) {
+                                       path->transport_handle);
+    if (remove_error != VMP_TRANSPORT_OK) {
+        if (remove_error == VMP_TRANSPORT_OVERFLOW) {
+            session->reverse_overflow = true;
+        }
         session->failed = true;
         session->started = false;
-        set_result(response, VMP_RESULT_TRANSPORT, "path_removal_failed");
+        set_result(response,
+                   remove_error == VMP_TRANSPORT_OVERFLOW
+                       ? VMP_RESULT_QUEUE_OVERFLOW
+                       : VMP_RESULT_TRANSPORT,
+                   remove_error == VMP_TRANSPORT_OVERFLOW
+                       ? "reverse_queue_overflow"
+                       : "path_removal_failed");
         return;
     }
     secure_zero(path, sizeof(*path));
@@ -1136,16 +1189,27 @@ static void dispatch_remove_path(vmp_runtime_t *runtime,
 static bool require_active(vmp_runtime_t *runtime, runtime_session_t *session,
                            vmp_response_t *response)
 {
+    if (session->reverse_overflow) {
+        set_result(response, VMP_RESULT_QUEUE_OVERFLOW,
+                   "reverse_queue_overflow");
+        return false;
+    }
     size_t active = 0U;
     bool ready = false;
     bool has_assignment = false;
     vmp_tunnel_assignment_t assignment;
     memset(&assignment, 0, sizeof(assignment));
-    if (snapshot_active(runtime, session, &active, &ready,
-                        &has_assignment, &assignment) !=
-        VMP_TRANSPORT_OK) {
+    const vmp_transport_error_t snapshot_error = snapshot_active(
+        runtime, session, &active, &ready, &has_assignment, &assignment);
+    if (snapshot_error != VMP_TRANSPORT_OK) {
         secure_zero(&assignment, sizeof(assignment));
-        set_result(response, VMP_RESULT_TRANSPORT, "native_transport_failed");
+        set_result(response,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? VMP_RESULT_QUEUE_OVERFLOW
+                       : VMP_RESULT_TRANSPORT,
+                   snapshot_error == VMP_TRANSPORT_OVERFLOW
+                       ? "reverse_queue_overflow"
+                       : "native_transport_failed");
         return false;
     }
     secure_zero(&assignment, sizeof(assignment));

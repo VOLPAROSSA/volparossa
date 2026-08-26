@@ -225,7 +225,7 @@ boundary was verified on Debian 13 amd64 on 2026-08-26:
   origin, license, bundled file, and local patch SHA-256 before compilation.
 - A newly replaced, offline full-graph build instrumented BoringSSL, xquic,
   mqvpn/lwIP, the VOLPAROSSA wrapper, and the final daemon with AddressSanitizer
-  and UndefinedBehaviorSanitizer. All 33 mqvpn/lwIP and all 5 wrapper tests
+  and UndefinedBehaviorSanitizer. All 33 mqvpn/lwIP and all 7 wrapper tests
   passed with leak detection and halt/abort-on-error enabled.
 - The sanitized daemon's side-effect-free version probe wrote exactly `6\n`;
   bounded SIGINT and SIGTERM lifecycle checks exited zero, removed their exact
@@ -238,10 +238,16 @@ boundary was verified on Debian 13 amd64 on 2026-08-26:
   BOOTTIME/REALTIME admission, rollback/forward-jump/overflow behavior,
   bounded no-eviction reservation/finalize replay tombstones, same-pair exit
   consumption through the framed server boundary, and FD cleanup when request
-  digest generation fails.
+  digest generation fails. Rust and C independently enforce the exact
+  VOLPAROSSA tunnel pools and MTU; focused native tests additionally cover
+  immutable retention, duplicate/conflict handling, secure wiping, minimum
+  IP version/length shape plus MTU, client source/reverse-destination
+  ownership, exact current-path projection with only retired CLOSED records,
+  and typed terminal reverse-queue overflow.
 
 This API-v6 run does not prove separate role service identity, trusted-helper
-descriptor provenance, product-pool assignment or retention, namespace state,
+descriptor provenance, server-side product-pool allocation, uniqueness and
+route-lifetime binding, assigned-address namespace state,
 independent signed-bundle verification or durable/general-nonce replay
 authority, cryptographic consistency of the candidate TLS identity, the
 separate BoringSSL Go suite, the xquic CUnit suite, or disposable
@@ -277,15 +283,19 @@ Datagrams. The current same-UID socket and both SCM_RIGHTS bindings prove local
 correlation only, not binary attestation, authentication against an untrusted
 agent, or privileged-helper origin. The active client `AddPath` backend also
 checks one same-session namespace cookie; `StartExitSession` has no namespace
-or assigned-address provenance. Tunnel assignment is a validated wire shape
-only and the current backend deliberately returns none.
+or assigned-address provenance. The client backend now retains one exact
+product-pool assignment, exposes it only after `ESTABLISHED`, rejects mutation,
+and enforces inner source/reverse-destination ownership. No test yet proves
+that a production exit configured that pool or that the helper installed it in
+the same namespace.
 
 The following required contracts and evidence remain unresolved:
 
 1. separate client/exit service identities and role sockets, followed by
    production agent preflight and affine handoff into signed route setup;
-2. trusted helper-origin, exact namespace, product-pool address assignment and
-   durable retention proof for each client path and exit-listener descriptor;
+2. trusted helper-origin, exact namespace, server-side product-pool allocation,
+   uniqueness/lifetime binding and assigned-address proof for each client path
+   and exit-listener descriptor;
 3. a unique delivered-payload counter rather than ACKed transport bytes;
 4. an operational exit backend with helper-to-native listener provenance,
    independent signed-reservation verification, preverified affine replay

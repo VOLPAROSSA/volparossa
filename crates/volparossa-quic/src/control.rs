@@ -13,6 +13,9 @@ const NATIVE_INSTANCE_ID_LEN: usize = 32;
 const SIGNED_ID_LEN: usize = 16;
 const SHA256_LEN: usize = 32;
 const NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN: &[u8] = b"VOLPAROSSA-NATIVE-ROUTE-AUTH-COMMITMENT-V4\0";
+const TUNNEL_SERVER_IPV4: [u8; 4] = [10, 76, 0, 1];
+const TUNNEL_IPV4_PREFIX: [u8; 3] = [10, 76, 0];
+const TUNNEL_IPV6_PREFIX: [u8; 6] = [0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x62];
 
 /// Hard maximum for one local native-control frame.
 pub const MAX_CONTROL_FRAME: usize = 1024 * 1024;
@@ -853,23 +856,26 @@ fn validate_signed_route_fields(
 
 fn validate_tunnel_assignment(value: &TunnelAssignment) -> Result<(), ControlError> {
     if value.assigned_ipv4.len() != 4
-        || value.assigned_ipv4.iter().all(|byte| *byte == 0)
+        || value.assigned_ipv4[..3] != TUNNEL_IPV4_PREFIX
+        || !(2..=254).contains(&value.assigned_ipv4[3])
         || value.assigned_prefix_v4 != 32
-        || value.server_ipv4.len() != 4
-        || value.server_ipv4.iter().all(|byte| *byte == 0)
-        || value.assigned_ipv4 == value.server_ipv4
+        || value.server_ipv4.as_slice() != TUNNEL_SERVER_IPV4
         || value.server_prefix_v4 != 32
-        || !(1_280..=9_000).contains(&value.mtu)
     {
         return Err(ControlError::Invalid("invalid IPv4 tunnel assignment"));
+    }
+    if !(1_280..=1_420).contains(&value.mtu) {
+        return Err(ControlError::Invalid("invalid tunnel MTU"));
     }
     if value.assigned_ipv6.is_empty() {
         if value.assigned_prefix_v6 != 0 {
             return Err(ControlError::Invalid("absent IPv6 assignment has a prefix"));
         }
     } else if value.assigned_ipv6.len() != 16
-        || value.assigned_ipv6.iter().all(|byte| *byte == 0)
-        || !(96..=126).contains(&value.assigned_prefix_v6)
+        || value.assigned_ipv6[..6] != TUNNEL_IPV6_PREFIX
+        || value.assigned_ipv6[6..15].iter().any(|byte| *byte != 0)
+        || !(2..=254).contains(&value.assigned_ipv6[15])
+        || value.assigned_prefix_v6 != 112
     {
         return Err(ControlError::Invalid("invalid IPv6 tunnel assignment"));
     }
@@ -1173,6 +1179,25 @@ mod tests {
         }
     }
 
+    fn valid_tunnel_assignment() -> TunnelAssignment {
+        TunnelAssignment {
+            assigned_ipv4: [10, 76, 0, 2].to_vec(),
+            assigned_prefix_v4: 32,
+            server_ipv4: [10, 76, 0, 1].to_vec(),
+            server_prefix_v4: 32,
+            mtu: 1_280,
+            assigned_ipv6: Vec::new(),
+            assigned_prefix_v6: 0,
+        }
+    }
+
+    fn tunnel_ipv6(host: u8) -> Vec<u8> {
+        [
+            0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x62, 0, 0, 0, 0, 0, 0, 0, 0, 0, host,
+        ]
+        .to_vec()
+    }
+
     fn ipv4_packet() -> Vec<u8> {
         let mut packet = vec![0_u8; 20];
         packet[0] = 0x45;
@@ -1296,15 +1321,7 @@ mod tests {
                 native_instance_id: vec![9; 32],
             }),
             request_sha256: request_sha256(&request).expect("digest").to_vec(),
-            tunnel_assignment: Some(TunnelAssignment {
-                assigned_ipv4: [10, 76, 0, 2].to_vec(),
-                assigned_prefix_v4: 32,
-                server_ipv4: [10, 76, 0, 1].to_vec(),
-                server_prefix_v4: 32,
-                mtu: 1_280,
-                assigned_ipv6: Vec::new(),
-                assigned_prefix_v6: 0,
-            }),
+            tunnel_assignment: Some(valid_tunnel_assignment()),
         };
         assert!(encode_response(&response).is_ok());
 
@@ -1334,36 +1351,124 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_assignment_rejects_zero_and_aliased_addresses() {
-        let valid = TunnelAssignment {
-            assigned_ipv4: [10, 76, 0, 2].to_vec(),
-            assigned_prefix_v4: 32,
-            server_ipv4: [10, 76, 0, 1].to_vec(),
-            server_prefix_v4: 32,
-            mtu: 1_280,
-            assigned_ipv6: [
-                0xfd, 0x76, 0x6f, 0x6c, 0x70, 0x61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
-            ]
-            .to_vec(),
-            assigned_prefix_v6: 126,
-        };
-        assert!(validate_tunnel_assignment(&valid).is_ok());
+    fn tunnel_assignment_accepts_exact_product_boundaries() {
+        let absent_ipv6 = valid_tunnel_assignment();
+        assert!(validate_tunnel_assignment(&absent_ipv6).is_ok());
 
-        let mut zero_client_v4 = valid.clone();
-        zero_client_v4.assigned_ipv4.fill(0);
-        assert!(validate_tunnel_assignment(&zero_client_v4).is_err());
+        let mut upper_v4_and_mtu = valid_tunnel_assignment();
+        upper_v4_and_mtu.assigned_ipv4[3] = 254;
+        upper_v4_and_mtu.mtu = 1_420;
+        assert!(validate_tunnel_assignment(&upper_v4_and_mtu).is_ok());
 
-        let mut zero_server_v4 = valid.clone();
-        zero_server_v4.server_ipv4.fill(0);
-        assert!(validate_tunnel_assignment(&zero_server_v4).is_err());
+        for host in [2, 254] {
+            let mut with_ipv6 = valid_tunnel_assignment();
+            with_ipv6.assigned_ipv6 = tunnel_ipv6(host);
+            with_ipv6.assigned_prefix_v6 = 112;
+            assert!(validate_tunnel_assignment(&with_ipv6).is_ok());
+        }
+    }
 
-        let mut aliased_v4 = valid.clone();
-        aliased_v4.server_ipv4 = aliased_v4.assigned_ipv4.clone();
-        assert!(validate_tunnel_assignment(&aliased_v4).is_err());
+    #[test]
+    fn tunnel_assignment_rejects_non_product_ipv4_addresses_and_prefixes() {
+        for client in [
+            Vec::new(),
+            vec![10, 76, 0],
+            vec![10, 76, 0, 2, 0],
+            vec![10, 76, 0, 0],
+            vec![10, 76, 0, 1],
+            vec![10, 76, 0, 255],
+            vec![10, 76, 1, 2],
+            vec![10, 75, 0, 2],
+            vec![192, 0, 2, 2],
+        ] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.assigned_ipv4 = client;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
 
-        let mut zero_v6 = valid;
-        zero_v6.assigned_ipv6.fill(0);
-        assert!(validate_tunnel_assignment(&zero_v6).is_err());
+        for prefix in [0, 31, 33] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.assigned_prefix_v4 = prefix;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+
+        for server in [
+            Vec::new(),
+            vec![10, 76, 0],
+            vec![10, 76, 0, 1, 0],
+            vec![0, 0, 0, 0],
+            vec![10, 76, 0, 0],
+            vec![10, 76, 0, 2],
+            vec![10, 76, 0, 255],
+            vec![10, 76, 1, 1],
+        ] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.server_ipv4 = server;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+
+        let mut aliased = valid_tunnel_assignment();
+        aliased.server_ipv4 = aliased.assigned_ipv4.clone();
+        assert!(validate_tunnel_assignment(&aliased).is_err());
+
+        for prefix in [0, 31, 33] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.server_prefix_v4 = prefix;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn tunnel_assignment_rejects_mtu_outside_product_bounds() {
+        for mtu in [0, 1_279, 1_421, u32::MAX] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.mtu = mtu;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn tunnel_assignment_rejects_non_product_ipv6_shape() {
+        let mut absent_with_prefix = valid_tunnel_assignment();
+        absent_with_prefix.assigned_prefix_v6 = 112;
+        assert!(validate_tunnel_assignment(&absent_with_prefix).is_err());
+
+        for address in [Vec::new(), vec![0; 15], vec![0; 17]] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.assigned_ipv6 = address;
+            invalid.assigned_prefix_v6 = 112;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+
+        for prefix in [0, 96, 111, 113, 126] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.assigned_ipv6 = tunnel_ipv6(2);
+            invalid.assigned_prefix_v6 = prefix;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+
+        for host in [0, 1, 255] {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.assigned_ipv6 = tunnel_ipv6(host);
+            invalid.assigned_prefix_v6 = 112;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+
+        for index in 0..6 {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.assigned_ipv6 = tunnel_ipv6(2);
+            invalid.assigned_ipv6[index] ^= 1;
+            invalid.assigned_prefix_v6 = 112;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
+
+        for index in 6..15 {
+            let mut invalid = valid_tunnel_assignment();
+            invalid.assigned_ipv6 = tunnel_ipv6(2);
+            invalid.assigned_ipv6[index] = 1;
+            invalid.assigned_prefix_v6 = 112;
+            assert!(validate_tunnel_assignment(&invalid).is_err());
+        }
     }
 
     #[test]

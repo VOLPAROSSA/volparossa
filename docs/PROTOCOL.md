@@ -648,14 +648,20 @@ exact canonical unframed request. It returns `Ok`, `Version`, `InvalidRequest`, 
 code, an optional exactly correlated reverse datagram, and no more than eight path records.
 `StaleInstance` is a separate typed result. Only a successful `StartSession` may carry a bounded
 IPv4/optional-IPv6 tunnel assignment; every other operation rejects one. The current mqvpn backend
-cannot produce that assignment, so production `StartSession` remains fail closed rather than
-returning a placeholder tunnel. API v6 currently validates only its canonical shape,
-nonzero/distinct IPv4 addresses, prefix bounds, and MTU; production must additionally prove the
-exact product pool, address types, namespace ownership, and durable backend retention. Each record
-reports path ID, smoothed RTT, loss, delivered unique bytes, congestion window, bytes in flight,
-delivery rate, and a flag that becomes true only after validation and real payload carriage.
-These fields are necessary to prevent a native process from falsely reporting mere path
-configuration as multipath operation.
+deep-copies exactly one assignment while `TUNNEL_READY`, accepts only a byte-identical duplicate
+after activation, and publishes it only after mqvpn synchronously reaches `ESTABLISHED`. Rust, the
+C protocol boundary, and the backend state independently require server `10.76.0.1/32`, client
+`10.76.0.2/32` through `10.76.0.254/32`, MTU 1280..1420, and either no IPv6 address or
+`fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`. The backend rejects outbound packets
+whose source is not the retained client address and reverse packets whose destination is not that
+address, and wipes retained state on fatal transport failure. This does not prove that a production
+exit allocated the address uniquely for the route lifetime, that the helper assigned it in the
+exact namespace, or that a real packet traversed it. Each path wire record reserves fields for path
+ID, smoothed RTT, loss, unique delivered payload bytes, congestion window, bytes in flight,
+delivery rate, and validation/real-carriage state. The pinned backend currently exposes ACKed
+transport bytes rather than unique payload bytes, so the runtime returns
+`unique_delivery_metric_unsupported` instead of claiming that evidence. These fields are necessary
+to prevent a native process from falsely reporting mere path configuration as multipath operation.
 
 ## Policy manifest encoding
 

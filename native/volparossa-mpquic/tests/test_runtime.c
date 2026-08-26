@@ -36,6 +36,10 @@ typedef struct mock_transport {
     bool has_assignment;
     vmp_tunnel_assignment_t assignment;
     bool pump_fails;
+    vmp_transport_error_t pump_result;
+    vmp_transport_error_t snapshot_result;
+    vmp_transport_error_t add_result;
+    vmp_transport_error_t remove_result;
     vmp_transport_path_snapshot_t paths[VMP_MAX_PATHS];
     size_t path_count;
 } mock_transport_t;
@@ -81,9 +85,11 @@ static void init_mock(mock_transport_t *mock)
     mock->receive_result = VMP_TRANSPORT_EMPTY;
     mock->has_assignment = true;
     mock->assignment.assigned_ipv4[0] = 10U;
+    mock->assignment.assigned_ipv4[1] = 76U;
     mock->assignment.assigned_ipv4[3] = 2U;
     mock->assignment.assigned_prefix_v4 = 32U;
     mock->assignment.server_ipv4[0] = 10U;
+    mock->assignment.server_ipv4[1] = 76U;
     mock->assignment.server_ipv4[3] = 1U;
     mock->assignment.server_prefix_v4 = 32U;
     mock->assignment.mtu = 1280U;
@@ -124,6 +130,11 @@ static vmp_transport_error_t mock_add(void *session,
     mock_transport_t *mock = session;
     assert(path_fd >= 0);
     assert(close(path_fd) == 0);
+    ++mock->add_calls;
+    if (mock->add_result != VMP_TRANSPORT_OK) {
+        *out_handle = -1;
+        return mock->add_result;
+    }
     assert(mock->path_count < VMP_MAX_PATHS);
     const int64_t handle = INT64_C(100) + (int64_t)path->path_id;
     vmp_transport_path_snapshot_t *snapshot =
@@ -132,13 +143,16 @@ static vmp_transport_error_t mock_add(void *session,
     snapshot->handle = handle;
     snapshot->state = VMP_TRANSPORT_PATH_PENDING;
     *out_handle = handle;
-    ++mock->add_calls;
     return VMP_TRANSPORT_OK;
 }
 
 static vmp_transport_error_t mock_remove(void *session, int64_t handle)
 {
     mock_transport_t *mock = session;
+    ++mock->remove_calls;
+    if (mock->remove_result != VMP_TRANSPORT_OK) {
+        return mock->remove_result;
+    }
     size_t found = mock->path_count;
     for (size_t index = 0; index < mock->path_count; ++index) {
         if (mock->paths[index].handle == handle) {
@@ -153,7 +167,6 @@ static vmp_transport_error_t mock_remove(void *session, int64_t handle)
     --mock->path_count;
     memset(&mock->paths[mock->path_count], 0,
            sizeof(mock->paths[mock->path_count]));
-    ++mock->remove_calls;
     return VMP_TRANSPORT_OK;
 }
 
@@ -161,7 +174,7 @@ static vmp_transport_error_t mock_pump(void *session)
 {
     mock_transport_t *mock = session;
     ++mock->pump_calls;
-    return mock->pump_fails ? VMP_TRANSPORT_ENGINE : VMP_TRANSPORT_OK;
+    return mock->pump_fails ? VMP_TRANSPORT_ENGINE : mock->pump_result;
 }
 
 static vmp_transport_error_t mock_snapshot(
@@ -170,6 +183,9 @@ static vmp_transport_error_t mock_snapshot(
     vmp_tunnel_assignment_t *out_assignment)
 {
     mock_transport_t *mock = session;
+    if (mock->snapshot_result != VMP_TRANSPORT_OK) {
+        return mock->snapshot_result;
+    }
     if (capacity < mock->path_count) return VMP_TRANSPORT_RESOURCE;
     memcpy(out, mock->paths, mock->path_count * sizeof(*out));
     *out_count = mock->path_count;
@@ -1078,6 +1094,101 @@ static void test_pump_failure_is_session_scoped(void)
     vmp_runtime_destroy(runtime);
 }
 
+static void test_transport_overflow_is_terminal_and_typed(void)
+{
+    mock_transport_t mock;
+    init_mock(&mock);
+    mock_clock_t clock = {
+        .boottime_ms = TEST_BOOTTIME_MS,
+        .realtime_ms = TEST_NOW_MS,
+    };
+    vmp_runtime_t *runtime =
+        create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    vmp_request_t start = start_request(
+        0x67U, 14U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    vmp_request_t add = add_request(0x67U, 1U, 21U);
+    assert(dispatch(runtime, &add).result == VMP_RESULT_OK);
+    mock.ready = true;
+    mock.paths[0].state = VMP_TRANSPORT_PATH_ACTIVE;
+    mock.snapshot_result = VMP_TRANSPORT_OVERFLOW;
+    assert(dispatch(runtime, &start).result == VMP_RESULT_QUEUE_OVERFLOW);
+    mock.snapshot_result = VMP_TRANSPORT_OK;
+    assert(dispatch(runtime, &start).result == VMP_RESULT_QUEUE_OVERFLOW);
+    vmp_runtime_destroy(runtime);
+
+    init_mock(&mock);
+    runtime = create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    start = start_request(
+        0x68U, 15U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    add = add_request(0x68U, 1U, 22U);
+    assert(dispatch(runtime, &add).result == VMP_RESULT_OK);
+    mock.ready = true;
+    mock.paths[0].state = VMP_TRANSPORT_PATH_ACTIVE;
+    assert(dispatch(runtime, &start).result == VMP_RESULT_OK);
+    mock.pump_result = VMP_TRANSPORT_OVERFLOW;
+    assert(vmp_runtime_pump(runtime) == VMP_SERVER_OK);
+    assert(mock.pump_calls == 1U);
+    vmp_request_t status =
+        context_request(VMP_OPERATION_GET_STATUS, 0x68U);
+    assert(dispatch(runtime, &status).result == VMP_RESULT_QUEUE_OVERFLOW);
+    assert(dispatch(runtime, &start).result == VMP_RESULT_QUEUE_OVERFLOW);
+    vmp_runtime_destroy(runtime);
+
+    init_mock(&mock);
+    runtime = create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    start = start_request(
+        0x69U, 16U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    mock.add_result = VMP_TRANSPORT_OVERFLOW;
+    add = add_request(0x69U, 1U, 23U);
+    vmp_response_t response = dispatch(runtime, &add);
+    assert(response.result == VMP_RESULT_QUEUE_OVERFLOW);
+    assert(strcmp(response.diagnostic_code,
+                  "reverse_queue_overflow") == 0);
+    assert(mock.add_calls == 1U);
+    assert(mock.destroy_calls == 1U);
+    response = dispatch(runtime, &add);
+    assert(response.result == VMP_RESULT_QUEUE_OVERFLOW);
+    assert(mock.add_calls == 1U);
+    vmp_runtime_destroy(runtime);
+
+    init_mock(&mock);
+    runtime = create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+    assert(runtime != NULL);
+    start = start_request(
+        0x6aU, 17U, VMP_TRANSPORT_MODE_SINGLE_PATH_GENERAL_UDP, 1U);
+    assert(dispatch(runtime, &start).result ==
+           VMP_RESULT_INSUFFICIENT_PATHS);
+    add = add_request(0x6aU, 1U, 24U);
+    assert(dispatch(runtime, &add).result == VMP_RESULT_OK);
+    mock.remove_result = VMP_TRANSPORT_OVERFLOW;
+    vmp_request_t remove;
+    memset(&remove, 0, sizeof(remove));
+    remove.api_version = VMP_API_VERSION;
+    set_target(&remove);
+    remove.operation = VMP_OPERATION_REMOVE_PATH;
+    memset(remove.body.remove_path.route_context_id, 0x6a,
+           VMP_CONTEXT_ID_LEN);
+    remove.body.remove_path.path_id = 1U;
+    response = dispatch(runtime, &remove);
+    assert(response.result == VMP_RESULT_QUEUE_OVERFLOW);
+    assert(strcmp(response.diagnostic_code,
+                  "reverse_queue_overflow") == 0);
+    assert(mock.remove_calls == 1U);
+    response = dispatch(runtime, &remove);
+    assert(response.result == VMP_RESULT_QUEUE_OVERFLOW);
+    assert(mock.remove_calls == 1U);
+    vmp_runtime_destroy(runtime);
+}
+
 static void test_boottime_deadline_and_monotonic_wall_anchor(void)
 {
     mock_transport_t mock;
@@ -1376,6 +1487,7 @@ int main(void)
     test_reverse_receive_and_overflow();
     test_session_credentials_versions_and_expiry();
     test_pump_failure_is_session_scoped();
+    test_transport_overflow_is_terminal_and_typed();
     test_boottime_deadline_and_monotonic_wall_anchor();
     test_authorization_replay_scope_and_exit_consumption();
     test_authorization_clock_failures_fail_closed();

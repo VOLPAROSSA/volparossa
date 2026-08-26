@@ -409,7 +409,7 @@ cmake -G "Unix Makefiles" -S "$component_root" -B "$wrapper_build" \
 cmake --build "$wrapper_build" --parallel "$jobs"
 verify_compile_flags VOLPAROSSA-wrapper "$wrapper_build"
 verify_link_flags VOLPAROSSA-wrapper "$wrapper_build"
-run_ctest_suite VOLPAROSSA-wrapper "$wrapper_build" 5
+run_ctest_suite VOLPAROSSA-wrapper "$wrapper_build" 7
 api_version=$(ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS="$ubsan_options" \
     "$wrapper_build/bin/volparossa-mpquic" --api-version)
 [ "$api_version" = "6" ] ||
@@ -421,7 +421,7 @@ run_daemon_smoke "$wrapper_build/bin/volparossa-mpquic" TERM
 echo "full pinned ASan+UBSan graph passed"
 echo "build root: $build_root"
 echo "mqvpn/lwIP tests: 33"
-echo "VOLPAROSSA wrapper tests: 5"
+echo "VOLPAROSSA wrapper tests: 7"
 echo "ASAN_OPTIONS=$asan_options"
 echo "UBSAN_OPTIONS=$ubsan_options"
 echo "BoringSSL and xquic are covered here through sanitized archives, mqvpn"
