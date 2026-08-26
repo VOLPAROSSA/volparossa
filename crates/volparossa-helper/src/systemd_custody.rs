@@ -17,9 +17,9 @@ const DESCRIPTORS_PER_CUSTODY_BUNDLE: usize = 2;
 const MAX_WORKER_CUSTODY_BUNDLES: usize = 64;
 const MAX_INHERITED_CUSTODY_DESCRIPTORS: usize =
     DESCRIPTORS_PER_CUSTODY_BUNDLE * MAX_WORKER_CUSTODY_BUNDLES;
-const CUSTODY_FD_NAME_PREFIX: &str = "volparossa-custody-v1-";
+pub(super) const CUSTODY_FD_NAME_PREFIX: &str = "volparossa-custody-v1-";
 const CUSTODY_FD_NAME_DIGEST_BYTES: usize = 32;
-const CUSTODY_FD_NAME_BYTES: usize =
+pub(super) const CUSTODY_FD_NAME_BYTES: usize =
     CUSTODY_FD_NAME_PREFIX.len() + CUSTODY_FD_NAME_DIGEST_BYTES * 2;
 
 struct InheritedCustody {
@@ -155,7 +155,7 @@ fn validate_inherited_custody(
     Ok(InheritedCustody { bundles })
 }
 
-fn custody_fd_name_is_valid(value: &str) -> bool {
+pub(super) fn custody_fd_name_is_valid(value: &str) -> bool {
     value.len() == CUSTODY_FD_NAME_BYTES
         && value
             .strip_prefix(CUSTODY_FD_NAME_PREFIX)

@@ -169,6 +169,29 @@ After a definite pre-rename I/O failure, another mutation is admitted only if a 
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
 temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the actor permanently.
 
+### Dormant systemd descriptor-store publication boundary
+
+The helper contains a private, dormant adapter for the systemd v257 descriptor-store protocol. It
+validates one fixed-shape opaque custody name, borrows exactly two already-owned descriptors,
+snapshots their kernel identities and sends them together in one `SCM_RIGHTS` datagram containing
+only the required `FDSTORE=1`, `FDNAME=` and `FDPOLL=0` assignments. It then sends `BARRIER=1`
+separately with exactly one pipe descriptor and carries one absolute monotonic deadline through
+every send, barrier wait and inventory read. It never sends `READY=1` or `FDSTOREREMOVE=1`.
+
+A successful notify send is not an acknowledgement that either descriptor was stored, and a
+successful barrier proves only that systemd processed earlier notifications. The adapter therefore
+accepts custody only after uncached D-Bus reads show stable pre/post `NFileDescriptorStore` counts
+and `DumpFileDescriptorStore()` supplies the exact complete, bounded descriptor multiset, including
+matching name, mode, device, inode, device-node and open-flag identity. Every failure after the
+publication datagram may have been accepted is classified as manager-may-own. Callers must retain
+their original affine descriptor owners; there is deliberately no automatic removal on an
+ambiguous path.
+
+This component is not called by the worker coordinator, journal actor, server or engine. It has no
+inherited-descriptor adoption, durable custody binding, reconciliation or restart reaper and has not
+yet been exercised inside the required disposable Debian 13 transient service. It therefore closes
+no production, crash-cleanup, datapath or acceptance milestone.
+
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
 handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
 public key, kernel-proven public UDP endpoint, and `DirectAssigned` evidence. Later operations may
