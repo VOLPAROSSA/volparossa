@@ -4,6 +4,53 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-08-26
 
+## Fixed alpha v1 scorecard
+
+This scorecard measures progress toward a **working alpha**, separately from
+the detailed implementation checklist below. Within alpha v1, the rows, names,
+IDs, criteria, weights, 100-point threshold, and A01--A15 definitions are frozen
+as of 2026-08-26; only State and supporting evidence may change. The normative
+baseline is repository commit `14d7f2b02a70dd626b5f6b7ba06348ac3dd48b9c`
+with `AGENTS.md` SHA-256
+`4c766b1f81c428f5862557c1c4d3c1cc0fbdd308f7944c2dd92e9d6a64dbee75`.
+A fully tested,
+explicitly named foundation, core, or boundary may earn only its own points
+before it has a production caller. Partial work, mocks, and dormant code earn
+no downstream production or dataplane points. An earned milestone can lose
+points only when a regression invalidates its evidence, not because the work is
+later estimated with a different ruler. Any future scope change must publish a
+visibly versioned replacement table instead of silently changing this one.
+The short milestone labels incorporate all corresponding normative-baseline
+privacy, policy, host-safety, cryptographic, path-count, no-fallback, and
+evidence requirements; their omission from a short label never relaxes an
+invariant.
+
+| ID | Milestone | Points | State | Evidence |
+| --- | --- | ---: | --- | --- |
+| AV1-01 | GPL source/licensing, pinned native provenance and separate RustSec audit gates | 3 | Earned | [Repository baseline](#repository-and-engineering-baseline), [testing](#testing-and-fuzzing) |
+| AV1-02 | Validated configuration/default roles and encrypted permanent node identity | 3 | Earned | [Configuration](#configuration-and-roles), [identity](#identity-and-signed-protocol) |
+| AV1-03 | Threshold-signed whitelist manifest and fail-closed matching core | 3 | Earned | [Policy](#policy-and-whitelist-enforcement) |
+| AV1-04 | Native API-v6 process, framing, descriptor, replay and client-assignment boundary | 2 | Earned | [Native boundary](#genuine-multipath-quic--masque), [testing](#testing-and-fuzzing) |
+| AV1-05 | Canonical signed control envelopes, replay/TTL and compromise recovery | 3 | Open | — |
+| AV1-06 | Live libp2p discovery, capability indexes and replaceable bootstrap | 5 | Open | — |
+| AV1-07 | Exit-first path selection, measurements, capacity and diversity | 5 | Open | — |
+| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |
+| AV1-09 | Production helper identity, authenticated IPC and operation allowlist | 6 | Open | — |
+| AV1-10 | Durable helper ownership journal, restart reaper and crash settlement | 5 | Open | — |
+| AV1-11 | Ephemeral-key two-leg WireGuard paths, relay fence/no relay egress or host access, exit-only egress | 9 | Open | — |
+| AV1-12 | Route orchestration, descriptor handoff, expiry and complete cleanup | 5 | Open | — |
+| AV1-13 | Transparent ingress, kill switch, DNS routing and loop prevention | 6 | Open | — |
+| AV1-14 | Live exit resolution/SNI/QUIC/general-UDP whitelist enforcement | 6 | Open | — |
+| AV1-15 | Single-path QUIC MASQUE UDP through exactly one relay | 6 | Open | — |
+| AV1-16 | Transparent TLS 1.3 framing over real multi-subflow kernel MPTCP, without ordinary-TCP fallback | 9 | Open | — |
+| AV1-17 | Browser QUIC over genuine MPQUIC/MASQUE on at least two data-carrying distinct-relay paths, fail closed/failover | 10 | Open | — |
+| AV1-18 | Debian 13 doctor, hardened services, privacy-safe logs/retention, reproducible package and operations | 3 | Open | — |
+| AV1-19 | Disposable full-topology runner and machine-readable evidence | 3 | Open | — |
+| AV1-20 | One unchanged clean build passes all required quality gates and A01--A15, including privacy and host safety | 3 | Open | — |
+
+Current fixed alpha score: **11/100 (11%)**. Alpha requires **100/100** and the
+single clean-build A01--A15 run; the score is not a release claim.
+
 ## Repository and engineering baseline
 
 - [x] Workspace is a Git repository.
