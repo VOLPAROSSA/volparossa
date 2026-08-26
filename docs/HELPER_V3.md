@@ -108,11 +108,18 @@ The actor remains disconnected from the server, engine, and worker coordinator. 
 production recovery executor and no server-wired startup/restart reaper; any private startup-sweep
 failure aborts startup, and readiness follows only after every record in the observed snapshot is
 durably `Absent` and the complete boundary rechecks. There is also no supported on-disk migration
-or live root proof. A bounded reply or thread-settlement timeout permanently fences admission as
-ambiguous. If the actor thread is stuck inside the non-cancellable recovery executor, its join
-handle is detached after the bounded settlement wait; that thread may retain the journal lock,
-while the process-global latch remains set until process exit. A clean shutdown acknowledges only
-an intact durable boundary: it does not retire or recover outstanding records, and reopening
+or live root proof. Every non-test actor entry point requires one caller-supplied absolute hard
+deadline. That same value is carried through admission, the queued command, actor-thread execution,
+reply handling and thread settlement. Startup rechecks it before the first filesystem or latch
+operation, and ordinary commands recheck it immediately after dequeue. Work which expires before
+its first mutation returns `DeadlineElapsed` without touching journal bytes; once journal or
+recovery work has begun it must settle, and a late or unobservable completion permanently fences
+admission as ambiguous. Shutdown gives settlement ambiguity precedence over a weaker queued
+deadline result. Only `Drop` retains a private emergency deadline; relative-deadline convenience
+wrappers are test-only. If the actor thread is stuck inside the non-cancellable recovery executor,
+its join handle is detached after the bounded settlement wait; that thread may retain the journal
+lock, while the process-global latch remains set until process exit. A clean shutdown acknowledges
+only an intact durable boundary: it does not retire or recover outstanding records, and reopening
 requires a fresh process. These limitations must be resolved at the production service boundary
 before the actor can become the production writer. The required tag-35 closed plan has a fallible
 exact conversion into the store's existing `ClosedPlan`; this removes the wire/schema mismatch but
@@ -571,11 +578,39 @@ retryable shutdown after incomplete cleanup. This establishes only the adapter b
 production constructor still installs the unavailable backend and performs no worker or network
 mutation.
 
+A private dormant worker-lifecycle seam now reserves a coordinator-local generation, changes its
+reservation to a non-expiring `LifecycleOwned` shutdown fence, authenticates one passive sandboxed
+worker under the caller's same hard deadline, and registers it in `Starting` without dispatching a
+child operation. Failures before reservation, or definitive spawn failures followed by exact
+absence, are rejected. Every other post-reservation deadline, spawn, registration, reap or purge
+outcome returns a non-`Clone` owner carrying an exact placement. `Spawned`, `Registered`,
+`Detached`, and `ReapedPendingPurge` transitions recheck the deadline immediately before their
+registry mutation. A reaped retry never signals or waits for the process a second time; it retains
+the pidfd, anchored process-directory descriptor and typed network-namespace descriptor until the
+exact generation is absent from records, reservations, cache and tombstone maps and both ordering
+indexes. Registration failure keeps the `LifecycleOwned` reservation visible to shutdown until
+that detached process is reaped. Unspawned settlement removes secondary residue while retaining
+the fence and abandons the reservation only as its final mutation.
+
+The corresponding recovery source is available only for the exact same coordinator and generation
+while the registered record is live, unquarantined, idle and still in `Starting`. After duplicating
+its authenticated pins and checking pidfd liveness, it revalidates the same process identity, phase
+and TTL under the same deadline. These pins still do not attest the boot ID, process start ticks,
+executable inode or service-cgroup inode, so conversion to a durable Prepare anchor explicitly
+returns `RecoveryIdentityIncomplete`. Ambiguous spawn has no low-level completion channel and
+therefore remains permanently fenced rather than falsely absent. Dropping or unwinding a retained
+lifecycle owner is fail-closed but not recoverable, and terminal shutdown may safely make a
+concurrently returning `Registered` marker stale. Production activation consequently requires an
+owned cancellation-safe settlement guard, lifecycle quiescence before shutdown, the complete
+durable anchor, and journal/reaper wiring.
+
 Production wiring remains a separate audited change with these explicit blockers:
 
-- No production adapter maps `BackendLineage`/`OperationBinding` to a generation reservation and
-  `WorkerCoordinator`, or carries the engine's exact deadline through `spawn_worker_v3_until` and
-  `execute_until`. Before returning success it must also revalidate every adopted kernel object
+- No production adapter maps `BackendLineage`/`OperationBinding` and a durable ownership key to the
+  dormant lifecycle owner, or carries that owner from journal Intent through authenticated anchor,
+  durable MayOwn, child dispatch and exact settlement. It also does not carry the engine's exact
+  deadline through the complete lifecycle and into `execute_until`. Before returning success it
+  must also revalidate every adopted kernel object
   against the requested socket kind, protocol, local/remote tuple, nonblocking/listening state and
   genuine MPTCP evidence. The implemented deadline, adoption and retryable-shutdown machinery
   therefore remains disconnected from `HelperEngine`.
