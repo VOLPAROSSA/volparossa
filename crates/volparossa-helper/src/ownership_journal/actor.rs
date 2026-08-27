@@ -40,15 +40,16 @@ use crate::deadline::HardDeadline;
 
 use super::{
     ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16, JournalConfig,
-    JournalEpochId, JournalError, NewOwnershipIntent, OwnershipId, OwnershipJournal,
-    OwnershipPhase, PrepareRecoveryAnchorV1, RecoveryAttemptError, RecoveryExecutor, RuntimeId,
-    open_verified_parent, random_ownership_id,
+    JournalEpochId, JournalError, JournalSnapshot, NewOwnershipIntent, OwnershipId,
+    OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1, PrepareRecoveryEvidenceV1,
+    RecoveryAttemptError, RecoveryExecutor, RuntimeId, open_verified_parent, random_ownership_id,
 };
 #[cfg(test)]
 use super::{DurableCustodyDescriptorIdentity, DurableCustodyDescriptorIdentityParts};
 
 const MAX_ACCEPTED_OPERATIONS: usize = 4;
 const COMMAND_CHANNEL_CAPACITY: usize = MAX_ACCEPTED_OPERATIONS + 1;
+const MAX_STARTUP_CUSTODY_TARGETS: usize = 64;
 const ACTOR_THREAD_NAME: &str = "volparossa-ownership-journal";
 const DURABLE_CUSTODY_NAME_DOMAIN: &str = "VOLPAROSSA helper durable systemd custody name v1";
 const DURABLE_CUSTODY_NAME_DIGEST_BYTES: usize = 32;
@@ -290,7 +291,7 @@ pub(crate) struct DurableOwnershipKey {
 /// This value is not ownership authority and is therefore copyable. Its raw digest remains
 /// private; the only exposed representation is a fixed-size lowercase hexadecimal buffer for the
 /// systemd descriptor-store naming boundary.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct DurableCustodyNameDigest([u8; DURABLE_CUSTODY_NAME_DIGEST_BYTES]);
 
 impl DurableCustodyNameDigest {
@@ -301,6 +302,11 @@ impl DurableCustodyNameDigest {
             pair[1] = LOWER_HEX_DIGITS[usize::from(*byte & 0x0f)];
         }
         encoded
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(bytes: [u8; DURABLE_CUSTODY_NAME_DIGEST_BYTES]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -316,6 +322,76 @@ struct OwnershipCoordinates {
     context_id: Id16,
     ownership_id: OwnershipId,
     generation: NonZeroU64,
+}
+
+fn custody_name_digest_for_coordinates(
+    coordinates: OwnershipCoordinates,
+) -> DurableCustodyNameDigest {
+    let mut digest = blake3::Hasher::new_derive_key(DURABLE_CUSTODY_NAME_DOMAIN);
+    digest.update(&coordinates.journal_epoch_id.0);
+    digest.update(&coordinates.context_id.0);
+    digest.update(&coordinates.ownership_id.0);
+    digest.update(&coordinates.generation.get().to_be_bytes());
+    DurableCustodyNameDigest(*digest.finalize().as_bytes())
+}
+
+/// Durable phase of one exact startup custody target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StartupCustodyPhase {
+    MayOwnCustody,
+    MayOwnPrepare,
+}
+
+/// Opaque, copyable correlation evidence from one exact locked journal snapshot.
+///
+/// This is neither ownership nor cleanup authority. The name digest, phase and descriptor binding
+/// are sufficient only for exact-set restart classification while the startup guard remains live.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct StartupCustodyTarget {
+    phase: StartupCustodyPhase,
+    custody_name_digest: DurableCustodyNameDigest,
+    durable_binding: DurableCustodyDescriptorBinding,
+}
+
+impl StartupCustodyTarget {
+    pub(crate) const fn phase(&self) -> StartupCustodyPhase {
+        self.phase
+    }
+
+    pub(crate) const fn custody_name_digest(&self) -> DurableCustodyNameDigest {
+        self.custody_name_digest
+    }
+
+    pub(crate) const fn durable_binding(&self) -> DurableCustodyDescriptorBinding {
+        self.durable_binding
+    }
+
+    pub(crate) fn matches_binding(&self, candidate: &DurableCustodyDescriptorBinding) -> bool {
+        self.durable_binding.matches_role_ordered(candidate)
+    }
+
+    pub(crate) fn overlaps_binding(&self, candidate: &DurableCustodyDescriptorBinding) -> bool {
+        self.durable_binding.overlaps(candidate)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        phase: StartupCustodyPhase,
+        custody_name_digest: DurableCustodyNameDigest,
+        durable_binding: DurableCustodyDescriptorBinding,
+    ) -> Self {
+        Self {
+            phase,
+            custody_name_digest,
+            durable_binding,
+        }
+    }
+}
+
+impl fmt::Debug for StartupCustodyTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StartupCustodyTarget(<redacted>)")
+    }
 }
 
 impl fmt::Debug for DurableOwnershipKey {
@@ -336,12 +412,7 @@ impl DurableMayOwnCustody {
 
     /// Derive stable descriptor-store name material only after phase 4 is known durable.
     pub(crate) fn custody_name_digest(&self) -> DurableCustodyNameDigest {
-        let mut digest = blake3::Hasher::new_derive_key(DURABLE_CUSTODY_NAME_DOMAIN);
-        digest.update(&self.key.coordinates.journal_epoch_id.0);
-        digest.update(&self.key.coordinates.context_id.0);
-        digest.update(&self.key.coordinates.ownership_id.0);
-        digest.update(&self.key.coordinates.generation.get().to_be_bytes());
-        DurableCustodyNameDigest(*digest.finalize().as_bytes())
+        custody_name_digest_for_coordinates(self.key.coordinates)
     }
 }
 
@@ -744,6 +815,11 @@ enum Command {
     },
 }
 
+enum StartupControl {
+    Revalidate { reply: ReplySender<()> },
+    Continue,
+}
+
 impl Operation {
     fn deadline(&self) -> HardDeadline {
         match self {
@@ -1030,6 +1106,142 @@ impl DurableCustodyArmHandle {
     }
 }
 
+/// Affine owner of one exact lock-held startup snapshot awaiting external classification.
+pub(super) struct DurableOwnershipStartup {
+    targets: Box<[StartupCustodyTarget]>,
+    control: Option<SyncSender<StartupControl>>,
+    final_pending: Option<PendingReply<()>>,
+    client: Option<ActorClient>,
+    join: Option<JoinHandle<()>>,
+    completion: Option<Receiver<()>>,
+    lifecycle: Arc<LifecycleState>,
+    deadline: HardDeadline,
+}
+
+impl DurableOwnershipStartup {
+    pub(super) fn targets(&self) -> &[StartupCustodyTarget] {
+        &self.targets
+    }
+
+    pub(super) fn revalidate_targets(
+        &mut self,
+    ) -> Result<&[StartupCustodyTarget], DurableOwnershipError> {
+        ensure_deadline_before_acceptance(self.deadline)?;
+        if self.lifecycle.load() != Lifecycle::Starting {
+            return Err(self.lifecycle.admission_error());
+        }
+        let client = self
+            .client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?;
+        let (reply, pending) = reply_pair(&self.lifecycle, &client.admission, self.deadline);
+        let control = StartupControl::Revalidate { reply };
+        match self
+            .control
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?
+            .try_send(control)
+        {
+            Ok(()) => pending.wait()?,
+            Err(TrySendError::Full(control)) => {
+                drop(control);
+                client
+                    .admission
+                    .fence_terminal(&self.lifecycle, Lifecycle::Ambiguous);
+                return Err(DurableOwnershipError::Ambiguous);
+            }
+            Err(TrySendError::Disconnected(control)) => {
+                drop(control);
+                return Err(self.lifecycle.disconnected_error());
+            }
+        }
+        Ok(&self.targets)
+    }
+
+    pub(super) fn continue_empty(mut self) -> Result<DurableOwnershipActor, DurableOwnershipError> {
+        if !self.targets.is_empty() {
+            return Err(self.abort_with(DurableOwnershipError::RecoveryNotConfirmed, self.deadline));
+        }
+        self.continue_existing()
+    }
+
+    fn continue_existing(mut self) -> Result<DurableOwnershipActor, DurableOwnershipError> {
+        self.revalidate_targets()?;
+        let control = self
+            .control
+            .take()
+            .ok_or(DurableOwnershipError::Unavailable)?;
+        match control.try_send(StartupControl::Continue) {
+            Ok(()) => {}
+            Err(TrySendError::Full(control)) => {
+                drop(control);
+                self.lifecycle.mark_ambiguous();
+                return Err(self.abort_with(DurableOwnershipError::Ambiguous, self.deadline));
+            }
+            Err(TrySendError::Disconnected(control)) => {
+                drop(control);
+                let error = self.lifecycle.disconnected_error();
+                return Err(self.abort_with(error, self.deadline));
+            }
+        }
+        drop(control);
+
+        let result = self
+            .final_pending
+            .take()
+            .ok_or(DurableOwnershipError::Unavailable)?
+            .wait();
+        match result {
+            Ok(()) => Ok(DurableOwnershipActor {
+                client: self.client.take(),
+                join: self.join.take(),
+                completion: self.completion.take(),
+                lifecycle: Arc::clone(&self.lifecycle),
+            }),
+            Err(error) => Err(self.abort_with(error, self.deadline)),
+        }
+    }
+
+    fn abort_with(
+        &mut self,
+        error: DurableOwnershipError,
+        deadline: HardDeadline,
+    ) -> DurableOwnershipError {
+        self.control.take();
+        self.final_pending.take();
+        self.client.take();
+        match (self.join.take(), self.completion.take()) {
+            (Some(join), Some(completion)) => {
+                if settle_thread_until(join, &completion, &self.lifecycle, deadline).is_err() {
+                    DurableOwnershipError::Ambiguous
+                } else {
+                    error
+                }
+            }
+            (None, None) => error,
+            _ => {
+                self.lifecycle.mark_ambiguous();
+                DurableOwnershipError::Ambiguous
+            }
+        }
+    }
+}
+
+impl Drop for DurableOwnershipStartup {
+    fn drop(&mut self) {
+        let Ok(deadline) = default_actor_deadline() else {
+            self.lifecycle.mark_ambiguous();
+            self.control.take();
+            self.final_pending.take();
+            self.client.take();
+            self.join.take();
+            self.completion.take();
+            return;
+        };
+        let _ = self.abort_with(DurableOwnershipError::Unavailable, deadline);
+    }
+}
+
 pub(crate) struct DurableOwnershipActor {
     client: Option<ActorClient>,
     join: Option<JoinHandle<()>>,
@@ -1060,6 +1272,18 @@ impl DurableOwnershipActor {
         Executor: RecoveryExecutor + Send + 'static,
     {
         Self::spawn_inner(config, || {}, || {}, executor_factory, deadline)
+    }
+
+    pub(super) fn begin_with_executor_factory_until<ExecutorFactory, Executor>(
+        config: JournalConfig,
+        executor_factory: ExecutorFactory,
+        deadline: HardDeadline,
+    ) -> Result<DurableOwnershipStartup, DurableOwnershipError>
+    where
+        ExecutorFactory: FnOnce() -> Executor + Send + 'static,
+        Executor: RecoveryExecutor + Send + 'static,
+    {
+        Self::begin_inner(config, || {}, || {}, executor_factory, deadline)
     }
 
     #[cfg(test)]
@@ -1124,6 +1348,29 @@ impl DurableOwnershipActor {
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
         Executor: RecoveryExecutor + Send + 'static,
     {
+        Self::begin_inner(
+            config,
+            pre_startup_hook,
+            startup_hook,
+            executor_factory,
+            deadline,
+        )?
+        .continue_existing()
+    }
+
+    fn begin_inner<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
+        config: JournalConfig,
+        pre_startup_hook: PreStartupHook,
+        startup_hook: StartupHook,
+        executor_factory: ExecutorFactory,
+        deadline: HardDeadline,
+    ) -> Result<DurableOwnershipStartup, DurableOwnershipError>
+    where
+        PreStartupHook: FnOnce() + Send + 'static,
+        StartupHook: FnOnce() + Send + 'static,
+        ExecutorFactory: FnOnce() -> Executor + Send + 'static,
+        Executor: RecoveryExecutor + Send + 'static,
+    {
         ensure_deadline_before_acceptance(deadline)?;
         let lifecycle = Arc::new(LifecycleState::new());
         let admission = Arc::new(Admission::new());
@@ -1133,7 +1380,10 @@ impl DurableOwnershipActor {
             admission,
             lifecycle: Arc::clone(&lifecycle),
         };
-        let (startup_reply, startup_pending) = reply_pair(&lifecycle, &client.admission, deadline);
+        let (preflight_reply, preflight_pending) =
+            reply_pair(&lifecycle, &client.admission, deadline);
+        let (final_reply, final_pending) = reply_pair(&lifecycle, &client.admission, deadline);
+        let (control_sender, control_receiver) = sync_channel(1);
         let (completion_sender, completion_receiver) = sync_channel(1);
         let thread_lifecycle = Arc::clone(&lifecycle);
         let thread_admission = Arc::clone(&client.admission);
@@ -1152,7 +1402,9 @@ impl DurableOwnershipActor {
                         executor_factory,
                         ActorThreadContext {
                             receiver: &receiver,
-                            startup_reply,
+                            control_receiver: &control_receiver,
+                            preflight_reply,
+                            final_reply,
                             lifecycle: &thread_lifecycle,
                             admission: &thread_admission,
                             deadline,
@@ -1164,14 +1416,20 @@ impl DurableOwnershipActor {
                 }
             })
             .map_err(|_| DurableOwnershipError::Unavailable)?;
-        match startup_pending.wait() {
-            Ok(()) => Ok(Self {
+        match preflight_pending.wait() {
+            Ok(targets) => Ok(DurableOwnershipStartup {
+                targets,
+                control: Some(control_sender),
+                final_pending: Some(final_pending),
                 client: Some(client),
                 join: Some(join),
                 completion: Some(completion_receiver),
                 lifecycle,
+                deadline,
             }),
             Err(error) => {
+                drop(control_sender);
+                drop(final_pending);
                 drop(client);
                 if settle_thread_until(join, &completion_receiver, &lifecycle, deadline).is_err() {
                     Err(DurableOwnershipError::Ambiguous)
@@ -1519,6 +1777,48 @@ impl<T> OperationOutcome<T> {
             FailureDisposition::Stop(error, lifecycle) => Self::Stop(error, lifecycle),
         }
     }
+}
+
+fn project_startup_custody_targets(
+    snapshot: &JournalSnapshot,
+) -> Result<Box<[StartupCustodyTarget]>, DurableOwnershipError> {
+    let mut targets = Vec::with_capacity(snapshot.records.len().min(MAX_STARTUP_CUSTODY_TARGETS));
+    for record in snapshot.records.values() {
+        let phase = match record.phase {
+            OwnershipPhase::MayOwnCustody => StartupCustodyPhase::MayOwnCustody,
+            OwnershipPhase::MayOwnPrepare => StartupCustodyPhase::MayOwnPrepare,
+            OwnershipPhase::Intent | OwnershipPhase::Absent => continue,
+        };
+        let Some(PrepareRecoveryEvidenceV1::CustodyBound { binding, .. }) =
+            record.recovery_evidence
+        else {
+            // Legacy MayOwnPrepare is not correlated to descriptor-store custody and must never be
+            // interpreted as an absent or adoptable startup target.
+            return Err(DurableOwnershipError::RecoveryNotConfirmed);
+        };
+        if targets.len() == MAX_STARTUP_CUSTODY_TARGETS {
+            return Err(DurableOwnershipError::RecoveryNotConfirmed);
+        }
+        let target = StartupCustodyTarget {
+            phase,
+            custody_name_digest: custody_name_digest_for_coordinates(OwnershipCoordinates {
+                journal_epoch_id: record.journal_epoch_id,
+                context_id: record.context_id,
+                ownership_id: record.ownership_id,
+                generation: record.generation,
+            }),
+            durable_binding: DurableCustodyDescriptorBinding(binding),
+        };
+        if targets.iter().any(|existing: &StartupCustodyTarget| {
+            existing.custody_name_digest == target.custody_name_digest
+                || existing.durable_binding.overlaps(&target.durable_binding)
+        }) {
+            return Err(DurableOwnershipError::RecoveryNotConfirmed);
+        }
+        targets.push(target);
+    }
+    targets.sort_unstable_by_key(|target| target.custody_name_digest);
+    Ok(targets.into_boxed_slice())
 }
 
 struct ActorCore<Executor> {
@@ -1899,12 +2199,15 @@ fn acquire_start_latch(
 
 struct ActorThreadContext<'a> {
     receiver: &'a Receiver<Command>,
-    startup_reply: ReplySender<()>,
+    control_receiver: &'a Receiver<StartupControl>,
+    preflight_reply: ReplySender<Box<[StartupCustodyTarget]>>,
+    final_reply: ReplySender<()>,
     lifecycle: &'a Arc<LifecycleState>,
     admission: &'a Arc<Admission>,
     deadline: HardDeadline,
 }
 
+#[allow(clippy::too_many_lines)] // Keep the affine lock, preflight and ready transition linear.
 fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
     config: JournalConfig,
     pre_startup_hook: PreStartupHook,
@@ -1919,16 +2222,18 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
 {
     let ActorThreadContext {
         receiver,
-        mut startup_reply,
+        control_receiver,
+        mut preflight_reply,
+        mut final_reply,
         lifecycle,
         admission,
         deadline,
     } = context;
-    startup_reply.arm();
+    preflight_reply.arm();
     pre_startup_hook();
     if deadline.ensure_remaining().is_err() {
         lifecycle.transition(Lifecycle::Unavailable);
-        startup_reply.complete_unstarted_deadline();
+        preflight_reply.complete_unstarted_deadline();
         return;
     }
     let parent_directory = match open_verified_parent(&config) {
@@ -1936,14 +2241,14 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
         Err(error) => {
             let failure = classify_startup_error(&error);
             let (error, terminal) = terminal_start_failure(failure);
-            complete_startup_failure(startup_reply, error, terminal, lifecycle);
+            complete_startup_failure(preflight_reply, error, terminal, lifecycle);
             return;
         }
     };
     let store = match derive_store_identity(&config, &parent_directory) {
         Ok(store) => store,
         Err(error) => {
-            complete_startup_failure(startup_reply, error, Lifecycle::Unavailable, lifecycle);
+            complete_startup_failure(preflight_reply, error, Lifecycle::Unavailable, lifecycle);
             return;
         }
     };
@@ -1953,7 +2258,7 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
         } else {
             Lifecycle::Unavailable
         };
-        complete_startup_failure(startup_reply, error, terminal, lifecycle);
+        complete_startup_failure(preflight_reply, error, terminal, lifecycle);
         return;
     }
     startup_hook();
@@ -1962,7 +2267,7 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
         Err(error) => {
             let failure = classify_startup_error(&error);
             let (error, terminal) = terminal_start_failure(failure);
-            complete_startup_failure(startup_reply, error, terminal, lifecycle);
+            complete_startup_failure(preflight_reply, error, terminal, lifecycle);
             return;
         }
     };
@@ -1971,29 +2276,100 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
         Ok(core) => core,
         Err(failure) => {
             let (error, terminal) = terminal_start_failure(failure);
-            complete_startup_failure(startup_reply, error, terminal, lifecycle);
+            complete_startup_failure(preflight_reply, error, terminal, lifecycle);
             return;
         }
     };
-    if let Err(failure) = core.startup_sweep(deadline) {
-        let (error, terminal) = terminal_start_failure(failure);
-        complete_startup_failure(startup_reply, error, terminal, lifecycle);
+    if core.confirm_complete_boundary().is_err() {
+        admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
+        preflight_reply.complete(Err(DurableOwnershipError::Ambiguous));
+        return;
+    }
+    let snapshot = match core.journal.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let (error, terminal) = terminal_start_failure(core.classify_journal_error(error));
+            complete_startup_failure(preflight_reply, error, terminal, lifecycle);
+            return;
+        }
+    };
+    let targets = match project_startup_custody_targets(snapshot) {
+        Ok(targets) => targets,
+        Err(error) => {
+            complete_startup_failure(preflight_reply, error, Lifecycle::Unavailable, lifecycle);
+            return;
+        }
+    };
+    preflight_reply.complete(Ok(targets));
+    if lifecycle.load() != Lifecycle::Starting {
+        return;
+    }
+
+    loop {
+        match control_receiver.recv() {
+            Ok(StartupControl::Revalidate { mut reply }) => {
+                reply.arm();
+                if deadline.ensure_remaining().is_err() {
+                    reply.complete_unstarted_deadline();
+                    continue;
+                }
+                if core.confirm_complete_boundary().is_err() {
+                    admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
+                    reply.complete(Err(DurableOwnershipError::Ambiguous));
+                    retain_startup_lock_until_owner_drop(control_receiver);
+                    return;
+                }
+                reply.complete(Ok(()));
+                if lifecycle.load() != Lifecycle::Starting {
+                    retain_startup_lock_until_owner_drop(control_receiver);
+                    return;
+                }
+            }
+            Ok(StartupControl::Continue) => break,
+            Err(_) => {
+                admission.fence_terminal(lifecycle, Lifecycle::Unavailable);
+                return;
+            }
+        }
+    }
+
+    final_reply.arm();
+    if deadline.ensure_remaining().is_err() {
+        lifecycle.transition(Lifecycle::Unavailable);
+        final_reply.complete_unstarted_deadline();
         return;
     }
     if core.confirm_complete_boundary().is_err() {
         admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
-        startup_reply.complete(Err(DurableOwnershipError::Ambiguous));
+        final_reply.complete(Err(DurableOwnershipError::Ambiguous));
+        return;
+    }
+    if let Err(failure) = core.startup_sweep(deadline) {
+        let (error, terminal) = terminal_start_failure(failure);
+        complete_startup_failure(final_reply, error, terminal, lifecycle);
+        return;
+    }
+    if core.confirm_complete_boundary().is_err() {
+        admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
+        final_reply.complete(Err(DurableOwnershipError::Ambiguous));
         return;
     }
     if lifecycle.load() != Lifecycle::Starting {
         admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
-        startup_reply.complete(Err(DurableOwnershipError::Ambiguous));
+        final_reply.complete(Err(DurableOwnershipError::Ambiguous));
         return;
     }
     lifecycle.transition(Lifecycle::Running);
-    startup_reply.complete(Ok(()));
+    final_reply.complete(Ok(()));
 
     run_actor_commands(&mut core, receiver, lifecycle, admission);
+}
+
+fn retain_startup_lock_until_owner_drop(control_receiver: &Receiver<StartupControl>) {
+    // Once post-observation revalidation fails, the affine startup owner still denotes this exact
+    // open journal and lock. Keep both alive until that owner is consumed or dropped. Leaking the
+    // owner intentionally keeps the store fenced rather than creating a lock gap after ambiguity.
+    while control_receiver.recv().is_ok() {}
 }
 
 fn run_actor_commands<Executor: RecoveryExecutor>(
@@ -2052,8 +2428,8 @@ fn run_actor_commands<Executor: RecoveryExecutor>(
     admission.fence_terminal(lifecycle, Lifecycle::Ambiguous);
 }
 
-fn complete_startup_failure(
-    reply: ReplySender<()>,
+fn complete_startup_failure<T>(
+    reply: ReplySender<T>,
     error: DurableOwnershipError,
     terminal: Lifecycle,
     lifecycle: &LifecycleState,

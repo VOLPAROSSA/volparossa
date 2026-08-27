@@ -8,9 +8,13 @@
 //! caller retains both local owners throughout. Once the first `sendmsg(2)` is attempted, every
 //! failure is classified as `ManagerMayOwn`. A separate callerless observer can classify that
 //! exact poisoned in-process attempt as present, absent, or unresolved, but never clears the
-//! poison or authorizes a resend. This slice never sends `FDSTOREREMOVE=1` or `READY=1`.
+//! poison or authorizes a resend. A read-only startup observer uses one manager barrier and two
+//! uncached exact-service snapshots, then exposes only an opaque exact-set comparison against
+//! inherited custody bindings. That observer never publishes descriptors. This slice never sends
+//! `FDSTOREREMOVE=1` or `READY=1`.
 
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsStr,
     fmt,
@@ -446,6 +450,23 @@ struct DescriptorStoreSnapshot {
     entries: Vec<InventoryEntry>,
 }
 
+/// Opaque evidence that one complete startup inventory was stable across a manager barrier and
+/// two uncached reads of the exact service object for the current process.
+///
+/// Descriptor identities and manager snapshot fields remain private. The only supported use is
+/// an exact-set comparison against the affine descriptor bindings already inherited by this
+/// process.
+#[must_use = "startup inventory evidence must be checked against the inherited custody set"]
+pub(crate) struct StableStartupInventory {
+    snapshot: DescriptorStoreSnapshot,
+}
+
+impl fmt::Debug for StableStartupInventory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StableStartupInventory(<redacted>)")
+    }
+}
+
 impl fmt::Debug for DescriptorStoreSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -651,6 +672,95 @@ impl DescriptorStoreSnapshot {
             ));
         }
         Ok(TargetInventoryProjection::ExactPresent { stored_descriptors })
+    }
+}
+
+impl StableStartupInventory {
+    /// Verify that the complete manager inventory is exactly the caller's inherited custody set.
+    ///
+    /// Manager ordering is irrelevant, while the caller's binding remains role ordered as
+    /// pidfd-then-network-namespace. No manager name, descriptor identity, or service property is
+    /// exposed by this comparison.
+    pub(crate) fn verify_complete_exact_set(
+        &self,
+        inherited: &BTreeMap<CustodyFdName, CustodyDescriptorBinding>,
+    ) -> Result<(), FdStoreError> {
+        let mut observed = BTreeMap::<CustodyFdName, Vec<&DescriptorIdentity>>::new();
+        let mut observed_identities =
+            Vec::<&DescriptorIdentity>::with_capacity(self.snapshot.entries.len());
+        for entry in &self.snapshot.entries {
+            let name = std::str::from_utf8(&entry.name)
+                .map_err(|_| invalid_inventory("startup custody name is not valid UTF-8"))?;
+            let name = CustodyFdName::parse(name)
+                .map_err(|_| invalid_inventory("startup custody name is invalid"))?;
+            if observed_identities
+                .iter()
+                .any(|identity| identity.is_same_kernel_object(&entry.identity))
+            {
+                return Err(invalid_inventory("startup descriptor identity is reused"));
+            }
+            observed_identities.push(&entry.identity);
+            observed.entry(name).or_default().push(&entry.identity);
+        }
+        if observed
+            .values()
+            .any(|identities| identities.len() != DESCRIPTORS_PER_CUSTODY)
+        {
+            return Err(invalid_inventory(
+                "startup custody name does not contain exactly two descriptors",
+            ));
+        }
+
+        let mut inherited_bindings =
+            Vec::<&CustodyDescriptorBinding>::with_capacity(inherited.len());
+        for (name, binding) in inherited {
+            let name = std::str::from_utf8(name.as_bytes())
+                .map_err(|_| invalid_inventory("inherited custody name is not valid UTF-8"))?;
+            if !custody_fd_name_is_valid(name) {
+                return Err(invalid_inventory("inherited custody name is invalid"));
+            }
+            if binding.0[0].is_same_kernel_object(&binding.0[1])
+                || inherited_bindings
+                    .iter()
+                    .any(|candidate| candidate.overlaps(binding))
+            {
+                return Err(invalid_inventory("inherited descriptor identity is reused"));
+            }
+            inherited_bindings.push(binding);
+        }
+
+        let inherited_descriptor_count = inherited
+            .len()
+            .checked_mul(DESCRIPTORS_PER_CUSTODY)
+            .ok_or_else(|| invalid_inventory("inherited custody set is oversized"))?;
+        if inherited.len() > MAX_DESCRIPTOR_STORE_ENTRIES / DESCRIPTORS_PER_CUSTODY
+            || observed.len() != inherited.len()
+            || self.snapshot.entries.len() != inherited_descriptor_count
+        {
+            return Err(invalid_inventory(
+                "startup inventory is not the complete inherited custody set",
+            ));
+        }
+
+        for (name, binding) in inherited {
+            let observed_pair = observed.get(name).ok_or_else(|| {
+                invalid_inventory("startup inventory is missing inherited custody")
+            })?;
+            let [first, second] = observed_pair.as_slice() else {
+                return Err(invalid_inventory(
+                    "startup custody name does not contain exactly two descriptors",
+                ));
+            };
+            let [pidfd, network_namespace] = &binding.0;
+            let exact_unordered = (*first == pidfd && *second == network_namespace)
+                || (*first == network_namespace && *second == pidfd);
+            if !exact_unordered {
+                return Err(invalid_inventory(
+                    "startup custody pair does not match inherited descriptors",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1035,6 +1145,45 @@ impl NotifySender {
     }
 }
 
+/// Observe the complete startup descriptor-store inventory without publishing or removing any
+/// descriptor.
+///
+/// The source is resolved once from the current PID to one exact systemd service object. The
+/// current process's `NOTIFY_SOCKET` is used for one non-mutating barrier, after which two
+/// uncached complete D-Bus snapshots must agree under the caller's single absolute deadline.
+pub(crate) async fn observe_current_process_startup_inventory(
+    deadline: HardDeadline,
+) -> Result<StableStartupInventory, FdStoreError> {
+    ensure_deadline(deadline)?;
+    let source = SystemdDescriptorStoreSource::for_current_process(deadline).await?;
+    let address = NotifySocketAddress::from_environment()?;
+    let sender = NotifySender::new(&address)?;
+    observe_stable_startup_inventory(&source, synchronize_manager(&sender, deadline), deadline)
+        .await
+}
+
+async fn observe_stable_startup_inventory<S, B>(
+    source: &S,
+    barrier: B,
+    deadline: HardDeadline,
+) -> Result<StableStartupInventory, FdStoreError>
+where
+    S: DescriptorStoreInventorySource,
+    B: Future<Output = Result<(), FdStoreError>>,
+{
+    ensure_deadline(deadline)?;
+    within_deadline(deadline, barrier).await?;
+    let first = within_deadline(deadline, source.snapshot(deadline)).await?;
+    first.validate_service_contract(source.scope())?;
+    let second = within_deadline(deadline, source.snapshot(deadline)).await?;
+    second.validate_service_contract(source.scope())?;
+    if first != second {
+        return Err(FdStoreError::UnstableInventory);
+    }
+    ensure_deadline(deadline)?;
+    Ok(StableStartupInventory { snapshot: first })
+}
+
 /// Publish through the production systemd manager interfaces. No production server, engine, or
 /// request-path caller exists yet.
 pub(crate) async fn publish_current_process_custody(
@@ -1371,7 +1520,7 @@ fn nix_io(error: nix::errno::Errno) -> FdStoreError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         fs::OpenOptions,
         io::{IoSliceMut, Write as _},
         os::{
@@ -1380,7 +1529,7 @@ mod tests {
         },
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         task::Poll,
         thread,
@@ -1837,6 +1986,334 @@ mod tests {
             .expect("release manager barrier descriptor");
         barrier.await.expect("barrier completes after pipe close");
         receiver_thread.join().expect("fake systemd receiver");
+    }
+
+    #[tokio::test]
+    async fn startup_observer_barriers_once_and_accepts_exact_unordered_inventory() {
+        let first_name = custody_name(60);
+        let second_name = custody_name(61);
+        let first_binding =
+            CustodyDescriptorBinding([descriptor_identity(600), descriptor_identity(610)]);
+        let second_binding =
+            CustodyDescriptorBinding([descriptor_identity(620), descriptor_identity(630)]);
+        let exact = snapshot(
+            42,
+            vec![
+                inventory_entry(first_name, first_binding.0[1].clone()),
+                inventory_entry(second_name, second_binding.0[1].clone()),
+                inventory_entry(first_name, first_binding.0[0].clone()),
+                inventory_entry(second_name, second_binding.0[0].clone()),
+            ],
+        );
+        let barrier_seen = Arc::new(AtomicBool::new(false));
+        let barrier_count = Arc::new(AtomicUsize::new(0));
+        let source = FakeInventorySource::after_barrier(
+            42,
+            vec![exact.clone(), exact],
+            Arc::clone(&barrier_seen),
+        );
+        let observed_barrier = Arc::clone(&barrier_seen);
+        let observed_count = Arc::clone(&barrier_count);
+        let barrier = async move {
+            observed_count.fetch_add(1, Ordering::SeqCst);
+            observed_barrier.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let deadline = HardDeadline::after(Duration::from_secs(2)).expect("startup deadline");
+
+        let inventory = observe_stable_startup_inventory(&source, barrier, deadline)
+            .await
+            .expect("stable exact startup inventory");
+        let inherited = BTreeMap::from([
+            (first_name, first_binding.clone()),
+            (second_name, second_binding.clone()),
+        ]);
+
+        inventory
+            .verify_complete_exact_set(&inherited)
+            .expect("unordered manager pairs match role-ordered inherited pairs");
+        assert_eq!(barrier_count.load(Ordering::SeqCst), 1);
+        assert!(
+            source
+                .snapshots
+                .lock()
+                .expect("fake snapshot lock")
+                .is_empty(),
+            "both complete snapshots were consumed"
+        );
+        assert_eq!(
+            format!("{inventory:?}"),
+            "StableStartupInventory(<redacted>)"
+        );
+
+        let wrong = BTreeMap::from([(
+            first_name,
+            CustodyDescriptorBinding([first_binding.0[0].clone(), descriptor_identity(640)]),
+        )]);
+        assert!(inventory.verify_complete_exact_set(&wrong).is_err());
+    }
+
+    #[tokio::test]
+    async fn startup_observer_accepts_exact_empty_inventory() {
+        let empty = snapshot(42, Vec::new());
+        let barrier_seen = Arc::new(AtomicBool::new(false));
+        let source = FakeInventorySource::after_barrier(
+            42,
+            vec![empty.clone(), empty],
+            Arc::clone(&barrier_seen),
+        );
+        let observed_barrier = Arc::clone(&barrier_seen);
+        let inventory = observe_stable_startup_inventory(
+            &source,
+            async move {
+                observed_barrier.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            HardDeadline::after(Duration::from_secs(2)).expect("empty startup deadline"),
+        )
+        .await
+        .expect("stable empty startup inventory");
+
+        inventory
+            .verify_complete_exact_set(&BTreeMap::new())
+            .expect("empty manager and inherited sets agree");
+    }
+
+    #[tokio::test]
+    async fn startup_observer_rejects_byte_or_struct_instability() {
+        let name = custody_name(62);
+        let first_identity = descriptor_identity(650);
+        let second_identity = descriptor_identity(660);
+        let first = snapshot(
+            42,
+            vec![
+                inventory_entry(name, first_identity.clone()),
+                inventory_entry(name, second_identity.clone()),
+            ],
+        );
+        let byte_changed = snapshot(
+            42,
+            vec![
+                inventory_entry(custody_name(63), first_identity.clone()),
+                inventory_entry(custody_name(63), second_identity.clone()),
+            ],
+        );
+        let mut flag_changed = first.clone();
+        flag_changed.entries[0].identity.status_flags ^= 1;
+        flag_changed.entries.sort_unstable();
+
+        for changed in [byte_changed, flag_changed] {
+            let source = FakeInventorySource::new(42, vec![first.clone(), changed]);
+            let result = observe_stable_startup_inventory(
+                &source,
+                std::future::ready(Ok(())),
+                HardDeadline::after(Duration::from_secs(2)).expect("unstable startup deadline"),
+            )
+            .await;
+            assert!(matches!(result, Err(FdStoreError::UnstableInventory)));
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_observer_rejects_malformed_scope_main_pid_and_names() {
+        let mut wrong_main_pid = snapshot(42, Vec::new());
+        wrong_main_pid.main_pid = 41;
+        let mut wrong_scope = snapshot(42, Vec::new());
+        wrong_scope.scope = fake_scope(43);
+        for malformed in [wrong_main_pid, wrong_scope] {
+            let source = FakeInventorySource::new(42, vec![malformed.clone(), malformed]);
+            let result = observe_stable_startup_inventory(
+                &source,
+                std::future::ready(Ok(())),
+                HardDeadline::after(Duration::from_secs(2)).expect("malformed startup deadline"),
+            )
+            .await;
+            assert!(matches!(result, Err(FdStoreError::InvalidInventory(_))));
+        }
+
+        let first = descriptor_identity(670);
+        let second = descriptor_identity(680);
+        let malformed_name = snapshot(
+            42,
+            vec![
+                InventoryEntry {
+                    name: Box::from(&b"legacy-custody"[..]),
+                    identity: first.clone(),
+                },
+                InventoryEntry {
+                    name: Box::from(&b"legacy-custody"[..]),
+                    identity: second.clone(),
+                },
+            ],
+        );
+        let source = FakeInventorySource::new(42, vec![malformed_name.clone(), malformed_name]);
+        let inventory = observe_stable_startup_inventory(
+            &source,
+            std::future::ready(Ok(())),
+            HardDeadline::after(Duration::from_secs(2)).expect("malformed name deadline"),
+        )
+        .await
+        .expect("service-level snapshot is otherwise stable");
+        let inherited =
+            BTreeMap::from([(custody_name(64), CustodyDescriptorBinding([first, second]))]);
+        assert!(matches!(
+            inventory.verify_complete_exact_set(&inherited),
+            Err(FdStoreError::InvalidInventory(
+                "startup custody name is invalid"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_rejects_extra_or_partial_custody_sets() {
+        let first_name = custody_name(65);
+        let second_name = custody_name(66);
+        let first_binding =
+            CustodyDescriptorBinding([descriptor_identity(690), descriptor_identity(700)]);
+        let second_binding =
+            CustodyDescriptorBinding([descriptor_identity(710), descriptor_identity(720)]);
+        let inherited = BTreeMap::from([(first_name, first_binding.clone())]);
+        let extra_snapshot = snapshot(
+            42,
+            vec![
+                inventory_entry(first_name, first_binding.0[0].clone()),
+                inventory_entry(first_name, first_binding.0[1].clone()),
+                inventory_entry(second_name, second_binding.0[0].clone()),
+                inventory_entry(second_name, second_binding.0[1].clone()),
+            ],
+        );
+        let extra_source =
+            FakeInventorySource::new(42, vec![extra_snapshot.clone(), extra_snapshot]);
+        let extra = observe_stable_startup_inventory(
+            &extra_source,
+            std::future::ready(Ok(())),
+            HardDeadline::after(Duration::from_secs(2)).expect("extra startup deadline"),
+        )
+        .await
+        .expect("stable extra manager inventory");
+        assert!(matches!(
+            extra.verify_complete_exact_set(&inherited),
+            Err(FdStoreError::InvalidInventory(
+                "startup inventory is not the complete inherited custody set"
+            ))
+        ));
+
+        let partial_snapshot = snapshot(
+            42,
+            vec![inventory_entry(first_name, first_binding.0[0].clone())],
+        );
+        let partial_source =
+            FakeInventorySource::new(42, vec![partial_snapshot.clone(), partial_snapshot]);
+        let partial = observe_stable_startup_inventory(
+            &partial_source,
+            std::future::ready(Ok(())),
+            HardDeadline::after(Duration::from_secs(2)).expect("partial startup deadline"),
+        )
+        .await
+        .expect("stable partial manager inventory");
+        assert!(matches!(
+            partial.verify_complete_exact_set(&inherited),
+            Err(FdStoreError::InvalidInventory(
+                "startup custody name does not contain exactly two descriptors"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_rejects_cross_name_kernel_object_aliases() {
+        let first_name = custody_name(67);
+        let second_name = custody_name(68);
+        let first = descriptor_identity(730);
+        let mut alias = first.clone();
+        alias.status_flags ^= 1;
+        assert_ne!(alias, first);
+        assert!(alias.is_same_kernel_object(&first));
+        let manager_snapshot = snapshot(
+            42,
+            vec![
+                inventory_entry(first_name, first.clone()),
+                inventory_entry(first_name, descriptor_identity(740)),
+                inventory_entry(second_name, alias),
+                inventory_entry(second_name, descriptor_identity(750)),
+            ],
+        );
+        let source = FakeInventorySource::new(42, vec![manager_snapshot.clone(), manager_snapshot]);
+        let manager = observe_stable_startup_inventory(
+            &source,
+            std::future::ready(Ok(())),
+            HardDeadline::after(Duration::from_secs(2)).expect("alias startup deadline"),
+        )
+        .await
+        .expect("stable aliased manager inventory");
+        let inherited = BTreeMap::from([
+            (
+                first_name,
+                CustodyDescriptorBinding([first, descriptor_identity(740)]),
+            ),
+            (
+                second_name,
+                CustodyDescriptorBinding([descriptor_identity(760), descriptor_identity(750)]),
+            ),
+        ]);
+
+        assert!(matches!(
+            manager.verify_complete_exact_set(&inherited),
+            Err(FdStoreError::InvalidInventory(
+                "startup descriptor identity is reused"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_observer_bounds_barrier_and_snapshots_by_one_deadline() {
+        let empty = snapshot(42, Vec::new());
+        let source = FakeInventorySource::new(42, vec![empty.clone(), empty]);
+        let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short deadline");
+
+        let result = observe_stable_startup_inventory(
+            &source,
+            std::future::pending::<Result<(), FdStoreError>>(),
+            deadline,
+        )
+        .await;
+
+        assert!(matches!(result, Err(FdStoreError::Deadline)));
+        assert_eq!(
+            source.snapshots.lock().expect("fake snapshot lock").len(),
+            2,
+            "deadline did not permit a snapshot before barrier acknowledgement"
+        );
+    }
+
+    #[test]
+    fn startup_observer_source_has_only_one_non_mutating_barrier_path() {
+        let source = include_str!("systemd_fdstore.rs");
+        let start = source
+            .find("pub(crate) async fn observe_current_process_startup_inventory")
+            .expect("startup observer source start");
+        let end = source[start..]
+            .find("/// Publish through the production systemd manager interfaces")
+            .map(|offset| start + offset)
+            .expect("startup observer source end");
+        let observer = &source[start..end];
+        assert!(observer.contains("SystemdDescriptorStoreSource::for_current_process"));
+        assert!(observer.contains("NotifySocketAddress::from_environment"));
+        assert_eq!(observer.matches("synchronize_manager").count(), 1);
+        assert_eq!(observer.matches("source.snapshot(deadline)").count(), 2);
+        for forbidden in [
+            "FDSTORE",
+            "publish_and_attest",
+            "fdstore_message",
+            "FDSTORE_PREFIX",
+            "FDSTORE=1",
+            "FDSTOREREMOVE=1",
+            "READY=1",
+        ] {
+            assert!(
+                !observer.contains(forbidden),
+                "startup observer must not contain {forbidden}"
+            );
+        }
     }
 
     #[tokio::test]

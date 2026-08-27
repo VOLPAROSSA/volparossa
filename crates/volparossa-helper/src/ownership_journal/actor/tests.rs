@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs, io,
     num::{NonZeroU32, NonZeroU64},
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -18,7 +19,9 @@ use volparossa_routing::{
     WireguardRole as WireRole,
 };
 
-use super::super::{AbsentOrigin, ConfirmedAbsentProof, JournalSnapshot, RecoveryTarget};
+use super::super::{
+    AbsentOrigin, ConfirmedAbsentProof, JournalSnapshot, PrepareRecoveryEvidenceV1, RecoveryTarget,
+};
 use super::*;
 
 const TEST_WAIT: Duration = Duration::from_secs(2);
@@ -258,6 +261,76 @@ fn prepopulate(
         });
     }
     coordinates
+}
+
+fn prepopulate_custody_target(
+    journal: &mut OwnershipJournal,
+    revision: u64,
+    seed: u8,
+    phase: StartupCustodyPhase,
+) -> (u64, OwnershipCoordinates, DurableCustodyDescriptorBinding) {
+    let intent = durable_intent(seed);
+    let inserted = journal
+        .insert_intent(revision, intent.0.clone())
+        .expect("persist startup target Intent");
+    let anchor = durable_anchor(seed);
+    let binding = custody_binding_for_test(anchor).expect("startup custody binding");
+    let marked = journal
+        .mark_may_own_custody(
+            inserted.revision,
+            inserted.ownership_id,
+            inserted.generation,
+            anchor.0,
+            binding.0,
+            HardDeadline::after(TEST_WAIT).expect("startup target deadline"),
+        )
+        .expect("persist startup MayOwnCustody");
+    let revision = match phase {
+        StartupCustodyPhase::MayOwnCustody => marked.revision,
+        StartupCustodyPhase::MayOwnPrepare => {
+            journal
+                .mark_may_own_prepare_from_custody(
+                    marked.revision,
+                    inserted.ownership_id,
+                    inserted.generation,
+                    HardDeadline::after(TEST_WAIT).expect("startup arm deadline"),
+                )
+                .expect("persist startup MayOwnPrepare")
+                .revision
+        }
+    };
+    (
+        revision,
+        OwnershipCoordinates {
+            journal_epoch_id: journal
+                .snapshot()
+                .expect("startup target snapshot")
+                .journal_epoch_id,
+            context_id: intent.0.context_id,
+            ownership_id: inserted.ownership_id,
+            generation: inserted.generation,
+        },
+        binding,
+    )
+}
+
+fn prepopulate_legacy_may_own_prepare(config: &JournalConfig, seed: u8) {
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open legacy setup journal");
+    let inserted = journal
+        .insert_intent(0, durable_intent(seed).0)
+        .expect("persist legacy setup Intent");
+    let mut next = journal.snapshot().expect("legacy setup snapshot").clone();
+    let record = next
+        .records
+        .get_mut(&inserted.ownership_id)
+        .expect("legacy setup record");
+    record.phase = OwnershipPhase::MayOwnPrepare;
+    record.recovery_evidence = Some(PrepareRecoveryEvidenceV1::LegacyAnchor(
+        durable_anchor(seed).0,
+    ));
+    journal
+        .compare_and_swap(inserted.revision, next)
+        .expect("persist legacy MayOwnPrepare");
 }
 
 fn reopened_snapshot(config: &JournalConfig) -> JournalSnapshot {
@@ -940,6 +1013,330 @@ fn startup_sweeps_every_intent_before_ready_on_the_named_actor_thread() {
         .expect("second record");
     assert_eq!(second.phase, OwnershipPhase::Absent);
     assert_eq!(second.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
+}
+
+#[test]
+fn lock_held_preflight_projects_canonical_targets_before_any_intent_mutation() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open target setup journal");
+    let (revision, custody_coordinates, custody_binding) =
+        prepopulate_custody_target(&mut journal, 0, 40, StartupCustodyPhase::MayOwnCustody);
+    let (revision, prepare_coordinates, prepare_binding) = prepopulate_custody_target(
+        &mut journal,
+        revision,
+        41,
+        StartupCustodyPhase::MayOwnPrepare,
+    );
+    let pending_intent = journal
+        .insert_intent(revision, durable_intent(42).0)
+        .expect("persist mixed pending Intent");
+    drop(journal);
+
+    let before = fs::read(&config.journal_path).expect("preflight journal bytes");
+    let before_snapshot = JournalSnapshot::decode(&before).expect("preflight journal snapshot");
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Exact, &observations_capture, None),
+        HardDeadline::after(TEST_WAIT).expect("preflight deadline"),
+    )
+    .expect("lock-held startup preflight");
+
+    let expected = BTreeMap::from([
+        (
+            custody_name_digest_for_coordinates(custody_coordinates),
+            (StartupCustodyPhase::MayOwnCustody, custody_binding),
+        ),
+        (
+            custody_name_digest_for_coordinates(prepare_coordinates),
+            (StartupCustodyPhase::MayOwnPrepare, prepare_binding),
+        ),
+    ]);
+    assert_eq!(startup.targets().len(), expected.len());
+    assert!(
+        startup
+            .targets()
+            .windows(2)
+            .all(|pair| pair[0].custody_name_digest() < pair[1].custody_name_digest()),
+        "startup targets must be in strict canonical digest order"
+    );
+    for target in startup.targets() {
+        let (phase, binding) = expected
+            .get(&target.custody_name_digest())
+            .expect("exact projected target");
+        assert_eq!(target.phase(), *phase);
+        assert!(target.matches_binding(binding));
+        assert_eq!(target.durable_binding(), *binding);
+        assert_eq!(format!("{target:?}"), "StartupCustodyTarget(<redacted>)");
+    }
+    assert!(matches!(
+        OwnershipJournal::open(config.clone()),
+        Err(JournalError::LockHeld)
+    ));
+    let projected = startup.targets().to_vec();
+    assert_eq!(
+        startup
+            .revalidate_targets()
+            .expect("unchanged lock-held targets"),
+        projected
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes during preflight"),
+        before
+    );
+
+    assert_eq!(
+        expect_error(&startup.continue_empty()),
+        DurableOwnershipError::RecoveryNotConfirmed
+    );
+    let after = fs::read(&config.journal_path).expect("bytes after refused continuation");
+    assert_eq!(after, before);
+    let after_snapshot = JournalSnapshot::decode(&after).expect("snapshot after refusal");
+    assert_eq!(after_snapshot.revision, before_snapshot.revision);
+    assert_eq!(
+        after_snapshot
+            .records
+            .get(&pending_intent.ownership_id)
+            .expect("pending Intent retained")
+            .phase,
+        OwnershipPhase::Intent
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn dropping_startup_guard_releases_lock_without_sweeping_pending_intent() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open drop setup journal");
+    let (revision, custody_coordinates, _) =
+        prepopulate_custody_target(&mut journal, 0, 46, StartupCustodyPhase::MayOwnCustody);
+    let pending_intent = journal
+        .insert_intent(revision, durable_intent(47).0)
+        .expect("persist drop pending Intent");
+    drop(journal);
+    let before = fs::read(&config.journal_path).expect("journal bytes before guard drop");
+    let before_revision = JournalSnapshot::decode(&before)
+        .expect("snapshot before guard drop")
+        .revision;
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Exact, &observations_capture, None),
+        HardDeadline::after(TEST_WAIT).expect("guard drop deadline"),
+    )
+    .expect("lock-held guard drop preflight");
+    assert_eq!(startup.targets().len(), 1);
+    assert_eq!(
+        startup.targets()[0].custody_name_digest(),
+        custody_name_digest_for_coordinates(custody_coordinates)
+    );
+    assert!(matches!(
+        OwnershipJournal::open(config.clone()),
+        Err(JournalError::LockHeld)
+    ));
+
+    let drop_started = Instant::now();
+    drop(startup);
+    assert!(
+        drop_started.elapsed() < TEST_WAIT,
+        "startup guard Drop did not settle its actor thread boundedly"
+    );
+    let after = fs::read(&config.journal_path).expect("journal bytes after guard drop");
+    assert_eq!(after, before);
+    assert_eq!(
+        JournalSnapshot::decode(&after)
+            .expect("snapshot after guard drop")
+            .revision,
+        before_revision
+    );
+    let reopened = OwnershipJournal::open(config.clone()).expect("lock released after guard drop");
+    let snapshot = reopened.snapshot().expect("reopened snapshot");
+    assert_eq!(
+        snapshot
+            .records
+            .get(&pending_intent.ownership_id)
+            .expect("pending Intent retained after guard drop")
+            .phase,
+        OwnershipPhase::Intent
+    );
+    assert_eq!(
+        snapshot
+            .records
+            .get(&custody_coordinates.ownership_id)
+            .expect("MayOwnCustody retained after guard drop")
+            .phase,
+        OwnershipPhase::MayOwnCustody
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn post_observation_revalidation_rejects_interposed_store_state_without_repair() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open revalidation journal");
+    journal
+        .insert_intent(0, durable_intent(45).0)
+        .expect("persist revalidation Intent");
+    drop(journal);
+    let before = fs::read(&config.journal_path).expect("journal bytes before revalidation");
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Exact, &observations_capture, None),
+        HardDeadline::after(TEST_WAIT).expect("revalidation deadline"),
+    )
+    .expect("lock-held revalidation preflight");
+    assert!(startup.targets().is_empty());
+
+    fs::write(&config.next_path, b"interposed next entry").expect("interpose next entry");
+    assert_eq!(
+        startup.revalidate_targets().unwrap_err(),
+        DurableOwnershipError::Ambiguous
+    );
+    assert!(matches!(
+        OwnershipJournal::open(config.clone()),
+        Err(JournalError::LockHeld)
+    ));
+    drop(startup);
+    assert_eq!(
+        fs::read(&config.journal_path).expect("journal bytes after failed revalidation"),
+        before
+    );
+    assert_eq!(
+        fs::read(&config.next_path).expect("interposed next entry remains"),
+        b"interposed next entry"
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn legacy_may_own_prepare_is_rejected_without_mutating_bytes_or_revision() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    prepopulate_legacy_may_own_prepare(&config, 43);
+    let before = fs::read(&config.journal_path).expect("legacy journal bytes");
+    let revision = JournalSnapshot::decode(&before)
+        .expect("legacy journal snapshot")
+        .revision;
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+
+    let result = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Exact, &observations_capture, None),
+        HardDeadline::after(TEST_WAIT).expect("legacy preflight deadline"),
+    );
+    assert_eq!(
+        expect_error(&result),
+        DurableOwnershipError::RecoveryNotConfirmed
+    );
+    let after = fs::read(&config.journal_path).expect("legacy bytes after refusal");
+    assert_eq!(after, before);
+    assert_eq!(
+        JournalSnapshot::decode(&after)
+            .expect("legacy snapshot after refusal")
+            .revision,
+        revision
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn more_than_sixty_four_startup_targets_are_rejected_without_mutation() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open capacity setup journal");
+    let mut revision = 0;
+    for seed in 1_u8..=65 {
+        (revision, _, _) = prepopulate_custody_target(
+            &mut journal,
+            revision,
+            seed,
+            StartupCustodyPhase::MayOwnCustody,
+        );
+    }
+    drop(journal);
+    let before = fs::read(&config.journal_path).expect("capacity journal bytes");
+    let before_revision = JournalSnapshot::decode(&before)
+        .expect("capacity journal snapshot")
+        .revision;
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+
+    let result = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Exact, &observations_capture, None),
+        HardDeadline::after(TEST_WAIT).expect("capacity preflight deadline"),
+    );
+    assert_eq!(
+        expect_error(&result),
+        DurableOwnershipError::RecoveryNotConfirmed
+    );
+    let after = fs::read(&config.journal_path).expect("capacity bytes after refusal");
+    assert_eq!(after, before);
+    assert_eq!(
+        JournalSnapshot::decode(&after)
+            .expect("capacity snapshot after refusal")
+            .revision,
+        before_revision
+    );
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
+}
+
+#[test]
+fn empty_target_preflight_preserves_existing_intent_settlement() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open Intent setup journal");
+    let inserted = journal
+        .insert_intent(0, durable_intent(44).0)
+        .expect("persist pending Intent");
+    drop(journal);
+    let before = fs::read(&config.journal_path).expect("Intent bytes before preflight");
+    let before_revision = JournalSnapshot::decode(&before)
+        .expect("Intent snapshot before preflight")
+        .revision;
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let mut startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Exact, &observations_capture, None),
+        HardDeadline::after(TEST_WAIT).expect("empty preflight deadline"),
+    )
+    .expect("empty target preflight");
+
+    assert!(startup.targets().is_empty());
+    assert!(
+        startup
+            .revalidate_targets()
+            .expect("revalidate empty target set")
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("Intent bytes during preflight"),
+        before
+    );
+    let actor = startup
+        .continue_empty()
+        .expect("continue empty startup and settle Intent");
+    actor.shutdown().expect("clean actor shutdown");
+
+    let after = fs::read(&config.journal_path).expect("Intent bytes after continuation");
+    let snapshot = JournalSnapshot::decode(&after).expect("settled Intent snapshot");
+    assert_eq!(snapshot.revision, before_revision + 1);
+    let record = snapshot
+        .records
+        .get(&inserted.ownership_id)
+        .expect("settled Intent record");
+    assert_eq!(record.phase, OwnershipPhase::Absent);
+    assert_eq!(record.absent_origin, Some(AbsentOrigin::NeverDispatched));
+    assert_eq!(observations.lock().expect("executor observations").calls, 0);
 }
 
 #[test]
@@ -2073,7 +2470,7 @@ fn custody_arm_handle_surface_cannot_register_retire_recover_or_own_lifecycle() 
         .split("impl DurableCustodyArmHandle {")
         .nth(1)
         .expect("custody arm handle implementation")
-        .split("pub(crate) struct DurableOwnershipActor")
+        .split("pub(super) struct DurableOwnershipStartup")
         .next()
         .expect("bounded custody arm handle implementation");
     assert_eq!(surface.matches("pub(crate) fn").count(), 1);
