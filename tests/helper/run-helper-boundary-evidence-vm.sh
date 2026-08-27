@@ -334,8 +334,8 @@ validate_supervisor_record() {
     supervisor_record=$1
     supervisor_state=$2
     [ -f "$supervisor_record" ] && [ ! -L "$supervisor_record" ] || return 1
-    [ "$(stat -c '%F:%h:%u:%a' "$supervisor_record" 2>/dev/null || true)" \
-        = "regular file:1:$(id -u):600" ] || return 1
+    [ "$(stat -c '%h:%u:%a' "$supervisor_record" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
     jq -e -s 'length == 1' "$supervisor_record" >/dev/null 2>&1 || return 1
     jq -S -c . "$supervisor_record" | cmp -s - "$supervisor_record" || return 1
     if [ "$supervisor_state" = ready ]; then
@@ -370,8 +370,8 @@ validate_supervisor_record() {
 validate_supervisor_stderr() {
     supervisor_stderr=$1
     [ -f "$supervisor_stderr" ] && [ ! -L "$supervisor_stderr" ] || return 1
-    [ "$(stat -c '%F:%h:%u:%a' "$supervisor_stderr" 2>/dev/null || true)" \
-        = "regular file:1:$(id -u):600" ] || return 1
+    [ "$(stat -c '%h:%u:%a' "$supervisor_stderr" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
     supervisor_stderr_size=$(stat -c '%s' "$supervisor_stderr") || return 1
     [ "$supervisor_stderr_size" -le 917504 ]
 }
@@ -608,9 +608,9 @@ scrub_supervisor_stderr() {
             | grep -Eq '^\.stderr\.[0-9]+\.tmp$' || return 1
         [ -f "$supervisor_stderr_temporary" ] \
             && [ ! -L "$supervisor_stderr_temporary" ] \
-            && [ "$(stat -c '%F:%h:%u:%a' \
+            && [ "$(stat -c '%h:%u:%a' \
                 "$supervisor_stderr_temporary" 2>/dev/null || true)" \
-                = "regular file:1:$(id -u):600" ] || return 1
+                = "1:$(id -u):600" ] || return 1
         supervisor_stderr_temporary_size=$(stat -c '%s' \
             "$supervisor_stderr_temporary") || return 1
         [ "$supervisor_stderr_temporary_size" -le 917504 ] || return 1

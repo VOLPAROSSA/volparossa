@@ -387,6 +387,15 @@ grep -Fx 'qemu_stderr_tail_begin' "$proof_stderr_log" >/dev/null
 grep -Fx 'qemu: bounded runtime failure' "$proof_stderr_log" >/dev/null
 grep -Fx 'qemu_stderr_tail_end' "$proof_stderr_log" >/dev/null
 
+# GNU stat describes an empty file as "regular empty file". The runner proves
+# the file type independently and must accept exact private empty QEMU stderr.
+: >"$qemu_stderr_fixture"
+: >"$proof_stderr_log"
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture"
+grep -Fx 'qemu_stderr_tail_begin' "$proof_stderr_log" >/dev/null
+grep -Fx 'qemu_stderr_tail_end' "$proof_stderr_log" >/dev/null
+
 printf '%s\n' '-----BEGIN PRIVATE KEY-----' >"$qemu_stderr_fixture"
 : >"$proof_stderr_log"
 set +e
@@ -438,10 +447,8 @@ test ! -s "$proof_stderr_log"
 run_directory=$temporary_directory/scrub-run
 mkdir -m 700 "$run_directory"
 mkdir -m 700 "$run_directory/qemu-provisioning"
-printf '%s\n' 'published diagnostic' \
-    >"$run_directory/qemu-provisioning/stderr"
-printf '%s\n' 'interrupted private diagnostic' \
-    >"$run_directory/qemu-provisioning/.stderr.12345.tmp"
+: >"$run_directory/qemu-provisioning/stderr"
+: >"$run_directory/qemu-provisioning/.stderr.12345.tmp"
 chmod 0600 \
     "$run_directory/qemu-provisioning/stderr" \
     "$run_directory/qemu-provisioning/.stderr.12345.tmp"
