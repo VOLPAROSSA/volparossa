@@ -1033,7 +1033,9 @@ systemd-run \
     --property='DeviceAllow=/dev/net/tun rw' \
     --property=ProtectSystem=strict \
     --property=ProtectHome=yes \
-    --property=ProtectControlGroups=yes \
+    --property=ProtectControlGroups=strict \
+    --property=Delegate=no \
+    --property=PrivatePIDs=no \
     --property=ProtectKernelModules=yes \
     --property=ProtectKernelLogs=yes \
     --property=ProtectClock=yes \
@@ -1044,7 +1046,8 @@ systemd-run \
     --property=RestrictSUIDSGID=yes \
     --property=RestrictNamespaces=net \
     --property=SystemCallArchitectures=native \
-    --property='SystemCallFilter=@system-service @network-io @mount seccomp' \
+    --property='SystemCallFilter=@system-service @network-io seccomp' \
+    --property='SystemCallFilter=~@mount' \
     --property=SystemCallErrorNumber=EPERM \
     --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
     --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
@@ -1344,7 +1347,9 @@ if [ "$proof_ok" = yes ]; then
         --property='DeviceAllow=/dev/net/tun rw' \
         --property=ProtectSystem=strict \
         --property=ProtectHome=yes \
-        --property=ProtectControlGroups=yes \
+        --property=ProtectControlGroups=strict \
+        --property=Delegate=no \
+        --property=PrivatePIDs=no \
         --property=ProtectKernelModules=yes \
         --property=ProtectKernelLogs=yes \
         --property=ProtectClock=yes \
@@ -1355,7 +1360,8 @@ if [ "$proof_ok" = yes ]; then
         --property=RestrictSUIDSGID=yes \
         --property=RestrictNamespaces=net \
         --property=SystemCallArchitectures=native \
-        --property='SystemCallFilter=@system-service @network-io @mount seccomp' \
+        --property='SystemCallFilter=@system-service @network-io seccomp' \
+        --property='SystemCallFilter=~@mount' \
         --property=SystemCallErrorNumber=EPERM \
         --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
         --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \

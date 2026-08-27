@@ -490,6 +490,34 @@ if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 2 ]; then
     printf '%s\n' 'both transient helper invocations do not have the exact file-size limit' >&2
     exit 1
 fi
+for exact_cgroup_property in \
+    '--property=ProtectControlGroups=strict' \
+    '--property=Delegate=no' \
+    '--property=PrivatePIDs=no' \
+    "--property='SystemCallFilter=@system-service @network-io seccomp'" \
+    "--property='SystemCallFilter=~@mount'"
+do
+    if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 2 ]; then
+        printf 'both transient helper invocations lack exact cgroup isolation: %s\n' \
+            "$exact_cgroup_property" >&2
+        exit 1
+    fi
+done
+for cgroup_assignment_contract in \
+    'ProtectControlGroups=:2' \
+    'Delegate=:2' \
+    'PrivatePIDs=:2' \
+    'SystemCallFilter=:4'
+do
+    assignment_key=${cgroup_assignment_contract%:*}
+    expected_count=${cgroup_assignment_contract##*:}
+    observed_count=$(grep -Fc -- "$assignment_key" "$gate")
+    if [ "$observed_count" -ne "$expected_count" ]; then
+        printf 'transient helper profiles contain extra cgroup assignments: %s expected %s, got %s\n' \
+            "$assignment_key" "$expected_count" "$observed_count" >&2
+        exit 1
+    fi
+done
 if [ "$(grep -Fc -- '--property=RuntimeMaxSec=180s' "$gate")" -ne 1 ]; then
     printf '%s\n' 'production IPC invocation does not have one exact runtime limit' >&2
     exit 1

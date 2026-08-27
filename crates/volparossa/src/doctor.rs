@@ -1251,62 +1251,55 @@ fn service_sandbox_check() -> Check {
 }
 
 fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind) -> bool {
-    let common = [
-        ("UMask", "0077"),
-        ("NoNewPrivileges", "yes"),
-        ("ProtectSystem", "strict"),
-        ("ProtectHome", "yes"),
-        ("PrivateTmp", "yes"),
-        ("PrivateMounts", "yes"),
-        ("ProtectControlGroups", "yes"),
-        ("ProtectKernelModules", "yes"),
-        ("ProtectKernelLogs", "yes"),
-        ("ProtectClock", "yes"),
-        ("ProtectHostname", "yes"),
-        ("LockPersonality", "yes"),
-        ("MemoryDenyWriteExecute", "yes"),
-        ("RestrictRealtime", "yes"),
-        ("RestrictSUIDSGID", "yes"),
-        ("SystemCallArchitectures", "native"),
-        ("SystemCallErrorNumber", "EPERM"),
-    ];
-    if !common
-        .iter()
-        .all(|(key, expected)| service.get(*key).is_some_and(|value| value == expected))
-    {
+    if !common_unit_sandbox_matches(service) {
         return false;
     }
 
-    let (user, executable, private_devices, kernel_tunables, namespaces, families, syscalls) =
-        match kind {
-            UnitKind::Agent => (
-                "volparossa",
-                "/usr/bin/volparossa-agent",
-                "yes",
-                "yes",
-                "yes",
-                ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"].as_slice(),
-                ["@system-service", "@network-io"].as_slice(),
-            ),
-            UnitKind::Helper => (
-                "root",
-                "/usr/libexec/volparossa/volparossa-helper",
-                "no",
-                "no",
-                "net",
-                ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"].as_slice(),
-                ["@system-service", "@network-io", "@mount", "seccomp"].as_slice(),
-            ),
-            UnitKind::Native => (
-                "volparossa",
-                "/usr/libexec/volparossa/volparossa-mpquic-launch",
-                "yes",
-                "yes",
-                "yes",
-                ["AF_UNIX", "AF_INET", "AF_INET6"].as_slice(),
-                ["@system-service", "@network-io"].as_slice(),
-            ),
-        };
+    let protect_control_groups = match kind {
+        UnitKind::Helper => "strict",
+        UnitKind::Agent | UnitKind::Native => "yes",
+    };
+    let (
+        user,
+        executable,
+        private_devices,
+        kernel_tunables,
+        namespaces,
+        families,
+        allowed_syscalls,
+        denied_syscalls,
+    ) = match kind {
+        UnitKind::Agent => (
+            "volparossa",
+            "/usr/bin/volparossa-agent",
+            "yes",
+            "yes",
+            "yes",
+            ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"].as_slice(),
+            ["@system-service", "@network-io"].as_slice(),
+            [].as_slice(),
+        ),
+        UnitKind::Helper => (
+            "root",
+            "/usr/libexec/volparossa/volparossa-helper",
+            "no",
+            "no",
+            "net",
+            ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"].as_slice(),
+            ["@system-service", "@network-io", "seccomp"].as_slice(),
+            ["~@mount"].as_slice(),
+        ),
+        UnitKind::Native => (
+            "volparossa",
+            "/usr/libexec/volparossa/volparossa-mpquic-launch",
+            "yes",
+            "yes",
+            "yes",
+            ["AF_UNIX", "AF_INET", "AF_INET6"].as_slice(),
+            ["@system-service", "@network-io"].as_slice(),
+            [].as_slice(),
+        ),
+    };
     service.get("User").is_some_and(|value| value == user)
         && service
             .get("Group")
@@ -1318,13 +1311,16 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
             .get("PrivateDevices")
             .is_some_and(|value| value == private_devices)
         && service
+            .get("ProtectControlGroups")
+            .is_some_and(|value| value == protect_control_groups)
+        && service
             .get("ProtectKernelTunables")
             .is_some_and(|value| value == kernel_tunables)
         && service
             .get("RestrictNamespaces")
             .is_some_and(|value| value == namespaces)
         && value_set_matches(service, "RestrictAddressFamilies", families)
-        && value_set_matches(service, "SystemCallFilter", syscalls)
+        && system_call_filter_matches(service, allowed_syscalls, denied_syscalls)
         && match kind {
             UnitKind::Helper => helper_has_required_custody_sandbox(service),
             UnitKind::Agent | UnitKind::Native => {
@@ -1338,6 +1334,57 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
         }
 }
 
+fn common_unit_sandbox_matches(service: &BTreeMap<String, String>) -> bool {
+    [
+        ("UMask", "0077"),
+        ("NoNewPrivileges", "yes"),
+        ("ProtectSystem", "strict"),
+        ("ProtectHome", "yes"),
+        ("PrivateTmp", "yes"),
+        ("PrivateMounts", "yes"),
+        ("ProtectKernelModules", "yes"),
+        ("ProtectKernelLogs", "yes"),
+        ("ProtectClock", "yes"),
+        ("ProtectHostname", "yes"),
+        ("LockPersonality", "yes"),
+        ("MemoryDenyWriteExecute", "yes"),
+        ("RestrictRealtime", "yes"),
+        ("RestrictSUIDSGID", "yes"),
+        ("SystemCallArchitectures", "native"),
+        ("SystemCallErrorNumber", "EPERM"),
+    ]
+    .iter()
+    .all(|(key, expected)| service.get(*key).is_some_and(|value| value == expected))
+}
+
+fn system_call_filter_matches(
+    service: &BTreeMap<String, String>,
+    expected_allowed: &[&str],
+    expected_denied: &[&str],
+) -> bool {
+    let Some(value) = service.get("SystemCallFilter") else {
+        return false;
+    };
+    let mut rules = value.lines();
+    let Some(allowed) = rules.next() else {
+        return false;
+    };
+    let allowed = allowed.split_ascii_whitespace().collect::<BTreeSet<_>>();
+    if allowed != expected_allowed.iter().copied().collect::<BTreeSet<_>>() {
+        return false;
+    }
+
+    if expected_denied.is_empty() {
+        return rules.next().is_none();
+    }
+    let Some(denied) = rules.next() else {
+        return false;
+    };
+    denied.split_ascii_whitespace().collect::<BTreeSet<_>>()
+        == expected_denied.iter().copied().collect::<BTreeSet<_>>()
+        && rules.next().is_none()
+}
+
 fn helper_has_required_custody_sandbox(service: &BTreeMap<String, String>) -> bool {
     [
         ("LimitCORE", "0"),
@@ -1346,6 +1393,8 @@ fn helper_has_required_custody_sandbox(service: &BTreeMap<String, String>) -> bo
         ("FileDescriptorStorePreserve", "yes"),
         ("KillMode", "control-group"),
         ("SendSIGKILL", "yes"),
+        ("Delegate", "no"),
+        ("PrivatePIDs", "no"),
     ]
     .iter()
     .all(|(key, expected)| service.get(*key).is_some_and(|value| value == expected))
@@ -1421,7 +1470,7 @@ fn drop_in_exists(root: &Path, name: &str) -> io::Result<bool> {
 fn parse_service_unit(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
     let input = std::str::from_utf8(bytes).ok()?;
     let mut service_section = false;
-    let mut values = BTreeMap::new();
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
     for (index, raw) in input.lines().enumerate() {
         if index >= 2_048 || raw.len() > 4_096 || raw.ends_with('\\') {
             return None;
@@ -1447,15 +1496,25 @@ fn parse_service_unit(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
         }
         if matches!(
             key,
-            "CapabilityBoundingSet"
-                | "AmbientCapabilities"
-                | "RestrictAddressFamilies"
-                | "SystemCallFilter"
+            "CapabilityBoundingSet" | "AmbientCapabilities" | "RestrictAddressFamilies"
         ) && values.contains_key(key)
         {
             return None;
         }
-        values.insert(key.to_owned(), value.trim().to_owned());
+        let value = value.trim();
+        if key == "SystemCallFilter" {
+            if value.is_empty() {
+                return None;
+            }
+            if let Some(existing) = values.get_mut(key) {
+                existing.push('\n');
+                existing.push_str(value);
+            } else {
+                values.insert(key.to_owned(), value.to_owned());
+            }
+        } else {
+            values.insert(key.to_owned(), value.to_owned());
+        }
     }
     Some(values)
 }
@@ -2223,6 +2282,14 @@ mod tests {
             )
             .is_none()
         );
+        let repeated_filter = parse_service_unit(
+            b"[Service]\nSystemCallFilter=@system-service @network-io seccomp\nSystemCallFilter=~@mount\n",
+        )
+        .expect("ordered system-call filter rules");
+        assert_eq!(
+            repeated_filter.get("SystemCallFilter").map(String::as_str),
+            Some("@system-service @network-io seccomp\n~@mount")
+        );
     }
 
     #[test]
@@ -2245,8 +2312,14 @@ mod tests {
         assert!(helper_capability_contract_matches(&helper));
         assert_eq!(
             helper.get("SystemCallFilter").map(String::as_str),
-            Some("@system-service @network-io @mount seccomp")
+            Some("@system-service @network-io seccomp\n~@mount")
         );
+        assert_eq!(
+            helper.get("ProtectControlGroups").map(String::as_str),
+            Some("strict")
+        );
+        assert_eq!(helper.get("Delegate").map(String::as_str), Some("no"));
+        assert_eq!(helper.get("PrivatePIDs").map(String::as_str), Some("no"));
         assert_eq!(helper.get("LimitCORE").map(String::as_str), Some("0"));
         assert_eq!(
             helper.get("FileDescriptorStoreMax").map(String::as_str),
@@ -2265,20 +2338,20 @@ mod tests {
         );
         assert_eq!(helper.get("SendSIGKILL").map(String::as_str), Some("yes"));
 
+        for (key, relaxed) in [
+            ("ProtectControlGroups", "yes"),
+            ("Delegate", "yes"),
+            ("PrivatePIDs", "yes"),
+        ] {
+            let mut service = helper.clone();
+            service.insert(key.to_owned(), relaxed.to_owned());
+            assert!(!unit_has_required_sandbox(&service, UnitKind::Helper));
+        }
+
         let mut dumpable = helper.clone();
         dumpable.insert("LimitCORE".to_owned(), "infinity".to_owned());
         assert!(!unit_has_required_sandbox(&dumpable, UnitKind::Helper));
         assert!(!helper_capability_contract_matches(&dumpable));
-
-        let mut broader_syscalls = helper.clone();
-        broader_syscalls.insert(
-            "SystemCallFilter".to_owned(),
-            "@system-service @network-io @mount seccomp @privileged".to_owned(),
-        );
-        assert!(!unit_has_required_sandbox(
-            &broader_syscalls,
-            UnitKind::Helper
-        ));
 
         for omitted in HELPER_BOOTSTRAP_CAPABILITIES {
             let mut missing = helper.clone();
@@ -2313,6 +2386,24 @@ mod tests {
             "CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN".to_owned(),
         );
         assert!(!helper_capability_contract_matches(&mismatched_ambient));
+    }
+
+    #[test]
+    fn packaged_helper_requires_ordered_explicit_mount_syscall_denial() {
+        let helper = parse_service_unit(include_bytes!(
+            "../../../packaging/systemd/volparossa-helper.service"
+        ))
+        .expect("packaged helper unit");
+
+        for invalid_filter in [
+            "@system-service @network-io seccomp @mount\n~@mount",
+            "@system-service @network-io seccomp",
+            "~@mount\n@system-service @network-io seccomp",
+        ] {
+            let mut invalid = helper.clone();
+            invalid.insert("SystemCallFilter".to_owned(), invalid_filter.to_owned());
+            assert!(!unit_has_required_sandbox(&invalid, UnitKind::Helper));
+        }
     }
 
     #[test]
@@ -2704,7 +2795,6 @@ mod tests {
             ("ProtectHome", "yes"),
             ("PrivateTmp", "yes"),
             ("PrivateMounts", "yes"),
-            ("ProtectControlGroups", "yes"),
             ("ProtectKernelModules", "yes"),
             ("ProtectKernelLogs", "yes"),
             ("ProtectClock", "yes"),
@@ -2727,6 +2817,7 @@ mod tests {
                         ("User", "volparossa"),
                         ("ExecStart", "/usr/bin/volparossa-agent"),
                         ("PrivateDevices", "yes"),
+                        ("ProtectControlGroups", "yes"),
                         ("ProtectKernelTunables", "yes"),
                         ("RestrictNamespaces", "yes"),
                         (
@@ -2746,6 +2837,9 @@ mod tests {
                         ("User", "root"),
                         ("ExecStart", "/usr/libexec/volparossa/volparossa-helper"),
                         ("PrivateDevices", "no"),
+                        ("ProtectControlGroups", "strict"),
+                        ("Delegate", "no"),
+                        ("PrivatePIDs", "no"),
                         ("ProtectKernelTunables", "no"),
                         ("RestrictNamespaces", "net"),
                         (
@@ -2754,7 +2848,7 @@ mod tests {
                         ),
                         (
                             "SystemCallFilter",
-                            "@system-service @network-io @mount seccomp",
+                            "@system-service @network-io seccomp\n~@mount",
                         ),
                         ("LimitCORE", "0"),
                         ("NotifyAccess", "main"),
@@ -2775,6 +2869,7 @@ mod tests {
                             "/usr/libexec/volparossa/volparossa-mpquic-launch",
                         ),
                         ("PrivateDevices", "yes"),
+                        ("ProtectControlGroups", "yes"),
                         ("ProtectKernelTunables", "yes"),
                         ("RestrictNamespaces", "yes"),
                         ("RestrictAddressFamilies", "AF_UNIX AF_INET AF_INET6"),
