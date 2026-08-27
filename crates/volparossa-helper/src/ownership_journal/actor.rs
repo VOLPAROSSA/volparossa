@@ -389,6 +389,14 @@ impl StartupCustodyTarget {
             .is_ok()
     }
 
+    /// Compare the opaque recovery anchor's service-cgroup inode without exposing it.
+    ///
+    /// This is correlation evidence only. A match neither authorizes cgroup mutation nor proves
+    /// that the cgroup is empty, undelegated, or immutable.
+    pub(crate) fn has_service_cgroup_inode(&self, candidate: NonZeroU64) -> bool {
+        self.recovery_anchor.0.service_cgroup_inode == candidate
+    }
+
     pub(crate) fn matches_binding(&self, candidate: &DurableCustodyDescriptorBinding) -> bool {
         self.durable_binding.matches_role_ordered(candidate)
     }
