@@ -197,6 +197,7 @@ grep -F 'wait_for_supervisor_ready 15' "$runner" >/dev/null
 grep -F 'QEMU exited after supervisor readiness for $vm_phase' "$runner" >/dev/null
 grep -F "printf 'qemu_supervisor_status='" "$runner" >/dev/null
 grep -F 'qemu_failure_stderr=$qemu_control/stderr' "$runner" >/dev/null
+grep -F "grep -Eq '^\\.stderr\\.[0-9]+\\.tmp$'" "$runner" >/dev/null
 grep -F 'MAX_STDERR_BYTES = 917_504' "$supervisor" >/dev/null
 grep -F 'MAX_STDERR_DRAIN_BYTES_PER_POLL = 262_144' "$supervisor" >/dev/null
 grep -F 'control.write_bytes("stderr", stderr_tail)' "$supervisor" >/dev/null
@@ -360,8 +361,9 @@ qemu_diagnostic_functions=$temporary_directory/qemu-diagnostic-functions.sh
     sed -n '/^validate_supervisor_stderr() {$/,/^}$/p' "$runner"
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^publish_qemu_failure_diagnostics() {$/,/^}$/p' "$runner"
+    sed -n '/^scrub_supervisor_stderr() {$/,/^}$/p' "$runner"
 } >"$qemu_diagnostic_functions"
-test "$(grep -c '^[_a-z].*() {$' "$qemu_diagnostic_functions")" -eq 4
+test "$(grep -c '^[_a-z].*() {$' "$qemu_diagnostic_functions")" -eq 5
 sh -n "$qemu_diagnostic_functions"
 # shellcheck disable=SC1090
 . "$qemu_diagnostic_functions"
@@ -395,6 +397,32 @@ set -e
 test "$private_marker_result" -ne 0
 test ! -s "$proof_stderr_log"
 
+qemu_secret_fixture=$temporary_directory/qemu-same-user-secret
+qemu_stderr_link=$temporary_directory/qemu-fast-exit.stderr.link
+printf '%s\n' 'same-user secret must not be followed' >"$qemu_secret_fixture"
+chmod 0600 "$qemu_secret_fixture"
+ln -s "$qemu_secret_fixture" "$qemu_stderr_link"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_stderr_link" >/dev/null 2>&1
+linked_stderr_result=$?
+set -e
+test "$linked_stderr_result" -ne 0
+test ! -s "$proof_stderr_log"
+
+qemu_status_link=$temporary_directory/qemu-fast-exit-status.link
+ln -s "$qemu_status_fixture" "$qemu_status_link"
+printf '%s\n' 'qemu: bounded runtime failure' >"$qemu_stderr_fixture"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_link" "$qemu_stderr_fixture" >/dev/null 2>&1
+linked_status_result=$?
+set -e
+test "$linked_status_result" -ne 0
+test ! -s "$proof_stderr_log"
+
 dd if=/dev/zero bs=65536 count=15 status=none >"$qemu_stderr_fixture"
 : >"$proof_stderr_log"
 set +e
@@ -404,6 +432,45 @@ oversized_stderr_result=$?
 set -e
 test "$oversized_stderr_result" -ne 0
 test ! -s "$proof_stderr_log"
+
+# Uncertain cleanup removes an interrupted atomic stderr publication only when
+# it is an exact private regular file under a fixed supervisor control path.
+run_directory=$temporary_directory/scrub-run
+mkdir -m 700 "$run_directory"
+mkdir -m 700 "$run_directory/qemu-provisioning"
+printf '%s\n' 'published diagnostic' \
+    >"$run_directory/qemu-provisioning/stderr"
+printf '%s\n' 'interrupted private diagnostic' \
+    >"$run_directory/qemu-provisioning/.stderr.12345.tmp"
+chmod 0600 \
+    "$run_directory/qemu-provisioning/stderr" \
+    "$run_directory/qemu-provisioning/.stderr.12345.tmp"
+scrub_supervisor_stderr "$run_directory/qemu-provisioning"
+test ! -e "$run_directory/qemu-provisioning/stderr"
+test ! -e "$run_directory/qemu-provisioning/.stderr.12345.tmp"
+
+printf '%s\n' 'invalid temporary name' \
+    >"$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
+chmod 0600 "$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
+set +e
+scrub_supervisor_stderr "$run_directory/qemu-provisioning" >/dev/null 2>&1
+invalid_stderr_name_result=$?
+set -e
+test "$invalid_stderr_name_result" -ne 0
+test -f "$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
+
+mkdir -m 700 "$run_directory/qemu-proof"
+scrub_link_target=$temporary_directory/scrub-link-target
+printf '%s\n' 'linked file must not be touched' >"$scrub_link_target"
+chmod 0600 "$scrub_link_target"
+ln -s "$scrub_link_target" "$run_directory/qemu-proof/.stderr.67890.tmp"
+set +e
+scrub_supervisor_stderr "$run_directory/qemu-proof" >/dev/null 2>&1
+linked_stderr_temporary_result=$?
+set -e
+test "$linked_stderr_temporary_result" -ne 0
+test -L "$run_directory/qemu-proof/.stderr.67890.tmp"
+grep -Fx 'linked file must not be touched' "$scrub_link_target" >/dev/null
 
 for exact_workflow_text in \
     '  workflow_dispatch:' \

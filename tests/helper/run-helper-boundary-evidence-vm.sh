@@ -333,7 +333,8 @@ wait_for_path() {
 validate_supervisor_record() {
     supervisor_record=$1
     supervisor_state=$2
-    [ "$(stat -Lc '%F:%h:%u:%a' "$supervisor_record" 2>/dev/null || true)" \
+    [ -f "$supervisor_record" ] && [ ! -L "$supervisor_record" ] || return 1
+    [ "$(stat -c '%F:%h:%u:%a' "$supervisor_record" 2>/dev/null || true)" \
         = "regular file:1:$(id -u):600" ] || return 1
     jq -e -s 'length == 1' "$supervisor_record" >/dev/null 2>&1 || return 1
     jq -S -c . "$supervisor_record" | cmp -s - "$supervisor_record" || return 1
@@ -368,9 +369,10 @@ validate_supervisor_record() {
 
 validate_supervisor_stderr() {
     supervisor_stderr=$1
-    [ "$(stat -Lc '%F:%h:%u:%a' "$supervisor_stderr" 2>/dev/null || true)" \
+    [ -f "$supervisor_stderr" ] && [ ! -L "$supervisor_stderr" ] || return 1
+    [ "$(stat -c '%F:%h:%u:%a' "$supervisor_stderr" 2>/dev/null || true)" \
         = "regular file:1:$(id -u):600" ] || return 1
-    supervisor_stderr_size=$(stat -Lc '%s' "$supervisor_stderr") || return 1
+    supervisor_stderr_size=$(stat -c '%s' "$supervisor_stderr") || return 1
     [ "$supervisor_stderr_size" -le 917504 ]
 }
 
@@ -573,6 +575,49 @@ discard_console_publish_temporary() {
     console_publish_temporary=
 }
 
+scrub_supervisor_stderr() {
+    supervisor_control_directory=$1
+    case $supervisor_control_directory in
+        "$run_directory"/qemu-provisioning|"$run_directory"/qemu-proof) ;;
+        *) return 1 ;;
+    esac
+    if [ ! -e "$supervisor_control_directory" ] \
+        && [ ! -L "$supervisor_control_directory" ]; then
+        return 0
+    fi
+    [ -d "$supervisor_control_directory" ] \
+        && [ ! -L "$supervisor_control_directory" ] \
+        && [ "$(stat -c '%u:%a' "$supervisor_control_directory" 2>/dev/null || true)" \
+            = "$(id -u):700" ] || return 1
+
+    supervisor_stderr=$supervisor_control_directory/stderr
+    if [ -e "$supervisor_stderr" ] || [ -L "$supervisor_stderr" ]; then
+        validate_supervisor_stderr "$supervisor_stderr" || return 1
+        rm -f -- "$supervisor_stderr" || return 1
+    fi
+
+    for supervisor_stderr_temporary in \
+        "$supervisor_control_directory"/.stderr.*.tmp
+    do
+        if [ ! -e "$supervisor_stderr_temporary" ] \
+            && [ ! -L "$supervisor_stderr_temporary" ]; then
+            continue
+        fi
+        supervisor_stderr_temporary_name=${supervisor_stderr_temporary##*/}
+        printf '%s\n' "$supervisor_stderr_temporary_name" \
+            | grep -Eq '^\.stderr\.[0-9]+\.tmp$' || return 1
+        [ -f "$supervisor_stderr_temporary" ] \
+            && [ ! -L "$supervisor_stderr_temporary" ] \
+            && [ "$(stat -c '%F:%h:%u:%a' \
+                "$supervisor_stderr_temporary" 2>/dev/null || true)" \
+                = "regular file:1:$(id -u):600" ] || return 1
+        supervisor_stderr_temporary_size=$(stat -c '%s' \
+            "$supervisor_stderr_temporary") || return 1
+        [ "$supervisor_stderr_temporary_size" -le 917504 ] || return 1
+        rm -f -- "$supervisor_stderr_temporary" || return 1
+    done
+}
+
 scrub_sensitive_run_state() {
     [ -n "$run_directory" ] || return 0
     case $run_directory in
@@ -600,13 +645,8 @@ scrub_sensitive_run_state() {
     if [ -e "$run_directory/source" ] || [ -L "$run_directory/source" ]; then
         rm -rf --one-file-system -- "$run_directory/source" || return 1
     fi
-    for qemu_phase_name in provisioning proof; do
-        supervisor_stderr=$run_directory/qemu-$qemu_phase_name/stderr
-        if [ -e "$supervisor_stderr" ] || [ -L "$supervisor_stderr" ]; then
-            validate_supervisor_stderr "$supervisor_stderr" || return 1
-            rm -f -- "$supervisor_stderr" || return 1
-        fi
-    done
+    scrub_supervisor_stderr "$run_directory/qemu-provisioning" || return 1
+    scrub_supervisor_stderr "$run_directory/qemu-proof" || return 1
     find "$run_directory" -mindepth 1 -maxdepth 1 \
         \( -type f -o -type p -o -type l \) \
         \( -name 'bounded.*' -o -name 'console.*' \) -delete \

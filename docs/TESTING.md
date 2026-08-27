@@ -139,7 +139,9 @@ retained-tail bytes. A writer inherited by an unexpected descendant cannot make 
 unbounded: that lifecycle fails closed. A failed run cannot publish a report or report hash. The
 upload uses an exact allowlist and never includes either ephemeral SSH key, the cloud-init seed, base
 image, source archive, or writable VM disk. Every candidate retained file is also rejected if it
-contains a private-key marker.
+contains a private-key marker. Uncertain cleanup removes both the finalized stderr and an exact
+private `.stderr.<pid>.tmp` left by an interrupted atomic publication; malformed names, links, or
+metadata fail cleanup closed instead of being followed.
 
 The standard GitHub-hosted runner is disposable and is not promised to expose nested KVM. On that
 ephemeral CI host only, the workflow uses `sudo` to install the fixed Ubuntu packages and add an
