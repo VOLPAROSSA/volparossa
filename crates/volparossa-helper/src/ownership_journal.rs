@@ -15,9 +15,9 @@ mod actor;
 // before their production composition is installed.
 #[allow(unused_imports)]
 pub(crate) use actor::{
-    DurableArmOutcome, DurableCustodyNameDigest, DurableCustodyOutcome, DurableIntentRegistration,
-    DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor, DurableOwnershipError,
-    DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
+    DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyNameDigest, DurableCustodyOutcome,
+    DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor,
+    DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
     DurableRegistrationOutcome,
 };
 
@@ -109,11 +109,11 @@ impl RecoveryExecutor for ExactTestRecoveryExecutor {
     }
 }
 
-/// Production ownership lifecycle without any issuance or kernel-recovery surface.
+/// Production ownership lifecycle with one separately cloneable arm-only authority.
 ///
-/// The server can only start and shut down this wrapper. It cannot register or arm ownership, so
-/// the unavailable production lease backend remains the sole request path while restart custody is
-/// still incomplete.
+/// The wrapper remains the sole owner of actor shutdown and thread settlement. It cannot register,
+/// mark, retire or recover ownership; future custody publication may receive only the narrow handle
+/// needed to arm an already durable custody token.
 pub(crate) struct ProductionOwnershipRuntime {
     actor: DurableOwnershipActor,
 }
@@ -134,6 +134,13 @@ impl ProductionOwnershipRuntime {
             deadline,
         )?;
         Ok(Self { actor })
+    }
+
+    /// Issue only the cloneable authority needed to arm an already durable custody token.
+    pub(crate) fn custody_arm_handle(
+        &self,
+    ) -> Result<DurableCustodyArmHandle, DurableOwnershipError> {
+        self.actor.custody_arm_handle()
     }
 
     /// Fence admission, prove that every record is Absent and join the actor thread.
@@ -5492,7 +5499,7 @@ mod tests {
     }
 
     #[test]
-    fn production_wrapper_exposes_only_lifecycle_and_installs_refusing_recovery() {
+    fn production_wrapper_exposes_only_lifecycle_and_arm_handle_with_refusing_recovery() {
         let source = include_str!("ownership_journal.rs");
         let start = source
             .find("impl ProductionOwnershipRuntime")
@@ -5506,9 +5513,12 @@ mod tests {
         assert!(wrapper.contains(&production_config));
         assert!(wrapper.contains("|| RefuseMayOwnRecovery"));
         assert!(wrapper.contains("start_until"));
+        assert!(wrapper.contains("custody_arm_handle"));
         assert!(wrapper.contains("shutdown_until"));
         assert!(!wrapper.contains("register_until"));
-        assert!(!wrapper.contains("arm_until"));
+        assert!(!wrapper.contains("mark_custody_until"));
+        assert!(!wrapper.contains("arm_custody_until"));
+        assert!(!wrapper.contains("retire_never_dispatched"));
         assert!(!wrapper.contains("confirm_recovered_absent"));
     }
 

@@ -786,7 +786,7 @@ impl Operation {
     }
 }
 
-#[cfg_attr(test, derive(Clone))]
+#[derive(Clone)]
 struct ActorClient {
     sender: SyncSender<Command>,
     admission: Arc<Admission>,
@@ -1009,6 +1009,27 @@ impl ActorClient {
     }
 }
 
+/// Cloneable, arm-only admission authority for a durable custody token.
+///
+/// This handle deliberately owns no actor thread, join handle, recovery executor or lifecycle
+/// transition API. Clones may only submit the exact `MayOwnCustody -> MayOwnPrepare` transition;
+/// [`DurableOwnershipActor`] remains the sole owner of shutdown and thread settlement.
+#[derive(Clone)]
+#[must_use = "a custody arm handle is the bounded authority to arm durable custody"]
+pub(crate) struct DurableCustodyArmHandle {
+    client: ActorClient,
+}
+
+impl DurableCustodyArmHandle {
+    pub(crate) fn arm_custody_until(
+        &self,
+        custody: DurableMayOwnCustody,
+        deadline: HardDeadline,
+    ) -> DurableArmOutcome {
+        arm_custody_with_client(&self.client, custody, deadline)
+    }
+}
+
 pub(crate) struct DurableOwnershipActor {
     client: Option<ActorClient>,
     join: Option<JoinHandle<()>>,
@@ -1208,19 +1229,22 @@ impl DurableOwnershipActor {
         custody: DurableMayOwnCustody,
         deadline: HardDeadline,
     ) -> DurableArmOutcome {
-        let result = self
-            .client
-            .as_ref()
-            .ok_or(DurableOwnershipError::Unavailable)
-            .and_then(|client| client.arm_custody_pending_until(custody.key.coordinates, deadline))
-            .and_then(PendingReply::wait);
-        match result {
-            Ok(resources) => DurableArmOutcome::Armed(DurableMayOwnPrepare {
-                key: custody.key,
-                resources,
-            }),
-            Err(error) => DurableArmOutcome::Retained { error, custody },
+        match self.client.as_ref() {
+            Some(client) => arm_custody_with_client(client, custody, deadline),
+            None => DurableArmOutcome::Retained {
+                error: DurableOwnershipError::Unavailable,
+                custody,
+            },
         }
+    }
+
+    pub(crate) fn custody_arm_handle(
+        &self,
+    ) -> Result<DurableCustodyArmHandle, DurableOwnershipError> {
+        self.client
+            .clone()
+            .map(|client| DurableCustodyArmHandle { client })
+            .ok_or(DurableOwnershipError::Unavailable)
     }
 
     #[cfg(test)]
@@ -1392,6 +1416,23 @@ impl DurableOwnershipActor {
             .take()
             .ok_or(DurableOwnershipError::Unavailable)?;
         settle_thread_until(join, &completion, &self.lifecycle, deadline)
+    }
+}
+
+fn arm_custody_with_client(
+    client: &ActorClient,
+    custody: DurableMayOwnCustody,
+    deadline: HardDeadline,
+) -> DurableArmOutcome {
+    let result = client
+        .arm_custody_pending_until(custody.key.coordinates, deadline)
+        .and_then(PendingReply::wait);
+    match result {
+        Ok(resources) => DurableArmOutcome::Armed(DurableMayOwnPrepare {
+            key: custody.key,
+            resources,
+        }),
+        Err(error) => DurableArmOutcome::Retained { error, custody },
     }
 }
 

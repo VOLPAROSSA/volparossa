@@ -563,6 +563,66 @@ fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identica
 }
 
 #[test]
+fn cloned_custody_arm_handle_retains_affinity_and_never_owns_actor_shutdown() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let actor = spawn_actor(config, ExecutorMode::Exact, &observations, None).expect("start actor");
+    let key = match actor.register_until(
+        durable_registration(29),
+        HardDeadline::after(TEST_WAIT).expect("registration deadline"),
+    ) {
+        DurableRegistrationOutcome::Registered(key) => key,
+        outcome @ DurableRegistrationOutcome::Retained { .. } => {
+            panic!("registration failed: {outcome:?}")
+        }
+    };
+    let anchor = durable_anchor(29);
+    let custody = match actor.mark_custody_until(
+        key,
+        anchor,
+        custody_binding_for_test(anchor).expect("custody binding"),
+        HardDeadline::after(TEST_WAIT).expect("custody deadline"),
+    ) {
+        DurableCustodyOutcome::Marked(custody) => custody,
+        outcome @ DurableCustodyOutcome::Retained { .. } => {
+            panic!("custody mark failed: {outcome:?}")
+        }
+    };
+
+    let handle = actor.custody_arm_handle().expect("arm handle");
+    let cloned_handle = handle.clone();
+    let custody = match cloned_handle.arm_custody_until(custody, expired_deadline()) {
+        DurableArmOutcome::Retained {
+            error: DurableOwnershipError::DeadlineElapsed,
+            custody,
+        } => custody,
+        outcome => panic!("expired handle arm did not retain custody: {outcome:?}"),
+    };
+    assert_eq!(custody.context_id(), [29; 16]);
+
+    let may_own = match handle.arm_custody_until(
+        custody,
+        HardDeadline::after(TEST_WAIT).expect("arm retry deadline"),
+    ) {
+        DurableArmOutcome::Armed(may_own) => may_own,
+        outcome @ DurableArmOutcome::Retained { .. } => {
+            panic!("cloned-handle arm retry failed: {outcome:?}")
+        }
+    };
+    actor
+        .confirm_recovered_absent(&may_own.key)
+        .expect("recover armed fixture");
+
+    let lifecycle = Arc::clone(&handle.client.lifecycle);
+    actor
+        .shutdown()
+        .expect("actor owner shuts down while arm handles remain alive");
+    assert_eq!(lifecycle.load(), Lifecycle::Stopped);
+    drop((handle, cloned_handle));
+}
+
+#[test]
 fn deadline_expiry_before_startup_acceptance_is_mutation_free_and_does_not_latch_store() {
     let directory = tempdir().expect("temporary directory");
     let config = test_config(directory.path());
@@ -1876,12 +1936,15 @@ fn definite_io_requires_health_confirmation_and_lifecycle_terminals_are_absorbin
 fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
+    fn assert_clone<T: Clone>() {}
     assert_send::<DurableOwnershipActor>();
     assert_send::<DurableIntentRegistration>();
     assert_send_sync::<DurableCustodyNameDigest>();
     assert_send_sync::<DurableOwnershipKey>();
     assert_send_sync::<DurableMayOwnCustody>();
     assert_send_sync::<DurableMayOwnPrepare>();
+    assert_send_sync::<DurableCustodyArmHandle>();
+    assert_clone::<DurableCustodyArmHandle>();
     let _: fn(&DurableMayOwnCustody) -> DurableCustodyNameDigest =
         DurableMayOwnCustody::custody_name_digest;
     let _: fn(
@@ -1905,6 +1968,10 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     ) -> DurableCustodyOutcome = DurableOwnershipActor::mark_custody_until;
     let _: fn(&DurableOwnershipActor, DurableMayOwnCustody, HardDeadline) -> DurableArmOutcome =
         DurableOwnershipActor::arm_custody_until;
+    let _: fn(&DurableOwnershipActor) -> Result<DurableCustodyArmHandle, DurableOwnershipError> =
+        DurableOwnershipActor::custody_arm_handle;
+    let _: fn(&DurableCustodyArmHandle, DurableMayOwnCustody, HardDeadline) -> DurableArmOutcome =
+        DurableCustodyArmHandle::arm_custody_until;
     let _: fn(
         &DurableOwnershipActor,
         &DurableOwnershipKey,
@@ -1953,6 +2020,7 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     assert!(actor_source.contains("pub(crate) fn register_until("));
     assert!(actor_source.contains("pub(crate) fn mark_custody_until("));
     assert!(actor_source.contains("pub(crate) fn arm_custody_until("));
+    assert!(actor_source.contains("pub(crate) fn custody_arm_handle("));
     assert!(actor_source.contains("fn register_pending_until("));
     assert!(actor_source.contains("fn mark_custody_pending_until("));
     assert!(actor_source.contains("fn arm_custody_pending_until("));
@@ -1973,12 +2041,58 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
             "DurableCustodyOutcome",
             "DurableArmOutcome",
             "DurableCustodyNameDigest",
+            "DurableCustodyArmHandle",
         ] {
             assert!(
                 !source.contains(affine_api),
                 "raw affine API escaped the production lifecycle wrapper in {name}: {affine_api}"
             );
         }
+    }
+}
+
+#[test]
+fn custody_arm_handle_surface_cannot_register_retire_recover_or_own_lifecycle() {
+    let actor_source = include_str!("../actor.rs");
+    let declaration = actor_source
+        .split("pub(crate) struct DurableCustodyArmHandle {")
+        .nth(1)
+        .expect("custody arm handle declaration")
+        .split("impl DurableCustodyArmHandle")
+        .next()
+        .expect("bounded custody arm handle declaration");
+    assert!(declaration.contains("client: ActorClient"));
+    for forbidden in ["join", "completion", "executor", "thread"] {
+        assert!(
+            !declaration.contains(forbidden),
+            "arm handle owns forbidden lifecycle state: {forbidden}"
+        );
+    }
+
+    let surface = actor_source
+        .split("impl DurableCustodyArmHandle {")
+        .nth(1)
+        .expect("custody arm handle implementation")
+        .split("pub(crate) struct DurableOwnershipActor")
+        .next()
+        .expect("bounded custody arm handle implementation");
+    assert_eq!(surface.matches("pub(crate) fn").count(), 1);
+    assert!(surface.contains("arm_custody_until"));
+    assert!(surface.contains("HardDeadline"));
+    for forbidden in [
+        "register",
+        "mark_custody",
+        "retire",
+        "recover",
+        "confirm",
+        "shutdown",
+        "settle",
+        "join",
+    ] {
+        assert!(
+            !surface.contains(forbidden),
+            "arm handle exposes forbidden authority: {forbidden}"
+        );
     }
 }
 
