@@ -134,7 +134,91 @@ expect_status 64 "$runner" --execute --yes --image
 expect_status 64 "$runner" --execute --yes --image /tmp/image --output /tmp/output
 expect_status 64 "$runner" --unknown
 expect_status 77 "$runner" --execute --yes \
-    --image /tmp/image --output /tmp/output --expected-commit invalid
+    --image /tmp/image --output /tmp/output --expected-commit invalid \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity '1:2:a:b:character special file'
+
+# Exercise the execute-mode argument parser independently of local VM tools.
+# A canonical process/KVM contract must parse before any host inspection, while
+# every missing, duplicated, or malformed affine expectation fails closed.
+argument_parser_fixture=$temporary_directory/runner-argument-parser.sh
+awk '
+    /^if \[ "\$\(id -u\)" -eq 0 \]; then$/ { exit }
+    { print }
+' "$runner" >"$argument_parser_fixture"
+test -s "$argument_parser_fixture"
+sh -n "$argument_parser_fixture"
+chmod 0700 "$argument_parser_fixture"
+canonical_commit=1111111111111111111111111111111111111111
+canonical_kvm_identity='1:2:a:b:character special file'
+
+expect_status 0 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+
+expect_status 64 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108
+
+expect_status 64 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity" \
+    --expected-kvm-identity "$canonical_kvm_identity"
+
+expect_status 77 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid invalid \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'the expected host UID is not canonical nonzero decimal' \
+    "$last_stderr" >/dev/null
+expect_status 77 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 0 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'the expected KVM GID is not canonical nonzero decimal' \
+    "$last_stderr" >/dev/null
+expect_status 77 "$argument_parser_fixture" --execute --yes \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity invalid
+grep -F 'the expected KVM identity' "$last_stderr" >/dev/null
 
 guest_setup_fixture=$temporary_directory/guest-setup.sh
 guest_proof_fixture=$temporary_directory/guest-proof.sh
@@ -184,6 +268,72 @@ for exact_runner_text in \
 do
     grep -F -- "$exact_runner_text" "$runner" >/dev/null
 done
+
+# The runner treats the workflow-supplied process and KVM facts as affine
+# expectations. It checks the complete Linux credential/capability view at
+# startup and again inside start_vm, before either supervised QEMU process.
+kvm_contract_function=$temporary_directory/verify-kvm-contract.sh
+sed -n '/^verify_kvm_contract() {$/,/^}$/p' "$runner" \
+    >"$kvm_contract_function"
+test "$(grep -c '^verify_kvm_contract() {$' "$kvm_contract_function")" -eq 1
+sh -n "$kvm_contract_function"
+for exact_kvm_contract_text in \
+    '$expected_host_uid' \
+    '$expected_kvm_gid' \
+    '$expected_kvm_identity' \
+    'expected_uid_quad="$expected_host_uid:$expected_host_uid:$expected_host_uid:$expected_host_uid"' \
+    'expected_gid_quad="$expected_kvm_gid:$expected_kvm_gid:$expected_kvm_gid:$expected_kvm_gid"' \
+    '/proc/self/status' \
+    'Uid:' \
+    'Gid:' \
+    'Groups:' \
+    'CapInh:' \
+    'CapPrm:' \
+    'CapEff:' \
+    'CapBnd:' \
+    'CapAmb:' \
+    'NoNewPrivs:' \
+    '/dev/kvm'
+do
+    grep -F -- "$exact_kvm_contract_text" "$kvm_contract_function" >/dev/null
+done
+if ! grep -Eq '\*\[!0\]\*|\^0\+\$|0000000000000000' \
+    "$kvm_contract_function"; then
+    printf '%s\n' 'the KVM process contract does not require zero capabilities' >&2
+    exit 1
+fi
+grep -F -- '-c /dev/kvm' "$kvm_contract_function" >/dev/null
+grep -F -- '-r /dev/kvm' "$kvm_contract_function" >/dev/null
+grep -F -- '-w /dev/kvm' "$kvm_contract_function" >/dev/null
+grep -F -- "stat -Lc '%d:%i:%t:%T:%F' /dev/kvm" \
+    "$kvm_contract_function" >/dev/null
+grep -F -- "stat -Lc '%u:%g' /dev/kvm" "$kvm_contract_function" >/dev/null
+test "$(grep -Ec '^[[:space:]]*verify_kvm_contract[[:space:]]*\\?$' "$runner")" -ge 2
+initial_kvm_contract_line=$(grep -n -m 1 -E \
+    '^verify_kvm_contract[[:space:]]*\\?$' "$runner" | cut -d: -f1)
+qemu_selection_line=$(grep -n -m 1 -F 'qemu_system=qemu-system-x86_64' \
+    "$runner" | cut -d: -f1)
+if [ -z "$initial_kvm_contract_line" ] || [ -z "$qemu_selection_line" ] \
+    || [ "$initial_kvm_contract_line" -ge "$qemu_selection_line" ]; then
+    printf '%s\n' 'the initial full KVM process contract is not checked before QEMU setup' >&2
+    exit 1
+fi
+
+start_vm_function=$temporary_directory/start-vm.sh
+sed -n '/^start_vm() {$/,/^}$/p' "$runner" >"$start_vm_function"
+test "$(grep -c '^start_vm() {$' "$start_vm_function")" -eq 1
+sh -n "$start_vm_function"
+test "$(grep -c -F 'verify_kvm_contract' "$start_vm_function")" -eq 1
+start_vm_kvm_line=$(grep -n -m 1 -F 'verify_kvm_contract' \
+    "$start_vm_function" | cut -d: -f1)
+start_vm_qemu_line=$(grep -n -m 1 -F 'python3 "$qemu_supervisor"' \
+    "$start_vm_function" | cut -d: -f1)
+if [ -z "$start_vm_kvm_line" ] || [ -z "$start_vm_qemu_line" ] \
+    || [ "$start_vm_kvm_line" -ge "$start_vm_qemu_line" ]; then
+    printf '%s\n' 'the full KVM process contract is not checked before QEMU' >&2
+    exit 1
+fi
+test "$(grep -c '^start_vm [a-z]' "$runner")" -eq 2
 
 if grep -F 'ssh_genkeytypes:' "$runner" >/dev/null; then
     printf '%s\n' 'pre-supplied host keys must not emit a redundant generation list' >&2
@@ -576,33 +726,131 @@ for exact_workflow_text in \
     'test "$(git symbolic-ref --quiet --short HEAD)" = main' \
     'retention-days: 90' \
     'prlimit --fsize=8388608:8388608' \
-    'sudo getfacl --absolute-names --numeric /dev/kvm' \
-    'sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm' \
-    'sudo setfacl --restore="$acl_snapshot"' \
-    'cmp -s "$acl_snapshot" "$restored_acl"' \
+    'getfacl --absolute-names --numeric /dev/kvm' \
+    'stat -Lc '\''%d:%i:%t:%T:%F'\'' /dev/kvm >"$acl_identity"' \
+    'runner_uid=$(id -u)' \
+    'kvm_gid=$(stat -Lc '\''%g'\'' /dev/kvm)' \
+    'while test "$kvm_attempt" -le 2' \
+    'udevadm settle --timeout=10' \
+    'test ! -L /usr/bin/setpriv' \
+    'test "$(stat -Lc '\''%F:%u:%g:%a'\'' /usr/bin/setpriv)"' \
+    '= '\''regular file:0:0:755'\''' \
+    'cmp -s "$acl_snapshot" "$final_acl"' \
     '--connect-timeout 30' \
     '--max-time 1200' \
     '--max-filesize 2147483648' \
     '--max-redirs 3' \
-    'tests/helper/run-helper-boundary-evidence-vm.sh' \
+    'runner_path="$(pwd -P)/tests/helper/run-helper-boundary-evidence-vm.sh"' \
+    'test "$(readlink -f -- "$runner_path")" = "$runner_path"' \
+    '"$runner_path"' \
+    '--expected-host-uid "$runner_uid"' \
+    '--expected-kvm-gid "$kvm_gid"' \
+    '--expected-kvm-identity "$(cat "$acl_identity")"' \
     'tests/helper/validate-helper-boundary-evidence-v1.sh' \
     'tests/helper/validate-helper-boundary-vm-environment-v1.sh' \
     "grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'" \
-    'RESTORE_KVM_ACL_OUTCOME: ${{ steps.restore_kvm_acl.outcome }}'
+    'VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}'
 do
     grep -F -- "$exact_workflow_text" "$workflow" >/dev/null
 done
 
+# Join only explicit shell continuations so exact process-scoped launches can
+# be counted without requiring one particular YAML line wrapping style.
+logical_shell_lines() {
+    awk '
+        {
+            current = $0
+            if (continued) {
+                sub(/^[[:space:]]*/, "", current)
+                logical = logical " " current
+            } else {
+                logical = current
+            }
+            if (logical ~ /\\[[:space:]]*$/) {
+                sub(/[[:space:]]*\\[[:space:]]*$/, "", logical)
+                continued = 1
+                next
+            }
+            print logical
+            logical = ""
+            continued = 0
+        }
+        END {
+            if (continued) exit 1
+        }
+    ' "$1"
+}
+workflow_logical=$temporary_directory/helper-boundary-workflow.logical
+logical_shell_lines "$workflow" >"$workflow_logical"
+
+setpriv_launch='sudo -n -- /usr/bin/setpriv --reuid "$runner_uid" --regid "$kvm_gid" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs --reset-env --'
+if [ "$(grep -c -F -- "$setpriv_launch" "$workflow_logical")" -ne 2 ]; then
+    printf '%s\n' 'the workflow must contain exactly two complete setpriv KVM launches' >&2
+    exit 1
+fi
+if grep -Eq '(^|[;&|[:space:]])([^;&|[:space:]]*/)?setfacl[[:space:]]+--(modify|restore)(=|[[:space:]])' \
+    "$workflow_logical" \
+    || grep -Eq 'sudo[^;&|]*getfacl([[:space:]]|$)' "$workflow_logical" \
+    || grep -Eq '(^|[;&|[:space:]])([^;&|[:space:]]*/)?(usermod|gpasswd|chgrp)([[:space:]]|$)' \
+        "$workflow_logical" \
+    || grep -Eq '(^|[;&|[:space:]])([^;&|[:space:]]*/)?chmod([[:space:]][^;&|]*)?/dev/kvm' \
+        "$workflow_logical"; then
+    printf '%s\n' 'the workflow contains a persistent KVM authority mutation' >&2
+    exit 1
+fi
+if grep -Eq 'sudo[^;&|]*(--user|--group)(=|[[:space:]])' "$workflow_logical"; then
+    printf '%s\n' 'sudo user/group switching cannot replace the exact setpriv boundary' >&2
+    exit 1
+fi
+
 test "$(grep -h -- '-no-user-config' "$runner" "$workflow" | wc -l)" -eq 2
-test "$(grep -c -F 'sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm' "$workflow")" -eq 2
 if grep -Eq '^[[:space:]]+-S([[:space:]]|$)' "$workflow"; then
     printf '%s\n' 'the KVM preflight does not execute a virtual CPU' >&2
     exit 1
 fi
-grep -F "steps.restore_kvm_acl.outcome == 'success'" "$workflow" >/dev/null
+grep -F "steps.verify_kvm_state.outcome == 'success'" "$workflow" >/dev/null
 test "$(grep -c -F 'require_no_private_key_marker "$candidate" "$name"' "$workflow")" -eq 1
 test "$(grep -c -F 'require_no_private_key_marker "$retained_candidate" "$name"' "$workflow")" -eq 1
 grep -F 'if test "$scan_status" -ne 1; then' "$workflow" >/dev/null
+
+preflight_step_line=$(grep -n -m 1 -F 'name: Require usable KVM without emulation fallback' \
+    "$workflow" | cut -d: -f1)
+preflight_next_step_line=$(awk -v minimum="$preflight_step_line" \
+    'NR > minimum && /^      - name:/ { print NR; exit }' "$workflow")
+if [ -z "$preflight_step_line" ] || [ -z "$preflight_next_step_line" ]; then
+    printf '%s\n' 'the KVM preflight step cannot be isolated' >&2
+    exit 1
+fi
+preflight_step_fixture=$temporary_directory/kvm-preflight-step.yml
+sed -n "${preflight_step_line},$((preflight_next_step_line - 1))p" "$workflow" \
+    >"$preflight_step_fixture"
+preflight_step_logical=$temporary_directory/kvm-preflight-step.logical
+logical_shell_lines "$preflight_step_fixture" >"$preflight_step_logical"
+test "$(grep -c -F -- "$setpriv_launch" "$preflight_step_logical")" -eq 1
+preflight_acl_line=$(grep -n -m 1 -F \
+    'getfacl --absolute-names --numeric /dev/kvm >"$acl_snapshot"' \
+    "$preflight_step_logical" | cut -d: -f1)
+preflight_identity_line=$(grep -n -m 1 -F \
+    "stat -Lc '%d:%i:%t:%T:%F' /dev/kvm >\"\$acl_identity\"" \
+    "$preflight_step_logical" | cut -d: -f1)
+preflight_setpriv_line=$(grep -n -m 1 -F -- "$setpriv_launch" \
+    "$preflight_step_logical" | cut -d: -f1)
+preflight_qemu_line=$(grep -n -F 'qemu-system-x86_64' \
+    "$preflight_step_logical" | tail -n 1 | cut -d: -f1)
+preflight_acl_compare_line=$(grep -n -m 1 -F \
+    'cmp -s "$acl_snapshot" "$post_preflight_acl"' \
+    "$preflight_step_logical" | cut -d: -f1)
+if [ -z "$preflight_acl_line" ] || [ -z "$preflight_identity_line" ] \
+    || [ -z "$preflight_setpriv_line" ] || [ -z "$preflight_qemu_line" ] \
+    || [ -z "$preflight_acl_compare_line" ] \
+    || [ "$preflight_acl_line" -ge "$preflight_setpriv_line" ] \
+    || [ "$preflight_identity_line" -ge "$preflight_setpriv_line" ] \
+    || [ "$preflight_setpriv_line" -ge "$preflight_qemu_line" ] \
+    || [ "$preflight_qemu_line" -ge "$preflight_acl_compare_line" ]; then
+    printf '%s\n' 'the original KVM state is not fenced before grouped KVM preflight' >&2
+    exit 1
+fi
+
 vm_step_line=$(grep -n -m 1 -F 'name: Run the disposable Debian 13 proof VM' "$workflow" | cut -d: -f1)
 vm_next_step_line=$(awk -v minimum="$vm_step_line" \
     'NR > minimum && /^      - name:/ { print NR; exit }' "$workflow")
@@ -612,28 +860,34 @@ if [ -z "$vm_step_line" ] || [ -z "$vm_next_step_line" ]; then
 fi
 vm_step_fixture=$temporary_directory/vm-proof-step.yml
 sed -n "${vm_step_line},$((vm_next_step_line - 1))p" "$workflow" >"$vm_step_fixture"
-vm_identity_line=$(grep -n -m 1 -F 'test "$(stat -Lc' "$vm_step_fixture" | cut -d: -f1)
-vm_acl_line=$(grep -n -m 1 -F 'sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm' \
-    "$vm_step_fixture" | cut -d: -f1)
-vm_read_line=$(grep -n -m 1 -F 'test -r /dev/kvm' "$vm_step_fixture" | cut -d: -f1)
-vm_write_line=$(grep -n -m 1 -F 'test -w /dev/kvm' "$vm_step_fixture" | cut -d: -f1)
-vm_runner_line=$(grep -n -m 1 -F 'tests/helper/run-helper-boundary-evidence-vm.sh' \
-    "$vm_step_fixture" | cut -d: -f1)
+vm_step_logical=$temporary_directory/vm-proof-step.logical
+logical_shell_lines "$vm_step_fixture" >"$vm_step_logical"
+test "$(grep -c -F -- "$setpriv_launch" "$vm_step_logical")" -eq 1
+vm_identity_line=$(grep -n -m 1 -F \
+    'test "$(stat -Lc '\''%d:%i:%t:%T:%F'\'' /dev/kvm)" = "$(cat "$acl_identity")"' \
+    "$vm_step_logical" | cut -d: -f1)
+vm_acl_line=$(grep -n -m 1 -F 'cmp -s "$acl_snapshot" "$pre_run_acl"' \
+    "$vm_step_logical" | cut -d: -f1)
+vm_setpriv_line=$(grep -n -m 1 -F -- "$setpriv_launch" \
+    "$vm_step_logical" | cut -d: -f1)
+vm_runner_line=$(grep -n -m 1 -F -- \
+    '-- "$runner_path" --execute' \
+    "$vm_step_logical" | cut -d: -f1)
 if [ -z "$vm_identity_line" ] || [ -z "$vm_acl_line" ] \
-    || [ -z "$vm_read_line" ] || [ -z "$vm_write_line" ] \
-    || [ -z "$vm_runner_line" ] \
+    || [ -z "$vm_setpriv_line" ] || [ -z "$vm_runner_line" ] \
     || [ "$vm_identity_line" -ge "$vm_acl_line" ] \
-    || [ "$vm_acl_line" -ge "$vm_read_line" ] \
-    || [ "$vm_read_line" -ge "$vm_write_line" ] \
-    || [ "$vm_write_line" -ge "$vm_runner_line" ]; then
-    printf '%s\n' 'the KVM ACL is not reinforced inside the VM run step' >&2
+    || [ "$vm_acl_line" -ge "$vm_setpriv_line" ] \
+    || [ "$vm_setpriv_line" -gt "$vm_runner_line" ]; then
+    printf '%s\n' 'the unchanged KVM state is not fenced before the scoped VM runner' >&2
     exit 1
 fi
-restore_acl_line=$(grep -n -m 1 -F 'name: Restore the exact KVM device ACL' "$workflow" | cut -d: -f1)
+
+verify_kvm_state_line=$(grep -n -m 1 -F \
+    'name: Verify the KVM device and ACL remained unchanged' "$workflow" | cut -d: -f1)
 pass_upload_line=$(grep -n -m 1 -F 'name: Upload bounded helper-boundary evidence' "$workflow" | cut -d: -f1)
-if [ -z "$restore_acl_line" ] || [ -z "$pass_upload_line" ] \
-    || [ "$restore_acl_line" -ge "$pass_upload_line" ]; then
-    printf '%s\n' 'the PASS artifact can be uploaded before exact KVM ACL restoration' >&2
+if [ -z "$verify_kvm_state_line" ] || [ -z "$pass_upload_line" ] \
+    || [ "$verify_kvm_state_line" -ge "$pass_upload_line" ]; then
+    printf '%s\n' 'the PASS artifact can be uploaded before exact KVM state comparison' >&2
     exit 1
 fi
 

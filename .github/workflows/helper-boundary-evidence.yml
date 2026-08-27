@@ -93,6 +93,7 @@ jobs:
           curl --version
           jq --version
           setfacl --version
+          udevadm --version
 
       - name: Create the bounded evidence directory
         run: |
@@ -120,40 +121,109 @@ jobs:
           test ! -L "$acl_snapshot"
           test ! -e "$acl_identity"
           test ! -L "$acl_identity"
-          sudo getfacl --absolute-names --numeric /dev/kvm >"$acl_snapshot"
+          getfacl --absolute-names --numeric /dev/kvm >"$acl_snapshot"
           stat -Lc '%d:%i:%t:%T:%F' /dev/kvm >"$acl_identity"
           chmod 0600 "$acl_snapshot" "$acl_identity"
 
-          runner_user=$(id -un)
-          sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm
-          runner_acl=$(
-            getfacl --absolute-names --omit-header /dev/kvm \
-              | awk -F: -v user="$runner_user" \
-                  '$1 == "user" && $2 == user { print $3 }'
+          runner_uid=$(id -u)
+          kvm_gid=$(stat -Lc '%g' /dev/kvm)
+          case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          case "$kvm_gid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          test "$(stat -Lc '%u' /dev/kvm)" = 0
+          test "$(getent group "$kvm_gid" | awk -F: -v gid="$kvm_gid" \
+            '$1 == "kvm" && $3 == gid { print $1 ":" $3 }')" = "kvm:$kvm_gid"
+          test "$(awk -F: '$1 == "group" && $2 == "" { print $3 }' \
+            "$acl_snapshot")" = rw-
+          kvm_acl_mask=$(
+            awk -F: '$1 == "mask" && $2 == "" { print $3 }' "$acl_snapshot"
           )
-          test "$runner_acl" = rw-
-          test -r /dev/kvm
-          test -w /dev/kvm
+          case "$kvm_acl_mask" in ''|rw-) ;; *) exit 1 ;; esac
+          test ! -L /usr/bin/setpriv
+          test "$(stat -Lc '%F:%u:%g:%a' /usr/bin/setpriv)" \
+            = 'regular file:0:0:755'
           qemu-system-x86_64 -accel help | grep -Fx kvm
 
           kvm_log="$RUNNER_TEMP/kvm-preflight.log"
+          # KVM change events retrigger uaccess on this headless host and flush
+          # named-user ACLs. Keep access process-scoped through the device GID.
           set +e
-          timeout --signal=TERM --kill-after=2s 3s \
-            prlimit --fsize=1048576:1048576 -- \
-              qemu-system-x86_64 \
-              -machine q35,accel=kvm \
-              -cpu host \
-              -m 64M \
-              -no-user-config \
-              -nodefaults \
-              -display none \
-              -monitor none \
-              -serial none \
-              >"$kvm_log" 2>&1
+          sudo -n -- \
+            /usr/bin/setpriv \
+            --reuid "$runner_uid" \
+            --regid "$kvm_gid" \
+            --clear-groups \
+            --inh-caps=-all \
+            --ambient-caps=-all \
+            --bounding-set=-all \
+            --no-new-privs \
+            --reset-env \
+            -- \
+            /bin/sh -c '
+              set -eu
+              expected_uid=$1
+              expected_gid=$2
+              expected_identity=$3
+              kvm_log=$4
+              PATH=/usr/sbin:/usr/bin:/sbin:/bin
+              export PATH
+              expected_uid_quad="$expected_uid:$expected_uid:$expected_uid:$expected_uid"
+              expected_gid_quad="$expected_gid:$expected_gid:$expected_gid:$expected_gid"
+              test "$(awk "\$1 == \"Uid:\" { print \$2 \":\" \$3 \":\" \$4 \":\" \$5 }" \
+                /proc/self/status)" = "$expected_uid_quad"
+              test "$(awk "\$1 == \"Gid:\" { print \$2 \":\" \$3 \":\" \$4 \":\" \$5 }" \
+                /proc/self/status)" = "$expected_gid_quad"
+              test "$(awk "\$1 == \"Groups:\" { print NF }" /proc/self/status)" = 1
+              for capability_name in CapInh: CapPrm: CapEff: CapBnd: CapAmb:
+              do
+                capability_value=$(awk -v name="$capability_name" \
+                  "\$1 == name { print \$2 }" /proc/self/status)
+                case "$capability_value" in ""|*[!0]*) exit 1 ;; esac
+              done
+              test "$(awk "\$1 == \"NoNewPrivs:\" { print \$2 }" \
+                /proc/self/status)" = 1
+              test "$(stat -Lc "%d:%i:%t:%T:%F" /dev/kvm)" = "$expected_identity"
+              test "$(stat -Lc "%u:%g" /dev/kvm)" = "0:$expected_gid"
+              test -r /dev/kvm
+              test -w /dev/kvm
+              : >"$kvm_log"
+              kvm_attempt=1
+              while test "$kvm_attempt" -le 2
+              do
+                set +e
+                timeout --signal=TERM --kill-after=2s 3s \
+                  prlimit --fsize=1048576:1048576 -- \
+                    qemu-system-x86_64 \
+                    -machine q35,accel=kvm \
+                    -cpu host \
+                    -m 64M \
+                    -no-user-config \
+                    -nodefaults \
+                    -display none \
+                    -monitor none \
+                    -serial none \
+                    >>"$kvm_log" 2>&1
+                kvm_status=$?
+                set -e
+                test "$kvm_status" -eq 124
+                udevadm settle --timeout=10
+                test "$(stat -Lc "%d:%i:%t:%T:%F" /dev/kvm)" \
+                  = "$expected_identity"
+                test "$(stat -Lc "%u:%g" /dev/kvm)" = "0:$expected_gid"
+                test -r /dev/kvm
+                test -w /dev/kvm
+                kvm_attempt=$((kvm_attempt + 1))
+              done
+            ' sh "$runner_uid" "$kvm_gid" "$(cat "$acl_identity")" "$kvm_log"
           kvm_status=$?
           set -e
           cat "$kvm_log"
-          test "$kvm_status" -eq 124
+          test "$kvm_status" -eq 0
+          test "$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm)" = "$(cat "$acl_identity")"
+          post_preflight_acl="$RUNNER_TEMP/kvm-acl.post-preflight"
+          test ! -e "$post_preflight_acl"
+          test ! -L "$post_preflight_acl"
+          getfacl --absolute-names --numeric /dev/kvm >"$post_preflight_acl"
+          cmp -s "$acl_snapshot" "$post_preflight_acl"
 
       - name: Download and verify the pinned Debian 13 image
         run: |
@@ -229,26 +299,43 @@ jobs:
           test ! -L "$acl_identity"
           test "$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm)" = "$(cat "$acl_identity")"
 
-          # GitHub-hosted runner steps may not preserve an earlier device ACL.
-          # Reapply the same bounded grant immediately before the unprivileged runner.
-          runner_user=$(id -un)
-          sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm
-          runner_acl=$(
-            getfacl --absolute-names --omit-header /dev/kvm \
-              | awk -F: -v user="$runner_user" \
-                  '$1 == "user" && $2 == user { print $3 }'
-          )
-          test "$runner_acl" = rw-
-          test -r /dev/kvm
-          test -w /dev/kvm
+          pre_run_acl="$RUNNER_TEMP/kvm-acl.pre-run"
+          test ! -e "$pre_run_acl"
+          test ! -L "$pre_run_acl"
+          getfacl --absolute-names --numeric /dev/kvm >"$pre_run_acl"
+          cmp -s "$acl_snapshot" "$pre_run_acl"
+          runner_uid=$(id -u)
+          kvm_gid=$(stat -Lc '%g' /dev/kvm)
+          case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          case "$kvm_gid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          test "$(stat -Lc '%u' /dev/kvm)" = 0
+          test "$(getent group "$kvm_gid" | awk -F: -v gid="$kvm_gid" \
+            '$1 == "kvm" && $3 == gid { print $1 ":" $3 }')" = "kvm:$kvm_gid"
+          runner_path="$(pwd -P)/tests/helper/run-helper-boundary-evidence-vm.sh"
+          test "$(readlink -f -- "$runner_path")" = "$runner_path"
+          test -x "$runner_path"
 
           set +e
-          tests/helper/run-helper-boundary-evidence-vm.sh \
+          sudo -n -- \
+            /usr/bin/setpriv \
+            --reuid "$runner_uid" \
+            --regid "$kvm_gid" \
+            --clear-groups \
+            --inh-caps=-all \
+            --ambient-caps=-all \
+            --bounding-set=-all \
+            --no-new-privs \
+            --reset-env \
+            -- \
+            "$runner_path" \
             --execute \
             --yes \
             --image "$VOLPAROSSA_VM_IMAGE" \
             --output "$VOLPAROSSA_EVIDENCE_OUTPUT" \
-            --expected-commit "$GITHUB_SHA"
+            --expected-commit "$GITHUB_SHA" \
+            --expected-host-uid "$runner_uid" \
+            --expected-kvm-gid "$kvm_gid" \
+            --expected-kvm-identity "$(cat "$acl_identity")"
           proof_status=$?
           printf '%s  %s\n' "$image_sha512" "$VOLPAROSSA_VM_IMAGE" \
             | sha512sum --check --strict -
@@ -449,8 +536,8 @@ jobs:
             "$proof_stderr"
           chmod 0500 -- "$retained_dir"
 
-      - name: Restore the exact KVM device ACL
-        id: restore_kvm_acl
+      - name: Verify the KVM device and ACL remained unchanged
+        id: verify_kvm_state
         if: always()
         run: |
           set -euo pipefail
@@ -464,11 +551,11 @@ jobs:
             test -f "$acl_identity"
             test ! -L "$acl_identity"
             test "$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm)" = "$(cat "$acl_identity")"
-            sudo setfacl --restore="$acl_snapshot"
-            restored_acl="$RUNNER_TEMP/kvm-acl.restored"
-            test ! -e "$restored_acl"
-            sudo getfacl --absolute-names --numeric /dev/kvm >"$restored_acl"
-            cmp -s "$acl_snapshot" "$restored_acl"
+            final_acl="$RUNNER_TEMP/kvm-acl.after"
+            test ! -e "$final_acl"
+            test ! -L "$final_acl"
+            getfacl --absolute-names --numeric /dev/kvm >"$final_acl"
+            cmp -s "$acl_snapshot" "$final_acl"
           fi
 
       - name: Upload bounded helper-boundary evidence
@@ -477,7 +564,7 @@ jobs:
           always() &&
           steps.vm_proof.outputs.exit_code == '0' &&
           steps.host_validation.outcome == 'success' &&
-          steps.restore_kvm_acl.outcome == 'success'
+          steps.verify_kvm_state.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helper-boundary-evidence-${{ github.sha }}
@@ -496,7 +583,7 @@ jobs:
           always() &&
           (steps.vm_proof.outputs.exit_code != '0' ||
           steps.host_validation.outcome != 'success' ||
-          steps.restore_kvm_acl.outcome != 'success') &&
+          steps.verify_kvm_state.outcome != 'success') &&
           steps.retained_artifacts.outputs.diagnostics_any == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -515,11 +602,11 @@ jobs:
           HOST_VALIDATION_OUTCOME: ${{ steps.host_validation.outcome }}
           RETAINED_ARTIFACTS_OUTCOME: ${{ steps.retained_artifacts.outcome }}
           PASS_ARTIFACT_UPLOAD_OUTCOME: ${{ steps.pass_artifact_upload.outcome }}
-          RESTORE_KVM_ACL_OUTCOME: ${{ steps.restore_kvm_acl.outcome }}
+          VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}
         run: |
           set -euo pipefail
           test "$PROOF_EXIT_CODE" = 0
           test "$HOST_VALIDATION_OUTCOME" = success
           test "$RETAINED_ARTIFACTS_OUTCOME" = success
           test "$PASS_ARTIFACT_UPLOAD_OUTCOME" = success
-          test "$RESTORE_KVM_ACL_OUTCOME" = success
+          test "$VERIFY_KVM_STATE_OUTCOME" = success

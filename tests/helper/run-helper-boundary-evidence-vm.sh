@@ -13,17 +13,25 @@ approval=no
 image_path=
 output_directory=
 expected_commit=
+expected_host_uid=
+expected_kvm_gid=
+expected_kvm_identity=
 seen_mode=no
 seen_approval=no
 seen_image=no
 seen_output=no
 seen_commit=no
+seen_host_uid=no
+seen_kvm_gid=no
+seen_kvm_identity=no
 
 usage() {
     printf '%s\n' \
         'usage: tests/helper/run-helper-boundary-evidence-vm.sh [--preview]' \
         '       tests/helper/run-helper-boundary-evidence-vm.sh --execute --yes' \
-        '         --image PATH --output DIRECTORY --expected-commit SHA'
+        '         --image PATH --output DIRECTORY --expected-commit SHA' \
+        '         --expected-host-uid UID --expected-kvm-gid GID' \
+        '         --expected-kvm-identity IDENTITY'
 }
 
 print_plan() {
@@ -87,6 +95,33 @@ while [ "$#" -gt 0 ]; do
             seen_commit=yes
             shift
             ;;
+        --expected-host-uid)
+            if [ "$seen_host_uid" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            expected_host_uid=$2
+            seen_host_uid=yes
+            shift
+            ;;
+        --expected-kvm-gid)
+            if [ "$seen_kvm_gid" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            expected_kvm_gid=$2
+            seen_kvm_gid=yes
+            shift
+            ;;
+        --expected-kvm-identity)
+            if [ "$seen_kvm_identity" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            expected_kvm_identity=$2
+            seen_kvm_identity=yes
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -101,7 +136,9 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" = yes ] || [ "$seen_image" = yes ] \
-        || [ "$seen_output" = yes ] || [ "$seen_commit" = yes ]; then
+        || [ "$seen_output" = yes ] || [ "$seen_commit" = yes ] \
+        || [ "$seen_host_uid" = yes ] || [ "$seen_kvm_gid" = yes ] \
+        || [ "$seen_kvm_identity" = yes ]; then
         usage >&2
         exit 64
     fi
@@ -111,7 +148,9 @@ if [ "$mode" = preview ]; then
 fi
 
 if [ "$approval" != yes ] || [ "$seen_image" != yes ] \
-    || [ "$seen_output" != yes ] || [ "$seen_commit" != yes ]; then
+    || [ "$seen_output" != yes ] || [ "$seen_commit" != yes ] \
+    || [ "$seen_host_uid" != yes ] || [ "$seen_kvm_gid" != yes ] \
+    || [ "$seen_kvm_identity" != yes ]; then
     print_plan >&2
     usage >&2
     exit 64
@@ -137,6 +176,26 @@ case $expected_commit in
         blocked 'the expected commit is not lowercase nonzero hexadecimal'
         ;;
 esac
+case $expected_host_uid in
+    ''|0|0*|*[!0-9]*) blocked 'the expected host UID is not canonical nonzero decimal' ;;
+esac
+case $expected_kvm_gid in
+    ''|0|0*|*[!0-9]*) blocked 'the expected KVM GID is not canonical nonzero decimal' ;;
+esac
+if [ "${#expected_host_uid}" -gt 10 ] || [ "${#expected_kvm_gid}" -gt 10 ]; then
+    blocked 'the expected host UID or KVM GID is outside the bounded form'
+fi
+case $expected_kvm_identity in
+    *:*:*:*:'character special file') ;;
+    *) blocked 'the expected KVM identity has the wrong shape' ;;
+esac
+kvm_identity_numbers="${expected_kvm_identity%:character special file}"
+case $kvm_identity_numbers in
+    ''|*[!0-9a-f:]*) blocked 'the expected KVM identity is not canonical' ;;
+esac
+if [ "${#expected_kvm_identity}" -gt 128 ]; then
+    blocked 'the expected KVM identity is outside the bounded form'
+fi
 
 if [ "$(id -u)" -eq 0 ]; then
     blocked 'the VM runner itself must remain unprivileged'
@@ -144,7 +203,7 @@ fi
 for command_name in \
     awk cat chmod cmp cp cloud-localds cut dd dirname find git grep id install jq mkfifo \
     mktemp mv python3 qemu-img qemu-system-x86_64 readlink rm scp sed sha256sum \
-    sha512sum sleep ssh ssh-keygen ss stat tail tar timeout uname
+    sha512sum sleep ssh ssh-keygen ss stat tail tar timeout udevadm uname
 do
     command -v "$command_name" >/dev/null 2>&1 \
         || blocked "required host tool is unavailable: $command_name"
@@ -281,9 +340,43 @@ if find "$output_directory" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; th
     blocked 'the output directory must start empty'
 fi
 
-if [ ! -c /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-    blocked 'readable and writable /dev/kvm is required'
-fi
+verify_kvm_contract() {
+    expected_uid_quad="$expected_host_uid:$expected_host_uid:$expected_host_uid:$expected_host_uid"
+    expected_gid_quad="$expected_kvm_gid:$expected_kvm_gid:$expected_kvm_gid:$expected_kvm_gid"
+    actual_uid_quad=$(
+        awk '$1 == "Uid:" { print $2 ":" $3 ":" $4 ":" $5 }' \
+            /proc/self/status 2>/dev/null
+    ) || return 1
+    actual_gid_quad=$(
+        awk '$1 == "Gid:" { print $2 ":" $3 ":" $4 ":" $5 }' \
+            /proc/self/status 2>/dev/null
+    ) || return 1
+    [ "$actual_uid_quad" = "$expected_uid_quad" ] || return 1
+    [ "$actual_gid_quad" = "$expected_gid_quad" ] || return 1
+    [ "$(awk '$1 == "Groups:" { print NF }' /proc/self/status 2>/dev/null)" \
+        = 1 ] || return 1
+    for capability_name in CapInh: CapPrm: CapEff: CapBnd: CapAmb:
+    do
+        capability_value=$(
+            awk -v name="$capability_name" '$1 == name { print $2 }' \
+                /proc/self/status 2>/dev/null
+        ) || return 1
+        case $capability_value in
+            ''|*[!0]*) return 1 ;;
+        esac
+    done
+    [ "$(awk '$1 == "NoNewPrivs:" { print $2 }' \
+        /proc/self/status 2>/dev/null)" = 1 ] || return 1
+    [ -c /dev/kvm ] || return 1
+    [ "$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm 2>/dev/null || true)" \
+        = "$expected_kvm_identity" ] || return 1
+    [ "$(stat -Lc '%u:%g' /dev/kvm 2>/dev/null || true)" \
+        = "0:$expected_kvm_gid" ] || return 1
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] || return 1
+}
+
+verify_kvm_contract \
+    || blocked 'the process-scoped unprivileged KVM authority is invalid'
 qemu_system=qemu-system-x86_64
 if ! "$qemu_system" -accel help 2>/dev/null | grep -Fx kvm >/dev/null; then
     blocked 'this QEMU binary does not expose KVM acceleration'
@@ -1156,6 +1249,8 @@ wait_for_ssh() {
 start_vm() {
     vm_phase=$1
     vm_network=$2
+    verify_kvm_contract \
+        || failed "the KVM authority changed before $vm_phase"
     if ss -H -ltn 2>/dev/null | awk '$4 ~ /:22222$/ { found=1 } END { exit !found }'; then
         failed "the loopback SSH port is occupied before $vm_phase"
     fi
@@ -1273,6 +1368,8 @@ bounded_run guest-provisioning 512 guest_ssh_raw \
     || failed 'the bounded guest provisioning or locked dependency fetch failed'
 guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
 reap_qemu yes || failed 'the provisioning VM did not power off cleanly'
+bounded_run kvm-uevent-settle 1 udevadm settle --timeout=10 \
+    || failed 'the host KVM change event did not settle after provisioning'
 
 start_vm proof restricted
 bounded_run proof-cloud-init 32 guest_ssh_raw sudo -n cloud-init status --wait \
@@ -1317,6 +1414,10 @@ bounded_run retrieve-report 2 guest_scp_from_raw \
 
 guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
 reap_qemu yes || failed 'the restricted proof VM did not power off cleanly'
+bounded_run proof-kvm-uevent-settle 1 udevadm settle --timeout=10 \
+    || failed 'the host KVM change event did not settle after the proof'
+verify_kvm_contract \
+    || failed 'the KVM authority changed after the restricted proof'
 settle_console || failed 'the bounded console log did not settle'
 publish_console || failed 'the bounded console log could not be published atomically'
 

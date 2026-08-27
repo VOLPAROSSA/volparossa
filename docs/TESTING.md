@@ -104,16 +104,34 @@ SHA-512. The recorded SHA-512 was manually reviewed against the upstream Debian 
 `SHA512SUMS` file. That per-build checksum file has no detached Debian signature, so the manifest
 deliberately calls this a reviewed Debian genericcloud image rather than cryptographically
 attested upstream provenance. The download is size-, redirect-, connection-, and wall-time-bounded,
-is verified before use, and is rehashed after VM use. The job invokes the fixed VM driver as
-follows:
+is verified before use, and is rehashed after VM use. The job invokes the fixed VM driver through
+an exact process-scoped KVM authority boundary. In outline, with each value first validated and the
+runner path made canonical and absolute, that boundary is:
 
 ```sh
-tests/helper/run-helper-boundary-evidence-vm.sh \
+runner_uid=$(id -u)
+kvm_gid=$(stat -Lc '%g' /dev/kvm)
+kvm_identity=$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm)
+runner_path="$(pwd -P)/tests/helper/run-helper-boundary-evidence-vm.sh"
+sudo -n -- /usr/bin/setpriv \
+  --reuid "$runner_uid" \
+  --regid "$kvm_gid" \
+  --clear-groups \
+  --inh-caps=-all \
+  --ambient-caps=-all \
+  --bounding-set=-all \
+  --no-new-privs \
+  --reset-env \
+  -- \
+  "$runner_path" \
   --execute \
   --yes \
   --image "$VOLPAROSSA_VM_IMAGE" \
   --output "$VOLPAROSSA_EVIDENCE_OUTPUT" \
-  --expected-commit "$GITHUB_SHA"
+  --expected-commit "$GITHUB_SHA" \
+  --expected-host-uid "$runner_uid" \
+  --expected-kvm-gid "$kvm_gid" \
+  --expected-kvm-identity "$kvm_identity"
 ```
 
 The driver uses two KVM boots of one disposable overlay. In the first boot, fixed provisioning
@@ -144,17 +162,29 @@ private `.stderr.<pid>.tmp` left by an interrupted atomic publication; malformed
 metadata fail cleanup closed instead of being followed.
 
 The standard GitHub-hosted runner is disposable and is not promised to expose nested KVM. On that
-ephemeral CI host only, the workflow uses `sudo` to install the fixed Ubuntu packages and add an
-exact `rw-` named-user ACL on `/dev/kvm`. It snapshots the device identity and complete ACL first,
-then rechecks that identity and reapplies the same bounded ACL inside the exact VM run step because
-hosted runner step boundaries need not preserve device-ACL visibility. It restores the original ACL
-in an unconditional cleanup step before artifact upload and makes restoration part of the PASS gate.
-The repository runner itself refuses host root and never invokes host `sudo`. The workflow performs
-a KVM-only launch preflight with a running virtual CPU and fails closed when hardware acceleration
-is unavailable; it never falls back to TCG. Such an infrastructure failure is not negative
-helper-boundary evidence. Equally, a completed job does not change the alpha score unless the
-selected post-merge `main` revision produces a host-revalidated `PASS`, the exact artifact is
-retained, and CI host cleanup succeeds.
+ephemeral CI host only, the workflow uses `sudo` to install the fixed Ubuntu packages. It does not
+change `/dev/kvm` ownership, mode, group membership, or ACL. Before any KVM process it records the
+device identity and the complete numeric ACL, requires the root-owned device's original group to
+have effective `rw-` access, and validates the fixed root-owned `/usr/bin/setpriv` executable.
+Exactly two launches receive process-scoped KVM authority: the KVM preflight and the absolute
+repository runner. Both use the device GID as their primary GID while clearing supplementary groups
+and inheritable, ambient, and bounding capabilities, enabling `no_new_privs`, and resetting the
+environment.
+
+The runner refuses host root and never invokes host `sudo`. Its execute mode requires the expected
+host UID, KVM GID, and device identity. At startup and immediately before each of the two QEMU
+boots, it requires all four `/proc/self/status` UID fields to equal the original runner UID, all
+four GID fields to equal the KVM device GID, an empty supplementary-group set, zero `CapInh`,
+`CapPrm`, `CapEff`, `CapBnd`, and `CapAmb`, and `NoNewPrivs: 1`. It also rechecks the exact character
+device identity, root ownership, device GID, and readable/writable access. The preflight exercises
+KVM twice inside one process-scoped authority across `udevadm settle`, with a running virtual CPU
+each time, and then compares the ACL byte-for-byte with the original snapshot. A one-open ACL
+lifetime therefore cannot produce a false pass. The workflow repeats the device-identity and
+numeric-ACL comparison before the PASS artifact can be uploaded. It never falls back to TCG. A
+missing stable group-readable KVM device is an infrastructure failure, not negative helper-boundary
+evidence. Equally, a completed job does not change the alpha score unless the selected post-merge
+`main` revision produces a host-revalidated `PASS`, the exact artifact is retained, and the
+unchanged host KVM-state gate succeeds.
 
 Fuzz targets are required for every externally controlled parser: all eighteen signed v4 control
 payloads, advertisement-v4, exit-forwarding-v4, datapath-relay-v4, policy manifests, local/helper/
