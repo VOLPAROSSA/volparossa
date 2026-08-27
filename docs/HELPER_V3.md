@@ -270,23 +270,24 @@ accepts custody only after uncached D-Bus reads show stable pre/post `NFileDescr
 and `DumpFileDescriptorStore()` supplies the exact complete, bounded descriptor multiset, including
 matching name, mode, device, inode, device-node and open-flag identity. Every failure after the
 publication datagram may have been accepted is classified as manager-may-own and carries one
-opaque monotone in-process attempt identity into the retained supervisor terminal. The publication
-gate binds that attempt before `sendmsg(2)` to the exact typed unit object path, `MainPID`, parsed
-notify endpoint, fixed custody name and role-ordered local descriptor identities. A later caller
-cannot obtain a new attempt identity merely by encountering the existing poison. Callers must
-retain their original affine descriptor owners; there is deliberately no automatic removal on an
-ambiguous path.
+opaque monotone in-process attempt identity into the retained supervisor terminal. The single
+process-global manager-mutation gate binds that attempt before `sendmsg(2)` to the exact typed unit
+object path, `MainPID`, parsed notify endpoint, fixed custody name and role-ordered local descriptor
+identities. Publication and removal have distinct attempt-ID types but draw from one monotone
+counter. A later caller cannot obtain a new attempt identity merely by encountering the existing
+poison. Callers must retain their original affine descriptor owners; there is deliberately no
+automatic removal on an ambiguous path.
 
 A separate dormant, observation-only reconciler can inspect only that exact poisoned in-process
-attempt. While borrowing both affine owners and holding the publication gate, it reopens the stored
-unit object directly, sends one non-mutating `BARRIER=1`, takes two complete bounded uncached D-Bus
-inventory identity projections, requires those projections and service properties to be identical,
-and remeasures the local role binding before accepting a result. It reports `ExactPresent` only for
-exactly two target name entries whose complete stat/status-flag identity multiset matches the
-retained pair; any same-kernel-object alias under another name fails closed even when flags differ.
-It reports
-`ExactAbsent` only when the target name and both kernel objects are absent everywhere. Partial,
-wrong, unstable, expired or otherwise ambiguous observations are `Unresolved`. Present and absent
+attempt. While borrowing both affine owners and holding the shared manager-mutation gate, it
+reopens the stored unit object directly, sends one non-mutating `BARRIER=1`, takes two complete
+bounded uncached D-Bus inventory identity projections, requires those projections and service
+properties to be identical, and remeasures the local role binding before accepting a result. It
+reports `ExactPresent` only for exactly two target name entries whose complete stat/status-flag
+identity multiset matches the retained pair; any same-kernel-object alias under another name fails
+closed even when flags differ. It reports `ExactAbsent` only when the target name and both kernel
+objects are absent everywhere. Partial, wrong, unstable, expired or otherwise ambiguous
+observations are `Unresolved`. Present and absent
 use private evidence types distinct from publication attestation, so they cannot arm a worker,
 adopt or remove custody, advance the journal, open dispatch, clear the permanent poison, or
 authorize publication retry. This is correlated inventory evidence, not proof of shared
@@ -298,8 +299,8 @@ A separate private dormant adapter can send exactly one name-scoped descriptor-s
 accepts an already stable complete startup inventory, the exact custody name and binding, and
 borrows both affine local owners. Before its mutation boundary it validates the complete baseline,
 takes a fresh uncached preflight snapshot which must equal that baseline, remeasures the local
-binding, creates the separate barrier pipe, and rechecks the absolute deadline. It then poisons a
-dedicated removal gate immediately before sending exactly
+binding, creates the separate barrier pipe, and rechecks the absolute deadline. It then poisons the
+same manager-mutation gate immediately before sending exactly
 `FDSTOREREMOVE=1\nFDNAME=<fixed-name>` with zero `SCM_RIGHTS` or other ancillary descriptors. A
 separate `BARRIER=1` notification carries exactly one pipe descriptor. After the barrier, two fresh
 uncached complete inventory snapshots must be equal, the service contract and local binding must
@@ -310,11 +311,15 @@ Every error from immediately before the removal `sendmsg(2)` onward is
 `ManagerMayHaveRemoved`; the retained opaque attempt stays poisoned and the adapter never retries
 blindly. Its observation-only reconciler uses the same exact attempt, a new barrier, two equal
 uncached complete snapshots, and local-binding remeasurement. Exact baseline-minus-pair may settle
-the removal gate, while exact unchanged-baseline evidence still authorizes no retry and leaves the
-gate poisoned; every other outcome remains unresolved. Publication and removal currently use
-separate gates, so production composition must first serialize both full-inventory mutations behind
-one shared gate. The removal adapter and reconciler have no production caller, do not prove worker
-death or kernel cleanup, and cannot by themselves advance the ownership journal.
+the shared gate, while exact unchanged-baseline evidence still authorizes no retry and leaves the
+gate poisoned; every other outcome remains unresolved. Publication, removal and their reconciler
+observations now hold that one gate from the fresh baseline/preflight read through terminal
+attestation. An ambiguous attempt of either kind blocks both mutation kinds, and a reconciler with
+the wrong typed attempt kind or exact target binding fails before barrier or inventory I/O.
+Publication reconciliation never clears poison; only exact-removed evidence for the same removal
+attempt reopens a gate poisoned by that removal. The removal adapter and reconciler have no
+production caller, do not prove worker death or kernel cleanup, and cannot by themselves advance
+the ownership journal.
 
 Only the durably confirmed `MayOwnCustody` token can derive an opaque, domain-separated fixed
 custody name from its exact journal epoch, context, ownership ID and generation without exposing
@@ -912,10 +917,10 @@ state.
 The supervisor and publisher remain private and dormant, with no server, engine or request-path
 caller and no production terminal consumer. Production startup now performs the separate read-only
 complete-set classification described above before retiring any `Intent`, but every non-empty
-classification still blocks. The durable `CleanupConfirmed` phase and dormant exact-name removal
-adapter now exist, but a production restart reaper, old-worker death proof, exact namespace/kernel
-cleanup, shared manager-mutation serialization, and authority-preserving composition of the two
-settlement proofs remain required before those phases can progress.
+classification still blocks. The durable `CleanupConfirmed` phase, dormant exact-name removal
+adapter and shared manager-mutation serialization now exist, but a production restart reaper,
+old-worker death proof, exact namespace/kernel cleanup, and authority-preserving composition of the
+two settlement proofs remain required before those phases can progress.
 
 Production wiring remains a separate audited change with these explicit blockers:
 

@@ -71,11 +71,7 @@ const SYSTEMD_DESTINATION: &str = "org.freedesktop.systemd1";
 const SYSTEMD_MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
-static PRODUCTION_PUBLICATION_GATE: PublicationGate = PublicationGate::new();
-// The removal adapter remains dormant while publication and removal use separate gates. A future
-// production composition must place both mutations behind one shared manager-inventory gate before
-// wiring removal, so neither full-inventory proof can race the other mutation.
-static PRODUCTION_REMOVAL_GATE: RemovalGate = RemovalGate::new();
+static PRODUCTION_MANAGER_MUTATION_GATE: ManagerMutationGate = ManagerMutationGate::new();
 
 /// One opaque, fixed-shape systemd descriptor-store name.
 ///
@@ -118,8 +114,9 @@ impl fmt::Debug for CustodyFdName {
 
 /// Opaque process-local identity of one descriptor-store send boundary.
 ///
-/// The ID is monotonic within one publication gate and exists only to prevent a stale terminal
-/// from reconciling a newer attempt which happens to use the same deterministic custody target.
+/// The ID comes from the one monotonic manager-mutation sequence and exists only to prevent a stale
+/// terminal from reconciling a newer attempt which happens to use the same deterministic custody
+/// target. Its type prevents using a removal attempt as publication authority.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct PublicationAttemptId(NonZeroU64);
 
@@ -136,7 +133,8 @@ impl PublicationAttemptId {
     }
 }
 
-/// Opaque process-local identity of one exact descriptor-store removal attempt.
+/// Opaque process-local identity of one exact descriptor-store removal attempt. It shares the
+/// manager-mutation sequence with publication while remaining a distinct authority type.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct RemovalAttemptId(NonZeroU64);
 
@@ -1068,34 +1066,30 @@ impl fmt::Debug for PoisonedRemoval {
     }
 }
 
-struct PublicationGateState {
+#[derive(Clone, Eq, PartialEq)]
+enum PoisonedManagerMutation {
+    Publication(PoisonedPublication),
+    Removal(PoisonedRemoval),
+}
+
+struct ManagerMutationGateState {
     last_attempt_id: u64,
-    poisoned: Option<PoisonedPublication>,
+    poisoned: Option<PoisonedManagerMutation>,
 }
 
-/// Serializes baseline observation through final attestation. Dropping an attempt after its first
-/// send boundary poisons the gate, including task cancellation and panic unwinding. This dormant
-/// slice intentionally provides no way to clear the poison. Reconciliation is observation-only
-/// and cannot authorize another publication attempt.
-struct PublicationGate {
-    state: tokio::sync::Mutex<PublicationGateState>,
+/// Serializes every descriptor-store mutation from its fresh baseline observation through final
+/// attestation. Publication and removal draw typed IDs from one monotonic sequence and share one
+/// poison state. Dropping either attempt after its first send boundary blocks both mutation kinds.
+/// After an ambiguous attempt, publication reconciliation is observation-only; only exact-removed
+/// reconciliation of that removal may reopen this gate.
+struct ManagerMutationGate {
+    state: tokio::sync::Mutex<ManagerMutationGateState>,
 }
 
-struct RemovalGateState {
-    last_attempt_id: u64,
-    poisoned: Option<PoisonedRemoval>,
-}
-
-/// Serializes exact named removals. A dropped attempt remains poisoned from immediately before its
-/// first removal `sendmsg(2)` until exact-removed reconciliation settles it.
-struct RemovalGate {
-    state: tokio::sync::Mutex<RemovalGateState>,
-}
-
-impl RemovalGate {
+impl ManagerMutationGate {
     const fn new() -> Self {
         Self {
-            state: tokio::sync::Mutex::const_new(RemovalGateState {
+            state: tokio::sync::Mutex::const_new(ManagerMutationGateState {
                 last_attempt_id: 0,
                 poisoned: None,
             }),
@@ -1105,7 +1099,7 @@ impl RemovalGate {
     async fn lock_state(
         &self,
         deadline: HardDeadline,
-    ) -> Result<tokio::sync::MutexGuard<'_, RemovalGateState>, FdStoreError> {
+    ) -> Result<tokio::sync::MutexGuard<'_, ManagerMutationGateState>, FdStoreError> {
         ensure_deadline(deadline)?;
         tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline.expires_at()),
@@ -1115,7 +1109,7 @@ impl RemovalGate {
         .map_err(|_| FdStoreError::Deadline)
     }
 
-    async fn acquire_open(
+    async fn acquire_removal(
         &self,
         deadline: HardDeadline,
     ) -> Result<RemovalAttempt<'_>, FdStoreError> {
@@ -1129,7 +1123,7 @@ impl RemovalGate {
         })
     }
 
-    async fn acquire_poisoned(
+    async fn acquire_poisoned_removal(
         &self,
         attempt_id: RemovalAttemptId,
         custody_name: CustodyFdName,
@@ -1137,10 +1131,13 @@ impl RemovalGate {
         deadline: HardDeadline,
     ) -> Result<PoisonedRemovalObservation<'_>, FdStoreError> {
         let state = self.lock_state(deadline).await?;
-        let poisoned = state
-            .poisoned
-            .clone()
-            .ok_or(FdStoreError::RemovalNotPoisoned)?;
+        let poisoned = match state.poisoned.clone() {
+            Some(PoisonedManagerMutation::Removal(poisoned)) => poisoned,
+            Some(PoisonedManagerMutation::Publication(_)) => {
+                return Err(FdStoreError::RemovalTargetMismatch);
+            }
+            None => return Err(FdStoreError::RemovalNotPoisoned),
+        };
         if poisoned.attempt_id != attempt_id
             || poisoned.target.custody_name != custody_name
             || &poisoned.target.binding != binding
@@ -1149,89 +1146,8 @@ impl RemovalGate {
         }
         Ok(PoisonedRemovalObservation { state, poisoned })
     }
-}
 
-struct RemovalAttempt<'a> {
-    state: tokio::sync::MutexGuard<'a, RemovalGateState>,
-    crossed: Option<PoisonedRemoval>,
-}
-
-impl RemovalAttempt<'_> {
-    /// Conservatively mark immediately before invoking the exact removal send.
-    fn mark_send_attempted(
-        &mut self,
-        target: RemovalTarget,
-    ) -> Result<RemovalAttemptId, FdStoreError> {
-        if self.crossed.is_some() || self.state.poisoned.is_some() {
-            return Err(FdStoreError::RemovalPoisoned);
-        }
-        let next = self
-            .state
-            .last_attempt_id
-            .checked_add(1)
-            .and_then(NonZeroU64::new)
-            .ok_or(FdStoreError::RemovalAttemptExhausted)?;
-        let poisoned = PoisonedRemoval {
-            attempt_id: RemovalAttemptId(next),
-            target,
-        };
-        self.state.last_attempt_id = next.get();
-        self.state.poisoned = Some(poisoned.clone());
-        self.crossed = Some(poisoned);
-        Ok(RemovalAttemptId(next))
-    }
-
-    fn complete_exact_removed(mut self, attempt_id: RemovalAttemptId) {
-        let exact = self.crossed.as_ref().is_some_and(|crossed| {
-            crossed.attempt_id == attempt_id && self.state.poisoned.as_ref() == Some(crossed)
-        });
-        if !exact {
-            std::process::abort();
-        }
-        self.state.poisoned = None;
-        self.crossed = None;
-    }
-}
-
-struct PoisonedRemovalObservation<'a> {
-    state: tokio::sync::MutexGuard<'a, RemovalGateState>,
-    poisoned: PoisonedRemoval,
-}
-
-impl PoisonedRemovalObservation<'_> {
-    fn complete_exact_removed(mut self) {
-        let exact = self.state.poisoned.as_ref() == Some(&self.poisoned);
-        if !exact {
-            std::process::abort();
-        }
-        self.state.poisoned = None;
-    }
-}
-
-impl PublicationGate {
-    const fn new() -> Self {
-        Self {
-            state: tokio::sync::Mutex::const_new(PublicationGateState {
-                last_attempt_id: 0,
-                poisoned: None,
-            }),
-        }
-    }
-
-    async fn lock_state(
-        &self,
-        deadline: HardDeadline,
-    ) -> Result<tokio::sync::MutexGuard<'_, PublicationGateState>, FdStoreError> {
-        ensure_deadline(deadline)?;
-        tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline.expires_at()),
-            self.state.lock(),
-        )
-        .await
-        .map_err(|_| FdStoreError::Deadline)
-    }
-
-    async fn acquire_open(
+    async fn acquire_publication(
         &self,
         deadline: HardDeadline,
     ) -> Result<PublicationAttempt<'_>, FdStoreError> {
@@ -1245,7 +1161,7 @@ impl PublicationGate {
         })
     }
 
-    async fn acquire_poisoned(
+    async fn acquire_poisoned_publication(
         &self,
         attempt_id: PublicationAttemptId,
         custody_name: CustodyFdName,
@@ -1253,10 +1169,13 @@ impl PublicationGate {
         deadline: HardDeadline,
     ) -> Result<PoisonedObservation<'_>, FdStoreError> {
         let state = self.lock_state(deadline).await?;
-        let poisoned = state
-            .poisoned
-            .clone()
-            .ok_or(FdStoreError::PublicationNotPoisoned)?;
+        let poisoned = match state.poisoned.clone() {
+            Some(PoisonedManagerMutation::Publication(poisoned)) => poisoned,
+            Some(PoisonedManagerMutation::Removal(_)) => {
+                return Err(FdStoreError::PublicationTargetMismatch);
+            }
+            None => return Err(FdStoreError::PublicationNotPoisoned),
+        };
         if poisoned.attempt_id != attempt_id
             || poisoned.target.custody_name != custody_name
             || &poisoned.target.identities != identities
@@ -1271,7 +1190,7 @@ impl PublicationGate {
 }
 
 struct PublicationAttempt<'a> {
-    state: tokio::sync::MutexGuard<'a, PublicationGateState>,
+    state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
     crossed: Option<PoisonedPublication>,
 }
 
@@ -1296,14 +1215,18 @@ impl PublicationAttempt<'_> {
             target,
         };
         self.state.last_attempt_id = next.get();
-        self.state.poisoned = Some(poisoned.clone());
+        self.state.poisoned = Some(PoisonedManagerMutation::Publication(poisoned.clone()));
         self.crossed = Some(poisoned);
         Ok(PublicationAttemptId(next))
     }
 
     fn complete_success(mut self, attempt_id: PublicationAttemptId) {
         let exact = self.crossed.as_ref().is_some_and(|crossed| {
-            crossed.attempt_id == attempt_id && self.state.poisoned.as_ref() == Some(crossed)
+            crossed.attempt_id == attempt_id
+                && matches!(
+                    self.state.poisoned.as_ref(),
+                    Some(PoisonedManagerMutation::Publication(poisoned)) if poisoned == crossed
+                )
         });
         if !exact {
             std::process::abort();
@@ -1313,11 +1236,75 @@ impl PublicationAttempt<'_> {
     }
 }
 
-/// Holds the one affine publication gate while a poisoned attempt is observed. Dropping this
+/// Holds the shared manager-mutation gate while a poisoned publication is observed. Dropping this
 /// guard never clears the poison, including cancellation and panic unwinding.
 struct PoisonedObservation<'a> {
-    _state: tokio::sync::MutexGuard<'a, PublicationGateState>,
+    _state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
     poisoned: PoisonedPublication,
+}
+
+struct RemovalAttempt<'a> {
+    state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
+    crossed: Option<PoisonedRemoval>,
+}
+
+impl RemovalAttempt<'_> {
+    /// Conservatively mark immediately before invoking the exact removal send.
+    fn mark_send_attempted(
+        &mut self,
+        target: RemovalTarget,
+    ) -> Result<RemovalAttemptId, FdStoreError> {
+        if self.crossed.is_some() || self.state.poisoned.is_some() {
+            return Err(FdStoreError::RemovalPoisoned);
+        }
+        let next = self
+            .state
+            .last_attempt_id
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(FdStoreError::RemovalAttemptExhausted)?;
+        let poisoned = PoisonedRemoval {
+            attempt_id: RemovalAttemptId(next),
+            target,
+        };
+        self.state.last_attempt_id = next.get();
+        self.state.poisoned = Some(PoisonedManagerMutation::Removal(poisoned.clone()));
+        self.crossed = Some(poisoned);
+        Ok(RemovalAttemptId(next))
+    }
+
+    fn complete_exact_removed(mut self, attempt_id: RemovalAttemptId) {
+        let exact = self.crossed.as_ref().is_some_and(|crossed| {
+            crossed.attempt_id == attempt_id
+                && matches!(
+                    self.state.poisoned.as_ref(),
+                    Some(PoisonedManagerMutation::Removal(poisoned)) if poisoned == crossed
+                )
+        });
+        if !exact {
+            std::process::abort();
+        }
+        self.state.poisoned = None;
+        self.crossed = None;
+    }
+}
+
+struct PoisonedRemovalObservation<'a> {
+    state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
+    poisoned: PoisonedRemoval,
+}
+
+impl PoisonedRemovalObservation<'_> {
+    fn complete_exact_removed(mut self) {
+        let exact = matches!(
+            self.state.poisoned.as_ref(),
+            Some(PoisonedManagerMutation::Removal(poisoned)) if poisoned == &self.poisoned
+        );
+        if !exact {
+            std::process::abort();
+        }
+        self.state.poisoned = None;
+    }
 }
 
 trait DescriptorStoreInventorySource: Sync {
@@ -1635,7 +1622,7 @@ pub(crate) async fn remove_current_process_custody(
     let sender =
         NotifySender::new(&baseline.notify_address).map_err(RemovalFailure::before_send)?;
     remove_and_attest(
-        &PRODUCTION_REMOVAL_GATE,
+        &PRODUCTION_MANAGER_MUTATION_GATE,
         &source,
         &sender,
         baseline,
@@ -1653,7 +1640,7 @@ pub(crate) async fn remove_current_process_custody(
     reason = "the removal transaction keeps every authority and deadline input explicit"
 )]
 async fn remove_and_attest<S>(
-    gate: &RemovalGate,
+    gate: &ManagerMutationGate,
     source: &S,
     sender: &NotifySender,
     baseline: StableStartupInventory,
@@ -1667,7 +1654,7 @@ where
 {
     ensure_deadline(deadline).map_err(RemovalFailure::before_send)?;
     let mut attempt = gate
-        .acquire_open(deadline)
+        .acquire_removal(deadline)
         .await
         .map_err(RemovalFailure::before_send)?;
     if source.scope() != &baseline.snapshot.scope {
@@ -1785,7 +1772,8 @@ where
 }
 
 /// Reobserve one exact ambiguous removal attempt. Exact-still-present evidence never authorizes a
-/// retry; exact-removed evidence only settles this process-local removal gate.
+/// retry; exact-removed evidence only settles this process-local manager-mutation gate after that
+/// exact removal.
 #[allow(dead_code)]
 pub(crate) async fn reconcile_current_process_removal(
     attempt_id: RemovalAttemptId,
@@ -1797,8 +1785,8 @@ pub(crate) async fn reconcile_current_process_removal(
     if let Err(error) = ensure_deadline(deadline) {
         return RemovalInventoryReconciliation::Unresolved { error };
     }
-    let observation = match PRODUCTION_REMOVAL_GATE
-        .acquire_poisoned(attempt_id, custody_name, &expected_binding, deadline)
+    let observation = match PRODUCTION_MANAGER_MUTATION_GATE
+        .acquire_poisoned_removal(attempt_id, custody_name, &expected_binding, deadline)
         .await
     {
         Ok(observation) => observation,
@@ -1913,7 +1901,7 @@ pub(crate) async fn publish_current_process_custody(
     let address =
         NotifySocketAddress::from_environment().map_err(PublicationFailure::before_send)?;
     publish_and_attest(
-        &PRODUCTION_PUBLICATION_GATE,
+        &PRODUCTION_MANAGER_MUTATION_GATE,
         &source,
         &address,
         custody_name,
@@ -1924,7 +1912,7 @@ pub(crate) async fn publish_current_process_custody(
 }
 
 async fn publish_and_attest<S: DescriptorStoreInventorySource>(
-    gate: &PublicationGate,
+    gate: &ManagerMutationGate,
     source: &S,
     address: &NotifySocketAddress,
     custody_name: CustodyFdName,
@@ -1935,7 +1923,7 @@ async fn publish_and_attest<S: DescriptorStoreInventorySource>(
     // The gate precedes the baseline read. Two callers can therefore never both validate against
     // the same inventory and subsequently publish from stale state.
     let mut attempt = gate
-        .acquire_open(deadline)
+        .acquire_publication(deadline)
         .await
         .map_err(PublicationFailure::before_send)?;
     let baseline = source
@@ -2067,8 +2055,8 @@ pub(crate) async fn reconcile_current_process_custody(
         Ok(identities) => identities,
         Err(error) => return CustodyInventoryReconciliation::Unresolved { error },
     };
-    let observation = match PRODUCTION_PUBLICATION_GATE
-        .acquire_poisoned(attempt_id, custody_name, &identities, deadline)
+    let observation = match PRODUCTION_MANAGER_MUTATION_GATE
+        .acquire_poisoned_publication(attempt_id, custody_name, &identities, deadline)
         .await
     {
         Ok(observation) => observation,
@@ -2475,7 +2463,7 @@ mod tests {
     }
 
     async fn poison_attempt(
-        gate: &PublicationGate,
+        gate: &ManagerMutationGate,
         scope: &DescriptorStoreScope,
         notify_address: &NotifySocketAddress,
         custody_name: CustodyFdName,
@@ -2483,7 +2471,9 @@ mod tests {
     ) -> PublicationAttemptId {
         let identities = exact_custody_identities(custody).expect("exact poisoned identities");
         let mut attempt = gate
-            .acquire_open(HardDeadline::after(Duration::from_secs(2)).expect("poison deadline"))
+            .acquire_publication(
+                HardDeadline::after(Duration::from_secs(2)).expect("poison deadline"),
+            )
             .await
             .expect("open publication gate");
         attempt
@@ -2497,7 +2487,7 @@ mod tests {
     }
 
     async fn reconcile_fake<B>(
-        gate: &PublicationGate,
+        gate: &ManagerMutationGate,
         source: &FakeInventorySource,
         attempt_id: PublicationAttemptId,
         custody_name: CustodyFdName,
@@ -2510,7 +2500,7 @@ mod tests {
         let deadline = HardDeadline::after(Duration::from_secs(2)).expect("reconcile deadline");
         let identities = exact_custody_identities(custody).expect("exact reconcile identities");
         let observation = gate
-            .acquire_poisoned(attempt_id, custody_name, &identities, deadline)
+            .acquire_poisoned_publication(attempt_id, custody_name, &identities, deadline)
             .await
             .expect("exact poisoned observation");
         reconcile_poisoned_observation(observation, source, custody, barrier, deadline).await
@@ -3091,6 +3081,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_gate_blocks_both_cross_direction_transactions_before_inventory_or_send() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("cross-inflight.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("manager sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let binding = custody_binding(custody);
+        let name = custody_name(69);
+        let removal_baseline = snapshot(42, Vec::from(exact_pair_entries(name, &binding)));
+        let gate = ManagerMutationGate::new();
+
+        let held_publication = gate
+            .acquire_publication(
+                HardDeadline::after(Duration::from_secs(2)).expect("held publication deadline"),
+            )
+            .await
+            .expect("hold publication transaction");
+        let removal_source = FakeInventorySource::new(42, vec![removal_baseline.clone()]);
+        let mut blocked_removal = Box::pin(remove_and_attest(
+            &gate,
+            &removal_source,
+            &sender,
+            stable_inventory(removal_baseline, address.clone()),
+            name,
+            binding,
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("blocked removal deadline"),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut blocked_removal)
+                .await
+                .is_err(),
+            "removal must wait behind an in-flight publication"
+        );
+        drop(blocked_removal);
+        assert_eq!(
+            removal_source
+                .snapshots
+                .lock()
+                .expect("removal snapshots")
+                .len(),
+            1,
+            "blocked removal must not read a preflight snapshot"
+        );
+        assert_no_datagram(&receiver);
+        drop(held_publication);
+        drop(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("released removal deadline"),
+            )
+            .await
+            .expect("dropping an unpoisoned publication releases removal"),
+        );
+
+        let held_removal = gate
+            .acquire_removal(
+                HardDeadline::after(Duration::from_secs(2)).expect("held removal deadline"),
+            )
+            .await
+            .expect("hold removal transaction");
+        let publication_source = FakeInventorySource::new(42, vec![snapshot(42, Vec::new())]);
+        let mut blocked_publication = Box::pin(publish_and_attest(
+            &gate,
+            &publication_source,
+            &address,
+            custody_name(68),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("blocked publication deadline"),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut blocked_publication)
+                .await
+                .is_err(),
+            "publication must wait behind an in-flight removal"
+        );
+        drop(blocked_publication);
+        assert_eq!(
+            publication_source
+                .snapshots
+                .lock()
+                .expect("publication snapshots")
+                .len(),
+            1,
+            "blocked publication must not read a baseline snapshot"
+        );
+        assert_no_datagram(&receiver);
+        drop(held_removal);
+        drop(
+            gate.acquire_publication(
+                HardDeadline::after(Duration::from_secs(1)).expect("released publication deadline"),
+            )
+            .await
+            .expect("dropping an unpoisoned removal releases publication"),
+        );
+    }
+
+    #[tokio::test]
     async fn exact_removal_is_payload_only_barriered_and_preserves_unrelated_inventory_and_owners()
     {
         let directory = tempdir().expect("notification directory");
@@ -3128,7 +3219,7 @@ mod tests {
                 successor_snapshot,
             ],
         );
-        let gate = RemovalGate::new();
+        let gate = ManagerMutationGate::new();
         let expected_removal = fdstore_remove_message(target_name);
         let receiver_thread = thread::spawn(move || {
             let (message, descriptors) = receive_message(&receiver);
@@ -3177,7 +3268,7 @@ mod tests {
             .verify_complete_exact_set(&BTreeMap::from([(unrelated_name, unrelated_binding)]))
             .expect("only the unrelated pair remains");
         drop(
-            gate.acquire_open(
+            gate.acquire_removal(
                 HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
             )
             .await
@@ -3348,7 +3439,7 @@ mod tests {
         let mut drifted_entries = baseline_snapshot.entries.clone();
         drifted_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
         let source = FakeInventorySource::new(42, vec![snapshot(42, drifted_entries)]);
-        let gate = RemovalGate::new();
+        let gate = ManagerMutationGate::new();
 
         let result = remove_and_attest(
             &gate,
@@ -3372,7 +3463,7 @@ mod tests {
         ));
         assert_no_datagram(&receiver);
         drop(
-            gate.acquire_open(
+            gate.acquire_removal(
                 HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
             )
             .await
@@ -3409,7 +3500,7 @@ mod tests {
                 baseline_snapshot.clone(),
             ],
         );
-        let gate = RemovalGate::new();
+        let gate = ManagerMutationGate::new();
         let expected_removal = fdstore_remove_message(target_name);
         let receiver_thread = thread::spawn(move || {
             let (message, descriptors) = receive_message(&receiver);
@@ -3441,11 +3532,93 @@ mod tests {
             other => panic!("unexpected still-present result: {other:?}"),
         };
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_removal(
                 HardDeadline::after(Duration::from_secs(2)).expect("poison check deadline")
             )
             .await,
             Err(FdStoreError::RemovalPoisoned)
+        ));
+
+        let blocked_path = directory
+            .path()
+            .join("removal-poison-blocks-publication.sock");
+        let blocked_receiver =
+            UnixDatagram::bind(&blocked_path).expect("bind blocked publication socket");
+        let blocked_address =
+            NotifySocketAddress::parse(blocked_path.as_os_str()).expect("blocked notify address");
+        let blocked_publication_source =
+            FakeInventorySource::new(42, vec![snapshot(42, Vec::new())]);
+        let blocked_publication = publish_and_attest(
+            &gate,
+            &blocked_publication_source,
+            &blocked_address,
+            custody_name(78),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("blocked publication deadline"),
+        )
+        .await;
+        assert!(matches!(
+            blocked_publication,
+            Err(PublicationFailure::BeforeSend {
+                error: FdStoreError::PublicationPoisoned
+            })
+        ));
+        assert_eq!(
+            blocked_publication_source
+                .snapshots
+                .lock()
+                .expect("blocked publication snapshots")
+                .len(),
+            1,
+            "removal poison blocks publication before its baseline read"
+        );
+        assert_no_datagram(&blocked_receiver);
+
+        let identities = exact_custody_identities(custody).expect("cross-kind identities");
+        assert!(matches!(
+            gate.acquire_poisoned_publication(
+                PublicationAttemptId::for_test(attempt_id.0.get()),
+                target_name,
+                &identities,
+                HardDeadline::after(Duration::from_secs(2))
+                    .expect("wrong-kind publication reconciliation deadline"),
+            )
+            .await,
+            Err(FdStoreError::PublicationTargetMismatch)
+        ));
+
+        let wrong_scope_source = FakeInventorySource::new(43, Vec::new());
+        let wrong_scope_observation = gate
+            .acquire_poisoned_removal(
+                attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2))
+                    .expect("wrong-scope removal observation deadline"),
+            )
+            .await
+            .expect("exact removal poison remains observable");
+        assert!(matches!(
+            reconcile_poisoned_removal(
+                wrong_scope_observation,
+                &wrong_scope_source,
+                std::future::ready(Ok(())),
+                custody,
+                HardDeadline::after(Duration::from_secs(2))
+                    .expect("wrong-scope removal reconciliation deadline"),
+            )
+            .await,
+            RemovalInventoryReconciliation::Unresolved {
+                error: FdStoreError::RemovalTargetMismatch
+            }
+        ));
+        assert!(matches!(
+            gate.acquire_publication(
+                HardDeadline::after(Duration::from_secs(2))
+                    .expect("unresolved cross-poison deadline")
+            )
+            .await,
+            Err(FdStoreError::PublicationPoisoned)
         ));
 
         let retry_source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
@@ -3479,7 +3652,7 @@ mod tests {
         let mismatch_deadline =
             HardDeadline::after(Duration::from_secs(2)).expect("mismatch deadline");
         assert!(matches!(
-            gate.acquire_poisoned(
+            gate.acquire_poisoned_removal(
                 RemovalAttemptId::for_test(999),
                 target_name,
                 &binding,
@@ -3489,15 +3662,25 @@ mod tests {
             Err(FdStoreError::RemovalTargetMismatch)
         ));
         assert!(matches!(
-            gate.acquire_poisoned(attempt_id, custody_name(80), &binding, mismatch_deadline,)
-                .await,
+            gate.acquire_poisoned_removal(
+                attempt_id,
+                custody_name(80),
+                &binding,
+                mismatch_deadline,
+            )
+            .await,
             Err(FdStoreError::RemovalTargetMismatch)
         ));
         let wrong_binding =
             CustodyDescriptorBinding([binding.0[0].clone(), descriptor_identity(980)]);
         assert!(matches!(
-            gate.acquire_poisoned(attempt_id, target_name, &wrong_binding, mismatch_deadline,)
-                .await,
+            gate.acquire_poisoned_removal(
+                attempt_id,
+                target_name,
+                &wrong_binding,
+                mismatch_deadline,
+            )
+            .await,
             Err(FdStoreError::RemovalTargetMismatch)
         ));
 
@@ -3506,7 +3689,7 @@ mod tests {
             vec![baseline_snapshot.clone(), baseline_snapshot.clone()],
         );
         let observation = gate
-            .acquire_poisoned(
+            .acquire_poisoned_removal(
                 attempt_id,
                 target_name,
                 &binding,
@@ -3534,18 +3717,44 @@ mod tests {
             other => panic!("unexpected exact-still-present reconciliation: {other:?}"),
         }
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_removal(
                 HardDeadline::after(Duration::from_secs(2)).expect("still poison deadline")
             )
             .await,
             Err(FdStoreError::RemovalPoisoned)
         ));
+        let blocked_again = publish_and_attest(
+            &gate,
+            &blocked_publication_source,
+            &blocked_address,
+            custody_name(78),
+            custody,
+            HardDeadline::after(Duration::from_secs(2))
+                .expect("still-present cross-poison deadline"),
+        )
+        .await;
+        assert!(matches!(
+            blocked_again,
+            Err(PublicationFailure::BeforeSend {
+                error: FdStoreError::PublicationPoisoned
+            })
+        ));
+        assert_eq!(
+            blocked_publication_source
+                .snapshots
+                .lock()
+                .expect("still blocked publication snapshots")
+                .len(),
+            1,
+            "exact-still-present observation cannot release publication"
+        );
+        assert_no_datagram(&blocked_receiver);
 
         let removed_snapshot = snapshot(42, Vec::new());
         let removed_source =
             FakeInventorySource::new(42, vec![removed_snapshot.clone(), removed_snapshot]);
         let observation = gate
-            .acquire_poisoned(
+            .acquire_poisoned_removal(
                 attempt_id,
                 target_name,
                 &binding,
@@ -3571,11 +3780,11 @@ mod tests {
             other => panic!("unexpected exact-removed reconciliation: {other:?}"),
         }
         drop(
-            gate.acquire_open(
+            gate.acquire_publication(
                 HardDeadline::after(Duration::from_secs(2)).expect("cleared gate deadline"),
             )
             .await
-            .expect("only exact-removed reconciliation clears poison"),
+            .expect("exact-removed reconciliation reopens publication too"),
         );
     }
 
@@ -3605,7 +3814,7 @@ mod tests {
                 baseline_snapshot.clone(),
             ],
         );
-        let gate = RemovalGate::new();
+        let gate = ManagerMutationGate::new();
         let receiver_thread = thread::spawn(move || {
             let (message, descriptors) = receive_message(&receiver);
             assert_eq!(message, fdstore_remove_message(target_name));
@@ -3637,7 +3846,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_removal(
                 HardDeadline::after(Duration::from_secs(2)).expect("poison deadline")
             )
             .await,
@@ -3672,7 +3881,7 @@ mod tests {
                 removed_snapshot,
             ],
         );
-        let gate = RemovalGate::new();
+        let gate = ManagerMutationGate::new();
         let receiver_thread = thread::spawn(move || {
             let (message, descriptors) = receive_message(&receiver);
             assert_eq!(message, fdstore_remove_message(target_name));
@@ -3708,7 +3917,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_removal(
                 HardDeadline::after(Duration::from_secs(2)).expect("poison deadline")
             )
             .await,
@@ -3737,7 +3946,7 @@ mod tests {
         let target_name = custody_name(83);
         let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
         let before_source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
-        let before_gate = RemovalGate::new();
+        let before_gate = ManagerMutationGate::new();
         let expired = HardDeadline::after(Duration::from_millis(1)).expect("short deadline");
         tokio::time::sleep(Duration::from_millis(5)).await;
 
@@ -3761,7 +3970,7 @@ mod tests {
         assert_no_datagram(&before_receiver);
         drop(
             before_gate
-                .acquire_open(
+                .acquire_removal(
                     HardDeadline::after(Duration::from_secs(2)).expect("before open-gate deadline"),
                 )
                 .await
@@ -3785,7 +3994,7 @@ mod tests {
                 removed_snapshot,
             ],
         );
-        let after_gate = RemovalGate::new();
+        let after_gate = ManagerMutationGate::new();
         let receiver_thread = thread::spawn(move || {
             let (message, descriptors) = receive_message(&after_receiver);
             assert_eq!(message, fdstore_remove_message(target_name));
@@ -3821,7 +4030,7 @@ mod tests {
         ));
         assert!(matches!(
             after_gate
-                .acquire_open(
+                .acquire_removal(
                     HardDeadline::after(Duration::from_secs(2)).expect("after poison deadline")
                 )
                 .await,
@@ -3850,9 +4059,11 @@ mod tests {
             NotifySocketAddress::parse(before_path.as_os_str()).expect("before notify address");
         let before_sender = NotifySender::new(&before_address).expect("before sender");
         let before_source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
-        let before_gate = RemovalGate::new();
+        let before_gate = ManagerMutationGate::new();
         let held = before_gate
-            .acquire_open(HardDeadline::after(Duration::from_secs(2)).expect("held-gate deadline"))
+            .acquire_removal(
+                HardDeadline::after(Duration::from_secs(2)).expect("held-gate deadline"),
+            )
             .await
             .expect("hold removal gate before boundary");
         let mut before = Box::pin(remove_and_attest(
@@ -3884,11 +4095,11 @@ mod tests {
         );
         drop(
             before_gate
-                .acquire_open(
+                .acquire_publication(
                     HardDeadline::after(Duration::from_secs(2)).expect("before reopened deadline"),
                 )
                 .await
-                .expect("cancel-before leaves no poison"),
+                .expect("cancel-before leaves both mutation directions open"),
         );
 
         let after_path = directory.path().join("cancel-after.sock");
@@ -3908,7 +4119,7 @@ mod tests {
                 removed_snapshot,
             ],
         );
-        let after_gate = RemovalGate::new();
+        let after_gate = ManagerMutationGate::new();
         let (sent_sender, sent_receiver) = tokio::sync::oneshot::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let receiver_thread = thread::spawn(move || {
@@ -3941,12 +4152,21 @@ mod tests {
         receiver_thread.join().expect("fake systemd receiver");
         assert!(matches!(
             after_gate
-                .acquire_open(
+                .acquire_removal(
                     HardDeadline::after(Duration::from_secs(2))
                         .expect("cancel-after poison deadline")
                 )
                 .await,
             Err(FdStoreError::RemovalPoisoned)
+        ));
+        assert!(matches!(
+            after_gate
+                .acquire_publication(
+                    HardDeadline::after(Duration::from_secs(2))
+                        .expect("cross-kind cancel-after poison deadline")
+                )
+                .await,
+            Err(FdStoreError::PublicationPoisoned)
         ));
     }
 
@@ -3996,7 +4216,7 @@ mod tests {
                 second_successor,
             ],
         );
-        let gate = RemovalGate::new();
+        let gate = ManagerMutationGate::new();
         let receiver_thread = thread::spawn(move || {
             for name in [first_name, second_name] {
                 let (message, descriptors) = receive_message(&receiver);
@@ -4170,9 +4390,16 @@ mod tests {
             2
         );
         assert!(!reconciliation.contains("send_without_descriptors_once"));
-        assert!(source.contains(
-            "removal adapter remains dormant while publication and removal use separate gates"
-        ));
+        let manager_gate_declaration = ["static PRODUCTION_MANAGER_", "MUTATION_GATE:"].concat();
+        assert_eq!(
+            source.matches(&manager_gate_declaration).count(),
+            1,
+            "publication and removal must use one production mutation gate"
+        );
+        let legacy_publication_gate = ["PRODUCTION_PUBLICATION_", "GATE"].concat();
+        let legacy_removal_gate = ["PRODUCTION_REMOVAL_", "GATE"].concat();
+        assert!(!source.contains(&legacy_publication_gate));
+        assert!(!source.contains(&legacy_removal_gate));
 
         let server = include_str!("server.rs");
         for forbidden in [
@@ -4214,7 +4441,7 @@ mod tests {
                 .collect(),
         );
         let source = FakeInventorySource::new(42, vec![baseline, post]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let mut expected_received_identities = identities
             .iter()
             .map(expected_stat_identity)
@@ -4269,6 +4496,13 @@ mod tests {
         );
         assert!(fstat(pidfd.as_fd()).is_ok());
         assert!(fstat(network_namespace.as_fd()).is_ok());
+        drop(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("cross-release deadline"),
+            )
+            .await
+            .expect("successful publication releases the shared removal gate"),
+        );
     }
 
     #[tokio::test]
@@ -4287,7 +4521,7 @@ mod tests {
         let mut invalid = snapshot(42, Vec::new());
         invalid.store_max = 127;
         let source = FakeInventorySource::new(42, vec![invalid]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let error = publish_and_attest(
             &gate,
             &source,
@@ -4333,7 +4567,7 @@ mod tests {
                 vec![inventory_entry(custody_name(34), identities[0].clone())],
             )],
         );
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
 
         let error = publish_and_attest(
             &gate,
@@ -4367,7 +4601,7 @@ mod tests {
         let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
             .expect("borrow exact pair");
         let source = FakeInventorySource::new(42, vec![snapshot(42, Vec::new())]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let error = publish_and_attest(
             &gate,
             &source,
@@ -4397,7 +4631,7 @@ mod tests {
         let custody = BorrowedCustodyPair::new(first.as_fd(), duplicate.as_fd())
             .expect("raw descriptors are distinct");
         let source = FakeInventorySource::new(42, vec![snapshot(42, Vec::new())]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let error = publish_and_attest(
             &gate,
             &source,
@@ -4433,7 +4667,7 @@ mod tests {
         let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
             .expect("borrow exact pair");
         let source = FakeInventorySource::new(42, vec![snapshot(42, Vec::new())]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let receiver_thread = thread::spawn(move || {
@@ -4477,6 +4711,14 @@ mod tests {
                 error: FdStoreError::PublicationPoisoned
             }
         ));
+        assert!(matches!(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1))
+                    .expect("cross-kind publication poison deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
         release_tx.send(()).expect("release fake manager");
         receiver_thread.join().expect("fake systemd receiver");
     }
@@ -4496,7 +4738,7 @@ mod tests {
             .expect("borrow exact pair");
         let source =
             FakeInventorySource::new(42, vec![snapshot(42, Vec::new()), snapshot(42, Vec::new())]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let receiver_thread = thread::spawn(move || {
             let (_, descriptors) = receive_message(&receiver);
             close_received(descriptors);
@@ -4550,11 +4792,11 @@ mod tests {
             vec![exact.clone(), exact],
             Arc::clone(&barrier_seen),
         );
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let attempt_id = poison_attempt(&gate, source.scope(), &address, name, custody).await;
         let deadline = HardDeadline::after(Duration::from_secs(2)).expect("reconcile deadline");
         let observation = gate
-            .acquire_poisoned(attempt_id, name, &identities, deadline)
+            .acquire_poisoned_publication(attempt_id, name, &identities, deadline)
             .await
             .expect("exact poisoned observation");
         let sender = NotifySender::new(&address).expect("barrier sender");
@@ -4603,7 +4845,7 @@ mod tests {
             "reconciliation consumes exactly two snapshots"
         );
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_publication(
                 HardDeadline::after(Duration::from_secs(1)).expect("poison check deadline")
             )
             .await,
@@ -4626,7 +4868,7 @@ mod tests {
             vec![inventory_entry(custody_name(43), descriptor_identity(430))],
         );
         let source = FakeInventorySource::new(42, vec![unrelated.clone(), unrelated]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let attempt_id =
             poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
 
@@ -4646,12 +4888,188 @@ mod tests {
         assert_eq!(evidence.stored_descriptors, 1);
         assert_eq!(format!("{evidence:?}"), "ExactAbsentEvidence(<redacted>)");
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_publication(
                 HardDeadline::after(Duration::from_secs(1)).expect("poison check deadline")
             )
             .await,
             Err(FdStoreError::PublicationPoisoned)
         ));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test proves publication poison blocks the complete opposite mutation before I/O"
+    )]
+    #[tokio::test]
+    async fn publication_poison_blocks_removal_and_wrong_kind_reconciliation_cannot_clear_it() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory
+            .path()
+            .join("publication-poison-blocks-removal.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("removal sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct cross-poison descriptor")
+            .expect("make fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let identities = exact_custody_identities(custody).expect("exact identities");
+        let binding = custody_binding(custody);
+        let name = custody_name(54);
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(name, &binding)));
+        let gate = ManagerMutationGate::new();
+        let attempt_id = poison_attempt(&gate, &fake_scope(42), &address, name, custody).await;
+
+        let removal_source = FakeInventorySource::new(42, vec![baseline.clone()]);
+        let blocked = remove_and_attest(
+            &gate,
+            &removal_source,
+            &sender,
+            stable_inventory(baseline.clone(), address.clone()),
+            name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("blocked removal deadline"),
+        )
+        .await;
+        assert!(matches!(
+            blocked,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalPoisoned
+            })
+        ));
+        assert_eq!(
+            removal_source
+                .snapshots
+                .lock()
+                .expect("blocked removal snapshots")
+                .len(),
+            1,
+            "publication poison blocks removal before preflight"
+        );
+        assert_no_datagram(&receiver);
+
+        assert!(matches!(
+            gate.acquire_poisoned_removal(
+                RemovalAttemptId::for_test(attempt_id.0.get()),
+                name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2))
+                    .expect("wrong-kind removal reconciliation deadline"),
+            )
+            .await,
+            Err(FdStoreError::RemovalTargetMismatch)
+        ));
+
+        let wrong_scope_source = FakeInventorySource::new(43, Vec::new());
+        let wrong_scope_observation = gate
+            .acquire_poisoned_publication(
+                attempt_id,
+                name,
+                &identities,
+                HardDeadline::after(Duration::from_secs(2))
+                    .expect("wrong-scope publication observation deadline"),
+            )
+            .await
+            .expect("exact publication poison remains observable");
+        assert!(matches!(
+            reconcile_poisoned_observation(
+                wrong_scope_observation,
+                &wrong_scope_source,
+                custody,
+                std::future::ready(Ok(())),
+                HardDeadline::after(Duration::from_secs(2))
+                    .expect("wrong-scope publication reconciliation deadline"),
+            )
+            .await,
+            CustodyInventoryReconciliation::Unresolved {
+                error: FdStoreError::PublicationTargetMismatch
+            }
+        ));
+        assert!(matches!(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1))
+                    .expect("unresolved publication cross-poison deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+
+        let absent = snapshot(42, Vec::new());
+        let absent_source = FakeInventorySource::new(42, vec![absent.clone(), absent]);
+        assert!(matches!(
+            reconcile_fake(
+                &gate,
+                &absent_source,
+                attempt_id,
+                name,
+                custody,
+                std::future::ready(Ok(())),
+            )
+            .await,
+            CustodyInventoryReconciliation::ExactAbsent(_)
+        ));
+        assert!(matches!(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("absent cross-poison deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+
+        let exact_present = snapshot(
+            42,
+            identities
+                .iter()
+                .cloned()
+                .map(|identity| inventory_entry(name, identity))
+                .collect(),
+        );
+        let present_source =
+            FakeInventorySource::new(42, vec![exact_present.clone(), exact_present]);
+        assert!(matches!(
+            reconcile_fake(
+                &gate,
+                &present_source,
+                attempt_id,
+                name,
+                custody,
+                std::future::ready(Ok(())),
+            )
+            .await,
+            CustodyInventoryReconciliation::ExactPresent(_)
+        ));
+
+        let blocked_again = remove_and_attest(
+            &gate,
+            &removal_source,
+            &sender,
+            stable_inventory(baseline, address),
+            name,
+            binding,
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("present cross-poison deadline"),
+        )
+        .await;
+        assert!(matches!(
+            blocked_again,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalPoisoned
+            })
+        ));
+        assert_eq!(
+            removal_source
+                .snapshots
+                .lock()
+                .expect("still blocked removal snapshots")
+                .len(),
+            1,
+            "publication reconciliation never releases removal"
+        );
+        assert_no_datagram(&receiver);
     }
 
     #[test]
@@ -4758,7 +5176,7 @@ mod tests {
             .push(inventory_entry(custody_name(47), descriptor_identity(500)));
         second.entries.sort_unstable();
         let source = FakeInventorySource::new(42, vec![first, second]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let attempt_id =
             poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
         let result = reconcile_fake(
@@ -4786,7 +5204,7 @@ mod tests {
         });
         let deadline = HardDeadline::after(Duration::from_secs(1)).expect("scope deadline");
         let observation = gate
-            .acquire_poisoned(attempt_id, name, &identities, deadline)
+            .acquire_poisoned_publication(attempt_id, name, &identities, deadline)
             .await
             .expect("poison remains observable");
         let result =
@@ -4812,18 +5230,18 @@ mod tests {
             .expect("borrow exact pair");
         let identities = exact_custody_identities(custody).expect("exact identities");
         let source = FakeInventorySource::new(42, Vec::new());
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let name = custody_name(48);
         let attempt_id =
             poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
         let deadline = HardDeadline::after(Duration::from_secs(1)).expect("mismatch deadline");
         let stale = PublicationAttemptId::for_test(attempt_id.0.get() + 1);
         for mismatch in [
-            gate.acquire_poisoned(stale, name, &identities, deadline)
+            gate.acquire_poisoned_publication(stale, name, &identities, deadline)
                 .await,
-            gate.acquire_poisoned(attempt_id, custody_name(49), &identities, deadline)
+            gate.acquire_poisoned_publication(attempt_id, custody_name(49), &identities, deadline)
                 .await,
-            gate.acquire_poisoned(
+            gate.acquire_poisoned_publication(
                 attempt_id,
                 name,
                 &[identities[1].clone(), identities[0].clone()],
@@ -4850,7 +5268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publication_attempt_ids_are_monotone_and_overflow_is_fail_atomic() {
+    async fn manager_mutation_attempt_ids_are_shared_monotone_and_overflow_is_fail_atomic() {
         let pidfd = tempfile().expect("pidfd fixture");
         let mut network_namespace = tempfile().expect("network namespace fixture");
         network_namespace
@@ -4859,37 +5277,73 @@ mod tests {
         let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
             .expect("borrow exact pair");
         let identities = exact_custody_identities(custody).expect("exact identities");
-        let target = PublicationTarget {
+        let name = custody_name(50);
+        let publication_target = PublicationTarget {
             scope: fake_scope(42),
             notify_address: fake_notify_address(),
-            custody_name: custody_name(50),
-            identities,
+            custody_name: name,
+            identities: identities.clone(),
         };
-        let gate = PublicationGate::new();
+        let binding = custody_binding(custody);
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(name, &binding)));
+        let removal_target = RemovalTarget {
+            scope: fake_scope(42),
+            notify_address: fake_notify_address(),
+            custody_name: name,
+            binding,
+            baseline,
+        };
+        let gate = ManagerMutationGate::new();
         let deadline = HardDeadline::after(Duration::from_secs(2)).expect("attempt deadline");
-        let mut first = gate.acquire_open(deadline).await.expect("first open gate");
+        let mut first = gate
+            .acquire_publication(deadline)
+            .await
+            .expect("first open gate");
         let first_id = first
-            .mark_send_attempted(target.clone())
+            .mark_send_attempted(publication_target.clone())
             .expect("first attempt ID");
         first.complete_success(first_id);
-        let mut second = gate.acquire_open(deadline).await.expect("second open gate");
+        let mut second = gate
+            .acquire_removal(deadline)
+            .await
+            .expect("second open gate");
         let second_id = second
-            .mark_send_attempted(target.clone())
+            .mark_send_attempted(removal_target.clone())
             .expect("second attempt ID");
         assert_eq!(first_id.0.get(), 1);
         assert_eq!(second_id.0.get(), 2);
-        second.complete_success(second_id);
+        assert_eq!(format!("{second_id:?}"), "RemovalAttemptId(<redacted>)");
+        second.complete_exact_removed(second_id);
+
+        let mut third = gate
+            .acquire_publication(deadline)
+            .await
+            .expect("third open gate");
+        let third_id = third
+            .mark_send_attempted(publication_target.clone())
+            .expect("third attempt ID");
+        assert_eq!(third_id.0.get(), 3);
+        third.complete_success(third_id);
 
         gate.state.lock().await.last_attempt_id = u64::MAX;
-        let mut exhausted = gate
-            .acquire_open(deadline)
+        let mut exhausted_publication = gate
+            .acquire_publication(deadline)
             .await
-            .expect("overflow open gate");
+            .expect("publication overflow open gate");
         assert!(matches!(
-            exhausted.mark_send_attempted(target),
+            exhausted_publication.mark_send_attempted(publication_target),
             Err(FdStoreError::PublicationAttemptExhausted)
         ));
-        drop(exhausted);
+        drop(exhausted_publication);
+        let mut exhausted_removal = gate
+            .acquire_removal(deadline)
+            .await
+            .expect("removal overflow open gate");
+        assert!(matches!(
+            exhausted_removal.mark_send_attempted(removal_target),
+            Err(FdStoreError::RemovalAttemptExhausted)
+        ));
+        drop(exhausted_removal);
         let state = gate.state.lock().await;
         assert_eq!(state.last_attempt_id, u64::MAX);
         assert!(state.poisoned.is_none());
@@ -4915,12 +5369,12 @@ mod tests {
                 .collect(),
         );
         let source = FakeInventorySource::new(42, vec![exact.clone(), exact]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let attempt_id =
             poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
         let deadline = HardDeadline::after(Duration::from_secs(2)).expect("cancel deadline");
         let observation = gate
-            .acquire_poisoned(attempt_id, name, &identities, deadline)
+            .acquire_poisoned_publication(attempt_id, name, &identities, deadline)
             .await
             .expect("poisoned observation");
         let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
@@ -4941,7 +5395,7 @@ mod tests {
         }
         drop(reconciliation);
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_publication(
                 HardDeadline::after(Duration::from_secs(1)).expect("poison check deadline")
             )
             .await,
@@ -4977,12 +5431,12 @@ mod tests {
                 .collect(),
         );
         let source = FakeInventorySource::new(42, vec![exact.clone(), exact]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let attempt_id =
             poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
         let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short deadline");
         let observation = gate
-            .acquire_poisoned(attempt_id, name, &identities, deadline)
+            .acquire_poisoned_publication(attempt_id, name, &identities, deadline)
             .await
             .expect("poisoned observation");
 
@@ -5001,7 +5455,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_publication(
                 HardDeadline::after(Duration::from_secs(1)).expect("poison check deadline")
             )
             .await,
@@ -5033,7 +5487,7 @@ mod tests {
                 .collect(),
         );
         let source = FakeInventorySource::new(42, vec![exact.clone(), exact]);
-        let gate = PublicationGate::new();
+        let gate = ManagerMutationGate::new();
         let attempt_id =
             poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
         let result = reconcile_fake(&gate, &source, attempt_id, name, custody, async {
@@ -5054,7 +5508,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            gate.acquire_open(
+            gate.acquire_publication(
                 HardDeadline::after(Duration::from_secs(1)).expect("poison check deadline")
             )
             .await,
