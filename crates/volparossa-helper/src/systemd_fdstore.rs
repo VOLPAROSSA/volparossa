@@ -10,8 +10,10 @@
 //! exact poisoned in-process attempt as present, absent, or unresolved, but never clears the
 //! poison or authorizes a resend. A read-only startup observer uses one manager barrier and two
 //! uncached exact-service snapshots, then exposes only an opaque exact-set comparison against
-//! inherited custody bindings. That observer never publishes descriptors. This slice never sends
-//! `FDSTOREREMOVE=1` or `READY=1`.
+//! inherited custody bindings. That observer never publishes descriptors. A separate dormant
+//! removal adapter can remove one already-proven exact custody name, orders that notification with
+//! a barrier, and accepts success only for the stable complete baseline-minus-pair inventory. It
+//! has no production caller. This slice never sends `READY=1`.
 
 use std::{
     collections::BTreeMap,
@@ -62,12 +64,18 @@ const FDSTORE_PREFIX: &[u8] = b"FDSTORE=1\nFDNAME=";
 const FDSTORE_SUFFIX: &[u8] = b"\nFDPOLL=0";
 const FDSTORE_MESSAGE_BYTES: usize =
     FDSTORE_PREFIX.len() + CUSTODY_FD_NAME_BYTES + FDSTORE_SUFFIX.len();
+const FDSTORE_REMOVE_PREFIX: &[u8] = b"FDSTOREREMOVE=1\nFDNAME=";
+const FDSTORE_REMOVE_MESSAGE_BYTES: usize = FDSTORE_REMOVE_PREFIX.len() + CUSTODY_FD_NAME_BYTES;
 const BARRIER_MESSAGE: &[u8] = b"BARRIER=1";
 const SYSTEMD_DESTINATION: &str = "org.freedesktop.systemd1";
 const SYSTEMD_MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
 static PRODUCTION_PUBLICATION_GATE: PublicationGate = PublicationGate::new();
+// The removal adapter remains dormant while publication and removal use separate gates. A future
+// production composition must place both mutations behind one shared manager-inventory gate before
+// wiring removal, so neither full-inventory proof can race the other mutation.
+static PRODUCTION_REMOVAL_GATE: RemovalGate = RemovalGate::new();
 
 /// One opaque, fixed-shape systemd descriptor-store name.
 ///
@@ -125,6 +133,23 @@ impl PublicationAttemptId {
     #[cfg(test)]
     pub(crate) fn for_test(value: u64) -> Self {
         Self(NonZeroU64::new(value).expect("test publication attempt ID must be nonzero"))
+    }
+}
+
+/// Opaque process-local identity of one exact descriptor-store removal attempt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RemovalAttemptId(NonZeroU64);
+
+impl fmt::Debug for RemovalAttemptId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemovalAttemptId(<redacted>)")
+    }
+}
+
+impl RemovalAttemptId {
+    #[cfg(test)]
+    fn for_test(value: u64) -> Self {
+        Self(NonZeroU64::new(value).expect("test removal attempt ID must be nonzero"))
     }
 }
 
@@ -202,6 +227,32 @@ impl PublicationFailure {
     }
 }
 
+/// Whether the exact named-removal send boundary was crossed.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RemovalFailure {
+    #[error("this removal attempt sent no descriptor-store removal notification")]
+    BeforeSend {
+        #[source]
+        error: FdStoreError,
+    },
+    #[error("descriptor-store removal is ambiguous; systemd may have removed the custody pair")]
+    ManagerMayHaveRemoved {
+        attempt_id: RemovalAttemptId,
+        #[source]
+        error: FdStoreError,
+    },
+}
+
+impl RemovalFailure {
+    fn before_send(error: FdStoreError) -> Self {
+        Self::BeforeSend { error }
+    }
+
+    fn manager_may_have_removed(attempt_id: RemovalAttemptId, error: FdStoreError) -> Self {
+        Self::ManagerMayHaveRemoved { attempt_id, error }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FdStoreError {
     #[error("custody descriptor-store name is invalid")]
@@ -228,6 +279,16 @@ pub(crate) enum FdStoreError {
     PublicationTargetMismatch,
     #[error("descriptor-store inventory changed across reconciliation snapshots")]
     UnstableInventory,
+    #[error("descriptor-store removal is blocked by an unresolved earlier attempt")]
+    RemovalPoisoned,
+    #[error("descriptor-store removal attempt identity is exhausted")]
+    RemovalAttemptExhausted,
+    #[error("descriptor-store removal has no ambiguous attempt to reconcile")]
+    RemovalNotPoisoned,
+    #[error("descriptor-store removal target does not match the ambiguous attempt")]
+    RemovalTargetMismatch,
+    #[error("descriptor-store removal was ordered but the exact custody pair remains present")]
+    RemovalStillPresent,
 }
 
 impl From<io::Error> for FdStoreError {
@@ -459,11 +520,85 @@ struct DescriptorStoreSnapshot {
 #[must_use = "startup inventory evidence must be checked against the inherited custody set"]
 pub(crate) struct StableStartupInventory {
     snapshot: DescriptorStoreSnapshot,
+    notify_address: NotifySocketAddress,
 }
 
 impl fmt::Debug for StableStartupInventory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("StableStartupInventory(<redacted>)")
+    }
+}
+
+/// Exact stable proof that one named pair is absent and every unrelated manager entry is
+/// unchanged. This is manager-inventory evidence only, not kernel-cleanup or journal authority.
+#[must_use = "exact removal evidence must remain joined to durable cleanup settlement"]
+pub(crate) struct ExactRemovalProof {
+    custody_name: CustodyFdName,
+    binding: CustodyDescriptorBinding,
+    successor: StableStartupInventory,
+    stored_descriptors: u32,
+}
+
+impl fmt::Debug for ExactRemovalProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExactRemovalProof(<redacted>)")
+    }
+}
+
+impl ExactRemovalProof {
+    /// Revalidate only the opaque target correlation carried by this proof.
+    pub(crate) fn verify_exact_target(
+        &self,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+    ) -> Result<(), FdStoreError> {
+        if self.custody_name != custody_name || &self.binding != binding {
+            return Err(invalid_inventory(
+                "removal proof does not match the exact custody target",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Continue a bounded sequence from the exact stable post-removal inventory.
+    pub(crate) fn into_successor(self) -> StableStartupInventory {
+        self.successor
+    }
+}
+
+/// Stable observation that an attempted exact removal left the complete baseline unchanged.
+///
+/// This deliberately carries no retry method or mutation authority.
+#[must_use = "exact-still-present evidence never authorizes a blind removal retry"]
+pub(crate) struct ExactStillPresentRemovalEvidence {
+    attempt: PoisonedRemoval,
+    stored_descriptors: u32,
+}
+
+impl fmt::Debug for ExactStillPresentRemovalEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExactStillPresentRemovalEvidence(<redacted>)")
+    }
+}
+
+/// Observation-only reconciliation of one exact ambiguous removal attempt.
+#[must_use = "removal reconciliation does not authorize an implicit retry"]
+pub(crate) enum RemovalInventoryReconciliation {
+    ExactRemoved(ExactRemovalProof),
+    ExactStillPresent(ExactStillPresentRemovalEvidence),
+    Unresolved { error: FdStoreError },
+}
+
+impl fmt::Debug for RemovalInventoryReconciliation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExactRemoved(_) => formatter.write_str("ExactRemoved(<redacted>)"),
+            Self::ExactStillPresent(_) => formatter.write_str("ExactStillPresent(<redacted>)"),
+            Self::Unresolved { error } => formatter
+                .debug_struct("Unresolved")
+                .field("error", error)
+                .finish(),
+        }
     }
 }
 
@@ -631,6 +766,107 @@ impl DescriptorStoreSnapshot {
         })
     }
 
+    fn validate_removal_target(
+        &self,
+        expected_scope: &DescriptorStoreScope,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+    ) -> Result<(), FdStoreError> {
+        self.validate_service_contract(expected_scope)?;
+        if self.entries.len() > MAX_DESCRIPTOR_STORE_ENTRIES {
+            return Err(invalid_inventory(
+                "removal baseline exceeds the descriptor-store bound",
+            ));
+        }
+        let mut grouped = BTreeMap::<CustodyFdName, Vec<&DescriptorIdentity>>::new();
+        let mut identities = Vec::<&DescriptorIdentity>::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let name = std::str::from_utf8(&entry.name)
+                .map_err(|_| invalid_inventory("removal baseline name is not valid UTF-8"))?;
+            let name = CustodyFdName::parse(name)
+                .map_err(|_| invalid_inventory("removal baseline custody name is invalid"))?;
+            if identities
+                .iter()
+                .any(|identity| identity.is_same_kernel_object(&entry.identity))
+            {
+                return Err(invalid_inventory(
+                    "removal baseline descriptor identity is reused",
+                ));
+            }
+            identities.push(&entry.identity);
+            grouped.entry(name).or_default().push(&entry.identity);
+        }
+        if grouped
+            .values()
+            .any(|group| group.len() != DESCRIPTORS_PER_CUSTODY)
+        {
+            return Err(invalid_inventory(
+                "removal baseline custody name does not contain exactly two descriptors",
+            ));
+        }
+        let target = grouped
+            .get(&custody_name)
+            .ok_or_else(|| invalid_inventory("removal target is absent from the baseline"))?;
+        let [first, second] = target.as_slice() else {
+            return Err(invalid_inventory(
+                "removal baseline custody name does not contain exactly two descriptors",
+            ));
+        };
+        let [pidfd, network_namespace] = &binding.0;
+        if !((*first == pidfd && *second == network_namespace)
+            || (*first == network_namespace && *second == pidfd))
+        {
+            return Err(invalid_inventory(
+                "removal target does not match the exact local binding",
+            ));
+        }
+        Ok(())
+    }
+
+    fn project_exact_removal(
+        &self,
+        post: &Self,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+    ) -> Result<RemovalProjection, FdStoreError> {
+        self.validate_removal_target(&self.scope, custody_name, binding)?;
+        if self.scope != post.scope
+            || self.main_pid != post.main_pid
+            || self.notify_access != post.notify_access
+            || self.store_max != post.store_max
+            || self.store_preserve != post.store_preserve
+        {
+            return Err(invalid_inventory(
+                "service identity or policy changed during removal",
+            ));
+        }
+        if post.entries.len() > MAX_DESCRIPTOR_STORE_ENTRIES {
+            return Err(invalid_inventory(
+                "removal successor exceeds the descriptor-store bound",
+            ));
+        }
+        let stored_descriptors = u32::try_from(post.entries.len())
+            .map_err(|_| invalid_inventory("descriptor count is invalid"))?;
+        if post.entries == self.entries {
+            return Ok(RemovalProjection::ExactStillPresent { stored_descriptors });
+        }
+        let expected = self
+            .entries
+            .iter()
+            .filter(|entry| entry.name.as_ref() != custody_name.as_bytes())
+            .cloned()
+            .collect::<Vec<_>>();
+        if post.entries != expected {
+            return Err(invalid_inventory(
+                "descriptor inventory is not the exact baseline minus custody pair",
+            ));
+        }
+        Ok(RemovalProjection::ExactRemoved {
+            snapshot: post.clone(),
+            stored_descriptors,
+        })
+    }
+
     fn project_poisoned_target(
         &self,
         target: &PublicationTarget,
@@ -673,6 +909,16 @@ impl DescriptorStoreSnapshot {
         }
         Ok(TargetInventoryProjection::ExactPresent { stored_descriptors })
     }
+}
+
+enum RemovalProjection {
+    ExactRemoved {
+        snapshot: DescriptorStoreSnapshot,
+        stored_descriptors: u32,
+    },
+    ExactStillPresent {
+        stored_descriptors: u32,
+    },
 }
 
 impl StableStartupInventory {
@@ -795,6 +1041,33 @@ impl fmt::Debug for PoisonedPublication {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+struct RemovalTarget {
+    scope: DescriptorStoreScope,
+    notify_address: NotifySocketAddress,
+    custody_name: CustodyFdName,
+    binding: CustodyDescriptorBinding,
+    baseline: DescriptorStoreSnapshot,
+}
+
+impl fmt::Debug for RemovalTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemovalTarget(<redacted>)")
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct PoisonedRemoval {
+    attempt_id: RemovalAttemptId,
+    target: RemovalTarget,
+}
+
+impl fmt::Debug for PoisonedRemoval {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PoisonedRemoval(<redacted>)")
+    }
+}
+
 struct PublicationGateState {
     last_attempt_id: u64,
     poisoned: Option<PoisonedPublication>,
@@ -806,6 +1079,133 @@ struct PublicationGateState {
 /// and cannot authorize another publication attempt.
 struct PublicationGate {
     state: tokio::sync::Mutex<PublicationGateState>,
+}
+
+struct RemovalGateState {
+    last_attempt_id: u64,
+    poisoned: Option<PoisonedRemoval>,
+}
+
+/// Serializes exact named removals. A dropped attempt remains poisoned from immediately before its
+/// first removal `sendmsg(2)` until exact-removed reconciliation settles it.
+struct RemovalGate {
+    state: tokio::sync::Mutex<RemovalGateState>,
+}
+
+impl RemovalGate {
+    const fn new() -> Self {
+        Self {
+            state: tokio::sync::Mutex::const_new(RemovalGateState {
+                last_attempt_id: 0,
+                poisoned: None,
+            }),
+        }
+    }
+
+    async fn lock_state(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<tokio::sync::MutexGuard<'_, RemovalGateState>, FdStoreError> {
+        ensure_deadline(deadline)?;
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline.expires_at()),
+            self.state.lock(),
+        )
+        .await
+        .map_err(|_| FdStoreError::Deadline)
+    }
+
+    async fn acquire_open(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<RemovalAttempt<'_>, FdStoreError> {
+        let state = self.lock_state(deadline).await?;
+        if state.poisoned.is_some() {
+            return Err(FdStoreError::RemovalPoisoned);
+        }
+        Ok(RemovalAttempt {
+            state,
+            crossed: None,
+        })
+    }
+
+    async fn acquire_poisoned(
+        &self,
+        attempt_id: RemovalAttemptId,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+        deadline: HardDeadline,
+    ) -> Result<PoisonedRemovalObservation<'_>, FdStoreError> {
+        let state = self.lock_state(deadline).await?;
+        let poisoned = state
+            .poisoned
+            .clone()
+            .ok_or(FdStoreError::RemovalNotPoisoned)?;
+        if poisoned.attempt_id != attempt_id
+            || poisoned.target.custody_name != custody_name
+            || &poisoned.target.binding != binding
+        {
+            return Err(FdStoreError::RemovalTargetMismatch);
+        }
+        Ok(PoisonedRemovalObservation { state, poisoned })
+    }
+}
+
+struct RemovalAttempt<'a> {
+    state: tokio::sync::MutexGuard<'a, RemovalGateState>,
+    crossed: Option<PoisonedRemoval>,
+}
+
+impl RemovalAttempt<'_> {
+    /// Conservatively mark immediately before invoking the exact removal send.
+    fn mark_send_attempted(
+        &mut self,
+        target: RemovalTarget,
+    ) -> Result<RemovalAttemptId, FdStoreError> {
+        if self.crossed.is_some() || self.state.poisoned.is_some() {
+            return Err(FdStoreError::RemovalPoisoned);
+        }
+        let next = self
+            .state
+            .last_attempt_id
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(FdStoreError::RemovalAttemptExhausted)?;
+        let poisoned = PoisonedRemoval {
+            attempt_id: RemovalAttemptId(next),
+            target,
+        };
+        self.state.last_attempt_id = next.get();
+        self.state.poisoned = Some(poisoned.clone());
+        self.crossed = Some(poisoned);
+        Ok(RemovalAttemptId(next))
+    }
+
+    fn complete_exact_removed(mut self, attempt_id: RemovalAttemptId) {
+        let exact = self.crossed.as_ref().is_some_and(|crossed| {
+            crossed.attempt_id == attempt_id && self.state.poisoned.as_ref() == Some(crossed)
+        });
+        if !exact {
+            std::process::abort();
+        }
+        self.state.poisoned = None;
+        self.crossed = None;
+    }
+}
+
+struct PoisonedRemovalObservation<'a> {
+    state: tokio::sync::MutexGuard<'a, RemovalGateState>,
+    poisoned: PoisonedRemoval,
+}
+
+impl PoisonedRemovalObservation<'_> {
+    fn complete_exact_removed(mut self) {
+        let exact = self.state.poisoned.as_ref() == Some(&self.poisoned);
+        if !exact {
+            std::process::abort();
+        }
+        self.state.poisoned = None;
+    }
 }
 
 impl PublicationGate {
@@ -1143,6 +1543,27 @@ impl NotifySender {
         }
         Ok(())
     }
+
+    /// Perform exactly one payload-only `sendmsg(2)` call with no ancillary data.
+    fn send_without_descriptors_once(&self, payload: &[u8]) -> Result<(), FdStoreError> {
+        let vectors = [IoSlice::new(payload)];
+        let control: [ControlMessage<'_>; 0] = [];
+        let written = sendmsg(
+            self.socket.as_raw_fd(),
+            &vectors,
+            &control,
+            MsgFlags::MSG_NOSIGNAL,
+            Some(&self.address),
+        )
+        .map_err(nix_io)?;
+        if written != payload.len() {
+            return Err(FdStoreError::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "systemd notification datagram was incomplete",
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Observe the complete startup descriptor-store inventory without publishing or removing any
@@ -1158,12 +1579,18 @@ pub(crate) async fn observe_current_process_startup_inventory(
     let source = SystemdDescriptorStoreSource::for_current_process(deadline).await?;
     let address = NotifySocketAddress::from_environment()?;
     let sender = NotifySender::new(&address)?;
-    observe_stable_startup_inventory(&source, synchronize_manager(&sender, deadline), deadline)
-        .await
+    observe_stable_startup_inventory(
+        &source,
+        address,
+        synchronize_manager(&sender, deadline),
+        deadline,
+    )
+    .await
 }
 
 async fn observe_stable_startup_inventory<S, B>(
     source: &S,
+    notify_address: NotifySocketAddress,
     barrier: B,
     deadline: HardDeadline,
 ) -> Result<StableStartupInventory, FdStoreError>
@@ -1181,7 +1608,296 @@ where
         return Err(FdStoreError::UnstableInventory);
     }
     ensure_deadline(deadline)?;
-    Ok(StableStartupInventory { snapshot: first })
+    Ok(StableStartupInventory {
+        snapshot: first,
+        notify_address,
+    })
+}
+
+/// Dormant exact named-removal adapter. No production server, engine, or request-path caller
+/// exists yet.
+///
+/// `custody` retains the exact affine owners across the operation and is remeasured before the send
+/// boundary and after the stable post-removal inventory. The adapter performs at most one removal
+/// send.
+#[allow(dead_code)]
+pub(crate) async fn remove_current_process_custody(
+    baseline: StableStartupInventory,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactRemovalProof, RemovalFailure> {
+    ensure_deadline(deadline).map_err(RemovalFailure::before_send)?;
+    let source = SystemdDescriptorStoreSource::for_scope(baseline.snapshot.scope.clone(), deadline)
+        .await
+        .map_err(RemovalFailure::before_send)?;
+    let sender =
+        NotifySender::new(&baseline.notify_address).map_err(RemovalFailure::before_send)?;
+    remove_and_attest(
+        &PRODUCTION_REMOVAL_GATE,
+        &source,
+        &sender,
+        baseline,
+        custody_name,
+        expected_binding,
+        custody,
+        deadline,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the removal transaction keeps every authority and deadline input explicit"
+)]
+async fn remove_and_attest<S>(
+    gate: &RemovalGate,
+    source: &S,
+    sender: &NotifySender,
+    baseline: StableStartupInventory,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactRemovalProof, RemovalFailure>
+where
+    S: DescriptorStoreInventorySource,
+{
+    ensure_deadline(deadline).map_err(RemovalFailure::before_send)?;
+    let mut attempt = gate
+        .acquire_open(deadline)
+        .await
+        .map_err(RemovalFailure::before_send)?;
+    if source.scope() != &baseline.snapshot.scope {
+        return Err(RemovalFailure::before_send(
+            FdStoreError::RemovalTargetMismatch,
+        ));
+    }
+    baseline
+        .snapshot
+        .validate_removal_target(source.scope(), custody_name, &expected_binding)
+        .map_err(RemovalFailure::before_send)?;
+    let preflight = within_deadline(deadline, source.snapshot(deadline))
+        .await
+        .map_err(RemovalFailure::before_send)?;
+    preflight
+        .validate_service_contract(source.scope())
+        .map_err(RemovalFailure::before_send)?;
+    if preflight != baseline.snapshot {
+        return Err(RemovalFailure::before_send(invalid_inventory(
+            "removal baseline changed before the send boundary",
+        )));
+    }
+    let before =
+        CustodyDescriptorBinding::from_custody(custody).map_err(RemovalFailure::before_send)?;
+    if before != expected_binding {
+        return Err(RemovalFailure::before_send(invalid_inventory(
+            "local custody binding does not match the removal target",
+        )));
+    }
+    let sender_address = baseline.notify_address.clone();
+    let (barrier_read, barrier_write) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
+        .map_err(nix_io)
+        .map_err(RemovalFailure::before_send)?;
+    let barrier_read = AsyncFd::new(barrier_read)
+        .map_err(FdStoreError::Io)
+        .map_err(RemovalFailure::before_send)?;
+    let removal_message = fdstore_remove_message(custody_name);
+    ensure_deadline(deadline).map_err(RemovalFailure::before_send)?;
+
+    let target = RemovalTarget {
+        scope: source.scope().clone(),
+        notify_address: sender_address.clone(),
+        custody_name,
+        binding: expected_binding.clone(),
+        baseline: baseline.snapshot.clone(),
+    };
+    let attempt_id = attempt
+        .mark_send_attempted(target)
+        .map_err(RemovalFailure::before_send)?;
+    sender
+        .send_without_descriptors_once(&removal_message)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    ensure_deadline(deadline)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    sender
+        .send_once(BARRIER_MESSAGE, &[barrier_write.as_raw_fd()])
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    drop(barrier_write);
+    wait_for_barrier(&barrier_read, deadline)
+        .await
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let first = within_deadline(deadline, source.snapshot(deadline))
+        .await
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    first
+        .validate_service_contract(source.scope())
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let second = within_deadline(deadline, source.snapshot(deadline))
+        .await
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    second
+        .validate_service_contract(source.scope())
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    if first != second {
+        return Err(RemovalFailure::manager_may_have_removed(
+            attempt_id,
+            FdStoreError::UnstableInventory,
+        ));
+    }
+    let after = CustodyDescriptorBinding::from_custody(custody)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    if after != before || after != expected_binding {
+        return Err(RemovalFailure::manager_may_have_removed(
+            attempt_id,
+            invalid_inventory("local custody binding changed during removal"),
+        ));
+    }
+    let projection = baseline
+        .snapshot
+        .project_exact_removal(&first, custody_name, &expected_binding)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let RemovalProjection::ExactRemoved {
+        snapshot,
+        stored_descriptors,
+    } = projection
+    else {
+        return Err(RemovalFailure::manager_may_have_removed(
+            attempt_id,
+            FdStoreError::RemovalStillPresent,
+        ));
+    };
+    ensure_deadline(deadline)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let proof = ExactRemovalProof {
+        custody_name,
+        binding: expected_binding,
+        successor: StableStartupInventory {
+            snapshot,
+            notify_address: sender_address,
+        },
+        stored_descriptors,
+    };
+    attempt.complete_exact_removed(attempt_id);
+    Ok(proof)
+}
+
+/// Reobserve one exact ambiguous removal attempt. Exact-still-present evidence never authorizes a
+/// retry; exact-removed evidence only settles this process-local removal gate.
+#[allow(dead_code)]
+pub(crate) async fn reconcile_current_process_removal(
+    attempt_id: RemovalAttemptId,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> RemovalInventoryReconciliation {
+    if let Err(error) = ensure_deadline(deadline) {
+        return RemovalInventoryReconciliation::Unresolved { error };
+    }
+    let observation = match PRODUCTION_REMOVAL_GATE
+        .acquire_poisoned(attempt_id, custody_name, &expected_binding, deadline)
+        .await
+    {
+        Ok(observation) => observation,
+        Err(error) => return RemovalInventoryReconciliation::Unresolved { error },
+    };
+    let source = match SystemdDescriptorStoreSource::for_scope(
+        observation.poisoned.target.scope.clone(),
+        deadline,
+    )
+    .await
+    {
+        Ok(source) => source,
+        Err(error) => return RemovalInventoryReconciliation::Unresolved { error },
+    };
+    let sender = match NotifySender::new(&observation.poisoned.target.notify_address) {
+        Ok(sender) => sender,
+        Err(error) => return RemovalInventoryReconciliation::Unresolved { error },
+    };
+    reconcile_poisoned_removal(
+        observation,
+        &source,
+        synchronize_manager(&sender, deadline),
+        custody,
+        deadline,
+    )
+    .await
+}
+
+async fn reconcile_poisoned_removal<S, B>(
+    observation: PoisonedRemovalObservation<'_>,
+    source: &S,
+    barrier: B,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> RemovalInventoryReconciliation
+where
+    S: DescriptorStoreInventorySource,
+    B: Future<Output = Result<(), FdStoreError>>,
+{
+    let outcome = async {
+        ensure_deadline(deadline)?;
+        if source.scope() != &observation.poisoned.target.scope {
+            return Err(FdStoreError::RemovalTargetMismatch);
+        }
+        let before = CustodyDescriptorBinding::from_custody(custody)?;
+        if before != observation.poisoned.target.binding {
+            return Err(FdStoreError::RemovalTargetMismatch);
+        }
+        within_deadline(deadline, barrier).await?;
+        let first = within_deadline(deadline, source.snapshot(deadline)).await?;
+        first.validate_service_contract(&observation.poisoned.target.scope)?;
+        let second = within_deadline(deadline, source.snapshot(deadline)).await?;
+        second.validate_service_contract(&observation.poisoned.target.scope)?;
+        if first != second {
+            return Err(FdStoreError::UnstableInventory);
+        }
+        let after = CustodyDescriptorBinding::from_custody(custody)?;
+        if before != after || after != observation.poisoned.target.binding {
+            return Err(invalid_inventory(
+                "local custody binding changed during removal reconciliation",
+            ));
+        }
+        let projection = observation.poisoned.target.baseline.project_exact_removal(
+            &first,
+            observation.poisoned.target.custody_name,
+            &observation.poisoned.target.binding,
+        )?;
+        ensure_deadline(deadline)?;
+        Ok(projection)
+    }
+    .await;
+
+    match outcome {
+        Ok(RemovalProjection::ExactRemoved {
+            snapshot,
+            stored_descriptors,
+        }) => {
+            let custody_name = observation.poisoned.target.custody_name;
+            let binding = observation.poisoned.target.binding.clone();
+            let notify_address = observation.poisoned.target.notify_address.clone();
+            observation.complete_exact_removed();
+            RemovalInventoryReconciliation::ExactRemoved(ExactRemovalProof {
+                custody_name,
+                binding,
+                successor: StableStartupInventory {
+                    snapshot,
+                    notify_address,
+                },
+                stored_descriptors,
+            })
+        }
+        Ok(RemovalProjection::ExactStillPresent { stored_descriptors }) => {
+            RemovalInventoryReconciliation::ExactStillPresent(ExactStillPresentRemovalEvidence {
+                attempt: observation.poisoned.clone(),
+                stored_descriptors,
+            })
+        }
+        Err(error) => RemovalInventoryReconciliation::Unresolved { error },
+    }
 }
 
 /// Publish through the production systemd manager interfaces. No production server, engine, or
@@ -1463,6 +2179,14 @@ fn fdstore_message(custody_name: CustodyFdName) -> [u8; FDSTORE_MESSAGE_BYTES] {
     message
 }
 
+fn fdstore_remove_message(custody_name: CustodyFdName) -> [u8; FDSTORE_REMOVE_MESSAGE_BYTES] {
+    let mut message = [0_u8; FDSTORE_REMOVE_MESSAGE_BYTES];
+    let name_start = FDSTORE_REMOVE_PREFIX.len();
+    message[..name_start].copy_from_slice(FDSTORE_REMOVE_PREFIX);
+    message[name_start..].copy_from_slice(custody_name.as_bytes());
+    message
+}
+
 async fn wait_for_barrier(
     descriptor: &AsyncFd<OwnedFd>,
     deadline: HardDeadline,
@@ -1707,6 +2431,47 @@ mod tests {
     fn fake_notify_address() -> NotifySocketAddress {
         NotifySocketAddress::parse(OsStr::new("/run/volparossa-test-notify.sock"))
             .expect("valid fake notify address")
+    }
+
+    fn stable_inventory(
+        snapshot: DescriptorStoreSnapshot,
+        notify_address: NotifySocketAddress,
+    ) -> StableStartupInventory {
+        StableStartupInventory {
+            snapshot,
+            notify_address,
+        }
+    }
+
+    fn custody_binding(custody: BorrowedCustodyPair<'_>) -> CustodyDescriptorBinding {
+        CustodyDescriptorBinding::from_custody(custody).expect("exact custody binding")
+    }
+
+    fn exact_pair_entries(
+        name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+    ) -> [InventoryEntry; DESCRIPTORS_PER_CUSTODY] {
+        [
+            inventory_entry(name, binding.0[1].clone()),
+            inventory_entry(name, binding.0[0].clone()),
+        ]
+    }
+
+    fn assert_no_datagram(socket: &UnixDatagram) {
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("set no-datagram timeout");
+        let mut payload = [0_u8; 1];
+        let error = socket
+            .recv(&mut payload)
+            .expect_err("no manager notification was sent");
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "unexpected no-datagram error: {error:?}"
+        );
     }
 
     async fn poison_attempt(
@@ -2021,9 +2786,10 @@ mod tests {
         };
         let deadline = HardDeadline::after(Duration::from_secs(2)).expect("startup deadline");
 
-        let inventory = observe_stable_startup_inventory(&source, barrier, deadline)
-            .await
-            .expect("stable exact startup inventory");
+        let inventory =
+            observe_stable_startup_inventory(&source, fake_notify_address(), barrier, deadline)
+                .await
+                .expect("stable exact startup inventory");
         let inherited = BTreeMap::from([
             (first_name, first_binding.clone()),
             (second_name, second_binding.clone()),
@@ -2065,6 +2831,7 @@ mod tests {
         let observed_barrier = Arc::clone(&barrier_seen);
         let inventory = observe_stable_startup_inventory(
             &source,
+            fake_notify_address(),
             async move {
                 observed_barrier.store(true, Ordering::SeqCst);
                 Ok(())
@@ -2106,6 +2873,7 @@ mod tests {
             let source = FakeInventorySource::new(42, vec![first.clone(), changed]);
             let result = observe_stable_startup_inventory(
                 &source,
+                fake_notify_address(),
                 std::future::ready(Ok(())),
                 HardDeadline::after(Duration::from_secs(2)).expect("unstable startup deadline"),
             )
@@ -2124,6 +2892,7 @@ mod tests {
             let source = FakeInventorySource::new(42, vec![malformed.clone(), malformed]);
             let result = observe_stable_startup_inventory(
                 &source,
+                fake_notify_address(),
                 std::future::ready(Ok(())),
                 HardDeadline::after(Duration::from_secs(2)).expect("malformed startup deadline"),
             )
@@ -2149,6 +2918,7 @@ mod tests {
         let source = FakeInventorySource::new(42, vec![malformed_name.clone(), malformed_name]);
         let inventory = observe_stable_startup_inventory(
             &source,
+            fake_notify_address(),
             std::future::ready(Ok(())),
             HardDeadline::after(Duration::from_secs(2)).expect("malformed name deadline"),
         )
@@ -2186,6 +2956,7 @@ mod tests {
             FakeInventorySource::new(42, vec![extra_snapshot.clone(), extra_snapshot]);
         let extra = observe_stable_startup_inventory(
             &extra_source,
+            fake_notify_address(),
             std::future::ready(Ok(())),
             HardDeadline::after(Duration::from_secs(2)).expect("extra startup deadline"),
         )
@@ -2206,6 +2977,7 @@ mod tests {
             FakeInventorySource::new(42, vec![partial_snapshot.clone(), partial_snapshot]);
         let partial = observe_stable_startup_inventory(
             &partial_source,
+            fake_notify_address(),
             std::future::ready(Ok(())),
             HardDeadline::after(Duration::from_secs(2)).expect("partial startup deadline"),
         )
@@ -2240,6 +3012,7 @@ mod tests {
         let source = FakeInventorySource::new(42, vec![manager_snapshot.clone(), manager_snapshot]);
         let manager = observe_stable_startup_inventory(
             &source,
+            fake_notify_address(),
             std::future::ready(Ok(())),
             HardDeadline::after(Duration::from_secs(2)).expect("alias startup deadline"),
         )
@@ -2272,6 +3045,7 @@ mod tests {
 
         let result = observe_stable_startup_inventory(
             &source,
+            fake_notify_address(),
             std::future::pending::<Result<(), FdStoreError>>(),
             deadline,
         )
@@ -2292,7 +3066,7 @@ mod tests {
             .find("pub(crate) async fn observe_current_process_startup_inventory")
             .expect("startup observer source start");
         let end = source[start..]
-            .find("/// Publish through the production systemd manager interfaces")
+            .find("/// Dormant exact named-removal adapter")
             .map(|offset| start + offset)
             .expect("startup observer source end");
         let observer = &source[start..end];
@@ -2312,6 +3086,1102 @@ mod tests {
             assert!(
                 !observer.contains(forbidden),
                 "startup observer must not contain {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_removal_is_payload_only_barriered_and_preserves_unrelated_inventory_and_owners()
+    {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("remove-notify.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("removal sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct removal descriptor")
+            .expect("make removal fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow removal pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(70);
+        let unrelated_name = custody_name(71);
+        let unrelated_binding =
+            CustodyDescriptorBinding([descriptor_identity(800), descriptor_identity(810)]);
+        let mut baseline_entries = Vec::from(exact_pair_entries(target_name, &binding));
+        baseline_entries.extend(exact_pair_entries(unrelated_name, &unrelated_binding));
+        let baseline_snapshot = snapshot(42, baseline_entries);
+        let successor_snapshot = snapshot(
+            42,
+            Vec::from(exact_pair_entries(unrelated_name, &unrelated_binding)),
+        );
+        let source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                successor_snapshot.clone(),
+                successor_snapshot,
+            ],
+        );
+        let gate = RemovalGate::new();
+        let expected_removal = fdstore_remove_message(target_name);
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, expected_removal);
+            assert!(descriptors.is_empty(), "removal carried ancillary FDs");
+            for forbidden in [b"FDSTORE=1".as_slice(), b"FDPOLL=0", b"READY=1"] {
+                assert!(
+                    !message
+                        .windows(forbidden.len())
+                        .any(|window| window == forbidden),
+                    "removal carried forbidden assignment"
+                );
+            }
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1, "barrier carried the wrong FD count");
+            close_received(descriptors);
+        });
+        let deadline = HardDeadline::after(Duration::from_secs(2)).expect("removal deadline");
+
+        let proof = remove_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot, address.clone()),
+            target_name,
+            binding.clone(),
+            custody,
+            deadline,
+        )
+        .await
+        .expect("exact named removal");
+
+        receiver_thread.join().expect("fake systemd receiver");
+        proof
+            .verify_exact_target(target_name, &binding)
+            .expect("proof target correlation");
+        assert_eq!(proof.stored_descriptors, 2);
+        assert_eq!(format!("{proof:?}"), "ExactRemovalProof(<redacted>)");
+        DescriptorIdentity::from_descriptor(pidfd.as_fd()).expect("pidfd owner remains alive");
+        DescriptorIdentity::from_descriptor(network_namespace.as_fd())
+            .expect("namespace owner remains alive");
+        let successor = proof.into_successor();
+        assert_eq!(successor.notify_address, address);
+        successor
+            .verify_complete_exact_set(&BTreeMap::from([(unrelated_name, unrelated_binding)]))
+            .expect("only the unrelated pair remains");
+        drop(
+            gate.acquire_open(
+                HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
+            )
+            .await
+            .expect("successful removal clears gate"),
+        );
+    }
+
+    #[test]
+    fn removal_baseline_requires_fixed_complete_unaliased_pairs_and_exact_target_binding() {
+        let target_name = custody_name(72);
+        let unrelated_name = custody_name(73);
+        let binding =
+            CustodyDescriptorBinding([descriptor_identity(820), descriptor_identity(830)]);
+        let exact = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        exact
+            .validate_removal_target(&fake_scope(42), target_name, &binding)
+            .expect("exact unordered target pair is valid");
+
+        let absent = snapshot(42, Vec::from(exact_pair_entries(unrelated_name, &binding)));
+        assert!(matches!(
+            absent.validate_removal_target(&fake_scope(42), target_name, &binding),
+            Err(FdStoreError::InvalidInventory(
+                "removal target is absent from the baseline"
+            ))
+        ));
+
+        let partial = snapshot(42, vec![inventory_entry(target_name, binding.0[0].clone())]);
+        assert!(matches!(
+            partial.validate_removal_target(&fake_scope(42), target_name, &binding),
+            Err(FdStoreError::InvalidInventory(
+                "removal baseline custody name does not contain exactly two descriptors"
+            ))
+        ));
+
+        let mut overfull_entries = Vec::from(exact_pair_entries(target_name, &binding));
+        overfull_entries.push(inventory_entry(target_name, descriptor_identity(840)));
+        let overfull = snapshot(42, overfull_entries);
+        assert!(matches!(
+            overfull.validate_removal_target(&fake_scope(42), target_name, &binding),
+            Err(FdStoreError::InvalidInventory(
+                "removal baseline custody name does not contain exactly two descriptors"
+            ))
+        ));
+
+        let wrong = CustodyDescriptorBinding([binding.0[0].clone(), descriptor_identity(850)]);
+        assert!(matches!(
+            exact.validate_removal_target(&fake_scope(42), target_name, &wrong),
+            Err(FdStoreError::InvalidInventory(
+                "removal target does not match the exact local binding"
+            ))
+        ));
+
+        let mut malformed_entries = Vec::from(exact_pair_entries(target_name, &binding));
+        malformed_entries.extend([
+            InventoryEntry {
+                name: Box::from(&b"legacy-name"[..]),
+                identity: descriptor_identity(860),
+            },
+            InventoryEntry {
+                name: Box::from(&b"legacy-name"[..]),
+                identity: descriptor_identity(870),
+            },
+        ]);
+        let malformed = snapshot(42, malformed_entries);
+        assert!(matches!(
+            malformed.validate_removal_target(&fake_scope(42), target_name, &binding),
+            Err(FdStoreError::InvalidInventory(
+                "removal baseline custody name is invalid"
+            ))
+        ));
+
+        let mut alias = binding.0[0].clone();
+        alias.status_flags ^= 1;
+        assert!(alias.is_same_kernel_object(&binding.0[0]));
+        let mut aliased_entries = Vec::from(exact_pair_entries(target_name, &binding));
+        aliased_entries.extend([
+            inventory_entry(unrelated_name, alias),
+            inventory_entry(unrelated_name, descriptor_identity(880)),
+        ]);
+        let aliased = snapshot(42, aliased_entries);
+        assert!(matches!(
+            aliased.validate_removal_target(&fake_scope(42), target_name, &binding),
+            Err(FdStoreError::InvalidInventory(
+                "removal baseline descriptor identity is reused"
+            ))
+        ));
+    }
+
+    #[test]
+    fn removal_projection_accepts_only_unchanged_or_exact_baseline_minus_target() {
+        let target_name = custody_name(74);
+        let unrelated_name = custody_name(75);
+        let added_name = custody_name(76);
+        let binding =
+            CustodyDescriptorBinding([descriptor_identity(900), descriptor_identity(910)]);
+        let unrelated =
+            CustodyDescriptorBinding([descriptor_identity(920), descriptor_identity(930)]);
+        let mut baseline_entries = Vec::from(exact_pair_entries(target_name, &binding));
+        baseline_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
+        let baseline = snapshot(42, baseline_entries);
+        let exact_post = snapshot(
+            42,
+            Vec::from(exact_pair_entries(unrelated_name, &unrelated)),
+        );
+
+        assert!(matches!(
+            baseline
+                .project_exact_removal(&baseline, target_name, &binding)
+                .expect("unchanged projection"),
+            RemovalProjection::ExactStillPresent {
+                stored_descriptors: 4
+            }
+        ));
+        assert!(matches!(
+            baseline
+                .project_exact_removal(&exact_post, target_name, &binding)
+                .expect("exact removed projection"),
+            RemovalProjection::ExactRemoved {
+                stored_descriptors: 2,
+                ..
+            }
+        ));
+
+        let mut partial_entries = Vec::from(exact_pair_entries(unrelated_name, &unrelated));
+        partial_entries.push(inventory_entry(target_name, binding.0[0].clone()));
+        let partial = snapshot(42, partial_entries);
+        let mut wrong = exact_post.clone();
+        wrong.entries[0].identity.status_flags ^= 1;
+        wrong.entries.sort_unstable();
+        let mut extra_entries = exact_post.entries.clone();
+        extra_entries.extend(exact_pair_entries(
+            added_name,
+            &CustodyDescriptorBinding([descriptor_identity(940), descriptor_identity(950)]),
+        ));
+        let extra = snapshot(42, extra_entries);
+        let unrelated_partial = snapshot(
+            42,
+            vec![inventory_entry(unrelated_name, unrelated.0[0].clone())],
+        );
+        let mut service_drift = exact_post.clone();
+        service_drift.notify_access = "all".into();
+
+        for drift in [partial, wrong, extra, unrelated_partial, service_drift] {
+            assert!(matches!(
+                baseline.project_exact_removal(&drift, target_name, &binding),
+                Err(FdStoreError::InvalidInventory(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn removal_preflight_drift_is_before_send_and_emits_no_datagram() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("preflight-drift.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("removal sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow removal pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(77);
+        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let unrelated_name = custody_name(78);
+        let unrelated =
+            CustodyDescriptorBinding([descriptor_identity(960), descriptor_identity(970)]);
+        let mut drifted_entries = baseline_snapshot.entries.clone();
+        drifted_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
+        let source = FakeInventorySource::new(42, vec![snapshot(42, drifted_entries)]);
+        let gate = RemovalGate::new();
+
+        let result = remove_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot, address),
+            target_name,
+            binding,
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("preflight deadline"),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::InvalidInventory(
+                    "removal baseline changed before the send boundary"
+                )
+            })
+        ));
+        assert_no_datagram(&receiver);
+        drop(
+            gate.acquire_open(
+                HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
+            )
+            .await
+            .expect("preflight failure leaves gate open"),
+        );
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test follows one poisoned attempt through every forbidden and terminal path"
+    )]
+    #[tokio::test]
+    async fn exact_still_present_poison_reconciles_without_blind_retry() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("still-present.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("removal sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow removal pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(79);
+        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                baseline_snapshot.clone(),
+                baseline_snapshot.clone(),
+            ],
+        );
+        let gate = RemovalGate::new();
+        let expected_removal = fdstore_remove_message(target_name);
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, expected_removal);
+            assert!(descriptors.is_empty());
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1);
+            close_received(descriptors);
+        });
+
+        let result = remove_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot.clone(), address.clone()),
+            target_name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("removal deadline"),
+        )
+        .await;
+        receiver_thread.join().expect("fake systemd receiver");
+        let attempt_id = match result {
+            Err(RemovalFailure::ManagerMayHaveRemoved {
+                attempt_id,
+                error: FdStoreError::RemovalStillPresent,
+            }) => attempt_id,
+            other => panic!("unexpected still-present result: {other:?}"),
+        };
+        assert!(matches!(
+            gate.acquire_open(
+                HardDeadline::after(Duration::from_secs(2)).expect("poison check deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+
+        let retry_source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
+        let retry = remove_and_attest(
+            &gate,
+            &retry_source,
+            &sender,
+            stable_inventory(baseline_snapshot.clone(), address),
+            target_name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("retry deadline"),
+        )
+        .await;
+        assert!(matches!(
+            retry,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalPoisoned
+            })
+        ));
+        assert_eq!(
+            retry_source
+                .snapshots
+                .lock()
+                .expect("retry snapshots")
+                .len(),
+            1,
+            "blocked retry did not even reobserve the manager"
+        );
+
+        let mismatch_deadline =
+            HardDeadline::after(Duration::from_secs(2)).expect("mismatch deadline");
+        assert!(matches!(
+            gate.acquire_poisoned(
+                RemovalAttemptId::for_test(999),
+                target_name,
+                &binding,
+                mismatch_deadline,
+            )
+            .await,
+            Err(FdStoreError::RemovalTargetMismatch)
+        ));
+        assert!(matches!(
+            gate.acquire_poisoned(attempt_id, custody_name(80), &binding, mismatch_deadline,)
+                .await,
+            Err(FdStoreError::RemovalTargetMismatch)
+        ));
+        let wrong_binding =
+            CustodyDescriptorBinding([binding.0[0].clone(), descriptor_identity(980)]);
+        assert!(matches!(
+            gate.acquire_poisoned(attempt_id, target_name, &wrong_binding, mismatch_deadline,)
+                .await,
+            Err(FdStoreError::RemovalTargetMismatch)
+        ));
+
+        let still_source = FakeInventorySource::new(
+            42,
+            vec![baseline_snapshot.clone(), baseline_snapshot.clone()],
+        );
+        let observation = gate
+            .acquire_poisoned(
+                attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("still observation deadline"),
+            )
+            .await
+            .expect("exact poisoned attempt");
+        let still = reconcile_poisoned_removal(
+            observation,
+            &still_source,
+            std::future::ready(Ok(())),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("still reconcile deadline"),
+        )
+        .await;
+        match still {
+            RemovalInventoryReconciliation::ExactStillPresent(evidence) => {
+                assert_eq!(evidence.attempt.attempt_id, attempt_id);
+                assert_eq!(evidence.stored_descriptors, 2);
+                assert_eq!(
+                    format!("{evidence:?}"),
+                    "ExactStillPresentRemovalEvidence(<redacted>)"
+                );
+            }
+            other => panic!("unexpected exact-still-present reconciliation: {other:?}"),
+        }
+        assert!(matches!(
+            gate.acquire_open(
+                HardDeadline::after(Duration::from_secs(2)).expect("still poison deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+
+        let removed_snapshot = snapshot(42, Vec::new());
+        let removed_source =
+            FakeInventorySource::new(42, vec![removed_snapshot.clone(), removed_snapshot]);
+        let observation = gate
+            .acquire_poisoned(
+                attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("removed observation deadline"),
+            )
+            .await
+            .expect("same exact poisoned attempt");
+        let removed = reconcile_poisoned_removal(
+            observation,
+            &removed_source,
+            std::future::ready(Ok(())),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("removed reconcile deadline"),
+        )
+        .await;
+        match removed {
+            RemovalInventoryReconciliation::ExactRemoved(proof) => {
+                proof
+                    .verify_exact_target(target_name, &binding)
+                    .expect("exact removed target");
+                assert_eq!(proof.stored_descriptors, 0);
+            }
+            other => panic!("unexpected exact-removed reconciliation: {other:?}"),
+        }
+        drop(
+            gate.acquire_open(
+                HardDeadline::after(Duration::from_secs(2)).expect("cleared gate deadline"),
+            )
+            .await
+            .expect("only exact-removed reconciliation clears poison"),
+        );
+    }
+
+    #[tokio::test]
+    async fn unstable_post_send_inventory_is_ambiguous_and_poisoned() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("unstable-removal.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("removal sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow removal pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(81);
+        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let removed_snapshot = snapshot(42, Vec::new());
+        let source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                removed_snapshot,
+                baseline_snapshot.clone(),
+            ],
+        );
+        let gate = RemovalGate::new();
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, fdstore_remove_message(target_name));
+            assert!(descriptors.is_empty());
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1);
+            close_received(descriptors);
+        });
+
+        let result = remove_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot, address),
+            target_name,
+            binding,
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("unstable deadline"),
+        )
+        .await;
+
+        receiver_thread.join().expect("fake systemd receiver");
+        assert!(matches!(
+            result,
+            Err(RemovalFailure::ManagerMayHaveRemoved {
+                error: FdStoreError::UnstableInventory,
+                ..
+            })
+        ));
+        assert!(matches!(
+            gate.acquire_open(
+                HardDeadline::after(Duration::from_secs(2)).expect("poison deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_owner_drift_after_barrier_is_ambiguous_and_poisoned() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("local-drift.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("removal sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow removal pair");
+        let binding = custody_binding(custody);
+        let shared_pidfd = nix::unistd::dup(pidfd.as_fd()).expect("duplicate shared pidfd");
+        let target_name = custody_name(82);
+        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let removed_snapshot = snapshot(42, Vec::new());
+        let source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                removed_snapshot.clone(),
+                removed_snapshot,
+            ],
+        );
+        let gate = RemovalGate::new();
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, fdstore_remove_message(target_name));
+            assert!(descriptors.is_empty());
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1);
+            fcntl(shared_pidfd.as_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+                .expect("change retained open-file status flags");
+            close_received(descriptors);
+        });
+
+        let result = remove_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot, address),
+            target_name,
+            binding,
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("local drift deadline"),
+        )
+        .await;
+
+        receiver_thread.join().expect("fake systemd receiver");
+        assert!(matches!(
+            result,
+            Err(RemovalFailure::ManagerMayHaveRemoved {
+                error: FdStoreError::InvalidInventory(
+                    "local custody binding changed during removal"
+                ),
+                ..
+            })
+        ));
+        assert!(matches!(
+            gate.acquire_open(
+                HardDeadline::after(Duration::from_secs(2)).expect("poison deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test compares both sides of the removal send boundary under deadlines"
+    )]
+    #[tokio::test]
+    async fn removal_deadline_before_and_after_send_preserves_attempt_boundary() {
+        let directory = tempdir().expect("notification directory");
+        let before_path = directory.path().join("before-deadline.sock");
+        let before_receiver =
+            UnixDatagram::bind(&before_path).expect("bind before-deadline socket");
+        let before_address =
+            NotifySocketAddress::parse(before_path.as_os_str()).expect("before notify address");
+        let before_sender = NotifySender::new(&before_address).expect("before sender");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow removal pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(83);
+        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let before_source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
+        let before_gate = RemovalGate::new();
+        let expired = HardDeadline::after(Duration::from_millis(1)).expect("short deadline");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let before = remove_and_attest(
+            &before_gate,
+            &before_source,
+            &before_sender,
+            stable_inventory(baseline_snapshot.clone(), before_address),
+            target_name,
+            binding.clone(),
+            custody,
+            expired,
+        )
+        .await;
+        assert!(matches!(
+            before,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::Deadline
+            })
+        ));
+        assert_no_datagram(&before_receiver);
+        drop(
+            before_gate
+                .acquire_open(
+                    HardDeadline::after(Duration::from_secs(2)).expect("before open-gate deadline"),
+                )
+                .await
+                .expect("expired before-send leaves gate open"),
+        );
+
+        let after_path = directory.path().join("after-deadline.sock");
+        let after_receiver = UnixDatagram::bind(&after_path).expect("bind after-deadline socket");
+        after_receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let after_address =
+            NotifySocketAddress::parse(after_path.as_os_str()).expect("after notify address");
+        let after_sender = NotifySender::new(&after_address).expect("after sender");
+        let removed_snapshot = snapshot(42, Vec::new());
+        let after_source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                removed_snapshot.clone(),
+                removed_snapshot,
+            ],
+        );
+        let after_gate = RemovalGate::new();
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&after_receiver);
+            assert_eq!(message, fdstore_remove_message(target_name));
+            assert!(descriptors.is_empty());
+            let (message, descriptors) = receive_message(&after_receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1);
+            thread::sleep(Duration::from_millis(400));
+            close_received(descriptors);
+        });
+        let one_deadline =
+            HardDeadline::after(Duration::from_millis(200)).expect("one removal deadline");
+
+        let after = remove_and_attest(
+            &after_gate,
+            &after_source,
+            &after_sender,
+            stable_inventory(baseline_snapshot, after_address),
+            target_name,
+            binding,
+            custody,
+            one_deadline,
+        )
+        .await;
+
+        receiver_thread.join().expect("fake systemd receiver");
+        assert!(matches!(
+            after,
+            Err(RemovalFailure::ManagerMayHaveRemoved {
+                error: FdStoreError::Deadline,
+                ..
+            })
+        ));
+        assert!(matches!(
+            after_gate
+                .acquire_open(
+                    HardDeadline::after(Duration::from_secs(2)).expect("after poison deadline")
+                )
+                .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test compares cancellation immediately before and after the send boundary"
+    )]
+    #[tokio::test]
+    async fn cancellation_before_send_is_clean_but_after_send_remains_poisoned() {
+        let directory = tempdir().expect("notification directory");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow removal pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(84);
+        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+
+        let before_path = directory.path().join("cancel-before.sock");
+        let before_receiver = UnixDatagram::bind(&before_path).expect("bind cancel-before socket");
+        let before_address =
+            NotifySocketAddress::parse(before_path.as_os_str()).expect("before notify address");
+        let before_sender = NotifySender::new(&before_address).expect("before sender");
+        let before_source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
+        let before_gate = RemovalGate::new();
+        let held = before_gate
+            .acquire_open(HardDeadline::after(Duration::from_secs(2)).expect("held-gate deadline"))
+            .await
+            .expect("hold removal gate before boundary");
+        let mut before = Box::pin(remove_and_attest(
+            &before_gate,
+            &before_source,
+            &before_sender,
+            stable_inventory(baseline_snapshot.clone(), before_address),
+            target_name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("cancel-before deadline"),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut before)
+                .await
+                .is_err(),
+            "operation is blocked before the send boundary"
+        );
+        drop(before);
+        drop(held);
+        assert_no_datagram(&before_receiver);
+        assert_eq!(
+            before_source
+                .snapshots
+                .lock()
+                .expect("before snapshots")
+                .len(),
+            1
+        );
+        drop(
+            before_gate
+                .acquire_open(
+                    HardDeadline::after(Duration::from_secs(2)).expect("before reopened deadline"),
+                )
+                .await
+                .expect("cancel-before leaves no poison"),
+        );
+
+        let after_path = directory.path().join("cancel-after.sock");
+        let after_receiver = UnixDatagram::bind(&after_path).expect("bind cancel-after socket");
+        after_receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let after_address =
+            NotifySocketAddress::parse(after_path.as_os_str()).expect("after notify address");
+        let after_sender = NotifySender::new(&after_address).expect("after sender");
+        let removed_snapshot = snapshot(42, Vec::new());
+        let after_source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                removed_snapshot.clone(),
+                removed_snapshot,
+            ],
+        );
+        let after_gate = RemovalGate::new();
+        let (sent_sender, sent_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&after_receiver);
+            assert_eq!(message, fdstore_remove_message(target_name));
+            assert!(descriptors.is_empty());
+            sent_sender.send(()).expect("signal removal send");
+            release_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("hold fake manager endpoint");
+        });
+        let mut after = Box::pin(remove_and_attest(
+            &after_gate,
+            &after_source,
+            &after_sender,
+            stable_inventory(baseline_snapshot, after_address),
+            target_name,
+            binding,
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("cancel-after deadline"),
+        ));
+        tokio::select! {
+            result = &mut after => panic!("operation completed before cancellation: {result:?}"),
+            observed = sent_receiver => observed.expect("manager observed removal send"),
+        }
+        drop(after);
+        release_sender
+            .send(())
+            .expect("release fake manager endpoint");
+        receiver_thread.join().expect("fake systemd receiver");
+        assert!(matches!(
+            after_gate
+                .acquire_open(
+                    HardDeadline::after(Duration::from_secs(2))
+                        .expect("cancel-after poison deadline")
+                )
+                .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the sequential proof keeps both affine owner pairs and both socket exchanges visible"
+    )]
+    #[tokio::test]
+    async fn exact_successors_support_bounded_sequential_named_removals() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("sequential-removal.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("removal sender");
+        let first_pidfd = tempfile().expect("first pidfd fixture");
+        let first_namespace = tempfile().expect("first namespace fixture");
+        let second_pidfd = tempfile().expect("second pidfd fixture");
+        let second_namespace = tempfile().expect("second namespace fixture");
+        let first_custody = BorrowedCustodyPair::new(first_pidfd.as_fd(), first_namespace.as_fd())
+            .expect("borrow first removal pair");
+        let second_custody =
+            BorrowedCustodyPair::new(second_pidfd.as_fd(), second_namespace.as_fd())
+                .expect("borrow second removal pair");
+        let first_binding = custody_binding(first_custody);
+        let second_binding = custody_binding(second_custody);
+        let first_name = custody_name(85);
+        let second_name = custody_name(86);
+        let mut baseline_entries = Vec::from(exact_pair_entries(first_name, &first_binding));
+        baseline_entries.extend(exact_pair_entries(second_name, &second_binding));
+        let baseline_snapshot = snapshot(42, baseline_entries);
+        let first_successor = snapshot(
+            42,
+            Vec::from(exact_pair_entries(second_name, &second_binding)),
+        );
+        let second_successor = snapshot(42, Vec::new());
+        let source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                first_successor.clone(),
+                first_successor.clone(),
+                first_successor.clone(),
+                second_successor.clone(),
+                second_successor,
+            ],
+        );
+        let gate = RemovalGate::new();
+        let receiver_thread = thread::spawn(move || {
+            for name in [first_name, second_name] {
+                let (message, descriptors) = receive_message(&receiver);
+                assert_eq!(message, fdstore_remove_message(name));
+                assert!(descriptors.is_empty());
+                let (message, descriptors) = receive_message(&receiver);
+                assert_eq!(message, BARRIER_MESSAGE);
+                assert_eq!(descriptors.len(), 1);
+                close_received(descriptors);
+            }
+        });
+
+        let first_proof = remove_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot, address.clone()),
+            first_name,
+            first_binding.clone(),
+            first_custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("first removal deadline"),
+        )
+        .await
+        .expect("first exact removal");
+        assert_eq!(first_proof.stored_descriptors, 2);
+        let first_successor = first_proof.into_successor();
+        first_successor
+            .verify_complete_exact_set(&BTreeMap::from([(second_name, second_binding.clone())]))
+            .expect("first successor retains only second pair");
+
+        let second_proof = remove_and_attest(
+            &gate,
+            &source,
+            &sender,
+            first_successor,
+            second_name,
+            second_binding,
+            second_custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("second removal deadline"),
+        )
+        .await
+        .expect("second exact removal");
+        assert_eq!(second_proof.stored_descriptors, 0);
+        let empty_successor = second_proof.into_successor();
+        assert_eq!(empty_successor.notify_address, address);
+        empty_successor
+            .verify_complete_exact_set(&BTreeMap::new())
+            .expect("second successor is exactly empty");
+        receiver_thread.join().expect("fake systemd receiver");
+        assert!(
+            source
+                .snapshots
+                .lock()
+                .expect("sequential snapshots")
+                .is_empty()
+        );
+        DescriptorIdentity::from_descriptor(first_pidfd.as_fd())
+            .expect("first pidfd owner remains alive");
+        DescriptorIdentity::from_descriptor(first_namespace.as_fd())
+            .expect("first namespace owner remains alive");
+        DescriptorIdentity::from_descriptor(second_pidfd.as_fd())
+            .expect("second pidfd owner remains alive");
+        DescriptorIdentity::from_descriptor(second_namespace.as_fd())
+            .expect("second namespace owner remains alive");
+    }
+
+    #[test]
+    fn removal_inventory_is_bounded_at_sixty_four_exact_pairs() {
+        let target_name = custody_name(0);
+        let target_binding =
+            CustodyDescriptorBinding([descriptor_identity(1_000), descriptor_identity(1_001)]);
+        let mut entries = Vec::with_capacity(MAX_DESCRIPTOR_STORE_ENTRIES);
+        entries.extend(exact_pair_entries(target_name, &target_binding));
+        for seed in 1_u8..64 {
+            let identity_seed = 1_100 + u32::from(seed) * 10;
+            let binding = CustodyDescriptorBinding([
+                descriptor_identity(identity_seed),
+                descriptor_identity(identity_seed + 1),
+            ]);
+            entries.extend(exact_pair_entries(custody_name(seed), &binding));
+        }
+        let maximum = snapshot(42, entries);
+        assert_eq!(maximum.entries.len(), MAX_DESCRIPTOR_STORE_ENTRIES);
+        maximum
+            .validate_removal_target(&fake_scope(42), target_name, &target_binding)
+            .expect("maximum complete inventory is accepted");
+        let exact_post = snapshot(
+            42,
+            maximum
+                .entries
+                .iter()
+                .filter(|entry| entry.name.as_ref() != target_name.as_bytes())
+                .cloned()
+                .collect(),
+        );
+        assert!(matches!(
+            maximum
+                .project_exact_removal(&exact_post, target_name, &target_binding)
+                .expect("bounded exact successor"),
+            RemovalProjection::ExactRemoved {
+                stored_descriptors: 126,
+                ..
+            }
+        ));
+
+        let overflow_name = custody_name(64);
+        let overflow_binding =
+            CustodyDescriptorBinding([descriptor_identity(2_000), descriptor_identity(2_001)]);
+        let mut overflow_entries = maximum.entries.clone();
+        overflow_entries.extend(exact_pair_entries(overflow_name, &overflow_binding));
+        let overflow = snapshot(42, overflow_entries);
+        assert!(matches!(
+            overflow.validate_removal_target(&fake_scope(42), target_name, &target_binding),
+            Err(FdStoreError::InvalidInventory(
+                "removal baseline exceeds the descriptor-store bound"
+            ))
+        ));
+    }
+
+    #[test]
+    fn removal_source_has_one_payload_only_send_one_barrier_and_no_production_caller() {
+        let name = custody_name(87);
+        let message = fdstore_remove_message(name);
+        let mut expected = FDSTORE_REMOVE_PREFIX.to_vec();
+        expected.extend_from_slice(name.as_bytes());
+        assert_eq!(message.as_slice(), expected);
+        assert_eq!(message.len(), FDSTORE_REMOVE_MESSAGE_BYTES);
+        for forbidden in [b"FDSTORE=1".as_slice(), b"FDPOLL=0", b"READY=1"] {
+            assert!(
+                !message
+                    .windows(forbidden.len())
+                    .any(|window| window == forbidden)
+            );
+        }
+
+        let source = include_str!("systemd_fdstore.rs");
+        let start = source
+            .find("pub(crate) async fn remove_current_process_custody")
+            .expect("removal adapter source start");
+        let reconcile = source[start..]
+            .find("pub(crate) async fn reconcile_current_process_removal")
+            .map(|offset| start + offset)
+            .expect("removal reconcile source start");
+        let end = source[reconcile..]
+            .find("/// Publish through the production systemd manager interfaces")
+            .map(|offset| reconcile + offset)
+            .expect("removal adapter source end");
+        let transaction = &source[start..reconcile];
+        assert_eq!(
+            transaction.matches("send_without_descriptors_once").count(),
+            1
+        );
+        assert_eq!(transaction.matches("send_once(BARRIER_MESSAGE").count(), 1);
+        assert_eq!(transaction.matches("source.snapshot(deadline)").count(), 3);
+        for forbidden in [
+            "FDSTORE_PREFIX",
+            "FDPOLL=0",
+            "READY=1",
+            "publish_and_attest",
+            "synchronize_manager",
+        ] {
+            assert!(
+                !transaction.contains(forbidden),
+                "removal transaction must not contain {forbidden}"
+            );
+        }
+        let reconciliation = &source[reconcile..end];
+        assert_eq!(reconciliation.matches("synchronize_manager").count(), 1);
+        assert_eq!(
+            reconciliation.matches("source.snapshot(deadline)").count(),
+            2
+        );
+        assert!(!reconciliation.contains("send_without_descriptors_once"));
+        assert!(source.contains(
+            "removal adapter remains dormant while publication and removal use separate gates"
+        ));
+
+        let server = include_str!("server.rs");
+        for forbidden in [
+            "remove_current_process_custody",
+            "reconcile_current_process_removal",
+        ] {
+            assert!(
+                !server.contains(forbidden),
+                "production server must not wire dormant {forbidden}"
             );
         }
     }
