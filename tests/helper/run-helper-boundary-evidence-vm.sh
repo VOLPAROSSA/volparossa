@@ -1100,10 +1100,11 @@ mv -f target/debug/examples/volparossa-helper-production-ipc-probe.detached \
     target/debug/examples/volparossa-helper-production-ipc-probe
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 set +e
-# The unprivileged shell intentionally owns these bounded output files.
+# The unprivileged shell intentionally owns these bounded output files. The
+# root proof applies its own 1 MiB ceiling after two separately bounded and
+# hash-verified executable staging copies.
 # shellcheck disable=SC2024
-sudo -n prlimit --fsize=1048576:1048576 -- \
-    ./tests/helper/require-live-worker-identity-proof.sh --execute --yes \
+sudo -n -- ./tests/helper/require-live-worker-identity-proof.sh --execute --yes \
     >/home/volparossa/helper-boundary-evidence-v1.json \
     2>/home/volparossa/helper-boundary-proof.stderr.log
 proof_status=$?

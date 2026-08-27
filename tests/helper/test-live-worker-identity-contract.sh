@@ -139,6 +139,143 @@ stream_hasher_failure_gate() {
     )
 }
 
+# Exercise the gate's real snapshot parser rather than a test-side copy. These
+# fixtures cover both accepted size boundaries and every metadata field that
+# grants authority to stage a workspace-owned executable as root.
+source_snapshot_function=$temporary_directory/source-snapshot-function.sh
+sed -n '/^source_snapshot_is_exact() {$/,/^}$/p' "$gate" \
+    >"$source_snapshot_function"
+if [ "$(grep -c '^source_snapshot_is_exact() {$' "$source_snapshot_function")" -ne 1 ]; then
+    printf '%s\n' 'the bounded source-snapshot predicate cannot be isolated' >&2
+    exit 1
+fi
+sh -n "$source_snapshot_function"
+repository_owner_uid=$(id -u)
+repository_owner_gid=$(id -g)
+staged_executable_max_bytes=134217728
+# The function path is generated from the reviewed gate above.
+# shellcheck disable=SC1090
+. "$source_snapshot_function"
+
+require_snapshot_acceptance() {
+    snapshot_description=$1
+    snapshot_value=$2
+    if ! source_snapshot_is_exact \
+        "$snapshot_value" 755 "$staged_executable_max_bytes"; then
+        printf 'valid source snapshot was rejected: %s\n' "$snapshot_description" >&2
+        exit 1
+    fi
+}
+
+require_snapshot_rejection() {
+    snapshot_description=$1
+    snapshot_value=$2
+    if source_snapshot_is_exact \
+        "$snapshot_value" 755 "$staged_executable_max_bytes"; then
+        printf 'adversarial source snapshot was accepted: %s\n' \
+            "$snapshot_description" >&2
+        exit 1
+    fi
+}
+
+snapshot_prefix="regular file:11:12:$repository_owner_uid:$repository_owner_gid:755:1"
+snapshot_suffix='13:14'
+require_snapshot_acceptance size-one \
+    "$snapshot_prefix:1:$snapshot_suffix"
+require_snapshot_acceptance size-exactly-128-mib \
+    "$snapshot_prefix:134217728:$snapshot_suffix"
+require_snapshot_rejection size-zero \
+    "$snapshot_prefix:0:$snapshot_suffix"
+require_snapshot_rejection size-over-128-mib \
+    "$snapshot_prefix:134217729:$snapshot_suffix"
+require_snapshot_rejection wrong-type \
+    "directory:11:12:$repository_owner_uid:$repository_owner_gid:755:1:1:$snapshot_suffix"
+require_snapshot_rejection wrong-uid \
+    "regular file:11:12:$((repository_owner_uid + 1)):$repository_owner_gid:755:1:1:$snapshot_suffix"
+require_snapshot_rejection wrong-gid \
+    "regular file:11:12:$repository_owner_uid:$((repository_owner_gid + 1)):755:1:1:$snapshot_suffix"
+require_snapshot_rejection wrong-mode \
+    "regular file:11:12:$repository_owner_uid:$repository_owner_gid:700:1:1:$snapshot_suffix"
+require_snapshot_rejection extra-hardlink \
+    "regular file:11:12:$repository_owner_uid:$repository_owner_gid:755:2:1:$snapshot_suffix"
+require_snapshot_rejection malformed-missing-field \
+    "$snapshot_prefix:1:13"
+require_snapshot_rejection malformed-extra-field \
+    "$snapshot_prefix:1:$snapshot_suffix:15"
+require_snapshot_rejection malformed-size \
+    "$snapshot_prefix:not-a-size:$snapshot_suffix"
+require_snapshot_rejection noncanonical-size \
+    "$snapshot_prefix:01:$snapshot_suffix"
+
+# `dash` preserves the parent's `$$` inside `( ... )`. Build a new /bin/sh
+# process around the gate's real limiter so this hard-limit test cannot lower
+# the contract runner's own RLIMIT_FSIZE.
+proof_limit_runner=$temporary_directory/proof-limit-runner.sh
+{
+    # Variables in these literal lines expand only in the generated child.
+    # shellcheck disable=SC2016
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'set -eu' \
+        'export LC_ALL=C' \
+        'PATH=/usr/sbin:/usr/bin:/sbin:/bin' \
+        'export PATH' \
+        'umask 077' \
+        'proof_file_max_bytes=1048576'
+    sed -n '/^install_proof_file_limit() {$/,/^}$/p' "$gate"
+    # Variables in these literal lines expand only in the generated child.
+    # shellcheck disable=SC2016
+    printf '%s\n' \
+        '[ "$#" -eq 1 ] || exit 64' \
+        'boundary_file=$1' \
+        '[ ! -e "$boundary_file" ] && [ ! -L "$boundary_file" ] || exit 1' \
+        'if install_proof_file_limit; then exit 1; fi' \
+        'if install_proof_file_limit 1048575; then exit 1; fi' \
+        'if install_proof_file_limit "$proof_file_max_bytes" extra; then exit 1; fi' \
+        'install_proof_file_limit "$proof_file_max_bytes"' \
+        'observed_limit=$(prlimit --pid "$$" --fsize --raw --noheadings --output SOFT,HARD | awk '\''NF == 2 { print $1 ":" $2 }'\'')' \
+        '[ "$observed_limit" = "$proof_file_max_bytes:$proof_file_max_bytes" ]' \
+        'dd if=/dev/zero of="$boundary_file" bs="$proof_file_max_bytes" count=1 status=none' \
+        '[ "$(stat -Lc '\''%s'\'' "$boundary_file")" -eq "$proof_file_max_bytes" ]' \
+        'set +e' \
+        'dd if=/dev/zero of="$boundary_file" bs=1 count=1 oflag=append conv=notrunc status=none 2>/dev/null' \
+        'extra_status=$?' \
+        'set -e' \
+        '[ "$extra_status" -ne 0 ]' \
+        '[ "$(stat -Lc '\''%s'\'' "$boundary_file")" -eq "$proof_file_max_bytes" ]'
+} >"$proof_limit_runner"
+if [ "$(grep -c '^install_proof_file_limit() {$' "$proof_limit_runner")" -ne 1 ]; then
+    printf '%s\n' 'the proof file-size limiter cannot be isolated' >&2
+    exit 1
+fi
+chmod 0700 "$proof_limit_runner"
+sh -n "$proof_limit_runner"
+parent_fsize_before=$(
+    prlimit --pid "$$" --fsize --raw --noheadings --output SOFT,HARD \
+        | awk 'NF == 2 { print $1 ":" $2 }'
+)
+case $parent_fsize_before in
+    ''|*:|:*|*:*:*)
+        printf '%s\n' 'the parent file-size limit is not observable' >&2
+        exit 1
+        ;;
+esac
+proof_limit_boundary=$temporary_directory/proof-limit-boundary
+expect_status 0 /bin/sh "$proof_limit_runner" "$proof_limit_boundary"
+parent_fsize_after=$(
+    prlimit --pid "$$" --fsize --raw --noheadings --output SOFT,HARD \
+        | awk 'NF == 2 { print $1 ":" $2 }'
+)
+if [ "$parent_fsize_before" != "$parent_fsize_after" ]; then
+    printf '%s\n' 'the child limiter changed the contract runner file-size limit' >&2
+    exit 1
+fi
+if [ "$(stat -Lc '%F:%u:%a:%h:%s' "$proof_limit_boundary")" \
+    != "regular file:$(id -u):600:1:1048576" ]; then
+    printf '%s\n' 'the proof-limit boundary write did not fail closed at exactly 1 MiB' >&2
+    exit 1
+fi
+
 resolver_fixture=$temporary_directory/resolver-fixture
 mkdir -m 0700 "$resolver_fixture"
 resolver_regular=$resolver_fixture/regular.conf
@@ -281,7 +418,9 @@ printf '%s\n' \
     '    FileDescriptorStorePreserve=yes on that transient service;' \
     '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
     '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
-    '  cap every transient-unit file write at 1 MiB and the production runtime at three minutes;' \
+    '  bound both large build-artifact staging copies at 128 MiB, then cap' \
+    '    the proof process and every transient-unit file write at 1 MiB;' \
+    '  cap the production runtime at three minutes;' \
     '  discard production runtime stdout and stderr through exact systemd null streams;' \
     '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
     '  invoke only --internal-worker-v3-live-proof and require its exact two success records;' \
@@ -407,6 +546,23 @@ fi
 # These are literal source contracts; expansion here would defeat the check.
 # shellcheck disable=SC2016
 for required_contract in \
+    'paste prlimit readlink rm sed setpriv' \
+    'staged_executable_max_bytes=134217728' \
+    'proof_file_max_bytes=1048576' \
+    'source_snapshot_is_exact() {' \
+    'install_proof_file_limit() {' \
+    'source_snapshot_is_exact "$source_before" 755 "$staged_executable_max_bytes"' \
+    'source_snapshot_is_exact "$ipc_probe_before" 755 "$staged_executable_max_bytes"' \
+    'source_snapshot_is_exact "$ipc_hook_before" 700 "$proof_file_max_bytes"' \
+    'source_snapshot_is_exact "$ipc_hook_before" 750 "$proof_file_max_bytes"' \
+    'source_snapshot_is_exact "$ipc_hook_before" 755 "$proof_file_max_bytes"' \
+    '[ "$source_before" != "$helper_initial_snapshot" ]' \
+    '[ "$ipc_probe_before" != "$ipc_probe_initial_snapshot" ]' \
+    '[ "$ipc_hook_before" = "$ipc_hook_initial_snapshot" ]' \
+    'prlimit --fsize="$staged_executable_max_bytes:$staged_executable_max_bytes" --' \
+    'install_proof_file_limit "$proof_file_max_bytes"' \
+    'prlimit --pid "$$" --fsize="$1:$1"' \
+    'prlimit --pid "$$" --fsize --raw --noheadings --output SOFT,HARD' \
     '--property=PrivateNetwork=yes' \
     '--property=PrivateMounts=yes' \
     '--property=NoNewPrivileges=yes' \
@@ -556,6 +712,55 @@ if ! awk '
 fi
 if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 2 ]; then
     printf '%s\n' 'both transient helper invocations do not have the exact file-size limit' >&2
+    exit 1
+fi
+# This is a literal gate-source contract, not a test-shell expansion.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc -- \
+    'prlimit --fsize="$staged_executable_max_bytes:$staged_executable_max_bytes" --' \
+    "$gate")" -ne 2 ]; then
+    printf '%s\n' 'both large staging copies do not have the exact 128 MiB limit' >&2
+    exit 1
+fi
+# This is a literal gate-source regular expression.
+# shellcheck disable=SC1003,SC2016
+if [ "$(grep -Ec '^install_proof_file_limit "\$proof_file_max_bytes" \\' \
+    "$gate")" -ne 1 ]; then
+    printf '%s\n' 'the proof process does not install its exact 1 MiB limit once' >&2
+    exit 1
+fi
+if [ "$(grep -Ec '^[[:space:]]*prlimit --pid "\$\$" --fsize=' "$gate")" -ne 1 ]; then
+    printf '%s\n' 'the proof source changes its own file-size limit more than once' >&2
+    exit 1
+fi
+if ! awk '
+    /failed '\''the bounded helper staging copy failed'\''/ { helper_copy = NR }
+    /failed '\''the real helper changed while copied or the staged image is unsafe'\''/ {
+        helper_fence = NR
+    }
+    /failed '\''the bounded production IPC probe staging copy failed'\''/ {
+        probe_copy = NR
+    }
+    /failed '\''the production IPC probe changed while copied or its staged image is unsafe'\''/ {
+        probe_fence = NR
+    }
+    /^install_proof_file_limit "\$proof_file_max_bytes" \\/ { proof_limit = NR }
+    /^ipc_hook_before=/ { hook_copy = NR }
+    /'\''root:x:0:0:root:\/root:\/bin\/sh'\''/ { account_write = NR }
+    /^capture_host_state "\$temporary_stage\/before"$/ { host_capture = NR }
+    /^[[:space:]]*systemd-run \\/ && first_unit == 0 { first_unit = NR }
+    END {
+        valid = helper_copy > 0 && helper_fence > 0 && probe_copy > 0
+        valid = valid && probe_fence > 0 && proof_limit > 0 && hook_copy > 0
+        valid = valid && account_write > 0 && host_capture > 0 && first_unit > 0
+        valid = valid && helper_copy < helper_fence && helper_fence < probe_copy
+        valid = valid && probe_copy < probe_fence && probe_fence < proof_limit
+        valid = valid && proof_limit < hook_copy && hook_copy < account_write
+        valid = valid && account_write < host_capture && host_capture < first_unit
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'the two-tier staging and proof-file limits are ordered incorrectly' >&2
     exit 1
 fi
 for exact_cgroup_property in \
