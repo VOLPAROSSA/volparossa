@@ -150,9 +150,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   output is confined to stderr. It does not infer that a pre-existing binary was built from the
   observed commit. Its validator rejects reordered or missing
   checks and malformed or internally inconsistent false-PASS combinations; it is not a
-  cryptographic attestation of who ran the producer. The expanded driver and its local contracts pass,
-  but it has not yet run in a trusted job which builds the artifacts from one unchanged clean
-  commit immediately before the required disposable Debian 13 VM proof,
+  cryptographic attestation of who ran the producer. A manual `main`-only workflow and a
+  preview-first KVM/QEMU driver now pin a manually reviewed Debian image and its checksum provenance,
+  transfer only a clean tracked source clone, fetch locked dependencies in a provisioning boot,
+  then deny proof-boot egress and build offline. Ephemeral SSH host identity, pidfd-bound QEMU
+  cleanup, active log bounds, exact environment/report crosslinks and post-use image hashing fail
+  closed; their unprivileged contracts pass. The expanded live driver has not yet succeeded in a
+  trusted job which builds the artifacts from one unchanged clean commit immediately before the
+  required disposable Debian 13 VM proof,
   validates no installed package or shipped-unit restart behavior, and closes no checkbox or
   scorecard row until durable live evidence exists.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
