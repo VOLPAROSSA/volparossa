@@ -956,6 +956,42 @@ enum RemovalProjection {
 }
 
 impl StableStartupInventory {
+    /// Reobserve the retained unit scope/object path without resolving a unit by PID again.
+    ///
+    /// One manager barrier and two uncached snapshots use the caller's unchanged hard deadline.
+    /// The ordinary service-contract validation still requires its fresh `MainPID` to be the
+    /// current process. No unit path or PID is exposed to the caller. This does not identify or
+    /// bind the systemd manager incarnation across observations.
+    pub(crate) async fn observe_same_service_scope(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<Self, FdStoreError> {
+        let scope = self.snapshot.scope.clone();
+        let address = self.notify_address.clone();
+        let source = SystemdDescriptorStoreSource::for_scope(scope, deadline).await?;
+        let sender = NotifySender::new(&address)?;
+        observe_stable_startup_inventory(
+            &source,
+            address,
+            synchronize_manager(&sender, deadline),
+            deadline,
+        )
+        .await
+    }
+
+    /// Compare two opaque snapshots to the retained unit object path and current main process.
+    ///
+    /// Unit path and PID remain private. This is service-scope correlation only; it does not
+    /// bind the manager incarnation or attest `ControlGroup`, delegation, or cgroup membership.
+    pub(crate) fn matches_current_service_scope(&self, candidate: &Self) -> bool {
+        let current_pid = std::process::id();
+        self.snapshot.scope == candidate.snapshot.scope
+            && self.snapshot.main_pid == current_pid
+            && candidate.snapshot.main_pid == current_pid
+            && self.snapshot.scope.main_pid() == current_pid
+            && candidate.snapshot.scope.main_pid() == current_pid
+    }
+
     /// Verify that the complete manager inventory is exactly the caller's inherited custody set.
     ///
     /// Manager ordering is irrelevant, while the caller's binding remains role ordered as

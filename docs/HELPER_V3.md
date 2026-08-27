@@ -267,6 +267,54 @@ production caller and therefore does not weaken the refusal boundary below. Any 
 composition must retain and revalidate the exact startup journal guard across this observation, or
 freshly rejoin the result to journal and manager evidence before consuming authority.
 
+A second dormant, private sampler borrows that first seam's successful opaque exit-set capability
+through every await. Cancelling its future therefore leaves the PR68 pidfd/namespace/custody owners
+with the caller, although partial manager/cgroup sampling state inside the cancelled future is
+discarded. Only a separate synchronous join consumes the exit capability. Every returned join
+outcome retains that capability and all complete sampling owners returned by the async layer. A
+future production composition must itself own and drive sampling non-cancellably; this dormant seam
+has no such outer owner. It resolves no new unit by PID. Instead, the retained unit object path and
+current `MainPID` scope are barrier-observed again on both sides of the first cgroup samples. This
+does not bind a systemd manager incarnation. Both fresh uncached inventory pairs must retain that
+opaque path/PID scope and exactly match freshly remeasured inherited descriptor bindings. One
+absolute deadline is stored in the sampling attempt and covers both manager bookends, cgroup
+capture, every bounded read, synchronous join, and final revalidation; expiry before join retains
+the supplied exit capability without join I/O. Attempts are also bound to the exact pending count,
+classified targets, and fresh manager/durable descriptor maps, so one exit set cannot consume
+another set's samples.
+
+The sampler parses the current process's single canonical unified-cgroup record, pins the fixed
+cgroup2 root with read-only `open()`, resolves and pins the service directory beneath it through
+`openat2(BENEATH|NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS)`, and pins both the PID and cgroup namespace.
+Every complete revalidation reopens the fixed process records,
+resolves the path beneath the retained root, remeasures directory and namespace identities, counts
+the pending target set back to the earlier nonzero pidfd-observation count, and remeasures each
+present custody binding. Only pending non-`CleanupConfirmed` targets must match the current pinned
+service-cgroup inode; cleanup-confirmed targets remain structurally and manager validated without
+claiming current membership. Two initial samples, one sample after the second manager observation,
+and one fresh synchronous-join sample must have identical canonical projections. `cgroup.type` must
+be exactly `domain`; the bounded canonical
+`cgroup.stat` parser permits additional unique numeric kernel fields but requires exactly one zero
+`nr_descendants` and `nr_dying_descendants`; and canonicalised `cgroup.procs` membership must be the
+singleton current `MainPID`. Repeated lines containing that same PID are accepted because Linux
+documents duplicate PID observations during iteration, while zero, noncanonical, overflowed, or
+different PIDs fail closed.
+
+The result is only bounded read-only quiescence sample/correlation evidence. `cgroup.type`,
+`cgroup.stat`, and `cgroup.procs` are separate, non-atomic reads; without admission, migration,
+freeze, or equivalent serialization, alternating process placement can make every projection pass
+even though set-wide absence never existed. It therefore proves neither continuous absence,
+instantaneous old-process absence, nor absence when sampling or join returns. It is unusable as
+cleanup authority. It exposes no PID, path, descriptor, signal, cgroup write, cleanup, journal,
+manager-removal, adoption, or server authority. This slice deliberately does not yet query and bind
+fresh systemd `ControlGroup`/`ControlGroupId`, `ControlPID`, `ProtectControlGroupsEx`, `Delegate`,
+`PrivatePIDs`, or `KillMode` properties, and therefore does not prove that an inherited writable
+cgroup descriptor, delegation, or migration path was impossible during sampling. The shipped
+`ProtectControlGroups=yes` setting is not treated as runtime proof here. It also proves no
+network-namespace destruction or kernel-resource cleanup, owns no startup guard or journal
+revalidation, has no production caller, leaves AV1-10 Open, and leaves the fixed alpha score at
+11/100 (11%).
+
 This is still a refusal boundary, not production recovery. Any non-empty journal target set blocks
 startup after read-only classification and drops its exact source-slot owners without publishing a
 cleanup token or helper socket. The takeover creates no additional process-local source alias;

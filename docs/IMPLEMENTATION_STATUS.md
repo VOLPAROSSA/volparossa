@@ -220,6 +220,27 @@ single clean-build A01--A15 run; the score is not a release claim.
   publication caller, worker-death/kernel-cleanup executor, manager-absence composition, restart
   reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live-root production lifecycle proof exists.
+  A private dormant follow-on now borrows only the successful exact inherited process-pidfd
+  exit-set capability across its cancellable async sampling layer; only a separate synchronous join
+  consumes it. Cancelling leaves the PR68 owners with the caller, while every returned join outcome
+  retains them and the complete returned sampling owners. Production still lacks the mandatory
+  non-cancellable outer owner and admission/migration guard. The attempt binds the exact exit set
+  and deadline, reobserves the retained unit object path/current `MainPID` scope without claiming a
+  stable systemd-manager incarnation, and verifies complete descriptor-store equality against
+  remeasured inherited bindings. It pins and revalidates the PID and cgroup namespaces, cgroup2
+  root/path/directory identity, pending-target cgroup inodes, exact pending-count echo and every
+  present custody binding; cleanup-confirmed targets do not claim current cgroup membership. Two
+  initial, one post-manager and one synchronous-join projection require an exact domain, zero
+  live/dying descendant counts, and canonical singleton current-MainPID membership. Documented
+  duplicate lines for that same PID are canonicalised. These are bounded non-atomic samples:
+  alternating placement can satisfy every projection, so they prove neither continuous,
+  instantaneous, nor at-return old-process absence and cannot authorize cleanup or settlement. The
+  seam has no production caller and does not
+  yet attest fresh systemd `ControlGroup`/`ControlGroupId`, `ControlPID`,
+  `ProtectControlGroupsEx`, `Delegate`, `PrivatePIDs`, or `KillMode`, nor exclude inherited writable
+  cgroup descriptors or migration/delegation authority. It proves no namespace destruction, kernel
+  cleanup, manager removal, journal transition, or startup readiness, so AV1-10 remains Open and the
+  fixed alpha score remains 11/100.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.

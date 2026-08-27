@@ -11,14 +11,19 @@
 //! a child without prematurely treating observation as adoption or cleanup authority.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
-    fmt, io,
-    num::NonZeroUsize,
+    fmt,
+    future::Future,
+    io,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
+    os::unix::ffi::OsStrExt,
 };
 
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+use rustix::fs::{FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat2};
+use volparossa_linux_uapi::namespace_type;
 
 use crate::{
     deadline::{HardDeadline, wait_for_process_pidfd_exit},
@@ -26,8 +31,8 @@ use crate::{
         DurableCustodyDescriptorBinding, StartupCustodyPhase, StartupCustodyTarget,
     },
     systemd_fdstore::{
-        BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName, StableStartupInventory,
-        observe_current_process_startup_inventory,
+        BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName, FdStoreError,
+        StableStartupInventory, observe_current_process_startup_inventory,
     },
 };
 
@@ -117,7 +122,7 @@ impl fmt::Debug for ClassifiedStartupCustodyTarget {
 #[must_use = "startup custody classification retains affine descriptor owners and is not cleanup authority"]
 pub(crate) struct StartupCustodyClassification {
     custody: InheritedCustody,
-    _manager_inventory: StableStartupInventory,
+    manager_inventory: StableStartupInventory,
     classified: Vec<ClassifiedStartupCustodyTarget>,
 }
 
@@ -390,6 +395,1092 @@ fn classify_pidfd_wait_error(error: &io::Error) -> InheritedWorkerExitObservatio
     }
 }
 
+const CGROUP2_SUPER_MAGIC: i64 = 0x6367_7270;
+const PROC_SUPER_MAGIC: i64 = 0x0000_9fa0;
+const MAX_PROC_CGROUP_BYTES: usize = 4 * 1_024;
+const MAX_CGROUP_COMPONENTS: usize = 256;
+const MAX_CGROUP_COMPONENT_BYTES: usize = 255;
+const MAX_CGROUP_TYPE_BYTES: usize = 32;
+const MAX_CGROUP_STAT_BYTES: usize = 32 * 1_024;
+const MAX_CGROUP_PROCS_BYTES: usize = 16 * 1_024;
+const MAX_CGROUP_STAT_FIELDS: usize = 256;
+const MAX_CGROUP_STAT_KEY_BYTES: usize = 64;
+const MAX_CGROUP_PROCS_LINES: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PinnedFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[must_use = "a pinned service-cgroup observation owner must remain joined to exit evidence"]
+struct PinnedSharedServiceCgroup {
+    root: OwnedFd,
+    root_identity: PinnedFileIdentity,
+    service: OwnedFd,
+    service_identity: PinnedFileIdentity,
+    pid_namespace: OwnedFd,
+    pid_namespace_identity: PinnedFileIdentity,
+    cgroup_namespace: OwnedFd,
+    cgroup_namespace_identity: PinnedFileIdentity,
+    path: Box<[u8]>,
+}
+
+impl fmt::Debug for PinnedSharedServiceCgroup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PinnedSharedServiceCgroup(<redacted>)")
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SharedServiceCgroupSnapshot {
+    control_file_identities: [PinnedFileIdentity; 3],
+    stat_fields: BTreeMap<Box<[u8]>, u64>,
+    canonical_members: BTreeSet<NonZeroU32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+enum SharedServiceCgroupObservationError {
+    #[error("the shared-service-cgroup observation deadline elapsed")]
+    DeadlineElapsed,
+    #[error("the exact retained systemd service scope could not be reobserved")]
+    ManagerObservation,
+    #[error("the retained systemd service scope or current MainPID changed")]
+    ManagerScopeChanged,
+    #[error("the exact retained descriptor-store inventory changed")]
+    ManagerInventoryChanged,
+    #[error("the current process identity is invalid")]
+    InvalidCurrentProcess,
+    #[error("the current unified service cgroup could not be pinned exactly")]
+    CgroupCapture,
+    #[error("a retained worker anchor does not name the pinned shared service cgroup")]
+    AnchorMismatch,
+    #[error("a retained worker custody binding changed")]
+    BindingChanged,
+    #[error("the pinned service-cgroup identity changed")]
+    CgroupIdentityChanged,
+    #[error("the pinned service cgroup is not an exact domain cgroup")]
+    InvalidCgroupType,
+    #[error("the pinned service cgroup has a live or dying descendant cgroup")]
+    DescendantCgroupPresent,
+    #[error("the pinned service cgroup contains a process other than the current MainPID")]
+    UnexpectedCgroupMember,
+    #[error("the pinned service-cgroup observation changed across snapshots")]
+    UnstableObservation,
+}
+
+struct SharedServiceCgroupSamplingState {
+    manager_before: Option<StableStartupInventory>,
+    cgroup: Option<PinnedSharedServiceCgroup>,
+    manager_after: Option<StableStartupInventory>,
+}
+
+impl fmt::Debug for SharedServiceCgroupSamplingState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedServiceCgroupSamplingState")
+            .field("has_manager_before", &self.manager_before.is_some())
+            .field("has_pinned_cgroup", &self.cgroup.is_some())
+            .field("has_manager_after", &self.manager_after.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+enum SharedServiceCgroupSamplingResult {
+    Sampled(SharedServiceCgroupSnapshot),
+    Failed(SharedServiceCgroupObservationError),
+}
+
+#[derive(Eq, PartialEq)]
+struct SharedServiceCgroupSamplingBinding {
+    observed_target_count: NonZeroUsize,
+    manager_bindings: BTreeMap<CustodyFdName, CustodyDescriptorBinding>,
+    durable_bindings: BTreeMap<CustodyFdName, DurableCustodyDescriptorBinding>,
+    classified: Vec<ClassifiedStartupCustodyTarget>,
+}
+
+impl fmt::Debug for SharedServiceCgroupSamplingBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SharedServiceCgroupSamplingBinding(<redacted>)")
+    }
+}
+
+/// Returned evidence from the cancellable, borrowing async sampling layer.
+///
+/// This value never owns the PR68 exit capability. Cancelling the future can discard partial
+/// manager/cgroup samples, but cannot drop the caller-owned exit/custody owners. Only the separate
+/// synchronous join below may consume those owners.
+#[must_use = "a returned cgroup sampling attempt must be joined synchronously or discarded"]
+struct SharedServiceCgroupSamplingAttempt {
+    deadline: HardDeadline,
+    binding: Option<SharedServiceCgroupSamplingBinding>,
+    state: SharedServiceCgroupSamplingState,
+    result: SharedServiceCgroupSamplingResult,
+}
+
+impl fmt::Debug for SharedServiceCgroupSamplingAttempt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let result = match self.result {
+            SharedServiceCgroupSamplingResult::Sampled(_) => "Sampled",
+            SharedServiceCgroupSamplingResult::Failed(_) => "Failed",
+        };
+        formatter
+            .debug_struct("SharedServiceCgroupSamplingAttempt")
+            .field("deadline", &self.deadline)
+            .field("has_binding", &self.binding.is_some())
+            .field("state", &self.state)
+            .field("result", &result)
+            .finish_non_exhaustive()
+    }
+}
+
+struct SharedServiceCgroupObservationState {
+    exits: ObservedExactInheritedWorkerExitSet,
+    sampling: SharedServiceCgroupSamplingAttempt,
+}
+
+impl fmt::Debug for SharedServiceCgroupObservationState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedServiceCgroupObservationState")
+            .field("exits", &self.exits)
+            .field("sampling", &self.sampling)
+            .finish_non_exhaustive()
+    }
+}
+
+#[must_use = "shared-cgroup quiescence samples are not cleanup or journal authority"]
+struct ObservedSharedServiceCgroupQuiescenceSamples {
+    state: SharedServiceCgroupObservationState,
+    _joined_snapshot: SharedServiceCgroupSnapshot,
+}
+
+impl fmt::Debug for ObservedSharedServiceCgroupQuiescenceSamples {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservedSharedServiceCgroupQuiescenceSamples")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+enum SharedServiceCgroupObservationOutcomeState {
+    Observed(ObservedSharedServiceCgroupQuiescenceSamples),
+    Retained {
+        error: SharedServiceCgroupObservationError,
+        state: SharedServiceCgroupObservationState,
+    },
+}
+
+/// Opaque all-or-nothing result of the dormant shared-service-cgroup sample join.
+///
+/// Success retains bounded exact samples, not continuous absence or absence at return. It exposes
+/// no PID, path, descriptor, signal, mutation, cleanup, journal, manager-removal, server, or
+/// adoption authority. Every returned outcome retains the exact PR68 exit evidence and every
+/// complete later observation owner returned by the async layer.
+#[must_use = "every shared-cgroup observation outcome retains its affine exit evidence"]
+struct SharedServiceCgroupObservationOutcome {
+    state: SharedServiceCgroupObservationOutcomeState,
+}
+
+impl fmt::Debug for SharedServiceCgroupObservationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.state {
+            SharedServiceCgroupObservationOutcomeState::Observed(observed) => {
+                formatter.debug_tuple("Observed").field(observed).finish()
+            }
+            SharedServiceCgroupObservationOutcomeState::Retained { error, state } => formatter
+                .debug_struct("Retained")
+                .field("error", error)
+                .field("state", state)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+trait SharedServiceCgroupSource {
+    fn capture(
+        &mut self,
+        deadline: HardDeadline,
+    ) -> Result<PinnedSharedServiceCgroup, SharedServiceCgroupObservationError>;
+
+    fn observe(
+        &mut self,
+        pinned: &PinnedSharedServiceCgroup,
+        current_main_pid: NonZeroU32,
+        deadline: HardDeadline,
+    ) -> Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError>;
+
+    fn revalidate(
+        &mut self,
+        pinned: &PinnedSharedServiceCgroup,
+        deadline: HardDeadline,
+    ) -> Result<(), SharedServiceCgroupObservationError>;
+}
+
+trait SharedServiceManagerSource {
+    fn reobserve<'a>(
+        &'a mut self,
+        baseline: &'a StableStartupInventory,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a;
+}
+
+struct LinuxSharedServiceManagerSource;
+
+impl SharedServiceManagerSource for LinuxSharedServiceManagerSource {
+    fn reobserve<'a>(
+        &'a mut self,
+        baseline: &'a StableStartupInventory,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a {
+        baseline.observe_same_service_scope(deadline)
+    }
+}
+
+struct LinuxSharedServiceCgroupSource;
+
+impl SharedServiceCgroupSource for LinuxSharedServiceCgroupSource {
+    fn capture(
+        &mut self,
+        deadline: HardDeadline,
+    ) -> Result<PinnedSharedServiceCgroup, SharedServiceCgroupObservationError> {
+        capture_current_shared_service_cgroup(deadline)
+    }
+
+    fn observe(
+        &mut self,
+        pinned: &PinnedSharedServiceCgroup,
+        current_main_pid: NonZeroU32,
+        deadline: HardDeadline,
+    ) -> Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError> {
+        observe_pinned_shared_service_cgroup(pinned, current_main_pid, deadline)
+    }
+
+    fn revalidate(
+        &mut self,
+        pinned: &PinnedSharedServiceCgroup,
+        deadline: HardDeadline,
+    ) -> Result<(), SharedServiceCgroupObservationError> {
+        revalidate_pinned_shared_service_cgroup(pinned, deadline)
+    }
+}
+
+/// Dormant, read-only shared-service-cgroup quiescence sampler.
+///
+/// The private PR68 success capability is borrowed across every await, so cancellation cannot drop
+/// its affine exit/custody owners. The retained unit object path and current `MainPID` are reobserved
+/// on both sides without a second `GetUnitByPID` lookup. Two pre-manager and one post-manager
+/// cgroup samples must match under one absolute deadline. Production has no caller.
+#[allow(dead_code)]
+async fn sample_shared_service_cgroup_quiescence(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    deadline: HardDeadline,
+) -> SharedServiceCgroupSamplingAttempt {
+    let mut manager = LinuxSharedServiceManagerSource;
+    let mut cgroup = LinuxSharedServiceCgroupSource;
+    sample_shared_service_cgroup_quiescence_with(exits, deadline, &mut manager, &mut cgroup).await
+}
+
+async fn sample_shared_service_cgroup_quiescence_with<
+    Manager: SharedServiceManagerSource,
+    Source: SharedServiceCgroupSource,
+>(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    deadline: HardDeadline,
+    manager: &mut Manager,
+    source: &mut Source,
+) -> SharedServiceCgroupSamplingAttempt {
+    let mut state = SharedServiceCgroupSamplingState {
+        manager_before: None,
+        cgroup: None,
+        manager_after: None,
+    };
+    if ensure_shared_cgroup_deadline(deadline).is_err() {
+        return failed_shared_cgroup_sampling(
+            SharedServiceCgroupObservationError::DeadlineElapsed,
+            deadline,
+            None,
+            state,
+        );
+    }
+    let binding = match capture_shared_cgroup_sampling_binding(exits) {
+        Ok(binding) => binding,
+        Err(error) => return failed_shared_cgroup_sampling(error, deadline, None, state),
+    };
+
+    let baseline = &exits.classification.manager_inventory;
+    let manager_before = manager.reobserve(baseline, deadline).await;
+    let Ok(manager_before) = manager_before else {
+        let error = classify_manager_observation_error(
+            &manager_before.expect_err("manager reobservation failed"),
+        );
+        return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+    };
+    state.manager_before = Some(manager_before);
+    let manager_before = state
+        .manager_before
+        .as_ref()
+        .expect("manager-before sample was installed");
+    if let Err(error) = verify_exact_manager_scope(exits, baseline, manager_before, deadline) {
+        return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+    }
+
+    let current_main_pid = match current_main_process_id() {
+        Ok(pid) => pid,
+        Err(error) => {
+            return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+        }
+    };
+    let cgroup = source.capture(deadline);
+    let Ok(cgroup) = cgroup else {
+        let error = cgroup.expect_err("cgroup capture failed");
+        return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+    };
+    state.cgroup = Some(cgroup);
+    let pinned = state.cgroup.as_ref().expect("cgroup sample was installed");
+    let stable_snapshot = match observe_initial_shared_service_cgroup_samples(
+        exits,
+        pinned,
+        current_main_pid,
+        deadline,
+        source,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+        }
+    };
+
+    let before = state
+        .manager_before
+        .as_ref()
+        .expect("manager-before sample was installed");
+    let manager_after = manager.reobserve(before, deadline).await;
+    let Ok(manager_after) = manager_after else {
+        let error = classify_manager_observation_error(
+            &manager_after.expect_err("manager reobservation failed"),
+        );
+        return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+    };
+    state.manager_after = Some(manager_after);
+    let manager_after = state
+        .manager_after
+        .as_ref()
+        .expect("manager-after sample was installed");
+    if let Err(error) = verify_exact_manager_scope(exits, before, manager_after, deadline) {
+        return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+    }
+
+    let pinned = state.cgroup.as_ref().expect("cgroup sample was installed");
+    let final_snapshot = match observe_final_shared_service_cgroup_sample(
+        exits,
+        pinned,
+        current_main_pid,
+        &stable_snapshot,
+        deadline,
+        source,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return failed_shared_cgroup_sampling(error, deadline, Some(binding), state);
+        }
+    };
+    SharedServiceCgroupSamplingAttempt {
+        deadline,
+        binding: Some(binding),
+        state,
+        result: SharedServiceCgroupSamplingResult::Sampled(final_snapshot),
+    }
+}
+
+fn classify_manager_observation_error(error: &FdStoreError) -> SharedServiceCgroupObservationError {
+    if matches!(error, FdStoreError::Deadline)
+        || matches!(error, FdStoreError::Io(error) if error.kind() == io::ErrorKind::TimedOut)
+    {
+        SharedServiceCgroupObservationError::DeadlineElapsed
+    } else {
+        SharedServiceCgroupObservationError::ManagerObservation
+    }
+}
+
+fn current_main_process_id() -> Result<NonZeroU32, SharedServiceCgroupObservationError> {
+    NonZeroU32::new(std::process::id())
+        .ok_or(SharedServiceCgroupObservationError::InvalidCurrentProcess)
+}
+
+fn verify_exact_manager_scope(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    baseline: &StableStartupInventory,
+    candidate: &StableStartupInventory,
+    deadline: HardDeadline,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    if !baseline.matches_current_service_scope(candidate) {
+        return Err(SharedServiceCgroupObservationError::ManagerScopeChanged);
+    }
+    verify_manager_inventory_against_retained_custody(exits, candidate)?;
+    ensure_shared_cgroup_deadline(deadline)
+}
+
+fn failed_shared_cgroup_sampling(
+    error: SharedServiceCgroupObservationError,
+    deadline: HardDeadline,
+    binding: Option<SharedServiceCgroupSamplingBinding>,
+    state: SharedServiceCgroupSamplingState,
+) -> SharedServiceCgroupSamplingAttempt {
+    SharedServiceCgroupSamplingAttempt {
+        deadline,
+        binding,
+        state,
+        result: SharedServiceCgroupSamplingResult::Failed(error),
+    }
+}
+
+fn capture_shared_cgroup_sampling_binding(
+    exits: &ObservedExactInheritedWorkerExitSet,
+) -> Result<SharedServiceCgroupSamplingBinding, SharedServiceCgroupObservationError> {
+    let (manager_bindings, durable_bindings) = exits
+        .classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| SharedServiceCgroupObservationError::BindingChanged)?;
+    Ok(SharedServiceCgroupSamplingBinding {
+        observed_target_count: exits.observed_target_count,
+        manager_bindings,
+        durable_bindings,
+        classified: exits.classification.classified.clone(),
+    })
+}
+
+fn observe_initial_shared_service_cgroup_samples<Source: SharedServiceCgroupSource>(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    pinned: &PinnedSharedServiceCgroup,
+    current_main_pid: NonZeroU32,
+    deadline: HardDeadline,
+    source: &mut Source,
+) -> Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError> {
+    verify_exit_set_against_shared_cgroup(exits, pinned)?;
+    source.revalidate(pinned, deadline)?;
+    let first = source.observe(pinned, current_main_pid, deadline)?;
+
+    verify_exit_set_against_shared_cgroup(exits, pinned)?;
+    source.revalidate(pinned, deadline)?;
+    let second = source.observe(pinned, current_main_pid, deadline)?;
+    if first != second {
+        return Err(SharedServiceCgroupObservationError::UnstableObservation);
+    }
+
+    ensure_shared_cgroup_deadline(deadline)?;
+    Ok(second)
+}
+
+fn observe_final_shared_service_cgroup_sample<Source: SharedServiceCgroupSource>(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    pinned: &PinnedSharedServiceCgroup,
+    current_main_pid: NonZeroU32,
+    baseline: &SharedServiceCgroupSnapshot,
+    deadline: HardDeadline,
+    source: &mut Source,
+) -> Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError> {
+    verify_exit_set_against_shared_cgroup(exits, pinned)?;
+    source.revalidate(pinned, deadline)?;
+    let final_snapshot = source.observe(pinned, current_main_pid, deadline)?;
+    if baseline != &final_snapshot {
+        return Err(SharedServiceCgroupObservationError::UnstableObservation);
+    }
+    ensure_shared_cgroup_deadline(deadline)?;
+    Ok(final_snapshot)
+}
+
+/// Consume the PR68 capability only after the borrowing async sampler returned.
+///
+/// This join performs no await. It synchronously revalidates the supplied capability and retained
+/// manager samples, then takes one last bounded cgroup projection. A future production owner must
+/// still run sampling non-cancellably while keeping admission/migration closed; this seam does not.
+#[allow(dead_code)]
+fn join_shared_service_cgroup_quiescence(
+    exits: ObservedExactInheritedWorkerExitSet,
+    sampling: SharedServiceCgroupSamplingAttempt,
+) -> SharedServiceCgroupObservationOutcome {
+    let mut source = LinuxSharedServiceCgroupSource;
+    join_shared_service_cgroup_quiescence_with(exits, sampling, &mut source)
+}
+
+fn join_shared_service_cgroup_quiescence_with<Source: SharedServiceCgroupSource>(
+    exits: ObservedExactInheritedWorkerExitSet,
+    sampling: SharedServiceCgroupSamplingAttempt,
+    source: &mut Source,
+) -> SharedServiceCgroupObservationOutcome {
+    let joined = validate_shared_service_cgroup_join(&exits, &sampling, source);
+    let state = SharedServiceCgroupObservationState { exits, sampling };
+    match joined {
+        Ok(joined_snapshot) => SharedServiceCgroupObservationOutcome {
+            state: SharedServiceCgroupObservationOutcomeState::Observed(
+                ObservedSharedServiceCgroupQuiescenceSamples {
+                    state,
+                    _joined_snapshot: joined_snapshot,
+                },
+            ),
+        },
+        Err(error) => SharedServiceCgroupObservationOutcome {
+            state: SharedServiceCgroupObservationOutcomeState::Retained { error, state },
+        },
+    }
+}
+
+fn validate_shared_service_cgroup_join<Source: SharedServiceCgroupSource>(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    sampling: &SharedServiceCgroupSamplingAttempt,
+    source: &mut Source,
+) -> Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError> {
+    let sampled_snapshot = match &sampling.result {
+        SharedServiceCgroupSamplingResult::Sampled(snapshot) => snapshot,
+        SharedServiceCgroupSamplingResult::Failed(error) => return Err(*error),
+    };
+    ensure_shared_cgroup_deadline(sampling.deadline)?;
+    verify_shared_cgroup_sampling_binding(exits, sampling)?;
+    verify_joined_manager_samples(exits, sampling, sampling.deadline)?;
+    let pinned = sampling
+        .state
+        .cgroup
+        .as_ref()
+        .ok_or(SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    verify_exit_set_against_shared_cgroup(exits, pinned)?;
+    source.revalidate(pinned, sampling.deadline)?;
+    let current_main_pid = current_main_process_id()?;
+    let joined_snapshot = source.observe(pinned, current_main_pid, sampling.deadline)?;
+    if sampled_snapshot != &joined_snapshot {
+        return Err(SharedServiceCgroupObservationError::UnstableObservation);
+    }
+    source.revalidate(pinned, sampling.deadline)?;
+    verify_shared_cgroup_sampling_binding(exits, sampling)?;
+    verify_joined_manager_samples(exits, sampling, sampling.deadline)?;
+    verify_exit_set_against_shared_cgroup(exits, pinned)?;
+    ensure_shared_cgroup_deadline(sampling.deadline)?;
+    Ok(joined_snapshot)
+}
+
+fn verify_shared_cgroup_sampling_binding(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    sampling: &SharedServiceCgroupSamplingAttempt,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    let binding = sampling
+        .binding
+        .as_ref()
+        .ok_or(SharedServiceCgroupObservationError::BindingChanged)?;
+    let (manager_bindings, durable_bindings) = exits
+        .classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| SharedServiceCgroupObservationError::BindingChanged)?;
+    if binding.observed_target_count != exits.observed_target_count
+        || binding.manager_bindings != manager_bindings
+        || binding.durable_bindings != durable_bindings
+        || binding.classified != exits.classification.classified
+    {
+        return Err(SharedServiceCgroupObservationError::BindingChanged);
+    }
+    Ok(())
+}
+
+fn verify_joined_manager_samples(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    sampling: &SharedServiceCgroupSamplingAttempt,
+    deadline: HardDeadline,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    let before = sampling
+        .state
+        .manager_before
+        .as_ref()
+        .ok_or(SharedServiceCgroupObservationError::ManagerObservation)?;
+    let after = sampling
+        .state
+        .manager_after
+        .as_ref()
+        .ok_or(SharedServiceCgroupObservationError::ManagerObservation)?;
+    verify_exact_manager_scope(
+        exits,
+        &exits.classification.manager_inventory,
+        before,
+        deadline,
+    )?;
+    verify_exact_manager_scope(exits, before, after, deadline)
+}
+
+fn verify_exit_set_against_shared_cgroup(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    pinned: &PinnedSharedServiceCgroup,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    let service_inode = NonZeroU64::new(pinned.service_identity.inode)
+        .ok_or(SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    let mut pending_target_count = 0_usize;
+    for entry in &exits.classification.classified {
+        if !entry.target.has_valid_recovery_binding() {
+            return Err(SharedServiceCgroupObservationError::AnchorMismatch);
+        }
+        if entry.target.phase() != StartupCustodyPhase::CleanupConfirmed {
+            if !entry.target.has_service_cgroup_inode(service_inode) {
+                return Err(SharedServiceCgroupObservationError::AnchorMismatch);
+            }
+            if entry.disposition != StartupCustodyDisposition::ExactPresent {
+                return Err(SharedServiceCgroupObservationError::BindingChanged);
+            }
+            pending_target_count = pending_target_count
+                .checked_add(1)
+                .ok_or(SharedServiceCgroupObservationError::BindingChanged)?;
+        }
+        if entry.disposition == StartupCustodyDisposition::ExactPresent {
+            let name = CustodyFdName::from_durable_digest(entry.target.custody_name_digest());
+            exits
+                .classification
+                .custody
+                .bundles
+                .get(&name)
+                .ok_or(SharedServiceCgroupObservationError::BindingChanged)?
+                .verify_exact_target(&entry.target)
+                .map_err(|_| SharedServiceCgroupObservationError::BindingChanged)?;
+        }
+    }
+    if NonZeroUsize::new(pending_target_count) != Some(exits.observed_target_count) {
+        return Err(SharedServiceCgroupObservationError::BindingChanged);
+    }
+    Ok(())
+}
+
+fn verify_manager_inventory_against_retained_custody(
+    exits: &ObservedExactInheritedWorkerExitSet,
+    inventory: &StableStartupInventory,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    let (manager_bindings, _) = exits
+        .classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| SharedServiceCgroupObservationError::BindingChanged)?;
+    inventory
+        .verify_complete_exact_set(&manager_bindings)
+        .map_err(|_| SharedServiceCgroupObservationError::ManagerInventoryChanged)
+}
+
+fn capture_current_shared_service_cgroup(
+    deadline: HardDeadline,
+) -> Result<PinnedSharedServiceCgroup, SharedServiceCgroupObservationError> {
+    ensure_shared_cgroup_deadline(deadline)?;
+    let path = read_current_unified_cgroup_path(deadline)?;
+    let root = open(
+        "/sys/fs/cgroup",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupCapture)?;
+    ensure_filesystem_magic(&root, CGROUP2_SUPER_MAGIC)?;
+    let root_identity = pinned_file_identity(&root, FileType::Directory)?;
+    let service = resolve_pinned_service_cgroup(&root, &path)?;
+    ensure_filesystem_magic(&service, CGROUP2_SUPER_MAGIC)?;
+    let service_identity = pinned_file_identity(&service, FileType::Directory)?;
+    if service_identity.device != root_identity.device {
+        return Err(SharedServiceCgroupObservationError::CgroupCapture);
+    }
+    let pid_namespace = open(
+        "/proc/self/ns/pid",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupCapture)?;
+    if namespace_type(&pid_namespace).ok() != Some(libc::CLONE_NEWPID) {
+        return Err(SharedServiceCgroupObservationError::CgroupCapture);
+    }
+    let pid_namespace_identity = pinned_namespace_identity(&pid_namespace)?;
+    let cgroup_namespace = open(
+        "/proc/self/ns/cgroup",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupCapture)?;
+    if namespace_type(&cgroup_namespace).ok() != Some(libc::CLONE_NEWCGROUP) {
+        return Err(SharedServiceCgroupObservationError::CgroupCapture);
+    }
+    let cgroup_namespace_identity = pinned_namespace_identity(&cgroup_namespace)?;
+    let pinned = PinnedSharedServiceCgroup {
+        root,
+        root_identity,
+        service,
+        service_identity,
+        pid_namespace,
+        pid_namespace_identity,
+        cgroup_namespace,
+        cgroup_namespace_identity,
+        path,
+    };
+    revalidate_pinned_shared_service_cgroup(&pinned, deadline)?;
+    Ok(pinned)
+}
+
+fn revalidate_pinned_shared_service_cgroup(
+    pinned: &PinnedSharedServiceCgroup,
+    deadline: HardDeadline,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    ensure_shared_cgroup_deadline(deadline)?;
+    ensure_filesystem_magic(&pinned.root, CGROUP2_SUPER_MAGIC)?;
+    ensure_filesystem_magic(&pinned.service, CGROUP2_SUPER_MAGIC)?;
+    if pinned_file_identity(&pinned.root, FileType::Directory)? != pinned.root_identity
+        || pinned_file_identity(&pinned.service, FileType::Directory)? != pinned.service_identity
+        || namespace_type(&pinned.pid_namespace).ok() != Some(libc::CLONE_NEWPID)
+        || pinned_namespace_identity(&pinned.pid_namespace)? != pinned.pid_namespace_identity
+        || namespace_type(&pinned.cgroup_namespace).ok() != Some(libc::CLONE_NEWCGROUP)
+        || pinned_namespace_identity(&pinned.cgroup_namespace)? != pinned.cgroup_namespace_identity
+    {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    let current_pid_namespace = open(
+        "/proc/self/ns/pid",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    if namespace_type(&current_pid_namespace).ok() != Some(libc::CLONE_NEWPID)
+        || pinned_namespace_identity(&current_pid_namespace)? != pinned.pid_namespace_identity
+    {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    let current_cgroup_namespace = open(
+        "/proc/self/ns/cgroup",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    if namespace_type(&current_cgroup_namespace).ok() != Some(libc::CLONE_NEWCGROUP)
+        || pinned_namespace_identity(&current_cgroup_namespace)? != pinned.cgroup_namespace_identity
+    {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    let current_path = read_current_unified_cgroup_path(deadline)?;
+    if current_path != pinned.path {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    let current_service = resolve_pinned_service_cgroup(&pinned.root, &current_path)?;
+    if pinned_file_identity(&current_service, FileType::Directory)? != pinned.service_identity {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    ensure_shared_cgroup_deadline(deadline)
+}
+
+fn observe_pinned_shared_service_cgroup(
+    pinned: &PinnedSharedServiceCgroup,
+    current_main_pid: NonZeroU32,
+    deadline: HardDeadline,
+) -> Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError> {
+    revalidate_pinned_shared_service_cgroup(pinned, deadline)?;
+    let (type_identity, cgroup_type) = read_pinned_cgroup_file(
+        &pinned.service,
+        "cgroup.type",
+        MAX_CGROUP_TYPE_BYTES,
+        deadline,
+    )?;
+    if cgroup_type.as_slice() != b"domain\n" {
+        return Err(SharedServiceCgroupObservationError::InvalidCgroupType);
+    }
+    let (stat_identity, stat) = read_pinned_cgroup_file(
+        &pinned.service,
+        "cgroup.stat",
+        MAX_CGROUP_STAT_BYTES,
+        deadline,
+    )?;
+    let stat_fields = parse_cgroup_stat(&stat)?;
+    let (procs_identity, procs) = read_pinned_cgroup_file(
+        &pinned.service,
+        "cgroup.procs",
+        MAX_CGROUP_PROCS_BYTES,
+        deadline,
+    )?;
+    let canonical_members = parse_cgroup_procs(&procs, current_main_pid)?;
+    revalidate_pinned_shared_service_cgroup(pinned, deadline)?;
+    Ok(SharedServiceCgroupSnapshot {
+        control_file_identities: [type_identity, stat_identity, procs_identity],
+        stat_fields,
+        canonical_members,
+    })
+}
+
+fn read_current_unified_cgroup_path(
+    deadline: HardDeadline,
+) -> Result<Box<[u8]>, SharedServiceCgroupObservationError> {
+    let record = open(
+        "/proc/self/cgroup",
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupCapture)?;
+    ensure_filesystem_magic(&record, PROC_SUPER_MAGIC)?;
+    let _ = pinned_file_identity(&record, FileType::RegularFile)?;
+    parse_unified_cgroup_path(&read_bounded_descriptor(
+        &record,
+        MAX_PROC_CGROUP_BYTES,
+        deadline,
+    )?)
+}
+
+fn parse_unified_cgroup_path(
+    bytes: &[u8],
+) -> Result<Box<[u8]>, SharedServiceCgroupObservationError> {
+    if bytes.len() < 5
+        || !bytes.starts_with(b"0::/")
+        || bytes.last() != Some(&b'\n')
+        || bytes[..bytes.len() - 1].contains(&b'\n')
+    {
+        return Err(SharedServiceCgroupObservationError::CgroupCapture);
+    }
+    let path = &bytes[3..bytes.len() - 1];
+    if path == b"/" {
+        return Ok(path.into());
+    }
+    if path.last() == Some(&b'/') {
+        return Err(SharedServiceCgroupObservationError::CgroupCapture);
+    }
+    let mut components = 0_usize;
+    for component in path[1..].split(|byte| *byte == b'/') {
+        components = components
+            .checked_add(1)
+            .ok_or(SharedServiceCgroupObservationError::CgroupCapture)?;
+        if components > MAX_CGROUP_COMPONENTS
+            || component.is_empty()
+            || component.len() > MAX_CGROUP_COMPONENT_BYTES
+            || matches!(component, b"." | b"..")
+            || component.ends_with(b" (deleted)")
+            || component
+                .iter()
+                .any(|byte| *byte == 0 || *byte < b' ' || *byte == 0x7f)
+        {
+            return Err(SharedServiceCgroupObservationError::CgroupCapture);
+        }
+    }
+    Ok(path.into())
+}
+
+fn resolve_pinned_service_cgroup<Fd: AsFd>(
+    root: &Fd,
+    absolute_path: &[u8],
+) -> Result<OwnedFd, SharedServiceCgroupObservationError> {
+    let relative = if absolute_path == b"/" {
+        &b"."[..]
+    } else {
+        absolute_path
+            .strip_prefix(b"/")
+            .ok_or(SharedServiceCgroupObservationError::CgroupCapture)?
+    };
+    openat2(
+        root,
+        OsStr::from_bytes(relative),
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_XDEV
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupCapture)
+}
+
+fn read_pinned_cgroup_file<Fd: AsFd>(
+    service: &Fd,
+    name: &str,
+    maximum: usize,
+    deadline: HardDeadline,
+) -> Result<(PinnedFileIdentity, Vec<u8>), SharedServiceCgroupObservationError> {
+    ensure_shared_cgroup_deadline(deadline)?;
+    let descriptor = openat2(
+        service,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_XDEV
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    ensure_filesystem_magic(&descriptor, CGROUP2_SUPER_MAGIC)?;
+    let before = pinned_file_identity(&descriptor, FileType::RegularFile)?;
+    let bytes = read_bounded_descriptor(&descriptor, maximum, deadline)?;
+    if pinned_file_identity(&descriptor, FileType::RegularFile)? != before {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    ensure_shared_cgroup_deadline(deadline)?;
+    Ok((before, bytes))
+}
+
+fn read_bounded_descriptor<Fd: AsFd>(
+    descriptor: &Fd,
+    maximum: usize,
+    deadline: HardDeadline,
+) -> Result<Vec<u8>, SharedServiceCgroupObservationError> {
+    const READ_CHUNK_BYTES: usize = 1_024;
+    let limit = maximum
+        .checked_add(1)
+        .ok_or(SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    let mut bytes = Vec::with_capacity(limit);
+    while bytes.len() < limit {
+        ensure_shared_cgroup_deadline(deadline)?;
+        let mut chunk = [0_u8; READ_CHUNK_BYTES];
+        let remaining = limit - bytes.len();
+        let length = rustix::io::pread(
+            descriptor,
+            &mut chunk[..remaining.min(READ_CHUNK_BYTES)],
+            u64::try_from(bytes.len())
+                .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?,
+        )
+        .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+        if length == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..length]);
+    }
+    if bytes.is_empty() || bytes.len() > maximum {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    ensure_shared_cgroup_deadline(deadline)?;
+    Ok(bytes)
+}
+
+fn parse_cgroup_stat(
+    bytes: &[u8],
+) -> Result<BTreeMap<Box<[u8]>, u64>, SharedServiceCgroupObservationError> {
+    if bytes.is_empty() || bytes.last() != Some(&b'\n') {
+        return Err(SharedServiceCgroupObservationError::DescendantCgroupPresent);
+    }
+    let mut fields = BTreeMap::<Box<[u8]>, u64>::new();
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let separator = line
+            .iter()
+            .position(|byte| *byte == b' ')
+            .ok_or(SharedServiceCgroupObservationError::DescendantCgroupPresent)?;
+        let (key, value_with_separator) = line.split_at(separator);
+        let value = value_with_separator
+            .strip_prefix(b" ")
+            .ok_or(SharedServiceCgroupObservationError::DescendantCgroupPresent)?;
+        if key.is_empty()
+            || key.len() > MAX_CGROUP_STAT_KEY_BYTES
+            || !key
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+        {
+            return Err(SharedServiceCgroupObservationError::DescendantCgroupPresent);
+        }
+        let value = parse_canonical_decimal_u64(value)
+            .ok_or(SharedServiceCgroupObservationError::DescendantCgroupPresent)?;
+        if fields.insert(key.into(), value).is_some() || fields.len() > MAX_CGROUP_STAT_FIELDS {
+            return Err(SharedServiceCgroupObservationError::DescendantCgroupPresent);
+        }
+    }
+    if fields.get(b"nr_descendants".as_slice()) != Some(&0)
+        || fields.get(b"nr_dying_descendants".as_slice()) != Some(&0)
+    {
+        return Err(SharedServiceCgroupObservationError::DescendantCgroupPresent);
+    }
+    Ok(fields)
+}
+
+fn parse_cgroup_procs(
+    bytes: &[u8],
+    current_main_pid: NonZeroU32,
+) -> Result<BTreeSet<NonZeroU32>, SharedServiceCgroupObservationError> {
+    if bytes.is_empty() || bytes.last() != Some(&b'\n') {
+        return Err(SharedServiceCgroupObservationError::UnexpectedCgroupMember);
+    }
+    let mut members = BTreeSet::new();
+    let mut line_count = 0_usize;
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        line_count = line_count
+            .checked_add(1)
+            .ok_or(SharedServiceCgroupObservationError::UnexpectedCgroupMember)?;
+        if line_count > MAX_CGROUP_PROCS_LINES {
+            return Err(SharedServiceCgroupObservationError::UnexpectedCgroupMember);
+        }
+        let value = parse_canonical_decimal_u64(line)
+            .and_then(|value| u32::try_from(value).ok())
+            .and_then(NonZeroU32::new)
+            .ok_or(SharedServiceCgroupObservationError::UnexpectedCgroupMember)?;
+        if value != current_main_pid {
+            return Err(SharedServiceCgroupObservationError::UnexpectedCgroupMember);
+        }
+        // Linux documents that cgroup.procs can repeat a PID while membership or PID identity
+        // changes during iteration. Canonicalising identical current-MainPID lines avoids treating
+        // that documented repetition as an extra process; any different value already failed.
+        members.insert(value);
+    }
+    if members.len() != 1 || !members.contains(&current_main_pid) {
+        return Err(SharedServiceCgroupObservationError::UnexpectedCgroupMember);
+    }
+    Ok(members)
+}
+
+fn parse_canonical_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty()
+        || !bytes.iter().all(u8::is_ascii_digit)
+        || (bytes.len() > 1 && bytes.first() == Some(&b'0'))
+    {
+        return None;
+    }
+    let mut value = 0_u64;
+    for byte in bytes {
+        value = value
+            .checked_mul(10)?
+            .checked_add(u64::from(*byte - b'0'))?;
+    }
+    Some(value)
+}
+
+fn ensure_filesystem_magic<Fd: AsFd>(
+    descriptor: &Fd,
+    expected: i64,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    let filesystem = fstatfs(descriptor)
+        .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    if i128::from(filesystem.f_type) != i128::from(expected) {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    Ok(())
+}
+
+fn pinned_file_identity<Fd: AsFd>(
+    descriptor: &Fd,
+    expected_type: FileType,
+) -> Result<PinnedFileIdentity, SharedServiceCgroupObservationError> {
+    let metadata = fstat(descriptor)
+        .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    if FileType::from_raw_mode(metadata.st_mode) != expected_type
+        || metadata.st_dev == 0
+        || metadata.st_ino == 0
+    {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    Ok(PinnedFileIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn pinned_namespace_identity<Fd: AsFd>(
+    descriptor: &Fd,
+) -> Result<PinnedFileIdentity, SharedServiceCgroupObservationError> {
+    let metadata = fstat(descriptor)
+        .map_err(|_| SharedServiceCgroupObservationError::CgroupIdentityChanged)?;
+    if metadata.st_dev == 0 || metadata.st_ino == 0 {
+        return Err(SharedServiceCgroupObservationError::CgroupIdentityChanged);
+    }
+    Ok(PinnedFileIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn ensure_shared_cgroup_deadline(
+    deadline: HardDeadline,
+) -> Result<(), SharedServiceCgroupObservationError> {
+    deadline
+        .ensure_remaining()
+        .map_err(|_| SharedServiceCgroupObservationError::DeadlineElapsed)
+}
+
 /// Consume the complete affine systemd startup snapshot into typed custody bundles.
 ///
 /// The audited Linux-UAPI boundary has already taken exact ownership of systemd's raw descriptor
@@ -494,7 +1585,7 @@ pub(crate) fn classify_startup_custody(
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "startup custody deadline elapsed"))?;
     Ok(StartupCustodyClassification {
         custody,
-        _manager_inventory: verified.manager_inventory,
+        manager_inventory: verified.manager_inventory,
         classified,
     })
 }
@@ -745,11 +1836,11 @@ impl InheritedCustodyBundle {
 fn inherited_descriptor_role(
     descriptor: BorrowedFd<'_>,
 ) -> Result<InheritedDescriptorRole, io::Error> {
-    let pidfd = rustix::fs::fstatfs(descriptor).map_err(rustix_io)?.f_type == PID_FS_MAGIC;
+    let pidfd = fstatfs(descriptor).map_err(rustix_io)?.f_type == PID_FS_MAGIC;
     if pidfd {
         return Ok(InheritedDescriptorRole::Pidfd);
     }
-    match volparossa_linux_uapi::namespace_type(&descriptor) {
+    match namespace_type(&descriptor) {
         Ok(namespace_type) if namespace_type == libc::CLONE_NEWNET => {
             Ok(InheritedDescriptorRole::NetworkNamespace)
         }
@@ -782,6 +1873,7 @@ fn rustix_io(error: rustix::io::Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         collections::VecDeque,
         ffi::OsString,
         fs::File,
@@ -789,6 +1881,7 @@ mod tests {
         os::fd::{AsRawFd, OwnedFd},
         os::unix::ffi::OsStringExt,
         process::Command,
+        rc::Rc,
         thread,
         time::Duration,
     };
@@ -903,7 +1996,7 @@ mod tests {
         binding: DurableCustodyDescriptorBinding,
     ) -> StartupCustodyTarget {
         let namespace = network_namespace();
-        let status = rustix::fs::fstat(&namespace).expect("stat current network namespace");
+        let status = fstat(&namespace).expect("stat current network namespace");
         startup_target_with_anchor(
             seed,
             phase,
@@ -1001,7 +2094,7 @@ mod tests {
             .expect("exact fixture target classification");
         StartupCustodyClassification {
             custody,
-            _manager_inventory: manager_inventory,
+            manager_inventory,
             classified,
         }
     }
@@ -1088,7 +2181,7 @@ mod tests {
         }
         StartupCustodyClassification {
             custody: InheritedCustody { bundles },
-            _manager_inventory: stable_startup_inventory_for_test(&BTreeMap::new()),
+            manager_inventory: stable_startup_inventory_for_test(&BTreeMap::new()),
             classified,
         }
     }
@@ -1823,7 +2916,7 @@ mod tests {
             .get(&typed_custody_name(46))
             .expect("durable inherited binding");
         let namespace = network_namespace();
-        let status = rustix::fs::fstat(&namespace).expect("stat network namespace");
+        let status = fstat(&namespace).expect("stat network namespace");
         let correct_anchor = durable_anchor(46, status.st_dev, status.st_ino);
         let wrong_anchor = durable_anchor(47, status.st_dev, status.st_ino);
         let correct = startup_target_with_anchor(
@@ -1898,6 +2991,704 @@ mod tests {
         );
         assert_eq!(exit_set.classification.custody.bundles.len(), 1);
         child.wait().expect("reap observed zombie");
+    }
+
+    struct FakeSharedServiceCgroupSource {
+        captured: Option<PinnedSharedServiceCgroup>,
+        observations:
+            VecDeque<Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError>>,
+        revalidations: VecDeque<Result<(), SharedServiceCgroupObservationError>>,
+        observe_deadlines: Vec<HardDeadline>,
+        revalidate_deadlines: Vec<HardDeadline>,
+        capture_deadlines: Vec<HardDeadline>,
+        events: Option<Rc<RefCell<Vec<&'static str>>>>,
+    }
+
+    impl SharedServiceCgroupSource for FakeSharedServiceCgroupSource {
+        fn capture(
+            &mut self,
+            deadline: HardDeadline,
+        ) -> Result<PinnedSharedServiceCgroup, SharedServiceCgroupObservationError> {
+            if let Some(events) = &self.events {
+                events.borrow_mut().push("capture");
+            }
+            self.capture_deadlines.push(deadline);
+            self.captured
+                .take()
+                .ok_or(SharedServiceCgroupObservationError::CgroupCapture)
+        }
+
+        fn observe(
+            &mut self,
+            _pinned: &PinnedSharedServiceCgroup,
+            current_main_pid: NonZeroU32,
+            deadline: HardDeadline,
+        ) -> Result<SharedServiceCgroupSnapshot, SharedServiceCgroupObservationError> {
+            assert_eq!(current_main_pid.get(), std::process::id());
+            if let Some(events) = &self.events {
+                let event = match self.observe_deadlines.len() {
+                    0 => "sample-1",
+                    1 => "sample-2",
+                    2 => "sample-3",
+                    _ => "sample-join",
+                };
+                events.borrow_mut().push(event);
+            }
+            self.observe_deadlines.push(deadline);
+            self.observations
+                .pop_front()
+                .unwrap_or(Err(SharedServiceCgroupObservationError::CgroupCapture))
+        }
+
+        fn revalidate(
+            &mut self,
+            _pinned: &PinnedSharedServiceCgroup,
+            deadline: HardDeadline,
+        ) -> Result<(), SharedServiceCgroupObservationError> {
+            self.revalidate_deadlines.push(deadline);
+            self.revalidations.pop_front().unwrap_or(Ok(()))
+        }
+    }
+
+    struct FakeSharedServiceManagerSource {
+        observations: VecDeque<Result<StableStartupInventory, FdStoreError>>,
+        deadlines: Vec<HardDeadline>,
+        events: Option<Rc<RefCell<Vec<&'static str>>>>,
+    }
+
+    impl SharedServiceManagerSource for FakeSharedServiceManagerSource {
+        fn reobserve<'a>(
+            &'a mut self,
+            _baseline: &'a StableStartupInventory,
+            deadline: HardDeadline,
+        ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a {
+            if let Some(events) = &self.events {
+                let event = if self.deadlines.is_empty() {
+                    "manager-before"
+                } else {
+                    "manager-after"
+                };
+                events.borrow_mut().push(event);
+            }
+            self.deadlines.push(deadline);
+            std::future::ready(self.observations.pop_front().unwrap_or(Err(
+                FdStoreError::InvalidInventory("scripted manager sample is absent"),
+            )))
+        }
+    }
+
+    fn fake_pinned_shared_service_cgroup(inode: u64) -> PinnedSharedServiceCgroup {
+        PinnedSharedServiceCgroup {
+            root: descriptor(),
+            root_identity: PinnedFileIdentity {
+                device: 7,
+                inode: 8,
+            },
+            service: descriptor(),
+            service_identity: PinnedFileIdentity { device: 7, inode },
+            pid_namespace: descriptor(),
+            pid_namespace_identity: PinnedFileIdentity {
+                device: 9,
+                inode: 10,
+            },
+            cgroup_namespace: descriptor(),
+            cgroup_namespace_identity: PinnedFileIdentity {
+                device: 9,
+                inode: 11,
+            },
+            path: b"/volparossa-test.service".as_slice().into(),
+        }
+    }
+
+    fn shared_cgroup_snapshot(
+        current_main_pid: NonZeroU32,
+        extra_stat_value: u64,
+    ) -> SharedServiceCgroupSnapshot {
+        SharedServiceCgroupSnapshot {
+            control_file_identities: [
+                PinnedFileIdentity {
+                    device: 7,
+                    inode: 11,
+                },
+                PinnedFileIdentity {
+                    device: 7,
+                    inode: 12,
+                },
+                PinnedFileIdentity {
+                    device: 7,
+                    inode: 13,
+                },
+            ],
+            stat_fields: BTreeMap::from([
+                (Box::<[u8]>::from(&b"nr_descendants"[..]), 0),
+                (Box::<[u8]>::from(&b"nr_dying_descendants"[..]), 0),
+                (
+                    Box::<[u8]>::from(&b"nr_subsys_memory"[..]),
+                    extra_stat_value,
+                ),
+            ]),
+            canonical_members: BTreeSet::from([current_main_pid]),
+        }
+    }
+
+    fn observed_exit_fixture(seed: u8) -> ObservedExactInheritedWorkerExitSet {
+        let custody = captured_custody(seed);
+        let target = exact_target_for_custody(seed, StartupCustodyPhase::MayOwnPrepare, &custody);
+        let classification = startup_classification(custody, &[target]);
+        let mut observer = FakeProcessPidfdExitObserver::default();
+        observed_observation(
+            observe_exact_inherited_worker_exits_outcome_with(
+                classification,
+                HardDeadline::after(Duration::from_secs(1)).expect("live exit deadline"),
+                &mut observer,
+            ),
+            1,
+        )
+    }
+
+    fn observed_exit_with_cleanup_fixture(
+        pending_seed: u8,
+        cleanup_seed: u8,
+    ) -> ObservedExactInheritedWorkerExitSet {
+        let custody = captured_custody(pending_seed);
+        let pending =
+            exact_target_for_custody(pending_seed, StartupCustodyPhase::MayOwnPrepare, &custody);
+        let cleanup = synthetic_startup_target(
+            cleanup_seed,
+            StartupCustodyPhase::CleanupConfirmed,
+            u32::from(cleanup_seed),
+        );
+        let classification = startup_classification(custody, &[pending, cleanup]);
+        let mut observer = FakeProcessPidfdExitObserver::default();
+        observed_observation(
+            observe_exact_inherited_worker_exits_outcome_with(
+                classification,
+                HardDeadline::after(Duration::from_secs(1)).expect("live exit deadline"),
+                &mut observer,
+            ),
+            1,
+        )
+    }
+
+    fn manager_sample_for_exits(
+        exits: &ObservedExactInheritedWorkerExitSet,
+    ) -> StableStartupInventory {
+        let (bindings, _) = exits
+            .classification
+            .custody
+            .verify_retained_bindings()
+            .expect("stable exit fixture bindings");
+        stable_startup_inventory_for_test(&bindings)
+    }
+
+    async fn successful_sampling_attempt(
+        exits: &ObservedExactInheritedWorkerExitSet,
+        seed: u8,
+        deadline: HardDeadline,
+    ) -> (
+        SharedServiceCgroupSamplingAttempt,
+        FakeSharedServiceCgroupSource,
+    ) {
+        let pid = NonZeroU32::new(std::process::id()).expect("nonzero current PID");
+        let mut manager = FakeSharedServiceManagerSource {
+            observations: VecDeque::from([
+                Ok(manager_sample_for_exits(exits)),
+                Ok(manager_sample_for_exits(exits)),
+            ]),
+            deadlines: Vec::new(),
+            events: None,
+        };
+        let mut source = FakeSharedServiceCgroupSource {
+            captured: Some(fake_pinned_shared_service_cgroup(u64::from(seed) + 40)),
+            observations: VecDeque::from([
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+            ]),
+            revalidations: VecDeque::new(),
+            observe_deadlines: Vec::new(),
+            revalidate_deadlines: Vec::new(),
+            capture_deadlines: Vec::new(),
+            events: None,
+        };
+        let sampling = sample_shared_service_cgroup_quiescence_with(
+            exits,
+            deadline,
+            &mut manager,
+            &mut source,
+        )
+        .await;
+        assert!(matches!(
+            sampling.result,
+            SharedServiceCgroupSamplingResult::Sampled(_)
+        ));
+        (sampling, source)
+    }
+
+    #[test]
+    fn cgroup_parsers_are_bounded_canonical_and_accept_only_current_main_pid() {
+        assert_eq!(
+            parse_unified_cgroup_path(b"0::/system.slice/volparossa-helper.service\n")
+                .expect("canonical unified path")
+                .as_ref(),
+            b"/system.slice/volparossa-helper.service"
+        );
+        for invalid in [
+            &b"1:name=/x\n"[..],
+            &b"0::/x/../y\n"[..],
+            &b"0::/x/\n"[..],
+            &b"0::/x\n0::/y\n"[..],
+            &b"0::/x (deleted)\n"[..],
+        ] {
+            assert!(parse_unified_cgroup_path(invalid).is_err());
+        }
+
+        let stat = b"nr_descendants 0\nnr_subsys_memory 1\nnr_dying_descendants 0\n";
+        let parsed = parse_cgroup_stat(stat).expect("exact zero descendants");
+        assert_eq!(parsed.get(b"nr_subsys_memory".as_slice()), Some(&1));
+        for invalid in [
+            &b"nr_descendants 1\nnr_dying_descendants 0\n"[..],
+            &b"nr_descendants 0\nnr_dying_descendants 1\n"[..],
+            &b"nr_descendants 0\n"[..],
+            &b"nr_descendants 00\nnr_dying_descendants 0\n"[..],
+            &b"nr_descendants 0\nnr_descendants 0\nnr_dying_descendants 0\n"[..],
+            &b"nr_descendants 0 extra\nnr_dying_descendants 0\n"[..],
+        ] {
+            assert!(parse_cgroup_stat(invalid).is_err());
+        }
+
+        let pid = NonZeroU32::new(42).expect("nonzero PID");
+        assert_eq!(
+            parse_cgroup_procs(b"42\n42\n", pid).expect("documented duplicate PID"),
+            BTreeSet::from([pid])
+        );
+        for invalid in [
+            &b""[..],
+            &b"42"[..],
+            &b"0\n"[..],
+            &b"042\n"[..],
+            &b"42\n43\n"[..],
+            &b"+42\n"[..],
+        ] {
+            assert!(parse_cgroup_procs(invalid, pid).is_err());
+        }
+
+        let mut maximum_component = b"0::/".to_vec();
+        maximum_component.extend(std::iter::repeat_n(b'a', MAX_CGROUP_COMPONENT_BYTES));
+        maximum_component.push(b'\n');
+        assert!(parse_unified_cgroup_path(&maximum_component).is_ok());
+        maximum_component.insert(maximum_component.len() - 1, b'a');
+        assert!(parse_unified_cgroup_path(&maximum_component).is_err());
+
+        let maximum_pid_lines = b"42\n".repeat(MAX_CGROUP_PROCS_LINES);
+        assert!(parse_cgroup_procs(&maximum_pid_lines, pid).is_ok());
+        let oversized_pid_lines = b"42\n".repeat(MAX_CGROUP_PROCS_LINES + 1);
+        assert!(parse_cgroup_procs(&oversized_pid_lines, pid).is_err());
+        assert!(parse_cgroup_procs(b"4294967296\n", pid).is_err());
+
+        let mut maximum_stat_fields = b"nr_descendants 0\nnr_dying_descendants 0\n".to_vec();
+        for index in 0..MAX_CGROUP_STAT_FIELDS - 2 {
+            maximum_stat_fields.extend_from_slice(format!("field{index} 0\n").as_bytes());
+        }
+        assert!(parse_cgroup_stat(&maximum_stat_fields).is_ok());
+        maximum_stat_fields.extend_from_slice(b"one_field_too_many 0\n");
+        assert!(parse_cgroup_stat(&maximum_stat_fields).is_err());
+        assert!(
+            parse_cgroup_stat(
+                b"nr_descendants 0\nnr_dying_descendants 0\noverflow 18446744073709551616\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn async_sampling_future_borrows_and_cancellation_keeps_the_exit_owner() {
+        let exits = observed_exit_fixture(52);
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
+        let mut manager = FakeSharedServiceManagerSource {
+            observations: VecDeque::new(),
+            deadlines: Vec::new(),
+            events: None,
+        };
+        let mut source = FakeSharedServiceCgroupSource {
+            captured: None,
+            observations: VecDeque::new(),
+            revalidations: VecDeque::new(),
+            observe_deadlines: Vec::new(),
+            revalidate_deadlines: Vec::new(),
+            capture_deadlines: Vec::new(),
+            events: None,
+        };
+        let sampling = sample_shared_service_cgroup_quiescence_with(
+            &exits,
+            deadline,
+            &mut manager,
+            &mut source,
+        );
+        drop(sampling);
+
+        assert_eq!(exits.observed_target_count.get(), 1);
+        assert_eq!(exits.classification.custody.bundles.len(), 1);
+        assert!(manager.deadlines.is_empty());
+        assert!(source.capture_deadlines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn injected_sources_prove_manager_and_post_manager_sample_order_and_sync_join() {
+        let seed = 53_u8;
+        let exits = observed_exit_fixture(seed);
+        let pid = NonZeroU32::new(std::process::id()).expect("nonzero current PID");
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut manager = FakeSharedServiceManagerSource {
+            observations: VecDeque::from([
+                Ok(manager_sample_for_exits(&exits)),
+                Ok(manager_sample_for_exits(&exits)),
+            ]),
+            deadlines: Vec::new(),
+            events: Some(Rc::clone(&events)),
+        };
+        let mut source = FakeSharedServiceCgroupSource {
+            captured: Some(fake_pinned_shared_service_cgroup(u64::from(seed) + 40)),
+            observations: VecDeque::from([
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+            ]),
+            revalidations: VecDeque::new(),
+            observe_deadlines: Vec::new(),
+            revalidate_deadlines: Vec::new(),
+            capture_deadlines: Vec::new(),
+            events: Some(Rc::clone(&events)),
+        };
+
+        let sampling = sample_shared_service_cgroup_quiescence_with(
+            &exits,
+            deadline,
+            &mut manager,
+            &mut source,
+        )
+        .await;
+        assert!(matches!(
+            sampling.result,
+            SharedServiceCgroupSamplingResult::Sampled(_)
+        ));
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                "manager-before",
+                "capture",
+                "sample-1",
+                "sample-2",
+                "manager-after",
+                "sample-3"
+            ]
+        );
+        assert_eq!(manager.deadlines, vec![deadline; 2]);
+
+        let outcome = join_shared_service_cgroup_quiescence_with(exits, sampling, &mut source);
+        let SharedServiceCgroupObservationOutcomeState::Observed(observed) = outcome.state else {
+            panic!("exact sampling and synchronous join did not succeed")
+        };
+        assert_eq!(observed.state.exits.observed_target_count.get(), 1);
+        assert_eq!(events.borrow().last().copied(), Some("sample-join"));
+        assert_eq!(source.observe_deadlines, vec![deadline; 4]);
+        assert!(
+            source
+                .observe_deadlines
+                .iter()
+                .all(|observed| *observed == deadline)
+        );
+    }
+
+    #[tokio::test]
+    async fn manager_deadline_remains_deadline_and_returned_attempt_leaves_exits_owned() {
+        let exits = observed_exit_fixture(54);
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
+        let mut manager = FakeSharedServiceManagerSource {
+            observations: VecDeque::from([Err(FdStoreError::Deadline)]),
+            deadlines: Vec::new(),
+            events: None,
+        };
+        let mut source = FakeSharedServiceCgroupSource {
+            captured: None,
+            observations: VecDeque::new(),
+            revalidations: VecDeque::new(),
+            observe_deadlines: Vec::new(),
+            revalidate_deadlines: Vec::new(),
+            capture_deadlines: Vec::new(),
+            events: None,
+        };
+        let sampling = sample_shared_service_cgroup_quiescence_with(
+            &exits,
+            deadline,
+            &mut manager,
+            &mut source,
+        )
+        .await;
+        assert!(matches!(
+            sampling.result,
+            SharedServiceCgroupSamplingResult::Failed(
+                SharedServiceCgroupObservationError::DeadlineElapsed
+            )
+        ));
+        assert_eq!(exits.observed_target_count.get(), 1);
+        assert!(source.capture_deadlines.is_empty());
+    }
+
+    #[test]
+    fn cleanup_confirmed_target_does_not_claim_current_pending_cgroup_membership() {
+        let pending_seed = 55_u8;
+        let exits = observed_exit_with_cleanup_fixture(pending_seed, 56);
+        let pinned = fake_pinned_shared_service_cgroup(u64::from(pending_seed) + 40);
+        verify_exit_set_against_shared_cgroup(&exits, &pinned)
+            .expect("only pending target requires current shared-cgroup anchor");
+        assert_eq!(exits.classification.classified.len(), 2);
+        assert_eq!(exits.observed_target_count.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn sampling_attempt_cannot_be_cross_joined_to_another_exit_set() {
+        let exits_a = observed_exit_fixture(57);
+        let exits_b = observed_exit_fixture(58);
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
+        let (sampling, mut source) = successful_sampling_attempt(&exits_a, 57, deadline).await;
+        let sampled_calls = source.observe_deadlines.len();
+
+        let outcome = join_shared_service_cgroup_quiescence_with(exits_b, sampling, &mut source);
+        let SharedServiceCgroupObservationOutcomeState::Retained { error, state } = outcome.state
+        else {
+            panic!("cross-joined sampling unexpectedly minted evidence")
+        };
+        assert_eq!(error, SharedServiceCgroupObservationError::BindingChanged);
+        assert_eq!(state.exits.classification.custody.bundles.len(), 1);
+        assert_eq!(source.observe_deadlines.len(), sampled_calls);
+        assert_eq!(exits_a.classification.custody.bundles.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_sampling_attempt_is_retained_before_join_io() {
+        let exits = observed_exit_fixture(59);
+        let deadline = HardDeadline::after(Duration::from_millis(40)).expect("brief deadline");
+        let (sampling, mut source) = successful_sampling_attempt(&exits, 59, deadline).await;
+        let sampled_calls = source.observe_deadlines.len();
+        while deadline.ensure_remaining().is_ok() {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let outcome = join_shared_service_cgroup_quiescence_with(exits, sampling, &mut source);
+        let SharedServiceCgroupObservationOutcomeState::Retained { error, state } = outcome.state
+        else {
+            panic!("expired sampling unexpectedly minted evidence")
+        };
+        assert_eq!(error, SharedServiceCgroupObservationError::DeadlineElapsed);
+        assert_eq!(state.exits.observed_target_count.get(), 1);
+        assert_eq!(source.observe_deadlines.len(), sampled_calls);
+    }
+
+    #[tokio::test]
+    async fn post_manager_and_join_projection_drift_never_mints_samples() {
+        let seed = 60_u8;
+        let exits = observed_exit_fixture(seed);
+        let pid = NonZeroU32::new(std::process::id()).expect("nonzero current PID");
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
+        let mut manager = FakeSharedServiceManagerSource {
+            observations: VecDeque::from([
+                Ok(manager_sample_for_exits(&exits)),
+                Ok(manager_sample_for_exits(&exits)),
+            ]),
+            deadlines: Vec::new(),
+            events: None,
+        };
+        let mut source = FakeSharedServiceCgroupSource {
+            captured: Some(fake_pinned_shared_service_cgroup(u64::from(seed) + 40)),
+            observations: VecDeque::from([
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 2)),
+            ]),
+            revalidations: VecDeque::new(),
+            observe_deadlines: Vec::new(),
+            revalidate_deadlines: Vec::new(),
+            capture_deadlines: Vec::new(),
+            events: None,
+        };
+        let post_manager_drift = sample_shared_service_cgroup_quiescence_with(
+            &exits,
+            deadline,
+            &mut manager,
+            &mut source,
+        )
+        .await;
+        assert!(matches!(
+            post_manager_drift.result,
+            SharedServiceCgroupSamplingResult::Failed(
+                SharedServiceCgroupObservationError::UnstableObservation
+            )
+        ));
+
+        let (sampling, mut source) = successful_sampling_attempt(&exits, seed, deadline).await;
+        source.observations = VecDeque::from([Ok(shared_cgroup_snapshot(pid, 2))]);
+        let join_drift = join_shared_service_cgroup_quiescence_with(exits, sampling, &mut source);
+        assert!(matches!(
+            join_drift.state,
+            SharedServiceCgroupObservationOutcomeState::Retained {
+                error: SharedServiceCgroupObservationError::UnstableObservation,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shared_cgroup_sampling_uses_two_initial_and_one_final_snapshot_under_one_deadline() {
+        let seed = 50_u8;
+        let exits = observed_exit_fixture(seed);
+        let pinned = fake_pinned_shared_service_cgroup(u64::from(seed) + 40);
+        let pid = NonZeroU32::new(std::process::id()).expect("nonzero current PID");
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
+        let mut source = FakeSharedServiceCgroupSource {
+            captured: None,
+            observations: VecDeque::from([
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+                Ok(shared_cgroup_snapshot(pid, 1)),
+            ]),
+            revalidations: VecDeque::new(),
+            observe_deadlines: Vec::new(),
+            revalidate_deadlines: Vec::new(),
+            capture_deadlines: Vec::new(),
+            events: None,
+        };
+        let initial = observe_initial_shared_service_cgroup_samples(
+            &exits,
+            &pinned,
+            pid,
+            deadline,
+            &mut source,
+        )
+        .expect("two matching initial samples");
+        let final_snapshot = observe_final_shared_service_cgroup_sample(
+            &exits,
+            &pinned,
+            pid,
+            &initial,
+            deadline,
+            &mut source,
+        )
+        .expect("matching final sample");
+        assert_eq!(final_snapshot, shared_cgroup_snapshot(pid, 1));
+        assert_eq!(source.observe_deadlines, vec![deadline; 3]);
+        assert_eq!(source.revalidate_deadlines, vec![deadline; 3]);
+    }
+
+    #[test]
+    fn cgroup_anchor_mismatch_and_snapshot_drift_fail_before_evidence() {
+        let seed = 51_u8;
+        let mut exits = observed_exit_fixture(seed);
+        let exact = fake_pinned_shared_service_cgroup(u64::from(seed) + 40);
+        let wrong = fake_pinned_shared_service_cgroup(u64::from(seed) + 41);
+        let pid = NonZeroU32::new(std::process::id()).expect("nonzero current PID");
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("live deadline");
+        let mut source = FakeSharedServiceCgroupSource {
+            captured: None,
+            observations: VecDeque::new(),
+            revalidations: VecDeque::new(),
+            observe_deadlines: Vec::new(),
+            revalidate_deadlines: Vec::new(),
+            capture_deadlines: Vec::new(),
+            events: None,
+        };
+        exits.observed_target_count = NonZeroUsize::new(2).expect("nonzero wrong count");
+        assert_eq!(
+            observe_initial_shared_service_cgroup_samples(
+                &exits,
+                &exact,
+                pid,
+                deadline,
+                &mut source,
+            )
+            .expect_err("observed pending count cannot drift"),
+            SharedServiceCgroupObservationError::BindingChanged
+        );
+        assert!(source.observe_deadlines.is_empty());
+        exits.observed_target_count = NonZeroUsize::new(1).expect("original exact count");
+        assert_eq!(
+            observe_initial_shared_service_cgroup_samples(
+                &exits,
+                &wrong,
+                pid,
+                deadline,
+                &mut source,
+            )
+            .expect_err("wrong anchor inode"),
+            SharedServiceCgroupObservationError::AnchorMismatch
+        );
+        assert!(source.observe_deadlines.is_empty());
+
+        let pinned = fake_pinned_shared_service_cgroup(u64::from(seed) + 40);
+        source.observations = VecDeque::from([
+            Ok(shared_cgroup_snapshot(pid, 1)),
+            Ok(shared_cgroup_snapshot(pid, 2)),
+        ]);
+        assert_eq!(
+            observe_initial_shared_service_cgroup_samples(
+                &exits,
+                &pinned,
+                pid,
+                deadline,
+                &mut source,
+            )
+            .expect_err("unstable stat projection"),
+            SharedServiceCgroupObservationError::UnstableObservation
+        );
+        assert_eq!(source.observe_deadlines, vec![deadline; 2]);
+    }
+
+    #[test]
+    fn shared_cgroup_surface_exposes_no_pid_fd_path_mutation_or_settlement_authority() {
+        let source = include_str!("systemd_custody.rs");
+        let start = source
+            .find("struct PinnedSharedServiceCgroup")
+            .expect("cgroup observer source start");
+        let end = source[start..]
+            .find("/// Consume the complete affine systemd startup snapshot")
+            .map(|offset| start + offset)
+            .expect("cgroup observer source end");
+        let observer = &source[start..end];
+        for forbidden in [
+            "pub fn pid",
+            "pub fn path",
+            "pub fn descriptor",
+            "as_raw_fd",
+            "RawFd",
+            "from_raw_fd",
+            "pidfd_send_signal",
+            "kill(",
+            "cgroup.kill",
+            "cgroup.procs\", OFlags::WR",
+            "OFlags::WRONLY",
+            "OFlags::RDWR",
+            "rustix::io::write",
+            "std::fs::write",
+            "confirm_cleanup",
+            "confirm_manager_absent",
+            "run_production_server",
+            "continue_empty",
+        ] {
+            assert!(
+                !observer.contains(forbidden),
+                "cgroup observer unexpectedly contains {forbidden} authority"
+            );
+        }
+        assert!(!include_str!("server.rs").contains("sample_shared_service_cgroup_quiescence"));
+        assert!(!include_str!("server.rs").contains("join_shared_service_cgroup_quiescence"));
+        assert!(observer.contains("observe_same_service_scope"));
+        assert!(observer.contains("exits: &ObservedExactInheritedWorkerExitSet"));
+        assert!(observer.contains("ResolveFlags::BENEATH"));
+        assert!(observer.contains("ResolveFlags::NO_XDEV"));
+        assert!(observer.contains("OFlags::RDONLY"));
     }
 
     #[test]
