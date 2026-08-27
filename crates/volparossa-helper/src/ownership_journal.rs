@@ -18,7 +18,7 @@ pub(crate) use actor::{
     DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyNameDigest, DurableCustodyOutcome,
     DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor,
     DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
-    DurableRegistrationOutcome,
+    DurableRegistrationOutcome, StartupCustodyPhase, StartupCustodyTarget,
 };
 
 use crate::{deadline::HardDeadline, lease_spec::WireguardLeaseSpec};
@@ -118,22 +118,73 @@ pub(crate) struct ProductionOwnershipRuntime {
     actor: DurableOwnershipActor,
 }
 
+/// Lock-holding, mutation-free production startup preflight.
+///
+/// The underlying actor thread retains the exact verified parent, runtime lock and decoded
+/// snapshot from which `targets` was projected. Dropping this guard aborts startup without running
+/// the Intent sweep. Production may continue only after the external descriptor-store observer has
+/// classified this exact bounded target set and the guard has revalidated the retained snapshot.
+#[must_use = "production ownership startup must be revalidated and continued or explicitly dropped"]
+pub(crate) struct ProductionOwnershipStartup {
+    startup: actor::DurableOwnershipStartup,
+}
+
+impl ProductionOwnershipStartup {
+    /// Canonical, digest-ordered custody targets from the exact locked startup snapshot.
+    pub(crate) fn targets(&self) -> &[StartupCustodyTarget] {
+        self.startup.targets()
+    }
+
+    /// Revalidate the retained parent, lock, `.next` absence and exact durable snapshot.
+    ///
+    /// This performs no repair or journal mutation. Success returns the same canonical slice so a
+    /// caller cannot accidentally classify targets from a different preflight.
+    pub(crate) fn revalidate_targets(
+        &mut self,
+    ) -> Result<&[StartupCustodyTarget], DurableOwnershipError> {
+        self.startup.revalidate_targets()
+    }
+
+    /// Continue only a startup whose durable snapshot projected no custody target.
+    pub(crate) fn continue_empty(
+        self,
+    ) -> Result<ProductionOwnershipRuntime, DurableOwnershipError> {
+        self.startup
+            .continue_empty()
+            .map(|actor| ProductionOwnershipRuntime { actor })
+    }
+}
+
 impl ProductionOwnershipRuntime {
     /// Open, lock, validate and sweep the fixed journal before socket publication may proceed.
     pub(crate) fn start_until(deadline: HardDeadline) -> Result<Self, DurableOwnershipError> {
-        Self::start_with_config_until(JournalConfig::production(), deadline)
+        Self::begin_until(deadline)?.continue_empty()
+    }
+
+    /// Open, lock and project custody-bound startup state without mutating any Intent.
+    pub(crate) fn begin_until(
+        deadline: HardDeadline,
+    ) -> Result<ProductionOwnershipStartup, DurableOwnershipError> {
+        Self::begin_with_config_until(JournalConfig::production(), deadline)
     }
 
     fn start_with_config_until(
         config: JournalConfig,
         deadline: HardDeadline,
     ) -> Result<Self, DurableOwnershipError> {
-        let actor = DurableOwnershipActor::spawn_with_executor_factory_until(
+        Self::begin_with_config_until(config, deadline)?.continue_empty()
+    }
+
+    fn begin_with_config_until(
+        config: JournalConfig,
+        deadline: HardDeadline,
+    ) -> Result<ProductionOwnershipStartup, DurableOwnershipError> {
+        let startup = DurableOwnershipActor::begin_with_executor_factory_until(
             config,
             || RefuseMayOwnRecovery,
             deadline,
         )?;
-        Ok(Self { actor })
+        Ok(ProductionOwnershipStartup { startup })
     }
 
     /// Issue only the cloneable authority needed to arm an already durable custody token.
@@ -725,6 +776,22 @@ impl DurableCustodyDescriptorBinding {
         CustodyDescriptorBindingV1::new(pidfd.0, network_namespace.0)
             .ok()
             .map(Self)
+    }
+
+    /// Compare the exact role-ordered durable identities, including normalized status flags.
+    pub(crate) fn matches_role_ordered(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Report reuse of either underlying kernel object, independent of role or status flags.
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        [self.0.pidfd, self.0.network_namespace]
+            .iter()
+            .any(|identity| {
+                [other.0.pidfd, other.0.network_namespace]
+                    .iter()
+                    .any(|candidate| identity.is_same_kernel_object(*candidate))
+            })
     }
 }
 
@@ -5648,25 +5715,65 @@ mod tests {
     }
 
     #[test]
-    fn production_server_reaches_actor_ready_before_token_socket_and_listener_mutation() {
+    fn production_server_classifies_lock_held_snapshot_before_ready_and_socket_mutation() {
         let source = include_str!("server.rs");
         let start = source
-            .find("fn bind_production_socket")
-            .expect("production bind function");
+            .find("pub fn run_production_server")
+            .expect("production entrypoint");
         let end = source[start..]
-            .find("async fn run_server")
+            .find("#[cfg(test)]")
             .map(|offset| start + offset)
-            .expect("end of production bind function");
-        let bind = &source[start..end];
-        let legacy = bind
+            .expect("end of production entrypoint");
+        let production = &source[start..end];
+        let inherited = production
+            .find("capture_inherited_custody(inherited)")
+            .expect("affine inherited custody capture");
+        let legacy = production
             .find("ensure_legacy_journal_absent()?")
             .expect("legacy interlock");
-        let identity = bind
+        let identity = production
             .find("prepare_production_runtime_identity()?")
             .expect("runtime identity preparation");
-        let ownership = bind
-            .find("ProductionOwnershipRuntime::start_until")
-            .expect("durable ownership startup");
+        let ownership = production
+            .find("ProductionOwnershipRuntime::begin_until")
+            .expect("lock-held durable ownership preflight");
+        let runtime = production
+            .find("Builder::new_multi_thread()")
+            .expect("Tokio runtime construction");
+        let observe = production
+            .find("observe_startup_custody_inventory")
+            .expect("stable manager inventory observation");
+        let revalidate = production
+            .find("revalidate_targets()")
+            .expect("post-observation journal revalidation");
+        let classify = production
+            .find("classify_startup_custody")
+            .expect("exact-set custody classification");
+        let continue_empty = production
+            .find("continue_empty()")
+            .expect("empty projection continuation");
+        let bind_call = production
+            .find("bind_production_socket(prepared_runtime, ownership_runtime)")
+            .expect("production socket bind call");
+
+        assert!(inherited < legacy);
+        assert!(legacy < identity);
+        assert!(identity < ownership);
+        assert!(ownership < runtime);
+        assert!(runtime < observe);
+        assert!(observe < revalidate);
+        assert!(revalidate < classify);
+        assert!(classify < continue_empty);
+        assert!(continue_empty < bind_call);
+
+        let bind_start = source
+            .find("fn bind_production_socket")
+            .expect("production bind function");
+        let bind_end = source[bind_start..]
+            .find("async fn run_server")
+            .map(|offset| bind_start + offset)
+            .expect("end of production bind function");
+        let bind = &source[bind_start..bind_end];
         let token = bind
             .find("publish_cleanup_token()")
             .expect("cleanup-token publication");
@@ -5678,9 +5785,6 @@ mod tests {
             .expect("guarded non-blocking listener bind");
         let secure = bind.find("secure_socket").expect("socket security");
 
-        assert!(legacy < identity);
-        assert!(identity < ownership);
-        assert!(ownership < token);
         assert!(token < stale_socket);
         assert!(stale_socket < guarded_listener);
         assert!(guarded_listener < secure);

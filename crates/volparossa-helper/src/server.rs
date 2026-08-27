@@ -28,10 +28,12 @@ use crate::{
     engine::HelperExecution,
     ownership_journal::{ProductionOwnershipRuntime, ensure_legacy_journal_absent},
     runtime::{
-        SOCKET_PATH, SocketPathGuard, bind_guarded_nonblocking_socket,
+        PreparedProductionRuntime, SOCKET_PATH, SocketPathGuard, bind_guarded_nonblocking_socket,
         prepare_production_runtime_identity, remove_stale_socket, secure_socket,
     },
-    systemd_custody::refuse_unrecoverable_inherited_custody,
+    systemd_custody::{
+        capture_inherited_custody, classify_startup_custody, observe_startup_custody_inventory,
+    },
 };
 
 const MAX_CONNECTIONS: usize = 32;
@@ -106,9 +108,34 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
     if Handle::try_current().is_ok() {
         return Err(ServerError::RuntimeContextConflict);
     }
-    refuse_unrecoverable_inherited_custody(inherited).map_err(|_| ServerError::InheritedCustody)?;
+    let inherited =
+        capture_inherited_custody(inherited).map_err(|_| ServerError::InheritedCustody)?;
+    ensure_legacy_journal_absent()?;
+    let prepared_runtime = prepare_production_runtime_identity()?;
+    let ownership_deadline = HardDeadline::after(OWNERSHIP_STARTUP_TIMEOUT)?;
+    let mut ownership_startup = ProductionOwnershipRuntime::begin_until(ownership_deadline)
+        .map_err(|_| ServerError::OwnershipIncomplete)?;
     let runtime = Builder::new_multi_thread().enable_all().build()?;
-    let server = bind_production_socket()?;
+    let observed_inventory = runtime
+        .block_on(observe_startup_custody_inventory(
+            &inherited,
+            ownership_deadline,
+        ))
+        .map_err(|_| ServerError::InheritedCustody)?;
+    let targets = ownership_startup
+        .revalidate_targets()
+        .map_err(|_| ServerError::OwnershipIncomplete)?;
+    let classification =
+        classify_startup_custody(inherited, targets, observed_inventory, ownership_deadline)
+            .map_err(|_| ServerError::InheritedCustody)?;
+    if !classification.is_empty() {
+        return Err(ServerError::InheritedCustody);
+    }
+    drop(classification);
+    let ownership_runtime = ownership_startup
+        .continue_empty()
+        .map_err(|_| ServerError::OwnershipIncomplete)?;
+    let server = bind_production_socket(prepared_runtime, ownership_runtime)?;
     runtime.block_on(run_server(server))
 }
 
@@ -117,11 +144,7 @@ fn run_production_server_with_empty_custody_for_test() -> Result<(), ServerError
     if Handle::try_current().is_ok() {
         return Err(ServerError::RuntimeContextConflict);
     }
-    crate::systemd_custody::refuse_empty_inherited_custody_for_test()
-        .map_err(|_| ServerError::InheritedCustody)?;
-    let runtime = Builder::new_multi_thread().enable_all().build()?;
-    let server = bind_production_socket()?;
-    runtime.block_on(run_server(server))
+    Err(ServerError::InheritedCustody)
 }
 
 /// Creates the fixed `/run/volparossa/helper.sock` production endpoint.
@@ -132,12 +155,10 @@ fn run_production_server_with_empty_custody_for_test() -> Result<(), ServerError
 ///
 /// Returns an error when the fixed runtime directory, durable ownership actor, or protected Unix
 /// socket cannot be prepared. A `MayOwnPrepare` record remains unreaped and blocks startup.
-fn bind_production_socket() -> Result<ProductionServer, ServerError> {
-    ensure_legacy_journal_absent()?;
-    let prepared_runtime = prepare_production_runtime_identity()?;
-    let ownership_deadline = HardDeadline::after(OWNERSHIP_STARTUP_TIMEOUT)?;
-    let ownership_runtime = ProductionOwnershipRuntime::start_until(ownership_deadline)
-        .map_err(|_| ServerError::OwnershipIncomplete)?;
+fn bind_production_socket(
+    prepared_runtime: PreparedProductionRuntime,
+    ownership_runtime: ProductionOwnershipRuntime,
+) -> Result<ProductionServer, ServerError> {
     let runtime = match prepared_runtime.publish_cleanup_token() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -795,20 +816,44 @@ mod tests {
             .find("Handle::try_current().is_ok()")
             .expect("nested-runtime preflight");
         let custody = entry
-            .find("refuse_unrecoverable_inherited_custody(inherited)")
-            .expect("inherited custody preflight");
+            .find("capture_inherited_custody(inherited)")
+            .expect("affine inherited custody capture");
+        let prepare = entry
+            .find("prepare_production_runtime_identity()?")
+            .expect("runtime identity before journal open");
+        let ownership = entry
+            .find("ProductionOwnershipRuntime::begin_until(ownership_deadline)")
+            .expect("lock-holding ownership preflight");
         let runtime = entry
             .find("Builder::new_multi_thread().enable_all().build()?")
             .expect("owned I/O-enabled Tokio runtime");
+        let inventory = entry
+            .find("observe_startup_custody_inventory(")
+            .expect("barriered manager inventory observation");
+        let revalidate = entry
+            .find("revalidate_targets()")
+            .expect("post-observation locked journal revalidation");
+        let classify = entry
+            .find("classify_startup_custody(inherited, targets, observed_inventory, ownership_deadline)")
+            .expect("three-way startup custody classification");
+        let continue_empty = entry
+            .find("continue_empty()")
+            .expect("empty-only ownership startup continuation");
         let bind = entry
-            .find("bind_production_socket()?")
+            .find("bind_production_socket(prepared_runtime, ownership_runtime)?")
             .expect("private bind call");
         let drive = entry
             .find("runtime.block_on(run_server(server))")
             .expect("private future driven to completion");
         assert!(preflight < custody);
-        assert!(custody < runtime);
-        assert!(runtime < bind);
+        assert!(custody < prepare);
+        assert!(prepare < ownership);
+        assert!(ownership < runtime);
+        assert!(runtime < inventory);
+        assert!(inventory < revalidate);
+        assert!(revalidate < classify);
+        assert!(classify < continue_empty);
+        assert!(continue_empty < bind);
         assert!(bind < drive);
         assert!(source.contains("async fn run_server"));
         let public_future = ["pub async fn", " run_server"].concat();
