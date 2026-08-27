@@ -228,13 +228,26 @@ fn prepopulate(
         revision = inserted.revision;
         if let Some(anchor) = anchor {
             revision = journal
-                .mark_may_own_prepare(
+                .mark_may_own_custody(
                     revision,
                     inserted.ownership_id,
                     inserted.generation,
                     anchor.0,
+                    custody_binding_for_test(*anchor)
+                        .expect("custody binding fixture")
+                        .0,
+                    HardDeadline::after(TEST_WAIT).expect("custody fixture deadline"),
                 )
-                .expect("arm setup intent")
+                .expect("mark custody setup intent")
+                .revision;
+            revision = journal
+                .mark_may_own_prepare_from_custody(
+                    revision,
+                    inserted.ownership_id,
+                    inserted.generation,
+                    HardDeadline::after(TEST_WAIT).expect("arm fixture deadline"),
+                )
+                .expect("arm custody setup intent")
                 .revision;
         }
         coordinates.push(OwnershipCoordinates {
@@ -429,6 +442,7 @@ fn affine_registration_retains_the_only_owner_and_rejects_an_independent_reparse
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One affine key-to-custody-to-MayOwn durability proof.
 fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identically() {
     let directory = tempdir().expect("temporary directory");
     let config = test_config(directory.path());
@@ -452,12 +466,14 @@ fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identica
             ..original
         },
     };
-    let retained_counterfeit = match actor.arm_until(
+    let counterfeit_anchor = durable_anchor(28);
+    let retained_counterfeit = match actor.mark_custody_until(
         counterfeit,
-        durable_anchor(28),
+        counterfeit_anchor,
+        custody_binding_for_test(counterfeit_anchor).expect("counterfeit binding"),
         HardDeadline::after(TEST_WAIT).expect("counterfeit deadline"),
     ) {
-        DurableArmOutcome::Retained {
+        DurableCustodyOutcome::Retained {
             error: DurableOwnershipError::Rejected,
             key,
         } => key,
@@ -466,8 +482,14 @@ fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identica
     assert_eq!(retained_counterfeit.coordinates.context_id.0, [99; 16]);
 
     let before = fs::read(&config.journal_path).expect("durable Intent bytes");
-    let key = match actor.arm_until(key, durable_anchor(28), expired_deadline()) {
-        DurableArmOutcome::Retained {
+    let exact_anchor = durable_anchor(28);
+    let key = match actor.mark_custody_until(
+        key,
+        exact_anchor,
+        custody_binding_for_test(exact_anchor).expect("exact binding"),
+        expired_deadline(),
+    ) {
+        DurableCustodyOutcome::Retained {
             error: DurableOwnershipError::DeadlineElapsed,
             key,
         } => key,
@@ -491,9 +513,21 @@ fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identica
         "no MayOwn token may exist before a durable phase transition"
     );
 
-    let may_own = match actor.arm_until(
+    let custody = match actor.mark_custody_until(
         key,
-        durable_anchor(28),
+        exact_anchor,
+        custody_binding_for_test(exact_anchor).expect("exact binding"),
+        HardDeadline::after(TEST_WAIT).expect("custody deadline"),
+    ) {
+        DurableCustodyOutcome::Marked(custody) => custody,
+        outcome @ DurableCustodyOutcome::Retained { .. } => {
+            panic!("durable custody mark failed: {outcome:?}")
+        }
+    };
+    assert_eq!(custody.context_id(), [28; 16]);
+    assert_eq!(format!("{custody:?}"), "DurableMayOwnCustody(<redacted>)");
+    let may_own = match actor.arm_custody_until(
+        custody,
         HardDeadline::after(TEST_WAIT).expect("arm deadline"),
     ) {
         DurableArmOutcome::Armed(may_own) => may_own,
@@ -512,7 +546,7 @@ fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identica
         .client
         .as_ref()
         .expect("actor client")
-        .arm_pending(may_own.key.coordinates, durable_anchor(28))
+        .arm_custody_pending(may_own.key.coordinates)
         .expect("admit exact raw test retry")
         .wait()
         .expect("exact durable retry");
@@ -927,8 +961,12 @@ fn dropped_replies_do_not_cancel_durable_transitions_and_exact_retries_recover()
     let anchor = durable_anchor(3);
     drop(
         client
-            .arm_pending(first_key.coordinates, anchor)
-            .expect("admit lost arm reply"),
+            .mark_custody_pending(
+                first_key.coordinates,
+                anchor,
+                custody_binding_for_test(anchor).expect("custody binding"),
+            )
+            .expect("admit lost custody reply"),
     );
     actor
         .arm_prepare(&first_key, anchor)
@@ -1834,6 +1872,7 @@ fn definite_io_requires_health_confirmation_and_lifecycle_terminals_are_absorbin
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Keep the complete private actor API surface audit together.
 fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
@@ -1841,9 +1880,10 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     assert_send::<DurableIntentRegistration>();
     assert_send_sync::<DurableCustodyNameDigest>();
     assert_send_sync::<DurableOwnershipKey>();
+    assert_send_sync::<DurableMayOwnCustody>();
     assert_send_sync::<DurableMayOwnPrepare>();
-    let _: fn(&DurableOwnershipKey) -> DurableCustodyNameDigest =
-        DurableOwnershipKey::custody_name_digest;
+    let _: fn(&DurableMayOwnCustody) -> DurableCustodyNameDigest =
+        DurableMayOwnCustody::custody_name_digest;
     let _: fn(
         &DurableOwnershipActor,
         &DurableOwnershipKey,
@@ -1860,8 +1900,11 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
         &DurableOwnershipActor,
         DurableOwnershipKey,
         DurablePrepareAnchor,
+        DurableCustodyDescriptorBinding,
         HardDeadline,
-    ) -> DurableArmOutcome = DurableOwnershipActor::arm_until;
+    ) -> DurableCustodyOutcome = DurableOwnershipActor::mark_custody_until;
+    let _: fn(&DurableOwnershipActor, DurableMayOwnCustody, HardDeadline) -> DurableArmOutcome =
+        DurableOwnershipActor::arm_custody_until;
     let _: fn(
         &DurableOwnershipActor,
         &DurableOwnershipKey,
@@ -1908,9 +1951,12 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
     assert!(!actor_source.contains("pub(crate) fn register("));
     assert!(!actor_source.contains("pub(crate) fn arm("));
     assert!(actor_source.contains("pub(crate) fn register_until("));
-    assert!(actor_source.contains("pub(crate) fn arm_until("));
+    assert!(actor_source.contains("pub(crate) fn mark_custody_until("));
+    assert!(actor_source.contains("pub(crate) fn arm_custody_until("));
     assert!(actor_source.contains("fn register_pending_until("));
-    assert!(actor_source.contains("fn arm_pending_until("));
+    assert!(actor_source.contains("fn mark_custody_pending_until("));
+    assert!(actor_source.contains("fn arm_custody_pending_until("));
+    assert!(!actor_source.contains("pub(crate) fn arm_until("));
 
     for (name, source) in [
         ("lib", library_source),
@@ -1921,8 +1967,10 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
         for affine_api in [
             "DurableIntentRegistration",
             "DurableOwnershipActor",
+            "DurableMayOwnCustody",
             "DurableMayOwnPrepare",
             "DurableRegistrationOutcome",
+            "DurableCustodyOutcome",
             "DurableArmOutcome",
             "DurableCustodyNameDigest",
         ] {
@@ -1940,6 +1988,7 @@ fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
     for declaration in [
         "pub(crate) struct DurableIntentRegistration",
         "pub(crate) struct DurableOwnershipKey",
+        "pub(crate) struct DurableMayOwnCustody",
         "pub(crate) struct DurableMayOwnPrepare",
     ] {
         let attributes = actor_source
@@ -1973,15 +2022,17 @@ fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
     assert!(may_own_surface.contains("context_id(&self)"));
     assert!(may_own_surface.contains("resources(&self) -> &[DurableWireguardResource]"));
 
-    let key_surface = actor_source
-        .split("impl DurableOwnershipKey {")
+    assert!(!actor_source.contains("impl DurableOwnershipKey {"));
+    let custody_surface = actor_source
+        .split("impl DurableMayOwnCustody {")
         .nth(1)
-        .expect("durable key implementation")
-        .split("/// Durable evidence that Prepare may own")
+        .expect("durable custody implementation")
+        .split("impl fmt::Debug for DurableMayOwnCustody")
         .next()
-        .expect("bounded durable key implementation");
-    assert_eq!(key_surface.matches("pub(crate) fn").count(), 1);
-    assert!(key_surface.contains("custody_name_digest(&self) -> DurableCustodyNameDigest"));
+        .expect("bounded durable custody implementation");
+    assert_eq!(custody_surface.matches("pub(crate)").count(), 2);
+    assert!(custody_surface.contains("context_id(&self)"));
+    assert!(custody_surface.contains("custody_name_digest(&self) -> DurableCustodyNameDigest"));
 
     let digest_surface = actor_source
         .split("impl DurableCustodyNameDigest {")

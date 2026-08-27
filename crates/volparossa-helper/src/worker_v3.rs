@@ -57,8 +57,9 @@ use crate::{
         validate_response_for_request,
     },
     ownership_journal::{
-        DurableArmOutcome, DurableIntentRegistration, DurableMayOwnPrepare, DurableOwnershipActor,
-        DurableOwnershipError, DurableOwnershipKey, DurableRegistrationOutcome,
+        DurableArmOutcome, DurableCustodyOutcome, DurableIntentRegistration, DurableMayOwnCustody,
+        DurableMayOwnPrepare, DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey,
+        DurableRegistrationOutcome,
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
@@ -2587,16 +2588,18 @@ impl std::fmt::Debug for DurableWorkerPrepareHandoff {
 
 /// Conservative owner of one durable worker custody publication boundary.
 ///
-/// This affine value deliberately retains the original absolute deadline, durable key, registered
-/// worker, authenticated recovery pins, pidfd and network-namespace descriptor. Its existence does
-/// not prove whether systemd owns the descriptors: a later non-cancellable supervisor must retain
-/// this exact owner across publication and reconciliation. There is no transition back to a
-/// retryable or definitely-unpublished state.
+/// This affine value deliberately retains the original absolute deadline, phase-4 durable custody
+/// token, registered worker, authenticated recovery pins, pidfd and network-namespace descriptor.
+/// Its existence does not prove whether systemd owns the descriptors: a later non-cancellable
+/// supervisor must retain this exact owner across publication and reconciliation. There is no
+/// transition back to a retryable or definitely-unpublished state.
 #[must_use = "durable publication authority must remain retained until exact attestation or reconciliation"]
 struct DurableWorkerCustodyPublicationOwner {
     custody_name: crate::systemd_fdstore::CustodyFdName,
     deadline: HardDeadline,
-    handoff: DurableWorkerPrepareHandoff,
+    durable: DurableMayOwnCustody,
+    worker: WorkerGenerationOwnership,
+    source: WorkerRecoveryIdentitySource,
 }
 
 impl std::fmt::Debug for DurableWorkerCustodyPublicationOwner {
@@ -2654,6 +2657,10 @@ enum DurableWorkerPrepareOutcome {
         error: WorkerV3Error,
         handoff: DurableWorkerPrepareHandoff,
     },
+    CustodyFenceRetained {
+        error: DurableOwnershipError,
+        handoff: DurableWorkerPrepareHandoff,
+    },
 }
 
 impl std::fmt::Debug for DurableWorkerPrepareOutcome {
@@ -2678,6 +2685,10 @@ impl std::fmt::Debug for DurableWorkerPrepareOutcome {
                 .finish_non_exhaustive(),
             Self::HandoffWorkerRetained { error, .. } => formatter
                 .debug_struct("HandoffWorkerRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::CustodyFenceRetained { error, .. } => formatter
+                .debug_struct("CustodyFenceRetained")
                 .field("error", error)
                 .finish_non_exhaustive(),
         }
@@ -4872,11 +4883,15 @@ impl WorkerCoordinator {
                 };
             }
         };
-        self.finish_durable_registered_worker_handoff_until(context_id, key, worker, deadline)
+        self.finish_durable_registered_worker_handoff_until(
+            actor, context_id, key, worker, deadline,
+        )
     }
 
+    #[allow(clippy::too_many_lines)] // Keep the complete ordered custody-publication fence auditable.
     fn finish_durable_registered_worker_handoff_until(
         &self,
+        actor: &DurableOwnershipActor,
         context_id: ContextId,
         key: DurableOwnershipKey,
         worker: WorkerGenerationOwnership,
@@ -4938,14 +4953,61 @@ impl WorkerCoordinator {
         ) {
             return DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff };
         }
-        let custody_name = crate::systemd_fdstore::CustodyFdName::from_durable_digest(
-            handoff.registered.key.custody_name_digest(),
-        );
-        DurableWorkerPrepareOutcome::CustodyPublication(DurableWorkerCustodyPublicationOwner {
-            custody_name,
-            deadline,
-            handoff,
-        })
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            return DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff };
+        }
+        let custody = match crate::systemd_fdstore::BorrowedCustodyPair::new(
+            handoff.source.restart_custody.borrowed_pidfd(),
+            handoff.source.restart_custody.borrowed_network_namespace(),
+        ) {
+            Ok(custody) => custody,
+            Err(error) => {
+                return DurableWorkerPrepareOutcome::HandoffWorkerRetained {
+                    error: WorkerV3Error::SystemdCustodyInput(error),
+                    handoff,
+                };
+            }
+        };
+        let binding = match custody.durable_binding() {
+            Ok(binding) => binding,
+            Err(error) => {
+                return DurableWorkerPrepareOutcome::HandoffWorkerRetained {
+                    error: WorkerV3Error::SystemdCustodyInput(error),
+                    handoff,
+                };
+            }
+        };
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            return DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff };
+        }
+        let anchor = handoff.source.durable_prepare_anchor();
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+        match actor.mark_custody_until(key, anchor, binding, deadline) {
+            DurableCustodyOutcome::Marked(durable) => {
+                let custody_name = crate::systemd_fdstore::CustodyFdName::from_durable_digest(
+                    durable.custody_name_digest(),
+                );
+                DurableWorkerPrepareOutcome::CustodyPublication(
+                    DurableWorkerCustodyPublicationOwner {
+                        custody_name,
+                        deadline,
+                        durable,
+                        worker,
+                        source,
+                    },
+                )
+            }
+            DurableCustodyOutcome::Retained { error, key } => {
+                DurableWorkerPrepareOutcome::CustodyFenceRetained {
+                    error,
+                    handoff: DurableWorkerPrepareHandoff {
+                        registered: DurableRegisteredStartingWorker { key, worker },
+                        source,
+                    },
+                }
+            }
+        }
     }
 
     /// Dormant synchronous transition from exact systemd inventory evidence to durable arming.
@@ -4969,9 +5031,8 @@ impl WorkerCoordinator {
             };
         }
         let custody_verification = crate::systemd_fdstore::BorrowedCustodyPair::new(
-            publication.handoff.source.restart_custody.borrowed_pidfd(),
+            publication.source.restart_custody.borrowed_pidfd(),
             publication
-                .handoff
                 .source
                 .restart_custody
                 .borrowed_network_namespace(),
@@ -4992,8 +5053,8 @@ impl WorkerCoordinator {
             };
         }
         if let Err(error) = self.revalidate_durable_recovery_identity_until(
-            &publication.handoff.registered.worker,
-            &publication.handoff.source,
+            &publication.worker,
+            &publication.source,
             publication.deadline,
         ) {
             return DurableWorkerPostAttestationOutcome::PublicationUnresolved {
@@ -5002,16 +5063,22 @@ impl WorkerCoordinator {
                 attestation,
             };
         }
-        let anchor = publication.handoff.source.durable_prepare_anchor();
+        if publication.durable.context_id() != publication.worker.coordinates.context_id {
+            return DurableWorkerPostAttestationOutcome::PublicationUnresolved {
+                error: WorkerV3Error::Conflict,
+                publication,
+                attestation,
+            };
+        }
         let DurableWorkerCustodyPublicationOwner {
             custody_name,
             deadline,
-            handoff,
+            durable,
+            worker,
+            source,
         } = publication;
-        let DurableWorkerPrepareHandoff { registered, source } = handoff;
-        let DurableRegisteredStartingWorker { key, worker } = registered;
 
-        match actor.arm_until(key, anchor, deadline) {
+        match actor.arm_custody_until(durable, deadline) {
             DurableArmOutcome::Armed(durable) => {
                 let may_own = DurableWorkerMayOwnPrepare {
                     durable,
@@ -5026,16 +5093,15 @@ impl WorkerCoordinator {
                     DurableWorkerPostAttestationOutcome::ContextMismatch(may_own)
                 }
             }
-            DurableArmOutcome::Retained { error, key } => {
+            DurableArmOutcome::Retained { error, custody } => {
                 DurableWorkerPostAttestationOutcome::ArmRetained {
                     error,
                     publication: DurableWorkerCustodyPublicationOwner {
                         custody_name,
                         deadline,
-                        handoff: DurableWorkerPrepareHandoff {
-                            registered: DurableRegisteredStartingWorker { key, worker },
-                            source,
-                        },
+                        durable: custody,
+                        worker,
+                        source,
                     },
                     attestation,
                 }
@@ -6464,7 +6530,7 @@ mod tests {
     use std::{
         env, fs,
         io::Read,
-        os::unix::process::ExitStatusExt,
+        os::unix::{fs::PermissionsExt as _, process::ExitStatusExt},
         process,
         sync::atomic::{AtomicBool, Ordering},
         thread,
@@ -7145,9 +7211,8 @@ mod tests {
         publication: &DurableWorkerCustodyPublicationOwner,
     ) -> crate::systemd_fdstore::InventoryAttestation {
         let custody = crate::systemd_fdstore::BorrowedCustodyPair::new(
-            publication.handoff.source.restart_custody.borrowed_pidfd(),
+            publication.source.restart_custody.borrowed_pidfd(),
             publication
-                .handoff
                 .source
                 .restart_custody
                 .borrowed_network_namespace(),
@@ -7183,12 +7248,12 @@ mod tests {
         let DurableWorkerCustodyPublicationOwner {
             custody_name,
             deadline: _,
-            handoff,
+            durable,
+            worker,
+            source,
         } = publication;
-        let DurableWorkerPrepareHandoff { registered, source } = handoff;
-        let DurableRegisteredStartingWorker { key, worker } = registered;
         let _ = custody_name;
-        drop(key);
+        drop(durable);
         drop(source);
         reap_durable_handoff_worker(coordinator, worker);
     }
@@ -7325,7 +7390,7 @@ mod tests {
         mutation: Mutation,
     ) -> FencedDurableHandoffFixture
     where
-        Mutation: FnOnce(&WorkerCoordinator, ContextId, u64),
+        Mutation: FnOnce(&WorkerCoordinator, ContextId, u64, &std::path::Path),
     {
         let directory = tempdir().expect("durable handoff directory");
         let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
@@ -7373,7 +7438,7 @@ mod tests {
             panic!("durable handoff did not reach its pre-arm source fence")
         }
         let mutation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            mutation(&coordinator, context_id, 1);
+            mutation(&coordinator, context_id, 1, directory.path());
         }));
         let (released, changed) = release.as_ref();
         *released
@@ -8086,6 +8151,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One end-to-end dormant Intent-to-MayOwn custody proof.
     fn durable_passive_handoff_journals_before_spawn_and_sends_zero_request_bytes() {
         let context_id = [90; 16];
         let directory = tempdir().expect("durable handoff directory");
@@ -8098,6 +8164,9 @@ mod tests {
         assert!(!journal_path.exists());
         let journal_advanced_before_spawn = Arc::new(AtomicBool::new(false));
         let observed_advance = Arc::clone(&journal_advanced_before_spawn);
+        let journal_before_spawn = Arc::new(Mutex::new(None));
+        let observed_journal_before_spawn = Arc::clone(&journal_before_spawn);
+        let spawn_journal_path = journal_path.clone();
         let coordinator =
             WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
         let registration = durable_worker_registration(context_id, 90);
@@ -8110,8 +8179,13 @@ mod tests {
             Duration::from_secs(5),
             deadline,
             move |reservation, _deadline| {
-                let durable_before_spawn =
-                    fs::read(&journal_path).is_ok_and(|current| !current.is_empty());
+                let durable_bytes = fs::read(&spawn_journal_path).ok();
+                let durable_before_spawn = durable_bytes
+                    .as_ref()
+                    .is_some_and(|current| !current.is_empty());
+                *observed_journal_before_spawn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = durable_bytes;
                 observed_advance.store(durable_before_spawn, Ordering::SeqCst);
                 process.binding = Some(reservation.binding());
                 Ok(SpawnedWorker {
@@ -8126,25 +8200,27 @@ mod tests {
             panic!("durable passive handoff did not retain publication authority: {outcome:?}")
         };
         assert!(journal_advanced_before_spawn.load(Ordering::SeqCst));
+        let intent_bytes = journal_before_spawn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("durable Intent bytes observed before spawn");
+        let custody_bytes = fs::read(&journal_path).expect("durable custody-fence bytes");
+        assert_ne!(custody_bytes, intent_bytes);
+        assert!(
+            crate::ownership_journal::journal_bytes_have_exact_custody_phase_for_test(
+                &custody_bytes,
+                context_id,
+            ),
+            "publication authority requires exact durable phase-4 custody evidence"
+        );
         assert_eq!(publication.deadline, deadline);
+        assert_eq!(publication.worker.coordinates.context_id, context_id);
+        assert_eq!(publication.worker.coordinates.worker_generation.get(), 1);
+        assert_durable_handoff_fence_owner(&publication.worker);
         assert_eq!(
-            publication.handoff.registered.worker.coordinates.context_id,
-            context_id
-        );
-        assert_eq!(
-            publication
-                .handoff
-                .registered
-                .worker
-                .coordinates
-                .worker_generation
-                .get(),
-            1
-        );
-        assert_durable_handoff_fence_owner(&publication.handoff.registered.worker);
-        assert_eq!(
-            publication.handoff.source.pending.coordinates,
-            publication.handoff.registered.worker.coordinates
+            publication.source.pending.coordinates,
+            publication.worker.coordinates
         );
         assert_eq!(
             coordinator
@@ -8159,6 +8235,8 @@ mod tests {
         let DurableWorkerPostAttestationOutcome::MayOwn(may_own) = outcome else {
             panic!("exact custody attestation did not arm durable ownership: {outcome:?}")
         };
+        let may_own_bytes = fs::read(&journal_path).expect("durable MayOwnPrepare bytes");
+        assert_ne!(may_own_bytes, custody_bytes);
         assert_eq!(may_own.durable.context_id(), context_id);
         assert_eq!(may_own.durable.resources().len(), 1);
         assert_eq!(may_own.worker.coordinates.context_id, context_id);
@@ -8194,7 +8272,7 @@ mod tests {
         let fixture = fenced_durable_handoff_fixture(
             context_id,
             HardDeadline::after(Duration::from_secs(5)).expect("dispatch-fence deadline"),
-            |coordinator, context_id, generation| {
+            |coordinator, context_id, generation, _directory| {
                 assert_durable_handoff_registry_pristine(coordinator, context_id, generation);
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_time()
@@ -8216,7 +8294,7 @@ mod tests {
         let DurableWorkerPrepareOutcome::CustodyPublication(publication) = fixture.outcome else {
             panic!("dispatch-fenced handoff did not retain custody publication authority")
         };
-        assert_durable_handoff_fence_owner(&publication.handoff.registered.worker);
+        assert_durable_handoff_fence_owner(&publication.worker);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -8272,15 +8350,16 @@ mod tests {
         let fixture = fenced_durable_handoff_fixture(
             context_id,
             HardDeadline::after(Duration::from_secs(5)).expect("attestation mismatch deadline"),
-            |_coordinator, _context_id, _generation| {},
+            |_coordinator, _context_id, _generation, _directory| {},
         );
+        let journal_path = fixture.directory.path().join("helper.ownership-v3");
+        let custody_bytes = fs::read(&journal_path).expect("phase-4 attestation-mismatch bytes");
         let DurableWorkerPrepareOutcome::CustodyPublication(publication) = fixture.outcome else {
             panic!("durable handoff did not retain publication authority")
         };
         let custody = crate::systemd_fdstore::BorrowedCustodyPair::new(
-            publication.handoff.source.restart_custody.borrowed_pidfd(),
+            publication.source.restart_custody.borrowed_pidfd(),
             publication
-                .handoff
                 .source
                 .restart_custody
                 .borrowed_network_namespace(),
@@ -8306,13 +8385,17 @@ mod tests {
             panic!("mismatched attestation did not retain every owner: {outcome:?}")
         };
         assert_eq!(
-            publication.handoff.source.pending.coordinates,
-            publication.handoff.registered.worker.coordinates
+            publication.source.pending.coordinates,
+            publication.worker.coordinates
         );
-        assert_durable_handoff_fence_owner(&publication.handoff.registered.worker);
+        assert_durable_handoff_fence_owner(&publication.worker);
         assert_eq!(
             format!("{attestation:?}"),
             "InventoryAttestation(<redacted>)"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("bytes after attestation mismatch"),
+            custody_bytes
         );
         assert_no_worker_request_bytes(&fixture.peer);
         retain_and_reap_durable_publication(&fixture.coordinator, publication);
@@ -8327,8 +8410,10 @@ mod tests {
         let fixture = fenced_durable_handoff_fixture(
             context_id,
             HardDeadline::after(Duration::from_secs(5)).expect("post-attestation fence deadline"),
-            |_coordinator, _context_id, _generation| {},
+            |_coordinator, _context_id, _generation, _directory| {},
         );
+        let journal_path = fixture.directory.path().join("helper.ownership-v3");
+        let custody_bytes = fs::read(&journal_path).expect("phase-4 worker-change bytes");
         let DurableWorkerPrepareOutcome::CustodyPublication(publication) = fixture.outcome else {
             panic!("durable handoff did not retain publication authority")
         };
@@ -8353,13 +8438,17 @@ mod tests {
             panic!("post-attestation phase change did not retain every owner: {outcome:?}")
         };
         assert_eq!(
-            publication.handoff.source.pending.coordinates,
-            publication.handoff.registered.worker.coordinates
+            publication.source.pending.coordinates,
+            publication.worker.coordinates
         );
-        assert_durable_handoff_fence_owner(&publication.handoff.registered.worker);
+        assert_durable_handoff_fence_owner(&publication.worker);
         assert_eq!(
             format!("{attestation:?}"),
             "InventoryAttestation(<redacted>)"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("bytes after worker identity change"),
+            custody_bytes
         );
         assert_no_worker_request_bytes(&fixture.peer);
         lock_worker_registry(&fixture.coordinator.registry)
@@ -8381,16 +8470,17 @@ mod tests {
         let fixture = fenced_durable_handoff_fixture(
             context_id,
             deadline,
-            |_coordinator, _context_id, _generation| {},
+            |_coordinator, _context_id, _generation, _directory| {},
         );
+        let journal_path = fixture.directory.path().join("helper.ownership-v3");
+        let custody_bytes = fs::read(&journal_path).expect("phase-4 expired-arm bytes");
         let DurableWorkerPrepareOutcome::CustodyPublication(publication) = fixture.outcome else {
             panic!("durable handoff did not retain publication authority")
         };
         assert_eq!(publication.deadline, deadline);
         let custody = crate::systemd_fdstore::BorrowedCustodyPair::new(
-            publication.handoff.source.restart_custody.borrowed_pidfd(),
+            publication.source.restart_custody.borrowed_pidfd(),
             publication
-                .handoff
                 .source
                 .restart_custody
                 .borrowed_network_namespace(),
@@ -8417,10 +8507,14 @@ mod tests {
             panic!("expired original deadline did not retain every owner: {outcome:?}")
         };
         assert_eq!(publication.deadline, deadline);
-        assert_durable_handoff_fence_owner(&publication.handoff.registered.worker);
+        assert_durable_handoff_fence_owner(&publication.worker);
         assert_eq!(
             format!("{attestation:?}"),
             "InventoryAttestation(<redacted>)"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("bytes after expired arm"),
+            custody_bytes
         );
         assert_no_worker_request_bytes(&fixture.peer);
         retain_and_reap_durable_publication(&fixture.coordinator, publication);
@@ -8435,8 +8529,10 @@ mod tests {
         let mut fixture = fenced_durable_handoff_fixture(
             context_id,
             HardDeadline::after(Duration::from_secs(5)).expect("arm failure deadline"),
-            |_coordinator, _context_id, _generation| {},
+            |_coordinator, _context_id, _generation, _directory| {},
         );
+        let journal_path = fixture.directory.path().join("helper.ownership-v3");
+        let custody_bytes = fs::read(&journal_path).expect("phase-4 actor-failure bytes");
         let DurableWorkerPrepareOutcome::CustodyPublication(publication) = fixture.outcome else {
             panic!("durable handoff did not retain publication authority")
         };
@@ -8462,17 +8558,21 @@ mod tests {
             panic!("actor failure did not reconstruct every owner: {outcome:?}")
         };
         assert_eq!(
-            format!("{:?}", publication.handoff.registered.key),
-            "DurableOwnershipKey(<redacted>)"
+            format!("{:?}", publication.durable),
+            "DurableMayOwnCustody(<redacted>)"
         );
         assert_eq!(
-            publication.handoff.source.pending.coordinates,
-            publication.handoff.registered.worker.coordinates
+            publication.source.pending.coordinates,
+            publication.worker.coordinates
         );
-        assert_durable_handoff_fence_owner(&publication.handoff.registered.worker);
+        assert_durable_handoff_fence_owner(&publication.worker);
         assert_eq!(
             format!("{attestation:?}"),
             "InventoryAttestation(<redacted>)"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("bytes after actor arm failure"),
+            custody_bytes
         );
         assert_no_worker_request_bytes(&fixture.peer);
         retain_and_reap_durable_publication(&fixture.coordinator, publication);
@@ -8647,7 +8747,7 @@ mod tests {
         let fixture = fenced_durable_handoff_fixture(
             context_id,
             HardDeadline::after(Duration::from_secs(5)).expect("phase-fence deadline"),
-            |coordinator, context_id, _generation| {
+            |coordinator, context_id, _generation, _directory| {
                 lock_worker_registry(&coordinator.registry)
                     .records
                     .get_mut(&context_id)
@@ -8687,7 +8787,7 @@ mod tests {
         let fixture = fenced_durable_handoff_fixture(
             context_id,
             HardDeadline::after(Duration::from_secs(5)).expect("binding-fence deadline"),
-            |coordinator, context_id, generation| {
+            |coordinator, context_id, generation, _directory| {
                 lock_worker_registry(&coordinator.registry)
                     .records
                     .get_mut(&context_id)
@@ -8727,7 +8827,9 @@ mod tests {
         let fixture = fenced_durable_handoff_fixture(
             context_id,
             deadline,
-            |_coordinator, _context_id, _generation| wait_until_deadline_elapsed(deadline),
+            |_coordinator, _context_id, _generation, _directory| {
+                wait_until_deadline_elapsed(deadline);
+            },
         );
         assert_no_worker_request_bytes(&fixture.peer);
         let DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff } = fixture.outcome
@@ -8737,6 +8839,58 @@ mod tests {
         assert!(matches!(error, WorkerV3Error::Deadline));
         assert_eq!(handoff.source.pending.coordinates.context_id, context_id);
         assert_durable_handoff_fence_owner(&handoff.registered.worker);
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+        drop(key);
+        drop(source);
+        reap_durable_handoff_worker(&fixture.coordinator, worker);
+        drop(fixture.actor);
+        drop(fixture.directory);
+    }
+
+    #[test]
+    fn durable_custody_mark_failure_retains_the_complete_unpublished_handoff() {
+        let context_id = [108; 16];
+        let original_mode = Arc::new(Mutex::new(None));
+        let captured_mode = Arc::clone(&original_mode);
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("custody-mark failure deadline"),
+            move |_coordinator, _context_id, _generation, directory| {
+                let mode = fs::metadata(directory)
+                    .expect("journal parent metadata")
+                    .permissions()
+                    .mode();
+                *captured_mode
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
+                fs::set_permissions(directory, fs::Permissions::from_mode(mode & !0o100))
+                    .expect("remove journal parent search permission");
+            },
+        );
+        let mode = original_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("original journal parent mode");
+        fs::set_permissions(fixture.directory.path(), fs::Permissions::from_mode(mode))
+            .expect("restore journal parent permissions");
+        assert_no_worker_request_bytes(&fixture.peer);
+        let DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff } = fixture.outcome
+        else {
+            panic!("custody mark failure did not retain the unpublished handoff")
+        };
+        assert!(matches!(
+            error,
+            DurableOwnershipError::Rejected
+                | DurableOwnershipError::Unavailable
+                | DurableOwnershipError::Ambiguous
+        ));
+        assert_eq!(handoff.source.pending.coordinates.context_id, context_id);
+        assert_durable_handoff_fence_owner(&handoff.registered.worker);
+        assert_eq!(
+            format!("{:?}", handoff.registered.key),
+            "DurableOwnershipKey(<redacted>)"
+        );
         let DurableWorkerPrepareHandoff { registered, source } = handoff;
         let DurableRegisteredStartingWorker { key, worker } = registered;
         drop(key);
@@ -9023,6 +9177,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One exhaustive source-order and dispatch-surface audit.
     fn durable_publication_and_attested_arm_boundaries_are_static_and_dispatch_free() {
         let source = include_str!("worker_v3.rs");
         let start = source
@@ -9045,8 +9200,22 @@ mod tests {
         let revalidation = prepare
             .find("self.revalidate_durable_recovery_identity_until")
             .expect("pre-publication source fence");
+        let first_deadline = prepare[revalidation..]
+            .find("ensure_worker_deadline(deadline)")
+            .map(|offset| revalidation + offset)
+            .expect("pre-measurement absolute deadline fence");
+        let durable_binding = prepare
+            .find("custody.durable_binding()")
+            .expect("exact durable custody descriptor binding");
+        let second_deadline = prepare[durable_binding..]
+            .find("ensure_worker_deadline(deadline)")
+            .map(|offset| durable_binding + offset)
+            .expect("post-measurement absolute deadline fence");
+        let durable_mark = prepare
+            .find("actor.mark_custody_until(key, anchor, binding, deadline)")
+            .expect("durable MayOwnCustody mark");
         let custody_name = prepare
-            .find("handoff.registered.key.custody_name_digest()")
+            .find("durable.custody_name_digest()")
             .expect("durable custody-name binding");
         let publication = prepare
             .find("DurableWorkerPrepareOutcome::CustodyPublication(")
@@ -9055,7 +9224,11 @@ mod tests {
             register < worker
                 && worker < source_identity
                 && source_identity < revalidation
-                && revalidation < custody_name
+                && revalidation < first_deadline
+                && first_deadline < durable_binding
+                && durable_binding < second_deadline
+                && second_deadline < durable_mark
+                && durable_mark < custody_name
                 && custody_name < publication
         );
         assert!(!prepare.contains("actor.arm_until("));
@@ -9079,19 +9252,21 @@ mod tests {
         let final_revalidation = arm
             .find("self.revalidate_durable_recovery_identity_until(")
             .expect("post-attestation worker identity fence");
-        let anchor = arm
-            .find("publication.handoff.source.durable_prepare_anchor()")
-            .expect("durable recovery anchor");
+        let context_fence = arm
+            .find("publication.durable.context_id()")
+            .expect("pre-arm durable/worker context fence");
         let durable_arm = arm
-            .find("actor.arm_until(key, anchor, deadline)")
+            .find("actor.arm_custody_until(durable, deadline)")
             .expect("durable MayOwnPrepare arm");
         assert!(
             first_deadline < attestation
                 && attestation < second_deadline
                 && second_deadline < final_revalidation
-                && final_revalidation < anchor
-                && anchor < durable_arm
+                && final_revalidation < context_fence
+                && context_fence < durable_arm
         );
+        assert!(!arm.contains("actor.arm_until("));
+        assert!(!arm.contains("publish_current_process_custody("));
         assert!(!arm.contains("async fn"));
         assert!(!arm.contains(".await"));
         assert!(!arm[final_revalidation..durable_arm].contains("lock_worker_registry"));

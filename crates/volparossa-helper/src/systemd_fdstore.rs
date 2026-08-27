@@ -13,6 +13,7 @@ use std::{
     fmt,
     future::Future,
     io::{self, IoSlice},
+    num::{NonZeroU32, NonZeroU64},
     os::{
         fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
         unix::ffi::OsStrExt as _,
@@ -39,7 +40,10 @@ use zbus::{
 
 use crate::{
     deadline::HardDeadline,
-    ownership_journal::DurableCustodyNameDigest,
+    ownership_journal::{
+        DurableCustodyDescriptorBinding, DurableCustodyDescriptorIdentity,
+        DurableCustodyDescriptorIdentityParts, DurableCustodyNameDigest,
+    },
     systemd_custody::{CUSTODY_FD_NAME_BYTES, CUSTODY_FD_NAME_PREFIX, custody_fd_name_is_valid},
 };
 const DESCRIPTORS_PER_CUSTODY: usize = 2;
@@ -128,6 +132,18 @@ impl<'a> BorrowedCustodyPair<'a> {
             DescriptorIdentity::from_descriptor(self.pidfd)?,
             DescriptorIdentity::from_descriptor(self.network_namespace)?,
         ])
+    }
+
+    /// Freeze the already measured pidfd-then-network-namespace identity for durable correlation.
+    ///
+    /// This deliberately reuses the exact publication identity path. The worker and journal must
+    /// never grow a second `fstat`/`F_GETFL` interpretation of the same descriptors.
+    pub(crate) fn durable_binding(self) -> Result<DurableCustodyDescriptorBinding, FdStoreError> {
+        let [pidfd, network_namespace] = exact_custody_identities(self)?;
+        let pidfd = durable_descriptor_identity(&pidfd)?;
+        let network_namespace = durable_descriptor_identity(&network_namespace)?;
+        DurableCustodyDescriptorBinding::try_from_role_ordered(pidfd, network_namespace)
+            .ok_or_else(|| invalid_inventory("durable custody descriptor binding is invalid"))
     }
 }
 
@@ -303,11 +319,30 @@ impl DescriptorIdentity {
     }
 }
 
+fn durable_descriptor_identity(
+    identity: &DescriptorIdentity,
+) -> Result<DurableCustodyDescriptorIdentity, FdStoreError> {
+    let mode = NonZeroU32::new(identity.mode)
+        .ok_or_else(|| invalid_inventory("custody descriptor mode is zero"))?;
+    let inode = NonZeroU64::new(identity.inode)
+        .ok_or_else(|| invalid_inventory("custody descriptor inode is zero"))?;
+    DurableCustodyDescriptorIdentity::try_from_parts(DurableCustodyDescriptorIdentityParts {
+        mode,
+        device_major: identity.device_major,
+        device_minor: identity.device_minor,
+        inode,
+        special_device_major: identity.special_device_major,
+        special_device_minor: identity.special_device_minor,
+        status_flags: identity.status_flags,
+    })
+    .ok_or_else(|| invalid_inventory("durable custody descriptor identity is invalid"))
+}
+
 fn exact_custody_identities(
     custody: BorrowedCustodyPair<'_>,
 ) -> Result<[DescriptorIdentity; DESCRIPTORS_PER_CUSTODY], FdStoreError> {
     let identities = custody.identities()?;
-    if identities[0] == identities[1] {
+    if identities[0].is_same_kernel_object(&identities[1]) {
         return Err(FdStoreError::DuplicateCustodyDescriptor);
     }
     Ok(identities)
@@ -447,11 +482,11 @@ impl DescriptorStoreSnapshot {
         {
             return Err(invalid_inventory("custody name already exists"));
         }
-        if self
-            .entries
-            .iter()
-            .any(|entry| custody_identities.contains(&entry.identity))
-        {
+        if self.entries.iter().any(|entry| {
+            custody_identities
+                .iter()
+                .any(|identity| identity.is_same_kernel_object(&entry.identity))
+        }) {
             return Err(invalid_inventory(
                 "custody descriptor identity already exists",
             ));
@@ -904,6 +939,7 @@ fn nix_io(error: nix::errno::Errno) -> FdStoreError {
 mod tests {
     use std::{
         collections::VecDeque,
+        fs::OpenOptions,
         io::{IoSliceMut, Write as _},
         os::{
             fd::{AsFd as _, AsRawFd as _},
@@ -915,7 +951,7 @@ mod tests {
     };
 
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
-    use tempfile::{tempdir, tempfile};
+    use tempfile::{NamedTempFile, tempdir, tempfile};
 
     use super::*;
     use crate::systemd_custody::CUSTODY_FD_NAME_PREFIX;
@@ -961,6 +997,75 @@ mod tests {
             format_args!("{seed:064x}")
         ))
         .expect("valid custody name")
+    }
+
+    #[test]
+    fn durable_binding_reuses_exact_role_ordered_publication_identities_and_redacts() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct durable descriptor")
+            .expect("make durable fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("distinct durable custody roles");
+        let [pidfd_identity, namespace_identity] =
+            exact_custody_identities(custody).expect("exact publication identities");
+        let expected = DurableCustodyDescriptorBinding::try_from_role_ordered(
+            durable_descriptor_identity(&pidfd_identity).expect("durable pidfd identity"),
+            durable_descriptor_identity(&namespace_identity).expect("durable namespace identity"),
+        )
+        .expect("valid role-ordered durable binding");
+        let reversed = DurableCustodyDescriptorBinding::try_from_role_ordered(
+            durable_descriptor_identity(&namespace_identity)
+                .expect("reversed durable namespace identity"),
+            durable_descriptor_identity(&pidfd_identity).expect("reversed durable pidfd identity"),
+        )
+        .expect("valid reversed durable binding shape");
+
+        let actual = custody.durable_binding().expect("durable custody binding");
+
+        assert!(actual == expected);
+        assert!(actual != reversed, "durable binding preserves role order");
+        assert_eq!(
+            format!("{actual:?}"),
+            "DurableCustodyDescriptorBinding(<redacted>)"
+        );
+
+        let duplicate = nix::unistd::dup(pidfd.as_fd()).expect("duplicate pidfd fixture");
+        let duplicate_pair = BorrowedCustodyPair::new(pidfd.as_fd(), duplicate.as_fd())
+            .expect("duplicate open-file descriptions have distinct descriptor numbers");
+        assert!(matches!(
+            duplicate_pair.durable_binding(),
+            Err(FdStoreError::DuplicateCustodyDescriptor)
+        ));
+    }
+
+    #[test]
+    fn durable_binding_rejects_independent_aliases_with_different_status_flags() {
+        let object = NamedTempFile::new().expect("shared kernel-object fixture");
+        let first = OpenOptions::new()
+            .read(true)
+            .open(object.path())
+            .expect("first independent open");
+        let second = OpenOptions::new()
+            .read(true)
+            .open(object.path())
+            .expect("second independent open");
+        fcntl(second.as_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+            .expect("set independent nonblocking flag");
+        let first_identity =
+            DescriptorIdentity::from_descriptor(first.as_fd()).expect("first identity");
+        let second_identity =
+            DescriptorIdentity::from_descriptor(second.as_fd()).expect("second identity");
+        assert!(first_identity.is_same_kernel_object(&second_identity));
+        assert_ne!(first_identity.status_flags, second_identity.status_flags);
+        let aliases = BorrowedCustodyPair::new(first.as_fd(), second.as_fd())
+            .expect("independent aliases use distinct descriptor numbers");
+
+        assert!(matches!(
+            aliases.durable_binding(),
+            Err(FdStoreError::DuplicateCustodyDescriptor)
+        ));
     }
 
     fn snapshot(pid: u32, entries: Vec<InventoryEntry>) -> DescriptorStoreSnapshot {
@@ -1143,6 +1248,17 @@ mod tests {
                 "custody descriptor identity already exists",
             );
         }
+
+        let mut flag_variant = identities[0].clone();
+        flag_variant.status_flags ^=
+            u32::try_from(OFlag::O_NONBLOCK.bits()).expect("nonblocking flag fits identity field");
+        assert_ne!(flag_variant, identities[0]);
+        assert!(flag_variant.is_same_kernel_object(&identities[0]));
+        let flagged_alias = snapshot(42, vec![inventory_entry(custody_name(33), flag_variant)]);
+        assert_invalid_inventory_reason(
+            flagged_alias.validate_baseline(42, target_name, &identities),
+            "custody descriptor identity already exists",
+        );
     }
 
     #[test]

@@ -101,20 +101,25 @@ stale-socket removal, or listener bind. Orderly shutdown cleans the engine first
 joins the quiescent actor before releasing the socket path.
 
 The v3 module contains a boot-scoped, secret-free, canonical and length-bounded codec/CAS store for
-exact `Intent`, `MayOwnPrepare`, and `Absent` ownership records. Its fixed lock, atomic
-file-fsync/rename/directory-fsync transaction, typed recovery anchor, and trusted
+exact `Intent`, `MayOwnCustody`, `MayOwnPrepare`, and `Absent` ownership records. Its fixed lock,
+atomic file-fsync/rename/directory-fsync transaction, typed recovery anchor, role-ordered
+pidfd/network-namespace identity binding, and trusted
 non-cryptographic exact-echo absence-proof interface have temp-directory tests. A private
 single-writer actor now owns both this store and its recovery executor on one named thread. It
-retains one verified parent-directory descriptor, acquires a process-global one-shot store latch
-before opening the lock, sweeps every startup `Intent` and `MayOwnPrepare`, rechecks the complete
-durable boundary, and only then reports ready. Its non-blocking admission accepts at most four
+retains one verified parent-directory descriptor and acquires a process-global one-shot store latch
+before opening the lock. Startup refuses the complete snapshot when any `MayOwnCustody` record
+exists, before retiring even one `Intent`; otherwise it sweeps every startup `Intent` and
+`MayOwnPrepare`, rechecks the complete durable boundary, and only then reports ready. Its
+non-blocking admission accepts at most four
 operations while reserving channel capacity for shutdown; opaque non-`Clone` keys expose neither
 the journal revision nor raw ownership coordinates. Each validated wire intent locally receives a
 fresh random 256-bit `OwnershipId` inside a non-`Clone` registration owner. Registration consumes
-that owner into one durable key, and arming consumes the key into a `MayOwnPrepare` token which
-exposes only the context and borrowed owner-bound resource metadata. Every error returns the exact
-affine owner which still exists, so the typed API neither duplicates authority nor discards it on
-an error path.
+that owner into one durable key. Custody marking consumes the key into a `MayOwnCustody` token only
+after atomically persisting the complete recovery anchor and exact role-ordered descriptor
+identities. Arming consumes only that token, preserves the custody evidence byte-for-byte, and
+returns a `MayOwnPrepare` token exposing only the context and borrowed owner-bound resource
+metadata. Every error returns the exact affine owner which still exists, so the typed API neither
+duplicates authority nor discards it on an error path.
 
 Validated records and private recovery targets now deterministically rederive the same non-`Clone`
 per-link resources. Focused tests fix the public alias grammar and cover every immutable field
@@ -122,11 +127,13 @@ class, mutable-field exclusion, redacted debug output, canonical codec/reopen st
 insert reply, and recovery projection. This dormant projection exposes no production issuance API
 and does not authorize a kernel operation.
 
-Production exposes only a start/shutdown wrapper around the actor; registration, arming and raw
-recovery authority remain inaccessible to the server and engine. Its production executor always
-refuses `MayOwnPrepare`, so a potentially mutating record stays byte-identical and blocks startup.
-Only a never-dispatched `Intent` may be durably settled to `Absent` before the internal actor-ready
-and socket-publication boundary. There is no production request-path issuance/arming writer,
+Production exposes only a start/shutdown wrapper around the actor; registration, custody marking,
+arming and raw recovery authority remain inaccessible to the server and engine. Its production
+executor always refuses `MayOwnPrepare`, so a potentially mutating record stays byte-identical and
+blocks startup. A `MayOwnCustody` record also stays byte-identical and blocks startup before any
+other record is settled because manager inventory adoption is not implemented. Only a
+never-dispatched `Intent` may be durably settled to `Absent` before the internal actor-ready and
+socket-publication boundary. There is no production request-path issuance/arming writer,
 namespace-FD vault, absence-proving `MayOwnPrepare` recovery executor, restart reaper, supported
 on-disk migration, or live-root proof. Every non-test actor entry point requires one caller-supplied
 absolute hard deadline. That same value is carried through admission, the queued
@@ -144,27 +151,30 @@ wrappers are test-only. If the actor thread is stuck inside the non-cancellable 
 its join handle is detached after the bounded settlement wait; that thread may retain the journal
 lock, while the process-global latch remains set until process exit. A clean shutdown now requires
 both an intact durable boundary and every record already durably `Absent`; it never retires or
-recovers an outstanding record and returns `RecoveryNotConfirmed` for a known `Intent` or
-`MayOwnPrepare`. Reopening requires a fresh process. These limitations must be resolved at the
-production service boundary before the actor can become the request-path issuance/arming writer.
-The required tag-35 closed plan has a fallible exact conversion into the store's existing
-`ClosedPlan`; this removes
-the wire/schema mismatch but performs no journal I/O and grants no mutation authority. A missing
-journal is therefore not proof that stale kernel state is absent, and the startup wrapper cannot
-issue a cross-runtime tag-28 receipt. The current `doctor` has no helper-v3 crash-ownership readiness
-check, so its other successful checks must not be interpreted as evidence of live recovery or
-cleanup.
+recovers an outstanding record and returns `RecoveryNotConfirmed` for a known `Intent`,
+`MayOwnCustody`, or `MayOwnPrepare`. Reopening requires a fresh process. These limitations must be
+resolved at the production service boundary before the actor can become the request-path
+issuance/arming writer. The required tag-35 closed plan has a fallible exact conversion into the
+store's existing `ClosedPlan`; this removes the wire/schema mismatch but performs no journal I/O and
+grants no mutation authority. A missing journal is therefore not proof that stale kernel state is
+absent, and the startup wrapper cannot issue a cross-runtime tag-28 receipt. The current `doctor`
+has no helper-v3 crash-ownership readiness check, so its other successful checks must not be
+interpreted as evidence of live recovery or cleanup.
 
-The store's insert, prepare-arm, never-dispatched retirement, and confirmed-recovery
-transitions are exact-current-revision retry-safe after a lost reply. A retry succeeds only when the
-complete durable post-state of that same operation still exists; an intervening transition, changed
-intent, generation, recovery anchor, or reconciliation binding fails closed without another write.
+The store's insert, custody mark, custody-bound prepare arm, never-dispatched retirement, and
+confirmed-recovery transitions are exact-current-revision retry-safe after a lost reply. A retry
+succeeds only when the complete durable post-state of that same operation still exists; an
+intervening transition, changed intent, generation, recovery anchor, descriptor identity, or
+reconciliation binding fails closed without another write. `MayOwnCustody -> MayOwnPrepare`
+accepts only the exact already-persisted custody evidence and copies it byte-for-byte.
 `Absent` records persist whether they came from a never-dispatched intent or from confirmed
 MayOwn recovery, so one operation can never acknowledge the other's tombstone and an already
 confirmed recovery never reruns its executor. Mutation authority remains private and
 pre-production: the server owns only the start/shutdown wrapper, version 3 has no supported on-disk
 migration contract yet, and production decodes a v3 object only behind the canonical lock and
-refuses Ready when a `MayOwnPrepare` record cannot be recovered.
+refuses Ready when a `MayOwnCustody` record cannot be adopted or a `MayOwnPrepare` record cannot be
+recovered.
+
 After a definite pre-rename I/O failure, another mutation is admitted only if a read-only health
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
 temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the actor permanently.
@@ -221,10 +231,12 @@ publication datagram may have been accepted is classified as manager-may-own. Ca
 their original affine descriptor owners; there is deliberately no automatic removal on an
 ambiguous path.
 
-The journal key now derives an opaque, domain-separated fixed custody name from its exact journal
-epoch, context, ownership ID and generation without exposing those coordinates. A private dormant
-worker typestate binds that name to the exact pidfd/network-namespace role identities and consumes
-the resulting inventory attestation only after fencing the original absolute deadline. This is not
+Only the durably confirmed `MayOwnCustody` token can derive an opaque, domain-separated fixed
+custody name from its exact journal epoch, context, ownership ID and generation without exposing
+those coordinates. A private dormant worker typestate first obtains the descriptor identities
+through the same measurement path used by descriptor-store publication, persists them with the
+complete worker anchor, and only then creates publication authority. It consumes the resulting
+inventory attestation only after fencing the original absolute deadline. This is not
 production composition: inherited descriptors are now snapshotted into typed local duplicate
 owners but still refused rather than journal-bound or adopted; there is no non-cancellable
 publication supervisor, manager reconciliation, restart reaper or request-path caller. Its
@@ -774,12 +786,14 @@ generation, then authenticates one child in an anonymous `NEWNET` namespace and 
 exact passive `Starting` worker under an atomically installed `DurableHandoffPending` dispatch
 fence and the same caller-supplied absolute deadline. Normal planning rejects that generation
 before cloning its channel or mutating in-flight, cache, tombstone, or phase state. The handoff
-derives and revalidates the worker's complete recovery anchor, derives the deterministic custody
-name from the exact durable key and then stops with one affine publication owner retaining that key,
-worker, recovery-pin source, pidfd/network-namespace pair and original deadline. It does not call
-the descriptor-store adapter or arm the journal. A separate synchronous dormant transition fences
-the deadline, verifies the exact role-ordered inventory attestation, fences the deadline again,
-revalidates the complete worker recovery identity and only then arms `MayOwnPrepare`. Success keeps
+derives and revalidates the worker's complete recovery anchor, freezes the exact
+pidfd/network-namespace identities through the descriptor-store adapter's measurement path, fences
+the deadline again, and durably advances `Intent -> MayOwnCustody`. Only the returned affine
+phase-4 token can derive the deterministic custody name and create one publication owner retaining
+that token, worker, recovery-pin source, pidfd/network-namespace pair and original deadline. It does
+not publish descriptors. A separate synchronous dormant transition fences the deadline, verifies
+the exact role-ordered inventory attestation, fences the deadline again, revalidates the complete
+worker recovery identity and only then advances `MayOwnCustody -> MayOwnPrepare`. Success keeps
 the durable token, registered worker owner, affine fence owner, recovery-pin source, custody name
 and attestation together. Every pre-arm failure retains or reconstructs the publication owner plus
 attestation; the defensive post-arm context-mismatch path retains the `MayOwnPrepare` composite,
@@ -791,10 +805,10 @@ creates the deliberately isolated process and anonymous `NEWNET`, without alteri
 state. The handoff remains private and dormant, with no server or engine caller, no restart reaper,
 and no cancellation-safe production settlement. A production publisher cannot safely be attached
 yet: once its future is first polled, neither a reported pre-send failure nor caller cancellation
-proves that an older deterministic-name attempt did not publish. Moreover, the current startup
-sweep treats journal `Intent` as never dispatched. Production therefore needs a non-cancellable
-supervisor and a durable publication-pending/adoption phase which reconciles inherited descriptors
-before that sweep.
+proves that an older deterministic-name attempt did not publish. Startup now preserves that
+ambiguity by refusing any `MayOwnCustody` snapshot before retiring an `Intent`; production still
+needs a non-cancellable supervisor plus manager-inventory adoption/reconciliation to progress that
+phase rather than block startup.
 
 Production wiring remains a separate audited change with these explicit blockers:
 

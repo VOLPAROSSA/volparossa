@@ -39,10 +39,13 @@ use volparossa_routing::PrepareIntent;
 use crate::deadline::HardDeadline;
 
 use super::{
-    ClosedPlan, DurableWireguardResource, Id16, JournalConfig, JournalEpochId, JournalError,
-    NewOwnershipIntent, OwnershipId, OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1,
-    RecoveryAttemptError, RecoveryExecutor, RuntimeId, open_verified_parent, random_ownership_id,
+    ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16, JournalConfig,
+    JournalEpochId, JournalError, NewOwnershipIntent, OwnershipId, OwnershipJournal,
+    OwnershipPhase, PrepareRecoveryAnchorV1, RecoveryAttemptError, RecoveryExecutor, RuntimeId,
+    open_verified_parent, random_ownership_id,
 };
+#[cfg(test)]
+use super::{DurableCustodyDescriptorIdentity, DurableCustodyDescriptorIdentityParts};
 
 const MAX_ACCEPTED_OPERATIONS: usize = 4;
 const COMMAND_CHANNEL_CAPACITY: usize = MAX_ACCEPTED_OPERATIONS + 1;
@@ -244,6 +247,38 @@ impl fmt::Debug for DurablePrepareAnchor {
     }
 }
 
+#[cfg(test)]
+fn custody_binding_for_test(
+    anchor: DurablePrepareAnchor,
+) -> Result<DurableCustodyDescriptorBinding, DurableOwnershipError> {
+    let namespace_minor = u32::try_from(anchor.0.network_namespace_device.get())
+        .map_err(|_| DurableOwnershipError::Rejected)?;
+    let pidfd =
+        DurableCustodyDescriptorIdentity::try_from_parts(DurableCustodyDescriptorIdentityParts {
+            mode: NonZeroU32::new(0o100_600).expect("non-zero fixture mode"),
+            device_major: 8,
+            device_minor: anchor.0.pid.get(),
+            inode: anchor.0.process_start_ticks,
+            special_device_major: 0,
+            special_device_minor: 0,
+            status_flags: 0,
+        })
+        .ok_or(DurableOwnershipError::Rejected)?;
+    let network_namespace =
+        DurableCustodyDescriptorIdentity::try_from_parts(DurableCustodyDescriptorIdentityParts {
+            mode: NonZeroU32::new(0o100_444).expect("non-zero fixture mode"),
+            device_major: 0,
+            device_minor: namespace_minor,
+            inode: anchor.0.network_namespace_inode,
+            special_device_major: 0,
+            special_device_minor: 0,
+            status_flags: 0,
+        })
+        .ok_or(DurableOwnershipError::Rejected)?;
+    DurableCustodyDescriptorBinding::try_from_role_ordered(pidfd, network_namespace)
+        .ok_or(DurableOwnershipError::Rejected)
+}
+
 #[derive(Eq, PartialEq)]
 #[must_use = "a durable ownership key must be armed or explicitly retired"]
 pub(crate) struct DurableOwnershipKey {
@@ -289,15 +324,30 @@ impl fmt::Debug for DurableOwnershipKey {
     }
 }
 
-impl DurableOwnershipKey {
-    /// Derive the stable descriptor-store name material without exposing durable coordinates.
+#[must_use = "MayOwnCustody authority must be armed or explicitly retained"]
+pub(crate) struct DurableMayOwnCustody {
+    key: DurableOwnershipKey,
+}
+
+impl DurableMayOwnCustody {
+    pub(crate) const fn context_id(&self) -> [u8; 16] {
+        self.key.coordinates.context_id.0
+    }
+
+    /// Derive stable descriptor-store name material only after phase 4 is known durable.
     pub(crate) fn custody_name_digest(&self) -> DurableCustodyNameDigest {
         let mut digest = blake3::Hasher::new_derive_key(DURABLE_CUSTODY_NAME_DOMAIN);
-        digest.update(&self.coordinates.journal_epoch_id.0);
-        digest.update(&self.coordinates.context_id.0);
-        digest.update(&self.coordinates.ownership_id.0);
-        digest.update(&self.coordinates.generation.get().to_be_bytes());
+        digest.update(&self.key.coordinates.journal_epoch_id.0);
+        digest.update(&self.key.coordinates.context_id.0);
+        digest.update(&self.key.coordinates.ownership_id.0);
+        digest.update(&self.key.coordinates.generation.get().to_be_bytes());
         DurableCustodyNameDigest(*digest.finalize().as_bytes())
+    }
+}
+
+impl fmt::Debug for DurableMayOwnCustody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableMayOwnCustody(<redacted>)")
     }
 }
 
@@ -354,7 +404,7 @@ pub(crate) enum DurableArmOutcome {
     Armed(DurableMayOwnPrepare),
     Retained {
         error: DurableOwnershipError,
-        key: DurableOwnershipKey,
+        custody: DurableMayOwnCustody,
     },
 }
 
@@ -362,6 +412,28 @@ impl fmt::Debug for DurableArmOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Armed(_) => formatter.write_str("Armed(<redacted>)"),
+            Self::Retained { error, .. } => formatter
+                .debug_struct("Retained")
+                .field("error", error)
+                .field("custody", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+#[must_use = "custody outcomes retain ownership on every error"]
+pub(crate) enum DurableCustodyOutcome {
+    Marked(DurableMayOwnCustody),
+    Retained {
+        error: DurableOwnershipError,
+        key: DurableOwnershipKey,
+    },
+}
+
+impl fmt::Debug for DurableCustodyOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Marked(_) => formatter.write_str("Marked(<redacted>)"),
             Self::Retained { error, .. } => formatter
                 .debug_struct("Retained")
                 .field("error", error)
@@ -624,10 +696,16 @@ enum Operation {
         intent: DurablePrepareIntent,
         reply: ReplySender<DurableOwnershipKey>,
     },
-    Arm {
+    MarkCustody {
         deadline: HardDeadline,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
+        binding: DurableCustodyDescriptorBinding,
+        reply: ReplySender<()>,
+    },
+    ArmCustody {
+        deadline: HardDeadline,
+        key: OwnershipCoordinates,
         reply: ReplySender<Vec<DurableWireguardResource>>,
     },
     RetireNeverDispatched {
@@ -670,7 +748,8 @@ impl Operation {
     fn deadline(&self) -> HardDeadline {
         match self {
             Self::Register { deadline, .. }
-            | Self::Arm { deadline, .. }
+            | Self::MarkCustody { deadline, .. }
+            | Self::ArmCustody { deadline, .. }
             | Self::RetireNeverDispatched { deadline, .. }
             | Self::ConfirmRecoveredAbsent { deadline, .. } => *deadline,
             #[cfg(test)]
@@ -689,7 +768,10 @@ impl Operation {
             Self::PanicAfterRegister { reply, .. } => {
                 reply.complete_unstarted_deadline();
             }
-            Self::Arm { reply, .. } => {
+            Self::MarkCustody { reply, .. } => {
+                reply.complete_unstarted_deadline();
+            }
+            Self::ArmCustody { reply, .. } => {
                 reply.complete_unstarted_deadline();
             }
             Self::RetireNeverDispatched { reply, .. }
@@ -780,24 +862,47 @@ impl ActorClient {
     }
 
     #[cfg(test)]
-    fn arm_pending(
+    fn mark_custody_pending(
         &self,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
-    ) -> Result<PendingReply<Vec<DurableWireguardResource>>, DurableOwnershipError> {
-        self.arm_pending_until(key, anchor, default_actor_deadline()?)
+        binding: DurableCustodyDescriptorBinding,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.mark_custody_pending_until(key, anchor, binding, default_actor_deadline()?)
     }
 
-    fn arm_pending_until(
+    fn mark_custody_pending_until(
         &self,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
+        binding: DurableCustodyDescriptorBinding,
         deadline: HardDeadline,
-    ) -> Result<PendingReply<Vec<DurableWireguardResource>>, DurableOwnershipError> {
-        self.submit(deadline, |reply| Operation::Arm {
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::MarkCustody {
             deadline,
             key,
             anchor,
+            binding,
+            reply,
+        })
+    }
+
+    #[cfg(test)]
+    fn arm_custody_pending(
+        &self,
+        key: OwnershipCoordinates,
+    ) -> Result<PendingReply<Vec<DurableWireguardResource>>, DurableOwnershipError> {
+        self.arm_custody_pending_until(key, default_actor_deadline()?)
+    }
+
+    fn arm_custody_pending_until(
+        &self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<Vec<DurableWireguardResource>>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::ArmCustody {
+            deadline,
+            key,
             reply,
         })
     }
@@ -1077,21 +1182,44 @@ impl DurableOwnershipActor {
         }
     }
 
-    pub(crate) fn arm_until(
+    pub(crate) fn mark_custody_until(
         &self,
         key: DurableOwnershipKey,
         anchor: DurablePrepareAnchor,
+        binding: DurableCustodyDescriptorBinding,
+        deadline: HardDeadline,
+    ) -> DurableCustodyOutcome {
+        let result = self
+            .client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)
+            .and_then(|client| {
+                client.mark_custody_pending_until(key.coordinates, anchor, binding, deadline)
+            })
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(()) => DurableCustodyOutcome::Marked(DurableMayOwnCustody { key }),
+            Err(error) => DurableCustodyOutcome::Retained { error, key },
+        }
+    }
+
+    pub(crate) fn arm_custody_until(
+        &self,
+        custody: DurableMayOwnCustody,
         deadline: HardDeadline,
     ) -> DurableArmOutcome {
         let result = self
             .client
             .as_ref()
             .ok_or(DurableOwnershipError::Unavailable)
-            .and_then(|client| client.arm_pending_until(key.coordinates, anchor, deadline))
+            .and_then(|client| client.arm_custody_pending_until(custody.key.coordinates, deadline))
             .and_then(PendingReply::wait);
         match result {
-            Ok(resources) => DurableArmOutcome::Armed(DurableMayOwnPrepare { key, resources }),
-            Err(error) => DurableArmOutcome::Retained { error, key },
+            Ok(resources) => DurableArmOutcome::Armed(DurableMayOwnPrepare {
+                key: custody.key,
+                resources,
+            }),
+            Err(error) => DurableArmOutcome::Retained { error, custody },
         }
     }
 
@@ -1117,6 +1245,31 @@ impl DurableOwnershipActor {
     }
 
     #[cfg(test)]
+    fn mark_custody_prepare(
+        &self,
+        key: &DurableOwnershipKey,
+        anchor: DurablePrepareAnchor,
+        binding: DurableCustodyDescriptorBinding,
+    ) -> Result<(), DurableOwnershipError> {
+        self.mark_custody_prepare_until(key, anchor, binding, default_actor_deadline()?)
+    }
+
+    #[cfg(test)]
+    fn mark_custody_prepare_until(
+        &self,
+        key: &DurableOwnershipKey,
+        anchor: DurablePrepareAnchor,
+        binding: DurableCustodyDescriptorBinding,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
+        self.client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?
+            .mark_custody_pending_until(key.coordinates, anchor, binding, deadline)?
+            .wait()
+    }
+
+    #[cfg(test)]
     fn arm_prepare(
         &self,
         key: &DurableOwnershipKey,
@@ -1132,10 +1285,33 @@ impl DurableOwnershipActor {
         anchor: DurablePrepareAnchor,
         deadline: HardDeadline,
     ) -> Result<(), DurableOwnershipError> {
+        self.mark_custody_prepare_until(key, anchor, custody_binding_for_test(anchor)?, deadline)?;
         self.client
             .as_ref()
             .ok_or(DurableOwnershipError::Unavailable)?
-            .arm_pending_until(key.coordinates, anchor, deadline)?
+            .arm_custody_pending_until(key.coordinates, deadline)?
+            .wait()
+            .map(drop)
+    }
+
+    #[cfg(test)]
+    fn arm_custody_prepare(
+        &self,
+        custody: &DurableMayOwnCustody,
+    ) -> Result<(), DurableOwnershipError> {
+        self.arm_custody_prepare_until(custody, default_actor_deadline()?)
+    }
+
+    #[cfg(test)]
+    fn arm_custody_prepare_until(
+        &self,
+        custody: &DurableMayOwnCustody,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
+        self.client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?
+            .arm_custody_pending_until(custody.key.coordinates, deadline)?
             .wait()
             .map(drop)
     }
@@ -1328,6 +1504,18 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(self.classify_journal_error(error)),
         };
+        // Phase 4 means a descriptor-store publication may already have happened. Until startup
+        // adoption is implemented, refuse the complete snapshot before retiring even one Intent;
+        // an extra or missing inherited bundle is not absence evidence.
+        if snapshot
+            .records
+            .values()
+            .any(|record| record.phase == OwnershipPhase::MayOwnCustody)
+        {
+            return Err(FailureDisposition::Continue(
+                DurableOwnershipError::RecoveryNotConfirmed,
+            ));
+        }
         let pending = snapshot
             .records
             .values()
@@ -1376,6 +1564,11 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
                         }
                     };
                 }
+                OwnershipPhase::MayOwnCustody => {
+                    return Err(FailureDisposition::Continue(
+                        DurableOwnershipError::RecoveryNotConfirmed,
+                    ));
+                }
                 OwnershipPhase::Absent => {}
             }
         }
@@ -1420,19 +1613,45 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
         }
     }
 
-    fn arm(
+    fn mark_custody(
         &mut self,
         key: OwnershipCoordinates,
         anchor: DurablePrepareAnchor,
-    ) -> OperationOutcome<Vec<DurableWireguardResource>> {
+        binding: DurableCustodyDescriptorBinding,
+        deadline: HardDeadline,
+    ) -> OperationOutcome<()> {
         if let Err(error) = self.validate_key(key) {
             return OperationOutcome::failure(error);
         }
-        match self.journal.mark_may_own_prepare(
+        match self.journal.mark_may_own_custody(
             self.revision,
             key.ownership_id,
             key.generation,
             anchor.0,
+            binding.0,
+            deadline,
+        ) {
+            Ok(marked) => {
+                self.revision = marked.revision;
+                OperationOutcome::Complete(Ok(()))
+            }
+            Err(error) => OperationOutcome::failure(self.classify_journal_error(error)),
+        }
+    }
+
+    fn arm_custody(
+        &mut self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> OperationOutcome<Vec<DurableWireguardResource>> {
+        if let Err(error) = self.validate_key(key) {
+            return OperationOutcome::failure(error);
+        }
+        match self.journal.mark_may_own_prepare_from_custody(
+            self.revision,
+            key.ownership_id,
+            key.generation,
+            deadline,
         ) {
             Ok(marked) => {
                 self.revision = marked.revision;
@@ -1824,14 +2043,28 @@ fn process_operation<Executor: RecoveryExecutor>(
             reply.arm();
             finish_operation(reply, core.register(intent), lifecycle, admission)
         }
-        Operation::Arm {
-            deadline: _,
+        Operation::MarkCustody {
+            deadline,
             key,
             anchor,
+            binding,
             mut reply,
         } => {
             reply.arm();
-            finish_operation(reply, core.arm(key, anchor), lifecycle, admission)
+            finish_operation(
+                reply,
+                core.mark_custody(key, anchor, binding, deadline),
+                lifecycle,
+                admission,
+            )
+        }
+        Operation::ArmCustody {
+            deadline,
+            key,
+            mut reply,
+        } => {
+            reply.arm();
+            finish_operation(reply, core.arm_custody(key, deadline), lifecycle, admission)
         }
         Operation::RetireNeverDispatched {
             deadline: _,
@@ -1944,9 +2177,13 @@ mod durable_custody_name_tests {
         )
     }
 
+    fn custody(key: DurableOwnershipKey) -> DurableMayOwnCustody {
+        DurableMayOwnCustody { key }
+    }
+
     #[test]
     fn durable_custody_digest_and_name_vectors_are_frozen() {
-        let first = vector_a_key().custody_name_digest();
+        let first = custody(vector_a_key()).custody_name_digest();
         assert_eq!(
             first.0,
             [
@@ -1968,7 +2205,8 @@ mod durable_custody_name_tests {
             .expect("first frozen custody name")
         );
 
-        let second = key([0xff; 32], [0xaa; 16], [0x55; 32], u64::MAX).custody_name_digest();
+        let second =
+            custody(key([0xff; 32], [0xaa; 16], [0x55; 32], u64::MAX)).custody_name_digest();
         assert_eq!(
             second.0,
             [
@@ -1991,8 +2229,8 @@ mod durable_custody_name_tests {
     #[test]
     fn every_durable_coordinate_changes_the_custody_digest() {
         let base = vector_a_key();
-        let expected = base.custody_name_digest();
         let coordinates = base.coordinates;
+        let expected = custody(base).custody_name_digest();
         for changed in [
             OwnershipCoordinates {
                 journal_epoch_id: JournalEpochId::new([0x11; 32]).expect("different epoch"),
@@ -2013,9 +2251,9 @@ mod durable_custody_name_tests {
             },
         ] {
             assert_ne!(
-                DurableOwnershipKey {
+                custody(DurableOwnershipKey {
                     coordinates: changed,
-                }
+                })
                 .custody_name_digest(),
                 expected
             );
