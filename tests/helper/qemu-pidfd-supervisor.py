@@ -18,10 +18,17 @@ from dataclasses import dataclass
 from typing import NoReturn, Sequence
 
 
-PROTOCOL = "volparossa-qemu-pidfd-supervisor-v1"
+PROTOCOL = "volparossa-qemu-pidfd-supervisor-v2"
 PR_SET_PDEATHSIG = 1
 POLL_SECONDS = 0.02
 MAX_TIMEOUT_SECONDS = 300.0
+MAX_STDERR_BYTES = 917_504
+STDERR_READ_BYTES = 65_536
+MAX_STDERR_DRAIN_BYTES_PER_POLL = 262_144
+MAX_FINAL_STDERR_DRAIN_BYTES = 8_388_608
+PRIVATE_KEY_BEGIN = b"-----BEGIN "
+PRIVATE_KEY_END = b"PRIVATE KEY-----"
+REDACTED_STDERR = b"[stderr suppressed: private-key marker detected]\n"
 
 EX_USAGE = 64
 EX_DATAERR = 65
@@ -112,7 +119,7 @@ class ControlDirectory:
         self._descriptor = descriptor
 
         try:
-            for name in ("ready", "stop", "status", "ack"):
+            for name in ("ready", "stop", "stderr", "status", "ack"):
                 if self._entry_exists(name):
                     raise ProtocolError("control protocol file already exists")
         except BaseException:
@@ -162,11 +169,11 @@ class ControlDirectory:
             raise ProtocolError("control input is not an empty private regular file")
         return True
 
-    def write_json(self, name: str, value: dict[str, object]) -> None:
-        encoded = (
-            json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-            + "\n"
-        ).encode("ascii")
+    def write_bytes(self, name: str, value: bytes) -> None:
+        if name not in ("ready", "stderr", "status"):
+            raise ProtocolError("control output name is invalid")
+        if len(value) > MAX_STDERR_BYTES:
+            raise ProtocolError("control output exceeds its hard size limit")
         temporary_name = f".{name}.{os.getpid()}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
@@ -180,7 +187,7 @@ class ControlDirectory:
                 dir_fd=self._descriptor,
             )
             os.fchmod(descriptor, 0o600)
-            view = memoryview(encoded)
+            view = memoryview(value)
             while view:
                 written = os.write(descriptor, view)
                 if written <= 0:
@@ -207,25 +214,99 @@ class ControlDirectory:
                 pass
             raise ProtocolError("control output cannot be published atomically") from error
 
+    def write_json(self, name: str, value: dict[str, object]) -> None:
+        encoded = (
+            json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            + "\n"
+        ).encode("ascii")
+        self.write_bytes(name, encoded)
+
 
 class ChildHandle:
-    def __init__(self, process_id: int, pidfd: int) -> None:
+    def __init__(self, process_id: int, pidfd: int, stderr_read: int) -> None:
         self._process_id = process_id
         self._pidfd = pidfd
+        self._stderr_read = stderr_read
+        self._stderr_tail = bytearray()
+        self._stderr_scan_tail = b""
+        self._stderr_saw_private_key_begin = False
+        self._stderr_contains_private_key_marker = False
+        self._stderr_finalized = False
         self._outcome: ChildOutcome | None = None
 
     @property
     def outcome(self) -> ChildOutcome | None:
         return self._outcome
 
+    @property
+    def stderr_tail(self) -> bytes:
+        if not self._stderr_finalized:
+            raise SupervisorError("child stderr requested before finalization")
+        if self._stderr_contains_private_key_marker:
+            return REDACTED_STDERR
+        return bytes(self._stderr_tail)
+
     def close(self) -> None:
         if self._pidfd >= 0:
             os.close(self._pidfd)
             self._pidfd = -1
+        if self._stderr_read >= 0:
+            os.close(self._stderr_read)
+            self._stderr_read = -1
+
+    def _drain_stderr(self, maximum_bytes: int) -> bool:
+        if self._stderr_read < 0:
+            return True
+        drained = 0
+        while drained < maximum_bytes:
+            try:
+                chunk = os.read(self._stderr_read, STDERR_READ_BYTES)
+            except BlockingIOError:
+                return False
+            except InterruptedError:
+                continue
+            except OSError as error:
+                raise SupervisorError("child stderr cannot be drained") from error
+            if not chunk:
+                os.close(self._stderr_read)
+                self._stderr_read = -1
+                return True
+            drained += len(chunk)
+            self._scan_stderr(chunk)
+            self._stderr_tail.extend(chunk)
+            excess = len(self._stderr_tail) - MAX_STDERR_BYTES
+            if excess > 0:
+                del self._stderr_tail[:excess]
+        return False
+
+    def _scan_stderr(self, chunk: bytes) -> None:
+        combined = self._stderr_scan_tail + chunk
+        search_from = 0
+        if not self._stderr_saw_private_key_begin:
+            begin_at = combined.find(PRIVATE_KEY_BEGIN)
+            if begin_at >= 0:
+                self._stderr_saw_private_key_begin = True
+                search_from = begin_at + len(PRIVATE_KEY_BEGIN)
+        if self._stderr_saw_private_key_begin and PRIVATE_KEY_END in combined[search_from:]:
+            self._stderr_contains_private_key_marker = True
+        carry_bytes = max(len(PRIVATE_KEY_BEGIN), len(PRIVATE_KEY_END)) - 1
+        self._stderr_scan_tail = combined[-carry_bytes:]
+
+    def _finalize_stderr(self) -> None:
+        if self._stderr_finalized:
+            return
+        reached_eof = self._drain_stderr(MAX_FINAL_STDERR_DRAIN_BYTES)
+        if not reached_eof and self._stderr_read >= 0:
+            os.close(self._stderr_read)
+            self._stderr_read = -1
+        self._stderr_finalized = True
+        if not reached_eof:
+            raise SupervisorError("child stderr did not close after child exit")
 
     def poll(self) -> ChildOutcome | None:
         if self._outcome is not None:
             return self._outcome
+        self._drain_stderr(MAX_STDERR_DRAIN_BYTES_PER_POLL)
         try:
             waited_process, wait_status = os.waitpid(self._process_id, os.WNOHANG)
         except ChildProcessError as error:
@@ -238,6 +319,7 @@ class ChildHandle:
             self._outcome = ChildOutcome(None, os.WTERMSIG(wait_status))
         else:
             raise SupervisorError("child produced an unsupported wait status")
+        self._finalize_stderr()
         return self._outcome
 
     def send(self, signal_number: int) -> bool:
@@ -363,10 +445,13 @@ def _child_exec(
     supervisor_process_id: int,
     gate_read: int,
     gate_write: int,
+    stderr_read: int,
+    stderr_write: int,
     command: tuple[str, ...],
 ) -> NoReturn:
     try:
         os.close(gate_write)
+        os.close(stderr_read)
         _set_parent_death_signal(signal.SIGKILL)
         if os.getppid() != supervisor_process_id:
             os._exit(125)
@@ -379,6 +464,9 @@ def _child_exec(
         os.close(gate_read)
         if release != b"1" or os.getppid() != supervisor_process_id:
             os._exit(125)
+        os.dup2(stderr_write, 2, inheritable=True)
+        if stderr_write != 2:
+            os.close(stderr_write)
         child_environment = {
             "HOME": "/nonexistent",
             "LANG": "C.UTF-8",
@@ -424,22 +512,46 @@ def _owner_is_live(original_parent: int) -> bool:
 
 def _launch_child(command: tuple[str, ...], original_parent: int) -> ChildHandle:
     gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
+    stderr_read = -1
+    stderr_write = -1
+    try:
+        stderr_read, stderr_write = os.pipe2(os.O_CLOEXEC)
+        os.set_blocking(stderr_read, False)
+    except OSError as error:
+        os.close(gate_read)
+        os.close(gate_write)
+        if stderr_read >= 0:
+            os.close(stderr_read)
+        if stderr_write >= 0:
+            os.close(stderr_write)
+        raise SupervisorError("child stderr pipe failed") from error
     supervisor_process_id = os.getpid()
     try:
         process_id = os.fork()
     except OSError as error:
         os.close(gate_read)
         os.close(gate_write)
+        os.close(stderr_read)
+        os.close(stderr_write)
         raise SupervisorError("child fork failed") from error
 
     if process_id == 0:
-        _child_exec(supervisor_process_id, gate_read, gate_write, command)
+        _child_exec(
+            supervisor_process_id,
+            gate_read,
+            gate_write,
+            stderr_read,
+            stderr_write,
+            command,
+        )
 
     os.close(gate_read)
+    os.close(stderr_write)
     try:
         pidfd = os.pidfd_open(process_id, 0)
     except OSError as error:
         os.close(gate_write)
+        os.close(stderr_read)
         _wait_for_unbound_child(process_id, 2.0)
         raise SupervisorError("pidfd binding failed") from error
 
@@ -458,7 +570,7 @@ def _launch_child(command: tuple[str, ...], original_parent: int) -> ChildHandle
             raise SupervisorError("owner disappeared during child release")
     except BaseException:
         os.close(gate_write)
-        handle = ChildHandle(process_id, pidfd)
+        handle = ChildHandle(process_id, pidfd, stderr_read)
         try:
             handle.send(signal.SIGKILL)
             if _wait_for_outcome(handle, 2.0) is None:
@@ -467,7 +579,7 @@ def _launch_child(command: tuple[str, ...], original_parent: int) -> ChildHandle
             handle.close()
         raise
     os.close(gate_write)
-    return ChildHandle(process_id, pidfd)
+    return ChildHandle(process_id, pidfd, stderr_read)
 
 
 def _trigger(
@@ -573,6 +685,14 @@ def _publish_failure_status(control: ControlDirectory) -> None:
     )
 
 
+def _publish_stderr(
+    control: ControlDirectory,
+    handle: ChildHandle | None,
+) -> None:
+    stderr_tail = b"" if handle is None else handle.stderr_tail
+    control.write_bytes("stderr", stderr_tail)
+
+
 def _emergency_reap(handle: ChildHandle, kill_seconds: float) -> None:
     if handle.outcome is not None:
         return
@@ -585,6 +705,7 @@ def supervise(configuration: Configuration) -> int:
     _close_inherited_file_descriptors()
     with ControlDirectory(configuration.control_directory) as control:
         handle: ChildHandle | None = None
+        stderr_published = False
         status_published = False
         try:
             _require_linux_pidfds()
@@ -609,6 +730,8 @@ def supervise(configuration: Configuration) -> int:
                     configuration.kill_seconds,
                 )
                 trigger = "control-error"
+            _publish_stderr(control, handle)
+            stderr_published = True
             _publish_status(control, outcome, trigger, termination)
             status_published = True
             if not _wait_for_ack(control, configuration.ack_timeout_seconds):
@@ -617,6 +740,9 @@ def supervise(configuration: Configuration) -> int:
         except (OSError, ProtocolError, SupervisorError):
             if handle is not None:
                 _emergency_reap(handle, configuration.kill_seconds)
+            if not stderr_published:
+                _publish_stderr(control, handle)
+                stderr_published = True
             if not status_published:
                 _publish_failure_status(control)
                 status_published = True

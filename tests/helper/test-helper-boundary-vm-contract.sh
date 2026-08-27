@@ -194,6 +194,13 @@ grep -F 'start_vm provisioning provisioning' "$runner" >/dev/null
 grep -F 'start_vm proof restricted' "$runner" >/dev/null
 grep -F '9>&- </dev/null >/dev/null 2>&1 &' "$runner" >/dev/null
 grep -F 'wait_for_supervisor_ready 15' "$runner" >/dev/null
+grep -F 'QEMU exited after supervisor readiness for $vm_phase' "$runner" >/dev/null
+grep -F "printf 'qemu_supervisor_status='" "$runner" >/dev/null
+grep -F 'qemu_failure_stderr=$qemu_control/stderr' "$runner" >/dev/null
+grep -F "grep -Eq '^\\.stderr\\.[0-9]+\\.tmp$'" "$runner" >/dev/null
+grep -F 'MAX_STDERR_BYTES = 917_504' "$supervisor" >/dev/null
+grep -F 'MAX_STDERR_DRAIN_BYTES_PER_POLL = 262_144' "$supervisor" >/dev/null
+grep -F 'control.write_bytes("stderr", stderr_tail)' "$supervisor" >/dev/null
 grep -F 'error: "supervisor-failure"' "$runner" >/dev/null
 grep -F "trap '' HUP INT TERM" "$runner" >/dev/null
 grep -F 'console_log=$run_directory/vm-console.log' "$runner" >/dev/null
@@ -203,6 +210,39 @@ grep -F 'if scrub_sensitive_run_state; then' "$runner" >/dev/null
 grep -F 'WARNING: sensitive state may remain in the private run directory:' "$runner" >/dev/null
 grep -F 'bounded_run proof-cloud-init 32' "$runner" >/dev/null
 grep -F 'bounded_run proof-systemd-ready 2' "$runner" >/dev/null
+
+# A canonical ready record wins over absence of status, while a same-poll
+# ready+status pair is retained as the distinct fast-exit state.
+readiness_function=$temporary_directory/wait-for-supervisor-ready.sh
+sed -n '/^wait_for_supervisor_ready() {$/,/^}$/p' "$runner" >"$readiness_function"
+test "$(grep -c '^wait_for_supervisor_ready() {$' "$readiness_function")" -eq 1
+sh -n "$readiness_function"
+# shellcheck disable=SC1090
+. "$readiness_function"
+
+qemu_control=$temporary_directory/readiness-ready
+mkdir -m 700 "$qemu_control"
+printf '%s\n' ready >"$qemu_control/ready"
+wait_for_supervisor_ready 1
+
+qemu_control=$temporary_directory/readiness-status
+mkdir -m 700 "$qemu_control"
+printf '%s\n' status >"$qemu_control/status"
+set +e
+wait_for_supervisor_ready 1
+status_only_result=$?
+set -e
+test "$status_only_result" -eq 2
+
+qemu_control=$temporary_directory/readiness-fast-exit
+mkdir -m 700 "$qemu_control"
+printf '%s\n' ready >"$qemu_control/ready"
+printf '%s\n' status >"$qemu_control/status"
+set +e
+wait_for_supervisor_ready 1
+fast_exit_result=$?
+set -e
+test "$fast_exit_result" -eq 3
 
 trap_line=$(grep -n -m 1 -F 'trap cleanup EXIT' "$runner" | cut -d: -f1)
 chmod_line=$(grep -n -m 1 -F 'chmod 0700 "$run_directory"' "$runner" | cut -d: -f1)
@@ -313,6 +353,125 @@ cmp -s "$console_log" "$published_console_log"
 test "$(find "$publication_output" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" \
     = vm-console.log
 
+# Early QEMU exits retain only canonical status fields plus the supervisor's
+# bounded, stream-scanned stderr tail in the allowlisted diagnostic file.
+qemu_diagnostic_functions=$temporary_directory/qemu-diagnostic-functions.sh
+{
+    sed -n '/^validate_supervisor_record() {$/,/^}$/p' "$runner"
+    sed -n '/^validate_supervisor_stderr() {$/,/^}$/p' "$runner"
+    sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
+    sed -n '/^publish_qemu_failure_diagnostics() {$/,/^}$/p' "$runner"
+    sed -n '/^scrub_supervisor_stderr() {$/,/^}$/p' "$runner"
+} >"$qemu_diagnostic_functions"
+test "$(grep -c '^[_a-z].*() {$' "$qemu_diagnostic_functions")" -eq 5
+sh -n "$qemu_diagnostic_functions"
+# shellcheck disable=SC1090
+. "$qemu_diagnostic_functions"
+
+qemu_status_fixture=$temporary_directory/qemu-fast-exit-status.json
+qemu_stderr_fixture=$temporary_directory/qemu-fast-exit.stderr.log
+proof_stderr_log=$temporary_directory/helper-boundary-proof.stderr.log
+printf '%s\n' \
+    '{"exit_code":1,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}' \
+    >"$qemu_status_fixture"
+printf '%s\n' 'qemu: bounded runtime failure' >"$qemu_stderr_fixture"
+: >"$proof_stderr_log"
+chmod 0600 "$qemu_status_fixture" "$qemu_stderr_fixture" "$proof_stderr_log"
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture"
+test "$(stat -Lc '%h:%u:%a' "$proof_stderr_log")" = "1:$(id -u):600"
+grep -Fx 'qemu_phase=provisioning' "$proof_stderr_log" >/dev/null
+grep -Fx 'qemu_supervisor_status={"exit_code":1,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}' \
+    "$proof_stderr_log" >/dev/null
+grep -Fx 'qemu_stderr_tail_begin' "$proof_stderr_log" >/dev/null
+grep -Fx 'qemu: bounded runtime failure' "$proof_stderr_log" >/dev/null
+grep -Fx 'qemu_stderr_tail_end' "$proof_stderr_log" >/dev/null
+
+printf '%s\n' '-----BEGIN PRIVATE KEY-----' >"$qemu_stderr_fixture"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture" >/dev/null 2>&1
+private_marker_result=$?
+set -e
+test "$private_marker_result" -ne 0
+test ! -s "$proof_stderr_log"
+
+qemu_secret_fixture=$temporary_directory/qemu-same-user-secret
+qemu_stderr_link=$temporary_directory/qemu-fast-exit.stderr.link
+printf '%s\n' 'same-user secret must not be followed' >"$qemu_secret_fixture"
+chmod 0600 "$qemu_secret_fixture"
+ln -s "$qemu_secret_fixture" "$qemu_stderr_link"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_stderr_link" >/dev/null 2>&1
+linked_stderr_result=$?
+set -e
+test "$linked_stderr_result" -ne 0
+test ! -s "$proof_stderr_log"
+
+qemu_status_link=$temporary_directory/qemu-fast-exit-status.link
+ln -s "$qemu_status_fixture" "$qemu_status_link"
+printf '%s\n' 'qemu: bounded runtime failure' >"$qemu_stderr_fixture"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_link" "$qemu_stderr_fixture" >/dev/null 2>&1
+linked_status_result=$?
+set -e
+test "$linked_status_result" -ne 0
+test ! -s "$proof_stderr_log"
+
+dd if=/dev/zero bs=65536 count=15 status=none >"$qemu_stderr_fixture"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture" >/dev/null 2>&1
+oversized_stderr_result=$?
+set -e
+test "$oversized_stderr_result" -ne 0
+test ! -s "$proof_stderr_log"
+
+# Uncertain cleanup removes an interrupted atomic stderr publication only when
+# it is an exact private regular file under a fixed supervisor control path.
+run_directory=$temporary_directory/scrub-run
+mkdir -m 700 "$run_directory"
+mkdir -m 700 "$run_directory/qemu-provisioning"
+printf '%s\n' 'published diagnostic' \
+    >"$run_directory/qemu-provisioning/stderr"
+printf '%s\n' 'interrupted private diagnostic' \
+    >"$run_directory/qemu-provisioning/.stderr.12345.tmp"
+chmod 0600 \
+    "$run_directory/qemu-provisioning/stderr" \
+    "$run_directory/qemu-provisioning/.stderr.12345.tmp"
+scrub_supervisor_stderr "$run_directory/qemu-provisioning"
+test ! -e "$run_directory/qemu-provisioning/stderr"
+test ! -e "$run_directory/qemu-provisioning/.stderr.12345.tmp"
+
+printf '%s\n' 'invalid temporary name' \
+    >"$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
+chmod 0600 "$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
+set +e
+scrub_supervisor_stderr "$run_directory/qemu-provisioning" >/dev/null 2>&1
+invalid_stderr_name_result=$?
+set -e
+test "$invalid_stderr_name_result" -ne 0
+test -f "$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
+
+mkdir -m 700 "$run_directory/qemu-proof"
+scrub_link_target=$temporary_directory/scrub-link-target
+printf '%s\n' 'linked file must not be touched' >"$scrub_link_target"
+chmod 0600 "$scrub_link_target"
+ln -s "$scrub_link_target" "$run_directory/qemu-proof/.stderr.67890.tmp"
+set +e
+scrub_supervisor_stderr "$run_directory/qemu-proof" >/dev/null 2>&1
+linked_stderr_temporary_result=$?
+set -e
+test "$linked_stderr_temporary_result" -ne 0
+test -L "$run_directory/qemu-proof/.stderr.67890.tmp"
+grep -Fx 'linked file must not be touched' "$scrub_link_target" >/dev/null
+
 for exact_workflow_text in \
     '  workflow_dispatch:' \
     '  contents: read' \
@@ -343,6 +502,10 @@ done
 
 test "$(grep -h -- '-no-user-config' "$runner" "$workflow" | wc -l)" -eq 2
 test "$(grep -c -F 'sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm' "$workflow")" -eq 2
+if grep -Eq '^[[:space:]]+-S([[:space:]]|$)' "$workflow"; then
+    printf '%s\n' 'the KVM preflight does not execute a virtual CPU' >&2
+    exit 1
+fi
 grep -F "steps.restore_kvm_acl.outcome == 'success'" "$workflow" >/dev/null
 test "$(grep -c -F 'require_no_private_key_marker "$candidate" "$name"' "$workflow")" -eq 1
 test "$(grep -c -F 'require_no_private_key_marker "$retained_candidate" "$name"' "$workflow")" -eq 1

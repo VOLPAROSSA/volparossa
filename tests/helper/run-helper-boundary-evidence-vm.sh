@@ -333,24 +333,25 @@ wait_for_path() {
 validate_supervisor_record() {
     supervisor_record=$1
     supervisor_state=$2
-    [ "$(stat -Lc '%F:%h:%u:%a' "$supervisor_record" 2>/dev/null || true)" \
+    [ -f "$supervisor_record" ] && [ ! -L "$supervisor_record" ] || return 1
+    [ "$(stat -c '%F:%h:%u:%a' "$supervisor_record" 2>/dev/null || true)" \
         = "regular file:1:$(id -u):600" ] || return 1
     jq -e -s 'length == 1' "$supervisor_record" >/dev/null 2>&1 || return 1
     jq -S -c . "$supervisor_record" | cmp -s - "$supervisor_record" || return 1
     if [ "$supervisor_state" = ready ]; then
-        jq -e '. == {protocol: "volparossa-qemu-pidfd-supervisor-v1", state: "ready"}' \
+        jq -e '. == {protocol: "volparossa-qemu-pidfd-supervisor-v2", state: "ready"}' \
             "$supervisor_record" >/dev/null
     elif [ "$supervisor_state" = status ]; then
         jq -e '
           . == {
             error: "supervisor-failure",
-            protocol: "volparossa-qemu-pidfd-supervisor-v1",
+            protocol: "volparossa-qemu-pidfd-supervisor-v2",
             state: "failed"
           }
           or (
             type == "object"
             and keys == (["exit_code", "exit_signal", "protocol", "state", "termination", "trigger"] | sort)
-            and .protocol == "volparossa-qemu-pidfd-supervisor-v1"
+            and .protocol == "volparossa-qemu-pidfd-supervisor-v2"
             and .state == "exited"
             and ((.exit_code | type == "number") != (.exit_signal | type == "number"))
             and (.exit_code == null or (.exit_code >= 0 and .exit_code <= 255 and (.exit_code | floor) == .exit_code))
@@ -366,15 +367,27 @@ validate_supervisor_record() {
     fi
 }
 
+validate_supervisor_stderr() {
+    supervisor_stderr=$1
+    [ -f "$supervisor_stderr" ] && [ ! -L "$supervisor_stderr" ] || return 1
+    [ "$(stat -c '%F:%h:%u:%a' "$supervisor_stderr" 2>/dev/null || true)" \
+        = "regular file:1:$(id -u):600" ] || return 1
+    supervisor_stderr_size=$(stat -c '%s' "$supervisor_stderr") || return 1
+    [ "$supervisor_stderr_size" -le 917504 ]
+}
+
 wait_for_supervisor_ready() {
     waited_limit=$1
     waited_count=0
     while [ "$waited_count" -lt "$waited_limit" ]; do
+        if [ -f "$qemu_control/ready" ] && [ ! -L "$qemu_control/ready" ]; then
+            if [ -e "$qemu_control/status" ] || [ -L "$qemu_control/status" ]; then
+                return 3
+            fi
+            return 0
+        fi
         if [ -e "$qemu_control/status" ] || [ -L "$qemu_control/status" ]; then
             return 2
-        fi
-        if [ -f "$qemu_control/ready" ] && [ ! -L "$qemu_control/ready" ]; then
-            return 0
         fi
         sleep 1
         waited_count=$((waited_count + 1))
@@ -397,6 +410,11 @@ reap_qemu() {
     fi
     validate_supervisor_record "$qemu_control/status" status || {
         printf '%s\n' 'QEMU supervisor status is not canonical' >&2
+        safe_to_remove=no
+        return 1
+    }
+    validate_supervisor_stderr "$qemu_control/stderr" || {
+        printf '%s\n' 'QEMU supervisor stderr is not private and bounded' >&2
         safe_to_remove=no
         return 1
     }
@@ -480,12 +498,12 @@ settle_console() {
 require_no_private_key_marker() {
     scanned_path=$1
     if grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$scanned_path"; then
-        printf '%s\n' 'the VM console contains private-key material' >&2
+        printf '%s\n' 'the bounded diagnostic contains private-key material' >&2
         return 1
     else
         scan_status=$?
         if [ "$scan_status" -ne 1 ]; then
-            printf '%s\n' 'the VM console could not be scanned for private-key material' >&2
+            printf '%s\n' 'the bounded diagnostic could not be scanned for private-key material' >&2
             return 1
         fi
     fi
@@ -518,6 +536,30 @@ publish_console() {
     console_published=yes
 }
 
+publish_qemu_failure_diagnostics() {
+    qemu_failure_phase=$1
+    qemu_failure_status=$2
+    qemu_failure_stderr=$3
+    case $qemu_failure_phase in provisioning|proof) ;; *) return 1 ;; esac
+    validate_supervisor_record "$qemu_failure_status" status || return 1
+    validate_supervisor_stderr "$qemu_failure_stderr" || return 1
+    require_no_private_key_marker "$qemu_failure_stderr" || return 1
+    [ -f "$proof_stderr_log" ] && [ ! -L "$proof_stderr_log" ] \
+        && [ "$(stat -Lc '%h:%u:%a' "$proof_stderr_log" 2>/dev/null || true)" \
+            = "1:$(id -u):600" ] || return 1
+    {
+        printf 'qemu_phase=%s\n' "$qemu_failure_phase"
+        printf 'qemu_supervisor_status='
+        jq -S -c . "$qemu_failure_status"
+        printf '%s\n' 'qemu_stderr_tail_begin'
+        cat "$qemu_failure_stderr"
+        printf '\n%s\n' 'qemu_stderr_tail_end'
+    } >"$proof_stderr_log" || return 1
+    proof_stderr_size=$(stat -Lc '%s' "$proof_stderr_log") || return 1
+    [ "$proof_stderr_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$proof_stderr_log" || return 1
+}
+
 discard_console_publish_temporary() {
     [ -n "$console_publish_temporary" ] || return 0
     case $console_publish_temporary in
@@ -531,6 +573,49 @@ discard_console_publish_temporary() {
         rm -f -- "$console_publish_temporary" || return 1
     fi
     console_publish_temporary=
+}
+
+scrub_supervisor_stderr() {
+    supervisor_control_directory=$1
+    case $supervisor_control_directory in
+        "$run_directory"/qemu-provisioning|"$run_directory"/qemu-proof) ;;
+        *) return 1 ;;
+    esac
+    if [ ! -e "$supervisor_control_directory" ] \
+        && [ ! -L "$supervisor_control_directory" ]; then
+        return 0
+    fi
+    [ -d "$supervisor_control_directory" ] \
+        && [ ! -L "$supervisor_control_directory" ] \
+        && [ "$(stat -c '%u:%a' "$supervisor_control_directory" 2>/dev/null || true)" \
+            = "$(id -u):700" ] || return 1
+
+    supervisor_stderr=$supervisor_control_directory/stderr
+    if [ -e "$supervisor_stderr" ] || [ -L "$supervisor_stderr" ]; then
+        validate_supervisor_stderr "$supervisor_stderr" || return 1
+        rm -f -- "$supervisor_stderr" || return 1
+    fi
+
+    for supervisor_stderr_temporary in \
+        "$supervisor_control_directory"/.stderr.*.tmp
+    do
+        if [ ! -e "$supervisor_stderr_temporary" ] \
+            && [ ! -L "$supervisor_stderr_temporary" ]; then
+            continue
+        fi
+        supervisor_stderr_temporary_name=${supervisor_stderr_temporary##*/}
+        printf '%s\n' "$supervisor_stderr_temporary_name" \
+            | grep -Eq '^\.stderr\.[0-9]+\.tmp$' || return 1
+        [ -f "$supervisor_stderr_temporary" ] \
+            && [ ! -L "$supervisor_stderr_temporary" ] \
+            && [ "$(stat -c '%F:%h:%u:%a' \
+                "$supervisor_stderr_temporary" 2>/dev/null || true)" \
+                = "regular file:1:$(id -u):600" ] || return 1
+        supervisor_stderr_temporary_size=$(stat -c '%s' \
+            "$supervisor_stderr_temporary") || return 1
+        [ "$supervisor_stderr_temporary_size" -le 917504 ] || return 1
+        rm -f -- "$supervisor_stderr_temporary" || return 1
+    done
 }
 
 scrub_sensitive_run_state() {
@@ -560,6 +645,8 @@ scrub_sensitive_run_state() {
     if [ -e "$run_directory/source" ] || [ -L "$run_directory/source" ]; then
         rm -rf --one-file-system -- "$run_directory/source" || return 1
     fi
+    scrub_supervisor_stderr "$run_directory/qemu-provisioning" || return 1
+    scrub_supervisor_stderr "$run_directory/qemu-proof" || return 1
     find "$run_directory" -mindepth 1 -maxdepth 1 \
         \( -type f -o -type p -o -type l \) \
         \( -name 'bounded.*' -o -name 'console.*' \) -delete \
@@ -985,14 +1072,50 @@ start_vm() {
     case $supervisor_ready_status in
         0) ;;
         2)
-            reap_qemu no || true
+            qemu_failure_status=$qemu_control/status
+            qemu_failure_stderr=$qemu_control/stderr
+            if ! reap_qemu no; then
+                printf '%s\n' 'the failed QEMU lifecycle could not be reaped cleanly' >&2
+            fi
+            if ! publish_qemu_failure_diagnostics \
+                "$vm_phase" "$qemu_failure_status" "$qemu_failure_stderr"; then
+                printf '%s\n' 'bounded QEMU failure diagnostics could not be published' >&2
+            fi
             failed "the QEMU supervisor failed before ready for $vm_phase"
+            ;;
+        3)
+            validate_supervisor_record "$qemu_control/ready" ready \
+                || failed "the QEMU supervisor ready record is invalid for $vm_phase"
+            qemu_failure_status=$qemu_control/status
+            qemu_failure_stderr=$qemu_control/stderr
+            if ! reap_qemu no; then
+                printf '%s\n' 'the exited QEMU lifecycle could not be reaped cleanly' >&2
+            fi
+            if ! publish_qemu_failure_diagnostics \
+                "$vm_phase" "$qemu_failure_status" "$qemu_failure_stderr"; then
+                printf '%s\n' 'bounded QEMU failure diagnostics could not be published' >&2
+            fi
+            failed "QEMU exited after supervisor readiness for $vm_phase"
             ;;
         *) failed "the QEMU supervisor did not become ready for $vm_phase" ;;
     esac
     validate_supervisor_record "$qemu_control/ready" ready \
         || failed "the QEMU supervisor ready record is invalid for $vm_phase"
-    wait_for_ssh || failed "the exact pinned guest did not expose SSH for $vm_phase"
+    if ! wait_for_ssh; then
+        if [ -f "$qemu_control/status" ] && [ ! -L "$qemu_control/status" ]; then
+            qemu_failure_status=$qemu_control/status
+            qemu_failure_stderr=$qemu_control/stderr
+            if ! reap_qemu no; then
+                printf '%s\n' 'the exited QEMU lifecycle could not be reaped cleanly' >&2
+            fi
+            if ! publish_qemu_failure_diagnostics \
+                "$vm_phase" "$qemu_failure_status" "$qemu_failure_stderr"; then
+                printf '%s\n' 'bounded QEMU failure diagnostics could not be published' >&2
+            fi
+            failed "QEMU exited after readiness before pinned guest SSH for $vm_phase"
+        fi
+        failed "the exact pinned guest did not expose SSH for $vm_phase"
+    fi
 }
 
 start_vm provisioning provisioning
