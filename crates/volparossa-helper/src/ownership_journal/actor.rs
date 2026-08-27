@@ -346,12 +346,14 @@ pub(crate) enum StartupCustodyPhase {
 
 /// Opaque, copyable correlation evidence from one exact locked journal snapshot.
 ///
-/// This is neither ownership nor cleanup authority. The name digest, phase and descriptor binding
-/// are sufficient only for exact-set restart classification while the startup guard remains live.
+/// This is neither ownership nor cleanup authority. The name digest, phase, complete opaque
+/// recovery anchor and descriptor binding are sufficient only for exact-set restart correlation
+/// while the startup guard remains live.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct StartupCustodyTarget {
     phase: StartupCustodyPhase,
     custody_name_digest: DurableCustodyNameDigest,
+    recovery_anchor: DurablePrepareAnchor,
     durable_binding: DurableCustodyDescriptorBinding,
 }
 
@@ -368,6 +370,25 @@ impl StartupCustodyTarget {
         self.durable_binding
     }
 
+    /// Compare one opaque complete worker anchor without exposing any of its numeric coordinates.
+    #[cfg(test)]
+    pub(crate) fn matches_recovery_anchor(&self, candidate: &DurablePrepareAnchor) -> bool {
+        self.recovery_anchor == *candidate
+    }
+
+    /// Revalidate the portion of the complete anchor which the inherited custody pair can
+    /// independently attest after process exit.
+    ///
+    /// The other anchor fields remain bound by this target's private construction from one exact
+    /// validated, lock-held journal record; Linux exposes no safe way to reconstruct them from an
+    /// already-terminal pidfd.
+    pub(crate) fn has_valid_recovery_binding(&self) -> bool {
+        self.durable_binding
+            .0
+            .validate_against_anchor(self.recovery_anchor.0)
+            .is_ok()
+    }
+
     pub(crate) fn matches_binding(&self, candidate: &DurableCustodyDescriptorBinding) -> bool {
         self.durable_binding.matches_role_ordered(candidate)
     }
@@ -380,11 +401,13 @@ impl StartupCustodyTarget {
     pub(crate) const fn for_test(
         phase: StartupCustodyPhase,
         custody_name_digest: DurableCustodyNameDigest,
+        recovery_anchor: DurablePrepareAnchor,
         durable_binding: DurableCustodyDescriptorBinding,
     ) -> Self {
         Self {
             phase,
             custody_name_digest,
+            recovery_anchor,
             durable_binding,
         }
     }
@@ -1839,7 +1862,7 @@ fn project_startup_custody_targets(
             OwnershipPhase::CleanupConfirmed => StartupCustodyPhase::CleanupConfirmed,
             OwnershipPhase::Intent | OwnershipPhase::Absent => continue,
         };
-        let Some(PrepareRecoveryEvidenceV1::CustodyBound { binding, .. }) =
+        let Some(PrepareRecoveryEvidenceV1::CustodyBound { anchor, binding }) =
             record.recovery_evidence
         else {
             // Legacy MayOwnPrepare is not correlated to descriptor-store custody and must never be
@@ -1857,6 +1880,7 @@ fn project_startup_custody_targets(
                 ownership_id: record.ownership_id,
                 generation: record.generation,
             }),
+            recovery_anchor: DurablePrepareAnchor(anchor),
             durable_binding: DurableCustodyDescriptorBinding(binding),
         };
         if targets.iter().any(|existing: &StartupCustodyTarget| {

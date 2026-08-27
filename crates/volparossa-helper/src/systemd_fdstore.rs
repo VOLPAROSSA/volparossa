@@ -527,6 +527,42 @@ impl fmt::Debug for StableStartupInventory {
     }
 }
 
+/// Construct an exact stable-inventory fixture for sibling startup-custody tests.
+#[cfg(test)]
+pub(super) fn stable_startup_inventory_for_test(
+    inherited: &BTreeMap<CustodyFdName, CustodyDescriptorBinding>,
+) -> StableStartupInventory {
+    let main_pid = std::process::id();
+    let scope = DescriptorStoreScope::new(
+        OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/volparossa_2dtest_2eservice")
+            .expect("valid fixture service object path"),
+        main_pid,
+    )
+    .expect("nonzero fixture service PID");
+    let mut entries = Vec::with_capacity(inherited.len() * DESCRIPTORS_PER_CUSTODY);
+    for (name, binding) in inherited {
+        for identity in &binding.0 {
+            entries.push(InventoryEntry {
+                name: Box::<[u8]>::from(name.as_bytes().as_slice()),
+                identity: identity.clone(),
+            });
+        }
+    }
+    entries.sort_unstable();
+    StableStartupInventory {
+        snapshot: DescriptorStoreSnapshot {
+            scope,
+            main_pid,
+            notify_access: "main".into(),
+            store_max: MAX_DESCRIPTOR_STORE_ENTRIES_U32,
+            store_preserve: "yes".into(),
+            entries,
+        },
+        notify_address: NotifySocketAddress::parse(OsStr::new("/run/volparossa-test-notify.sock"))
+            .expect("valid fixture notify address"),
+    }
+}
+
 /// Exact stable proof that one named pair is absent and every unrelated manager entry is
 /// unchanged. This is manager-inventory evidence only, not kernel-cleanup or journal authority.
 #[must_use = "exact removal evidence must remain joined to durable cleanup settlement"]

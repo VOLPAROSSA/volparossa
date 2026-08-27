@@ -368,6 +368,55 @@ fn prepopulate_custody_target(
     )
 }
 
+type ExpectedStartupTarget = (
+    StartupCustodyPhase,
+    DurablePrepareAnchor,
+    DurableCustodyDescriptorBinding,
+);
+
+fn expected_startup_targets(
+    entries: &[(
+        OwnershipCoordinates,
+        StartupCustodyPhase,
+        DurablePrepareAnchor,
+        DurableCustodyDescriptorBinding,
+    ); 3],
+) -> BTreeMap<DurableCustodyNameDigest, ExpectedStartupTarget> {
+    entries
+        .iter()
+        .copied()
+        .map(|(coordinates, phase, anchor, binding)| {
+            (
+                custody_name_digest_for_coordinates(coordinates),
+                (phase, anchor, binding),
+            )
+        })
+        .collect()
+}
+
+fn assert_startup_targets(
+    actual: &[StartupCustodyTarget],
+    expected: &BTreeMap<DurableCustodyNameDigest, ExpectedStartupTarget>,
+) {
+    assert_eq!(actual.len(), expected.len());
+    assert!(
+        actual
+            .windows(2)
+            .all(|pair| pair[0].custody_name_digest() < pair[1].custody_name_digest()),
+        "startup targets must be in strict canonical digest order"
+    );
+    for target in actual {
+        let (phase, anchor, binding) = expected
+            .get(&target.custody_name_digest())
+            .expect("exact projected target");
+        assert_eq!(target.phase(), *phase);
+        assert!(target.matches_recovery_anchor(anchor));
+        assert!(target.matches_binding(binding));
+        assert_eq!(target.durable_binding(), *binding);
+        assert_eq!(format!("{target:?}"), "StartupCustodyTarget(<redacted>)");
+    }
+}
+
 fn prepopulate_legacy_may_own_prepare(config: &JournalConfig, seed: u8) {
     let mut journal = OwnershipJournal::open(config.clone()).expect("open legacy setup journal");
     let inserted = journal
@@ -1116,37 +1165,27 @@ fn lock_held_preflight_projects_canonical_targets_before_any_intent_mutation() {
     )
     .expect("lock-held startup preflight");
 
-    let expected = BTreeMap::from([
+    let expected = expected_startup_targets(&[
         (
-            custody_name_digest_for_coordinates(custody_coordinates),
-            (StartupCustodyPhase::MayOwnCustody, custody_binding),
+            custody_coordinates,
+            StartupCustodyPhase::MayOwnCustody,
+            durable_anchor(40),
+            custody_binding,
         ),
         (
-            custody_name_digest_for_coordinates(prepare_coordinates),
-            (StartupCustodyPhase::MayOwnPrepare, prepare_binding),
+            prepare_coordinates,
+            StartupCustodyPhase::MayOwnPrepare,
+            durable_anchor(41),
+            prepare_binding,
         ),
         (
-            custody_name_digest_for_coordinates(cleanup_coordinates),
-            (StartupCustodyPhase::CleanupConfirmed, cleanup_binding),
+            cleanup_coordinates,
+            StartupCustodyPhase::CleanupConfirmed,
+            durable_anchor(42),
+            cleanup_binding,
         ),
     ]);
-    assert_eq!(startup.targets().len(), expected.len());
-    assert!(
-        startup
-            .targets()
-            .windows(2)
-            .all(|pair| pair[0].custody_name_digest() < pair[1].custody_name_digest()),
-        "startup targets must be in strict canonical digest order"
-    );
-    for target in startup.targets() {
-        let (phase, binding) = expected
-            .get(&target.custody_name_digest())
-            .expect("exact projected target");
-        assert_eq!(target.phase(), *phase);
-        assert!(target.matches_binding(binding));
-        assert_eq!(target.durable_binding(), *binding);
-        assert_eq!(format!("{target:?}"), "StartupCustodyTarget(<redacted>)");
-    }
+    assert_startup_targets(startup.targets(), &expected);
     assert!(matches!(
         OwnershipJournal::open(config.clone()),
         Err(JournalError::LockHeld)
