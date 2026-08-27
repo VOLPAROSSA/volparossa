@@ -153,6 +153,8 @@ fi
 for exact_runner_text in \
     '-machine q35,accel=kvm' \
     '-no-user-config -nodefaults' \
+    '-S -qmp stdio' \
+    '--qmp-stdio --qmp-timeout-seconds 10' \
     "qemu_netdev='user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22'" \
     "qemu_netdev='user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:22222-:22'" \
     '-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny' \
@@ -196,8 +198,20 @@ grep -F '9>&- </dev/null >/dev/null 2>&1 &' "$runner" >/dev/null
 grep -F 'wait_for_supervisor_ready 15' "$runner" >/dev/null
 grep -F 'QEMU exited after supervisor readiness for $vm_phase' "$runner" >/dev/null
 grep -F "printf 'qemu_supervisor_status='" "$runner" >/dev/null
+grep -F "printf 'qemu_event_record='" "$runner" >/dev/null
+grep -F 'qemu_failure_qmp=$qemu_control/qmp' "$runner" >/dev/null
 grep -F 'qemu_failure_stderr=$qemu_control/stderr' "$runner" >/dev/null
+grep -F '.events[-1] == {' "$runner" >/dev/null
+grep -F 'event: "SHUTDOWN", guest: true, reason: "guest-shutdown"' \
+    "$runner" >/dev/null
+grep -F 'qemu_clean_lifecycle=yes' "$runner" >/dev/null
+grep -F 'publish_reap_failure_diagnostics "$qemu_control"' "$runner" >/dev/null
+grep -F 'qemu_failed_before_ssh=no' "$runner" >/dev/null
+grep -F 'the stalled QEMU stop request failed for $vm_phase' "$runner" >/dev/null
+grep -F "grep -Eq '^\\.qmp\\.[0-9]+\\.tmp$'" "$runner" >/dev/null
 grep -F "grep -Eq '^\\.stderr\\.[0-9]+\\.tmp$'" "$runner" >/dev/null
+grep -F 'MAX_QMP_RECORD_BYTES = 65_536' "$supervisor" >/dev/null
+grep -F 'MAX_QMP_STREAM_BYTES = 8_388_608' "$supervisor" >/dev/null
 grep -F 'MAX_STDERR_BYTES = 917_504' "$supervisor" >/dev/null
 grep -F 'MAX_STDERR_DRAIN_BYTES_PER_POLL = 262_144' "$supervisor" >/dev/null
 grep -F 'control.write_bytes("stderr", stderr_tail)' "$supervisor" >/dev/null
@@ -354,45 +368,81 @@ test "$(find "$publication_output" -mindepth 1 -maxdepth 1 -type f -printf '%f\n
     = vm-console.log
 
 # Early QEMU exits retain only canonical status fields plus the supervisor's
-# bounded, stream-scanned stderr tail in the allowlisted diagnostic file.
+# bounded QMP event record and stream-scanned stderr tail in the allowlisted diagnostic file.
 qemu_diagnostic_functions=$temporary_directory/qemu-diagnostic-functions.sh
 {
     sed -n '/^validate_supervisor_record() {$/,/^}$/p' "$runner"
     sed -n '/^validate_supervisor_stderr() {$/,/^}$/p' "$runner"
+    sed -n '/^validate_supervisor_qmp() {$/,/^}$/p' "$runner"
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^publish_qemu_failure_diagnostics() {$/,/^}$/p' "$runner"
-    sed -n '/^scrub_supervisor_stderr() {$/,/^}$/p' "$runner"
+    sed -n '/^scrub_supervisor_diagnostics() {$/,/^}$/p' "$runner"
 } >"$qemu_diagnostic_functions"
-test "$(grep -c '^[_a-z].*() {$' "$qemu_diagnostic_functions")" -eq 5
+test "$(grep -c '^[_a-z].*() {$' "$qemu_diagnostic_functions")" -eq 6
 sh -n "$qemu_diagnostic_functions"
 # shellcheck disable=SC1090
 . "$qemu_diagnostic_functions"
 
 qemu_status_fixture=$temporary_directory/qemu-fast-exit-status.json
+qemu_qmp_fixture=$temporary_directory/qemu-fast-exit-qmp.json
 qemu_stderr_fixture=$temporary_directory/qemu-fast-exit.stderr.log
 proof_stderr_log=$temporary_directory/helper-boundary-proof.stderr.log
 printf '%s\n' \
-    '{"exit_code":1,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}' \
+    '{"exit_code":1,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}' \
     >"$qemu_status_fixture"
+printf '%s\n' \
+    '{"events":[{"event":"RESET","guest":true,"reason":"guest-reset"}],"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"final","truncated":false}' \
+    >"$qemu_qmp_fixture"
 printf '%s\n' 'qemu: bounded runtime failure' >"$qemu_stderr_fixture"
 : >"$proof_stderr_log"
-chmod 0600 "$qemu_status_fixture" "$qemu_stderr_fixture" "$proof_stderr_log"
+chmod 0600 \
+    "$qemu_status_fixture" "$qemu_qmp_fixture" "$qemu_stderr_fixture" \
+    "$proof_stderr_log"
 publish_qemu_failure_diagnostics \
-    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture"
+    provisioning "$qemu_status_fixture" "$qemu_qmp_fixture" "$qemu_stderr_fixture"
 test "$(stat -Lc '%h:%u:%a' "$proof_stderr_log")" = "1:$(id -u):600"
 grep -Fx 'qemu_phase=provisioning' "$proof_stderr_log" >/dev/null
-grep -Fx 'qemu_supervisor_status={"exit_code":1,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}' \
+grep -Fx 'qemu_supervisor_status={"exit_code":1,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}' \
+    "$proof_stderr_log" >/dev/null
+grep -Fx 'qemu_event_record={"events":[{"event":"RESET","guest":true,"reason":"guest-reset"}],"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"final","truncated":false}' \
     "$proof_stderr_log" >/dev/null
 grep -Fx 'qemu_stderr_tail_begin' "$proof_stderr_log" >/dev/null
 grep -Fx 'qemu: bounded runtime failure' "$proof_stderr_log" >/dev/null
 grep -Fx 'qemu_stderr_tail_end' "$proof_stderr_log" >/dev/null
+
+qemu_qmp_link=$temporary_directory/qemu-fast-exit-qmp.link
+ln -s "$qemu_qmp_fixture" "$qemu_qmp_link"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_qmp_link" \
+    "$qemu_stderr_fixture" >/dev/null 2>&1
+linked_qmp_result=$?
+set -e
+test "$linked_qmp_result" -ne 0
+test ! -s "$proof_stderr_log"
+
+qemu_invalid_qmp=$temporary_directory/qemu-invalid-qmp.json
+printf '%s\n' \
+    '{"events":[{"event":"RESET","guest":true,"reason":"raw-attacker-token"}],"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"final","truncated":false}' \
+    >"$qemu_invalid_qmp"
+chmod 0600 "$qemu_invalid_qmp"
+: >"$proof_stderr_log"
+set +e
+publish_qemu_failure_diagnostics \
+    provisioning "$qemu_status_fixture" "$qemu_invalid_qmp" \
+    "$qemu_stderr_fixture" >/dev/null 2>&1
+invalid_qmp_result=$?
+set -e
+test "$invalid_qmp_result" -ne 0
+test ! -s "$proof_stderr_log"
 
 # GNU stat describes an empty file as "regular empty file". The runner proves
 # the file type independently and must accept exact private empty QEMU stderr.
 : >"$qemu_stderr_fixture"
 : >"$proof_stderr_log"
 publish_qemu_failure_diagnostics \
-    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture"
+    provisioning "$qemu_status_fixture" "$qemu_qmp_fixture" "$qemu_stderr_fixture"
 grep -Fx 'qemu_stderr_tail_begin' "$proof_stderr_log" >/dev/null
 grep -Fx 'qemu_stderr_tail_end' "$proof_stderr_log" >/dev/null
 
@@ -400,7 +450,8 @@ printf '%s\n' '-----BEGIN PRIVATE KEY-----' >"$qemu_stderr_fixture"
 : >"$proof_stderr_log"
 set +e
 publish_qemu_failure_diagnostics \
-    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture" >/dev/null 2>&1
+    provisioning "$qemu_status_fixture" "$qemu_qmp_fixture" \
+    "$qemu_stderr_fixture" >/dev/null 2>&1
 private_marker_result=$?
 set -e
 test "$private_marker_result" -ne 0
@@ -414,7 +465,8 @@ ln -s "$qemu_secret_fixture" "$qemu_stderr_link"
 : >"$proof_stderr_log"
 set +e
 publish_qemu_failure_diagnostics \
-    provisioning "$qemu_status_fixture" "$qemu_stderr_link" >/dev/null 2>&1
+    provisioning "$qemu_status_fixture" "$qemu_qmp_fixture" \
+    "$qemu_stderr_link" >/dev/null 2>&1
 linked_stderr_result=$?
 set -e
 test "$linked_stderr_result" -ne 0
@@ -426,7 +478,8 @@ printf '%s\n' 'qemu: bounded runtime failure' >"$qemu_stderr_fixture"
 : >"$proof_stderr_log"
 set +e
 publish_qemu_failure_diagnostics \
-    provisioning "$qemu_status_link" "$qemu_stderr_fixture" >/dev/null 2>&1
+    provisioning "$qemu_status_link" "$qemu_qmp_fixture" \
+    "$qemu_stderr_fixture" >/dev/null 2>&1
 linked_status_result=$?
 set -e
 test "$linked_status_result" -ne 0
@@ -436,7 +489,8 @@ dd if=/dev/zero bs=65536 count=15 status=none >"$qemu_stderr_fixture"
 : >"$proof_stderr_log"
 set +e
 publish_qemu_failure_diagnostics \
-    provisioning "$qemu_status_fixture" "$qemu_stderr_fixture" >/dev/null 2>&1
+    provisioning "$qemu_status_fixture" "$qemu_qmp_fixture" \
+    "$qemu_stderr_fixture" >/dev/null 2>&1
 oversized_stderr_result=$?
 set -e
 test "$oversized_stderr_result" -ne 0
@@ -447,12 +501,22 @@ test ! -s "$proof_stderr_log"
 run_directory=$temporary_directory/scrub-run
 mkdir -m 700 "$run_directory"
 mkdir -m 700 "$run_directory/qemu-provisioning"
+: >"$run_directory/qemu-provisioning/qmp"
+: >"$run_directory/qemu-provisioning/.qmp.23456.tmp"
 : >"$run_directory/qemu-provisioning/stderr"
 : >"$run_directory/qemu-provisioning/.stderr.12345.tmp"
 chmod 0600 \
+    "$run_directory/qemu-provisioning/qmp" \
+    "$run_directory/qemu-provisioning/.qmp.23456.tmp" \
     "$run_directory/qemu-provisioning/stderr" \
     "$run_directory/qemu-provisioning/.stderr.12345.tmp"
-scrub_supervisor_stderr "$run_directory/qemu-provisioning"
+# A completed QMP record must be canonical before cleanup may remove it.
+printf '%s\n' \
+    '{"events":[],"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"failed","truncated":false}' \
+    >"$run_directory/qemu-provisioning/qmp"
+scrub_supervisor_diagnostics "$run_directory/qemu-provisioning"
+test ! -e "$run_directory/qemu-provisioning/qmp"
+test ! -e "$run_directory/qemu-provisioning/.qmp.23456.tmp"
 test ! -e "$run_directory/qemu-provisioning/stderr"
 test ! -e "$run_directory/qemu-provisioning/.stderr.12345.tmp"
 
@@ -460,7 +524,7 @@ printf '%s\n' 'invalid temporary name' \
     >"$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
 chmod 0600 "$run_directory/qemu-provisioning/.stderr.not-a-pid.tmp"
 set +e
-scrub_supervisor_stderr "$run_directory/qemu-provisioning" >/dev/null 2>&1
+scrub_supervisor_diagnostics "$run_directory/qemu-provisioning" >/dev/null 2>&1
 invalid_stderr_name_result=$?
 set -e
 test "$invalid_stderr_name_result" -ne 0
@@ -471,12 +535,14 @@ scrub_link_target=$temporary_directory/scrub-link-target
 printf '%s\n' 'linked file must not be touched' >"$scrub_link_target"
 chmod 0600 "$scrub_link_target"
 ln -s "$scrub_link_target" "$run_directory/qemu-proof/.stderr.67890.tmp"
+ln -s "$scrub_link_target" "$run_directory/qemu-proof/.qmp.54321.tmp"
 set +e
-scrub_supervisor_stderr "$run_directory/qemu-proof" >/dev/null 2>&1
+scrub_supervisor_diagnostics "$run_directory/qemu-proof" >/dev/null 2>&1
 linked_stderr_temporary_result=$?
 set -e
 test "$linked_stderr_temporary_result" -ne 0
 test -L "$run_directory/qemu-proof/.stderr.67890.tmp"
+test -L "$run_directory/qemu-proof/.qmp.54321.tmp"
 grep -Fx 'linked file must not be touched' "$scrub_link_target" >/dev/null
 
 for exact_workflow_text in \

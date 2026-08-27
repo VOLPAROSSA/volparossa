@@ -116,6 +116,30 @@ wait_for_status_after_stderr() {
     return 1
 }
 
+wait_for_qmp_status_after_outputs() {
+    control_directory=$1
+    attempts=0
+    while [ "$attempts" -lt 400 ]; do
+        if [ -e "$control_directory/status" ] \
+            && { [ ! -f "$control_directory/qmp" ] \
+                || [ -L "$control_directory/qmp" ] \
+                || [ ! -f "$control_directory/stderr" ] \
+                || [ -L "$control_directory/stderr" ]; }; then
+            printf '%s\n' 'status became visible before finalized QMP and stderr' >&2
+            return 1
+        fi
+        if [ -f "$control_directory/status" ] \
+            && [ ! -L "$control_directory/status" ]; then
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.01
+    done
+    printf 'timed out waiting for QMP supervisor status: %s\n' \
+        "$control_directory" >&2
+    return 1
+}
+
 assert_private_regular_file() {
     file=$1
     if [ ! -f "$file" ] || [ -L "$file" ]; then
@@ -173,6 +197,24 @@ start_supervisor() {
     supervisor_processes="$supervisor_processes $started_process"
 }
 
+start_qmp_supervisor() {
+    control_directory=$1
+    stdout_file=$2
+    stderr_file=$3
+    shift 3
+    "$supervisor" \
+        --grace-seconds 0.05 \
+        --term-seconds 0.15 \
+        --kill-seconds 0.50 \
+        --ack-timeout-seconds 2 \
+        --qmp-stdio \
+        --qmp-timeout-seconds 0.75 \
+        "$control_directory" -- "$@" \
+        <"$supervisor_stdin_fixture" >"$stdout_file" 2>"$stderr_file" &
+    started_process=$!
+    supervisor_processes="$supervisor_processes $started_process"
+}
+
 wait_for_supervisor() {
     process=$1
     expected=$2
@@ -186,7 +228,226 @@ wait_for_supervisor() {
     fi
 }
 
-ready_json='{"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"ready"}'
+ready_json='{"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"ready"}'
+
+# QMP stdio is private to the supervisor. It negotiates capabilities, sends
+# only cont, publishes ready after that reply, and retains only allowlisted
+# canonical events before status.
+qmp_control=$(new_control_directory qmp)
+start_qmp_supervisor "$qmp_control" \
+    "$temporary_directory/qmp.stdout" "$temporary_directory/qmp.stderr" \
+    python3 -c '
+import json
+import select
+import sys
+
+
+def emit(value):
+    encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+    sys.stdout.buffer.write(encoded.encode("ascii") + b"\r\n")
+    sys.stdout.buffer.flush()
+
+
+secret = "-----BEGIN PRIVATE KEY-----"
+emit({
+    "QMP": {
+        "capabilities": [],
+        "future": secret,
+        "version": {
+            "future": secret,
+            "package": "fake-qemu",
+            "qemu": {"future": secret, "major": 8, "micro": 8, "minor": 2},
+        },
+    },
+    "future": secret,
+})
+if sys.stdin.buffer.readline() != b"{\"execute\":\"qmp_capabilities\",\"id\":\"volparossa-capabilities\"}\r\n":
+    raise SystemExit(91)
+emit({"future": secret, "id": "volparossa-capabilities", "return": {"future": secret}})
+if sys.stdin.buffer.readline() != b"{\"execute\":\"cont\",\"id\":\"volparossa-cont\"}\r\n":
+    raise SystemExit(92)
+emit({"future": secret, "id": "volparossa-cont", "return": {"future": secret}})
+timestamp = {"future": secret, "microseconds": 2, "seconds": 1}
+emit({"data": {"future": secret}, "event": "STOP", "future": secret, "timestamp": timestamp})
+emit({"data": {"future": secret, "guest": True, "reason": "guest-reset"}, "event": "RESET", "future": secret, "timestamp": timestamp})
+emit({"data": {"future": secret, "guest": False, "reason": "attacker-controlled-token"}, "event": "SHUTDOWN", "future": secret, "timestamp": timestamp})
+emit({"data": {"action": "pause", "future": secret, "info": {"raw": secret}}, "event": "GUEST_PANICKED", "future": secret, "timestamp": timestamp})
+emit({"data": {"raw": "never retained"}, "event": "UNRELATED", "timestamp": timestamp})
+if select.select([sys.stdin.buffer], [], [], 0.15)[0]:
+    raise SystemExit(93)
+'
+qmp_supervisor=$started_process
+wait_for_file "$qmp_control/ready"
+wait_for_qmp_status_after_outputs "$qmp_control"
+for qmp_output in ready qmp stderr status; do
+    assert_private_regular_file "$qmp_control/$qmp_output"
+done
+assert_json_equals "$qmp_control/ready" "$ready_json"
+assert_json_equals "$qmp_control/qmp" \
+    '{"events":[{"event":"STOP"},{"event":"RESET","guest":true,"reason":"guest-reset"},{"event":"SHUTDOWN","guest":false,"reason":"unavailable"},{"action":"pause","event":"GUEST_PANICKED"}],"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"final","truncated":false}'
+test ! -s "$qmp_control/stderr"
+if grep -aF 'PRIVATE KEY' "$qmp_control/qmp" >/dev/null; then
+    printf '%s\n' 'raw QMP panic information reached the event record' >&2
+    exit 1
+fi
+assert_json_equals "$qmp_control/status" \
+    '{"exit_code":0,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}'
+assert_no_atomic_temporary_files "$qmp_control"
+if [ -s "$temporary_directory/qmp.stdout" ] \
+    || [ -s "$temporary_directory/qmp.stderr" ]; then
+    printf '%s\n' 'successful QMP lifecycle emitted supervisor output' >&2
+    exit 1
+fi
+atomic_empty_file "$qmp_control/ack"
+wait_for_supervisor "$qmp_supervisor" 0
+
+# Closing QMP immediately before process exit is not mistaken for a live QMP
+# disconnect, even under repeated scheduler races.
+qmp_stress_iteration=1
+while [ "$qmp_stress_iteration" -le 100 ]; do
+    qmp_stress_control=$(new_control_directory "qmp-stress-$qmp_stress_iteration")
+    start_qmp_supervisor "$qmp_stress_control" \
+        "$temporary_directory/qmp-stress-$qmp_stress_iteration.stdout" \
+        "$temporary_directory/qmp-stress-$qmp_stress_iteration.stderr" \
+        python3 -c '
+import json
+import os
+import sys
+import time
+
+
+def emit(value):
+    sys.stdout.buffer.write(json.dumps(value, separators=(",", ":")).encode("ascii") + b"\r\n")
+    sys.stdout.buffer.flush()
+
+
+emit({"QMP": {"capabilities": [], "version": {"package": "stress", "qemu": {"major": 8, "micro": 8, "minor": 2}}}})
+if not sys.stdin.buffer.readline():
+    raise SystemExit(71)
+emit({"id": "volparossa-capabilities", "return": {}})
+if not sys.stdin.buffer.readline():
+    raise SystemExit(72)
+emit({"id": "volparossa-cont", "return": {}})
+ready = os.path.join(sys.argv[1], "ready")
+for _ in range(500):
+    if os.path.isfile(ready) and not os.path.islink(ready):
+        raise SystemExit(0)
+    time.sleep(0.001)
+raise SystemExit(73)
+' "$qmp_stress_control"
+    qmp_stress_supervisor=$started_process
+    wait_for_qmp_status_after_outputs "$qmp_stress_control"
+    assert_json_equals "$qmp_stress_control/qmp" \
+        '{"events":[],"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"final","truncated":false}'
+    assert_json_equals "$qmp_stress_control/status" \
+        '{"exit_code":0,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}'
+    atomic_empty_file "$qmp_stress_control/ack"
+    wait_for_supervisor "$qmp_stress_supervisor" 0
+    qmp_stress_iteration=$((qmp_stress_iteration + 1))
+done
+
+# Malformed, out-of-order and overflowing fake QMP peers fail closed. Raw QMP
+# bytes are never published, and event overflow cannot yield partial evidence.
+for qmp_failure_mode in \
+    unsolicited-null duplicate-key nonfinite deep-json lf-only early-event \
+    child-before-greeting oversized overflow total-stream eof-live
+do
+    qmp_failure_control=$(new_control_directory "qmp-$qmp_failure_mode")
+    start_qmp_supervisor "$qmp_failure_control" \
+        "$temporary_directory/qmp-$qmp_failure_mode.stdout" \
+        "$temporary_directory/qmp-$qmp_failure_mode.stderr" \
+        python3 -c '
+import json
+import os
+import sys
+import time
+
+mode = sys.argv[1]
+
+
+def raw(value):
+    sys.stdout.buffer.write(value)
+    sys.stdout.buffer.flush()
+
+
+def emit(value):
+    raw(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\r\n")
+
+
+greeting = {"QMP": {"capabilities": [], "version": {"package": "fake", "qemu": {"major": 8, "micro": 8, "minor": 2}}}}
+timestamp = {"microseconds": 0, "seconds": 1}
+if mode == "unsolicited-null":
+    emit({"id": None, "return": {}})
+elif mode == "duplicate-key":
+    raw(b"{\"QMP\":{},\"QMP\":{}}\r\n")
+elif mode == "nonfinite":
+    raw(b"{\"QMP\":{\"capabilities\":[],\"version\":{\"package\":\"fake\",\"qemu\":{\"major\":NaN,\"micro\":8,\"minor\":2}}}}\r\n")
+elif mode == "deep-json":
+    raw(b"[" * 2000 + b"0" + b"]" * 2000 + b"\r\n")
+elif mode == "lf-only":
+    raw(json.dumps(greeting, separators=(",", ":")).encode("ascii") + b"\n")
+elif mode == "early-event":
+    emit({"data": {"guest": True, "reason": "guest-reset"}, "event": "RESET", "timestamp": timestamp})
+elif mode == "child-before-greeting":
+    raise SystemExit(0)
+elif mode == "oversized":
+    raw(b"X" * 65537)
+elif mode in ("overflow", "total-stream", "eof-live"):
+    emit(greeting)
+    if not sys.stdin.buffer.readline():
+        raise SystemExit(81)
+    emit({"id": "volparossa-capabilities", "return": {}})
+    if not sys.stdin.buffer.readline():
+        raise SystemExit(82)
+    emit({"id": "volparossa-cont", "return": {}})
+    if mode == "overflow":
+        for _ in range(65):
+            emit({"event": "STOP", "timestamp": timestamp})
+    elif mode == "total-stream":
+        try:
+            for _ in range(9000):
+                emit({"data": {"ignored": "X" * 960}, "event": "UNRELATED", "timestamp": timestamp})
+        except BrokenPipeError:
+            pass
+    else:
+        os.close(1)
+else:
+    raise SystemExit(83)
+time.sleep(30)
+' "$qmp_failure_mode"
+    qmp_failure_supervisor=$started_process
+    wait_for_qmp_status_after_outputs "$qmp_failure_control"
+    assert_private_regular_file "$qmp_failure_control/qmp"
+    assert_private_regular_file "$qmp_failure_control/stderr"
+    assert_private_regular_file "$qmp_failure_control/status"
+    python3 - "$qmp_failure_control/qmp" "$qmp_failure_mode" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+raw = path.read_bytes()
+record = json.loads(raw)
+canonical = (json.dumps(record, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+if raw != canonical or record.get("protocol") != "volparossa-qemu-pidfd-supervisor-v3" or record.get("state") != "failed":
+    raise SystemExit(f"invalid failed QMP record for {mode}")
+if mode == "overflow":
+    if record.get("truncated") is not True or len(record.get("events", [])) != 64:
+        raise SystemExit("QMP event overflow was not explicit and fail-closed")
+elif record != {
+    "events": [],
+    "protocol": "volparossa-qemu-pidfd-supervisor-v3",
+    "state": "failed",
+    "truncated": False,
+}:
+    raise SystemExit(f"unexpected pre-handshake QMP evidence for {mode}")
+PY
+    assert_json_equals "$qmp_failure_control/status" \
+        '{"error":"supervisor-failure","protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"failed"}'
+    atomic_empty_file "$qmp_failure_control/ack"
+    wait_for_supervisor "$qmp_failure_supervisor" 69
+done
 
 # A naturally exiting child is reaped, reported canonically, and held for ack.
 normal_control=$(new_control_directory normal)
@@ -208,7 +469,7 @@ assert_private_regular_file "$normal_control/status"
 test ! -s "$normal_control/stderr"
 assert_json_equals "$normal_control/ready" "$ready_json"
 assert_json_equals "$normal_control/status" \
-    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
+    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}'
 assert_no_atomic_temporary_files "$normal_control"
 if [ ! -r "/proc/$normal_supervisor/stat" ]; then
     printf '%s\n' 'supervisor exited before the parent acknowledgement' >&2
@@ -223,7 +484,7 @@ atomic_empty_file "$normal_control/ack"
 wait_for_supervisor "$normal_supervisor" 0
 assert_private_regular_file "$normal_control/ack"
 assert_json_equals "$normal_control/status" \
-    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
+    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}'
 
 # A noisy child cannot block the supervisor. Its true rolling stderr tail is
 # finalized and published before status without imposing a file limit on it.
@@ -246,7 +507,7 @@ if captured != b"B" * 917_504:
     raise SystemExit("supervisor did not retain the exact bounded stderr tail")
 PY
 assert_json_equals "$tail_control/status" \
-    '{"exit_code":23,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
+    '{"exit_code":23,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}'
 atomic_empty_file "$tail_control/ack"
 wait_for_supervisor "$tail_supervisor" 0
 
@@ -273,7 +534,7 @@ assert_private_regular_file "$redacted_control/stderr"
 test "$(cat "$redacted_control/stderr")" = \
     '[stderr suppressed: private-key marker detected]'
 assert_json_equals "$redacted_control/status" \
-    '{"exit_code":24,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
+    '{"exit_code":24,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"none","trigger":"child-exit"}'
 atomic_empty_file "$redacted_control/ack"
 wait_for_supervisor "$redacted_supervisor" 0
 
@@ -298,7 +559,7 @@ inherited_writer_supervisor=$started_process
 wait_for_status_after_stderr "$inherited_writer_control"
 assert_private_regular_file "$inherited_writer_control/stderr"
 assert_json_equals "$inherited_writer_control/status" \
-    '{"error":"supervisor-failure","protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"failed"}'
+    '{"error":"supervisor-failure","protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"failed"}'
 atomic_empty_file "$inherited_writer_control/ack"
 wait_for_supervisor "$inherited_writer_supervisor" 69
 
@@ -318,7 +579,7 @@ wait_for_file "$term_control/status"
 assert_private_regular_file "$term_control/stderr"
 test ! -s "$term_control/stderr"
 assert_json_equals "$term_control/status" \
-    '{"exit_code":null,"exit_signal":15,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"term","trigger":"stop-requested"}'
+    '{"exit_code":null,"exit_signal":15,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"term","trigger":"stop-requested"}'
 assert_private_regular_file "$term_control/stop"
 atomic_empty_file "$term_control/ack"
 wait_for_supervisor "$term_supervisor" 0
@@ -344,7 +605,7 @@ wait_for_file "$kill_control/status"
 assert_private_regular_file "$kill_control/stderr"
 test ! -s "$kill_control/stderr"
 assert_json_equals "$kill_control/status" \
-    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"kill","trigger":"stop-requested"}'
+    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"kill","trigger":"stop-requested"}'
 atomic_empty_file "$kill_control/ack"
 wait_for_supervisor "$kill_supervisor" 0
 if [ -s "$temporary_directory/kill.stdout" ] ||
@@ -415,7 +676,7 @@ wait_for_file "$parent_control/status"
 assert_private_regular_file "$parent_control/stderr"
 test ! -s "$parent_control/stderr"
 assert_json_equals "$parent_control/status" \
-    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"kill","trigger":"parent-death"}'
+    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v3","state":"exited","termination":"kill","trigger":"parent-death"}'
 atomic_empty_file "$parent_control/ack"
 wait_for_supervisor "$parent_harness" 0
 if [ -s "$temporary_directory/parent-death.stdout" ] ||
@@ -477,6 +738,21 @@ if [ "$stale_stderr_status" -eq 0 ] || [ -e "$stale_stderr_marker" ] \
     exit 1
 fi
 
+stale_qmp_control=$(new_control_directory stale-qmp)
+atomic_empty_file "$stale_qmp_control/qmp"
+stale_qmp_marker=$temporary_directory/stale-qmp-command-ran
+set +e
+"$supervisor" --qmp-stdio "$stale_qmp_control" -- /usr/bin/touch "$stale_qmp_marker" \
+    >"$temporary_directory/stale-qmp.stdout" \
+    2>"$temporary_directory/stale-qmp.stderr"
+stale_qmp_status=$?
+set -e
+if [ "$stale_qmp_status" -eq 0 ] || [ -e "$stale_qmp_marker" ] \
+    || [ -e "$stale_qmp_control/ready" ]; then
+    printf '%s\n' 'stale QMP protocol did not fail before COMMAND' >&2
+    exit 1
+fi
+
 real_control=$(new_control_directory real)
 linked_control=$temporary_directory/control-linked
 ln -s "$real_control" "$linked_control"
@@ -517,7 +793,7 @@ real_pidfd_send_signal = module.signal.pidfd_send_signal
 base_control = pathlib.Path(control_directory)
 expected_failure = {
     "error": "supervisor-failure",
-    "protocol": "volparossa-qemu-pidfd-supervisor-v2",
+    "protocol": "volparossa-qemu-pidfd-supervisor-v3",
     "state": "failed",
 }
 
@@ -533,6 +809,8 @@ def fresh_configuration(name):
         term_seconds=0.05,
         kill_seconds=0.50,
         ack_timeout_seconds=1.0,
+        qmp_stdio=False,
+        qmp_timeout_seconds=1.0,
     )
 
 
