@@ -55,6 +55,39 @@ The production agent route state machine is not yet proven end to end. Helper `P
 two-leg probing, client ingress, and live relay/exit publication remain fail-closed. None of the
 tests above creates a WireGuard device or host route or satisfies a privileged acceptance case.
 
+## Helper-boundary evidence
+
+The helper identity and production IPC boundary has a separate, narrower live gate:
+
+```sh
+just build-helper-live-worker-identity-proof
+sudo just test-helper-live-worker-identity-proof
+```
+
+Build as the ordinary workspace user, then execute only as root inside a disposable Debian 13
+amd64 virtual machine with PID 1 systemd v257. The execute path refuses containers, a dirty or
+changing worktree, unsupported hosts, missing artifacts, and an occupied host
+`/run/volparossa`. Preview remains the safe default.
+
+Successful execution writes exactly one canonical JSON document to stdout; plans and diagnostics
+go to stderr. `tests/helper/helper-boundary-evidence-v1.schema.json` is the structural contract and
+`tests/helper/validate-helper-boundary-evidence-v1.sh` enforces stricter semantics, exact ordered
+PASS checks, distinct systemd invocation IDs, two worker descriptors before retirement, exact
+not-found unit retirement, zero production descriptors during the live run, argumentless
+production startup, clean retirement, separate observed source/artifact bookends, and equal
+digests for the exact enumerated host-state records at two fences. The report is published only after its
+root-owned stage has been removed. `tests/helper/test-helper-boundary-evidence-v1.sh` supplies a
+canonical fixture and adversarial malformed or internally inconsistent false-PASS mutations. The
+standalone validator checks the report contract, not the authenticity of an arbitrary report file;
+the gate also does not infer that a pre-existing binary was built from the observed commit. Retained
+evidence must therefore include the trusted disposable-VM job which first builds both binaries as
+an unprivileged user from that clean checkout and then runs the fixed producer without changing it.
+
+The report carries those non-claims in its exact `scope` object: it is evidence only for the helper
+boundary and does not claim package behavior, restart recovery, `CleanupOwned`, a VPN datapath, or
+any A01--A15 result. AV1-09 remains Open until
+the exact committed gate passes on the required clean disposable VM and its report is retained.
+
 Fuzz targets are required for every externally controlled parser: all eighteen signed v4 control
 payloads, advertisement-v4, exit-forwarding-v4, datapath-relay-v4, policy manifests, local/helper/
 native control frames, `OPEN_TCP`, UDP authorization, TLS ClientHello, QUIC

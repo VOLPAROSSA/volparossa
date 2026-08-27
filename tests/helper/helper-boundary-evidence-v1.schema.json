@@ -1,0 +1,529 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volparossa.org/schemas/helper-boundary-evidence-v1.schema.json",
+  "title": "VOLPAROSSA canonical helper-boundary evidence v1",
+  "$comment": "SPDX-License-Identifier: GPL-3.0-only. A conforming report is at most 32768 bytes and is serialized as exactly one LF-terminated jq -S -c JSON line. JSON Schema validates the data model; validate-helper-boundary-evidence-v1.sh enforces serialization, timestamp ordering, and equal digests for the exact enumerated host-state records at two fences.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "enumerated_host_state",
+    "observed_artifact_hashes",
+    "checks",
+    "environment",
+    "finished_at",
+    "generated_at",
+    "invocation_ids",
+    "overall",
+    "production",
+    "report_kind",
+    "retirement",
+    "schema_version",
+    "observed_source",
+    "scope",
+    "started_at",
+    "worker"
+  ],
+  "properties": {
+    "observed_artifact_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "production_ipc_probe_sha256",
+        "production_ipc_unit_hook_sha256",
+        "volparossa_helper_sha256"
+      ],
+      "properties": {
+        "production_ipc_probe_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "production_ipc_unit_hook_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "volparossa_helper_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/sourceTreeCleanCheck"
+        },
+        {
+          "$ref": "#/$defs/artifactHashesBoundCheck"
+        },
+        {
+          "$ref": "#/$defs/environmentCheck"
+        },
+        {
+          "$ref": "#/$defs/workerInvocationBoundCheck"
+        },
+        {
+          "$ref": "#/$defs/workerLiveIdentityCheck"
+        },
+        {
+          "$ref": "#/$defs/workerFdstoreTwoCheck"
+        },
+        {
+          "$ref": "#/$defs/workerRetiredUnitNotFoundCheck"
+        },
+        {
+          "$ref": "#/$defs/productionDistinctInvocationBoundCheck"
+        },
+        {
+          "$ref": "#/$defs/productionArgumentlessCheck"
+        },
+        {
+          "$ref": "#/$defs/productionIpcBoundaryCheck"
+        },
+        {
+          "$ref": "#/$defs/productionFdstoreZeroDuringRunCheck"
+        },
+        {
+          "$ref": "#/$defs/productionRetiredUnitNotFoundCheck"
+        },
+        {
+          "$ref": "#/$defs/retirementJournalUnchangedCheck"
+        },
+        {
+          "$ref": "#/$defs/retirementLockReleasedCheck"
+        },
+        {
+          "$ref": "#/$defs/retirementSocketAbsentCheck"
+        },
+        {
+          "$ref": "#/$defs/enumeratedHostStateEqualAtFencesCheck"
+        }
+      ],
+      "items": false
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "debian_version",
+        "dpkg_architecture",
+        "kernel_release",
+        "machine",
+        "systemd_version",
+        "virtualization"
+      ],
+      "properties": {
+        "debian_version": {
+          "const": "13"
+        },
+        "dpkg_architecture": {
+          "const": "amd64"
+        },
+        "kernel_release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$"
+        },
+        "machine": {
+          "const": "x86_64"
+        },
+        "systemd_version": {
+          "const": 257
+        },
+        "virtualization": {
+          "const": "vm"
+        }
+      }
+    },
+    "finished_at": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "enumerated_host_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "after_sha256",
+        "before_sha256",
+        "equal_at_fences",
+        "records"
+      ],
+      "properties": {
+        "after_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "before_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "equal_at_fences": {
+          "const": true
+        },
+        "records": {
+          "type": "array",
+          "minItems": 16,
+          "maxItems": 16,
+          "prefixItems": [
+            {"const": "production_runtime_path"},
+            {"const": "accounts"},
+            {"const": "namespaces"},
+            {"const": "mounts"},
+            {"const": "resolver"},
+            {"const": "sysctls"},
+            {"const": "links"},
+            {"const": "addresses"},
+            {"const": "routes"},
+            {"const": "rules"},
+            {"const": "nexthops"},
+            {"const": "qdiscs"},
+            {"const": "nftables"},
+            {"const": "wireguard"},
+            {"const": "legacy_ipv4_firewall"},
+            {"const": "legacy_ipv6_firewall"}
+          ],
+          "items": false
+        }
+      }
+    },
+    "invocation_ids": {
+      "type": "array",
+      "description": "Exactly [worker InvocationID, production InvocationID].",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/invocationId"
+      }
+    },
+    "overall": {
+      "const": "PASS"
+    },
+    "production": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argumentless",
+        "fdstore_during_run",
+        "unit_load_state_after_retirement"
+      ],
+      "properties": {
+        "argumentless": {
+          "const": true
+        },
+        "fdstore_during_run": {
+          "const": 0
+        },
+        "unit_load_state_after_retirement": {
+          "const": "not-found"
+        }
+      }
+    },
+    "report_kind": {
+      "const": "volparossa-helper-boundary-evidence"
+    },
+    "retirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "journal_unchanged",
+        "lock_released",
+        "socket_absent"
+      ],
+      "properties": {
+        "journal_unchanged": {
+          "const": true
+        },
+        "lock_released": {
+          "const": true
+        },
+        "socket_absent": {
+          "const": true
+        }
+      }
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "observed_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit_sha",
+        "worktree_clean"
+      ],
+      "properties": {
+        "commit_sha": {
+          "$ref": "#/$defs/sourceRevision"
+        },
+        "worktree_clean": {
+          "const": true
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acceptance_a01_a15",
+        "cleanup_owned",
+        "datapath",
+        "helper_boundary_only",
+        "installed_package",
+        "restart_recovery"
+      ],
+      "properties": {
+        "acceptance_a01_a15": {"const": false},
+        "cleanup_owned": {"const": false},
+        "datapath": {"const": false},
+        "helper_boundary_only": {"const": true},
+        "installed_package": {"const": false},
+        "restart_recovery": {"const": false}
+      }
+    },
+    "started_at": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fdstore_before_retirement",
+        "unit_load_state_after_retirement"
+      ],
+      "properties": {
+        "fdstore_before_retirement": {
+          "const": 2
+        },
+        "unit_load_state_after_retirement": {
+          "const": "not-found"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "not": {
+        "const": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "sourceRevision": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "not": {
+        "enum": [
+          "0000000000000000000000000000000000000000",
+          "0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      }
+    },
+    "invocationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "not": {
+        "const": "00000000000000000000000000000000"
+      }
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+    },
+    "sourceTreeCleanCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "OBSERVED_SOURCE_TREE_CLEAN"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "artifactHashesBoundCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "OBSERVED_ARTIFACT_HASHES"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "environmentCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "DEBIAN_13_AMD64_X86_64_SYSTEMD_257_VM"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "workerInvocationBoundCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "WORKER_INVOCATION_BOUND"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "workerLiveIdentityCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "WORKER_LIVE_IDENTITY"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "workerFdstoreTwoCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "WORKER_FDSTORE_TWO_BEFORE_RETIREMENT"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "workerRetiredUnitNotFoundCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "WORKER_RETIRED_UNIT_NOT_FOUND"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "productionDistinctInvocationBoundCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "PRODUCTION_DISTINCT_INVOCATION_BOUND"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "productionArgumentlessCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "PRODUCTION_ARGUMENTLESS"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "productionIpcBoundaryCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "PRODUCTION_IPC_BOUNDARY"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "productionFdstoreZeroDuringRunCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "PRODUCTION_FDSTORE_ZERO_DURING_RUN"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "productionRetiredUnitNotFoundCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "PRODUCTION_RETIRED_UNIT_NOT_FOUND"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "retirementJournalUnchangedCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "RETIREMENT_JOURNAL_UNCHANGED"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "retirementLockReleasedCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "RETIREMENT_LOCK_RELEASED"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "retirementSocketAbsentCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "RETIREMENT_SOCKET_ABSENT"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "enumeratedHostStateEqualAtFencesCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "ENUMERATED_HOST_STATE_EQUAL_AT_FENCES"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "passCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "result"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Z0-9_]+$"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    }
+  }
+}

@@ -13,6 +13,8 @@ repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
 gate=$repository_directory/tests/helper/require-live-worker-identity-proof.sh
 capture_library=$repository_directory/tests/helper/lib/live-worker-proof-capture.sh
 ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
+evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
+evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 temporary_directory=$(mktemp -d /tmp/volparossa-helper-proof-contract.XXXXXX)
 case $temporary_directory in
     /tmp/volparossa-helper-proof-contract.??????) ;;
@@ -45,9 +47,21 @@ if [ ! -f "$ipc_hook" ] || [ ! -x "$ipc_hook" ] || [ -L "$ipc_hook" ]; then
     printf '%s\n' 'production IPC unit hook is not one executable regular file' >&2
     exit 1
 fi
+if [ ! -f "$evidence_validator" ] || [ ! -x "$evidence_validator" ] \
+    || [ -L "$evidence_validator" ]; then
+    printf '%s\n' 'helper-boundary evidence validator is not one executable regular file' >&2
+    exit 1
+fi
+if [ ! -f "$evidence_schema" ] || [ ! -r "$evidence_schema" ] \
+    || [ -L "$evidence_schema" ]; then
+    printf '%s\n' 'helper-boundary evidence schema is not one readable regular file' >&2
+    exit 1
+fi
 sh -n "$gate"
 sh -n "$capture_library"
 sh -n "$ipc_hook"
+sh -n "$evidence_validator"
+jq -e . "$evidence_schema" >/dev/null
 
 VP_CAPTURE_OWNER_UID=$(id -u)
 VP_CAPTURE_OWNER_GID=$(id -g)
@@ -256,6 +270,7 @@ expected_preview=$temporary_directory/expected-preview
 printf '%s\n' \
     'VOLPAROSSA live worker-identity proof plan:' \
     '  require a disposable Debian 13 amd64 VM, root, and the exact systemd v257 manager;' \
+    '  bookend one unchanged clean Git revision and three exact staged artifact hashes;' \
     '  copy the already-built real helper into one validated root-only temporary stage;' \
     '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
     '  bind account files and the system bus socket read-only in two sequential invocations;' \
@@ -282,7 +297,8 @@ printf '%s\n' \
     '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
     '  collect that exact second invocation and remove the validated temporary stage;' \
     '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
-    '    and network digests.' \
+    '    and network digests;' \
+    '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
     'This stages the helper identity and production IPC boundary. It creates no host account, link,' \
     'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
     'It is not package-install, restart-recovery, CleanupOwned, datapath, or A01-A15 evidence.' \
@@ -303,6 +319,10 @@ expect_status 0 "$gate" --help
 grep -F 'usage: tests/helper/require-live-worker-identity-proof.sh' "$last_stdout" >/dev/null
 expect_status 64 "$gate" --execute
 grep -Fx 'Execution requires --yes after reviewing the exact plan.' "$last_stderr" >/dev/null
+if [ -s "$last_stdout" ]; then
+    printf '%s\n' 'unapproved execute request wrote non-JSON standard output' >&2
+    exit 1
+fi
 expect_status 64 "$gate" --preview --yes
 expect_status 64 "$gate" --preview --execute
 expect_status 64 "$gate" --execute --execute
@@ -312,9 +332,13 @@ expect_status 64 "$gate" --unknown
 find /var/tmp -maxdepth 1 -name 'volparossa-helper-live-proof.*' -printf '%f\n' \
     | sort >"$temporary_directory/stages.before"
 expect_status 77 "$gate" --execute --yes
-if ! grep -Fx 'VOLPAROSSA live worker-identity proof plan:' "$last_stdout" >/dev/null \
-    || grep -F 'PREVIEW ONLY:' "$last_stdout" >/dev/null; then
-    printf '%s\n' 'approved execution did not print the exact plan before refusing root' >&2
+if [ -s "$last_stdout" ]; then
+    printf '%s\n' 'blocked execute request wrote non-JSON standard output' >&2
+    exit 1
+fi
+grep -Fx 'VOLPAROSSA live worker-identity proof plan:' "$last_stderr" >/dev/null
+if grep -F 'PREVIEW ONLY:' "$last_stderr" >/dev/null; then
+    printf '%s\n' 'approved execution printed a preview-only claim' >&2
     exit 1
 fi
 grep -Fx 'BLOCKED: execution requires root inside the disposable VM' "$last_stderr" >/dev/null
@@ -327,7 +351,7 @@ fi
 
 if ! awk '
     /^if \[ "\$approval" != yes \]; then$/ { approval_guard = NR }
-    /^print_plan$/ { execute_plan = NR }
+    /^print_plan >&2$/ { execute_plan = NR }
     /^if \[ "\$\(id -u\)" -ne 0 \]; then$/ { root_preflight = NR }
     END {
         if (!(approval_guard < execute_plan && execute_plan < root_preflight)) exit 1
@@ -479,13 +503,57 @@ for required_contract in \
     'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
-    'VOLPAROSSA_HELPER_V3_IPC_CLEAN_SHUTDOWN_V1=pass'
+    'VOLPAROSSA_HELPER_V3_IPC_CLEAN_SHUTDOWN_V1=pass' \
+    'evidence_validator=$script_directory/validate-helper-boundary-evidence-v1.sh' \
+    'status --porcelain=v1 --untracked-files=normal' \
+    "blocked 'the source worktree must be clean before live evidence execution'" \
+    "failed 'the exact clean source revision changed during live execution'" \
+    'jq -n -S -c' \
+    '"$evidence_validator" "$report_path" >"$validator_stdout" 2>"$validator_stderr"' \
+    '[ "$validator_status" -ne 0 ]' \
+    '[ -s "$validator_stdout" ]' \
+    '[ -s "$validator_stderr" ]' \
+    'validated_report=$(cat "$report_path")' \
+    "failed 'the exact clean source revision changed before report publication'" \
+    'if ! remove_temporary_stage; then' \
+    'printf '\''%s\n'\'' "$validated_report"'
 do
     grep -F -- "$required_contract" "$gate" >/dev/null || {
         printf 'missing live helper proof contract: %s\n' "$required_contract" >&2
         exit 1
     }
 done
+if ! awk '
+    /if \[ "\$proof_ok" != yes \]; then/ { proof_gate = NR }
+    /final_source_commit=\$\(git / { source_revalidation = NR }
+    /^jq -n -S -c \\/ { report_generation = NR }
+    /^"\$evidence_validator" "\$report_path" >/ { report_validation = NR }
+    /^validator_status=\$\?$/ { validator_status = NR }
+    /if ! vp_capture_file_is_safe "\$validator_stdout"/ { validator_gate = NR }
+    /validated_report=\$\(cat "\$report_path"\)/ { retained_report = NR }
+    /publication_source_commit=\$\(git / { publication_fence = NR }
+    /if ! remove_temporary_stage; then/ { stage_removal = NR }
+    /^printf '\''%s\\n'\'' "\$validated_report"$/ { publication = NR }
+    END {
+        valid = proof_gate > 0 && source_revalidation > 0 && report_generation > 0
+        valid = valid && report_validation > 0 && validator_status > 0
+        valid = valid && validator_gate > 0 && retained_report > 0
+        valid = valid && publication_fence > 0 && stage_removal > 0 && publication > 0
+        valid = valid && proof_gate < source_revalidation
+        valid = valid && source_revalidation < report_generation
+        valid = valid && report_generation < report_validation
+        valid = valid && report_validation < validator_status
+        valid = valid && validator_status < validator_gate
+        valid = valid && validator_gate < retained_report
+        valid = valid && retained_report < publication_fence
+        valid = valid && publication_fence < stage_removal
+        valid = valid && stage_removal < publication
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'validated report publication is not ordered after proof and stage removal' >&2
+    exit 1
+fi
 if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 2 ]; then
     printf '%s\n' 'both transient helper invocations do not have the exact file-size limit' >&2
     exit 1
