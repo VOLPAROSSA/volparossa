@@ -149,7 +149,6 @@ jobs:
               -display none \
               -monitor none \
               -serial none \
-              -S \
               >"$kvm_log" 2>&1
           kvm_status=$?
           set -e

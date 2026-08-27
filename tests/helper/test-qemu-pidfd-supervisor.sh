@@ -95,6 +95,27 @@ wait_for_file() {
     return 1
 }
 
+wait_for_status_after_stderr() {
+    control_directory=$1
+    attempts=0
+    while [ "$attempts" -lt 400 ]; do
+        if [ -e "$control_directory/status" ] \
+            && { [ ! -f "$control_directory/stderr" ] \
+                || [ -L "$control_directory/stderr" ]; }; then
+            printf '%s\n' 'status became visible before finalized stderr' >&2
+            return 1
+        fi
+        if [ -f "$control_directory/status" ] \
+            && [ ! -L "$control_directory/status" ]; then
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.01
+    done
+    printf 'timed out waiting for supervisor status: %s\n' "$control_directory" >&2
+    return 1
+}
+
 assert_private_regular_file() {
     file=$1
     if [ ! -f "$file" ] || [ -L "$file" ]; then
@@ -165,7 +186,7 @@ wait_for_supervisor() {
     fi
 }
 
-ready_json='{"protocol":"volparossa-qemu-pidfd-supervisor-v1","state":"ready"}'
+ready_json='{"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"ready"}'
 
 # A naturally exiting child is reaped, reported canonically, and held for ack.
 normal_control=$(new_control_directory normal)
@@ -180,12 +201,14 @@ normal_supervisor=$started_process
 unset VOLPAROSSA_SUPERVISOR_TEST_SECRET
 exec 9>&-
 wait_for_file "$normal_control/ready"
-wait_for_file "$normal_control/status"
+wait_for_status_after_stderr "$normal_control"
 assert_private_regular_file "$normal_control/ready"
+assert_private_regular_file "$normal_control/stderr"
 assert_private_regular_file "$normal_control/status"
+test ! -s "$normal_control/stderr"
 assert_json_equals "$normal_control/ready" "$ready_json"
 assert_json_equals "$normal_control/status" \
-    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v1","state":"exited","termination":"none","trigger":"child-exit"}'
+    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
 assert_no_atomic_temporary_files "$normal_control"
 if [ ! -r "/proc/$normal_supervisor/stat" ]; then
     printf '%s\n' 'supervisor exited before the parent acknowledgement' >&2
@@ -200,7 +223,84 @@ atomic_empty_file "$normal_control/ack"
 wait_for_supervisor "$normal_supervisor" 0
 assert_private_regular_file "$normal_control/ack"
 assert_json_equals "$normal_control/status" \
-    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v1","state":"exited","termination":"none","trigger":"child-exit"}'
+    '{"exit_code":7,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
+
+# A noisy child cannot block the supervisor. Its true rolling stderr tail is
+# finalized and published before status without imposing a file limit on it.
+tail_control=$(new_control_directory tail)
+start_supervisor "$tail_control" \
+    "$temporary_directory/tail.stdout" "$temporary_directory/tail.stderr" \
+    python3 -c \
+    'import sys; sys.stderr.buffer.write(b"A" * 524288 + b"B" * 1048576); sys.stderr.buffer.flush(); sys.exit(23)'
+tail_supervisor=$started_process
+wait_for_status_after_stderr "$tail_control"
+assert_private_regular_file "$tail_control/stderr"
+assert_private_regular_file "$tail_control/status"
+test "$(stat -c '%s' "$tail_control/stderr")" -eq 917504
+python3 - "$tail_control/stderr" <<'PY'
+import pathlib
+import sys
+
+captured = pathlib.Path(sys.argv[1]).read_bytes()
+if captured != b"B" * 917_504:
+    raise SystemExit("supervisor did not retain the exact bounded stderr tail")
+PY
+assert_json_equals "$tail_control/status" \
+    '{"exit_code":23,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
+atomic_empty_file "$tail_control/ack"
+wait_for_supervisor "$tail_supervisor" 0
+
+# A private-key marker is detected across the entire stream even when the
+# rolling tail would discard it, and no part of that stream is published.
+redacted_control=$(new_control_directory redacted)
+start_supervisor "$redacted_control" \
+    "$temporary_directory/redacted.stdout" "$temporary_directory/redacted.stderr" \
+    python3 -c '
+import os
+import sys
+import time
+
+for part in (b"-----BE", b"GIN OPENSSH PRIVATE", b" KEY-----\n"):
+    os.write(2, part)
+    time.sleep(0.05)
+sys.stderr.buffer.write(b"Z" * 1048576)
+sys.stderr.buffer.flush()
+sys.exit(24)
+'
+redacted_supervisor=$started_process
+wait_for_status_after_stderr "$redacted_control"
+assert_private_regular_file "$redacted_control/stderr"
+test "$(cat "$redacted_control/stderr")" = \
+    '[stderr suppressed: private-key marker detected]'
+assert_json_equals "$redacted_control/status" \
+    '{"exit_code":24,"exit_signal":null,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"none","trigger":"child-exit"}'
+atomic_empty_file "$redacted_control/ack"
+wait_for_supervisor "$redacted_supervisor" 0
+
+# An inherited writer cannot make final stderr draining unbounded after the
+# identity-bound child exits. The lifecycle fails closed instead.
+inherited_writer_control=$(new_control_directory inherited-writer)
+start_supervisor "$inherited_writer_control" \
+    "$temporary_directory/inherited-writer.stdout" \
+    "$temporary_directory/inherited-writer.stderr" \
+    python3 -c '
+import os
+
+if os.fork() != 0:
+    os._exit(25)
+while True:
+    try:
+        os.write(2, b"W" * 65536)
+    except BrokenPipeError:
+        os._exit(0)
+'
+inherited_writer_supervisor=$started_process
+wait_for_status_after_stderr "$inherited_writer_control"
+assert_private_regular_file "$inherited_writer_control/stderr"
+assert_json_equals "$inherited_writer_control/status" \
+    '{"error":"supervisor-failure","protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"failed"}'
+atomic_empty_file "$inherited_writer_control/ack"
+wait_for_supervisor "$inherited_writer_supervisor" 69
 
 # An atomic stop request reaches the exact child through pidfd SIGTERM.
 term_control=$(new_control_directory term)
@@ -215,8 +315,10 @@ wait_for_file "$term_control/ready"
 wait_for_file "$term_child_ready"
 atomic_empty_file "$term_control/stop"
 wait_for_file "$term_control/status"
+assert_private_regular_file "$term_control/stderr"
+test ! -s "$term_control/stderr"
 assert_json_equals "$term_control/status" \
-    '{"exit_code":null,"exit_signal":15,"protocol":"volparossa-qemu-pidfd-supervisor-v1","state":"exited","termination":"term","trigger":"stop-requested"}'
+    '{"exit_code":null,"exit_signal":15,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"term","trigger":"stop-requested"}'
 assert_private_regular_file "$term_control/stop"
 atomic_empty_file "$term_control/ack"
 wait_for_supervisor "$term_supervisor" 0
@@ -239,8 +341,10 @@ wait_for_file "$kill_control/ready"
 wait_for_file "$kill_child_ready"
 atomic_empty_file "$kill_control/stop"
 wait_for_file "$kill_control/status"
+assert_private_regular_file "$kill_control/stderr"
+test ! -s "$kill_control/stderr"
 assert_json_equals "$kill_control/status" \
-    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v1","state":"exited","termination":"kill","trigger":"stop-requested"}'
+    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"kill","trigger":"stop-requested"}'
 atomic_empty_file "$kill_control/ack"
 wait_for_supervisor "$kill_supervisor" 0
 if [ -s "$temporary_directory/kill.stdout" ] ||
@@ -308,8 +412,10 @@ wait_for_file "$parent_control/ready"
 wait_for_file "$parent_child_ready"
 atomic_empty_file "$parent_release"
 wait_for_file "$parent_control/status"
+assert_private_regular_file "$parent_control/stderr"
+test ! -s "$parent_control/stderr"
 assert_json_equals "$parent_control/status" \
-    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v1","state":"exited","termination":"kill","trigger":"parent-death"}'
+    '{"exit_code":null,"exit_signal":9,"protocol":"volparossa-qemu-pidfd-supervisor-v2","state":"exited","termination":"kill","trigger":"parent-death"}'
 atomic_empty_file "$parent_control/ack"
 wait_for_supervisor "$parent_harness" 0
 if [ -s "$temporary_directory/parent-death.stdout" ] ||
@@ -356,6 +462,21 @@ if [ "$stale_status" -eq 0 ] || [ -e "$stale_marker" ] || [ -e "$stale_control/r
     exit 1
 fi
 
+stale_stderr_control=$(new_control_directory stale-stderr)
+atomic_empty_file "$stale_stderr_control/stderr"
+stale_stderr_marker=$temporary_directory/stale-stderr-command-ran
+set +e
+"$supervisor" "$stale_stderr_control" -- /usr/bin/touch "$stale_stderr_marker" \
+    >"$temporary_directory/stale-stderr.stdout" \
+    2>"$temporary_directory/stale-stderr.stderr"
+stale_stderr_status=$?
+set -e
+if [ "$stale_stderr_status" -eq 0 ] || [ -e "$stale_stderr_marker" ] \
+    || [ -e "$stale_stderr_control/ready" ]; then
+    printf '%s\n' 'stale stderr protocol did not fail before COMMAND' >&2
+    exit 1
+fi
+
 real_control=$(new_control_directory real)
 linked_control=$temporary_directory/control-linked
 ln -s "$real_control" "$linked_control"
@@ -396,7 +517,7 @@ real_pidfd_send_signal = module.signal.pidfd_send_signal
 base_control = pathlib.Path(control_directory)
 expected_failure = {
     "error": "supervisor-failure",
-    "protocol": "volparossa-qemu-pidfd-supervisor-v1",
+    "protocol": "volparossa-qemu-pidfd-supervisor-v2",
     "state": "failed",
 }
 
@@ -461,7 +582,9 @@ def run_expected_failure(configuration):
         raise SystemExit(f"failure acknowledgement failed: {acknowledgement_errors}")
     if (control / "ready").exists():
         raise SystemExit("pre-ready failure published ready")
-    for name in ("status", "ack"):
+    if (control / "stderr").read_bytes() != b"":
+        raise SystemExit("pre-ready failure stderr is not exact and empty")
+    for name in ("stderr", "status", "ack"):
         metadata = (control / name).stat()
         if not pathlib.Path(control / name).is_file() or metadata.st_mode & 0o777 != 0o600 or metadata.st_nlink != 1:
             raise SystemExit(f"unsafe failure protocol metadata: {name}")
@@ -528,4 +651,4 @@ if [ "$zero_kill_status" -ne 64 ]; then
 fi
 
 printf '%s\n' \
-    'PASS: pidfd supervisor normal, TERM, KILL, parent-death, pre-ready failure, isolated stdin/environment/FDs, atomic status, and ack lifecycles are exact.'
+    'PASS: pidfd supervisor lifecycle, bounded stderr tail/redaction, pre-ready failure, isolation, atomic status, and acknowledgement are exact.'

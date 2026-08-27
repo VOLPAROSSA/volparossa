@@ -129,10 +129,17 @@ The host revalidates a successful canonical report, its SHA-256, and the exact P
 record including the commit, image, guest versions, KVM, restricted network mode, and report hash
 crosslink. A successful retained artifact contains only the report, report hash, bounded environment
 record, VM console, and proof stderr, for 90 days. A caught VM/proof failure may retain only its
-bounded environment diagnostic, console, and proof stderr for diagnosis; it cannot publish a report
-or report hash. The upload uses an exact allowlist and never includes either ephemeral SSH key, the
-cloud-init seed, base image, source archive, or writable VM disk.
-Every candidate retained file is also rejected if it contains a PEM/OpenSSH private-key marker.
+bounded environment diagnostic, console, and proof stderr for diagnosis; before the guest proof,
+that stderr file may instead contain the canonical supervisor status and a private rolling tail of
+QEMU stderr. The identity-bound supervisor continuously drains the supervised stream, retains at
+most 896 KiB, and publishes the finalized tail before status; it never applies a file-size limit to
+QEMU or its writable disk. It scans every drained byte across read boundaries and replaces the tail
+with a fixed redaction notice if a PEM/OpenSSH private-key marker appeared, including before
+retained-tail bytes. A writer inherited by an unexpected descendant cannot make finalization
+unbounded: that lifecycle fails closed. A failed run cannot publish a report or report hash. The
+upload uses an exact allowlist and never includes either ephemeral SSH key, the cloud-init seed, base
+image, source archive, or writable VM disk. Every candidate retained file is also rejected if it
+contains a private-key marker.
 
 The standard GitHub-hosted runner is disposable and is not promised to expose nested KVM. On that
 ephemeral CI host only, the workflow uses `sudo` to install the fixed Ubuntu packages and add an
@@ -140,11 +147,12 @@ exact `rw-` named-user ACL on `/dev/kvm`. It snapshots the device identity and c
 then rechecks that identity and reapplies the same bounded ACL inside the exact VM run step because
 hosted runner step boundaries need not preserve device-ACL visibility. It restores the original ACL
 in an unconditional cleanup step before artifact upload and makes restoration part of the PASS gate.
-The repository runner itself refuses host root and never invokes host `sudo`. It performs a KVM-only
-launch preflight and fails closed when hardware acceleration is unavailable; it never falls back to
-TCG. Such an infrastructure failure is not negative helper-boundary evidence. Equally, a completed
-job does not change the alpha score unless the selected post-merge `main` revision produces a
-host-revalidated `PASS`, the exact artifact is retained, and CI host cleanup succeeds.
+The repository runner itself refuses host root and never invokes host `sudo`. The workflow performs
+a KVM-only launch preflight with a running virtual CPU and fails closed when hardware acceleration
+is unavailable; it never falls back to TCG. Such an infrastructure failure is not negative
+helper-boundary evidence. Equally, a completed job does not change the alpha score unless the
+selected post-merge `main` revision produces a host-revalidated `PASS`, the exact artifact is
+retained, and CI host cleanup succeeds.
 
 Fuzz targets are required for every externally controlled parser: all eighteen signed v4 control
 payloads, advertisement-v4, exit-forwarding-v4, datapath-relay-v4, policy manifests, local/helper/
