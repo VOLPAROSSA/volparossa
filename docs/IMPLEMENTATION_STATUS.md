@@ -275,26 +275,30 @@ single clean-build A01--A15 run; the score is not a release claim.
   normal production handoff does not yet publish anything to PID 1. Ambiguous or partially
   observed publication remains fail-closed;
   it is never treated as restart custody and is not removed automatically. Each possibly sent
-  publication now poisons the gate before `sendmsg(2)` with an opaque monotone attempt identity
-  bound to the exact unit object path, `MainPID`, parsed notify endpoint, custody name and
-  role-ordered local identities; that identity is retained in the normal manager-may-own terminal.
-  A callerless observation-only reconciler holds that gate and borrows the affine owners while it
+  publication now poisons one process-global manager-mutation gate before `sendmsg(2)` with an
+  opaque typed attempt identity bound to the exact unit object path, `MainPID`, parsed notify
+  endpoint, custody name and role-ordered local identities; publication and removal IDs draw from
+  one monotone counter, and that identity is retained in the normal manager-may-own terminal. A
+  callerless observation-only reconciler holds that same gate and borrows the affine owners while it
   sends one causal non-mutating manager barrier, requires two identical complete bounded D-Bus
   inventory identity projections plus exact service properties and remeasures the local binding. It
   can report exact name/identity-correlated present, exact absent, or unresolved evidence, but uses
   types which cannot arm/adopt/remove, advance the journal, open dispatch, clear poison or authorize
   retry. A distinct dormant exact-name removal adapter accepts a stable complete baseline and the
   borrowed affine custody pair, requires a fresh uncached preflight equal to that baseline, and
-  remeasures the local binding before its send boundary. It poisons a dedicated gate immediately
+  remeasures the local binding before its send boundary. It poisons the shared gate immediately
   before sending exactly `FDSTOREREMOVE=1\nFDNAME=<fixed-name>` with zero `SCM_RIGHTS`, then orders
   the mutation using a separate `BARRIER=1` notification with exactly one pipe FD. Two fresh
   uncached complete post-barrier snapshots must be equal and exactly the baseline minus the named
   pair, with service identity, local binding, and every unrelated entry unchanged. Any post-boundary
   error is `ManagerMayHaveRemoved` and never authorizes a blind retry. A same-attempt reconciler may
   clear the removal poison only after that exact removed projection; an exact unchanged baseline
-  still leaves the gate poisoned and grants no retry. Publication and removal currently use
-  separate gates and the removal APIs have no production caller, so they are not yet safe
-  production composition or either journal settlement proof. Ambiguous spawn remains
+  still leaves the gate poisoned and grants no retry. Both transaction kinds and both reconcilers
+  hold one process-global gate from their fresh baseline/preflight read through final attestation;
+  cross-kind in-flight work is serialized, either poison blocks both mutations, and wrong-kind or
+  wrong-target reconciliation fails before observation. Publication reconciliation never clears
+  poison. The removal APIs still have no production caller, so this is not yet production
+  composition or either journal settlement proof. Ambiguous spawn remains
   permanently fail-closed. `SupervisorDropped` without a returned normal-failure attempt identity
   is deliberately not reconcilable in this slice.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
@@ -403,18 +407,20 @@ single clean-build A01--A15 run; the score is not a release claim.
   publication component sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
-  Every publication failure returned after the first send is manager-may-own and leaves the
-  publication gate permanently poisoned. A separate dormant poisoned-attempt
+  Every publication failure returned after the first send is manager-may-own and leaves the shared
+  manager-mutation gate permanently poisoned. A separate dormant poisoned-attempt
   observer can only classify the exact poisoned in-process attempt after a barrier, two identical
   complete bounded inventory identity projections, exact service properties and retained-binding
   revalidation; its private evidence grants no mutation, adoption, arming or retry authority. A
   distinct dormant remover takes a fresh exact preflight from a stable complete baseline, rechecks
   the local pair, then sends exact-name `FDSTOREREMOVE=1` with zero ancillary FDs and orders it with
   a separate one-FD barrier. It accepts only two equal fresh uncached snapshots proving the exact
-  baseline-minus-pair result with unrelated entries unchanged. The removal gate is poisoned
+  baseline-minus-pair result with unrelated entries unchanged. That same gate is poisoned
   immediately before the send; any later failure is manager-may-have-removed, no blind retry is
-  authorized, and exact-still-present reconciliation retains the poison. This separate gate must be
-  unified with publication serialization before production wiring.
+  authorized, and exact-still-present reconciliation retains the poison. Publication and removal
+  use distinct typed attempt IDs from one monotone sequence, cross-kind work and poison block before
+  inventory I/O, and only exact-removed same-attempt removal reconciliation reopens ambiguous
+  removal poison.
   Publication is reachable only from the private live-proof selector and private dormant supervisor
   publisher; that poisoned-attempt observer remains callerless and every removal entry point has no
   production caller. The distinct complete startup observer and
