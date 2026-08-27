@@ -247,7 +247,44 @@ struct DescriptorIdentity {
     status_flags: u32,
 }
 
+/// Role-ordered identity of exactly one pidfd followed by one network-namespace descriptor.
+///
+/// This is correlation evidence only, never descriptor or cleanup authority. The affine
+/// `OwnedFd`s must remain alive anywhere the binding is relied upon.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct CustodyDescriptorBinding([DescriptorIdentity; DESCRIPTORS_PER_CUSTODY]);
+
+impl CustodyDescriptorBinding {
+    pub(super) fn from_custody(custody: BorrowedCustodyPair<'_>) -> Result<Self, FdStoreError> {
+        Ok(Self(exact_custody_identities(custody)?))
+    }
+
+    pub(super) fn overlaps(&self, other: &Self) -> bool {
+        self.0.iter().any(|identity| {
+            other
+                .0
+                .iter()
+                .any(|candidate| identity.is_same_kernel_object(candidate))
+        })
+    }
+}
+
+impl fmt::Debug for CustodyDescriptorBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CustodyDescriptorBinding(<redacted>)")
+    }
+}
+
 impl DescriptorIdentity {
+    fn is_same_kernel_object(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.device_major == other.device_major
+            && self.device_minor == other.device_minor
+            && self.inode == other.inode
+            && self.special_device_major == other.special_device_major
+            && self.special_device_minor == other.special_device_minor
+    }
+
     fn from_descriptor(descriptor: BorrowedFd<'_>) -> Result<Self, FdStoreError> {
         let status = fstat(descriptor).map_err(nix_io)?;
         let flags = fcntl(descriptor, FcntlArg::F_GETFL).map_err(nix_io)?;
