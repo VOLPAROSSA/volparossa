@@ -2740,11 +2740,11 @@ impl std::fmt::Debug for DurableWorkerPostAttestationOutcome {
 ///
 /// Neither failure class authorises a retry. `BeforeSend` proves only that this attempt did not
 /// send; it cannot disprove ownership left by an older attempt. `ManagerMayOwn` means this attempt
-/// crossed the irreversible send boundary.
+/// crossed the irreversible send boundary and retains its opaque reconciliation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DurableCustodyPublicationBoundary {
     BeforeSend,
-    ManagerMayOwn,
+    ManagerMayOwn(crate::systemd_fdstore::PublicationAttemptId),
 }
 
 /// Coordinator-owned terminal authority from one non-cancellable custody publication supervisor.
@@ -4291,7 +4291,9 @@ impl DurableCustodyTestPublisher {
             }
             DurableCustodyTestPublicationDisposition::ManagerMayOwn => {
                 Err(DurableCustodyPublicationFailure {
-                    boundary: DurableCustodyPublicationBoundary::ManagerMayOwn,
+                    boundary: DurableCustodyPublicationBoundary::ManagerMayOwn(
+                        crate::systemd_fdstore::PublicationAttemptId::for_test(1),
+                    ),
                     error: WorkerV3Error::SystemdCustodyInput(
                         crate::systemd_fdstore::FdStoreError::PublicationPoisoned,
                     ),
@@ -4326,13 +4328,14 @@ impl DurableCustodyPublisher {
             )
             .await
             .map_err(|error| {
-                let boundary = match error {
+                let boundary = match &error {
                     crate::systemd_fdstore::PublicationFailure::BeforeSend { .. } => {
                         DurableCustodyPublicationBoundary::BeforeSend
                     }
-                    crate::systemd_fdstore::PublicationFailure::ManagerMayOwn { .. } => {
-                        DurableCustodyPublicationBoundary::ManagerMayOwn
-                    }
+                    crate::systemd_fdstore::PublicationFailure::ManagerMayOwn {
+                        attempt_id,
+                        ..
+                    } => DurableCustodyPublicationBoundary::ManagerMayOwn(*attempt_id),
                 };
                 DurableCustodyPublicationFailure {
                     boundary,
@@ -9416,7 +9419,9 @@ mod tests {
         assert_custody_supervisor_publication_failure(
             [110; 16],
             DurableCustodyTestPublicationDisposition::ManagerMayOwn,
-            DurableCustodyPublicationBoundary::ManagerMayOwn,
+            DurableCustodyPublicationBoundary::ManagerMayOwn(
+                crate::systemd_fdstore::PublicationAttemptId::for_test(1),
+            ),
         );
     }
 
