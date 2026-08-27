@@ -1,6 +1,7 @@
 [package]
 name = "volparossa-helper"
 description = "Minimal privileged network helper for VOLPAROSSA"
+autobins = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +22,6 @@ subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
 volparossa-mptcp = { path = "../volparossa-mptcp", version = "=0.1.0" }
 volparossa-routing = { path = "../volparossa-routing", version = "=0.1.0" }

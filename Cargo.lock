@@ -4437,13 +4437,23 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "volparossa-linux-uapi",
  "volparossa-mptcp",
  "volparossa-routing",
  "volparossa-wireguard",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "volparossa-helper-entry"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "tracing",
+ "tracing-subscriber",
+ "volparossa-helper",
+ "volparossa-linux-uapi",
 ]
 
 [[package]]
