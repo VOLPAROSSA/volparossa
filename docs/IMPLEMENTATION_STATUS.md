@@ -310,11 +310,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   `NEWNET` without altering host-network state.
 
   Production publication remains deliberately disconnected from `ProductionServer`, `HelperEngine`
-  and every request path. No production terminal consumer of the in-process observer,
-  cross-process/restart-stable manager-inventory reconciliation or adoption,
-  exact-set inherited-custody/journal join, request-path issuance writer,
-  `MayOwnPrepare` reaper or complete restart settlement exists. Startup therefore continues to block
-  on `MayOwnCustody` before retiring any `Intent`; AV1-10 remains Open and this slice adds no
+  and every request path. Startup now performs a record-transition-free, lock-held exact-set
+  classification of durable journal targets, affinely inherited custody and a barrier-ordered
+  stable manager inventory before any `Intent` mutation. No production terminal consumer of the
+  in-process poisoned-attempt observer, authoritative adoption/absence proof, request-path issuance
+  writer, `MayOwnPrepare` reaper, manager removal or complete restart settlement exists. Every non-empty
+  classification therefore continues to block startup; AV1-10 remains Open and this slice adds no
   scorecard, datapath or acceptance points.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
@@ -360,24 +361,36 @@ single clean-build A01--A15 run; the score is not a release claim.
   `CLONE_NEWNET` namespace owner. Repeated
   kernel-object identity within or across names fails closed even when mutable descriptor status
   flags differ.
-  Production still refuses startup while any inherited group exists because the all-or-nothing
-  durable-journal/manager-inventory join and a custody-capable restart-settlement executor do not
-  exist yet. The snapshot is process-latched, and dropping the refused set closes the exact
-  process-local source slots; source ownership is no longer a positive-adoption blocker. A dormant
+  Production opens a record-transition-free journal preflight and, under its retained exclusive
+  lock, projects every custody-bound `MayOwnCustody`/`MayOwnPrepare` record before any `Intent`
+  sweep. Creating the fixed lock entry is expected; no main-journal transition occurs. One
+  non-mutating manager barrier then precedes two identical uncached complete bounded D-Bus
+  inventory identity projections plus exact service properties. Local bindings are measured before
+  and after observation; the journal parent, lock entry, held lock, absent temporary entry and exact
+  durable snapshot are revalidated before a final local measurement and three-way classification.
+  Manager and inherited maps must be identical and every present pair must match exactly one
+  derived journal name and role binding. `MayOwnPrepare` must be exactly present. An absent
+  `MayOwnCustody` becomes only `ExactNoStoredCustody`, never an `Absent`
+  proof or mutation authority. Every non-empty classification still refuses startup before cleanup
+  token or socket publication. Dropping the refused set closes the exact process-local source
+  slots; source ownership and the read-only exact-set join are no longer positive-adoption
+  blockers, but a custody-capable restart-settlement executor remains absent. A dormant
   publication component sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
   Every publication failure returned after the first send is manager-may-own, leaves the gate
-  permanently poisoned, and issues no `FDSTOREREMOVE`. A separate dormant observer can only
-  classify the exact poisoned in-process attempt after a barrier, two identical complete bounded
-  inventory identity projections, exact service properties and retained-binding revalidation; its
-  private evidence grants no mutation, adoption, arming or retry authority. Publication is
-  reachable only from the private live-proof selector and private dormant supervisor publisher,
-  while observation is callerless; none is connected to a
-  production server/engine/request path or has a recorded live transient-unit result. This is
-  a fail-closed typed custody-capture bootstrap, dormant durable-journal/name/attestation binding
-  and production-dormant publication foundation, not composed production adoption, restart
-  recovery, or crash cleanup. The child
+  permanently poisoned, and issues no `FDSTOREREMOVE`. A separate dormant poisoned-attempt
+  observer can only classify the exact poisoned in-process attempt after a barrier, two identical
+  complete bounded inventory identity projections, exact service properties and retained-binding
+  revalidation; its private evidence grants no mutation, adoption, arming or retry authority.
+  Publication is
+  reachable only from the private live-proof selector and private dormant supervisor publisher;
+  that poisoned-attempt observer remains callerless. The distinct complete startup observer and
+  journal/inherited classifier are production-wired but grant no mutation, adoption, arming or
+  cleanup authority. No publication path is connected to a production server/engine/request path
+  or has a recorded live transient-unit result. This is a fail-closed typed custody-capture and
+  read-only restart-classification boundary plus dormant publication foundation, not composed
+  production adoption, restart settlement, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists, but staged-package and
   disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits

@@ -179,7 +179,7 @@ After a definite pre-rename I/O failure, another mutation is admitted only if a 
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
 temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the actor permanently.
 
-### Production fail-closed inherited-custody capture
+### Production fail-closed inherited-custody capture and classification
 
 Before constructing tracing, Tokio or the helper socket, the separate executable-entry crate makes
 the only explicit unsafe startup assertion in the helper process. The one-shot Linux-UAPI boundary
@@ -208,13 +208,35 @@ fields, so mutable `O_NONBLOCK` drift cannot hide an alias. Arbitrary files, oth
 duplicate roles, incomplete groups and identity reuse fail closed. Type classification deliberately
 accepts an exited pidfd: capture proves object type, not worker liveness or cleanup.
 
-This is still a refusal boundary, not production recovery. Any non-empty captured set blocks
-startup and drops its exact source-slot owners without constructing the runtime or publishing the
-socket. The takeover creates no additional process-local source alias; dropping the refused set
-closes every captured source slot. The capture does not yet
-prove that a particular pidfd and namespace belong to the same worker, join the complete inherited
-set to durable journal evidence and stable manager inventory, remove manager custody, or reap
-kernel state. Those proofs remain mandatory before the refusal may be replaced by adoption.
+Production now opens the ownership actor in a record-transition-free, lock-holding preflight which
+keeps the exact journal parent, exclusive lock and decoded snapshot alive. Creating the fixed lock
+entry is expected, but no main-journal transition or `Intent` sweep occurs. It projects at most 64
+canonical custody-bound `MayOwnCustody`/`MayOwnPrepare` targets, each containing only its durable
+phase, derived opaque name and role-ordered descriptor binding. Legacy `MayOwnPrepare`, name
+collision and cross-record kernel-object reuse fail closed. While that lock remains held, one
+non-mutating systemd barrier precedes two uncached, identical complete bounded D-Bus inventory
+identity projections of the exact current service object. Exact `MainPID`, `NotifyAccess=main`,
+128-entry capacity and `FileDescriptorStorePreserve=yes` remain mandatory. The complete manager
+and inherited maps must be equal, with no extra name, partial pair or cross-name alias. Local
+descriptor bindings are measured before the barrier and after both projections. The journal's
+retained parent, lock entry, held lock, absence of its temporary entry and byte-exact durable
+snapshot are then revalidated, followed by a final local binding measurement, all under one
+absolute deadline.
+
+A custody-bound `MayOwnPrepare` target classifies only when the exact pair is present in both maps.
+A custody-bound `MayOwnCustody` target may classify either `ExactPresent` or
+`ExactNoStoredCustody`; the latter means only that its name and both journal identities are absent
+from both complete observed maps. It does **not** prove that publication was never attempted, that
+the old worker is dead, that kernel resources are absent, or that the journal may advance. Every
+partial, one-sided, wrong-name, wrong-binding or unstable case remains unresolved.
+
+This is still a refusal boundary, not production recovery. Any non-empty journal target set blocks
+startup after read-only classification and drops its exact source-slot owners without publishing a
+cleanup token or helper socket. The takeover creates no additional process-local source alias;
+dropping the refused set closes every captured source slot while PID 1 retains any manager copies.
+No descriptor-store removal, journal transition, worker adoption, reaper or cleanup is authorized.
+Those proofs remain mandatory before the refusal may be replaced by settlement and socket
+publication.
 
 ### Production-dormant systemd descriptor-store publication boundary
 
@@ -851,10 +873,10 @@ creates the deliberately isolated process and anonymous `NEWNET`, without alteri
 state.
 
 The supervisor and publisher remain private and dormant, with no server, engine or request-path
-caller and no production terminal consumer. Startup preserves unresolved manager ownership by
-refusing any `MayOwnCustody` snapshot before retiring an `Intent`; an all-or-nothing join of the
-affinely consumed inherited set to durable journal records and stable manager inventory, followed
-by a restart reaper, is still required before that phase can progress rather than block startup.
+caller and no production terminal consumer. Production startup now performs the separate read-only
+complete-set classification described above before retiring any `Intent`, but every non-empty
+classification still blocks. A restart reaper, crash-safe settlement phase, exact manager removal
+and authoritative adoption/absence proofs remain required before those phases can progress.
 
 Production wiring remains a separate audited change with these explicit blockers:
 
