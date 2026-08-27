@@ -57,8 +57,9 @@ use crate::{
         validate_response_for_request,
     },
     ownership_journal::{
-        DurableArmOutcome, DurableCustodyOutcome, DurableIntentRegistration, DurableMayOwnCustody,
-        DurableMayOwnPrepare, DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey,
+        DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyOutcome,
+        DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare,
+        DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey,
         DurableRegistrationOutcome,
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
@@ -88,6 +89,7 @@ const DEFAULT_MAX_CACHE_ENTRIES: usize = 1_024;
 const DEFAULT_MAX_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_PROCESS_OWNERS: usize = DEFAULT_MAX_WORKERS;
 const MAX_SUPERVISORS: usize = DEFAULT_MAX_WORKERS;
+const MAX_CUSTODY_PUBLICATION_TERMINALS: usize = DEFAULT_MAX_WORKERS;
 static WORKER_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 const LIVE_PROOF_CUSTODY_FD_NAME: &str =
@@ -2734,6 +2736,94 @@ impl std::fmt::Debug for DurableWorkerPostAttestationOutcome {
     }
 }
 
+/// Conservative classification of the one systemd descriptor-store publication attempt.
+///
+/// Neither failure class authorises a retry. `BeforeSend` proves only that this attempt did not
+/// send; it cannot disprove ownership left by an older attempt. `ManagerMayOwn` means this attempt
+/// crossed the irreversible send boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurableCustodyPublicationBoundary {
+    BeforeSend,
+    ManagerMayOwn,
+}
+
+/// Coordinator-owned terminal authority from one non-cancellable custody publication supervisor.
+///
+/// Every variant retains the exact affine owner which exists at that terminal boundary. These
+/// values are intentionally dormant: no production consumer, retry, reconciliation or dispatch
+/// path exists yet.
+#[must_use = "terminal custody publication authority must remain coordinator-owned"]
+enum DurableWorkerCustodyPublicationTerminal {
+    MayOwn(DurableWorkerMayOwnPrepare),
+    PublicationUnresolved {
+        boundary: DurableCustodyPublicationBoundary,
+        error: WorkerV3Error,
+        publication: DurableWorkerCustodyPublicationOwner,
+    },
+    PostAttestationUnresolved(DurableWorkerPostAttestationOutcome),
+    SupervisorDropped(DurableWorkerCustodyPublicationOwner),
+}
+
+impl std::fmt::Debug for DurableWorkerCustodyPublicationTerminal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MayOwn(_) => formatter.write_str("MayOwn(<redacted>)"),
+            Self::PublicationUnresolved {
+                boundary, error, ..
+            } => formatter
+                .debug_struct("PublicationUnresolved")
+                .field("boundary", boundary)
+                .field("error", error)
+                .finish_non_exhaustive(),
+            Self::PostAttestationUnresolved(outcome) => formatter
+                .debug_tuple("PostAttestationUnresolved")
+                .field(outcome)
+                .finish(),
+            Self::SupervisorDropped(_) => formatter.write_str("SupervisorDropped(<redacted>)"),
+        }
+    }
+}
+
+/// Non-authoritative notice that a terminal owner has already reached coordinator storage.
+///
+/// Dropping this waiter cannot cancel or otherwise influence the supervisor.
+#[must_use = "drop explicitly if custody publication completion is not observed"]
+struct DurableCustodyPublicationCompletion {
+    receiver: oneshot::Receiver<()>,
+}
+
+impl DurableCustodyPublicationCompletion {
+    async fn wait(self) -> bool {
+        self.receiver.await.is_ok()
+    }
+}
+
+/// Synchronous result of trying to transfer a publication owner into a supervisor.
+///
+/// `Started` means the task, capacity permit, terminal slot and task handle were registered before
+/// its activation barrier opened. Every start failure returns the original owner unchanged.
+#[must_use = "custody publication start retains affine authority on every outcome"]
+#[allow(clippy::large_enum_variant)] // Failure returns the exact affine owner without allocation.
+enum DurableCustodyPublicationStartOutcome {
+    Started(DurableCustodyPublicationCompletion),
+    Retained {
+        error: WorkerV3Error,
+        publication: DurableWorkerCustodyPublicationOwner,
+    },
+}
+
+impl std::fmt::Debug for DurableCustodyPublicationStartOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Started(_) => formatter.write_str("Started(<non-authoritative>)"),
+            Self::Retained { error, .. } => formatter
+                .debug_struct("Retained")
+                .field("error", error)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Affine proof that the exact worker generation was reaped and removed from every registry index.
 #[must_use = "confirmed absence is the only result which may release durable worker ownership"]
 struct ConfirmedWorkerGenerationAbsent {
@@ -4022,6 +4112,8 @@ fn ensure_worker_deadline(deadline: HardDeadline) -> Result<(), WorkerV3Error> {
 
 struct SupervisorSettlements {
     shutdown_owners: Vec<DetachedWorker>,
+    custody_publication_terminals: Vec<DurableWorkerCustodyPublicationTerminal>,
+    reserved_custody_publication_terminals: usize,
     unresolved: bool,
     #[cfg(test)]
     retirement_hook: Option<RetirementHook>,
@@ -4035,6 +4127,8 @@ impl SupervisorSettlements {
     fn new() -> Self {
         Self {
             shutdown_owners: Vec::with_capacity(MAX_PROCESS_OWNERS),
+            custody_publication_terminals: Vec::with_capacity(MAX_CUSTODY_PUBLICATION_TERMINALS),
+            reserved_custody_publication_terminals: 0,
             unresolved: false,
             #[cfg(test)]
             retirement_hook: None,
@@ -4063,8 +4157,274 @@ impl SupervisorSettlements {
         }
     }
 
+    fn reserve_custody_publication_terminal(&mut self) -> bool {
+        let Some(occupied) = self
+            .custody_publication_terminals
+            .len()
+            .checked_add(self.reserved_custody_publication_terminals)
+        else {
+            std::process::abort();
+        };
+        if occupied > MAX_CUSTODY_PUBLICATION_TERMINALS {
+            std::process::abort();
+        }
+        if occupied == MAX_CUSTODY_PUBLICATION_TERMINALS {
+            return false;
+        }
+        let Some(reserved) = self.reserved_custody_publication_terminals.checked_add(1) else {
+            std::process::abort();
+        };
+        self.reserved_custody_publication_terminals = reserved;
+        true
+    }
+
+    fn release_custody_publication_terminal(&mut self) {
+        let Some(reserved) = self.reserved_custody_publication_terminals.checked_sub(1) else {
+            std::process::abort();
+        };
+        self.reserved_custody_publication_terminals = reserved;
+    }
+
+    fn store_custody_publication_terminal(
+        &mut self,
+        terminal: DurableWorkerCustodyPublicationTerminal,
+    ) {
+        self.release_custody_publication_terminal();
+        if self.custody_publication_terminals.len() >= MAX_CUSTODY_PUBLICATION_TERMINALS {
+            std::process::abort();
+        }
+        self.custody_publication_terminals.push(terminal);
+    }
+
     fn take_for_shutdown(&mut self) -> (Vec<DetachedWorker>, bool) {
-        (std::mem::take(&mut self.shutdown_owners), !self.unresolved)
+        let custody_settled = self.custody_publication_terminals.is_empty()
+            && self.reserved_custody_publication_terminals == 0;
+        (
+            std::mem::take(&mut self.shutdown_owners),
+            !self.unresolved && custody_settled,
+        )
+    }
+
+    #[cfg(test)]
+    fn take_custody_publication_terminals(
+        &mut self,
+    ) -> Vec<DurableWorkerCustodyPublicationTerminal> {
+        std::mem::take(&mut self.custody_publication_terminals)
+    }
+}
+
+struct DurableCustodyPublicationFailure {
+    boundary: DurableCustodyPublicationBoundary,
+    error: WorkerV3Error,
+}
+
+enum DurableCustodyPublisher {
+    Production,
+    #[cfg(test)]
+    Test(DurableCustodyTestPublisher),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurableCustodyTestPublicationDisposition {
+    ExactAttestation,
+    BeforeSend,
+    ManagerMayOwn,
+}
+
+#[cfg(test)]
+struct DurableCustodyTestPublisher {
+    started: Arc<AtomicUsize>,
+    activation_registered: Arc<AtomicBool>,
+    supervisors: Arc<Mutex<SupervisorState>>,
+    release: Arc<tokio::sync::Semaphore>,
+    disposition: DurableCustodyTestPublicationDisposition,
+}
+
+#[cfg(test)]
+impl DurableCustodyTestPublisher {
+    async fn publish(
+        self,
+        publication: &DurableWorkerCustodyPublicationOwner,
+        custody: crate::systemd_fdstore::BorrowedCustodyPair<'_>,
+    ) -> Result<crate::systemd_fdstore::InventoryAttestation, DurableCustodyPublicationFailure>
+    {
+        let activation_registered = {
+            let supervisors = self
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            !supervisors.handles.is_empty()
+                && supervisors.active_permits > 0
+                && supervisors.pending_admissions == 0
+        };
+        self.activation_registered
+            .store(activation_registered, Ordering::SeqCst);
+        self.started.fetch_add(1, Ordering::SeqCst);
+        let release =
+            self.release
+                .acquire()
+                .await
+                .map_err(|_| DurableCustodyPublicationFailure {
+                    boundary: DurableCustodyPublicationBoundary::BeforeSend,
+                    error: WorkerV3Error::RuntimeUnavailable,
+                })?;
+        drop(release);
+        match self.disposition {
+            DurableCustodyTestPublicationDisposition::ExactAttestation => {
+                crate::systemd_fdstore::InventoryAttestation::for_test_exact_custody(
+                    publication.custody_name,
+                    custody,
+                )
+                .map_err(|error| DurableCustodyPublicationFailure {
+                    boundary: DurableCustodyPublicationBoundary::BeforeSend,
+                    error: WorkerV3Error::SystemdCustodyInput(error),
+                })
+            }
+            DurableCustodyTestPublicationDisposition::BeforeSend => {
+                Err(DurableCustodyPublicationFailure {
+                    boundary: DurableCustodyPublicationBoundary::BeforeSend,
+                    error: WorkerV3Error::SystemdCustodyInput(
+                        crate::systemd_fdstore::FdStoreError::InvalidNotifySocket,
+                    ),
+                })
+            }
+            DurableCustodyTestPublicationDisposition::ManagerMayOwn => {
+                Err(DurableCustodyPublicationFailure {
+                    boundary: DurableCustodyPublicationBoundary::ManagerMayOwn,
+                    error: WorkerV3Error::SystemdCustodyInput(
+                        crate::systemd_fdstore::FdStoreError::PublicationPoisoned,
+                    ),
+                })
+            }
+        }
+    }
+}
+
+impl DurableCustodyPublisher {
+    async fn publish(
+        self,
+        publication: &DurableWorkerCustodyPublicationOwner,
+    ) -> Result<crate::systemd_fdstore::InventoryAttestation, DurableCustodyPublicationFailure>
+    {
+        let custody = crate::systemd_fdstore::BorrowedCustodyPair::new(
+            publication.source.restart_custody.borrowed_pidfd(),
+            publication
+                .source
+                .restart_custody
+                .borrowed_network_namespace(),
+        )
+        .map_err(|error| DurableCustodyPublicationFailure {
+            boundary: DurableCustodyPublicationBoundary::BeforeSend,
+            error: WorkerV3Error::SystemdCustodyInput(error),
+        })?;
+        match self {
+            Self::Production => crate::systemd_fdstore::publish_current_process_custody(
+                publication.custody_name,
+                custody,
+                publication.deadline,
+            )
+            .await
+            .map_err(|error| {
+                let boundary = match error {
+                    crate::systemd_fdstore::PublicationFailure::BeforeSend { .. } => {
+                        DurableCustodyPublicationBoundary::BeforeSend
+                    }
+                    crate::systemd_fdstore::PublicationFailure::ManagerMayOwn { .. } => {
+                        DurableCustodyPublicationBoundary::ManagerMayOwn
+                    }
+                };
+                DurableCustodyPublicationFailure {
+                    boundary,
+                    error: WorkerV3Error::SystemdCustodyPublication(error),
+                }
+            }),
+            #[cfg(test)]
+            Self::Test(publisher) => publisher.publish(publication, custody).await,
+        }
+    }
+}
+
+#[must_use = "a reserved terminal slot must store or return its publication owner"]
+struct DurableCustodyPublicationTerminalGuard {
+    settlements: Arc<Mutex<SupervisorSettlements>>,
+    publication: Option<DurableWorkerCustodyPublicationOwner>,
+    completion: Option<oneshot::Sender<()>>,
+    terminal_reserved: bool,
+}
+
+impl DurableCustodyPublicationTerminalGuard {
+    fn new(
+        settlements: Arc<Mutex<SupervisorSettlements>>,
+        publication: DurableWorkerCustodyPublicationOwner,
+        completion: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            settlements,
+            publication: Some(publication),
+            completion: Some(completion),
+            terminal_reserved: true,
+        }
+    }
+
+    fn publication(&self) -> &DurableWorkerCustodyPublicationOwner {
+        self.publication.as_ref().unwrap_or_else(|| {
+            std::process::abort();
+        })
+    }
+
+    fn take_publication(&mut self) -> DurableWorkerCustodyPublicationOwner {
+        self.publication.take().unwrap_or_else(|| {
+            std::process::abort();
+        })
+    }
+
+    fn store(mut self, terminal: DurableWorkerCustodyPublicationTerminal) {
+        if self.publication.is_some() || !self.terminal_reserved {
+            std::process::abort();
+        }
+        self.settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_custody_publication_terminal(terminal);
+        self.terminal_reserved = false;
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(());
+        }
+    }
+
+    fn return_before_activation(mut self) -> DurableWorkerCustodyPublicationOwner {
+        if !self.terminal_reserved {
+            std::process::abort();
+        }
+        self.settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_custody_publication_terminal();
+        self.terminal_reserved = false;
+        drop(self.completion.take());
+        self.take_publication()
+    }
+}
+
+impl Drop for DurableCustodyPublicationTerminalGuard {
+    fn drop(&mut self) {
+        if !self.terminal_reserved {
+            return;
+        }
+        let publication = self.publication.take().unwrap_or_else(|| {
+            std::process::abort();
+        });
+        self.settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_custody_publication_terminal(
+                DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication),
+            );
+        self.terminal_reserved = false;
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(());
+        }
     }
 }
 
@@ -4654,6 +5014,13 @@ struct SupervisorPermit {
     stage: SupervisorPermitStage,
 }
 
+struct DurableCustodyPublicationActivation {
+    permit: SupervisorPermit,
+    terminal: DurableCustodyPublicationTerminalGuard,
+    arm: DurableCustodyArmHandle,
+    publisher: DurableCustodyPublisher,
+}
+
 impl SupervisorPermit {
     fn bind_to_task(&mut self, state: &mut SupervisorState) {
         if self.stage != SupervisorPermitStage::Pending || state.pending_admissions == 0 {
@@ -5023,6 +5390,25 @@ impl WorkerCoordinator {
         publication: DurableWorkerCustodyPublicationOwner,
         attestation: crate::systemd_fdstore::InventoryAttestation,
     ) -> DurableWorkerPostAttestationOutcome {
+        let arm = match actor.custody_arm_handle() {
+            Ok(arm) => arm,
+            Err(error) => {
+                return DurableWorkerPostAttestationOutcome::ArmRetained {
+                    error,
+                    publication,
+                    attestation,
+                };
+            }
+        };
+        self.arm_attested_durable_worker_with_handle(&arm, publication, attestation)
+    }
+
+    fn arm_attested_durable_worker_with_handle(
+        &self,
+        arm: &DurableCustodyArmHandle,
+        publication: DurableWorkerCustodyPublicationOwner,
+        attestation: crate::systemd_fdstore::InventoryAttestation,
+    ) -> DurableWorkerPostAttestationOutcome {
         if let Err(error) = ensure_worker_deadline(publication.deadline) {
             return DurableWorkerPostAttestationOutcome::PublicationUnresolved {
                 error,
@@ -5078,7 +5464,7 @@ impl WorkerCoordinator {
             source,
         } = publication;
 
-        match actor.arm_custody_until(durable, deadline) {
+        match arm.arm_custody_until(durable, deadline) {
             DurableArmOutcome::Armed(durable) => {
                 let may_own = DurableWorkerMayOwnPrepare {
                     durable,
@@ -5812,6 +6198,223 @@ impl WorkerCoordinator {
         })
     }
 
+    /// Dormant cancellation-safe custody-publication supervisor entry point.
+    ///
+    /// This synchronous call consumes `publication` before any spawned future can be polled. The
+    /// production publisher remains private and disconnected from every server/request path.
+    #[allow(dead_code)] // Enabled only with the future production custody coordinator.
+    fn start_durable_custody_publication(
+        &self,
+        arm: DurableCustodyArmHandle,
+        publication: DurableWorkerCustodyPublicationOwner,
+    ) -> DurableCustodyPublicationStartOutcome {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return DurableCustodyPublicationStartOutcome::Retained {
+                error: WorkerV3Error::RuntimeUnavailable,
+                publication,
+            };
+        };
+        self.start_durable_custody_publication_with(
+            &runtime,
+            arm,
+            publication,
+            DurableCustodyPublisher::Production,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the complete activation and affine-drop fence auditable.
+    fn start_durable_custody_publication_with(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        arm: DurableCustodyArmHandle,
+        publication: DurableWorkerCustodyPublicationOwner,
+        publisher: DurableCustodyPublisher,
+    ) -> DurableCustodyPublicationStartOutcome {
+        let permit = match self.acquire_supervisor_permit() {
+            Ok(permit) => permit,
+            Err(error) => {
+                return DurableCustodyPublicationStartOutcome::Retained { error, publication };
+            }
+        };
+        let terminal_reserved = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserve_custody_publication_terminal();
+        if !terminal_reserved {
+            drop(permit);
+            return DurableCustodyPublicationStartOutcome::Retained {
+                error: WorkerV3Error::Capacity,
+                publication,
+            };
+        }
+
+        let (completion_sender, completion_receiver) = oneshot::channel();
+        let terminal = DurableCustodyPublicationTerminalGuard::new(
+            Arc::clone(&self.settlements),
+            publication,
+            completion_sender,
+        );
+        let (activation_sender, activation_receiver) = oneshot::channel();
+        let activation = DurableCustodyPublicationActivation {
+            permit,
+            terminal,
+            arm,
+            publisher,
+        };
+        let coordinator = self.clone();
+        let settlements = Arc::clone(&self.settlements);
+        let supervisor_task = move || {
+            let Ok(activation) = activation_receiver.blocking_recv() else {
+                return;
+            };
+            let DurableCustodyPublicationActivation {
+                permit,
+                terminal,
+                arm,
+                publisher,
+            } = activation;
+            let settlement = SupervisorSettlementGuard::new(settlements, permit);
+            // Declared after `settlement` so an unwind while this guard still owns the publication
+            // stores `SupervisorDropped` before the generic settlement guard marks the coordinator
+            // unresolved. After ownership is extracted, the guard aborts rather than falsely
+            // claiming that an in-memory terminal was retained.
+            let mut terminal = terminal;
+            // The complete owner-bearing transaction stays on this blocking supervisor. Tokio
+            // cannot abort a `spawn_blocking` closure after it starts; the private current-thread
+            // runtime exists only to drive the systemd publication future.
+            let publication_result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| DurableCustodyPublicationFailure {
+                    boundary: DurableCustodyPublicationBoundary::BeforeSend,
+                    error: WorkerV3Error::RuntimeUnavailable,
+                })
+                .and_then(|publication_runtime| {
+                    publication_runtime.block_on(publisher.publish(terminal.publication()))
+                });
+            let terminal_outcome = match publication_result {
+                Err(failure) => {
+                    let publication = terminal.take_publication();
+                    DurableWorkerCustodyPublicationTerminal::PublicationUnresolved {
+                        boundary: failure.boundary,
+                        error: failure.error,
+                        publication,
+                    }
+                }
+                Ok(attestation) => {
+                    // The non-abortable blocking closure performs synchronous durable arming and
+                    // receives every affine outcome before it can return.
+                    let publication = terminal.take_publication();
+                    match coordinator.arm_attested_durable_worker_with_handle(
+                        &arm,
+                        publication,
+                        attestation,
+                    ) {
+                        DurableWorkerPostAttestationOutcome::MayOwn(may_own) => {
+                            DurableWorkerCustodyPublicationTerminal::MayOwn(may_own)
+                        }
+                        outcome => {
+                            DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved(
+                                outcome,
+                            )
+                        }
+                    }
+                }
+            };
+            // The authoritative affine result is stored before this sends the non-authoritative
+            // completion notice. A dropped receiver has no effect on either operation.
+            terminal.store(terminal_outcome);
+            settlement.settle();
+        };
+        let Ok(handle) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.spawn_blocking(supervisor_task)
+        })) else {
+            let DurableCustodyPublicationActivation {
+                terminal, permit, ..
+            } = activation;
+            let publication = terminal.return_before_activation();
+            drop(permit);
+            return DurableCustodyPublicationStartOutcome::Retained {
+                error: WorkerV3Error::RuntimeUnavailable,
+                publication,
+            };
+        };
+
+        let mut supervisors = self
+            .supervisors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if supervisors.shutting_down {
+            drop(supervisors);
+            handle.abort();
+            drop(handle);
+            let DurableCustodyPublicationActivation {
+                terminal, permit, ..
+            } = activation;
+            let publication = terminal.return_before_activation();
+            drop(permit);
+            return DurableCustodyPublicationStartOutcome::Retained {
+                error: WorkerV3Error::ShuttingDown,
+                publication,
+            };
+        }
+        supervisors.handles.retain(|handle| !handle.is_finished());
+        let Some(reserved_slots) = supervisors
+            .handles
+            .len()
+            .checked_add(supervisors.pending_admissions)
+        else {
+            std::process::abort();
+        };
+        if reserved_slots > MAX_SUPERVISORS
+            || supervisors.pending_admissions == 0
+            || supervisors.active_permits == 0
+            || supervisors.active_permits > MAX_SUPERVISORS
+        {
+            std::process::abort();
+        }
+        let DurableCustodyPublicationActivation {
+            mut permit,
+            terminal,
+            arm,
+            publisher,
+        } = activation;
+        permit.bind_to_task(&mut supervisors);
+        // Register the handle while the task is still blocked on the activation receiver.
+        supervisors.handles.push(handle);
+        if supervisors.handles.len() > MAX_SUPERVISORS {
+            std::process::abort();
+        }
+        let activation = DurableCustodyPublicationActivation {
+            permit,
+            terminal,
+            arm,
+            publisher,
+        };
+        if let Err(activation) = activation_sender.send(activation) {
+            let handle = supervisors.handles.pop().unwrap_or_else(|| {
+                std::process::abort();
+            });
+            drop(supervisors);
+            handle.abort();
+            drop(handle);
+            let DurableCustodyPublicationActivation {
+                terminal, permit, ..
+            } = activation;
+            let publication = terminal.return_before_activation();
+            drop(permit);
+            return DurableCustodyPublicationStartOutcome::Retained {
+                error: WorkerV3Error::RuntimeUnavailable,
+                publication,
+            };
+        }
+        drop(supervisors);
+        DurableCustodyPublicationStartOutcome::Started(DurableCustodyPublicationCompletion {
+            receiver: completion_receiver,
+        })
+    }
+
     fn acquire_supervisor_permit(&self) -> Result<SupervisorPermit, WorkerV3Error> {
         let mut state = self
             .supervisors
@@ -6183,6 +6786,23 @@ impl WorkerCoordinator {
             .durable_handoff_source_hook
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    fn custody_publication_terminal_count(&self) -> usize {
+        self.settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .custody_publication_terminals
+            .len()
+    }
+
+    #[cfg(test)]
+    fn take_custody_publication_terminals(&self) -> Vec<DurableWorkerCustodyPublicationTerminal> {
+        self.settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_custody_publication_terminals()
     }
 
     fn shutdown(&self) -> impl Future<Output = bool> + Send + 'static {
@@ -7223,6 +7843,69 @@ mod tests {
             custody,
         )
         .expect("exact durable publication attestation")
+    }
+
+    fn deterministic_custody_publisher(
+        coordinator: &WorkerCoordinator,
+        disposition: DurableCustodyTestPublicationDisposition,
+        initially_released: bool,
+    ) -> (
+        DurableCustodyPublisher,
+        Arc<AtomicUsize>,
+        Arc<tokio::sync::Semaphore>,
+        Arc<AtomicBool>,
+    ) {
+        let started = Arc::new(AtomicUsize::new(0));
+        let activation_registered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Semaphore::new(usize::from(initially_released)));
+        (
+            DurableCustodyPublisher::Test(DurableCustodyTestPublisher {
+                started: Arc::clone(&started),
+                activation_registered: Arc::clone(&activation_registered),
+                supervisors: Arc::clone(&coordinator.supervisors),
+                release: Arc::clone(&release),
+                disposition,
+            }),
+            started,
+            release,
+            activation_registered,
+        )
+    }
+
+    fn wait_for_custody_publisher_start(started: &AtomicUsize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while started.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "custody publication supervisor did not reach its publisher"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn wait_for_custody_terminal(coordinator: &WorkerCoordinator) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while coordinator.custody_publication_terminal_count() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "custody publication supervisor did not retain a terminal owner"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn reap_durable_may_own(coordinator: &WorkerCoordinator, may_own: DurableWorkerMayOwnPrepare) {
+        let DurableWorkerMayOwnPrepare {
+            durable,
+            worker,
+            source,
+            custody_name: _,
+            attestation,
+        } = may_own;
+        drop(durable);
+        drop(source);
+        drop(attestation);
+        reap_durable_handoff_worker(coordinator, worker);
     }
 
     fn different_custody_name(
@@ -8582,6 +9265,505 @@ mod tests {
     }
 
     #[test]
+    fn custody_supervisor_registers_before_activation_and_stores_before_completion() {
+        let context_id = [108; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("supervisor success deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fixture;
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("supervisor fixture did not retain publication authority")
+        };
+        let arm = actor.custody_arm_handle().expect("test custody arm handle");
+        let (publisher, started, release, activation_registered) = deterministic_custody_publisher(
+            &coordinator,
+            DurableCustodyTestPublicationDisposition::ExactAttestation,
+            false,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("custody supervisor runtime");
+        let start = coordinator.start_durable_custody_publication_with(
+            runtime.handle(),
+            arm,
+            publication,
+            publisher,
+        );
+        let DurableCustodyPublicationStartOutcome::Started(completion) = start else {
+            panic!("custody supervisor did not start: {start:?}")
+        };
+
+        wait_for_custody_publisher_start(&started);
+        assert!(activation_registered.load(Ordering::SeqCst));
+        {
+            let supervisors = coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(supervisors.handles.len(), 1);
+            assert_eq!(supervisors.active_permits, 1);
+            assert_eq!(supervisors.pending_admissions, 0);
+        }
+        release.add_permits(1);
+        assert!(runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+                .await
+                .expect("custody supervisor completion deadline")
+        }));
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(coordinator.custody_publication_terminal_count(), 1);
+        let mut terminals = coordinator.take_custody_publication_terminals().into_iter();
+        let Some(DurableWorkerCustodyPublicationTerminal::MayOwn(may_own)) = terminals.next()
+        else {
+            panic!("successful publication did not store exact MayOwn authority")
+        };
+        assert!(terminals.next().is_none());
+        assert_eq!(may_own.durable.context_id(), context_id);
+        assert_no_worker_request_bytes(&peer);
+        reap_durable_may_own(&coordinator, may_own);
+        drop(runtime);
+        drop(actor);
+        drop(directory);
+    }
+
+    fn assert_custody_supervisor_publication_failure(
+        context_id: ContextId,
+        disposition: DurableCustodyTestPublicationDisposition,
+        expected_boundary: DurableCustodyPublicationBoundary,
+    ) {
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("publication failure deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fixture;
+        let journal_path = directory.path().join("helper.ownership-v3");
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("publication failure fixture did not retain authority")
+        };
+        let arm = actor.custody_arm_handle().expect("test custody arm handle");
+        let (publisher, started, _release, activation_registered) =
+            deterministic_custody_publisher(&coordinator, disposition, true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("publication failure runtime");
+        let start = coordinator.start_durable_custody_publication_with(
+            runtime.handle(),
+            arm,
+            publication,
+            publisher,
+        );
+        let DurableCustodyPublicationStartOutcome::Started(completion) = start else {
+            panic!("publication failure supervisor did not start: {start:?}")
+        };
+        assert!(runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+                .await
+                .expect("publication failure completion deadline")
+        }));
+        let mut terminals = coordinator.take_custody_publication_terminals().into_iter();
+        let Some(DurableWorkerCustodyPublicationTerminal::PublicationUnresolved {
+            boundary,
+            error: _,
+            publication,
+        }) = terminals.next()
+        else {
+            panic!("publication failure did not retain an unresolved terminal")
+        };
+        assert_eq!(boundary, expected_boundary);
+        assert!(activation_registered.load(Ordering::SeqCst));
+        assert!(terminals.next().is_none());
+        assert_eq!(started.load(Ordering::SeqCst), 1, "no retry is allowed");
+        assert!(
+            crate::ownership_journal::journal_bytes_have_exact_custody_phase_for_test(
+                &fs::read(&journal_path).expect("phase-4 publication failure bytes"),
+                context_id,
+            ),
+            "publication failure must not arm durable ownership"
+        );
+        assert_no_worker_request_bytes(&peer);
+        retain_and_reap_durable_publication(&coordinator, publication);
+        drop((runtime, actor, directory));
+    }
+
+    #[test]
+    fn custody_supervisor_before_send_is_unresolved_and_never_retried() {
+        assert_custody_supervisor_publication_failure(
+            [109; 16],
+            DurableCustodyTestPublicationDisposition::BeforeSend,
+            DurableCustodyPublicationBoundary::BeforeSend,
+        );
+    }
+
+    #[test]
+    fn custody_supervisor_manager_may_own_is_unresolved_and_never_retried() {
+        assert_custody_supervisor_publication_failure(
+            [110; 16],
+            DurableCustodyTestPublicationDisposition::ManagerMayOwn,
+            DurableCustodyPublicationBoundary::ManagerMayOwn,
+        );
+    }
+
+    #[test]
+    fn dropping_custody_completion_waiter_cannot_cancel_supervisor() {
+        let context_id = [111; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("dropped waiter deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fixture;
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("dropped waiter fixture did not retain publication authority")
+        };
+        let arm = actor.custody_arm_handle().expect("test custody arm handle");
+        let (publisher, started, release, activation_registered) = deterministic_custody_publisher(
+            &coordinator,
+            DurableCustodyTestPublicationDisposition::ExactAttestation,
+            false,
+        );
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()
+            .expect("dropped waiter runtime");
+        let start = coordinator.start_durable_custody_publication_with(
+            runtime.handle(),
+            arm,
+            publication,
+            publisher,
+        );
+        let DurableCustodyPublicationStartOutcome::Started(completion) = start else {
+            panic!("dropped waiter supervisor did not start: {start:?}")
+        };
+        wait_for_custody_publisher_start(&started);
+        assert!(activation_registered.load(Ordering::SeqCst));
+        drop(completion);
+        release.add_permits(1);
+        wait_for_custody_terminal(&coordinator);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        let mut terminals = coordinator.take_custody_publication_terminals().into_iter();
+        let Some(DurableWorkerCustodyPublicationTerminal::MayOwn(may_own)) = terminals.next()
+        else {
+            panic!("waiter cancellation cancelled or lost the supervisor owner")
+        };
+        assert!(terminals.next().is_none());
+        assert_no_worker_request_bytes(&peer);
+        reap_durable_may_own(&coordinator, may_own);
+        drop(runtime);
+        drop(actor);
+        drop(directory);
+    }
+
+    #[test]
+    fn activated_blocking_publication_survives_outer_runtime_shutdown() {
+        let context_id = [112; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("runtime-drop deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fixture;
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("runtime-drop fixture did not retain publication authority")
+        };
+        let arm = actor.custody_arm_handle().expect("test custody arm handle");
+        let (publisher, started, release, activation_registered) = deterministic_custody_publisher(
+            &coordinator,
+            DurableCustodyTestPublicationDisposition::ExactAttestation,
+            false,
+        );
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()
+            .expect("runtime-drop supervisor runtime");
+        let start = coordinator.start_durable_custody_publication_with(
+            runtime.handle(),
+            arm,
+            publication,
+            publisher,
+        );
+        let DurableCustodyPublicationStartOutcome::Started(completion) = start else {
+            panic!("runtime-drop supervisor did not start: {start:?}")
+        };
+        wait_for_custody_publisher_start(&started);
+        assert!(activation_registered.load(Ordering::SeqCst));
+        runtime.shutdown_background();
+        release.add_permits(1);
+        wait_for_custody_terminal(&coordinator);
+        let wait_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime-drop completion observer");
+        assert!(wait_runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+                .await
+                .expect("runtime-drop completion deadline")
+        }));
+        let mut terminals = coordinator.take_custody_publication_terminals().into_iter();
+        let Some(DurableWorkerCustodyPublicationTerminal::MayOwn(may_own)) = terminals.next()
+        else {
+            panic!("outer runtime shutdown cancelled an activated blocking publication")
+        };
+        assert!(terminals.next().is_none());
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(may_own.durable.context_id(), context_id);
+        assert_no_worker_request_bytes(&peer);
+        reap_durable_may_own(&coordinator, may_own);
+        drop(wait_runtime);
+        drop(actor);
+        drop(directory);
+    }
+
+    #[test]
+    fn aborting_queued_blocking_publication_stores_affine_owner_without_polling() {
+        let context_id = [114; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("queued-abort deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fixture;
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("queued-abort fixture did not retain publication authority")
+        };
+        let arm = actor.custody_arm_handle().expect("test custody arm handle");
+        let (publisher, started, _release, activation_registered) = deterministic_custody_publisher(
+            &coordinator,
+            DurableCustodyTestPublicationDisposition::ExactAttestation,
+            true,
+        );
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .expect("queued-abort supervisor runtime");
+        let (blocker_started_sender, blocker_started_receiver) = std::sync::mpsc::sync_channel(1);
+        let blocker_release = Arc::new((Mutex::new(false), Condvar::new()));
+        let blocker_task_release = Arc::clone(&blocker_release);
+        let blocker_handle = runtime.spawn_blocking(move || {
+            blocker_started_sender
+                .send(())
+                .expect("report occupied blocking slot");
+            let (released, changed) = blocker_task_release.as_ref();
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        });
+        blocker_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("blocking slot occupancy");
+
+        let start = coordinator.start_durable_custody_publication_with(
+            runtime.handle(),
+            arm,
+            publication,
+            publisher,
+        );
+        let DurableCustodyPublicationStartOutcome::Started(completion) = start else {
+            panic!("queued publication did not reach activation: {start:?}")
+        };
+        let handle = coordinator
+            .supervisors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .handles
+            .pop()
+            .expect("registered queued supervisor handle");
+        handle.abort();
+        drop(handle);
+        let (released, changed) = blocker_release.as_ref();
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+        runtime
+            .block_on(blocker_handle)
+            .expect("blocking slot release");
+        wait_for_custody_terminal(&coordinator);
+        assert!(runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+                .await
+                .expect("queued-abort completion deadline")
+        }));
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+        assert!(!activation_registered.load(Ordering::SeqCst));
+        let mut terminals = coordinator.take_custody_publication_terminals().into_iter();
+        let Some(DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication)) =
+            terminals.next()
+        else {
+            panic!("queued supervisor abort did not retain the publication owner")
+        };
+        assert!(terminals.next().is_none());
+        assert!(
+            crate::ownership_journal::journal_bytes_have_exact_custody_phase_for_test(
+                &fs::read(directory.path().join("helper.ownership-v3"))
+                    .expect("phase-4 queued-abort bytes"),
+                context_id,
+            )
+        );
+        assert_no_worker_request_bytes(&peer);
+        retain_and_reap_durable_publication(&coordinator, publication);
+        drop((runtime, actor, directory));
+    }
+
+    #[test]
+    fn shutting_down_start_returns_owner_without_polling_publisher() {
+        let context_id = [113; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("start rejection deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fixture;
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("start rejection fixture did not retain publication authority")
+        };
+        coordinator
+            .supervisors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutting_down = true;
+        let arm = actor.custody_arm_handle().expect("test custody arm handle");
+        let (publisher, started, _release, activation_registered) = deterministic_custody_publisher(
+            &coordinator,
+            DurableCustodyTestPublicationDisposition::ExactAttestation,
+            true,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("start rejection runtime");
+        let start = coordinator.start_durable_custody_publication_with(
+            runtime.handle(),
+            arm,
+            publication,
+            publisher,
+        );
+        let DurableCustodyPublicationStartOutcome::Retained {
+            error: WorkerV3Error::ShuttingDown,
+            publication,
+        } = start
+        else {
+            panic!("shutdown admission did not synchronously return the owner: {start:?}")
+        };
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+        assert!(!activation_registered.load(Ordering::SeqCst));
+        assert_eq!(coordinator.custody_publication_terminal_count(), 0);
+        {
+            let supervisors = coordinator
+                .supervisors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(supervisors.handles.is_empty());
+            assert_eq!(supervisors.active_permits, 0);
+            assert_eq!(supervisors.pending_admissions, 0);
+        }
+        {
+            let settlements = coordinator
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(settlements.custody_publication_terminals.is_empty());
+            assert_eq!(settlements.reserved_custody_publication_terminals, 0);
+        }
+        assert_no_worker_request_bytes(&peer);
+        retain_and_reap_durable_publication(&coordinator, publication);
+        drop(runtime);
+        drop(actor);
+        drop(directory);
+    }
+
+    #[test]
+    fn preactivation_failure_releases_terminal_before_supervisor_permit() {
+        let source = include_str!("worker_v3.rs");
+        let start = source
+            .find("    fn start_durable_custody_publication_with(")
+            .expect("custody publication supervisor");
+        let end = source[start..]
+            .find("\n    fn acquire_supervisor_permit(")
+            .map(|offset| start + offset)
+            .expect("custody publication supervisor boundary");
+        let supervisor = &source[start..end];
+        let activation_owner = [
+            "let DurableCustodyPublicationActivation {\n",
+            "                terminal, permit, ..\n",
+            "            } = activation;",
+        ]
+        .concat();
+        let terminal_release = ["terminal.return_before_", "activation()"].concat();
+        let permit_release = ["drop", "(permit);"].concat();
+        let retained_return =
+            ["return DurableCustodyPublicationStartOutcome::", "Retained"].concat();
+        let activation_owners = supervisor
+            .match_indices(&activation_owner)
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert_eq!(activation_owners.len(), 3);
+        for activation_owner in activation_owners {
+            let failure = &supervisor[activation_owner..];
+            let terminal_release = failure
+                .find(&terminal_release)
+                .expect("pre-activation terminal reservation release");
+            let permit_release = failure
+                .find(&permit_release)
+                .expect("pre-activation supervisor permit release");
+            let retained_return = failure
+                .find(&retained_return)
+                .expect("pre-activation retained outcome");
+            assert!(terminal_release < permit_release);
+            assert!(permit_release < retained_return);
+        }
+    }
+
+    #[test]
     fn ordinary_open_worker_registration_remains_plannable() {
         let context_id = [98; 16];
         let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
@@ -9256,7 +10438,7 @@ mod tests {
             .find("publication.durable.context_id()")
             .expect("pre-arm durable/worker context fence");
         let durable_arm = arm
-            .find("actor.arm_custody_until(durable, deadline)")
+            .find("arm.arm_custody_until(durable, deadline)")
             .expect("durable MayOwnPrepare arm");
         assert!(
             first_deadline < attestation
