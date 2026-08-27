@@ -2,9 +2,9 @@
 //!
 //! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], the fixed
 //! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], the fixed
-//! [`socket_network_namespace`] and close-on-exec duplication wrappers, taking immediate RAII
-//! ownership of descriptors installed by the bounded receive helpers, the one-shot bounded
-//! [`take_systemd_listen_fd_set_once`] startup takeover, the
+//! [`socket_network_namespace`], the fixed [`cgroup_v2_id`] handle query, and close-on-exec
+//! duplication wrappers, taking immediate RAII ownership of descriptors installed by the bounded
+//! receive helpers, the one-shot bounded [`take_systemd_listen_fd_set_once`] startup takeover, the
 //! [`install_close_range_on_exec`] process hook, the read-only
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
@@ -20,6 +20,10 @@
 //! values and expose no caller-controlled ioctl request or argument. Every returned namespace
 //! descriptor is placed in [`OwnedFd`] immediately, then required to be read-only, close-on-exec,
 //! and the exact expected namespace type before it is returned.
+//! The cgroup wrapper first proves the borrowed descriptor is a directory on an exact cgroup v2
+//! filesystem, then passes only an empty path, `AT_EMPTY_PATH`, and a fixed eight-byte, fully
+//! initialized file-handle buffer to `name_to_handle_at(2)`. Every returned field is validated
+//! before use.
 //! The MPTCP buffer uses the exact Debian 13 `/usr/include/linux/mptcp.h`
 //! `struct mptcp_info` layout, is fully initialized before FFI, and its returned
 //! length is checked before any field is trusted.
@@ -35,6 +39,7 @@ use std::{
     io::{self, IoSlice, IoSliceMut},
     mem,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    num::NonZeroU64,
     os::{
         fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::process::CommandExt,
@@ -48,6 +53,8 @@ use nix::sys::socket::{
     ControlMessage, ControlMessageOwned, MsgFlags, SockType, SockaddrIn, SockaddrIn6,
     SockaddrStorage, getsockopt, recvmsg, sendmsg, sockopt,
 };
+use nix::sys::stat::fstat;
+use nix::sys::statfs::{CGROUP2_SUPER_MAGIC, fstatfs};
 
 use socket2::{Domain, Protocol, SockRef, Type};
 /// `SOL_MPTCP` from the Linux socket UAPI.
@@ -60,6 +67,9 @@ const NS_GET_USERNS: libc::c_ulong = 0xb701;
 const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
 /// `SIOCGSKNS` from the Debian 13 `<linux/sockios.h>` UAPI.
 const SIOCGSKNS: libc::c_ulong = 0x894c;
+/// Eight-byte `FILEID_KERNFS` handle type from Debian 13 `<linux/exportfs.h>`.
+const FILEID_KERNFS: libc::c_int = 0xfe;
+const CGROUP_V2_HANDLE_BYTES: libc::c_uint = 8;
 const MPTCP_INFO_FLAG_FALLBACK: u32 = 1 << 0;
 const MPTCP_INFO_FLAG_REMOTE_KEY_RECEIVED: u32 = 1 << 1;
 const MAX_HANDOFF_FDS: usize = 2;
@@ -93,6 +103,25 @@ const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const WORKER_CONFINEMENT_FILTER_LENGTH: usize = 16;
+
+/// Fixed allocation compatible with `struct file_handle` plus one eight-byte kernfs identifier.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CgroupV2FileHandle {
+    handle_bytes: libc::c_uint,
+    handle_type: libc::c_int,
+    id: u64,
+}
+
+impl CgroupV2FileHandle {
+    const fn initialized() -> Self {
+        Self {
+            handle_bytes: CGROUP_V2_HANDLE_BYTES,
+            handle_type: 0,
+            id: 0,
+        }
+    }
+}
 
 /// Duplicates one caller-retained descriptor into independent close-on-exec ownership.
 ///
@@ -395,6 +424,107 @@ fn retry_raw_fcntl(
             return Err(error);
         }
     }
+}
+
+/// Derives the kernel's nonzero cgroup v2 identifier for an already-open cgroup descriptor.
+///
+/// The descriptor remains borrowed. Before requesting a handle, this wrapper requires its exact
+/// file type to be a directory and its exact filesystem type to be `CGROUP2_SUPER_MAGIC`. It then
+/// uses only the descriptor itself, an empty path, and the fixed `AT_EMPTY_PATH` flag. The handle
+/// allocation has exactly eight payload bytes; callers cannot select a path, flag, handle size, or
+/// handle type.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` when the source descriptor is negative, is not a directory, or is not on
+/// a cgroup v2 filesystem. Kernel errors from `fstat(2)`, `fstatfs(2)`, or
+/// `name_to_handle_at(2)` are returned unchanged. Returns `InvalidData` unless the kernel reports
+/// an eight-byte `FILEID_KERNFS` handle, a nonnegative mount identifier, and a nonzero cgroup
+/// identifier.
+pub fn cgroup_v2_id<Fd: AsFd + ?Sized>(source: &Fd) -> io::Result<NonZeroU64> {
+    let source = source.as_fd();
+    let descriptor = source.as_raw_fd();
+    if descriptor < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source descriptor is invalid",
+        ));
+    }
+
+    let metadata = loop {
+        match fstat(source) {
+            Ok(metadata) => break metadata,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(errno_io(error)),
+        }
+    };
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source descriptor is not a directory",
+        ));
+    }
+
+    let filesystem = loop {
+        match fstatfs(source) {
+            Ok(filesystem) => break filesystem,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(errno_io(error)),
+        }
+    };
+    if filesystem.filesystem_type() != CGROUP2_SUPER_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source descriptor is not on a cgroup v2 filesystem",
+        ));
+    }
+
+    loop {
+        let mut handle = CgroupV2FileHandle::initialized();
+        let mut mount_id: libc::c_int = -1;
+        // SAFETY: `source` keeps the validated descriptor borrowed for this call. The path is the
+        // fixed empty C string and the flags are exactly `AT_EMPTY_PATH`. `handle` is a fully
+        // initialized `repr(C)` allocation with the `struct file_handle` header followed by the
+        // advertised eight writable payload bytes. `mount_id` is writable storage of the exact
+        // libc integer type. No pointer, path, size, handle type, or flag is caller controlled.
+        let result = unsafe {
+            libc::name_to_handle_at(
+                descriptor,
+                c"".as_ptr(),
+                std::ptr::from_mut(&mut handle).cast::<libc::file_handle>(),
+                std::ptr::from_mut(&mut mount_id),
+                libc::AT_EMPTY_PATH,
+            )
+        };
+        if result == 0 {
+            return validate_cgroup_v2_handle(handle, mount_id);
+        }
+        if result != -1 {
+            return Err(invalid_data(
+                "name_to_handle_at returned an unexpected status",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn validate_cgroup_v2_handle(
+    handle: CgroupV2FileHandle,
+    mount_id: libc::c_int,
+) -> io::Result<NonZeroU64> {
+    if handle.handle_bytes != CGROUP_V2_HANDLE_BYTES {
+        return Err(invalid_data("cgroup v2 handle has an invalid length"));
+    }
+    if handle.handle_type != FILEID_KERNFS {
+        return Err(invalid_data("cgroup v2 handle has an invalid type"));
+    }
+    if mount_id < 0 {
+        return Err(invalid_data("cgroup v2 handle has an invalid mount ID"));
+    }
+    NonZeroU64::new(handle.id).ok_or_else(|| invalid_data("cgroup v2 handle ID is zero"))
 }
 
 /// Returns the Linux clone flag identifying an nsfs namespace descriptor.
@@ -1837,6 +1967,89 @@ mod tests {
         fn as_raw_fd(&self) -> RawFd {
             -1
         }
+    }
+
+    #[test]
+    fn cgroup_v2_file_handle_layout_and_initialization_are_exact() {
+        assert_eq!(mem::size_of::<CgroupV2FileHandle>(), 16);
+        assert_eq!(mem::offset_of!(CgroupV2FileHandle, handle_bytes), 0);
+        assert_eq!(mem::offset_of!(CgroupV2FileHandle, handle_type), 4);
+        assert_eq!(mem::offset_of!(CgroupV2FileHandle, id), 8);
+
+        let handle = CgroupV2FileHandle::initialized();
+        assert_eq!(handle.handle_bytes, 8);
+        assert_eq!(handle.handle_type, 0);
+        assert_eq!(handle.id, 0);
+    }
+
+    #[test]
+    fn cgroup_v2_handle_result_validation_fails_closed() {
+        let valid = CgroupV2FileHandle {
+            handle_bytes: 8,
+            handle_type: FILEID_KERNFS,
+            id: 0x0123_4567_89ab_cdef,
+        };
+        assert_eq!(
+            validate_cgroup_v2_handle(valid, 0).expect("valid kernel handle"),
+            NonZeroU64::new(valid.id).expect("test ID is nonzero")
+        );
+
+        for (handle, mount_id) in [
+            (
+                CgroupV2FileHandle {
+                    handle_bytes: 7,
+                    ..valid
+                },
+                0,
+            ),
+            (
+                CgroupV2FileHandle {
+                    handle_type: 0,
+                    ..valid
+                },
+                0,
+            ),
+            (CgroupV2FileHandle { id: 0, ..valid }, 0),
+            (valid, -1),
+        ] {
+            assert_eq!(
+                validate_cgroup_v2_handle(handle, mount_id)
+                    .expect_err("invalid returned field must fail")
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn cgroup_v2_id_safely_rejects_non_cgroup_descriptor() {
+        let (pipe, _peer) = nix::unistd::pipe().expect("pipe");
+        assert_eq!(
+            cgroup_v2_id(&pipe)
+                .expect_err("pipe is not a cgroup v2 descriptor")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn cgroup_v2_id_safely_rejects_cgroup_control_files_when_available() {
+        let Ok(control_file) = File::open("/sys/fs/cgroup/cgroup.procs") else {
+            return;
+        };
+        let Ok(filesystem) = fstatfs(&control_file) else {
+            return;
+        };
+        if filesystem.filesystem_type() != CGROUP2_SUPER_MAGIC {
+            return;
+        }
+
+        assert_eq!(
+            cgroup_v2_id(&control_file)
+                .expect_err("a cgroup control file is not a cgroup directory")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

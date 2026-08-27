@@ -32,7 +32,8 @@ use crate::{
         prepare_production_runtime_identity, remove_stale_socket, secure_socket,
     },
     systemd_custody::{
-        capture_inherited_custody, classify_startup_custody, observe_startup_custody_inventory,
+        capture_inherited_custody, classify_startup_custody,
+        observe_nonempty_restart_custody_for_refusal, observe_startup_custody_inventory,
     },
 };
 
@@ -129,6 +130,12 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
         classify_startup_custody(inherited, targets, observed_inventory, ownership_deadline)
             .map_err(|_| ServerError::InheritedCustody)?;
     if !classification.is_empty() {
+        let _ = observe_nonempty_restart_custody_for_refusal(
+            &runtime,
+            ownership_startup,
+            classification,
+            ownership_deadline,
+        );
         return Err(ServerError::InheritedCustody);
     }
     drop(classification);
@@ -836,6 +843,9 @@ mod tests {
         let classify = entry
             .find("classify_startup_custody(inherited, targets, observed_inventory, ownership_deadline)")
             .expect("three-way startup custody classification");
+        let restart_refusal = entry
+            .find("observe_nonempty_restart_custody_for_refusal(")
+            .expect("nonempty restart observation before refusal");
         let continue_empty = entry
             .find("continue_empty()")
             .expect("empty-only ownership startup continuation");
@@ -852,6 +862,8 @@ mod tests {
         assert!(runtime < inventory);
         assert!(inventory < revalidate);
         assert!(revalidate < classify);
+        assert!(classify < restart_refusal);
+        assert!(restart_refusal < continue_empty);
         assert!(classify < continue_empty);
         assert!(continue_empty < bind);
         assert!(bind < drive);

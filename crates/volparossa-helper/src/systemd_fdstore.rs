@@ -1,4 +1,4 @@
-//! Dormant, fail-closed systemd descriptor-store publication adapter.
+//! Fail-closed systemd descriptor-store observation and dormant publication adapter.
 //!
 //! Its publication adapter is reachable from the private live-proof selector and a private dormant
 //! supervisor publisher, but neither is connected to the production server, engine, or request
@@ -43,6 +43,7 @@ use nix::{
 use tokio::io::unix::AsyncFd;
 use zbus::{
     Connection, Proxy,
+    names::OwnedUniqueName,
     proxy::{Builder as ProxyBuilder, CacheProperties},
     zvariant::OwnedObjectPath,
 };
@@ -60,6 +61,11 @@ const MAX_DESCRIPTOR_STORE_ENTRIES: usize = 128;
 const MAX_DESCRIPTOR_STORE_ENTRIES_U32: u32 = 128;
 const MAX_DESCRIPTOR_NAME_BYTES: usize = 255;
 const MAX_DUMP_PATH_BYTES: usize = 4_096;
+const MAX_CONTROL_GROUP_BYTES: usize = 4_096;
+const MAX_CONTROL_GROUP_COMPONENTS: usize = 256;
+const MAX_CONTROL_GROUP_COMPONENT_BYTES: usize = 255;
+const MAX_ISOLATION_PROPERTY_BYTES: usize = 32;
+const SYSTEMD_INVOCATION_ID_BYTES: usize = 16;
 const FDSTORE_PREFIX: &[u8] = b"FDSTORE=1\nFDNAME=";
 const FDSTORE_SUFFIX: &[u8] = b"\nFDPOLL=0";
 const FDSTORE_MESSAGE_BYTES: usize =
@@ -70,7 +76,11 @@ const BARRIER_MESSAGE: &[u8] = b"BARRIER=1";
 const SYSTEMD_DESTINATION: &str = "org.freedesktop.systemd1";
 const SYSTEMD_MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
+const SYSTEMD_UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
 const SYSTEMD_SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
+const DBUS_DESTINATION: &str = "org.freedesktop.DBus";
+const DBUS_PATH: &str = "/org/freedesktop/DBus";
+const DBUS_INTERFACE: &str = "org.freedesktop.DBus";
 static PRODUCTION_MANAGER_MUTATION_GATE: ManagerMutationGate = ManagerMutationGate::new();
 
 /// One opaque, fixed-shape systemd descriptor-store name.
@@ -464,15 +474,21 @@ struct InventoryEntry {
 /// process through a second, potentially different `GetUnitByPID` lookup.
 #[derive(Clone, Eq, PartialEq)]
 struct DescriptorStoreScope {
+    manager_owner: OwnedUniqueName,
     unit_path: OwnedObjectPath,
     main_pid: NonZeroU32,
 }
 
 impl DescriptorStoreScope {
-    fn new(unit_path: OwnedObjectPath, main_pid: u32) -> Result<Self, FdStoreError> {
+    fn new(
+        manager_owner: OwnedUniqueName,
+        unit_path: OwnedObjectPath,
+        main_pid: u32,
+    ) -> Result<Self, FdStoreError> {
         let main_pid = NonZeroU32::new(main_pid)
             .ok_or_else(|| invalid_inventory("MainPID must be nonzero"))?;
         Ok(Self {
+            manager_owner,
             unit_path,
             main_pid,
         })
@@ -527,6 +543,152 @@ impl fmt::Debug for StableStartupInventory {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+struct ServiceCgroupIsolationSnapshot {
+    scope: DescriptorStoreScope,
+    invocation_id: [u8; SYSTEMD_INVOCATION_ID_BYTES],
+    control_group: Box<str>,
+    control_group_id: NonZeroU64,
+}
+
+#[derive(Clone)]
+struct RawServiceCgroupIsolationSnapshot {
+    invocation_id: Vec<u8>,
+    main_pid: u32,
+    control_pid: u32,
+    control_group: String,
+    control_group_id: u64,
+    delegate: bool,
+    delegate_controllers: Vec<String>,
+    delegate_subgroup: String,
+    protect_control_groups: bool,
+    protect_control_groups_ex: String,
+    private_pids: String,
+    kill_mode: String,
+    send_sigkill: bool,
+}
+
+impl ServiceCgroupIsolationSnapshot {
+    fn from_raw(
+        scope: DescriptorStoreScope,
+        raw: RawServiceCgroupIsolationSnapshot,
+    ) -> Result<Self, FdStoreError> {
+        if raw.invocation_id.len() != SYSTEMD_INVOCATION_ID_BYTES
+            || raw.invocation_id.iter().all(|byte| *byte == 0)
+        {
+            return Err(invalid_inventory("InvocationID is invalid"));
+        }
+        if raw.main_pid != scope.main_pid() || raw.main_pid != std::process::id() {
+            return Err(invalid_inventory(
+                "MainPID changed during isolation observation",
+            ));
+        }
+        if raw.control_pid != 0 {
+            return Err(invalid_inventory("ControlPID is not zero"));
+        }
+        validate_control_group(&raw.control_group)?;
+        let control_group_id = NonZeroU64::new(raw.control_group_id)
+            .ok_or_else(|| invalid_inventory("ControlGroupId is zero"))?;
+        if raw.delegate || !raw.delegate_controllers.is_empty() || !raw.delegate_subgroup.is_empty()
+        {
+            return Err(invalid_inventory("cgroup delegation is enabled"));
+        }
+        if !raw.protect_control_groups
+            || !exact_bounded_property(&raw.protect_control_groups_ex, "strict")
+        {
+            return Err(invalid_inventory("ProtectControlGroups is not strict"));
+        }
+        if !exact_bounded_property(&raw.private_pids, "no") {
+            return Err(invalid_inventory("PrivatePIDs is not disabled"));
+        }
+        if !exact_bounded_property(&raw.kill_mode, "control-group") || !raw.send_sigkill {
+            return Err(invalid_inventory("service kill policy is not exact"));
+        }
+        let invocation_id: [u8; SYSTEMD_INVOCATION_ID_BYTES] = raw
+            .invocation_id
+            .try_into()
+            .map_err(|_| invalid_inventory("InvocationID is invalid"))?;
+        Ok(Self {
+            scope,
+            invocation_id,
+            control_group: raw.control_group.into_boxed_str(),
+            control_group_id,
+        })
+    }
+}
+
+fn exact_bounded_property(observed: &str, expected: &str) -> bool {
+    observed.len() <= MAX_ISOLATION_PROPERTY_BYTES && observed == expected
+}
+
+fn validate_control_group(control_group: &str) -> Result<(), FdStoreError> {
+    let bytes = control_group.as_bytes();
+    if bytes.len() < 2
+        || bytes.len() > MAX_CONTROL_GROUP_BYTES
+        || bytes.first() != Some(&b'/')
+        || bytes.last() == Some(&b'/')
+    {
+        return Err(invalid_inventory("ControlGroup is invalid"));
+    }
+    let mut components = 0_usize;
+    for component in bytes[1..].split(|byte| *byte == b'/') {
+        components = components
+            .checked_add(1)
+            .ok_or_else(|| invalid_inventory("ControlGroup is invalid"))?;
+        if components > MAX_CONTROL_GROUP_COMPONENTS
+            || component.is_empty()
+            || component.len() > MAX_CONTROL_GROUP_COMPONENT_BYTES
+            || matches!(component, b"." | b"..")
+            || component.ends_with(b" (deleted)")
+            || component
+                .iter()
+                .any(|byte| *byte == 0 || *byte < b' ' || *byte == 0x7f)
+        {
+            return Err(invalid_inventory("ControlGroup is invalid"));
+        }
+    }
+    Ok(())
+}
+
+/// Stable, configured systemd isolation evidence for the exact retained helper invocation.
+///
+/// This remains bounded snapshot evidence. It is not cgroup mutation, migration, cleanup,
+/// descriptor, journal, or server authority and does not claim that PID 1 cannot move a process.
+#[must_use = "service-cgroup isolation evidence must remain joined to its pinned kernel cgroup"]
+pub(crate) struct StableServiceCgroupIsolation {
+    snapshot: ServiceCgroupIsolationSnapshot,
+}
+
+impl fmt::Debug for StableServiceCgroupIsolation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StableServiceCgroupIsolation(<redacted>)")
+    }
+}
+
+impl StableServiceCgroupIsolation {
+    pub(crate) fn verify_exact_scope_and_kernel_id(
+        &self,
+        inventory: &StableStartupInventory,
+        current_main_pid: NonZeroU32,
+        kernel_cgroup_id: NonZeroU64,
+    ) -> Result<(), FdStoreError> {
+        if self.snapshot.scope != inventory.snapshot.scope
+            || self.snapshot.scope.main_pid() != current_main_pid.get()
+            || inventory.snapshot.main_pid != current_main_pid.get()
+            || self.snapshot.control_group_id != kernel_cgroup_id
+        {
+            return Err(invalid_inventory(
+                "service-cgroup isolation does not match the pinned service scope",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn matches_exact(&self, candidate: &Self) -> bool {
+        self.snapshot == candidate.snapshot
+    }
+}
+
 /// Construct an exact stable-inventory fixture for sibling startup-custody tests.
 #[cfg(test)]
 pub(super) fn stable_startup_inventory_for_test(
@@ -534,6 +696,7 @@ pub(super) fn stable_startup_inventory_for_test(
 ) -> StableStartupInventory {
     let main_pid = std::process::id();
     let scope = DescriptorStoreScope::new(
+        OwnedUniqueName::try_from(":1.4242").expect("valid fixture manager owner"),
         OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/volparossa_2dtest_2eservice")
             .expect("valid fixture service object path"),
         main_pid,
@@ -560,6 +723,21 @@ pub(super) fn stable_startup_inventory_for_test(
         },
         notify_address: NotifySocketAddress::parse(OsStr::new("/run/volparossa-test-notify.sock"))
             .expect("valid fixture notify address"),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn stable_service_cgroup_isolation_for_test(
+    inventory: &StableStartupInventory,
+    kernel_cgroup_id: NonZeroU64,
+) -> StableServiceCgroupIsolation {
+    StableServiceCgroupIsolation {
+        snapshot: ServiceCgroupIsolationSnapshot {
+            scope: inventory.snapshot.scope.clone(),
+            invocation_id: [0x5a; SYSTEMD_INVOCATION_ID_BYTES],
+            control_group: "/volparossa-test.service".into(),
+            control_group_id: kernel_cgroup_id,
+        },
     }
 }
 
@@ -960,8 +1138,8 @@ impl StableStartupInventory {
     ///
     /// One manager barrier and two uncached snapshots use the caller's unchanged hard deadline.
     /// The ordinary service-contract validation still requires its fresh `MainPID` to be the
-    /// current process. No unit path or PID is exposed to the caller. This does not identify or
-    /// bind the systemd manager incarnation across observations.
+    /// current process. No unit path or PID is exposed to the caller. The retained unique manager
+    /// owner identifies the systemd manager incarnation and is rejected if it changes.
     pub(crate) async fn observe_same_service_scope(
         &self,
         deadline: HardDeadline,
@@ -979,10 +1157,29 @@ impl StableStartupInventory {
         .await
     }
 
+    /// Observe the exact retained unit invocation's configured cgroup isolation twice.
+    ///
+    /// This reuses the manager unique-name owner and object path retained by the startup
+    /// inventory. It performs no `GetUnitByPID`, mutation, cleanup, or readiness notification.
+    pub(crate) async fn observe_same_service_cgroup_isolation(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<StableServiceCgroupIsolation, FdStoreError> {
+        let scope = self.snapshot.scope.clone();
+        let source = SystemdDescriptorStoreSource::for_scope(scope, deadline).await?;
+        let sender = NotifySender::new(&self.notify_address)?;
+        observe_stable_service_cgroup_isolation(
+            &source,
+            synchronize_manager(&sender, deadline),
+            deadline,
+        )
+        .await
+    }
+
     /// Compare two opaque snapshots to the retained unit object path and current main process.
     ///
-    /// Unit path and PID remain private. This is service-scope correlation only; it does not
-    /// bind the manager incarnation or attest `ControlGroup`, delegation, or cgroup membership.
+    /// Unit path and PID remain private. This binds the retained manager incarnation and unit
+    /// scope, but does not itself attest `ControlGroup`, delegation, or cgroup membership.
     pub(crate) fn matches_current_service_scope(&self, candidate: &Self) -> bool {
         let current_pid = std::process::id();
         self.snapshot.scope == candidate.snapshot.scope
@@ -1388,6 +1585,15 @@ trait DescriptorStoreInventorySource: Sync {
     ) -> impl Future<Output = Result<DescriptorStoreSnapshot, FdStoreError>> + Send;
 }
 
+trait ServiceCgroupIsolationSource: Sync {
+    fn scope(&self) -> &DescriptorStoreScope;
+
+    fn isolation_snapshot(
+        &self,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<ServiceCgroupIsolationSnapshot, FdStoreError>> + Send;
+}
+
 /// Production D-Bus source bound to the unit owning the current process.
 struct SystemdDescriptorStoreSource {
     connection: Connection,
@@ -1399,8 +1605,9 @@ impl SystemdDescriptorStoreSource {
         let expected_main_pid = std::process::id();
         within_deadline(deadline, async move {
             let connection = Connection::system().await?;
+            let manager_owner = systemd_manager_owner(&connection).await?;
             let manager: Proxy<'_> = ProxyBuilder::new(&connection)
-                .destination(SYSTEMD_DESTINATION)?
+                .destination(manager_owner.clone())?
                 .path(SYSTEMD_MANAGER_PATH)?
                 .interface(SYSTEMD_MANAGER_INTERFACE)?
                 .cache_properties(CacheProperties::No)
@@ -1409,7 +1616,10 @@ impl SystemdDescriptorStoreSource {
             let unit_path: OwnedObjectPath =
                 manager.call("GetUnitByPID", &(expected_main_pid,)).await?;
             drop(manager);
-            let scope = DescriptorStoreScope::new(unit_path, expected_main_pid)?;
+            if systemd_manager_owner(&connection).await? != manager_owner {
+                return Err(FdStoreError::UnstableInventory);
+            }
+            let scope = DescriptorStoreScope::new(manager_owner, unit_path, expected_main_pid)?;
             Ok(Self { connection, scope })
         })
         .await
@@ -1421,6 +1631,9 @@ impl SystemdDescriptorStoreSource {
     ) -> Result<Self, FdStoreError> {
         within_deadline(deadline, async move {
             let connection = Connection::system().await?;
+            if systemd_manager_owner(&connection).await? != scope.manager_owner {
+                return Err(FdStoreError::UnstableInventory);
+            }
             Ok(Self { connection, scope })
         })
         .await
@@ -1428,7 +1641,7 @@ impl SystemdDescriptorStoreSource {
 
     async fn snapshot_unbounded(&self) -> Result<DescriptorStoreSnapshot, FdStoreError> {
         let service: Proxy<'_> = ProxyBuilder::new(&self.connection)
-            .destination(SYSTEMD_DESTINATION)?
+            .destination(self.scope.manager_owner.clone())?
             .path(self.scope.unit_path.clone())?
             .interface(SYSTEMD_SERVICE_INTERFACE)?
             .cache_properties(CacheProperties::No)
@@ -1464,6 +1677,61 @@ impl SystemdDescriptorStoreSource {
             entries,
         )
     }
+
+    async fn isolation_snapshot_unbounded(
+        &self,
+    ) -> Result<ServiceCgroupIsolationSnapshot, FdStoreError> {
+        let unit: Proxy<'_> = ProxyBuilder::new(&self.connection)
+            .destination(self.scope.manager_owner.clone())?
+            .path(self.scope.unit_path.clone())?
+            .interface(SYSTEMD_UNIT_INTERFACE)?
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await?;
+        let invocation_id = unit.get_property::<Vec<u8>>("InvocationID").await?;
+        drop(unit);
+
+        let service: Proxy<'_> = ProxyBuilder::new(&self.connection)
+            .destination(self.scope.manager_owner.clone())?
+            .path(self.scope.unit_path.clone())?
+            .interface(SYSTEMD_SERVICE_INTERFACE)?
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await?;
+        let raw = RawServiceCgroupIsolationSnapshot {
+            invocation_id,
+            main_pid: service.get_property::<u32>("MainPID").await?,
+            control_pid: service.get_property::<u32>("ControlPID").await?,
+            control_group: service.get_property::<String>("ControlGroup").await?,
+            control_group_id: service.get_property::<u64>("ControlGroupId").await?,
+            delegate: service.get_property::<bool>("Delegate").await?,
+            delegate_controllers: service
+                .get_property::<Vec<String>>("DelegateControllers")
+                .await?,
+            delegate_subgroup: service.get_property::<String>("DelegateSubgroup").await?,
+            protect_control_groups: service.get_property::<bool>("ProtectControlGroups").await?,
+            protect_control_groups_ex: service
+                .get_property::<String>("ProtectControlGroupsEx")
+                .await?,
+            private_pids: service.get_property::<String>("PrivatePIDs").await?,
+            kill_mode: service.get_property::<String>("KillMode").await?,
+            send_sigkill: service.get_property::<bool>("SendSIGKILL").await?,
+        };
+        ServiceCgroupIsolationSnapshot::from_raw(self.scope.clone(), raw)
+    }
+}
+
+async fn systemd_manager_owner(connection: &Connection) -> Result<OwnedUniqueName, FdStoreError> {
+    let bus: Proxy<'_> = ProxyBuilder::new(connection)
+        .destination(DBUS_DESTINATION)?
+        .path(DBUS_PATH)?
+        .interface(DBUS_INTERFACE)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    bus.call("GetNameOwner", &(SYSTEMD_DESTINATION,))
+        .await
+        .map_err(FdStoreError::from)
 }
 
 fn validate_properties_before_dump(
@@ -1506,6 +1774,19 @@ impl DescriptorStoreInventorySource for SystemdDescriptorStoreSource {
         deadline: HardDeadline,
     ) -> impl Future<Output = Result<DescriptorStoreSnapshot, FdStoreError>> + Send {
         within_deadline(deadline, self.snapshot_unbounded())
+    }
+}
+
+impl ServiceCgroupIsolationSource for SystemdDescriptorStoreSource {
+    fn scope(&self) -> &DescriptorStoreScope {
+        &self.scope
+    }
+
+    fn isolation_snapshot(
+        &self,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<ServiceCgroupIsolationSnapshot, FdStoreError>> + Send {
+        within_deadline(deadline, self.isolation_snapshot_unbounded())
     }
 }
 
@@ -1671,6 +1952,29 @@ where
         snapshot: first,
         notify_address,
     })
+}
+
+async fn observe_stable_service_cgroup_isolation<S, B>(
+    source: &S,
+    barrier: B,
+    deadline: HardDeadline,
+) -> Result<StableServiceCgroupIsolation, FdStoreError>
+where
+    S: ServiceCgroupIsolationSource,
+    B: Future<Output = Result<(), FdStoreError>>,
+{
+    ensure_deadline(deadline)?;
+    within_deadline(deadline, barrier).await?;
+    let first = within_deadline(deadline, source.isolation_snapshot(deadline)).await?;
+    if &first.scope != source.scope() {
+        return Err(invalid_inventory("service-cgroup isolation scope changed"));
+    }
+    let second = within_deadline(deadline, source.isolation_snapshot(deadline)).await?;
+    if &second.scope != source.scope() || first != second {
+        return Err(FdStoreError::UnstableInventory);
+    }
+    ensure_deadline(deadline)?;
+    Ok(StableServiceCgroupIsolation { snapshot: first })
 }
 
 /// Dormant exact named-removal adapter. No production server, engine, or request-path caller
@@ -2381,6 +2685,208 @@ mod tests {
         }
     }
 
+    struct FakeIsolationSource {
+        scope: DescriptorStoreScope,
+        snapshots: Mutex<VecDeque<Result<ServiceCgroupIsolationSnapshot, FdStoreError>>>,
+        required_barrier: Option<Arc<AtomicBool>>,
+    }
+
+    impl ServiceCgroupIsolationSource for FakeIsolationSource {
+        fn scope(&self) -> &DescriptorStoreScope {
+            &self.scope
+        }
+
+        fn isolation_snapshot(
+            &self,
+            deadline: HardDeadline,
+        ) -> impl Future<Output = Result<ServiceCgroupIsolationSnapshot, FdStoreError>> + Send
+        {
+            let result = ensure_deadline(deadline).and_then(|()| {
+                if self
+                    .required_barrier
+                    .as_ref()
+                    .is_some_and(|barrier| !barrier.load(Ordering::SeqCst))
+                {
+                    return Err(invalid_inventory(
+                        "isolation snapshot preceded manager barrier",
+                    ));
+                }
+                self.snapshots
+                    .lock()
+                    .map_err(|_| invalid_inventory("fake isolation lock is poisoned"))?
+                    .pop_front()
+                    .ok_or_else(|| invalid_inventory("fake isolation source is exhausted"))?
+            });
+            std::future::ready(result)
+        }
+    }
+
+    fn exact_raw_isolation(
+        main_pid: u32,
+        control_group_id: u64,
+    ) -> RawServiceCgroupIsolationSnapshot {
+        RawServiceCgroupIsolationSnapshot {
+            invocation_id: vec![0x5a; SYSTEMD_INVOCATION_ID_BYTES],
+            main_pid,
+            control_pid: 0,
+            control_group: "/volparossa-test.service".to_owned(),
+            control_group_id,
+            delegate: false,
+            delegate_controllers: Vec::new(),
+            delegate_subgroup: String::new(),
+            protect_control_groups: true,
+            protect_control_groups_ex: "strict".to_owned(),
+            private_pids: "no".to_owned(),
+            kill_mode: "control-group".to_owned(),
+            send_sigkill: true,
+        }
+    }
+
+    fn isolation_snapshot(main_pid: u32, control_group_id: u64) -> ServiceCgroupIsolationSnapshot {
+        ServiceCgroupIsolationSnapshot::from_raw(
+            fake_scope(main_pid),
+            exact_raw_isolation(main_pid, control_group_id),
+        )
+        .expect("exact fake isolation snapshot")
+    }
+
+    #[test]
+    fn service_cgroup_isolation_rejects_every_non_exact_contract_field() {
+        let pid = std::process::id();
+        let scope = fake_scope(pid);
+        let exact = exact_raw_isolation(pid, 73);
+        ServiceCgroupIsolationSnapshot::from_raw(scope.clone(), exact.clone())
+            .expect("exact strict isolation contract");
+
+        let mut invalid = Vec::new();
+        let mut value = exact.clone();
+        value.invocation_id = vec![0; SYSTEMD_INVOCATION_ID_BYTES];
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.invocation_id.pop();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.main_pid = pid.checked_add(1).unwrap_or(pid - 1);
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.control_pid = 1;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.control_group = "/".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.control_group_id = 0;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.delegate = true;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.delegate_controllers.push("memory".to_owned());
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.delegate_subgroup = "worker".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.protect_control_groups = false;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.protect_control_groups_ex = "yes".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.private_pids = "yes".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.kill_mode = "mixed".to_owned();
+        invalid.push(value);
+        let mut value = exact;
+        value.send_sigkill = false;
+        invalid.push(value);
+
+        for malformed in invalid {
+            assert!(ServiceCgroupIsolationSnapshot::from_raw(scope.clone(), malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn service_control_group_path_is_canonical_and_bounded() {
+        for malformed in [
+            "",
+            "/",
+            "relative.service",
+            "/trailing/",
+            "/double//component",
+            "/./component",
+            "/../component",
+            "/deleted (deleted)",
+            "/control\u{7f}",
+        ] {
+            assert!(validate_control_group(malformed).is_err(), "{malformed:?}");
+        }
+        assert!(validate_control_group("/system.slice/volparossa-helper.service").is_ok());
+        let oversized = format!("/{}", "a".repeat(MAX_CONTROL_GROUP_COMPONENT_BYTES + 1));
+        assert!(validate_control_group(&oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn isolation_observer_requires_barrier_stability_and_exact_kernel_binding() {
+        let pid = std::process::id();
+        let first = isolation_snapshot(pid, 73);
+        let barrier_seen = Arc::new(AtomicBool::new(false));
+        let source = FakeIsolationSource {
+            scope: fake_scope(pid),
+            snapshots: Mutex::new(VecDeque::from([Ok(first.clone()), Ok(first.clone())])),
+            required_barrier: Some(Arc::clone(&barrier_seen)),
+        };
+        let observed_barrier = Arc::clone(&barrier_seen);
+        let evidence = observe_stable_service_cgroup_isolation(
+            &source,
+            async move {
+                observed_barrier.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            HardDeadline::after(Duration::from_secs(2)).expect("isolation deadline"),
+        )
+        .await
+        .expect("stable strict isolation evidence");
+        let inventory = stable_inventory(snapshot(pid, Vec::new()), fake_notify_address());
+        evidence
+            .verify_exact_scope_and_kernel_id(
+                &inventory,
+                NonZeroU32::new(pid).expect("nonzero current PID"),
+                NonZeroU64::new(73).expect("nonzero cgroup ID"),
+            )
+            .expect("exact service scope and kernel cgroup ID");
+        assert!(
+            evidence
+                .verify_exact_scope_and_kernel_id(
+                    &inventory,
+                    NonZeroU32::new(pid).expect("nonzero current PID"),
+                    NonZeroU64::new(74).expect("nonzero wrong cgroup ID"),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            format!("{evidence:?}"),
+            "StableServiceCgroupIsolation(<redacted>)"
+        );
+
+        let changed = isolation_snapshot(pid, 74);
+        let unstable = FakeIsolationSource {
+            scope: fake_scope(pid),
+            snapshots: Mutex::new(VecDeque::from([Ok(first), Ok(changed)])),
+            required_barrier: None,
+        };
+        assert!(matches!(
+            observe_stable_service_cgroup_isolation(
+                &unstable,
+                std::future::ready(Ok(())),
+                HardDeadline::after(Duration::from_secs(2)).expect("drift deadline"),
+            )
+            .await,
+            Err(FdStoreError::UnstableInventory)
+        ));
+    }
+
     fn custody_name(seed: u8) -> CustodyFdName {
         CustodyFdName::parse(&format!(
             "{}{}",
@@ -2474,6 +2980,7 @@ mod tests {
 
     fn fake_scope(pid: u32) -> DescriptorStoreScope {
         DescriptorStoreScope::new(
+            OwnedUniqueName::try_from(":1.4242").expect("valid fake manager owner"),
             OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/volparossa_2dtest_2eservice")
                 .expect("valid fake service object path"),
             pid,
