@@ -132,9 +132,21 @@ single clean-build A01--A15 run; the score is not a release claim.
   not-found result is failure. An interrupt window is covered by an atomically installed per-stage
   SHA-256 `Description` marker: tentative ownership can become mutable only after bounded read-only
   proof of the exact marker and a nonzero current ID. Remaining ambiguity causes zero unit mutation
-  and requires discarding the disposable VM. It has not yet run
-  in the required disposable Debian 13 VM,
-  validates neither a staged package nor the production server lifecycle, and closes no checkbox.
+  and requires discarding the disposable VM. After that first unit is collected, the same driver
+  now requires its cgroup to be absent before reusing the random unit name with a different marker
+  and `InvocationID` for the true argumentless production server. A fixed, read-only probe then
+  proves two same-process runtime binds, bounded frame and canonical-wire rejection, and independent
+  wrong-UID, wrong-primary-GID and root-peer rejection after each peer has passed Unix DAC. Every
+  probe pins the server's `SO_PEERCRED` PID/GID to the exact unit `MainPID`/agent GID and brackets one
+  socket inode. PID 1 enforces a three-minute maximum lifetime and 1 MiB file-size limit while unit
+  stdout/stderr go to `null`. Normal `SIGTERM` retirement must leave the journal byte-for-byte and
+  metadata-identical, release the same captured lock inode that was proven exclusively held while
+  the helper ran, remove the socket, empty the descriptor store and remove the exact old process and
+  cgroup. Both phases use a private runtime bind and
+  require host `/run/volparossa` to remain absent. The expanded driver and its local contracts pass,
+  but it has not yet run in the required disposable Debian 13 VM, validates no installed package or
+  shipped-unit restart behavior, and closes no checkbox or scorecard row until durable live evidence
+  exists.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

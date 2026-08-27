@@ -45,12 +45,12 @@ the complete Debian 13 namespace suite before release. `ProtectKernelTunables=no
 documented exception needed for namespace-local MPTCP sysctls; the typed helper must prove it never
 writes host sysctls. Do not weaken the other sandbox settings merely to hide an implementation bug.
 
-The repository now has a component-only live worker-identity driver. Preview is always safe and
-non-writing. Build the helper as the workspace user, then run the explicit gate only as root inside
-a disposable Debian 13 amd64 VM:
+The repository now has a sequential live worker-identity and production-IPC driver. Preview is
+always safe and non-writing. Build the helper and its fixed probe as the workspace user, then run
+the explicit gate only as root inside a disposable Debian 13 amd64 VM:
 
 ```sh
-cargo build --locked -p volparossa-helper
+just build-helper-live-worker-identity-proof
 ./tests/helper/require-live-worker-identity-proof.sh --preview
 sudo ./tests/helper/require-live-worker-identity-proof.sh --execute --yes
 ```
@@ -60,8 +60,14 @@ The gate requires exact systemd v257 and uses synthetic read-only account overla
 validate an installed package. The canonical system bus socket is bound read-only into that private
 `/run`, and `DBUS_SYSTEM_BUS_ADDRESS` is pinned to that verified path. The unit retains
 `NotifyAccess=main`, `FileDescriptorStoreMax=128` and
-`FileDescriptorStorePreserve=yes`; success requires the two exact ordered helper records and an
-external post-exit `NFileDescriptorStore=2`. The helper also requires the transient parent to expose
+`FileDescriptorStorePreserve=yes`; its first phase requires the two exact ordered helper records and
+an external post-exit `NFileDescriptorStore=2`. After exact collection, a separately marked second
+invocation runs the true argumentless helper and fixed probe. It requires stable authenticated
+runtime binding to the exact `MainPID`, primary GID and socket inode, fail-closed frame/wire
+handling, independent UID/GID/root denial past socket DAC, a PID-1 three-minute lifetime cap, a
+1 MiB file-write limit, unit stdout/stderr routed to `null`, an exact lock inode exclusively held
+while the helper runs and released after normal `SIGTERM`, an unchanged journal, no socket, no stored
+descriptors, and no old cgroup or process. The helper also requires the transient parent to expose
 exactly the staged agent GID as its sole kernel supplementary group, so any additional group
 inherited for host root fails closed. Retirement stops only the exact random transient unit, cleans
 only its `fdstore`, binds every mutation to that run's nonzero systemd v257 `InvocationID`, accepts
@@ -69,8 +75,8 @@ only a zero count or not-found unit, and resets/collects with bounded waiting. F
 reset inactive before cleaning. Its one-shot, numeric-group, account-overlay,
 private-network/private-`/run`, bounded-output
 and no-restart deviations from the shipped helper unit are enumerated in `docs/HELPER_V3.md`. No
-required disposable-VM result has been recorded yet, so this is a driver rather than package,
-production-service, restart-recovery, datapath, A14 or A15 evidence.
+required disposable-VM result has been recorded yet, so this remains a reviewed driver rather than
+earned package, shipped-service, restart-recovery, datapath, A14 or A15 evidence.
 
 The start request atomically carries a per-stage SHA-256 `Description` ownership marker. Bounded
 unit retirement normally begins after `systemd-run` returns the exact requested name plus a nonzero

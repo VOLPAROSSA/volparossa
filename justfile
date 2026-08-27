@@ -61,8 +61,20 @@ test-helper-live-worker-identity-contract:
 test-helper-live-worker-identity-preview:
     ./tests/helper/require-live-worker-identity-proof.sh --preview
 
-# Build this target as the workspace user first; execute the recipe itself as
-# root only inside a disposable Debian 13 amd64 VM.
+build-helper-live-worker-identity-proof:
+    cargo build --locked -p volparossa-helper
+    cargo build --locked -p volparossa-helper \
+        --example volparossa-helper-production-ipc-probe
+    install -m 0755 target/debug/volparossa-helper \
+        target/debug/volparossa-helper.detached
+    mv -f target/debug/volparossa-helper.detached target/debug/volparossa-helper
+    install -m 0755 target/debug/examples/volparossa-helper-production-ipc-probe \
+        target/debug/examples/volparossa-helper-production-ipc-probe.detached
+    mv -f target/debug/examples/volparossa-helper-production-ipc-probe.detached \
+        target/debug/examples/volparossa-helper-production-ipc-probe
+
+# Run build-helper-live-worker-identity-proof as the workspace user first;
+# execute this recipe itself as root only inside a disposable Debian 13 amd64 VM.
 test-helper-live-worker-identity-proof:
     ./tests/helper/require-live-worker-identity-proof.sh --execute --yes
 

@@ -422,12 +422,13 @@ the launcher remains disconnected from the engine, and the complete account tran
 pre-filter task state, path access denials and parent-signal denial still require a disposable
 Debian 13 live-root acceptance run.
 
-### Component-only live worker proof driver
+### Sequential live worker and production IPC proof driver
 
 `tests/helper/require-live-worker-identity-proof.sh` now provides a preview-first, execute-gated
-driver for one real `--internal-worker-v3-live-proof` invocation. Execution is restricted to root
-inside a recognised disposable Debian 13 amd64 VM with the exact systemd v257 manager. It copies the
-already-built helper into a root-only stage, creates collision-free synthetic service identities,
+driver for one real `--internal-worker-v3-live-proof` invocation followed by one true no-argument
+production-helper invocation. Execution is restricted to root inside a recognised disposable
+Debian 13 amd64 VM with the exact systemd v257 manager. It copies the already-built helper and fixed
+production IPC probe into a root-only stage, creates collision-free synthetic service identities,
 binds the staged passwd, group, shadow and nsswitch files read-only, and grants the helper parent
 exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes`,
 `NotifyAccess=main`, `FileDescriptorStoreMax=128`, `FileDescriptorStorePreserve=yes`, and a private
@@ -435,9 +436,9 @@ temporary `/run`. Only the canonical root-owned system bus socket is bound read-
 private `/run`, and the unit pins `DBUS_SYSTEM_BUS_ADDRESS` to that verified path, so the
 live-proof-only adapter cannot follow a manager-provided alternate address for its uncached systemd
 inventory reads.
-Success requires the two exact ordered helper records, an externally observed post-exit
-`NFileDescriptorStore=2`, confirmed worker reap and pin release. Before and after the unit, the
-driver compares privacy-safe digests of account files,
+The first phase succeeds only with the two exact ordered helper records, an externally observed
+post-exit `NFileDescriptorStore=2`, confirmed worker reap and pin release. Before the first phase
+and after the fully retired second phase, the driver compares privacy-safe digests of account files,
 mounts, resolver configuration, sysctls, links, addresses, routes, rules, nexthops, qdiscs,
 nftables, optional legacy iptables/ip6tables state and optional WireGuard state. A WireGuard dump
 is streamed through a validated private FIFO into a separately checked SHA-256 consumer and is
@@ -448,8 +449,29 @@ absence markers. Resolver capture accepts either a regular Debian resolver file 
 resolved regular target remains below `/etc` or `/run`; repeated object, target, metadata and digest
 observations reject unsafe ownership, writable path components, target replacement and other drift.
 
-The transient proof unit intentionally differs from the shipped production unit in every following
-respect:
+Only after the first transient unit is `not-found` and its exact cgroup is absent may the driver
+reuse that random unit name. The second invocation gets a separately derived ownership marker and a
+different nonzero `InvocationID`, runs the exact staged helper with no argument, and binds private
+runtime and proof directories into its private `/run`. A fixed probe performs two successful
+same-process tag-35 runtime queries around all negative cases. Separate connections prove zero and
+oversized frame rejection, retired/unknown/version/noncanonical wire rejection, wrong UID with the
+right socket group, right UID with the wrong primary GID but the right supplementary socket group,
+and root UID rejection. Every negative credential case therefore passes filesystem DAC before the
+server applies exact `SO_PEERCRED` policy. The probe additionally requires the server peer PID and
+primary GID to equal the unit's exact `MainPID` and staged agent GID, while the hook brackets one
+socket inode. The hook publishes seven distinct fixed proof records only after all probe output and
+the unchanged `MainPID`, executable inode and `InvocationID` have been checked. PID 1 bounds the
+second unit to three minutes even if the runner disappears, and a 1 MiB hard/soft `RLIMIT_FSIZE`
+bounds every proof/runtime-file write. Unit stdout and stderr are attested as `null`, so structured
+helper rejection logs cannot grow host files. The start hook proves that the same captured lock inode
+is exclusively contended while the exact helper process runs. Normal `SIGTERM` must produce exit
+status zero, remove the socket, preserve the initially absent-or-exact ownership journal, prove that
+inode is then unlocked, keep the descriptor store empty, and leave no old process or cgroup.
+Host `/run/volparossa` must be absent at both host-state fences; the private runtime bind never
+targets the host path.
+
+The first transient proof unit intentionally differs from the shipped production unit in every
+following respect:
 
 - it is a collected `Type=oneshot` with `RemainAfterExit=yes`, a 45-second activation bound, no restart,
   and the private proof selector instead of the production no-argument server;
@@ -482,9 +504,10 @@ one-shot is reset to inactive before its descriptor store is cleaned. Retirement
 unit's `fdstore`, requires either
 `NFileDescriptorStore=0` or `LoadState=not-found`, resets it when still present and waits boundedly
 for collection; any ambiguous observation fails the gate. The driver has not yet produced evidence
-from the required disposable VM, and it does not validate an installed/staged package, production
-systemd service lifecycle, inherited-descriptor restart adoption or recovery. It is therefore not
-live-root, package, production, datapath, A14 or A15 acceptance evidence.
+from the required disposable VM. Its second phase exercises the production server entry point, but
+not an installed package, the shipped unit file, restart policy, or inherited-descriptor
+adoption/recovery. Until a successful run is durably tied to the same clean commit, it is a reviewed
+driver rather than earned live-root, package, datapath, A14 or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
