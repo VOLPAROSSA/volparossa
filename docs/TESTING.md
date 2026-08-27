@@ -137,8 +137,9 @@ Every candidate retained file is also rejected if it contains a PEM/OpenSSH priv
 The standard GitHub-hosted runner is disposable and is not promised to expose nested KVM. On that
 ephemeral CI host only, the workflow uses `sudo` to install the fixed Ubuntu packages and add an
 exact `rw-` named-user ACL on `/dev/kvm`. It snapshots the device identity and complete ACL first,
-restores the exact ACL in an unconditional cleanup step before artifact upload, and makes
-restoration part of the PASS gate.
+then rechecks that identity and reapplies the same bounded ACL inside the exact VM run step because
+hosted runner step boundaries need not preserve device-ACL visibility. It restores the original ACL
+in an unconditional cleanup step before artifact upload and makes restoration part of the PASS gate.
 The repository runner itself refuses host root and never invokes host `sudo`. It performs a KVM-only
 launch preflight and fails closed when hardware acceleration is unavailable; it never falls back to
 TCG. Such an infrastructure failure is not negative helper-boundary evidence. Equally, a completed
