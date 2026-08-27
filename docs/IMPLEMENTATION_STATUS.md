@@ -169,15 +169,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   wrapper has explicit composition and ordering tests. Production opens and locks the actor after
   fixed runtime identity/directory validation but before cleanup-token publication, stale-socket
   removal or listener bind; shutdown cleans the engine and then proves actor quiescence and joins it
-  before releasing the socket. Its insert, prepare-arm, never-dispatched retirement, and
-  confirmed-recovery transitions
-  are exact-current-revision retry-safe after lost replies; persisted typed `Absent` origins prevent
-  cross-operation acknowledgement and repeated recovery execution. Intervening transitions and
-  conflicting identity, plan, expiry, generation, anchor, or reconciliation state fail closed
-  without journal mutation. A private single-writer actor owns the store and recovery
-  executor on one named thread, opens and retains one verified parent-directory descriptor, and
+  before releasing the socket. Its insert, custody-mark, custody-bound prepare-arm,
+  never-dispatched retirement, and confirmed-recovery transitions are exact-current-revision
+  retry-safe after lost replies; persisted typed `Absent` origins prevent cross-operation
+  acknowledgement and repeated recovery execution. Intervening transitions and
+  conflicting identity, plan, expiry, generation, anchor, descriptor identity, or reconciliation
+  state fail closed without journal mutation. The new `MayOwnCustody -> MayOwnPrepare` transition
+  copies only the exact already-persisted custody evidence byte-for-byte. A private single-writer
+  actor owns the store and recovery executor on one named thread, opens and retains one verified
+  parent-directory descriptor, and
   trips a process-global one-shot start latch before lock creation. The latch remains set after
-  startup failure or clean shutdown. The startup sweep resolves every observed uncertain record
+  startup failure or clean shutdown. Before retiring even one `Intent`, startup refuses a snapshot
+  containing `MayOwnCustody`; otherwise the startup sweep resolves every observed uncertain record
   before reporting ready, and admission is bounded to four operations plus shutdown. The installed
   production executor deliberately refuses `MayOwnPrepare`, leaving it byte-identical and blocking
   Ready; independently, the actor may durably settle only never-dispatched `Intent` records.
@@ -196,10 +199,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   requires every record to be durably `Absent`; it refuses rather than retires or recovers an
   outstanding record. Each validated wire intent locally receives a fresh random 256-bit
   `OwnershipId` inside a non-`Clone` registration owner. Registration consumes it into one durable
-  key, arming consumes that key into a `MayOwnPrepare` token with only borrowed owner-bound
-  resources, and every error retains the exact affine owner which still exists. Raw codec,
-  issuance, arming and recovery authority remain private; no production request-path
-  issuance/arming writer, inventory-attested pidfd/network-namespace publication, absence-proving
+  key. Custody marking consumes that key into `MayOwnCustody` only after persisting the complete
+  worker anchor and exact role-ordered pidfd/network-namespace identities; arming consumes only that
+  phase-4 token into `MayOwnPrepare` with borrowed owner-bound resources. Every error retains the
+  exact affine owner which still exists. Raw codec, issuance, custody marking, arming and recovery
+  authority remain private; no production request-path issuance/arming writer, inventory-attested
+  pidfd/network-namespace publication, absence-proving
   `MayOwnPrepare` recovery executor, restart reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live-root production lifecycle proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
@@ -264,13 +269,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   generation, authenticates one anonymous-`NEWNET` child as an exact passive `Starting` worker, and
   atomically installs a `DurableHandoffPending` dispatch fence at registration. Normal planning
   rejects that generation before channel, in-flight, cache, tombstone, or phase mutation. The seam
-  revalidates the complete recovery anchor, derives one domain-separated deterministic custody name
-  from the exact durable journal epoch/context/ownership/generation, and returns an affine
-  publication owner carrying the original absolute deadline, journal key, registered worker,
-  recovery pins, pidfd and network-namespace FD. It does not publish or arm. A separate synchronous
-  dormant transition fences that same deadline before and after exact role-ordered name/descriptor
-  attestation, revalidates the complete worker recovery identity once more, and only then consumes
-  the journal key into `MayOwnPrepare`. Success and every failure retain all authority and inventory
+  revalidates the complete recovery anchor, obtains exact role-ordered pidfd/network-namespace
+  identities through the same measurement path as descriptor-store publication, fences the
+  deadline again, and durably advances `Intent -> MayOwnCustody`. Only that affine phase-4 token may
+  derive one domain-separated deterministic custody name and create a publication owner carrying
+  the original absolute deadline, registered worker, recovery pins, pidfd and network-namespace FD.
+  It does not publish. A separate synchronous dormant transition fences that same deadline before
+  and after exact role-ordered name/descriptor attestation, revalidates the complete worker recovery
+  identity once more, checks the worker/token context before mutation, and only then advances
+  `MayOwnCustody -> MayOwnPrepare`. Success and every failure retain all authority and inventory
   evidence which exists at that point. The fence remains closed after arming because this slice has
   no authority-consuming transition that opens child dispatch. It
   dispatches no child operation, sends zero protocol-request bytes, and performs no WireGuard
@@ -278,11 +285,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   deliberately isolated process and anonymous `NEWNET`, without altering host-network state. This
   seam remains private and dormant with no server or engine caller. The production journal actor
   owns startup/shutdown and may settle only never-dispatched `Intent`. Production publication is
-  deliberately still disconnected: the first descriptor send would otherwise precede durable
-  `MayOwnPrepare`, while startup currently retires `Intent` as never dispatched. A future
+  deliberately still disconnected. Startup now blocks on `MayOwnCustody` before retiring any
+  `Intent`, preserving possible manager ownership without claiming adoption. A future
   non-cancellable custody supervisor must own the affine token before its first poll, retain both
-  adapter failure classes as unresolved, durably reconcile inherited descriptors before the startup
-  sweep, and store its terminal owner outcome before notifying a caller. No request-path
+  adapter failure classes as unresolved, reconcile inherited descriptors before startup can
+  progress, and store its terminal owner outcome before notifying a caller. No request-path
   issuance/arming writer, `MayOwnPrepare` reaper, or cancellation-safe production settlement guard
   exists. No scorecard, datapath, or acceptance checkbox closes.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
