@@ -15,9 +15,10 @@ mod actor;
 // before their production composition is installed.
 #[allow(unused_imports)]
 pub(crate) use actor::{
-    DurableArmOutcome, DurableCustodyNameDigest, DurableIntentRegistration, DurableMayOwnPrepare,
-    DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor,
-    DurablePrepareAnchorParts, DurableRegistrationOutcome,
+    DurableArmOutcome, DurableCustodyNameDigest, DurableCustodyOutcome, DurableIntentRegistration,
+    DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor, DurableOwnershipError,
+    DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
+    DurableRegistrationOutcome,
 };
 
 use crate::{deadline::HardDeadline, lease_spec::WireguardLeaseSpec};
@@ -70,6 +71,26 @@ pub(crate) fn spawn_test_durable_ownership_actor_until(
         || ExactTestRecoveryExecutor,
         deadline,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn journal_bytes_have_exact_custody_phase_for_test(
+    bytes: &[u8],
+    context_id: [u8; 16],
+) -> bool {
+    let Ok(context_id) = Id16::new(context_id) else {
+        return false;
+    };
+    JournalSnapshot::decode(bytes).is_ok_and(|snapshot| {
+        snapshot.records.values().any(|record| {
+            record.context_id == context_id
+                && record.phase == OwnershipPhase::MayOwnCustody
+                && matches!(
+                    record.recovery_evidence,
+                    Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+                )
+        })
+    })
 }
 
 #[cfg(test)]
@@ -439,6 +460,7 @@ enum OwnershipPhase {
     Intent = 1,
     MayOwnPrepare = 2,
     Absent = 3,
+    MayOwnCustody = 4,
 }
 
 impl TryFrom<u8> for OwnershipPhase {
@@ -449,6 +471,7 @@ impl TryFrom<u8> for OwnershipPhase {
             1 => Ok(Self::Intent),
             2 => Ok(Self::MayOwnPrepare),
             3 => Ok(Self::Absent),
+            4 => Ok(Self::MayOwnCustody),
             _ => Err(JournalError::InvalidRecord),
         }
     }
@@ -503,6 +526,207 @@ impl fmt::Debug for PrepareRecoveryAnchorV1 {
     }
 }
 
+const CUSTODY_DESCRIPTOR_IDENTITY_BYTES: usize = 32;
+const CUSTODY_DESCRIPTOR_BINDING_BYTES: usize = CUSTODY_DESCRIPTOR_IDENTITY_BYTES * 2;
+
+/// One fixed descriptor identity persisted only as restart correlation evidence.
+///
+/// Kernel role classification remains the responsibility of the descriptor-custody boundary. The
+/// journal stores the already classified role-ordered identities and never treats these fields as
+/// descriptor or cleanup authority.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct CustodyDescriptorIdentityV1 {
+    mode: NonZeroU32,
+    device_major: u32,
+    device_minor: u32,
+    inode: NonZeroU64,
+    special_device_major: u32,
+    special_device_minor: u32,
+    status_flags: u32,
+}
+
+impl CustodyDescriptorIdentityV1 {
+    fn new(
+        mode: NonZeroU32,
+        device_major: u32,
+        device_minor: u32,
+        inode: NonZeroU64,
+        special_device_major: u32,
+        special_device_minor: u32,
+        status_flags: u32,
+    ) -> Result<Self, JournalError> {
+        if status_flags & OFlags::LARGEFILE.bits() != 0 {
+            return Err(JournalError::InvalidRecord);
+        }
+        Ok(Self {
+            mode,
+            device_major,
+            device_minor,
+            inode,
+            special_device_major,
+            special_device_minor,
+            status_flags,
+        })
+    }
+
+    fn is_same_kernel_object(self, other: Self) -> bool {
+        self.mode == other.mode
+            && self.device_major == other.device_major
+            && self.device_minor == other.device_minor
+            && self.inode == other.inode
+            && self.special_device_major == other.special_device_major
+            && self.special_device_minor == other.special_device_minor
+    }
+}
+
+impl fmt::Debug for CustodyDescriptorIdentityV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CustodyDescriptorIdentityV1(<redacted>)")
+    }
+}
+
+/// Exact pidfd-then-network-namespace descriptor identity binding.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct CustodyDescriptorBindingV1 {
+    pidfd: CustodyDescriptorIdentityV1,
+    network_namespace: CustodyDescriptorIdentityV1,
+}
+
+impl CustodyDescriptorBindingV1 {
+    fn new(
+        pidfd: CustodyDescriptorIdentityV1,
+        network_namespace: CustodyDescriptorIdentityV1,
+    ) -> Result<Self, JournalError> {
+        if pidfd.is_same_kernel_object(network_namespace) {
+            return Err(JournalError::InvalidRecord);
+        }
+        Ok(Self {
+            pidfd,
+            network_namespace,
+        })
+    }
+
+    fn validate_against_anchor(self, anchor: PrepareRecoveryAnchorV1) -> Result<(), JournalError> {
+        let network_namespace_device = rustix::fs::makedev(
+            self.network_namespace.device_major,
+            self.network_namespace.device_minor,
+        );
+        if network_namespace_device != anchor.network_namespace_device.get()
+            || self.network_namespace.inode != anchor.network_namespace_inode
+        {
+            return Err(JournalError::InvalidRecord);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for CustodyDescriptorBindingV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CustodyDescriptorBindingV1(<redacted>)")
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PrepareRecoveryEvidenceV1 {
+    LegacyAnchor(PrepareRecoveryAnchorV1),
+    CustodyBound {
+        anchor: PrepareRecoveryAnchorV1,
+        binding: CustodyDescriptorBindingV1,
+    },
+}
+
+impl PrepareRecoveryEvidenceV1 {
+    fn custody_bound(
+        anchor: PrepareRecoveryAnchorV1,
+        binding: CustodyDescriptorBindingV1,
+    ) -> Result<Self, JournalError> {
+        binding.validate_against_anchor(anchor)?;
+        Ok(Self::CustodyBound { anchor, binding })
+    }
+
+    fn is_custody_bound(self) -> bool {
+        matches!(self, Self::CustodyBound { .. })
+    }
+
+    fn validate(self) -> Result<(), JournalError> {
+        match self {
+            Self::LegacyAnchor(_) => Ok(()),
+            Self::CustodyBound { anchor, binding } => binding.validate_against_anchor(anchor),
+        }
+    }
+}
+
+impl fmt::Debug for PrepareRecoveryEvidenceV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PrepareRecoveryEvidenceV1(<redacted>)")
+    }
+}
+
+/// Fixed-width descriptor-stat input for one already kernel-classified custody role.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DurableCustodyDescriptorIdentityParts {
+    pub(crate) mode: NonZeroU32,
+    pub(crate) device_major: u32,
+    pub(crate) device_minor: u32,
+    pub(crate) inode: NonZeroU64,
+    pub(crate) special_device_major: u32,
+    pub(crate) special_device_minor: u32,
+    pub(crate) status_flags: u32,
+}
+
+impl fmt::Debug for DurableCustodyDescriptorIdentityParts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableCustodyDescriptorIdentityParts(<redacted>)")
+    }
+}
+
+/// Opaque durable form of one descriptor identity.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DurableCustodyDescriptorIdentity(CustodyDescriptorIdentityV1);
+
+impl DurableCustodyDescriptorIdentity {
+    pub(crate) fn try_from_parts(parts: DurableCustodyDescriptorIdentityParts) -> Option<Self> {
+        CustodyDescriptorIdentityV1::new(
+            parts.mode,
+            parts.device_major,
+            parts.device_minor,
+            parts.inode,
+            parts.special_device_major,
+            parts.special_device_minor,
+            parts.status_flags,
+        )
+        .ok()
+        .map(Self)
+    }
+}
+
+impl fmt::Debug for DurableCustodyDescriptorIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableCustodyDescriptorIdentity(<redacted>)")
+    }
+}
+
+/// Opaque role-ordered pidfd-then-network-namespace journal correlation binding.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DurableCustodyDescriptorBinding(CustodyDescriptorBindingV1);
+
+impl DurableCustodyDescriptorBinding {
+    pub(crate) fn try_from_role_ordered(
+        pidfd: DurableCustodyDescriptorIdentity,
+        network_namespace: DurableCustodyDescriptorIdentity,
+    ) -> Option<Self> {
+        CustodyDescriptorBindingV1::new(pidfd.0, network_namespace.0)
+            .ok()
+            .map(Self)
+    }
+}
+
+impl fmt::Debug for DurableCustodyDescriptorBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableCustodyDescriptorBinding(<redacted>)")
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 struct OwnershipRecord {
     journal_epoch_id: JournalEpochId,
@@ -518,14 +742,19 @@ struct OwnershipRecord {
     phase: OwnershipPhase,
     absent_origin: Option<AbsentOrigin>,
     reconcile: Option<ReconcileBinding>,
-    recovery_anchor: Option<PrepareRecoveryAnchorV1>,
+    recovery_evidence: Option<PrepareRecoveryEvidenceV1>,
 }
 
 impl OwnershipRecord {
     fn validate(&self) -> Result<(), JournalError> {
         let phase_evidence_is_valid = matches!(
-            (self.phase, self.absent_origin, self.recovery_anchor),
+            (self.phase, self.absent_origin, self.recovery_evidence),
             (OwnershipPhase::Intent, None, None)
+                | (
+                    OwnershipPhase::MayOwnCustody,
+                    None,
+                    Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+                )
                 | (OwnershipPhase::MayOwnPrepare, None, Some(_))
                 | (
                     OwnershipPhase::Absent,
@@ -535,6 +764,9 @@ impl OwnershipRecord {
         );
         if self.hard_expires_at_unix < self.setup_expires_at_unix || !phase_evidence_is_valid {
             return Err(JournalError::InvalidRecord);
+        }
+        if let Some(evidence) = self.recovery_evidence {
+            evidence.validate()?;
         }
         let canonical = ClosedPlan::new(self.plan.context_role, self.plan.paths.clone())?;
         if canonical != self.plan {
@@ -604,16 +836,21 @@ impl OwnershipRecord {
     fn advance(
         &mut self,
         next: OwnershipPhase,
-        recovery_anchor: Option<PrepareRecoveryAnchorV1>,
+        recovery_evidence: Option<PrepareRecoveryEvidenceV1>,
         absent_origin: Option<AbsentOrigin>,
     ) -> Result<(), JournalError> {
         let transition_is_valid = matches!(
-            (self.phase, next, absent_origin, recovery_anchor),
+            (self.phase, next, absent_origin, recovery_evidence),
             (
                 OwnershipPhase::Intent,
+                OwnershipPhase::MayOwnCustody,
+                None,
+                Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+            ) | (
+                OwnershipPhase::MayOwnCustody,
                 OwnershipPhase::MayOwnPrepare,
                 None,
-                Some(_)
+                Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
             ) | (
                 OwnershipPhase::Intent,
                 OwnershipPhase::Absent,
@@ -626,13 +863,17 @@ impl OwnershipRecord {
                 None
             )
         );
-        if !transition_is_valid {
+        let custody_evidence_is_preserved = !matches!(
+            (self.phase, next),
+            (OwnershipPhase::MayOwnCustody, OwnershipPhase::MayOwnPrepare)
+        ) || self.recovery_evidence == recovery_evidence;
+        if !transition_is_valid || !custody_evidence_is_preserved {
             return Err(JournalError::InvalidTransition);
         }
         let mut candidate = self.clone();
         candidate.phase = next;
         candidate.absent_origin = absent_origin;
-        candidate.recovery_anchor = recovery_anchor;
+        candidate.recovery_evidence = recovery_evidence;
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -726,7 +967,7 @@ pub(crate) fn durable_wireguard_resource_for_test(
         phase: OwnershipPhase::Intent,
         absent_origin: None,
         reconcile: None,
-        recovery_anchor: None,
+        recovery_evidence: None,
     };
     record
         .durable_wireguard_resources()
@@ -752,7 +993,7 @@ impl fmt::Debug for OwnershipRecord {
             .field("phase", &self.phase)
             .field("absent_origin", &self.absent_origin)
             .field("reconcile", &self.reconcile)
-            .field("recovery_anchor", &self.recovery_anchor)
+            .field("recovery_evidence", &self.recovery_evidence)
             .finish()
     }
 }
@@ -963,20 +1204,50 @@ fn encode_record(encoded: &mut Vec<u8>, record: &OwnershipRecord) {
             encoded.extend_from_slice(&binding.operation_digest);
         }
     }
-    match record.recovery_anchor {
+    match record.recovery_evidence {
         None => encoded.push(0),
-        Some(anchor) => {
+        Some(PrepareRecoveryEvidenceV1::LegacyAnchor(anchor)) => {
             encoded.push(1);
-            encoded.extend_from_slice(&anchor.boot_id.0);
-            put_u32(encoded, anchor.pid.get());
-            put_u64(encoded, anchor.process_start_ticks.get());
-            put_u64(encoded, anchor.network_namespace_device.get());
-            put_u64(encoded, anchor.network_namespace_inode.get());
-            put_u64(encoded, anchor.executable_device.get());
-            put_u64(encoded, anchor.executable_inode.get());
-            put_u64(encoded, anchor.service_cgroup_inode.get());
+            encode_recovery_anchor(encoded, anchor);
+        }
+        Some(PrepareRecoveryEvidenceV1::CustodyBound { anchor, binding }) => {
+            encoded.push(2);
+            encode_recovery_anchor(encoded, anchor);
+            let binding_start = encoded.len();
+            encode_custody_descriptor_identity(encoded, binding.pidfd);
+            encode_custody_descriptor_identity(encoded, binding.network_namespace);
+            debug_assert_eq!(
+                encoded.len() - binding_start,
+                CUSTODY_DESCRIPTOR_BINDING_BYTES
+            );
         }
     }
+}
+
+fn encode_recovery_anchor(encoded: &mut Vec<u8>, anchor: PrepareRecoveryAnchorV1) {
+    encoded.extend_from_slice(&anchor.boot_id.0);
+    put_u32(encoded, anchor.pid.get());
+    put_u64(encoded, anchor.process_start_ticks.get());
+    put_u64(encoded, anchor.network_namespace_device.get());
+    put_u64(encoded, anchor.network_namespace_inode.get());
+    put_u64(encoded, anchor.executable_device.get());
+    put_u64(encoded, anchor.executable_inode.get());
+    put_u64(encoded, anchor.service_cgroup_inode.get());
+}
+
+fn encode_custody_descriptor_identity(
+    encoded: &mut Vec<u8>,
+    identity: CustodyDescriptorIdentityV1,
+) {
+    let start = encoded.len();
+    put_u32(encoded, identity.mode.get());
+    put_u32(encoded, identity.device_major);
+    put_u32(encoded, identity.device_minor);
+    put_u64(encoded, identity.inode.get());
+    put_u32(encoded, identity.special_device_major);
+    put_u32(encoded, identity.special_device_minor);
+    put_u32(encoded, identity.status_flags);
+    debug_assert_eq!(encoded.len() - start, CUSTODY_DESCRIPTOR_IDENTITY_BYTES);
 }
 
 fn decode_record(decoder: &mut Decoder<'_>) -> Result<OwnershipRecord, JournalError> {
@@ -1022,18 +1293,22 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<OwnershipRecord, JournalEr
         }),
         _ => return Err(JournalError::Corrupt),
     };
-    let recovery_anchor = match decoder.u8()? {
+    let recovery_evidence = match decoder.u8()? {
         0 => None,
-        1 => Some(PrepareRecoveryAnchorV1 {
-            boot_id: Id16::new(decoder.take::<16>()?).map_err(|_| JournalError::Corrupt)?,
-            pid: nonzero_u32(decoder.u32()?)?,
-            process_start_ticks: nonzero(decoder.u64()?)?,
-            network_namespace_device: nonzero(decoder.u64()?)?,
-            network_namespace_inode: nonzero(decoder.u64()?)?,
-            executable_device: nonzero(decoder.u64()?)?,
-            executable_inode: nonzero(decoder.u64()?)?,
-            service_cgroup_inode: nonzero(decoder.u64()?)?,
-        }),
+        1 => Some(PrepareRecoveryEvidenceV1::LegacyAnchor(
+            decode_recovery_anchor(decoder)?,
+        )),
+        2 => {
+            let anchor = decode_recovery_anchor(decoder)?;
+            let pidfd = decode_custody_descriptor_identity(decoder)?;
+            let network_namespace = decode_custody_descriptor_identity(decoder)?;
+            let binding = CustodyDescriptorBindingV1::new(pidfd, network_namespace)
+                .map_err(|_| JournalError::Corrupt)?;
+            Some(
+                PrepareRecoveryEvidenceV1::custody_bound(anchor, binding)
+                    .map_err(|_| JournalError::Corrupt)?,
+            )
+        }
         _ => return Err(JournalError::Corrupt),
     };
     let record = OwnershipRecord {
@@ -1050,10 +1325,40 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<OwnershipRecord, JournalEr
         phase,
         absent_origin,
         reconcile,
-        recovery_anchor,
+        recovery_evidence,
     };
     record.validate().map_err(|_| JournalError::Corrupt)?;
     Ok(record)
+}
+
+fn decode_recovery_anchor(
+    decoder: &mut Decoder<'_>,
+) -> Result<PrepareRecoveryAnchorV1, JournalError> {
+    Ok(PrepareRecoveryAnchorV1 {
+        boot_id: Id16::new(decoder.take::<16>()?).map_err(|_| JournalError::Corrupt)?,
+        pid: nonzero_u32(decoder.u32()?)?,
+        process_start_ticks: nonzero(decoder.u64()?)?,
+        network_namespace_device: nonzero(decoder.u64()?)?,
+        network_namespace_inode: nonzero(decoder.u64()?)?,
+        executable_device: nonzero(decoder.u64()?)?,
+        executable_inode: nonzero(decoder.u64()?)?,
+        service_cgroup_inode: nonzero(decoder.u64()?)?,
+    })
+}
+
+fn decode_custody_descriptor_identity(
+    decoder: &mut Decoder<'_>,
+) -> Result<CustodyDescriptorIdentityV1, JournalError> {
+    CustodyDescriptorIdentityV1::new(
+        nonzero_u32(decoder.u32()?)?,
+        decoder.u32()?,
+        decoder.u32()?,
+        nonzero(decoder.u64()?)?,
+        decoder.u32()?,
+        decoder.u32()?,
+        decoder.u32()?,
+    )
+    .map_err(|_| JournalError::Corrupt)
 }
 
 fn nonzero(value: u64) -> Result<NonZeroU64, JournalError> {
@@ -1232,7 +1537,7 @@ fn record_is_exact_post_insert(record: &OwnershipRecord, intent: &NewOwnershipIn
         && record.phase == OwnershipPhase::Intent
         && record.absent_origin.is_none()
         && record.reconcile.is_none()
-        && record.recovery_anchor.is_none()
+        && record.recovery_evidence.is_none()
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1245,6 +1550,17 @@ struct InsertedOwnership {
 impl fmt::Debug for InsertedOwnership {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("InsertedOwnership(<redacted>)")
+    }
+}
+
+/// Result of durably fencing the first possible descriptor-store publication attempt.
+struct MarkedMayOwnCustody {
+    revision: u64,
+}
+
+impl fmt::Debug for MarkedMayOwnCustody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MarkedMayOwnCustody(<redacted>)")
     }
 }
 
@@ -1478,7 +1794,7 @@ impl OwnershipJournal {
             phase: OwnershipPhase::Intent,
             absent_origin: None,
             reconcile: None,
-            recovery_anchor: None,
+            recovery_evidence: None,
         };
         record.validate()?;
         next.records.insert(ownership_id, record);
@@ -1524,12 +1840,104 @@ impl OwnershipJournal {
         self.compare_and_swap(expected_revision, next)
     }
 
-    fn mark_may_own_prepare(
+    fn mark_may_own_custody(
         &mut self,
         expected_revision: u64,
         ownership_id: OwnershipId,
         generation: NonZeroU64,
         anchor: PrepareRecoveryAnchorV1,
+        binding: CustodyDescriptorBindingV1,
+        deadline: HardDeadline,
+    ) -> Result<MarkedMayOwnCustody, JournalError> {
+        let evidence = PrepareRecoveryEvidenceV1::custody_bound(anchor, binding)?;
+        self.mark_may_own_custody_observed(
+            expected_revision,
+            ownership_id,
+            generation,
+            evidence,
+            deadline,
+            &mut NoFailPersistObserver,
+        )
+    }
+
+    fn mark_may_own_custody_observed(
+        &mut self,
+        expected_revision: u64,
+        ownership_id: OwnershipId,
+        generation: NonZeroU64,
+        evidence: PrepareRecoveryEvidenceV1,
+        deadline: HardDeadline,
+        observer: &mut impl PersistObserver,
+    ) -> Result<MarkedMayOwnCustody, JournalError> {
+        self.ensure_expected_revision(expected_revision)?;
+        let record = self
+            .snapshot
+            .records
+            .get(&ownership_id)
+            .ok_or(JournalError::InvalidRecord)?;
+        if record.generation != generation {
+            return Err(JournalError::InvalidRecord);
+        }
+        if record.phase == OwnershipPhase::MayOwnCustody {
+            // At the exact current revision, acknowledge only the durable transition already made.
+            if record.recovery_evidence != Some(evidence)
+                || record.absent_origin.is_some()
+                || record.reconcile.is_some()
+            {
+                return Err(JournalError::InvalidTransition);
+            }
+            self.ensure_durable_matches()?;
+            return Ok(MarkedMayOwnCustody {
+                revision: self.snapshot.revision,
+            });
+        }
+        let mut next = self.snapshot.clone();
+        let record = next
+            .records
+            .get_mut(&ownership_id)
+            .ok_or(JournalError::InvalidRecord)?;
+        if record.generation != generation {
+            return Err(JournalError::InvalidRecord);
+        }
+        if record.phase != OwnershipPhase::Intent || record.reconcile.is_some() {
+            return Err(JournalError::InvalidTransition);
+        }
+        record.advance(OwnershipPhase::MayOwnCustody, Some(evidence), None)?;
+        deadline
+            .ensure_remaining()
+            .map_err(|_| JournalError::Io(io::ErrorKind::TimedOut.into()))?;
+        let revision = self.compare_and_swap_observed_with_deadline(
+            expected_revision,
+            next,
+            observer,
+            Some(deadline),
+        )?;
+        Ok(MarkedMayOwnCustody { revision })
+    }
+
+    fn mark_may_own_prepare_from_custody(
+        &mut self,
+        expected_revision: u64,
+        ownership_id: OwnershipId,
+        generation: NonZeroU64,
+        deadline: HardDeadline,
+    ) -> Result<MarkedMayOwnPrepare, JournalError> {
+        self.mark_may_own_prepare_from_custody_observed(
+            expected_revision,
+            ownership_id,
+            generation,
+            deadline,
+            &mut NoFailPersistObserver,
+        )
+    }
+
+    fn mark_may_own_prepare_from_custody_observed(
+        &mut self,
+        expected_revision: u64,
+        ownership_id: OwnershipId,
+        generation: NonZeroU64,
+        deadline: HardDeadline,
+        observer: &mut impl PersistObserver,
     ) -> Result<MarkedMayOwnPrepare, JournalError> {
         self.ensure_expected_revision(expected_revision)?;
         let record = self
@@ -1541,8 +1949,9 @@ impl OwnershipJournal {
             return Err(JournalError::InvalidRecord);
         }
         if record.phase == OwnershipPhase::MayOwnPrepare {
-            // At the exact current revision, acknowledge only the durable transition already made.
-            if record.recovery_anchor != Some(anchor)
+            if !record
+                .recovery_evidence
+                .is_some_and(PrepareRecoveryEvidenceV1::is_custody_bound)
                 || record.absent_origin.is_some()
                 || record.reconcile.is_some()
             {
@@ -1560,15 +1969,27 @@ impl OwnershipJournal {
             .records
             .get_mut(&ownership_id)
             .ok_or(JournalError::InvalidRecord)?;
-        if record.generation != generation {
-            return Err(JournalError::InvalidRecord);
-        }
-        if record.reconcile.is_some() {
+        if record.generation != generation
+            || record.phase != OwnershipPhase::MayOwnCustody
+            || record.reconcile.is_some()
+        {
             return Err(JournalError::InvalidTransition);
         }
-        record.advance(OwnershipPhase::MayOwnPrepare, Some(anchor), None)?;
+        let evidence = record
+            .recovery_evidence
+            .filter(|evidence| evidence.is_custody_bound())
+            .ok_or(JournalError::InvalidTransition)?;
+        record.advance(OwnershipPhase::MayOwnPrepare, Some(evidence), None)?;
         let resources = record.durable_wireguard_resources()?;
-        let revision = self.compare_and_swap(expected_revision, next)?;
+        deadline
+            .ensure_remaining()
+            .map_err(|_| JournalError::Io(io::ErrorKind::TimedOut.into()))?;
+        let revision = self.compare_and_swap_observed_with_deadline(
+            expected_revision,
+            next,
+            observer,
+            Some(deadline),
+        )?;
         Ok(MarkedMayOwnPrepare {
             revision,
             resources,
@@ -1603,10 +2024,7 @@ impl OwnershipJournal {
             .records
             .get_mut(&ownership_id)
             .ok_or(JournalError::InvalidRecord)?;
-        if record.generation != generation {
-            return Err(JournalError::InvalidRecord);
-        }
-        if record.phase != OwnershipPhase::Intent || record.recovery_anchor.is_some() {
+        if record.phase != OwnershipPhase::Intent || record.recovery_evidence.is_some() {
             return Err(JournalError::InvalidTransition);
         }
         record.advance(
@@ -1664,7 +2082,7 @@ impl OwnershipJournal {
                 .map_err(RecoveryAttemptError::Journal)?;
             return Ok(self.snapshot.revision);
         }
-        if record.phase != OwnershipPhase::MayOwnPrepare || record.recovery_anchor.is_none() {
+        if record.phase != OwnershipPhase::MayOwnPrepare || record.recovery_evidence.is_none() {
             return Err(RecoveryAttemptError::Journal(
                 JournalError::InvalidTransition,
             ));
@@ -2466,6 +2884,49 @@ mod tests {
         )
     }
 
+    fn mark_custody_fixture(
+        journal: &mut OwnershipJournal,
+        expected_revision: u64,
+        inserted: InsertedOwnership,
+        exact_anchor: PrepareRecoveryAnchorV1,
+    ) -> MarkedMayOwnCustody {
+        journal
+            .mark_may_own_custody(
+                expected_revision,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_anchor,
+                custody_binding(exact_anchor, 7),
+                recovery_deadline(),
+            )
+            .expect("durable MayOwnCustody fixture")
+    }
+
+    fn arm_custody_fixture(
+        journal: &mut OwnershipJournal,
+        expected_revision: u64,
+        inserted: InsertedOwnership,
+    ) -> MarkedMayOwnPrepare {
+        journal
+            .mark_may_own_prepare_from_custody(
+                expected_revision,
+                inserted.ownership_id,
+                inserted.generation,
+                recovery_deadline(),
+            )
+            .expect("durable custody-bound MayOwnPrepare fixture")
+    }
+
+    fn mark_and_arm_custody_fixture(
+        journal: &mut OwnershipJournal,
+        expected_revision: u64,
+        inserted: InsertedOwnership,
+        exact_anchor: PrepareRecoveryAnchorV1,
+    ) -> MarkedMayOwnPrepare {
+        let marked = mark_custody_fixture(journal, expected_revision, inserted, exact_anchor);
+        arm_custody_fixture(journal, marked.revision, inserted)
+    }
+
     fn client_plan(path_ids: &[u8]) -> ClosedPlan {
         ClosedPlan::new(
             ContextRole::Client,
@@ -2494,6 +2955,48 @@ mod tests {
         }
     }
 
+    fn descriptor_identity(
+        mode: u32,
+        device_major: u32,
+        device_minor: u32,
+        inode: u64,
+        special_device_major: u32,
+        special_device_minor: u32,
+        status_flags: u32,
+    ) -> CustodyDescriptorIdentityV1 {
+        CustodyDescriptorIdentityV1::new(
+            NonZeroU32::new(mode).expect("non-zero descriptor mode"),
+            device_major,
+            device_minor,
+            nz(inode),
+            special_device_major,
+            special_device_minor,
+            status_flags,
+        )
+        .expect("valid descriptor identity fixture")
+    }
+
+    fn custody_binding(
+        exact_anchor: PrepareRecoveryAnchorV1,
+        seed: u32,
+    ) -> CustodyDescriptorBindingV1 {
+        let network_namespace_minor = u32::try_from(exact_anchor.network_namespace_device.get())
+            .expect("small fixture namespace device");
+        CustodyDescriptorBindingV1::new(
+            descriptor_identity(0o100_600, 8, seed, u64::from(seed) + 100, 0, 0, 0),
+            descriptor_identity(
+                0o100_444,
+                0,
+                network_namespace_minor,
+                exact_anchor.network_namespace_inode.get(),
+                0,
+                0,
+                0,
+            ),
+        )
+        .expect("distinct role-ordered descriptor binding")
+    }
+
     fn record(
         journal_epoch_id: JournalEpochId,
         ownership_seed: u8,
@@ -2517,7 +3020,22 @@ mod tests {
             absent_origin: (phase == OwnershipPhase::Absent)
                 .then_some(AbsentOrigin::NeverDispatched),
             reconcile: None,
-            recovery_anchor: (phase == OwnershipPhase::MayOwnPrepare).then(|| anchor(7)),
+            recovery_evidence: match phase {
+                OwnershipPhase::MayOwnCustody => {
+                    let exact_anchor = anchor(7);
+                    Some(
+                        PrepareRecoveryEvidenceV1::custody_bound(
+                            exact_anchor,
+                            custody_binding(exact_anchor, 7),
+                        )
+                        .expect("custody evidence fixture"),
+                    )
+                }
+                OwnershipPhase::MayOwnPrepare => {
+                    Some(PrepareRecoveryEvidenceV1::LegacyAnchor(anchor(7)))
+                }
+                OwnershipPhase::Intent | OwnershipPhase::Absent => None,
+            },
         }
     }
 
@@ -2789,7 +3307,8 @@ mod tests {
         let may_own = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::MayOwnPrepare);
         assert_eq!(marker_aliases(&may_own), expected);
         let mut different_anchor = may_own;
-        different_anchor.recovery_anchor = Some(anchor(8));
+        different_anchor.recovery_evidence =
+            Some(PrepareRecoveryEvidenceV1::LegacyAnchor(anchor(8)));
         assert_eq!(marker_aliases(&different_anchor), expected);
 
         let absent = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Absent);
@@ -2805,6 +3324,21 @@ mod tests {
         first.reconcile = Some(binding(5));
         let snapshot = snapshot_with(vec![first]);
         let encoded = snapshot.encode().expect("canonical encoding");
+        assert_eq!(
+            blake3::hash(&encoded).to_hex().as_str(),
+            "e01cbfd204aa20db6ce7e223b5e49eb2c9e73edb392d48025014b829df9bf69e"
+        );
+        let legacy_matrix = snapshot_with(vec![
+            record(epoch(1), 5, 6, 7, 2, OwnershipPhase::Intent),
+            record(epoch(1), 8, 9, 10, 3, OwnershipPhase::MayOwnPrepare),
+            record(epoch(1), 11, 12, 13, 4, OwnershipPhase::Absent),
+        ]);
+        assert_eq!(
+            blake3::hash(&legacy_matrix.encode().expect("legacy matrix encoding"))
+                .to_hex()
+                .as_str(),
+            "ddb36231c7c1c6db9a108b08dac8d7f31f46f3a0b602f134e3c1e5fe764374cd"
+        );
         assert!(encoded.len() <= MAX_JOURNAL_BYTES);
         let decoded = JournalSnapshot::decode(&encoded).expect("canonical decoding");
         assert_eq!(decoded, snapshot);
@@ -2830,6 +3364,173 @@ mod tests {
             Err(JournalError::Corrupt)
         ));
         assert!(!format!("{snapshot:?}").contains("03030303"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One exhaustive phase/evidence codec matrix.
+    fn custody_evidence_tag_two_is_exact_bounded_and_phase_matrix_fail_closed() {
+        const RECOVERY_ANCHOR_BYTES: usize = 16 + 4 + (6 * 8);
+        const CUSTODY_EVIDENCE_BYTES: usize =
+            1 + RECOVERY_ANCHOR_BYTES + CUSTODY_DESCRIPTOR_BINDING_BYTES;
+
+        fn replace_checksum(encoded: &mut [u8]) {
+            let payload_len = encoded
+                .len()
+                .checked_sub(DIGEST_BYTES)
+                .expect("encoded journal checksum");
+            let checksum = *blake3::hash(&encoded[..payload_len]).as_bytes();
+            encoded[payload_len..].copy_from_slice(&checksum);
+        }
+
+        let custody_record = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::MayOwnCustody);
+        let snapshot = snapshot_with(vec![custody_record.clone()]);
+        let encoded = snapshot.encode().expect("canonical custody encoding");
+        let evidence_tag = encoded.len()
+            - DIGEST_BYTES
+            - RECOVERY_ANCHOR_BYTES
+            - CUSTODY_DESCRIPTOR_BINDING_BYTES
+            - 1;
+        assert_eq!(encoded[evidence_tag], 2, "custody evidence tag is frozen");
+        assert_eq!(
+            JournalSnapshot::decode(&encoded).expect("custody decode"),
+            snapshot
+        );
+        assert_eq!(
+            JournalSnapshot::decode(&encoded)
+                .expect("custody decode")
+                .encode()
+                .expect("custody re-encode"),
+            encoded
+        );
+        let exact_evidence = custody_record
+            .recovery_evidence
+            .expect("phase-4 custody evidence");
+        let different_anchor = anchor(8);
+        let different_evidence = PrepareRecoveryEvidenceV1::custody_bound(
+            different_anchor,
+            custody_binding(different_anchor, 8),
+        )
+        .expect("different valid custody evidence");
+        let mut rejected_substitution = custody_record.clone();
+        assert!(matches!(
+            rejected_substitution.advance(
+                OwnershipPhase::MayOwnPrepare,
+                Some(different_evidence),
+                None,
+            ),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert_eq!(rejected_substitution, custody_record);
+
+        let mut armed_record = custody_record.clone();
+        armed_record
+            .advance(OwnershipPhase::MayOwnPrepare, Some(exact_evidence), None)
+            .expect("exact custody evidence survives arming");
+        let armed_encoded = snapshot_with(vec![armed_record])
+            .encode()
+            .expect("custody-bound phase-2 encoding");
+        let custody_evidence_start = encoded.len() - DIGEST_BYTES - CUSTODY_EVIDENCE_BYTES;
+        let armed_evidence_start = armed_encoded.len() - DIGEST_BYTES - CUSTODY_EVIDENCE_BYTES;
+        assert_eq!(
+            &encoded[custody_evidence_start..encoded.len() - DIGEST_BYTES],
+            &armed_encoded[armed_evidence_start..armed_encoded.len() - DIGEST_BYTES]
+        );
+        for length in 0..encoded.len() {
+            assert!(
+                JournalSnapshot::decode(&encoded[..length]).is_err(),
+                "custody truncation unexpectedly decoded at {length}"
+            );
+        }
+
+        let mut unknown_tag = encoded.clone();
+        unknown_tag[evidence_tag] = 99;
+        replace_checksum(&mut unknown_tag);
+        assert!(matches!(
+            JournalSnapshot::decode(&unknown_tag),
+            Err(JournalError::Corrupt)
+        ));
+
+        let mut mismatched_anchor = encoded.clone();
+        let namespace_device_offset = evidence_tag + 1 + 16 + 4 + 8;
+        mismatched_anchor[namespace_device_offset + 7] ^= 1;
+        replace_checksum(&mut mismatched_anchor);
+        assert!(matches!(
+            JournalSnapshot::decode(&mismatched_anchor),
+            Err(JournalError::Corrupt)
+        ));
+
+        let mut bad_checksum = encoded;
+        let checksum_index = bad_checksum.len() - 1;
+        bad_checksum[checksum_index] ^= 0x80;
+        assert!(matches!(
+            JournalSnapshot::decode(&bad_checksum),
+            Err(JournalError::Corrupt)
+        ));
+
+        let custody_evidence = custody_record
+            .recovery_evidence
+            .expect("custody evidence fixture");
+        let mut invalid_intent = custody_record.clone();
+        invalid_intent.phase = OwnershipPhase::Intent;
+        assert!(matches!(
+            invalid_intent.validate(),
+            Err(JournalError::InvalidRecord)
+        ));
+        let mut invalid_absent = custody_record.clone();
+        invalid_absent.phase = OwnershipPhase::Absent;
+        invalid_absent.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        assert!(matches!(
+            invalid_absent.validate(),
+            Err(JournalError::InvalidRecord)
+        ));
+        let mut valid_prepare = custody_record;
+        valid_prepare.phase = OwnershipPhase::MayOwnPrepare;
+        valid_prepare.validate().expect("custody-bound phase 2");
+        let mut invalid_legacy_custody = valid_prepare;
+        invalid_legacy_custody.phase = OwnershipPhase::MayOwnCustody;
+        invalid_legacy_custody.recovery_evidence =
+            Some(PrepareRecoveryEvidenceV1::LegacyAnchor(anchor(7)));
+        assert!(matches!(
+            invalid_legacy_custody.validate(),
+            Err(JournalError::InvalidRecord)
+        ));
+        assert!(custody_evidence.is_custody_bound());
+    }
+
+    #[test]
+    fn custody_namespace_binding_reconstructs_major_minor_and_rejects_each_anchor_mismatch() {
+        let mut exact_anchor = anchor(7);
+        let exact_device = rustix::fs::makedev(12, 34);
+        assert_ne!(exact_device, 0);
+        exact_anchor.network_namespace_device =
+            NonZeroU64::new(exact_device).expect("non-zero reconstructed namespace device");
+        exact_anchor.network_namespace_inode = nz(987);
+        let pidfd = descriptor_identity(0o100_600, 8, 7, 107, 0, 0, 0);
+        let exact_namespace = descriptor_identity(0o100_444, 12, 34, 987, 0, 0, 0);
+        let exact_binding =
+            CustodyDescriptorBindingV1::new(pidfd, exact_namespace).expect("exact binding");
+        exact_binding
+            .validate_against_anchor(exact_anchor)
+            .expect("major/minor reconstruction matches the anchor");
+
+        let wrong_device = CustodyDescriptorBindingV1::new(
+            pidfd,
+            descriptor_identity(0o100_444, 12, 35, 987, 0, 0, 0),
+        )
+        .expect("different-device binding shape");
+        assert!(matches!(
+            wrong_device.validate_against_anchor(exact_anchor),
+            Err(JournalError::InvalidRecord)
+        ));
+        let wrong_inode = CustodyDescriptorBindingV1::new(
+            pidfd,
+            descriptor_identity(0o100_444, 12, 34, 988, 0, 0, 0),
+        )
+        .expect("different-inode binding shape");
+        assert!(matches!(
+            wrong_inode.validate_against_anchor(exact_anchor),
+            Err(JournalError::InvalidRecord)
+        ));
     }
 
     #[test]
@@ -3498,34 +4199,90 @@ mod tests {
     }
 
     #[test]
-    fn lost_arm_reply_restarts_to_exact_same_anchor_success() {
+    #[allow(clippy::too_many_lines)] // Both lost custody replies and exact restart retries form one proof.
+    fn lost_custody_and_arm_replies_restart_to_exact_idempotent_success() {
         let directory = tempdir().expect("temporary directory");
         let config = test_config(directory.path());
         let exact_anchor = anchor(7);
+        let exact_binding = custody_binding(exact_anchor, 7);
         let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
         let inserted = journal
             .insert_intent(0, intent(2, 3))
             .expect("durable intent");
+        let first_custody = journal
+            .mark_may_own_custody(
+                1,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_anchor,
+                exact_binding,
+                recovery_deadline(),
+            )
+            .expect("durable custody mark whose reply is discarded");
+        assert_eq!(first_custody.revision, 2);
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("restart after custody");
+        let custody_bytes = fs::read(&config.journal_path).expect("durable custody bytes");
+        let retried_custody = journal
+            .mark_may_own_custody(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_anchor,
+                exact_binding,
+                recovery_deadline(),
+            )
+            .expect("exact custody retry at current revision");
+        assert_eq!(retried_custody.revision, 2);
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after exact custody retry"),
+            custody_bytes
+        );
+        assert!(matches!(
+            journal.mark_intent_absent(2, inserted.ownership_id, inserted.generation),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert_eq!(
+            fs::read(&config.journal_path).expect("phase 4 cannot be retired"),
+            custody_bytes
+        );
+        assert!(matches!(
+            journal.mark_may_own_custody(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                anchor(8),
+                custody_binding(anchor(8), 8),
+                recovery_deadline(),
+            ),
+            Err(JournalError::InvalidTransition)
+        ));
         let first_projection = journal
-            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, exact_anchor)
+            .mark_may_own_prepare_from_custody(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                recovery_deadline(),
+            )
             .expect("durable arm whose reply is discarded");
         let first_aliases = first_projection
             .resources
             .iter()
             .map(|resource| resource.ownership_alias().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(first_projection.revision, 2);
+        assert_eq!(first_projection.revision, 3);
         drop(journal);
 
         let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
         let before = fs::read(&config.journal_path).expect("durable arm bytes");
-        for wrong_revision in [1, 3] {
+        for wrong_revision in [2, 4] {
             assert!(matches!(
-                journal.mark_may_own_prepare(
+                journal.mark_may_own_prepare_from_custody(
                     wrong_revision,
                     inserted.ownership_id,
                     inserted.generation,
-                    exact_anchor,
+                    recovery_deadline(),
                 ),
                 Err(JournalError::RevisionConflict)
             ));
@@ -3535,9 +4292,14 @@ mod tests {
             before
         );
         let retried = journal
-            .mark_may_own_prepare(2, inserted.ownership_id, inserted.generation, exact_anchor)
+            .mark_may_own_prepare_from_custody(
+                3,
+                inserted.ownership_id,
+                inserted.generation,
+                recovery_deadline(),
+            )
             .expect("exact arm retry at the current revision");
-        assert_eq!(retried.revision, 2);
+        assert_eq!(retried.revision, 3);
         assert_eq!(
             retried
                 .resources
@@ -3552,12 +4314,220 @@ mod tests {
             before
         );
         assert!(matches!(
-            journal.mark_may_own_prepare(2, inserted.ownership_id, inserted.generation, anchor(8),),
+            journal.mark_may_own_custody(
+                3,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_anchor,
+                exact_binding,
+                recovery_deadline(),
+            ),
             Err(JournalError::InvalidTransition)
         ));
+    }
+
+    #[test]
+    fn custody_transition_deadlines_expire_before_next_file_creation() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        let exact_anchor = anchor(7);
+        let exact_binding = custody_binding(exact_anchor, 7);
+        let intent_snapshot = journal.snapshot().expect("intent snapshot").clone();
+        let intent_bytes = fs::read(&config.journal_path).expect("intent bytes");
+        let mark_deadline = HardDeadline::after(Duration::from_millis(30)).expect("mark deadline");
+        let mut mark_observer = ExpireBeforeCreateObserver {
+            deadline: mark_deadline,
+            steps: Vec::new(),
+        };
+        assert!(matches!(
+            journal.mark_may_own_custody_observed(
+                1,
+                inserted.ownership_id,
+                inserted.generation,
+                PrepareRecoveryEvidenceV1::custody_bound(exact_anchor, exact_binding)
+                    .expect("deadline custody evidence"),
+                mark_deadline,
+                &mut mark_observer,
+            ),
+            Err(JournalError::Io(error)) if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert_eq!(mark_observer.steps, vec![PersistStep::BeforeCreate]);
         assert_eq!(
-            fs::read(&config.journal_path).expect("bytes after conflicting arm retry"),
-            before
+            journal.snapshot().expect("intent remains"),
+            &intent_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("intent bytes remain"),
+            intent_bytes
+        );
+        assert!(!config.next_path.exists());
+        journal
+            .confirm_retry_safe_after_definite_failure()
+            .expect("mark timeout is retry-safe");
+
+        let custody_revision = journal
+            .mark_may_own_custody(
+                1,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_anchor,
+                exact_binding,
+                recovery_deadline(),
+            )
+            .expect("durable custody retry")
+            .revision;
+        let custody_snapshot = journal.snapshot().expect("custody snapshot").clone();
+        let custody_bytes = fs::read(&config.journal_path).expect("custody bytes");
+        let arm_deadline = HardDeadline::after(Duration::from_millis(30)).expect("arm deadline");
+        let mut arm_observer = ExpireBeforeCreateObserver {
+            deadline: arm_deadline,
+            steps: Vec::new(),
+        };
+        assert!(matches!(
+            journal.mark_may_own_prepare_from_custody_observed(
+                custody_revision,
+                inserted.ownership_id,
+                inserted.generation,
+                arm_deadline,
+                &mut arm_observer,
+            ),
+            Err(JournalError::Io(error)) if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert_eq!(arm_observer.steps, vec![PersistStep::BeforeCreate]);
+        assert_eq!(
+            journal.snapshot().expect("custody remains"),
+            &custody_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("custody bytes remain"),
+            custody_bytes
+        );
+        assert!(!config.next_path.exists());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Cover both chained durable transitions at both rename boundaries.
+    fn custody_transition_failpoints_preserve_or_poison_exactly() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        let exact_anchor = anchor(7);
+        let exact_binding = custody_binding(exact_anchor, 7);
+        let exact_evidence = PrepareRecoveryEvidenceV1::custody_bound(exact_anchor, exact_binding)
+            .expect("exact custody evidence");
+        let before = journal.snapshot().expect("intent snapshot").clone();
+        let bytes = fs::read(&config.journal_path).expect("intent bytes");
+        let mut pre_rename = FailingObserver {
+            steps: vec![PersistStep::BeforeRename],
+        };
+        assert!(matches!(
+            journal.mark_may_own_custody_observed(
+                1,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_evidence,
+                recovery_deadline(),
+                &mut pre_rename,
+            ),
+            Err(JournalError::Io(_))
+        ));
+        assert_eq!(journal.snapshot().expect("retryable Intent"), &before);
+        assert_eq!(fs::read(&config.journal_path).expect("intent bytes"), bytes);
+        journal
+            .confirm_retry_safe_after_definite_failure()
+            .expect("clean failpoint is retry-safe");
+
+        let mut post_rename = FailingObserver {
+            steps: vec![PersistStep::AfterRename],
+        };
+        assert!(matches!(
+            journal.mark_may_own_custody_observed(
+                1,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_evidence,
+                recovery_deadline(),
+                &mut post_rename,
+            ),
+            Err(JournalError::PersistUncertain)
+        ));
+        assert!(matches!(journal.snapshot(), Err(JournalError::Poisoned)));
+        drop(journal);
+        let mut journal = OwnershipJournal::open(config.clone())
+            .expect("restart after ambiguous custody-mark reply");
+        assert_eq!(
+            journal
+                .snapshot()
+                .expect("durable custody snapshot")
+                .records
+                .get(&inserted.ownership_id)
+                .expect("custody record")
+                .phase,
+            OwnershipPhase::MayOwnCustody
+        );
+
+        let before_arm = journal
+            .snapshot()
+            .expect("custody snapshot before arm")
+            .clone();
+        let custody_bytes = fs::read(&config.journal_path).expect("custody bytes before arm");
+        let mut arm_pre_rename = FailingObserver {
+            steps: vec![PersistStep::BeforeRename],
+        };
+        assert!(matches!(
+            journal.mark_may_own_prepare_from_custody_observed(
+                before_arm.revision,
+                inserted.ownership_id,
+                inserted.generation,
+                recovery_deadline(),
+                &mut arm_pre_rename,
+            ),
+            Err(JournalError::Io(_))
+        ));
+        assert_eq!(
+            journal.snapshot().expect("retryable custody snapshot"),
+            &before_arm
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("retryable custody bytes"),
+            custody_bytes
+        );
+        journal
+            .confirm_retry_safe_after_definite_failure()
+            .expect("clean arm failpoint is retry-safe");
+
+        let mut arm_post_rename = FailingObserver {
+            steps: vec![PersistStep::AfterRename],
+        };
+        assert!(matches!(
+            journal.mark_may_own_prepare_from_custody_observed(
+                before_arm.revision,
+                inserted.ownership_id,
+                inserted.generation,
+                recovery_deadline(),
+                &mut arm_post_rename,
+            ),
+            Err(JournalError::PersistUncertain)
+        ));
+        assert!(matches!(journal.snapshot(), Err(JournalError::Poisoned)));
+        drop(journal);
+        assert_eq!(
+            OwnershipJournal::open(config)
+                .expect("restart after ambiguous custody-arm reply")
+                .snapshot()
+                .expect("durable MayOwnPrepare snapshot")
+                .records
+                .get(&inserted.ownership_id)
+                .expect("MayOwnPrepare record")
+                .phase,
+            OwnershipPhase::MayOwnPrepare
         );
     }
 
@@ -3571,9 +4541,7 @@ mod tests {
         let inserted = journal
             .insert_intent(0, exact_intent.clone())
             .expect("durable intent");
-        journal
-            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, exact_anchor)
-            .expect("interposed durable arm");
+        mark_and_arm_custody_fixture(&mut journal, 1, inserted, exact_anchor);
         drop(journal);
 
         let mut journal = OwnershipJournal::open(config.clone()).expect("restart after arm");
@@ -3581,9 +4549,9 @@ mod tests {
             fs::read(&config.journal_path).expect("durable armed journal bytes");
         let revision_before_insert_retry =
             journal.snapshot().expect("usable armed snapshot").revision;
-        assert_eq!(revision_before_insert_retry, 2);
+        assert_eq!(revision_before_insert_retry, 3);
         assert!(matches!(
-            journal.insert_intent(2, exact_intent),
+            journal.insert_intent(3, exact_intent),
             Err(JournalError::InvalidTransition)
         ));
         assert_eq!(
@@ -3599,20 +4567,20 @@ mod tests {
         );
 
         journal
-            .bind_reconcile(2, inserted.ownership_id, inserted.generation, binding(4))
+            .bind_reconcile(3, inserted.ownership_id, inserted.generation, binding(4))
             .expect("interposed reconcile binding");
         drop(journal);
 
         let mut journal = OwnershipJournal::open(config.clone()).expect("restart after binding");
         let before_arm_retry = fs::read(&config.journal_path).expect("durable bound journal bytes");
         let revision_before_arm_retry = journal.snapshot().expect("usable bound snapshot").revision;
-        assert_eq!(revision_before_arm_retry, 3);
+        assert_eq!(revision_before_arm_retry, 4);
         assert!(matches!(
-            journal.mark_may_own_prepare(
-                3,
+            journal.mark_may_own_prepare_from_custody(
+                4,
                 inserted.ownership_id,
                 inserted.generation,
-                exact_anchor,
+                recovery_deadline(),
             ),
             Err(JournalError::InvalidTransition)
         ));
@@ -3744,12 +4712,10 @@ mod tests {
         let inserted = journal
             .insert_intent(0, intent(2, 3))
             .expect("durable intent");
-        journal
-            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
-            .expect("durable MayOwnPrepare");
+        mark_and_arm_custody_fixture(&mut journal, 1, inserted, anchor(7));
         journal
             .recover_may_own_prepare(
-                2,
+                3,
                 inserted.ownership_id,
                 inserted.generation,
                 &mut FakeRecoveryExecutor {
@@ -3763,7 +4729,7 @@ mod tests {
 
         let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
         let before = fs::read(&config.journal_path).expect("durable recovered bytes");
-        for wrong_revision in [2, 4] {
+        for wrong_revision in [3, 5] {
             assert!(matches!(
                 journal.recover_may_own_prepare(
                     wrong_revision,
@@ -3784,21 +4750,21 @@ mod tests {
         assert_eq!(
             journal
                 .recover_may_own_prepare(
-                    3,
+                    4,
                     inserted.ownership_id,
                     inserted.generation,
                     &mut PanicIfRecoveryRuns,
                     recovery_deadline(),
                 )
                 .expect("exact recovered retry at current revision skips executor"),
-            3
+            4
         );
         assert_eq!(
             fs::read(&config.journal_path).expect("bytes after exact recovered retry"),
             before
         );
         assert!(matches!(
-            journal.mark_intent_absent(3, inserted.ownership_id, inserted.generation),
+            journal.mark_intent_absent(4, inserted.ownership_id, inserted.generation),
             Err(JournalError::InvalidTransition)
         ));
     }
@@ -3811,11 +4777,9 @@ mod tests {
         let inserted = journal
             .insert_intent(0, intent(2, 3))
             .expect("durable intent");
-        let may_own_revision = journal
-            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
-            .expect("durable MayOwnPrepare")
-            .revision;
-        assert_eq!(may_own_revision, 2);
+        let may_own_revision =
+            mark_and_arm_custody_fixture(&mut journal, 1, inserted, anchor(7)).revision;
+        assert_eq!(may_own_revision, 3);
         let before_snapshot = journal.snapshot().expect("usable snapshot").clone();
         let before_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");
 
@@ -3840,7 +4804,7 @@ mod tests {
         );
 
         assert!(matches!(
-            journal.mark_intent_absent(2, inserted.ownership_id, inserted.generation),
+            journal.mark_intent_absent(3, inserted.ownership_id, inserted.generation),
             Err(JournalError::InvalidTransition)
         ));
         assert_eq!(journal.snapshot().expect("still usable"), &before_snapshot);
@@ -3854,7 +4818,7 @@ mod tests {
             calls: 0,
         };
         assert!(matches!(
-            recover_fixture(&mut journal, 2, inserted, &mut wrong),
+            recover_fixture(&mut journal, 3, inserted, &mut wrong),
             Err(RecoveryAttemptError::Journal(JournalError::ProofMismatch))
         ));
         assert_eq!(wrong.calls, 1);
@@ -3865,7 +4829,7 @@ mod tests {
         );
 
         assert!(matches!(
-            recover_fixture(&mut journal, 2, inserted, &mut ErrorRecoveryExecutor),
+            recover_fixture(&mut journal, 3, inserted, &mut ErrorRecoveryExecutor),
             Err(RecoveryAttemptError::Executor("injected recovery failure"))
         ));
         assert_eq!(
@@ -3882,8 +4846,8 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            recover_fixture(&mut journal, 2, inserted, &mut exact).expect("exact typed proof"),
-            3
+            recover_fixture(&mut journal, 3, inserted, &mut exact).expect("exact typed proof"),
+            4
         );
         let recovered = journal
             .snapshot()
@@ -3893,7 +4857,7 @@ mod tests {
             .expect("recovered tombstone");
         assert_eq!(recovered.phase, OwnershipPhase::Absent);
         assert_eq!(recovered.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
-        assert!(recovered.recovery_anchor.is_none());
+        assert!(recovered.recovery_evidence.is_none());
     }
 
     #[test]
@@ -3904,9 +4868,7 @@ mod tests {
         let inserted = journal
             .insert_intent(0, intent(2, 3))
             .expect("durable intent");
-        journal
-            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
-            .expect("durable MayOwnPrepare");
+        mark_and_arm_custody_fixture(&mut journal, 1, inserted, anchor(7));
         let before_snapshot = journal.snapshot().expect("usable snapshot").clone();
         let before_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");
 
@@ -3921,7 +4883,7 @@ mod tests {
         }
         assert!(matches!(
             journal.recover_may_own_prepare(
-                2,
+                3,
                 inserted.ownership_id,
                 inserted.generation,
                 &mut never_started,
@@ -3947,7 +4909,7 @@ mod tests {
         };
         assert!(matches!(
             journal.recover_may_own_prepare(
-                2,
+                3,
                 inserted.ownership_id,
                 inserted.generation,
                 &mut blocked,
@@ -3975,9 +4937,7 @@ mod tests {
         let inserted = journal
             .insert_intent(0, intent(2, 3))
             .expect("durable intent");
-        journal
-            .mark_may_own_prepare(1, inserted.ownership_id, inserted.generation, anchor(7))
-            .expect("durable MayOwnPrepare");
+        mark_and_arm_custody_fixture(&mut journal, 1, inserted, anchor(7));
         let before_snapshot = journal.snapshot().expect("usable snapshot").clone();
         let before_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");
         let deadline =
@@ -3993,7 +4953,7 @@ mod tests {
 
         assert!(matches!(
             journal.recover_may_own_prepare_observed(
-                2,
+                3,
                 inserted.ownership_id,
                 inserted.generation,
                 &mut exact,
@@ -4027,8 +4987,16 @@ mod tests {
             .bind_reconcile(1, inserted.ownership_id, inserted.generation, binding(4))
             .expect("durable reconcile lineage");
         let before = journal.snapshot().expect("usable snapshot").clone();
+        let exact_anchor = anchor(7);
         assert!(matches!(
-            journal.mark_may_own_prepare(2, inserted.ownership_id, inserted.generation, anchor(7),),
+            journal.mark_may_own_custody(
+                2,
+                inserted.ownership_id,
+                inserted.generation,
+                exact_anchor,
+                custody_binding(exact_anchor, 7),
+                recovery_deadline(),
+            ),
             Err(JournalError::InvalidTransition)
         ));
         assert_eq!(journal.snapshot().expect("unchanged snapshot"), &before);
@@ -4582,14 +5550,12 @@ mod tests {
         let may_own_inserted = may_own_journal
             .insert_intent(0, intent(22, 23))
             .expect("MayOwn intent");
-        may_own_journal
-            .mark_may_own_prepare(
-                may_own_inserted.revision,
-                may_own_inserted.ownership_id,
-                may_own_inserted.generation,
-                anchor(24),
-            )
-            .expect("durable MayOwn");
+        mark_custody_fixture(
+            &mut may_own_journal,
+            may_own_inserted.revision,
+            may_own_inserted,
+            anchor(24),
+        );
         drop(may_own_journal);
         let before = fs::read(&may_own_config.journal_path).expect("MayOwn bytes before startup");
         assert!(matches!(
@@ -4602,6 +5568,46 @@ mod tests {
         assert_eq!(
             fs::read(&may_own_config.journal_path).expect("MayOwn bytes after refused startup"),
             before
+        );
+
+        let mixed_directory = tempdir().expect("mixed directory");
+        let mixed_config = test_config(mixed_directory.path());
+        let mut mixed_journal =
+            OwnershipJournal::open(mixed_config.clone()).expect("mixed journal");
+        let custody = mixed_journal
+            .insert_intent(0, intent(30, 31))
+            .expect("mixed custody intent");
+        let custody_revision =
+            mark_custody_fixture(&mut mixed_journal, custody.revision, custody, anchor(32))
+                .revision;
+        let pending_intent = mixed_journal
+            .insert_intent(custody_revision, intent(33, 34))
+            .expect("mixed pending Intent");
+        drop(mixed_journal);
+        let mixed_before =
+            fs::read(&mixed_config.journal_path).expect("mixed bytes before startup");
+        assert!(matches!(
+            ProductionOwnershipRuntime::start_with_config_until(
+                mixed_config.clone(),
+                recovery_deadline(),
+            ),
+            Err(DurableOwnershipError::RecoveryNotConfirmed)
+        ));
+        assert_eq!(
+            fs::read(&mixed_config.journal_path).expect("mixed bytes after refused startup"),
+            mixed_before,
+            "phase 4 preflight must run before retiring any Intent"
+        );
+        let mixed_reopened = OwnershipJournal::open(mixed_config).expect("reopen mixed journal");
+        assert_eq!(
+            mixed_reopened
+                .snapshot()
+                .expect("mixed snapshot")
+                .records
+                .get(&pending_intent.ownership_id)
+                .expect("pending mixed Intent")
+                .phase,
+            OwnershipPhase::Intent
         );
     }
 
