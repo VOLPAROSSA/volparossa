@@ -260,7 +260,7 @@ for exact_runner_text in \
     'ed25519_private: |' \
     'exec 9<>"$console_fifo"' \
     'dd bs=65536 count=256 iflag=fullblock' \
-    'prlimit --fsize=1048576:1048576' \
+    'sudo -n -- ./tests/helper/require-live-worker-identity-proof.sh --execute --yes' \
     'cargo fetch --locked' \
     'cargo build --locked --offline' \
     'proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"}' \
@@ -268,6 +268,12 @@ for exact_runner_text in \
 do
     grep -F -- "$exact_runner_text" "$runner" >/dev/null
 done
+if grep -F -- 'sudo -n prlimit --fsize=' "$guest_proof_fixture" >/dev/null \
+    || grep -F -- 'prlimit --fsize=1048576:1048576 --' \
+        "$guest_proof_fixture" >/dev/null; then
+    printf '%s\n' 'the guest runner wraps the complete root proof in an outer file-size limit' >&2
+    exit 1
+fi
 
 # The runner treats the workflow-supplied process and KVM facts as affine
 # expectations. It checks the complete Linux credential/capability view at

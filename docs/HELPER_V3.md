@@ -629,7 +629,12 @@ Debian 13 live-root acceptance run.
 driver for one real `--internal-worker-v3-live-proof` invocation followed by one true no-argument
 production-helper invocation. Execution is restricted to root inside a recognised disposable
 Debian 13 amd64 VM with the exact systemd v257 manager. It copies the already-built helper and fixed
-production IPC probe into a root-only stage, creates collision-free synthetic service identities,
+production IPC probe into a root-only stage. Both sources must be non-empty, workspace-owned 0755
+regular files with one hard link and at most 128 MiB. Each copy runs under its own exact 128 MiB
+file-size ceiling and is fenced by stable source identity, metadata, and matching source/staged
+digests. After those two large copies, the root producer sets and verifies its own 1 MiB soft/hard
+file-size limit before copying the bounded hook or writing account, capture, and report files; its
+fixed path never raises that limit. It then creates collision-free synthetic service identities,
 binds the staged passwd, group, shadow and nsswitch files read-only, and grants the helper parent
 exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes`,
 `NotifyAccess=main`, `FileDescriptorStoreMax=128`, `FileDescriptorStorePreserve=yes`, and a private
@@ -662,8 +667,8 @@ server applies exact `SO_PEERCRED` policy. The probe additionally requires the s
 primary GID to equal the unit's exact `MainPID` and staged agent GID, while the hook brackets one
 socket inode. The hook publishes seven distinct fixed proof records only after all probe output and
 the unchanged `MainPID`, executable inode and `InvocationID` have been checked. PID 1 bounds the
-second unit to three minutes even if the runner disappears, and a 1 MiB hard/soft `RLIMIT_FSIZE`
-bounds every proof/runtime-file write. Unit stdout and stderr are attested as `null`, so structured
+second unit to three minutes even if the runner disappears, and each transient unit independently
+receives a 1 MiB hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are attested as `null`, so structured
 helper rejection logs cannot grow host files. The start hook proves that the same captured lock inode
 is exclusively contended while the exact helper process runs. Normal `SIGTERM` must produce exit
 status zero, remove the socket, preserve the initially absent-or-exact ownership journal, prove that

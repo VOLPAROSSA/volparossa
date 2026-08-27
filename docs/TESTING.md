@@ -83,6 +83,16 @@ the gate also does not infer that a pre-existing binary was built from the obser
 evidence must therefore include the trusted disposable-VM job which first builds both binaries as
 an unprivileged user from that clean checkout and then runs the fixed producer without changing it.
 
+The guest does not wrap that complete root producer in one 1 MiB file-size limit: the reviewed
+helper and IPC-probe binaries are legitimately larger. Instead, each source must be one non-empty,
+workspace-owned executable regular file with one hard link and a size of at most 128 MiB. Each is
+copied separately under an exact 128 MiB `RLIMIT_FSIZE`, with source identity, metadata, and digest
+fenced before and after the root-only staged copy. Only after both copies pass does the producer set
+its own soft and hard file-size limit to 1 MiB and verify it before copying the at-most-1-MiB hook,
+creating account/capture files, or starting either unit. The fixed path never raises that limit.
+Both transient units independently retain `LimitFSIZE=1048576`; this bounds their writes even if
+the producer exits.
+
 The report carries those non-claims in its exact `scope` object: it is evidence only for the helper
 boundary and does not claim package behavior, restart recovery, `CleanupOwned`, a VPN datapath, or
 any A01--A15 result. AV1-09 remains Open until

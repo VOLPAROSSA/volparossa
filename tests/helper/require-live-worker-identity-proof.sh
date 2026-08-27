@@ -36,7 +36,9 @@ print_plan() {
         '    FileDescriptorStorePreserve=yes on that transient service;' \
         '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
         '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
-        '  cap every transient-unit file write at 1 MiB and the production runtime at three minutes;' \
+        '  bound both large build-artifact staging copies at 128 MiB, then cap' \
+        '    the proof process and every transient-unit file write at 1 MiB;' \
+        '  cap the production runtime at three minutes;' \
         '  discard production runtime stdout and stderr through exact systemd null streams;' \
         '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
         '  invoke only --internal-worker-v3-live-proof and require its exact two success records;' \
@@ -146,7 +148,7 @@ fi
 
 for command_name in \
     awk cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
-    paste readlink rm sed setpriv sha256sum sleep sort stat systemctl systemd-detect-virt \
+    paste prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl systemd-detect-virt \
     systemd-run tc tr uname
 do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -231,21 +233,90 @@ export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID
 helper_source=$repository_directory/target/debug/volparossa-helper
 ipc_probe_source=$repository_directory/target/debug/examples/volparossa-helper-production-ipc-probe
 ipc_hook_source=$script_directory/lib/production-ipc-unit-hook.sh
+staged_executable_max_bytes=134217728
+proof_file_max_bytes=1048576
+repository_owner_uid=$(stat -Lc '%u' "$repository_directory" 2>/dev/null) \
+    || blocked 'the repository owner UID is unavailable'
+repository_owner_gid=$(stat -Lc '%g' "$repository_directory" 2>/dev/null) \
+    || blocked 'the repository owner GID is unavailable'
+case $repository_owner_uid in
+    ''|0|0*|*[!0-9]*)
+        blocked 'the repository must be owned by one canonical unprivileged identity'
+        ;;
+esac
+case $repository_owner_gid in
+    ''|0|0*|*[!0-9]*)
+        blocked 'the repository must be owned by one canonical unprivileged identity'
+        ;;
+esac
+
+source_snapshot_is_exact() {
+    [ "$#" -eq 3 ] || return 1
+    source_snapshot_value=$1
+    source_snapshot_mode=$2
+    source_snapshot_max_bytes=$3
+    saved_source_snapshot_ifs=$IFS
+    IFS=:
+    # The fixed stat serialization contains no glob metacharacters.
+    # shellcheck disable=SC2086
+    set -- $source_snapshot_value
+    IFS=$saved_source_snapshot_ifs
+    [ "$#" -eq 10 ] || return 1
+    [ "$1" = 'regular file' ] \
+        && [ "$4" = "$repository_owner_uid" ] \
+        && [ "$5" = "$repository_owner_gid" ] \
+        && [ "$6" = "$source_snapshot_mode" ] \
+        && [ "$7" = 1 ] \
+        || return 1
+    case $8 in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#8}" -le 9 ] || return 1
+    [ "$8" -le "$source_snapshot_max_bytes" ]
+}
+
+install_proof_file_limit() {
+    [ "$#" -eq 1 ] && [ "$1" = "$proof_file_max_bytes" ] || return 1
+    prlimit --pid "$$" --fsize="$1:$1" \
+        || return 1
+    observed_proof_fsize=$(
+        prlimit --pid "$$" --fsize --raw --noheadings --output SOFT,HARD \
+            | awk 'NF == 2 { print $1 ":" $2 }'
+    ) || return 1
+    [ "$observed_proof_fsize" = "$1:$1" ]
+}
+
 if [ ! -f "$helper_source" ] || [ ! -x "$helper_source" ] || [ -L "$helper_source" ]; then
     blocked 'build target/debug/volparossa-helper as an unprivileged workspace user first'
 fi
-if [ "$(stat -Lc '%F:%h' "$helper_source")" != 'regular file:1' ]; then
-    blocked 'the helper source must be one executable regular file with one hard link'
+helper_initial_snapshot=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$helper_source" 2>/dev/null || true)
+if ! source_snapshot_is_exact \
+    "$helper_initial_snapshot" 755 "$staged_executable_max_bytes"; then
+    blocked 'the helper source must be one bounded workspace-owned 0755 regular file'
 fi
 if [ ! -f "$ipc_probe_source" ] || [ ! -x "$ipc_probe_source" ] \
-    || [ -L "$ipc_probe_source" ] \
-    || [ "$(stat -Lc '%F:%h' "$ipc_probe_source" 2>/dev/null || true)" != 'regular file:1' ]; then
+    || [ -L "$ipc_probe_source" ]; then
     blocked 'build the production IPC probe as an unprivileged workspace user first'
 fi
+ipc_probe_initial_snapshot=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$ipc_probe_source" 2>/dev/null || true)
+if ! source_snapshot_is_exact \
+    "$ipc_probe_initial_snapshot" 755 "$staged_executable_max_bytes"; then
+    blocked 'the production IPC probe must be one bounded workspace-owned 0755 regular file'
+fi
 if [ ! -f "$ipc_hook_source" ] || [ ! -x "$ipc_hook_source" ] \
-    || [ -L "$ipc_hook_source" ] \
-    || [ "$(stat -Lc '%F:%h' "$ipc_hook_source" 2>/dev/null || true)" != 'regular file:1' ]; then
+    || [ -L "$ipc_hook_source" ]; then
     blocked 'the production IPC unit hook must be one executable regular file with one hard link'
+fi
+ipc_hook_initial_snapshot=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$ipc_hook_source" 2>/dev/null || true)
+if ! source_snapshot_is_exact "$ipc_hook_initial_snapshot" 700 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$ipc_hook_initial_snapshot" 750 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$ipc_hook_initial_snapshot" 755 "$proof_file_max_bytes"; then
+    blocked 'the production IPC unit hook has unsafe workspace metadata'
 fi
 
 if [ "$(stat -c '%F:%u:%g:%a' /var/tmp)" != 'directory:0:0:1777' ]; then
@@ -700,11 +771,18 @@ if [ "$ids_found" != yes ]; then
     blocked 'no collision-free synthetic service identity range is available'
 fi
 
-source_before=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source")
+source_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source")
+if ! source_snapshot_is_exact "$source_before" 755 "$staged_executable_max_bytes" \
+    || [ "$source_before" != "$helper_initial_snapshot" ]; then
+    failed 'the helper source changed before its bounded staging copy'
+fi
 source_digest_before=$(vp_capture_sha256_file "$helper_source") \
     || failed 'the helper source could not be hashed'
-install -o root -g root -m 0500 "$helper_source" "$temporary_stage/volparossa-helper"
-source_after=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source")
+prlimit --fsize="$staged_executable_max_bytes:$staged_executable_max_bytes" -- \
+    install -o root -g root -m 0500 \
+        "$helper_source" "$temporary_stage/volparossa-helper" \
+    || failed 'the bounded helper staging copy failed'
+source_after=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source")
 source_digest_after=$(vp_capture_sha256_file "$helper_source") \
     || failed 'the helper source could not be re-hashed'
 staged_digest=$(vp_capture_sha256_file "$temporary_stage/volparossa-helper") \
@@ -717,12 +795,18 @@ if [ "$source_before" != "$source_after" ] \
     failed 'the real helper changed while copied or the staged image is unsafe'
 fi
 
-ipc_probe_before=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source")
+ipc_probe_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source")
+if ! source_snapshot_is_exact "$ipc_probe_before" 755 "$staged_executable_max_bytes" \
+    || [ "$ipc_probe_before" != "$ipc_probe_initial_snapshot" ]; then
+    failed 'the production IPC probe changed before its bounded staging copy'
+fi
 ipc_probe_digest_before=$(vp_capture_sha256_file "$ipc_probe_source") \
     || failed 'the production IPC probe source could not be hashed'
-install -o root -g "$agent_gid" -m 0550 "$ipc_probe_source" \
-    "$temporary_stage/production-ipc-probe"
-ipc_probe_after=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source")
+prlimit --fsize="$staged_executable_max_bytes:$staged_executable_max_bytes" -- \
+    install -o root -g "$agent_gid" -m 0550 \
+        "$ipc_probe_source" "$temporary_stage/production-ipc-probe" \
+    || failed 'the bounded production IPC probe staging copy failed'
+ipc_probe_after=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source")
 ipc_probe_digest_after=$(vp_capture_sha256_file "$ipc_probe_source") \
     || failed 'the production IPC probe source could not be re-hashed'
 staged_ipc_probe_digest=$(vp_capture_sha256_file "$temporary_stage/production-ipc-probe") \
@@ -735,12 +819,26 @@ if [ "$ipc_probe_before" != "$ipc_probe_after" ] \
     failed 'the production IPC probe changed while copied or its staged image is unsafe'
 fi
 
-ipc_hook_before=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source")
+# The two reviewed build artifacts need more than the proof-file ceiling while
+# being copied. From this point onward, apply that ceiling to this fixed shell
+# and every ordinary descendant before any other staged file is written. No
+# later gate path raises it; transient services get an independent PID 1 limit.
+install_proof_file_limit "$proof_file_max_bytes" \
+    || failed 'the proof-process file-size limit is not exact'
+
+ipc_hook_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source")
+if ! source_snapshot_is_exact "$ipc_hook_before" 700 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact "$ipc_hook_before" 750 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact "$ipc_hook_before" 755 "$proof_file_max_bytes"; then
+    failed 'the production IPC hook changed before its bounded staging copy'
+fi
+[ "$ipc_hook_before" = "$ipc_hook_initial_snapshot" ] \
+    || failed 'the production IPC hook identity changed before its staging copy'
 ipc_hook_digest_before=$(vp_capture_sha256_file "$ipc_hook_source") \
     || failed 'the production IPC hook source could not be hashed'
 install -o root -g root -m 0500 "$ipc_hook_source" \
     "$temporary_stage/production-ipc-hook"
-ipc_hook_after=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source")
+ipc_hook_after=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source")
 ipc_hook_digest_after=$(vp_capture_sha256_file "$ipc_hook_source") \
     || failed 'the production IPC hook source could not be re-hashed'
 staged_ipc_hook_digest=$(vp_capture_sha256_file "$temporary_stage/production-ipc-hook") \
@@ -1871,20 +1969,20 @@ if [ "$worker_fdstore_before_retirement" != 2 ] \
     failed 'the retained fdstore or exact-unit retirement observations are incomplete'
 fi
 
-source_final=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source") \
+source_final=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source") \
     || failed 'the helper source metadata could not be revalidated'
 source_digest_final=$(vp_capture_sha256_file "$helper_source") \
     || failed 'the helper source could not be revalidated'
 staged_digest_final=$(vp_capture_sha256_file "$temporary_stage/volparossa-helper") \
     || failed 'the staged helper could not be revalidated'
-ipc_probe_final=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source") \
+ipc_probe_final=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source") \
     || failed 'the production IPC probe metadata could not be revalidated'
 ipc_probe_digest_final=$(vp_capture_sha256_file "$ipc_probe_source") \
     || failed 'the production IPC probe source could not be revalidated'
 staged_ipc_probe_digest_final=$(vp_capture_sha256_file \
     "$temporary_stage/production-ipc-probe") \
     || failed 'the staged production IPC probe could not be revalidated'
-ipc_hook_final=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source") \
+ipc_hook_final=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source") \
     || failed 'the production IPC hook metadata could not be revalidated'
 ipc_hook_digest_final=$(vp_capture_sha256_file "$ipc_hook_source") \
     || failed 'the production IPC hook source could not be revalidated'

@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## Fixed alpha v1 scorecard
 
@@ -138,10 +138,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   proves two same-process runtime binds, bounded frame and canonical-wire rejection, and independent
   wrong-UID, wrong-primary-GID and root-peer rejection after each peer has passed Unix DAC. Every
   probe pins the server's `SO_PEERCRED` PID/GID to the exact unit `MainPID`/agent GID and brackets one
-  socket inode. PID 1 enforces a three-minute maximum lifetime and 1 MiB file-size limit while unit
-  stdout/stderr go to `null`. Normal `SIGTERM` retirement must leave the journal byte-for-byte and
-  metadata-identical, release the same captured lock inode that was proven exclusively held while
-  the helper ran, remove the socket, empty the descriptor store and remove the exact old process and
+  socket inode. The retained-evidence producer now stages the non-empty helper and IPC probe under
+  separate 128 MiB ceilings with workspace ownership, single-link, metadata, and digest fencing;
+  only after those copies does it set and verify its own 1 MiB ceiling before any hook, account,
+  capture, or report write. PID 1 independently enforces the unit's three-minute maximum lifetime
+  and 1 MiB file-size limit while unit stdout/stderr go to `null`. Normal `SIGTERM` retirement must
+  leave the journal byte-for-byte and metadata-identical, release the same captured lock inode
+  proven exclusively held while the helper ran, remove the socket, empty the descriptor store and
+  remove the exact old process and
   cgroup. Both phases use a private runtime bind and require host `/run/volparossa` to remain
   absent. A successful execute-mode run now emits one bounded canonical helper-boundary evidence-v1
   JSON document on stdout only after separate observed clean-source and executed-artifact
