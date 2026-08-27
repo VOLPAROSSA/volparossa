@@ -339,11 +339,25 @@ single clean-build A01--A15 run; the score is not a release claim.
   classification of durable journal targets, affinely inherited custody and a barrier-ordered
   stable manager inventory before any `Intent` mutation. No production terminal consumer of the
   in-process poisoned-attempt observer, authoritative adoption/absence proof, request-path issuance
-  writer, restart reaper, old-worker death proof, namespace/kernel cleanup executor, or
+  writer, restart reaper, namespace/kernel cleanup executor, or
   authority-ordered composition of the dormant manager removal exists. Every non-empty
-  classification therefore continues to block startup. The durable settlement substrate does not
-  make crash cleanup production-complete: AV1-10 remains Open, the fixed alpha score remains
-  **11/100 (11%)**, and this slice adds no scorecard, datapath or acceptance points.
+  classification therefore continues to block startup. A new dormant observation-only seam waits
+  for exact inherited process-pidfd `POLLIN` under one hard deadline, permits `POLLHUP` only with
+  `POLLIN`, remeasures the exact descriptor binding before and after each wait, and remeasures the
+  complete pending set once more before constructing evidence. Process/thread-group interpretation
+  relies on the private causal publication path creating pidfds with `PidfdFlags::empty()`; pidfs
+  typing alone cannot recover `PIDFD_THREAD` flag history after restart. Every pending
+  `MayOwnCustody`/`MayOwnPrepare` target must have exact inherited custody before any wait;
+  `CleanupConfirmed` targets are skipped. Both success and failure retain the complete affine set.
+  Only the role-ordered descriptor binding and network-namespace portion of the recovery anchor are
+  freshly remeasured; the other complete anchor fields remain correlation from the previously
+  lock-held projection and are not freshly journal-revalidated. A future settlement must retain and
+  revalidate that exact startup guard across the wait or freshly rejoin journal and manager
+  evidence. This proves one exact worker thread group's exit, not descendant exit, cgroup
+  emptiness, namespace destruction, kernel cleanup, manager removal or journal settlement, and it
+  has no production caller. The durable settlement substrate therefore does not make crash cleanup
+  production-complete: AV1-10 remains Open, the fixed alpha score remains **11/100 (11%)**, and this
+  slice adds no scorecard, datapath or acceptance points.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly

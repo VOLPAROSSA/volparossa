@@ -217,10 +217,11 @@ Production now opens the ownership actor in a record-transition-free, lock-holdi
 keeps the exact journal parent, exclusive lock and decoded snapshot alive. Creating the fixed lock
 entry is expected, but no main-journal transition or `Intent` sweep occurs. It projects at most 64
 canonical custody-bound `MayOwnCustody`/`MayOwnPrepare`/`CleanupConfirmed` targets, each containing
-only its durable phase, derived opaque name and role-ordered descriptor binding. Legacy
-`MayOwnPrepare`, name collision and cross-record kernel-object reuse fail closed. While that lock remains held, one
-non-mutating systemd barrier precedes two uncached, identical complete bounded D-Bus inventory
-identity projections of the exact current service object. Exact `MainPID`, `NotifyAccess=main`,
+its durable phase, derived opaque name, complete recovery anchor and role-ordered descriptor
+binding. Legacy `MayOwnPrepare`, name collision and cross-record kernel-object reuse fail closed.
+While that lock remains held, one non-mutating systemd barrier precedes two uncached, identical
+complete bounded D-Bus inventory identity projections of the exact current service object. Exact
+`MainPID`, `NotifyAccess=main`,
 128-entry capacity and `FileDescriptorStorePreserve=yes` remain mandatory. The complete manager
 and inherited maps must be equal, with no extra name, partial pair or cross-name alias. Local
 descriptor bindings are measured before the barrier and after both projections. The journal's
@@ -239,6 +240,32 @@ death, kernel cleanup, or authority for a journal transition. In particular,
 disposition is still only read-only startup classification rather than the actor's separate affine
 manager-absence proof. Every partial, one-sided, wrong-name, wrong-binding or unstable case remains
 unresolved.
+
+A dormant observation-only seam can consume the complete affine classification and wait for exact
+inherited process-pidfd exit. Before its first wait, every pending `MayOwnCustody` or
+`MayOwnPrepare` target must be `ExactPresent`; an absent pending target fails the whole set without
+minting evidence. `CleanupConfirmed` targets are skipped because their earlier durable cleanup
+transition does not require a second, weaker death observation. Every pending pidfd is waited under
+one copied absolute deadline. Linux `POLLIN` is mandatory, `POLLIN|POLLHUP` is accepted for a reaped
+task, and bare `POLLHUP`, `POLLERR`, `POLLNVAL` or any other bit fails closed. The exact descriptor
+binding is freshly remeasured before and after every wait, including the network-namespace
+device/inode slice of the anchor, followed by one final remeasurement of the complete pending set
+before evidence can be constructed. Process/thread-group semantics rely on the private causal
+publication path having created every worker pidfd with `PidfdFlags::empty()`; `PID_FS_MAGIC` proves
+only pidfs object type and cannot reveal after restart whether `PIDFD_THREAD` was requested. The
+remaining complete anchor fields are correlated only by the previously lock-held journal
+projection; they cannot safely be reconstructed from an already-terminal pidfd and are not freshly
+journal-revalidated by this observer. Success or failure retains the complete classification,
+manager snapshot, pidfds and namespace owners affinely, with no raw descriptor or PID exposure.
+
+This seam proves only that the exact inherited worker thread group exited. It does not prove
+descendant exit, cgroup emptiness, network-namespace destruction, kernel cleanup, descriptor-store
+removal, journal settlement, adoption or readiness to publish the helper socket. The retained
+namespace descriptor intentionally keeps that namespace alive. The seam is synchronous and has no
+separate cancellation surface: expiry returns the entire classification unresolved. It has no
+production caller and therefore does not weaken the refusal boundary below. Any future settlement
+composition must retain and revalidate the exact startup journal guard across this observation, or
+freshly rejoin the result to journal and manager evidence before consuming authority.
 
 This is still a refusal boundary, not production recovery. Any non-empty journal target set blocks
 startup after read-only classification and drops its exact source-slot owners without publishing a

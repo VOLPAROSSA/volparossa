@@ -103,6 +103,23 @@ pub(crate) fn wait_for_readable_fd<F: AsFd>(
     wait_for_fd_inner(descriptor, PollFlags::POLLIN, deadline, true)
 }
 
+/// Wait for terminal readiness from one exact Linux process pidfd.
+///
+/// A process pidfd created without `PIDFD_THREAD` reports `POLLIN` only after the last thread in
+/// the thread group exits. Reaping may additionally report `POLLHUP`. No other readiness bit is
+/// accepted, and a bare hangup is not enough to construct exit evidence.
+pub(crate) fn wait_for_process_pidfd_exit<F: AsFd>(
+    descriptor: &F,
+    deadline: HardDeadline,
+) -> io::Result<()> {
+    wait_for_fd_events(
+        descriptor,
+        PollFlags::POLLIN,
+        deadline,
+        exact_process_pidfd_exit_events,
+    )
+}
+
 fn wait_for_fd_inner<F: AsFd>(
     descriptor: &F,
     required: PollFlags,
@@ -118,6 +135,20 @@ fn wait_for_fd_inner<F: AsFd>(
         ));
     }
 
+    wait_for_fd_events(descriptor, required, deadline, move |events| {
+        let terminal = events.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL)
+            || (events.contains(PollFlags::POLLHUP)
+                && (!allow_hangup_with_readiness || !events.contains(required)));
+        !terminal && events.contains(required)
+    })
+}
+
+fn wait_for_fd_events<F: AsFd>(
+    descriptor: &F,
+    required: PollFlags,
+    deadline: HardDeadline,
+    events_are_valid: impl Fn(PollFlags) -> bool,
+) -> io::Result<()> {
     loop {
         deadline.ensure_remaining()?;
         let mut descriptors = [PollFd::new(descriptor.as_fd(), required)];
@@ -132,15 +163,16 @@ fn wait_for_fd_inner<F: AsFd>(
         let events = descriptors[0]
             .revents()
             .ok_or_else(|| io::Error::other("poll returned no readiness state"))?;
-        let terminal = events.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL)
-            || (events.contains(PollFlags::POLLHUP)
-                && (!allow_hangup_with_readiness || !events.contains(required)));
-        if terminal || !events.contains(required) {
+        if !events_are_valid(events) {
             return Err(io::Error::other("descriptor readiness is invalid"));
         }
         deadline.ensure_remaining()?;
         return Ok(());
     }
+}
+
+fn exact_process_pidfd_exit_events(events: PollFlags) -> bool {
+    events == PollFlags::POLLIN || events == (PollFlags::POLLIN | PollFlags::POLLHUP)
 }
 
 fn timed_out() -> io::Error {
@@ -152,7 +184,10 @@ mod tests {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
+        process::Command,
     };
+
+    use rustix::process::{PidfdFlags, pidfd_open};
 
     use super::*;
 
@@ -237,6 +272,65 @@ mod tests {
                 .expect_err("equality is expired")
                 .kind(),
             io::ErrorKind::TimedOut
+        );
+    }
+
+    #[test]
+    fn process_pidfd_exit_mask_requires_pollin_and_permits_only_paired_hangup() {
+        for accepted in [PollFlags::POLLIN, PollFlags::POLLIN | PollFlags::POLLHUP] {
+            assert!(exact_process_pidfd_exit_events(accepted));
+        }
+        for rejected in [
+            PollFlags::empty(),
+            PollFlags::POLLHUP,
+            PollFlags::POLLERR,
+            PollFlags::POLLNVAL,
+            PollFlags::POLLIN | PollFlags::POLLERR,
+            PollFlags::POLLIN | PollFlags::POLLNVAL,
+            PollFlags::POLLPRI,
+            PollFlags::POLLIN | PollFlags::POLLPRI,
+            PollFlags::POLLHUP | PollFlags::POLLPRI,
+        ] {
+            assert!(!exact_process_pidfd_exit_events(rejected));
+        }
+    }
+
+    #[test]
+    fn exact_process_pidfd_reports_running_zombie_and_reaped_states() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn live child");
+        let pidfd = pidfd_open(
+            rustix::process::Pid::from_child(&child),
+            PidfdFlags::empty(),
+        )
+        .expect("open exact process pidfd without PIDFD_THREAD");
+
+        assert_eq!(
+            wait_for_process_pidfd_exit(
+                &pidfd,
+                HardDeadline::after(Duration::from_millis(20)).expect("brief deadline"),
+            )
+            .expect_err("running process must not report exit")
+            .kind(),
+            io::ErrorKind::TimedOut
+        );
+
+        child.kill().expect("terminate child without reaping");
+        let mut zombie = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
+        assert_eq!(poll(&mut zombie, 1_000_u16).expect("poll zombie"), 1);
+        assert_eq!(
+            zombie[0].revents().expect("zombie readiness"),
+            PollFlags::POLLIN
+        );
+
+        child.wait().expect("reap child");
+        let mut reaped = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
+        assert_eq!(poll(&mut reaped, 1_000_u16).expect("poll reaped"), 1);
+        assert_eq!(
+            reaped[0].revents().expect("reaped readiness"),
+            PollFlags::POLLIN | PollFlags::POLLHUP
         );
     }
 }
