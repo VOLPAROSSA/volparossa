@@ -169,34 +169,44 @@ single clean-build A01--A15 run; the score is not a release claim.
   wrapper has explicit composition and ordering tests. Production opens and locks the actor after
   fixed runtime identity/directory validation but before cleanup-token publication, stale-socket
   removal or listener bind; shutdown cleans the engine and then proves actor quiescence and joins it
-  before releasing the socket. Its insert, custody-mark, custody-bound prepare-arm,
-  never-dispatched retirement, and confirmed-recovery transitions are exact-current-revision
-  retry-safe after lost replies; persisted typed `Absent` origins prevent cross-operation
-  acknowledgement and repeated recovery execution. Intervening transitions and
+  before releasing the socket. The canonical journal now persists exact `Intent`,
+  `MayOwnCustody`, `MayOwnPrepare`, `CleanupConfirmed`, and `Absent` phases. Its insert,
+  custody-mark, custody-bound prepare-arm, never-dispatched retirement, cleanup-confirmation, and
+  manager-absence-confirmation transitions are independently exact-current-revision retry-safe
+  after lost replies; persisted typed `Absent` origins prevent cross-operation acknowledgement and
+  repeated executor calls. Intervening transitions and
   conflicting identity, plan, expiry, generation, anchor, descriptor identity, or reconciliation
   state fail closed without journal mutation. The new `MayOwnCustody -> MayOwnPrepare` transition
-  copies only the exact already-persisted custody evidence byte-for-byte. A private single-writer
-  actor owns the store and recovery executor on one named thread, opens and retains one verified
+  copies only the exact already-persisted custody evidence byte-for-byte. Either custody-bound
+  `MayOwnCustody` or `MayOwnPrepare` may advance to the durable `CleanupConfirmed` phase only after
+  a trusted exact-record-bound proof of worker teardown and kernel cleanup; that phase preserves
+  the custody evidence and has no absent origin. Only a separate exact manager-absence proof may
+  then advance `CleanupConfirmed -> Absent(RecoveredMayOwn)`. There is no direct
+  `MayOwnPrepare -> Absent` transition. A private single-writer actor owns the store and both
+  settlement executor interfaces on one named thread, opens and retains one verified
   parent-directory descriptor, and
   trips a process-global one-shot start latch before lock creation. The latch remains set after
-  startup failure or clean shutdown. Before retiring even one `Intent`, startup refuses a snapshot
-  containing `MayOwnCustody`; otherwise the startup sweep resolves every observed uncertain record
-  before reporting ready, and admission is bounded to four operations plus shutdown. The installed
-  production executor deliberately refuses `MayOwnPrepare`, leaving it byte-identical and blocking
-  Ready; independently, the actor may durably settle only never-dispatched `Intent` records.
+  startup failure or clean shutdown. The generic actor path settles every custody-bearing phase in
+  two-proof order before retiring even one `Intent`; production's prior lock-held exact-set join
+  still refuses every non-empty custody target before handing control to that path. The installed
+  production executor deliberately refuses both proofs, leaving `MayOwnCustody`, `MayOwnPrepare`,
+  or `CleanupConfirmed` byte-identical and blocking Ready; independently, the actor may durably
+  settle only never-dispatched `Intent` records in production. Admission is bounded to four
+  operations plus shutdown.
   Every non-test actor entry point now requires one absolute hard deadline carried through
   admission, queueing, actor execution, reply and thread settlement. Startup rechecks it before
-  filesystem/latch work and each pending record, commands recheck it after dequeue, and recovery
-  receives the exact same value. Recovery checks it before the executor and after the exact proof,
-  immediately before journal mutation, so a late executor return cannot publish `Absent`. Expired
+  filesystem/latch work and each pending record, commands recheck it after dequeue, and each
+  settlement executor receives the exact supplied value. Each operation checks it before its
+  executor and after the exact proof, immediately before journal mutation, so a late executor
+  return cannot publish its next phase. Expired
   unstarted work is mutation-free; every late completion permanently fences admission as ambiguous,
   and shutdown cannot hide settlement ambiguity behind a weaker deadline result.
   Definite pre-rename I/O failures permit a retry only after the retained parent, exact exclusive
   lock, absent temporary entry, and durable snapshot are all re-proved; otherwise the actor is
   permanently ambiguous. Reply and thread-settlement waits are bounded, but an actor thread stuck
-  inside the non-cancellable recovery executor can only be detached while retaining the journal
+  inside either non-cancellable settlement executor can only be detached while retaining the journal
   lock; the process latch remains set. Clean shutdown proves the durable boundary and additionally
-  requires every record to be durably `Absent`; it refuses rather than retires or recovers an
+  requires every record to be durably `Absent`; it refuses rather than retires or settles an
   outstanding record. Each validated wire intent locally receives a fresh random 256-bit
   `OwnershipId` inside a non-`Clone` registration owner. Registration consumes it into one durable
   key. Custody marking consumes that key into `MayOwnCustody` only after persisting the complete
@@ -204,11 +214,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   phase-4 token into `MayOwnPrepare` with borrowed owner-bound resources. Every error retains the
   exact affine owner which still exists. `ProductionOwnershipRuntime` may issue a separately
   cloneable arm-only handle, but remains the sole owner of actor startup, shutdown and thread
-  settlement; that handle exposes no registration, custody-mark, retirement, recovery or lifecycle
-  authority. Raw codec, issuance, custody marking and recovery authority remain private; no
+  settlement; that handle exposes no registration, custody-mark, retirement, settlement or lifecycle
+  authority. Raw codec, issuance, custody marking and settlement authority remain private; no
   production request-path issuance/arming writer, inventory-attested pidfd/network-namespace
-  publication caller, absence-proving
-  `MayOwnPrepare` recovery executor, restart reaper, supported on-disk migration, cross-runtime
+  publication caller, worker-death/kernel-cleanup executor, manager-absence composition, restart
+  reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live-root production lifecycle proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
@@ -273,7 +283,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   inventory identity projections plus exact service properties and remeasures the local binding. It
   can report exact name/identity-correlated present, exact absent, or unresolved evidence, but uses
   types which cannot arm/adopt/remove, advance the journal, open dispatch, clear poison or authorize
-  retry. Ambiguous spawn remains
+  retry. A distinct dormant exact-name removal adapter accepts a stable complete baseline and the
+  borrowed affine custody pair, requires a fresh uncached preflight equal to that baseline, and
+  remeasures the local binding before its send boundary. It poisons a dedicated gate immediately
+  before sending exactly `FDSTOREREMOVE=1\nFDNAME=<fixed-name>` with zero `SCM_RIGHTS`, then orders
+  the mutation using a separate `BARRIER=1` notification with exactly one pipe FD. Two fresh
+  uncached complete post-barrier snapshots must be equal and exactly the baseline minus the named
+  pair, with service identity, local binding, and every unrelated entry unchanged. Any post-boundary
+  error is `ManagerMayHaveRemoved` and never authorizes a blind retry. A same-attempt reconciler may
+  clear the removal poison only after that exact removed projection; an exact unchanged baseline
+  still leaves the gate poisoned and grants no retry. Publication and removal currently use
+  separate gates and the removal APIs have no production caller, so they are not yet safe
+  production composition or either journal settlement proof. Ambiguous spawn remains
   permanently fail-closed. `SupervisorDropped` without a returned normal-failure attempt identity
   is deliberately not reconcilable in this slice.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
@@ -314,9 +335,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   classification of durable journal targets, affinely inherited custody and a barrier-ordered
   stable manager inventory before any `Intent` mutation. No production terminal consumer of the
   in-process poisoned-attempt observer, authoritative adoption/absence proof, request-path issuance
-  writer, `MayOwnPrepare` reaper, manager removal or complete restart settlement exists. Every non-empty
-  classification therefore continues to block startup; AV1-10 remains Open and this slice adds no
-  scorecard, datapath or acceptance points.
+  writer, restart reaper, old-worker death proof, namespace/kernel cleanup executor, or
+  authority-ordered composition of the dormant manager removal exists. Every non-empty
+  classification therefore continues to block startup. The durable settlement substrate does not
+  make crash cleanup production-complete: AV1-10 remains Open, the fixed alpha score remains
+  **11/100 (11%)**, and this slice adds no scorecard, datapath or acceptance points.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
@@ -362,35 +385,44 @@ single clean-build A01--A15 run; the score is not a release claim.
   kernel-object identity within or across names fails closed even when mutable descriptor status
   flags differ.
   Production opens a record-transition-free journal preflight and, under its retained exclusive
-  lock, projects every custody-bound `MayOwnCustody`/`MayOwnPrepare` record before any `Intent`
-  sweep. Creating the fixed lock entry is expected; no main-journal transition occurs. One
+  lock, projects every custody-bound `MayOwnCustody`/`MayOwnPrepare`/`CleanupConfirmed` record before
+  any `Intent` sweep. Creating the fixed lock entry is expected; no main-journal transition occurs. One
   non-mutating manager barrier then precedes two identical uncached complete bounded D-Bus
   inventory identity projections plus exact service properties. Local bindings are measured before
   and after observation; the journal parent, lock entry, held lock, absent temporary entry and exact
-  durable snapshot are revalidated before a final local measurement and three-way classification.
+  durable snapshot are revalidated before a final local measurement and exact classification.
   Manager and inherited maps must be identical and every present pair must match exactly one
   derived journal name and role binding. `MayOwnPrepare` must be exactly present. An absent
-  `MayOwnCustody` becomes only `ExactNoStoredCustody`, never an `Absent`
-  proof or mutation authority. Every non-empty classification still refuses startup before cleanup
+  `MayOwnCustody` becomes only `ExactNoStoredCustody`; an absent `CleanupConfirmed` receives the
+  distinct `CleanupConfirmedNoStoredCustody` disposition. Neither is an `Absent` proof or mutation
+  authority, and the former cannot substitute for either durable settlement proof. Every non-empty
+  classification still refuses startup before cleanup
   token or socket publication. Dropping the refused set closes the exact process-local source
   slots; source ownership and the read-only exact-set join are no longer positive-adoption
-  blockers, but a custody-capable restart-settlement executor remains absent. A dormant
+  blockers, but a custody-capable production restart-settlement executor remains absent. A dormant
   publication component sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
-  Every publication failure returned after the first send is manager-may-own, leaves the gate
-  permanently poisoned, and issues no `FDSTOREREMOVE`. A separate dormant poisoned-attempt
+  Every publication failure returned after the first send is manager-may-own and leaves the
+  publication gate permanently poisoned. A separate dormant poisoned-attempt
   observer can only classify the exact poisoned in-process attempt after a barrier, two identical
   complete bounded inventory identity projections, exact service properties and retained-binding
-  revalidation; its private evidence grants no mutation, adoption, arming or retry authority.
-  Publication is
-  reachable only from the private live-proof selector and private dormant supervisor publisher;
-  that poisoned-attempt observer remains callerless. The distinct complete startup observer and
+  revalidation; its private evidence grants no mutation, adoption, arming or retry authority. A
+  distinct dormant remover takes a fresh exact preflight from a stable complete baseline, rechecks
+  the local pair, then sends exact-name `FDSTOREREMOVE=1` with zero ancillary FDs and orders it with
+  a separate one-FD barrier. It accepts only two equal fresh uncached snapshots proving the exact
+  baseline-minus-pair result with unrelated entries unchanged. The removal gate is poisoned
+  immediately before the send; any later failure is manager-may-have-removed, no blind retry is
+  authorized, and exact-still-present reconciliation retains the poison. This separate gate must be
+  unified with publication serialization before production wiring.
+  Publication is reachable only from the private live-proof selector and private dormant supervisor
+  publisher; that poisoned-attempt observer remains callerless and every removal entry point has no
+  production caller. The distinct complete startup observer and
   journal/inherited classifier are production-wired but grant no mutation, adoption, arming or
   cleanup authority. No publication path is connected to a production server/engine/request path
   or has a recorded live transient-unit result. This is a fail-closed typed custody-capture and
-  read-only restart-classification boundary plus dormant publication foundation, not composed
-  production adoption, restart settlement, or crash cleanup. The child
+  read-only restart-classification boundary plus dormant publication/removal foundation, not
+  composed production adoption, restart settlement, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists, but staged-package and
   disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits

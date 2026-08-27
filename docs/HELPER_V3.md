@@ -101,16 +101,20 @@ stale-socket removal, or listener bind. Orderly shutdown cleans the engine first
 joins the quiescent actor before releasing the socket path.
 
 The v3 module contains a boot-scoped, secret-free, canonical and length-bounded codec/CAS store for
-exact `Intent`, `MayOwnCustody`, `MayOwnPrepare`, and `Absent` ownership records. Its fixed lock,
-atomic file-fsync/rename/directory-fsync transaction, typed recovery anchor, role-ordered
-pidfd/network-namespace identity binding, and trusted
-non-cryptographic exact-echo absence-proof interface have temp-directory tests. A private
-single-writer actor now owns both this store and its recovery executor on one named thread. It
-retains one verified parent-directory descriptor and acquires a process-global one-shot store latch
-before opening the lock. Startup refuses the complete snapshot when any `MayOwnCustody` record
-exists, before retiring even one `Intent`; otherwise it sweeps every startup `Intent` and
-`MayOwnPrepare`, rechecks the complete durable boundary, and only then reports ready. Its
-non-blocking admission accepts at most four
+exact `Intent`, `MayOwnCustody`, `MayOwnPrepare`, `CleanupConfirmed`, and `Absent` ownership records.
+Its fixed lock, atomic file-fsync/rename/directory-fsync transaction, typed recovery anchor,
+role-ordered pidfd/network-namespace identity binding, and two distinct non-cryptographic
+exact-record-echo proof interfaces have temp-directory tests. The first interface may advance a
+custody-bound `MayOwnCustody` or `MayOwnPrepare` record to `CleanupConfirmed` only after a trusted
+executor has proved worker teardown and exact kernel cleanup. The second may advance only that
+durable `CleanupConfirmed` record to `Absent(RecoveredMayOwn)` after a separate executor has proved
+exact stable manager absence. There is no direct `MayOwnPrepare -> Absent` transition. A private
+single-writer actor owns the store and both executor interfaces on one named thread. It retains one
+verified parent-directory descriptor and acquires a process-global one-shot store latch before
+opening the lock. Its generic settlement path processes every custody-bearing phase before retiring
+even one `Intent`, rechecks the complete durable boundary, and only then reports ready. The
+production lock-held startup join still refuses every non-empty custody target set before this path,
+and its installed executor refuses both proofs. Its non-blocking admission accepts at most four
 operations while reserving channel capacity for shutdown; opaque non-`Clone` keys expose neither
 the journal revision nor raw ownership coordinates. Each validated wire intent locally receives a
 fresh random 256-bit `OwnershipId` inside a non-`Clone` registration owner. Registration consumes
@@ -121,39 +125,38 @@ returns a `MayOwnPrepare` token exposing only the context and borrowed owner-bou
 metadata. Every error returns the exact affine owner which still exists, so the typed API neither
 duplicates authority nor discards it on an error path.
 
-Validated records and private recovery targets now deterministically rederive the same non-`Clone`
+Validated records and private settlement targets now deterministically rederive the same non-`Clone`
 per-link resources. Focused tests fix the public alias grammar and cover every immutable field
 class, mutable-field exclusion, redacted debug output, canonical codec/reopen stability, a lost
 insert reply, and recovery projection. This dormant projection exposes no production issuance API
 and does not authorize a kernel operation.
 
 Production exposes only a start/shutdown wrapper around the actor; registration, custody marking,
-arming and raw recovery authority remain inaccessible to the server and engine. Its production
-executor always refuses `MayOwnPrepare`, so a potentially mutating record stays byte-identical and
-blocks startup. A `MayOwnCustody` record also stays byte-identical and blocks startup before any
-other record is settled because manager inventory adoption is not implemented. Only a
-never-dispatched `Intent` may be durably settled to `Absent` before the internal actor-ready and
-socket-publication boundary. There is no production request-path issuance/arming writer,
-namespace-FD vault, absence-proving `MayOwnPrepare` recovery executor, restart reaper, supported
-on-disk migration, or live-root proof. Every non-test actor entry point requires one caller-supplied
-absolute hard deadline. That same value is carried through admission, the queued
-command, actor-thread execution, reply handling and thread settlement. Recovery additionally
-receives that exact same deadline and rechecks it before invoking the trusted executor and after the
-exact proof, immediately before any
-`MayOwnPrepare -> Absent` mutation. Startup rechecks it before the first filesystem or latch
+arming and raw settlement authority remain inaccessible to the server and engine. Its production
+executor always refuses both trusted cleanup and manager-absence proof requests, so
+`MayOwnCustody`, `MayOwnPrepare`, and `CleanupConfirmed` remain byte-identical and block startup.
+Only a never-dispatched `Intent` may be durably settled to `Absent` before the internal actor-ready
+and socket-publication boundary. There is no production request-path issuance/arming writer,
+restart-stable namespace custody, worker-death and kernel-cleanup executor, manager-absence
+executor, restart reaper, supported on-disk migration, or live-root proof. Every non-test actor
+entry point requires one caller-supplied absolute hard deadline. That same value is carried through
+admission, the queued command, actor-thread execution, reply handling and thread settlement. Each
+settlement operation additionally receives its exact supplied deadline and rechecks it before
+invoking its trusted executor and after the exact proof, immediately before its one journal
+mutation. Startup rechecks its deadline before the first filesystem or latch
 operation and before each pending record; ordinary commands recheck it immediately after dequeue.
 Work which expires before its first mutation returns `DeadlineElapsed` without touching journal
-bytes. Non-recovery journal I/O which already began must settle, while a recovery executor may
-return late but can no longer publish `Absent`; every late or unobservable completion permanently
-fences admission as ambiguous. Shutdown gives settlement ambiguity precedence over a weaker queued
+bytes. Non-settlement journal I/O which already began must settle, while either settlement executor
+may return late but can no longer publish its next phase; every late or unobservable completion
+permanently fences admission as ambiguous. Shutdown gives settlement ambiguity precedence over a weaker queued
 deadline result. Only `Drop` retains a private emergency deadline; relative-deadline convenience
-wrappers are test-only. If the actor thread is stuck inside the non-cancellable recovery executor,
+wrappers are test-only. If the actor thread is stuck inside a non-cancellable settlement executor,
 its join handle is detached after the bounded settlement wait; that thread may retain the journal
 lock, while the process-global latch remains set until process exit. A clean shutdown now requires
 both an intact durable boundary and every record already durably `Absent`; it never retires or
-recovers an outstanding record and returns `RecoveryNotConfirmed` for a known `Intent`,
-`MayOwnCustody`, or `MayOwnPrepare`. Reopening requires a fresh process. These limitations must be
-resolved at the production service boundary before the actor can become the request-path
+settles an outstanding record and returns `RecoveryNotConfirmed` for a known `Intent`,
+`MayOwnCustody`, `MayOwnPrepare`, or `CleanupConfirmed`. Reopening requires a fresh process. These
+limitations must be resolved at the production service boundary before the actor can become the request-path
 issuance/arming writer. The required tag-35 closed plan has a fallible exact conversion into the
 store's existing `ClosedPlan`; this removes the wire/schema mismatch but performs no journal I/O and
 grants no mutation authority. A missing journal is therefore not proof that stale kernel state is
@@ -161,19 +164,21 @@ absent, and the startup wrapper cannot issue a cross-runtime tag-28 receipt. The
 has no helper-v3 crash-ownership readiness check, so its other successful checks must not be
 interpreted as evidence of live recovery or cleanup.
 
-The store's insert, custody mark, custody-bound prepare arm, never-dispatched retirement, and
-confirmed-recovery transitions are exact-current-revision retry-safe after a lost reply. A retry
+The store's insert, custody mark, custody-bound prepare arm, never-dispatched retirement, cleanup
+confirmation, and manager-absence confirmation transitions are independently
+exact-current-revision retry-safe after a lost reply. A retry
 succeeds only when the complete durable post-state of that same operation still exists; an
 intervening transition, changed intent, generation, recovery anchor, descriptor identity, or
 reconciliation binding fails closed without another write. `MayOwnCustody -> MayOwnPrepare`
 accepts only the exact already-persisted custody evidence and copies it byte-for-byte.
-`Absent` records persist whether they came from a never-dispatched intent or from confirmed
-MayOwn recovery, so one operation can never acknowledge the other's tombstone and an already
-confirmed recovery never reruns its executor. Mutation authority remains private and
-pre-production: the server owns only the start/shutdown wrapper, version 3 has no supported on-disk
+`CleanupConfirmed` preserves the exact custody evidence and has no absent origin. An exact retry of
+that first transition does not rerun cleanup, while the distinct manager-absence proof is still
+required before `Absent(RecoveredMayOwn)` may be written. `Absent` records persist whether they came
+from a never-dispatched intent or from completed two-step settlement, so one operation can never
+acknowledge the other's tombstone and an exact retry never reruns its executor. Mutation authority
+remains private and pre-production: the server owns only the start/shutdown wrapper, version 3 has no supported on-disk
 migration contract yet, and production decodes a v3 object only behind the canonical lock and
-refuses Ready when a `MayOwnCustody` record cannot be adopted or a `MayOwnPrepare` record cannot be
-recovered.
+refuses Ready while any custody-bearing record cannot complete both settlement proofs.
 
 After a definite pre-rename I/O failure, another mutation is admitted only if a read-only health
 check re-proves the retained parent object, exact lock entry and exclusive lock, absence of the
@@ -211,9 +216,9 @@ accepts an exited pidfd: capture proves object type, not worker liveness or clea
 Production now opens the ownership actor in a record-transition-free, lock-holding preflight which
 keeps the exact journal parent, exclusive lock and decoded snapshot alive. Creating the fixed lock
 entry is expected, but no main-journal transition or `Intent` sweep occurs. It projects at most 64
-canonical custody-bound `MayOwnCustody`/`MayOwnPrepare` targets, each containing only its durable
-phase, derived opaque name and role-ordered descriptor binding. Legacy `MayOwnPrepare`, name
-collision and cross-record kernel-object reuse fail closed. While that lock remains held, one
+canonical custody-bound `MayOwnCustody`/`MayOwnPrepare`/`CleanupConfirmed` targets, each containing
+only its durable phase, derived opaque name and role-ordered descriptor binding. Legacy
+`MayOwnPrepare`, name collision and cross-record kernel-object reuse fail closed. While that lock remains held, one
 non-mutating systemd barrier precedes two uncached, identical complete bounded D-Bus inventory
 identity projections of the exact current service object. Exact `MainPID`, `NotifyAccess=main`,
 128-entry capacity and `FileDescriptorStorePreserve=yes` remain mandatory. The complete manager
@@ -226,19 +231,25 @@ absolute deadline.
 A custody-bound `MayOwnPrepare` target classifies only when the exact pair is present in both maps.
 A custody-bound `MayOwnCustody` target may classify either `ExactPresent` or
 `ExactNoStoredCustody`; the latter means only that its name and both journal identities are absent
-from both complete observed maps. It does **not** prove that publication was never attempted, that
-the old worker is dead, that kernel resources are absent, or that the journal may advance. Every
-partial, one-sided, wrong-name, wrong-binding or unstable case remains unresolved.
+from both complete observed maps. A `CleanupConfirmed` target is likewise `ExactPresent` when the
+pair remains stored, but manager absence receives the distinct
+`CleanupConfirmedNoStoredCustody` disposition. Neither no-store disposition proves old-worker
+death, kernel cleanup, or authority for a journal transition. In particular,
+`ExactNoStoredCustody` cannot substitute for either settlement proof, while the cleanup-confirmed
+disposition is still only read-only startup classification rather than the actor's separate affine
+manager-absence proof. Every partial, one-sided, wrong-name, wrong-binding or unstable case remains
+unresolved.
 
 This is still a refusal boundary, not production recovery. Any non-empty journal target set blocks
 startup after read-only classification and drops its exact source-slot owners without publishing a
 cleanup token or helper socket. The takeover creates no additional process-local source alias;
 dropping the refused set closes every captured source slot while PID 1 retains any manager copies.
-No descriptor-store removal, journal transition, worker adoption, reaper or cleanup is authorized.
-Those proofs remain mandatory before the refusal may be replaced by settlement and socket
-publication.
+This classification invokes no descriptor-store removal, journal transition, worker adoption,
+reaper or cleanup. Those proofs remain mandatory before the refusal may be replaced by settlement
+and socket publication; the separate dormant removal adapter below does not change this startup
+authority boundary.
 
-### Production-dormant systemd descriptor-store publication boundary
+### Production-dormant systemd descriptor-store mutation boundary
 
 The helper contains a private adapter for the systemd v257 descriptor-store protocol. Its two
 private non-test callers are the live-proof selector and the dormant supervisor publisher; neither
@@ -247,7 +258,8 @@ validates one fixed-shape opaque custody name, borrows exactly two already-owned
 snapshots their kernel identities and sends them together in one `SCM_RIGHTS` datagram containing
 only the required `FDSTORE=1`, `FDNAME=` and `FDPOLL=0` assignments. It then sends `BARRIER=1`
 separately with exactly one pipe descriptor and carries one absolute monotonic deadline through
-every send, barrier wait and inventory read. It never sends `READY=1` or `FDSTOREREMOVE=1`.
+every send, barrier wait and inventory read. The publication path never sends `READY=1` or
+`FDSTOREREMOVE=1`.
 Before the first send it rejects an existing exact name and any partial or complete reuse of either
 role identity elsewhere in the bounded descriptor-store inventory, including reuse under a
 different name.
@@ -282,6 +294,28 @@ open-file-description identity. A `SupervisorDropped` terminal produced before a
 manager-may-own failure returns has no exported attempt identity and deliberately remains
 not reconcilable in this slice.
 
+A separate private dormant adapter can send exactly one name-scoped descriptor-store removal. It
+accepts an already stable complete startup inventory, the exact custody name and binding, and
+borrows both affine local owners. Before its mutation boundary it validates the complete baseline,
+takes a fresh uncached preflight snapshot which must equal that baseline, remeasures the local
+binding, creates the separate barrier pipe, and rechecks the absolute deadline. It then poisons a
+dedicated removal gate immediately before sending exactly
+`FDSTOREREMOVE=1\nFDNAME=<fixed-name>` with zero `SCM_RIGHTS` or other ancillary descriptors. A
+separate `BARRIER=1` notification carries exactly one pipe descriptor. After the barrier, two fresh
+uncached complete inventory snapshots must be equal, the service contract and local binding must
+remain exact, and the result must be precisely the original baseline minus the named two-descriptor
+pair with every unrelated entry unchanged. Only that result yields exact removal evidence.
+
+Every error from immediately before the removal `sendmsg(2)` onward is
+`ManagerMayHaveRemoved`; the retained opaque attempt stays poisoned and the adapter never retries
+blindly. Its observation-only reconciler uses the same exact attempt, a new barrier, two equal
+uncached complete snapshots, and local-binding remeasurement. Exact baseline-minus-pair may settle
+the removal gate, while exact unchanged-baseline evidence still authorizes no retry and leaves the
+gate poisoned; every other outcome remains unresolved. Publication and removal currently use
+separate gates, so production composition must first serialize both full-inventory mutations behind
+one shared gate. The removal adapter and reconciler have no production caller, do not prove worker
+death or kernel cleanup, and cannot by themselves advance the ownership journal.
+
 Only the durably confirmed `MayOwnCustody` token can derive an opaque, domain-separated fixed
 custody name from its exact journal epoch, context, ownership ID and generation without exposing
 those coordinates. A private dormant worker typestate first obtains the descriptor identities
@@ -301,10 +335,13 @@ actor startup, shutdown and thread settlement.
 This is not production composition. The supervisor entry point and production publisher remain
 private and unreachable from the server, engine and request path. Terminal storage has no
 production consumer for the in-process observer; cross-process/restart-stable reconciliation,
-adoption and manager removal do not exist, inherited descriptors are still refused rather than
-adopted, and no restart reaper exists. The executable live-proof path has not yet
+adoption and authority-ordered manager removal are not connected, inherited descriptors are still
+refused rather than adopted, and no restart reaper exists. In particular, no production worker-death
+proof or exact namespace/kernel cleanup backend can satisfy the first settlement transition, and
+the dormant removal evidence is not wired into the second. The executable live-proof path has not yet
 produced recorded evidence inside the required disposable Debian 13 transient service. This
-therefore closes no production, crash-cleanup, datapath or acceptance milestone.
+therefore leaves AV1-10 Open, keeps the fixed alpha score at 11/100 (11%), and closes no production,
+crash-cleanup, datapath or acceptance milestone.
 
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
 handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
@@ -875,8 +912,10 @@ state.
 The supervisor and publisher remain private and dormant, with no server, engine or request-path
 caller and no production terminal consumer. Production startup now performs the separate read-only
 complete-set classification described above before retiring any `Intent`, but every non-empty
-classification still blocks. A restart reaper, crash-safe settlement phase, exact manager removal
-and authoritative adoption/absence proofs remain required before those phases can progress.
+classification still blocks. The durable `CleanupConfirmed` phase and dormant exact-name removal
+adapter now exist, but a production restart reaper, old-worker death proof, exact namespace/kernel
+cleanup, shared manager-mutation serialization, and authority-preserving composition of the two
+settlement proofs remain required before those phases can progress.
 
 Production wiring remains a separate audited change with these explicit blockers:
 
@@ -940,8 +979,8 @@ itself retries exact Pending/Owned cleanup. Tag 29 `CleanupOwned` is an independ
 cleanup operation, neither part of per-route reconciliation nor that ACK, and leaves `Absent` proof
 retained. A helper restart loses this in-memory ledger and changes the runtime ID, so the agent
 quarantines rather than releasing. A production-started secret-free journal substrate exists, but
-the request-path issuance/arming writer, restart reaper, absence-proving recovery backend, and
-cross-runtime proof needed to settle that case do not.
+the request-path issuance/arming writer, restart reaper, trusted worker/kernel-cleanup executor,
+exact manager-absence composition, and cross-runtime proof needed to settle that case do not.
 
 This entire path is dormant containment, not a live route implementation. Production Prepare still
 returns `Unavailable`, and no production route-manager caller drives the helper-backed setup
@@ -1093,10 +1132,11 @@ remain:
   full rollback or quarantine;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - capture activation baselines and perform correlated handshake/RX/TX commit probes;
-- extend the production startup-owned secret-free store with its typed per-link marker projection
-  only after a real cleanup backend and restart-stable namespace/pidfd custody can prove reaper
-  cleanup; the pure-tested typed marker/kernel foundation rejects an old same-name link carrying a
-  non-exact marker but grants no journal-phase or cleanup authority;
+- connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact
+  old-worker death, and a real namespace/kernel cleanup backend can prove the transition to
+  `CleanupConfirmed`; then authority-order the dormant exact-name manager removal and its stable
+  absence proof before `Absent`. The pure-tested typed marker/kernel foundation rejects an old
+  same-name link carrying a non-exact marker but grants no journal-phase or cleanup authority;
 - add the production tag-35/tag-28 writer plus restart reaper; until then a runtime mismatch must
   remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
 - invoke the implemented factories inside the correct committed child namespace and feed their

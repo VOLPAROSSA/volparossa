@@ -20,7 +20,8 @@ use volparossa_routing::{
 };
 
 use super::super::{
-    AbsentOrigin, ConfirmedAbsentProof, JournalSnapshot, PrepareRecoveryEvidenceV1, RecoveryTarget,
+    AbsentOrigin, CleanupTarget, ConfirmedCleanupProof, ConfirmedManagerAbsentProof,
+    JournalSnapshot, ManagerAbsenceTarget, PrepareRecoveryEvidenceV1,
 };
 use super::*;
 
@@ -36,6 +37,8 @@ enum ExecutorMode {
 #[derive(Default)]
 struct ExecutorObservations {
     calls: usize,
+    cleanup_calls: usize,
+    manager_absence_calls: usize,
     threads: Vec<ThreadId>,
     thread_names: Vec<Option<String>>,
     deadlines: Vec<HardDeadline>,
@@ -108,31 +111,66 @@ struct RecordingExecutor {
     gate: Option<Arc<ExecutorGate>>,
 }
 
-impl RecoveryExecutor for RecordingExecutor {
-    type Error = &'static str;
-
-    fn confirm_absent(
-        &mut self,
-        target: &RecoveryTarget,
-        deadline: HardDeadline,
-    ) -> Result<ConfirmedAbsentProof, Self::Error> {
-        {
-            let mut observations = self.observations.lock().expect("executor observations");
-            observations.calls += 1;
-            observations.threads.push(thread::current().id());
-            observations
-                .thread_names
-                .push(thread::current().name().map(str::to_owned));
-            observations.deadlines.push(deadline);
+impl RecordingExecutor {
+    fn observe(&self, deadline: HardDeadline, cleanup: bool) {
+        let mut observations = self.observations.lock().expect("executor observations");
+        observations.calls += 1;
+        if cleanup {
+            observations.cleanup_calls += 1;
+        } else {
+            observations.manager_absence_calls += 1;
         }
+        observations.threads.push(thread::current().id());
+        observations
+            .thread_names
+            .push(thread::current().name().map(str::to_owned));
+        observations.deadlines.push(deadline);
+    }
+
+    fn block_if_requested(&self) {
         if let Some(gate) = &self.gate {
             gate.block();
         }
+    }
+}
+
+impl CleanupExecutor for RecordingExecutor {
+    type Error = &'static str;
+
+    fn confirm_cleanup(
+        &mut self,
+        target: &CleanupTarget,
+        deadline: HardDeadline,
+    ) -> Result<ConfirmedCleanupProof, Self::Error> {
+        self.observe(deadline, true);
+        self.block_if_requested();
         match self.mode {
-            ExecutorMode::Exact => Ok(target.confirmed_absent()),
+            ExecutorMode::Exact => Ok(target.confirmed_cleanup()),
             ExecutorMode::Error => Err("definite executor failure"),
             ExecutorMode::MismatchedProof => {
-                let mut proof = target.confirmed_absent();
+                let mut proof = target.confirmed_cleanup();
+                proof.exact_record.prepare_operation_digest[0] ^= 0x80;
+                Ok(proof)
+            }
+        }
+    }
+}
+
+impl ManagerAbsenceExecutor for RecordingExecutor {
+    type Error = &'static str;
+
+    fn confirm_manager_absent(
+        &mut self,
+        target: &ManagerAbsenceTarget,
+        deadline: HardDeadline,
+    ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+        self.observe(deadline, false);
+        self.block_if_requested();
+        match self.mode {
+            ExecutorMode::Exact => Ok(target.confirmed_manager_absent()),
+            ExecutorMode::Error => Err("definite executor failure"),
+            ExecutorMode::MismatchedProof => {
+                let mut proof = target.confirmed_manager_absent();
                 proof.exact_record.prepare_operation_digest[0] ^= 0x80;
                 Ok(proof)
             }
@@ -287,16 +325,32 @@ fn prepopulate_custody_target(
         .expect("persist startup MayOwnCustody");
     let revision = match phase {
         StartupCustodyPhase::MayOwnCustody => marked.revision,
-        StartupCustodyPhase::MayOwnPrepare => {
-            journal
+        StartupCustodyPhase::MayOwnPrepare | StartupCustodyPhase::CleanupConfirmed => {
+            let armed = journal
                 .mark_may_own_prepare_from_custody(
                     marked.revision,
                     inserted.ownership_id,
                     inserted.generation,
                     HardDeadline::after(TEST_WAIT).expect("startup arm deadline"),
                 )
-                .expect("persist startup MayOwnPrepare")
-                .revision
+                .expect("persist startup MayOwnPrepare");
+            if phase == StartupCustodyPhase::MayOwnPrepare {
+                armed.revision
+            } else {
+                journal
+                    .confirm_cleanup(
+                        armed.revision,
+                        inserted.ownership_id,
+                        inserted.generation,
+                        &mut RecordingExecutor {
+                            mode: ExecutorMode::Exact,
+                            observations: Arc::new(Mutex::new(ExecutorObservations::default())),
+                            gate: None,
+                        },
+                        HardDeadline::after(TEST_WAIT).expect("cleanup fixture deadline"),
+                    )
+                    .expect("persist startup CleanupConfirmed")
+            }
         }
     };
     (
@@ -630,8 +684,11 @@ fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identica
     );
 
     actor
-        .confirm_recovered_absent(&may_own.key)
-        .expect("recover armed fixture");
+        .confirm_cleanup(&may_own.key)
+        .expect("confirm cleanup for armed fixture");
+    actor
+        .confirm_manager_absent(&may_own.key)
+        .expect("confirm manager absence for armed fixture");
     actor.shutdown().expect("clean actor shutdown");
 }
 
@@ -684,8 +741,11 @@ fn cloned_custody_arm_handle_retains_affinity_and_never_owns_actor_shutdown() {
         }
     };
     actor
-        .confirm_recovered_absent(&may_own.key)
-        .expect("recover armed fixture");
+        .confirm_cleanup(&may_own.key)
+        .expect("confirm cleanup for armed fixture");
+    actor
+        .confirm_manager_absent(&may_own.key)
+        .expect("confirm manager absence for armed fixture");
 
     let lifecycle = Arc::clone(&handle.client.lifecycle);
     actor
@@ -915,7 +975,7 @@ fn deadline_expiry_before_operation_acceptance_is_truthful_and_mutation_free() {
     let before = fs::read(&config.journal_path).expect("armed journal bytes");
     assert_eq!(
         actor
-            .confirm_recovered_absent_until(&recovered, expired)
+            .confirm_cleanup_until(&recovered, expired)
             .unwrap_err(),
         DurableOwnershipError::DeadlineElapsed
     );
@@ -925,8 +985,11 @@ fn deadline_expiry_before_operation_acceptance_is_truthful_and_mutation_free() {
     );
     assert_eq!(observations.lock().expect("executor observations").calls, 0);
     actor
-        .confirm_recovered_absent(&recovered)
-        .expect("recover armed fixture");
+        .confirm_cleanup(&recovered)
+        .expect("confirm cleanup for armed fixture");
+    actor
+        .confirm_manager_absent(&recovered)
+        .expect("confirm manager absence for armed fixture");
 
     let retired = actor
         .register_intent(durable_intent(23))
@@ -988,14 +1051,17 @@ fn startup_sweeps_every_intent_before_ready_on_the_named_actor_thread() {
         Some(&caller_thread)
     );
     let observed = observations.lock().expect("executor observations");
-    assert_eq!(observed.calls, 1);
-    assert_eq!(
-        observed.threads,
-        vec![factory_thread.lock().expect("factory thread").unwrap()]
-    );
+    assert_eq!(observed.calls, 2);
+    assert_eq!(observed.cleanup_calls, 1);
+    assert_eq!(observed.manager_absence_calls, 1);
+    let actor_thread = factory_thread.lock().expect("factory thread").unwrap();
+    assert_eq!(observed.threads, vec![actor_thread, actor_thread]);
     assert_eq!(
         observed.thread_names,
-        vec![Some(ACTOR_THREAD_NAME.to_owned())]
+        vec![
+            Some(ACTOR_THREAD_NAME.to_owned()),
+            Some(ACTOR_THREAD_NAME.to_owned()),
+        ]
     );
     drop(observed);
     actor.shutdown().expect("clean actor shutdown");
@@ -1028,8 +1094,14 @@ fn lock_held_preflight_projects_canonical_targets_before_any_intent_mutation() {
         41,
         StartupCustodyPhase::MayOwnPrepare,
     );
+    let (revision, cleanup_coordinates, cleanup_binding) = prepopulate_custody_target(
+        &mut journal,
+        revision,
+        42,
+        StartupCustodyPhase::CleanupConfirmed,
+    );
     let pending_intent = journal
-        .insert_intent(revision, durable_intent(42).0)
+        .insert_intent(revision, durable_intent(43).0)
         .expect("persist mixed pending Intent");
     drop(journal);
 
@@ -1052,6 +1124,10 @@ fn lock_held_preflight_projects_canonical_targets_before_any_intent_mutation() {
         (
             custody_name_digest_for_coordinates(prepare_coordinates),
             (StartupCustodyPhase::MayOwnPrepare, prepare_binding),
+        ),
+        (
+            custody_name_digest_for_coordinates(cleanup_coordinates),
+            (StartupCustodyPhase::CleanupConfirmed, cleanup_binding),
         ),
     ]);
     assert_eq!(startup.targets().len(), expected.len());
@@ -1363,7 +1439,7 @@ fn startup_and_command_recovery_receive_the_exact_outer_deadline() {
             .lock()
             .expect("startup observations")
             .deadlines,
-        vec![startup_deadline]
+        vec![startup_deadline, startup_deadline]
     );
 
     let command_directory = tempdir().expect("command temporary directory");
@@ -1384,15 +1460,18 @@ fn startup_and_command_recovery_receive_the_exact_outer_deadline() {
         .expect("arm command fixture");
     let command_deadline = HardDeadline::after(TEST_WAIT).expect("command deadline");
     actor
-        .confirm_recovered_absent_until(&key, command_deadline)
-        .expect("deadline-bound command recovery");
+        .confirm_cleanup_until(&key, command_deadline)
+        .expect("deadline-bound cleanup confirmation");
+    actor
+        .confirm_manager_absent_until(&key, command_deadline)
+        .expect("deadline-bound manager-absence confirmation");
     actor.shutdown().expect("clean command actor shutdown");
     assert_eq!(
         command_observations
             .lock()
             .expect("command observations")
             .deadlines,
-        vec![command_deadline]
+        vec![command_deadline, command_deadline]
     );
 }
 
@@ -1430,12 +1509,20 @@ fn dropped_replies_do_not_cancel_durable_transitions_and_exact_retries_recover()
         .expect("exact arm retry succeeds");
     drop(
         client
-            .confirm_pending(first_key.coordinates)
-            .expect("admit lost recovery reply"),
+            .confirm_cleanup_pending(first_key.coordinates)
+            .expect("admit lost cleanup reply"),
     );
     actor
-        .confirm_recovered_absent(&first_key)
-        .expect("exact recovery retry succeeds");
+        .confirm_cleanup(&first_key)
+        .expect("exact cleanup retry succeeds");
+    drop(
+        client
+            .confirm_manager_absent_pending(first_key.coordinates)
+            .expect("admit lost manager-absence reply"),
+    );
+    actor
+        .confirm_manager_absent(&first_key)
+        .expect("exact manager-absence retry succeeds");
 
     let second_intent = durable_intent(4);
     let second_key = actor
@@ -1449,7 +1536,93 @@ fn dropped_replies_do_not_cancel_durable_transitions_and_exact_retries_recover()
     actor
         .retire_never_dispatched(&second_key)
         .expect("exact retire retry succeeds");
-    assert_eq!(observations.lock().expect("executor observations").calls, 1);
+    let observations = observations.lock().expect("executor observations");
+    assert_eq!(observations.calls, 2);
+    assert_eq!(observations.cleanup_calls, 1);
+    assert_eq!(observations.manager_absence_calls, 1);
+    drop(observations);
+    actor.shutdown().expect("clean actor shutdown");
+}
+
+#[test]
+fn actor_exposes_only_ordered_distinct_cleanup_and_manager_absence_transitions() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let actor =
+        spawn_actor(config.clone(), ExecutorMode::Exact, &observations, None).expect("start actor");
+    let key = actor
+        .register_intent(durable_intent(44))
+        .expect("register settlement fixture");
+    actor
+        .arm_prepare(&key, durable_anchor(44))
+        .expect("arm settlement fixture");
+    let may_own_bytes = fs::read(&config.journal_path).expect("MayOwn bytes");
+
+    assert_eq!(
+        actor.confirm_manager_absent(&key).unwrap_err(),
+        DurableOwnershipError::Rejected
+    );
+    assert_eq!(
+        observations.lock().expect("executor observations").calls,
+        0,
+        "out-of-order manager settlement must not invoke an executor"
+    );
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes after rejected manager transition"),
+        may_own_bytes
+    );
+
+    actor.confirm_cleanup(&key).expect("confirm exact cleanup");
+    let cleanup_bytes = fs::read(&config.journal_path).expect("CleanupConfirmed bytes");
+    let cleanup_snapshot =
+        JournalSnapshot::decode(&cleanup_bytes).expect("CleanupConfirmed decode");
+    let cleanup_record = cleanup_snapshot
+        .records
+        .get(&key.coordinates.ownership_id)
+        .expect("CleanupConfirmed record");
+    assert_eq!(cleanup_record.phase, OwnershipPhase::CleanupConfirmed);
+    assert_eq!(cleanup_record.absent_origin, None);
+    assert!(matches!(
+        cleanup_record.recovery_evidence,
+        Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+    ));
+    actor
+        .confirm_cleanup(&key)
+        .expect("exact cleanup retry is read-only");
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes after cleanup retry"),
+        cleanup_bytes
+    );
+
+    actor
+        .confirm_manager_absent(&key)
+        .expect("confirm distinct manager absence");
+    let absent_bytes = fs::read(&config.journal_path).expect("Absent bytes");
+    let absent_snapshot = JournalSnapshot::decode(&absent_bytes).expect("Absent decode");
+    let absent_record = absent_snapshot
+        .records
+        .get(&key.coordinates.ownership_id)
+        .expect("RecoveredMayOwn tombstone");
+    assert_eq!(absent_record.phase, OwnershipPhase::Absent);
+    assert_eq!(
+        absent_record.absent_origin,
+        Some(AbsentOrigin::RecoveredMayOwn)
+    );
+    assert!(absent_record.recovery_evidence.is_none());
+    actor
+        .confirm_manager_absent(&key)
+        .expect("exact manager-absence retry is read-only");
+    assert_eq!(
+        fs::read(&config.journal_path).expect("bytes after manager retry"),
+        absent_bytes
+    );
+
+    let observations = observations.lock().expect("executor observations");
+    assert_eq!(observations.calls, 2);
+    assert_eq!(observations.cleanup_calls, 1);
+    assert_eq!(observations.manager_absence_calls, 1);
+    drop(observations);
     actor.shutdown().expect("clean actor shutdown");
 }
 
@@ -1475,8 +1648,8 @@ fn late_recovery_after_caller_drop_fences_admission_without_publishing_absent() 
     let client = actor.client.as_ref().expect("actor client");
     let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short deadline");
     let pending = client
-        .confirm_pending_until(key.coordinates, deadline)
-        .expect("accept recovery before deadline");
+        .confirm_cleanup_pending_until(key.coordinates, deadline)
+        .expect("accept cleanup before deadline");
     gate.wait_entered();
     drop(pending);
     while deadline.ensure_remaining().is_ok() {
@@ -1538,8 +1711,11 @@ fn interposed_transitions_and_wrong_keys_reject_without_changing_durable_bytes()
     let anchor = durable_anchor(6);
     actor.arm_prepare(&armed_key, anchor).expect("arm fixture");
     actor
-        .confirm_recovered_absent(&armed_key)
-        .expect("recover fixture");
+        .confirm_cleanup(&armed_key)
+        .expect("confirm fixture cleanup");
+    actor
+        .confirm_manager_absent(&armed_key)
+        .expect("confirm fixture manager absence");
     let before = fs::read(&config.journal_path).expect("journal bytes before arm retry");
     assert_eq!(
         actor.arm_prepare(&armed_key, anchor).unwrap_err(),
@@ -1593,11 +1769,11 @@ fn interposed_transitions_and_wrong_keys_reject_without_changing_durable_bytes()
         DurableOwnershipError::Rejected
     );
     assert_eq!(
-        actor.confirm_recovered_absent(&wrong_keys[2]).unwrap_err(),
+        actor.confirm_cleanup(&wrong_keys[2]).unwrap_err(),
         DurableOwnershipError::Rejected
     );
     assert_eq!(
-        actor.confirm_recovered_absent(&wrong_keys[3]).unwrap_err(),
+        actor.confirm_manager_absent(&wrong_keys[3]).unwrap_err(),
         DurableOwnershipError::Rejected
     );
     assert_eq!(
@@ -1624,11 +1800,11 @@ fn executor_failure_is_definite_and_preserves_may_own_for_later_recovery() {
         .arm_prepare(&key, durable_anchor(8))
         .expect("arm intent");
     assert_eq!(
-        actor.confirm_recovered_absent(&key).unwrap_err(),
+        actor.confirm_cleanup(&key).unwrap_err(),
         DurableOwnershipError::RecoveryNotConfirmed
     );
     assert_eq!(
-        actor.confirm_recovered_absent(&key).unwrap_err(),
+        actor.confirm_cleanup(&key).unwrap_err(),
         DurableOwnershipError::RecoveryNotConfirmed
     );
     assert_eq!(observations.lock().expect("executor observations").calls, 2);
@@ -2009,7 +2185,7 @@ fn queue_capacity_reserves_shutdown_and_the_fence_linearizes_admission() {
         .expect("arm intent");
     let client = actor.client.as_ref().expect("actor client").clone();
     let active = client
-        .confirm_pending(key.coordinates)
+        .confirm_cleanup_pending(key.coordinates)
         .expect("admit active recovery");
     gate.wait_entered();
     let wrong = OwnershipCoordinates {
@@ -2017,7 +2193,10 @@ fn queue_capacity_reserves_shutdown_and_the_fence_linearizes_admission() {
             .expect("wrong generation"),
         ..key.coordinates
     };
-    let queued = (0..3)
+    let manager_absence = client
+        .confirm_manager_absent_pending(key.coordinates)
+        .expect("queue distinct manager-absence transition");
+    let queued = (0..2)
         .map(|_| client.retire_pending(wrong).expect("fill accepted queue"))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -2038,6 +2217,7 @@ fn queue_capacity_reserves_shutdown_and_the_fence_linearizes_admission() {
     );
     gate.release();
     assert_eq!(active.wait(), Ok(()));
+    assert_eq!(manager_absence.wait(), Ok(()));
     for reply in queued {
         assert_eq!(reply.wait(), Err(DurableOwnershipError::Rejected));
     }
@@ -2079,15 +2259,15 @@ fn timed_out_operation_fences_queue_and_drop_never_waits_forever_for_executor() 
     let first_deadline =
         HardDeadline::after(Duration::from_millis(20)).expect("short recovery deadline");
     let first_reply = client
-        .confirm_pending_until(first.coordinates, first_deadline)
+        .confirm_cleanup_pending_until(first.coordinates, first_deadline)
         .expect("admit blocked recovery");
     gate.wait_entered();
     let second_reply = client
-        .confirm_pending(second.coordinates)
+        .confirm_cleanup_pending(second.coordinates)
         .expect("queue second recovery");
     assert_eq!(first_reply.wait(), Err(DurableOwnershipError::Ambiguous));
     assert_eq!(
-        expect_error(&client.confirm_pending(second.coordinates)),
+        expect_error(&client.confirm_cleanup_pending(second.coordinates)),
         DurableOwnershipError::Ambiguous
     );
     gate.release();
@@ -2122,7 +2302,7 @@ fn timed_out_operation_fences_queue_and_drop_never_waits_forever_for_executor() 
             .client
             .as_ref()
             .expect("actor client")
-            .confirm_pending(key.coordinates)
+            .confirm_cleanup_pending(key.coordinates)
             .expect("admit drop fixture"),
     );
     second_gate.wait_entered();
@@ -2161,9 +2341,7 @@ fn proof_mismatch_is_terminal_and_fences_admission() {
         .arm_prepare(&mismatch_key, durable_anchor(14))
         .expect("arm mismatch intent");
     assert_eq!(
-        mismatch_actor
-            .confirm_recovered_absent(&mismatch_key)
-            .unwrap_err(),
+        mismatch_actor.confirm_cleanup(&mismatch_key).unwrap_err(),
         DurableOwnershipError::Ambiguous
     );
     assert_eq!(
@@ -2378,7 +2556,12 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
         &DurableOwnershipActor,
         &DurableOwnershipKey,
         HardDeadline,
-    ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::confirm_recovered_absent_until;
+    ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::confirm_cleanup_until;
+    let _: fn(
+        &DurableOwnershipActor,
+        &DurableOwnershipKey,
+        HardDeadline,
+    ) -> Result<(), DurableOwnershipError> = DurableOwnershipActor::confirm_manager_absent_until;
     let _: fn(&mut DurableOwnershipActor, HardDeadline) -> Result<(), DurableOwnershipError> =
         DurableOwnershipActor::shutdown_until;
 
@@ -2398,7 +2581,8 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
         "#[cfg(test)]\n    fn arm_prepare(",
         "#[cfg(test)]\n    fn arm_prepare_until(",
         "#[cfg(test)]\n    pub(super) fn retire_never_dispatched(",
-        "#[cfg(test)]\n    pub(super) fn confirm_recovered_absent(",
+        "#[cfg(test)]\n    pub(super) fn confirm_cleanup(",
+        "#[cfg(test)]\n    pub(super) fn confirm_manager_absent(",
         "#[cfg(test)]\n    pub(super) fn shutdown(",
     ] {
         assert!(
