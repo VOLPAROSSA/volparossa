@@ -61,6 +61,15 @@ test-helper-live-worker-identity-contract:
 test-helper-boundary-evidence:
     ./tests/helper/test-helper-boundary-evidence-v1.sh
 
+test-helper-boundary-vm-contract:
+    ./tests/helper/test-helper-boundary-vm-contract.sh
+
+test-helper-boundary-vm-environment:
+    ./tests/helper/test-helper-boundary-vm-environment-v1.sh
+
+test-qemu-pidfd-supervisor:
+    ./tests/helper/test-qemu-pidfd-supervisor.sh
+
 test-helper-live-worker-identity-preview:
     ./tests/helper/require-live-worker-identity-proof.sh --preview
 

@@ -1,0 +1,1136 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Build and run the helper-boundary proof in a disposable, KVM-only Debian 13 VM.
+set -eu
+
+export LC_ALL=C
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+mode=preview
+approval=no
+image_path=
+output_directory=
+expected_commit=
+seen_mode=no
+seen_approval=no
+seen_image=no
+seen_output=no
+seen_commit=no
+
+usage() {
+    printf '%s\n' \
+        'usage: tests/helper/run-helper-boundary-evidence-vm.sh [--preview]' \
+        '       tests/helper/run-helper-boundary-evidence-vm.sh --execute --yes' \
+        '         --image PATH --output DIRECTORY --expected-commit SHA'
+}
+
+print_plan() {
+    printf '%s\n' \
+        'VOLPAROSSA helper-boundary evidence VM plan:' \
+        '  require an unprivileged host user and usable KVM; never fall back to TCG;' \
+        '  require one clean main-branch commit and clone only its tracked Git state;' \
+        '  require the reviewed Debian 13 amd64 genericcloud image by exact SHA-512;' \
+        '  create one temporary qcow2 overlay, NoCloud seed and ephemeral SSH keys;' \
+        '  pin the injected guest host key before the first SSH connection;' \
+        '  provision and fetch locked dependencies in a first disposable KVM boot;' \
+        '  restart with QEMU user-network egress denied and prove that denial;' \
+        '  build fully offline as the unprivileged guest user in the restricted boot;' \
+        '  run only the fixed helper-boundary proof as guest root;' \
+        '  shut down, rehash the base image, validate, and publish five bounded files;' \
+        '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
+        'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
+}
+
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --preview)
+            [ "$seen_mode" = no ] || { usage >&2; exit 64; }
+            mode=preview
+            seen_mode=yes
+            ;;
+        --execute)
+            [ "$seen_mode" = no ] || { usage >&2; exit 64; }
+            mode=execute
+            seen_mode=yes
+            ;;
+        --yes)
+            [ "$seen_approval" = no ] || { usage >&2; exit 64; }
+            approval=yes
+            seen_approval=yes
+            ;;
+        --image)
+            if [ "$seen_image" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            image_path=$2
+            seen_image=yes
+            shift
+            ;;
+        --output)
+            if [ "$seen_output" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            output_directory=$2
+            seen_output=yes
+            shift
+            ;;
+        --expected-commit)
+            if [ "$seen_commit" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            expected_commit=$2
+            seen_commit=yes
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 64
+            ;;
+    esac
+    shift
+done
+
+if [ "$mode" = preview ]; then
+    if [ "$approval" = yes ] || [ "$seen_image" = yes ] \
+        || [ "$seen_output" = yes ] || [ "$seen_commit" = yes ]; then
+        usage >&2
+        exit 64
+    fi
+    print_plan
+    printf '%s\n' 'PREVIEW ONLY: no image, VM, key, file, service, or network state was changed.'
+    exit 0
+fi
+
+if [ "$approval" != yes ] || [ "$seen_image" != yes ] \
+    || [ "$seen_output" != yes ] || [ "$seen_commit" != yes ]; then
+    print_plan >&2
+    usage >&2
+    exit 64
+fi
+print_plan >&2
+
+blocked() {
+    printf 'BLOCKED: %s\n' "$1" >&2
+    exit 77
+}
+
+failed() {
+    printf 'helper-boundary evidence VM failed: %s\n' "$1" >&2
+    exit 1
+}
+
+case ${#expected_commit} in
+    40|64) ;;
+    *) blocked 'the expected commit is not a canonical Git object ID' ;;
+esac
+case $expected_commit in
+    *[!0-9a-f]*|0000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000)
+        blocked 'the expected commit is not lowercase nonzero hexadecimal'
+        ;;
+esac
+
+if [ "$(id -u)" -eq 0 ]; then
+    blocked 'the VM runner itself must remain unprivileged'
+fi
+for command_name in \
+    awk cat chmod cmp cp cloud-localds cut dd dirname find git grep id install jq mkfifo \
+    mktemp mv python3 qemu-img qemu-system-x86_64 readlink rm scp sed sha256sum \
+    sha512sum sleep ssh ssh-keygen ss stat tail tar timeout uname
+do
+    command -v "$command_name" >/dev/null 2>&1 \
+        || blocked "required host tool is unavailable: $command_name"
+done
+
+script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd -P)
+manifest=$script_directory/debian13-amd64-image-v1.json
+report_validator=$script_directory/validate-helper-boundary-evidence-v1.sh
+environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
+qemu_supervisor=$script_directory/qemu-pidfd-supervisor.py
+manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
+image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
+image_filename=debian-13-genericcloud-amd64-20260826-2582.qcow2
+
+if [ ! -f "$manifest" ] || [ -L "$manifest" ] \
+    || [ "$(stat -Lc '%h' "$manifest" 2>/dev/null || true)" != 1 ]; then
+    blocked 'the reviewed Debian image manifest is not one regular file'
+fi
+actual_manifest_sha256=$(sha256sum "$manifest" | awk '{print $1}') \
+    || blocked 'the Debian image manifest cannot be hashed'
+[ "$actual_manifest_sha256" = "$manifest_sha256" ] \
+    || blocked 'the Debian image manifest differs from the reviewed v1 bytes'
+jq -e \
+    --arg filename "$image_filename" \
+    --arg sha512 "$image_sha512" \
+    '. == {
+      architecture: "amd64",
+      checksum_provenance: "manually-reviewed-upstream-sha512-no-detached-signature",
+      checksum_url: "https://cloud.debian.org/images/cloud/trixie/20260826-2582/SHA512SUMS",
+      debian_version: "13",
+      filename: $filename,
+      format: "qcow2",
+      image_kind: "reviewed-debian-genericcloud",
+      release_build: "20260826-2582",
+      release_codename: "trixie",
+      release_date: "2026-08-26",
+      schema_version: 1,
+      sha512: $sha512,
+      systemd_version: 257,
+      url: ("https://cloud.debian.org/images/cloud/trixie/20260826-2582/" + $filename)
+    }' "$manifest" >/dev/null || blocked 'the Debian image manifest semantics are not exact'
+jq -S -c . "$manifest" | cmp -s - "$manifest" \
+    || blocked 'the Debian image manifest serialization is not canonical'
+for fixed_tool in "$report_validator" "$environment_validator" "$qemu_supervisor"; do
+    if [ ! -f "$fixed_tool" ] || [ -L "$fixed_tool" ] \
+        || [ "$(stat -Lc '%h' "$fixed_tool" 2>/dev/null || true)" != 1 ]; then
+        blocked "a fixed evidence tool is unavailable: ${fixed_tool##*/}"
+    fi
+done
+if [ ! -x "$report_validator" ] || [ ! -x "$environment_validator" ] \
+    || [ ! -x "$qemu_supervisor" ]; then
+    blocked 'the fixed evidence tools are not executable'
+fi
+python3 -c 'import os, signal, sys; sys.exit(0 if callable(getattr(os, "pidfd_open", None)) and callable(getattr(signal, "pidfd_send_signal", None)) else 1)' \
+    || blocked 'Python pidfd lifecycle support is unavailable'
+
+source_root=$(git -C "$repository_directory" rev-parse --show-toplevel 2>/dev/null) \
+    || blocked 'the repository root cannot be established'
+[ "$source_root" = "$repository_directory" ] \
+    || blocked 'the VM runner is not inside the exact repository root'
+source_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || blocked 'the source HEAD cannot be established'
+[ "$source_head" = "$expected_commit" ] || blocked 'HEAD differs from the expected commit'
+source_branch=$(git -C "$repository_directory" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+    || blocked 'the source must be the checked-out main branch'
+[ "$source_branch" = main ] || blocked 'retained VM evidence is restricted to main'
+source_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$repository_directory" \
+    status --porcelain=v1 --untracked-files=normal --ignore-submodules=none 2>/dev/null) \
+    || blocked 'the source worktree state cannot be established'
+[ -z "$source_status" ] || blocked 'the source worktree must be clean'
+if git -C "$repository_directory" ls-files --stage \
+    | awk '$1 == "160000" { found=1 } END { exit !found }'; then
+    blocked 'submodules are outside the fixed VM source-transfer contract'
+fi
+
+case $image_path in
+    /*) ;;
+    *) blocked 'the Debian image path must be absolute' ;;
+esac
+case $output_directory in
+    /*) ;;
+    *) blocked 'the output directory path must be absolute' ;;
+esac
+[ "$(readlink -f -- "$image_path" 2>/dev/null || true)" = "$image_path" ] \
+    || blocked 'the Debian image path is not canonical'
+[ "${image_path##*/}" = "$image_filename" ] \
+    || blocked 'the Debian image filename is not the reviewed filename'
+if [ ! -f "$image_path" ] || [ -L "$image_path" ]; then
+    blocked 'the Debian image is not one regular file'
+fi
+image_stat=$(stat -Lc '%F:%h:%u:%a:%s' "$image_path" 2>/dev/null) \
+    || blocked 'the Debian image metadata is unavailable'
+image_type=${image_stat%%:*}
+image_rest=${image_stat#*:}
+image_links=${image_rest%%:*}
+image_rest=${image_rest#*:}
+image_owner=${image_rest%%:*}
+image_rest=${image_rest#*:}
+image_mode=${image_rest%%:*}
+image_size=${image_rest##*:}
+if [ "$image_type" != 'regular file' ] || [ "$image_links" != 1 ] \
+    || [ "$image_owner" != "$(id -u)" ]; then
+    blocked 'the Debian image ownership is unsafe'
+fi
+case $image_mode in
+    400|440|444|600|640|644) ;;
+    *) blocked 'the Debian image mode is broader than the reviewed read contract' ;;
+esac
+if [ "$image_size" -le 0 ] || [ "$image_size" -gt 2147483648 ]; then
+    blocked 'the Debian image size is outside the bounded contract'
+fi
+actual_image_sha512=$(sha512sum "$image_path" | awk '{print $1}') \
+    || blocked 'the Debian image cannot be hashed'
+[ "$actual_image_sha512" = "$image_sha512" ] \
+    || blocked 'the Debian image SHA-512 does not match the reviewed image'
+image_info=$(qemu-img info --output=json "$image_path" 2>/dev/null) \
+    || blocked 'the Debian image is not parseable as a qcow2 image'
+printf '%s\n' "$image_info" | jq -e \
+    '.format == "qcow2"
+     and .["virtual-size"] >= 1073741824
+     and .["virtual-size"] <= 21474836480
+     and (has("backing-filename") | not)' >/dev/null \
+    || blocked 'the Debian image qcow2 structure is outside the fixed contract'
+
+[ "$(readlink -f -- "$output_directory" 2>/dev/null || true)" = "$output_directory" ] \
+    || blocked 'the output directory path is not canonical'
+if [ ! -d "$output_directory" ] || [ -L "$output_directory" ]; then
+    blocked 'the output directory is not one real directory'
+fi
+[ "$(stat -Lc '%u:%a' "$output_directory" 2>/dev/null || true)" = "$(id -u):700" ] \
+    || blocked 'the output directory must be owned by the runner and mode 0700'
+if find "$output_directory" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    blocked 'the output directory must start empty'
+fi
+
+if [ ! -c /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+    blocked 'readable and writable /dev/kvm is required'
+fi
+qemu_system=qemu-system-x86_64
+if ! "$qemu_system" -accel help 2>/dev/null | grep -Fx kvm >/dev/null; then
+    blocked 'this QEMU binary does not expose KVM acceleration'
+fi
+if ss -H -ltn 2>/dev/null | awk '$4 ~ /:22222$/ { found=1 } END { exit !found }'; then
+    blocked 'the fixed loopback SSH port 22222 is already occupied'
+fi
+
+run_directory=
+qemu_control=
+qemu_supervisor_pid=
+console_pid=
+console_done=
+console_sentinel_open=no
+console_settled=no
+console_published=no
+console_log=
+published_console_log=
+console_publish_temporary=
+image_was_used=no
+safe_to_remove=yes
+
+atomic_empty_file() {
+    atomic_target=$1
+    [ ! -e "$atomic_target" ] && [ ! -L "$atomic_target" ] || return 1
+    (
+        umask 077
+        set -C
+        : >"$atomic_target"
+    ) 2>/dev/null || return 1
+    [ -f "$atomic_target" ] && [ ! -L "$atomic_target" ] \
+        && [ "$(stat -Lc '%h:%u:%a:%s' "$atomic_target" 2>/dev/null || true)" \
+            = "1:$(id -u):600:0" ]
+}
+
+wait_for_path() {
+    waited_path=$1
+    waited_limit=$2
+    waited_count=0
+    while [ ! -f "$waited_path" ] || [ -L "$waited_path" ]; do
+        [ "$waited_count" -lt "$waited_limit" ] || return 1
+        sleep 1
+        waited_count=$((waited_count + 1))
+    done
+}
+
+validate_supervisor_record() {
+    supervisor_record=$1
+    supervisor_state=$2
+    [ "$(stat -Lc '%F:%h:%u:%a' "$supervisor_record" 2>/dev/null || true)" \
+        = "regular file:1:$(id -u):600" ] || return 1
+    jq -e -s 'length == 1' "$supervisor_record" >/dev/null 2>&1 || return 1
+    jq -S -c . "$supervisor_record" | cmp -s - "$supervisor_record" || return 1
+    if [ "$supervisor_state" = ready ]; then
+        jq -e '. == {protocol: "volparossa-qemu-pidfd-supervisor-v1", state: "ready"}' \
+            "$supervisor_record" >/dev/null
+    elif [ "$supervisor_state" = status ]; then
+        jq -e '
+          . == {
+            error: "supervisor-failure",
+            protocol: "volparossa-qemu-pidfd-supervisor-v1",
+            state: "failed"
+          }
+          or (
+            type == "object"
+            and keys == (["exit_code", "exit_signal", "protocol", "state", "termination", "trigger"] | sort)
+            and .protocol == "volparossa-qemu-pidfd-supervisor-v1"
+            and .state == "exited"
+            and ((.exit_code | type == "number") != (.exit_signal | type == "number"))
+            and (.exit_code == null or (.exit_code >= 0 and .exit_code <= 255 and (.exit_code | floor) == .exit_code))
+            and (.exit_signal == null or (.exit_signal >= 1 and .exit_signal <= 64 and (.exit_signal | floor) == .exit_signal))
+            and (.termination == "none" or .termination == "term" or .termination == "kill")
+            and (.trigger == "child-exit" or .trigger == "stop-requested"
+              or .trigger == "parent-death" or .trigger == "supervisor-signal"
+              or .trigger == "control-error")
+          )' \
+            "$supervisor_record" >/dev/null
+    else
+        return 1
+    fi
+}
+
+wait_for_supervisor_ready() {
+    waited_limit=$1
+    waited_count=0
+    while [ "$waited_count" -lt "$waited_limit" ]; do
+        if [ -e "$qemu_control/status" ] || [ -L "$qemu_control/status" ]; then
+            return 2
+        fi
+        if [ -f "$qemu_control/ready" ] && [ ! -L "$qemu_control/ready" ]; then
+            return 0
+        fi
+        sleep 1
+        waited_count=$((waited_count + 1))
+    done
+    return 1
+}
+
+reap_qemu() {
+    require_clean_exit=$1
+    if [ -z "$qemu_supervisor_pid" ] || [ -z "$qemu_control" ]; then
+        return 0
+    fi
+    if ! wait_for_path "$qemu_control/status" 90; then
+        atomic_empty_file "$qemu_control/stop" || true
+        if ! wait_for_path "$qemu_control/status" 30; then
+            printf '%s\n' 'QEMU supervisor did not produce bounded status' >&2
+            safe_to_remove=no
+            return 1
+        fi
+    fi
+    validate_supervisor_record "$qemu_control/status" status || {
+        printf '%s\n' 'QEMU supervisor status is not canonical' >&2
+        safe_to_remove=no
+        return 1
+    }
+    qemu_status_state=$(jq -r '.state' "$qemu_control/status")
+    if [ "$qemu_status_state" = failed ]; then
+        atomic_empty_file "$qemu_control/ack" || {
+            printf '%s\n' 'QEMU supervisor acknowledgement could not be published' >&2
+            safe_to_remove=no
+            return 1
+        }
+        set +e
+        wait "$qemu_supervisor_pid"
+        supervisor_exit=$?
+        set -e
+        qemu_supervisor_pid=
+        qemu_control=
+        if [ "$supervisor_exit" -eq 0 ]; then
+            printf '%s\n' 'QEMU supervisor reported failure but exited successfully' >&2
+        else
+            printf 'QEMU supervisor failed before a usable VM lifecycle; status=%s\n' \
+                "$supervisor_exit" >&2
+        fi
+        return 1
+    fi
+    qemu_exit_code=$(jq -r '.exit_code // "null"' "$qemu_control/status")
+    qemu_exit_signal=$(jq -r '.exit_signal // "null"' "$qemu_control/status")
+    qemu_trigger=$(jq -r '.trigger' "$qemu_control/status")
+    qemu_termination=$(jq -r '.termination' "$qemu_control/status")
+    atomic_empty_file "$qemu_control/ack" || {
+        printf '%s\n' 'QEMU supervisor acknowledgement could not be published' >&2
+        safe_to_remove=no
+        return 1
+    }
+    set +e
+    wait "$qemu_supervisor_pid"
+    supervisor_exit=$?
+    set -e
+    qemu_supervisor_pid=
+    qemu_control=
+    if [ "$supervisor_exit" -ne 0 ]; then
+        printf 'QEMU supervisor exited with status %s\n' "$supervisor_exit" >&2
+        return 1
+    fi
+    if [ "$require_clean_exit" = yes ] && {
+        [ "$qemu_exit_code" != 0 ] || [ "$qemu_exit_signal" != null ] \
+            || [ "$qemu_trigger" != child-exit ] || [ "$qemu_termination" != none ];
+    }; then
+        printf 'QEMU did not exit cleanly: code=%s signal=%s trigger=%s termination=%s\n' \
+            "$qemu_exit_code" "$qemu_exit_signal" "$qemu_trigger" "$qemu_termination" >&2
+        return 1
+    fi
+}
+
+settle_console() {
+    if [ "$console_settled" = yes ]; then
+        return 0
+    fi
+    if [ "$console_sentinel_open" = yes ]; then
+        exec 9>&-
+        console_sentinel_open=no
+    fi
+    if [ -n "$console_pid" ]; then
+        if ! wait_for_path "$console_done" 20; then
+            printf '%s\n' 'bounded console collector did not settle' >&2
+            safe_to_remove=no
+            return 1
+        fi
+        set +e
+        wait "$console_pid"
+        console_status=$?
+        set -e
+        console_pid=
+        if [ "$console_status" -ne 0 ]; then
+            printf 'bounded console collector exited with status %s\n' "$console_status" >&2
+            return 1
+        fi
+        console_settled=yes
+    fi
+}
+
+require_no_private_key_marker() {
+    scanned_path=$1
+    if grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$scanned_path"; then
+        printf '%s\n' 'the VM console contains private-key material' >&2
+        return 1
+    else
+        scan_status=$?
+        if [ "$scan_status" -ne 1 ]; then
+            printf '%s\n' 'the VM console could not be scanned for private-key material' >&2
+            return 1
+        fi
+    fi
+}
+
+publish_console() {
+    if [ "$console_published" = yes ]; then
+        return 0
+    fi
+    [ "$console_settled" = yes ] || return 1
+    [ -n "$console_log" ] && [ -n "$published_console_log" ] || return 1
+    discard_console_publish_temporary || return 1
+    [ -f "$console_log" ] && [ ! -L "$console_log" ] \
+        && [ "$(stat -Lc '%h:%u:%a' "$console_log" 2>/dev/null || true)" \
+            = "1:$(id -u):600" ] || return 1
+    console_size=$(stat -Lc '%s' "$console_log") || return 1
+    [ "$console_size" -le 16777216 ] || return 1
+    require_no_private_key_marker "$console_log" || return 1
+    [ ! -e "$published_console_log" ] && [ ! -L "$published_console_log" ] \
+        || return 1
+    console_publish_temporary=$(mktemp "$output_directory/.vm-console.log.XXXXXX") \
+        || return 1
+    chmod 0600 "$console_publish_temporary" \
+        || { discard_console_publish_temporary || true; return 1; }
+    cp -- "$console_log" "$console_publish_temporary" \
+        || { discard_console_publish_temporary || true; return 1; }
+    mv -f -- "$console_publish_temporary" "$published_console_log" \
+        || { discard_console_publish_temporary || true; return 1; }
+    console_publish_temporary=
+    console_published=yes
+}
+
+discard_console_publish_temporary() {
+    [ -n "$console_publish_temporary" ] || return 0
+    case $console_publish_temporary in
+        "$output_directory"/.vm-console.log.??????) ;;
+        *) return 1 ;;
+    esac
+    if [ -e "$console_publish_temporary" ] || [ -L "$console_publish_temporary" ]; then
+        [ -f "$console_publish_temporary" ] && [ ! -L "$console_publish_temporary" ] \
+            && [ "$(stat -Lc '%h:%u:%a' "$console_publish_temporary" 2>/dev/null || true)" \
+                = "1:$(id -u):600" ] || return 1
+        rm -f -- "$console_publish_temporary" || return 1
+    fi
+    console_publish_temporary=
+}
+
+scrub_sensitive_run_state() {
+    [ -n "$run_directory" ] || return 0
+    case $run_directory in
+        /tmp/volparossa-helper-boundary-vm.??????) ;;
+        *) return 1 ;;
+    esac
+    if [ -n "$console_publish_temporary" ] \
+        && { [ -e "$console_publish_temporary" ] || [ -L "$console_publish_temporary" ]; }; then
+        rm -f -- "$console_publish_temporary" || return 1
+    fi
+    for scrub_name in \
+        source.tar.gz overlay.qcow2 seed.img guest-user-key guest-user-key.pub \
+        guest-host-key guest-host-key.pub known-hosts user-data meta-data \
+        guest-setup.sh guest-proof.sh helper-boundary-evidence-v1.json \
+        helper-boundary-proof.stderr.log helper-boundary-evidence-v1.json.sha256 \
+        vm-environment-v1.json validator.stdout validator.stderr \
+        environment-validator.stdout environment-validator.stderr vm-console.log \
+        console.fifo console.done
+    do
+        scrub_path=$run_directory/$scrub_name
+        if [ -e "$scrub_path" ] || [ -L "$scrub_path" ]; then
+            rm -f -- "$scrub_path" || return 1
+        fi
+    done
+    if [ -e "$run_directory/source" ] || [ -L "$run_directory/source" ]; then
+        rm -rf --one-file-system -- "$run_directory/source" || return 1
+    fi
+    find "$run_directory" -mindepth 1 -maxdepth 1 \
+        \( -type f -o -type p -o -type l \) \
+        \( -name 'bounded.*' -o -name 'console.*' \) -delete \
+        || return 1
+}
+
+cleanup() {
+    cleanup_status=$?
+    trap - EXIT
+    trap '' HUP INT TERM
+    discard_console_publish_temporary || cleanup_status=1
+    if [ -n "$qemu_supervisor_pid" ]; then
+        if [ -n "$qemu_control" ] && [ ! -e "$qemu_control/status" ]; then
+            atomic_empty_file "$qemu_control/stop" || true
+        fi
+        reap_qemu no || cleanup_status=1
+    fi
+    if settle_console; then
+        if [ "$safe_to_remove" = yes ]; then
+            publish_console || cleanup_status=1
+        fi
+    else
+        cleanup_status=1
+    fi
+    discard_console_publish_temporary || cleanup_status=1
+    if [ "$image_was_used" = yes ]; then
+        cleanup_image_hash=$(sha512sum "$image_path" 2>/dev/null | awk '{print $1}' || true)
+        if [ "$cleanup_image_hash" != "$image_sha512" ]; then
+            printf '%s\n' 'the reviewed base image changed during VM use' >&2
+            cleanup_status=1
+        fi
+    fi
+    if [ "$safe_to_remove" = yes ] && [ -n "$run_directory" ]; then
+        rm -rf --one-file-system -- "$run_directory"
+    elif [ -n "$run_directory" ]; then
+        if scrub_sensitive_run_state; then
+            printf 'retained only non-secret supervisor state after uncertain cleanup: %s\n' \
+                "$run_directory" >&2
+        else
+            printf 'WARNING: sensitive state may remain in the private run directory: %s\n' \
+                "$run_directory" >&2
+            cleanup_status=1
+        fi
+        cleanup_status=1
+    fi
+    exit "$cleanup_status"
+}
+
+run_directory=$(mktemp -d /tmp/volparossa-helper-boundary-vm.XXXXXX)
+case $run_directory in
+    /tmp/volparossa-helper-boundary-vm.??????) ;;
+    *) failed 'mktemp returned an unsafe run directory' ;;
+esac
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+chmod 0700 "$run_directory"
+
+console_log=$run_directory/vm-console.log
+published_console_log=$output_directory/vm-console.log
+proof_stderr_log=$output_directory/helper-boundary-proof.stderr.log
+environment_report=$output_directory/vm-environment-v1.json
+: >"$console_log"
+: >"$proof_stderr_log"
+chmod 0600 "$console_log" "$proof_stderr_log"
+jq -S -c -n \
+    --arg commit "$expected_commit" \
+    --arg image_sha512 "$image_sha512" \
+    '{expected_commit: $commit, image_sha512: $image_sha512,
+      report_kind: "volparossa-helper-boundary-vm-environment",
+      schema_version: 1, status: "STARTED"}' >"$environment_report"
+chmod 0600 "$environment_report"
+
+source_clone=$run_directory/source
+git -c protocol.file.allow=always clone \
+    --no-hardlinks --depth 1 --no-tags --single-branch --branch main \
+    "file://$repository_directory" "$source_clone" >/dev/null 2>&1 \
+    || failed 'the bounded tracked-only source clone failed'
+[ "$(git -C "$source_clone" rev-parse HEAD)" = "$expected_commit" ] \
+    || failed 'the bounded source clone selected the wrong commit'
+[ -z "$(git -C "$source_clone" status --porcelain=v1 --untracked-files=all)" ] \
+    || failed 'the bounded source clone is not clean'
+[ ! -e "$source_clone/.git/objects/info/alternates" ] \
+    || failed 'the bounded source clone unexpectedly uses object alternates'
+if find "$source_clone/.git" -type l -print -quit | grep -q .; then
+    failed 'the bounded source clone contains a Git metadata symlink'
+fi
+git -C "$source_clone" remote remove origin \
+    || failed 'the local source origin could not be removed'
+rm -rf --one-file-system -- "$source_clone/.git/logs"
+rm -f -- "$source_clone/.git/FETCH_HEAD"
+if grep -F "$repository_directory" "$source_clone/.git/config" >/dev/null 2>&1; then
+    failed 'the bounded source clone retained the host workspace path'
+fi
+
+source_archive=$run_directory/source.tar.gz
+tar -C "$run_directory" -czf "$source_archive" source \
+    || failed 'the bounded source archive could not be created'
+archive_size=$(stat -Lc '%s' "$source_archive")
+if [ "$archive_size" -le 0 ] || [ "$archive_size" -gt 536870912 ]; then
+    failed 'the bounded source archive exceeds 512 MiB'
+fi
+source_archive_sha256=$(sha256sum "$source_archive" | awk '{print $1}') \
+    || failed 'the bounded source archive cannot be hashed'
+
+overlay=$run_directory/overlay.qcow2
+seed=$run_directory/seed.img
+ssh_key=$run_directory/guest-user-key
+guest_host_key=$run_directory/guest-host-key
+known_hosts=$run_directory/known-hosts
+user_data=$run_directory/user-data
+meta_data=$run_directory/meta-data
+console_fifo=$run_directory/console.fifo
+guest_setup=$run_directory/guest-setup.sh
+guest_proof=$run_directory/guest-proof.sh
+retrieved_report=$run_directory/helper-boundary-evidence-v1.json
+retrieved_stderr=$run_directory/helper-boundary-proof.stderr.log
+
+qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$overlay" 12G \
+    || failed 'the disposable qcow2 overlay could not be created'
+ssh-keygen -q -t ed25519 -N '' -C volparossa-helper-boundary-user -f "$ssh_key" \
+    || failed 'the ephemeral guest user key could not be created'
+ssh-keygen -q -t ed25519 -N '' -C volparossa-helper-boundary-host -f "$guest_host_key" \
+    || failed 'the ephemeral guest host key could not be created'
+guest_public_key=$(cat "$ssh_key.pub")
+guest_host_public_key=$(cat "$guest_host_key.pub")
+case $guest_public_key in
+    'ssh-ed25519 '*volparossa-helper-boundary-user) ;;
+    *) failed 'the generated guest user public key is not canonical' ;;
+esac
+case $guest_host_public_key in
+    'ssh-ed25519 '*volparossa-helper-boundary-host) ;;
+    *) failed 'the generated guest host public key is not canonical' ;;
+esac
+printf '[127.0.0.1]:22222 %s\n' "$guest_host_public_key" >"$known_hosts"
+chmod 0600 "$known_hosts"
+
+{
+    printf '%s\n' '#cloud-config' \
+        'users:' \
+        '  - name: volparossa' \
+        '    gecos: VOLPAROSSA evidence runner' \
+        '    groups: [sudo]' \
+        '    sudo: "ALL=(ALL) NOPASSWD:ALL"' \
+        '    shell: /bin/bash' \
+        '    lock_passwd: true' \
+        '    ssh_authorized_keys:'
+    printf '      - %s\n' "$guest_public_key"
+    printf '%s\n' \
+        'ssh_pwauth: false' \
+        'disable_root: true' \
+        'ssh_deletekeys: true' \
+        'ssh_genkeytypes: []' \
+        'ssh_keys:' \
+        '  ed25519_private: |'
+    sed 's/^/    /' "$guest_host_key"
+    printf '  ed25519_public: %s\n' "$guest_host_public_key"
+    printf '%s\n' \
+        'growpart:' \
+        '  mode: auto' \
+        '  devices: [/]' \
+        'resize_rootfs: true'
+} >"$user_data"
+printf 'instance-id: volparossa-helper-boundary-%s\nlocal-hostname: volparossa-proof\n' \
+    "$(printf '%s' "$expected_commit" | cut -c1-12)" >"$meta_data"
+cloud-localds "$seed" "$user_data" "$meta_data" \
+    || failed 'the NoCloud seed could not be created'
+
+cat >"$guest_setup" <<'GUEST_SETUP'
+#!/bin/sh
+set -eu
+export LC_ALL=C
+umask 077
+expected_commit=$1
+archive_sha256=$2
+case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
+case $archive_sha256 in *[!0-9a-f]*|'') exit 64 ;; esac
+sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
+sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
+    --yes --no-install-recommends \
+    build-essential ca-certificates cargo cmake curl dbus git iproute2 jq nftables \
+    pkg-config rustc sudo util-linux wireguard-tools
+test "$(rustc --version | awk '{print $2}')" = 1.85.0
+test "$(cargo --version | awk '{print $2}')" = 1.85.0
+# shellcheck disable=SC1091
+test "$(. /etc/os-release; printf '%s' "$ID:$VERSION_ID")" = debian:13
+test "$(dpkg --print-architecture)" = amd64
+test "$(uname -m)" = x86_64
+test "$(sed -n '1p' /proc/1/comm)" = systemd
+test "$(systemctl show --property=Version --value | sed 's/[^0-9].*$//')" = 257
+test "$(systemd-detect-virt)" = kvm
+cd /home/volparossa
+printf '%s  source.tar.gz\n' "$archive_sha256" | sha256sum --check --strict -
+tar -xzf source.tar.gz
+cd source
+test "$(git rev-parse HEAD)" = "$expected_commit"
+test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
+test -z "$(git remote)"
+cargo fetch --locked
+test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
+GUEST_SETUP
+chmod 0700 "$guest_setup"
+
+cat >"$guest_proof" <<'GUEST_PROOF'
+#!/bin/sh
+set -eu
+export LC_ALL=C
+umask 077
+expected_commit=$1
+case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
+cd /home/volparossa/source
+test "$(rustc --version | awk '{print $2}')" = 1.85.0
+test "$(cargo --version | awk '{print $2}')" = 1.85.0
+# shellcheck disable=SC1091
+test "$(. /etc/os-release; printf '%s' "$ID:$VERSION_ID")" = debian:13
+test "$(dpkg --print-architecture)" = amd64
+test "$(uname -m)" = x86_64
+test "$(sed -n '1p' /proc/1/comm)" = systemd
+test "$(systemctl show --property=Version --value | sed 's/[^0-9].*$//')" = 257
+test "$(systemd-detect-virt)" = kvm
+test "$(git rev-parse HEAD)" = "$expected_commit"
+test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
+test -z "$(git remote)"
+if curl --fail --silent --show-error --location \
+    --connect-timeout 5 --max-time 10 --max-redirs 0 \
+    --proto '=https' --proto-redir '=https' \
+    https://cloud.debian.org/images/cloud/trixie/ >/dev/null 2>&1; then
+    printf '%s\n' 'restricted proof boot unexpectedly reached external HTTPS' >&2
+    exit 1
+fi
+cargo build --locked --offline -p volparossa-helper-entry
+cargo build --locked --offline -p volparossa-helper \
+    --example volparossa-helper-production-ipc-probe
+install -m 0755 target/debug/volparossa-helper \
+    target/debug/volparossa-helper.detached
+mv -f target/debug/volparossa-helper.detached target/debug/volparossa-helper
+install -m 0755 target/debug/examples/volparossa-helper-production-ipc-probe \
+    target/debug/examples/volparossa-helper-production-ipc-probe.detached
+mv -f target/debug/examples/volparossa-helper-production-ipc-probe.detached \
+    target/debug/examples/volparossa-helper-production-ipc-probe
+test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
+set +e
+# The unprivileged shell intentionally owns these bounded output files.
+# shellcheck disable=SC2024
+sudo -n prlimit --fsize=1048576:1048576 -- \
+    ./tests/helper/require-live-worker-identity-proof.sh --execute --yes \
+    >/home/volparossa/helper-boundary-evidence-v1.json \
+    2>/home/volparossa/helper-boundary-proof.stderr.log
+proof_status=$?
+set -e
+chmod 0600 /home/volparossa/helper-boundary-proof.stderr.log
+test "$(stat -c '%s' /home/volparossa/helper-boundary-proof.stderr.log)" -le 1048576 \
+    || exit 1
+if test "$proof_status" -ne 0; then
+    exit "$proof_status"
+fi
+chmod 0600 /home/volparossa/helper-boundary-evidence-v1.json
+test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -ge 1
+test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -le 32768
+test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
+GUEST_PROOF
+chmod 0700 "$guest_proof"
+
+mkfifo -m 0600 "$console_fifo"
+exec 9<>"$console_fifo"
+console_sentinel_open=yes
+console_done=$run_directory/console.done
+(
+    exec 9>&-
+    {
+        dd bs=65536 count=256 iflag=fullblock 2>/dev/null
+        cat >/dev/null
+    } <"$console_fifo" >"$console_log"
+    (
+        umask 077
+        set -C
+        : >"$console_done"
+    )
+) &
+console_pid=$!
+
+bounded_counter=0
+bounded_run() {
+    bounded_name=$1
+    bounded_blocks=$2
+    shift 2
+    bounded_counter=$((bounded_counter + 1))
+    bounded_fifo=$run_directory/bounded.$bounded_counter.fifo
+    bounded_log=$run_directory/bounded.$bounded_counter.log
+    mkfifo -m 0600 "$bounded_fifo"
+    {
+        dd bs=65536 count="$bounded_blocks" iflag=fullblock 2>/dev/null
+        cat >/dev/null
+    } <"$bounded_fifo" >"$bounded_log" &
+    bounded_capture_pid=$!
+    set +e
+    "$@" >"$bounded_fifo" 2>&1
+    bounded_command_status=$?
+    wait "$bounded_capture_pid"
+    bounded_capture_status=$?
+    set -e
+    rm -f -- "$bounded_fifo"
+    if [ "$bounded_capture_status" -ne 0 ]; then
+        printf 'bounded output collector failed for %s\n' "$bounded_name" >&2
+        return 125
+    fi
+    if [ "$bounded_command_status" -ne 0 ]; then
+        printf '%s failed with status %s; bounded tail follows:\n' \
+            "$bounded_name" "$bounded_command_status" >&2
+        tail -c 65536 "$bounded_log" >&2
+    fi
+    return "$bounded_command_status"
+}
+
+guest_ssh_raw() {
+    timeout --signal=TERM --kill-after=10s 1800s ssh \
+        -F /dev/null -i "$ssh_key" \
+        -o Port=22222 -o BatchMode=yes -o ConnectTimeout=5 \
+        -o CanonicalizeHostname=no -o ClearAllForwardings=yes \
+        -o ControlMaster=no -o ControlPath=none -o ControlPersist=no \
+        -o ForwardAgent=no -o PermitLocalCommand=no \
+        -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+        -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o KbdInteractiveAuthentication=no -o LogLevel=ERROR \
+        -o PasswordAuthentication=no -o ProxyCommand=none -o ProxyJump=none \
+        -o RequestTTY=no -o StrictHostKeyChecking=yes -o Tunnel=no \
+        -o UserKnownHostsFile="$known_hosts" volparossa@127.0.0.1 "$@"
+}
+
+guest_scp_to_raw() {
+    timeout --signal=TERM --kill-after=10s 300s scp \
+        -F /dev/null -i "$ssh_key" \
+        -o Port=22222 -o BatchMode=yes -o ConnectTimeout=5 \
+        -o CanonicalizeHostname=no -o ClearAllForwardings=yes \
+        -o ControlMaster=no -o ControlPath=none -o ControlPersist=no \
+        -o ForwardAgent=no -o PermitLocalCommand=no \
+        -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+        -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o KbdInteractiveAuthentication=no -o LogLevel=ERROR \
+        -o PasswordAuthentication=no -o ProxyCommand=none -o ProxyJump=none \
+        -o RequestTTY=no -o StrictHostKeyChecking=yes -o Tunnel=no \
+        -o UserKnownHostsFile="$known_hosts" \
+        "$1" "volparossa@127.0.0.1:$2"
+}
+
+guest_scp_from_raw() {
+    timeout --signal=TERM --kill-after=10s 300s scp \
+        -F /dev/null -i "$ssh_key" \
+        -o Port=22222 -o BatchMode=yes -o ConnectTimeout=5 \
+        -o CanonicalizeHostname=no -o ClearAllForwardings=yes \
+        -o ControlMaster=no -o ControlPath=none -o ControlPersist=no \
+        -o ForwardAgent=no -o PermitLocalCommand=no \
+        -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+        -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o KbdInteractiveAuthentication=no -o LogLevel=ERROR \
+        -o PasswordAuthentication=no -o ProxyCommand=none -o ProxyJump=none \
+        -o RequestTTY=no -o StrictHostKeyChecking=yes -o Tunnel=no \
+        -o UserKnownHostsFile="$known_hosts" \
+        "volparossa@127.0.0.1:$1" "$2"
+}
+
+wait_for_ssh() {
+    ssh_wait_count=0
+    while [ "$ssh_wait_count" -lt 180 ]; do
+        if [ -f "$qemu_control/status" ] || [ -L "$qemu_control/status" ]; then
+            return 1
+        fi
+        if timeout --signal=TERM --kill-after=2s 10s ssh \
+            -F /dev/null -i "$ssh_key" \
+            -o Port=22222 -o BatchMode=yes -o ConnectTimeout=5 \
+            -o CanonicalizeHostname=no -o ClearAllForwardings=yes \
+            -o ControlMaster=no -o ControlPath=none -o ControlPersist=no \
+            -o ForwardAgent=no -o PermitLocalCommand=no \
+            -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+            -o IdentitiesOnly=yes -o IdentityAgent=none \
+            -o KbdInteractiveAuthentication=no -o LogLevel=ERROR \
+            -o PasswordAuthentication=no -o ProxyCommand=none -o ProxyJump=none \
+            -o RequestTTY=no -o StrictHostKeyChecking=yes -o Tunnel=no \
+            -o UserKnownHostsFile="$known_hosts" \
+            volparossa@127.0.0.1 true >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        ssh_wait_count=$((ssh_wait_count + 1))
+    done
+    return 1
+}
+
+start_vm() {
+    vm_phase=$1
+    vm_network=$2
+    if ss -H -ltn 2>/dev/null | awk '$4 ~ /:22222$/ { found=1 } END { exit !found }'; then
+        failed "the loopback SSH port is occupied before $vm_phase"
+    fi
+    qemu_control=$run_directory/qemu-$vm_phase
+    install -d -m 0700 -- "$qemu_control"
+    case $vm_network in
+        provisioning) qemu_netdev='user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22' ;;
+        restricted) qemu_netdev='user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:22222-:22' ;;
+        *) failed 'internal VM network phase is invalid' ;;
+    esac
+    python3 "$qemu_supervisor" \
+        --grace-seconds 5 --term-seconds 5 --kill-seconds 5 \
+        --ack-timeout-seconds 30 "$qemu_control" -- \
+        "$qemu_system" \
+        -name "volparossa-helper-boundary-$vm_phase" \
+        -no-user-config -nodefaults \
+        -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
+        -drive "if=virtio,format=qcow2,file=$overlay" \
+        -drive "if=virtio,format=raw,readonly=on,file=$seed" \
+        -device virtio-rng-pci -device virtio-net-pci,netdev=net0 \
+        -netdev "$qemu_netdev" -display none -monitor none \
+        -serial "file:$console_fifo" -no-reboot \
+        -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
+        9>&- </dev/null >/dev/null 2>&1 &
+    qemu_supervisor_pid=$!
+    image_was_used=yes
+    set +e
+    wait_for_supervisor_ready 15
+    supervisor_ready_status=$?
+    set -e
+    case $supervisor_ready_status in
+        0) ;;
+        2)
+            reap_qemu no || true
+            failed "the QEMU supervisor failed before ready for $vm_phase"
+            ;;
+        *) failed "the QEMU supervisor did not become ready for $vm_phase" ;;
+    esac
+    validate_supervisor_record "$qemu_control/ready" ready \
+        || failed "the QEMU supervisor ready record is invalid for $vm_phase"
+    wait_for_ssh || failed "the exact pinned guest did not expose SSH for $vm_phase"
+}
+
+start_vm provisioning provisioning
+bounded_run cloud-init 32 guest_ssh_raw sudo -n cloud-init status --wait \
+    || failed 'cloud-init did not complete successfully'
+bounded_run copy-setup 2 guest_scp_to_raw "$guest_setup" /home/volparossa/guest-setup.sh \
+    || failed 'the fixed guest setup script could not be copied'
+bounded_run copy-source 2 guest_scp_to_raw "$source_archive" /home/volparossa/source.tar.gz \
+    || failed 'the bounded source archive could not be copied'
+bounded_run copy-proof 2 guest_scp_to_raw "$guest_proof" /home/volparossa/guest-proof.sh \
+    || failed 'the fixed guest proof script could not be copied'
+bounded_run guest-permissions 2 guest_ssh_raw chmod 0700 \
+    /home/volparossa/guest-setup.sh /home/volparossa/guest-proof.sh \
+    || failed 'the fixed guest scripts could not be protected'
+bounded_run guest-provisioning 512 guest_ssh_raw \
+    /home/volparossa/guest-setup.sh "$expected_commit" "$source_archive_sha256" \
+    || failed 'the bounded guest provisioning or locked dependency fetch failed'
+guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
+reap_qemu yes || failed 'the provisioning VM did not power off cleanly'
+
+start_vm proof restricted
+bounded_run proof-cloud-init 32 guest_ssh_raw sudo -n cloud-init status --wait \
+    || failed 'cloud-init did not settle in the restricted proof boot'
+wait_for_guest_systemd() {
+    guest_system_state=$(guest_ssh_raw sudo -n systemctl is-system-running --wait \
+        2>/dev/null || true)
+    case $guest_system_state in
+        running|degraded) return 0 ;;
+        *)
+            printf 'restricted proof guest system state is not ready: %s\n' \
+                "$guest_system_state" >&2
+            return 1
+            ;;
+    esac
+}
+bounded_run proof-systemd-ready 2 wait_for_guest_systemd \
+    || failed 'systemd did not reach running or degraded in the restricted proof boot'
+if bounded_run offline-proof 512 guest_ssh_raw \
+    /home/volparossa/guest-proof.sh "$expected_commit"; then
+    guest_status=0
+else
+    guest_status=$?
+fi
+if ! bounded_run retrieve-proof-diagnostics 32 guest_scp_from_raw \
+    /home/volparossa/helper-boundary-proof.stderr.log "$retrieved_stderr"; then
+    if [ "$guest_status" -eq 0 ]; then
+        failed 'the successful proof did not expose bounded diagnostics'
+    fi
+    printf 'guest proof command exited before bounded proof diagnostics; status=%s\n' \
+        "$guest_status" >"$retrieved_stderr"
+fi
+[ "$(stat -Lc '%s' "$retrieved_stderr")" -le 1048576 ] \
+    || failed 'the retrieved proof diagnostics exceed 1 MiB'
+install -m 0600 -- "$retrieved_stderr" "$proof_stderr_log"
+if [ "$guest_status" -ne 0 ]; then
+    failed "the guest helper-boundary proof exited with status $guest_status"
+fi
+bounded_run retrieve-report 2 guest_scp_from_raw \
+    /home/volparossa/helper-boundary-evidence-v1.json "$retrieved_report" \
+    || failed 'the canonical helper-boundary report could not be retrieved'
+
+guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
+reap_qemu yes || failed 'the restricted proof VM did not power off cleanly'
+settle_console || failed 'the bounded console log did not settle'
+publish_console || failed 'the bounded console log could not be published atomically'
+
+post_image_sha512=$(sha512sum "$image_path" | awk '{print $1}') \
+    || failed 'the reviewed base image cannot be rehashed after VM use'
+[ "$post_image_sha512" = "$image_sha512" ] \
+    || failed 'the reviewed base image changed during VM use'
+
+validator_stdout=$run_directory/validator.stdout
+validator_stderr=$run_directory/validator.stderr
+set +e
+"$report_validator" "$retrieved_report" >"$validator_stdout" 2>"$validator_stderr"
+validator_status=$?
+set -e
+[ "$validator_status" -eq 0 ] || failed 'the retrieved report failed local validation'
+if [ -s "$validator_stdout" ] || [ -s "$validator_stderr" ]; then
+    failed 'the local report validator was not silent'
+fi
+jq -e --arg commit "$expected_commit" \
+    '.overall == "PASS" and .observed_source.commit_sha == $commit' \
+    "$retrieved_report" >/dev/null || failed 'the report is not a PASS for the expected commit'
+retrieved_report_size=$(stat -Lc '%s' "$retrieved_report")
+if [ "$retrieved_report_size" -lt 1 ] || [ "$retrieved_report_size" -gt 32768 ]; then
+    failed 'the retrieved report size is outside the evidence bound'
+fi
+
+late_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}') \
+    || failed 'the late source HEAD fence failed'
+late_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$repository_directory" \
+    status --porcelain=v1 --untracked-files=normal --ignore-submodules=none) \
+    || failed 'the late source clean fence failed'
+if [ "$late_head" != "$expected_commit" ] || [ -n "$late_status" ]; then
+    failed 'the source changed while the VM proof ran'
+fi
+
+report_hash=$(sha256sum "$retrieved_report" | awk '{print $1}') \
+    || failed 'the retained report hash could not be calculated'
+report_hash_file=$run_directory/helper-boundary-evidence-v1.json.sha256
+printf '%s  helper-boundary-evidence-v1.json\n' "$report_hash" >"$report_hash_file"
+successful_environment=$run_directory/vm-environment-v1.json
+jq -S -c -n \
+    --arg commit "$expected_commit" \
+    --arg image_sha512 "$image_sha512" \
+    --arg report_sha256 "$report_hash" \
+    --arg release_build 20260826-2582 \
+    '{expected_commit: $commit,
+      guest: {architecture: "amd64", cargo_version: "1.85.0",
+        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+        virtualization: "kvm"},
+      image_release_build: $release_build,
+      image_sha512: $image_sha512,
+      proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
+      report_kind: "volparossa-helper-boundary-vm-environment",
+      report_sha256: $report_sha256,
+      schema_version: 1,
+      status: "PASS"}' >"$successful_environment"
+
+environment_validator_stdout=$run_directory/environment-validator.stdout
+environment_validator_stderr=$run_directory/environment-validator.stderr
+set +e
+"$environment_validator" "$successful_environment" "$retrieved_report" \
+    "$expected_commit" "$image_sha512" \
+    >"$environment_validator_stdout" 2>"$environment_validator_stderr"
+environment_validator_status=$?
+set -e
+[ "$environment_validator_status" -eq 0 ] \
+    || failed 'the exact VM-environment record failed local validation'
+if [ -s "$environment_validator_stdout" ] || [ -s "$environment_validator_stderr" ]; then
+    failed 'the local VM-environment validator was not silent'
+fi
+
+install -m 0600 -- "$retrieved_report" \
+    "$output_directory/helper-boundary-evidence-v1.json"
+install -m 0600 -- "$report_hash_file" \
+    "$output_directory/helper-boundary-evidence-v1.json.sha256"
+install -m 0600 -- "$successful_environment" "$environment_report"
+
+printf '%s\n' 'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2

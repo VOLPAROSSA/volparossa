@@ -1,0 +1,504 @@
+name: Helper boundary evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helper-boundary-evidence-main
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  helper-boundary-evidence:
+    name: Debian 13 VM helper-boundary evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out selected revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.ref }}
+
+      - name: Require the selected main revision
+        env:
+          SELECTED_REF: ${{ github.ref }}
+          SELECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$SELECTED_REF" = refs/heads/main
+          test "$SELECTED_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git symbolic-ref --quiet --short HEAD)" = main
+          test -z "$(git status --short --untracked-files=all)"
+
+      - name: Install official Ubuntu VM tools
+        run: |
+          set -euo pipefail
+          umask 077
+          apt_update_log="$RUNNER_TEMP/apt-update.log"
+          apt_install_log="$RUNNER_TEMP/apt-install.log"
+          set +e
+          prlimit --fsize=8388608:8388608 -- \
+            sudo apt-get update >"$apt_update_log" 2>&1
+          apt_update_status=$?
+          set -e
+          if test "$apt_update_status" -ne 0; then
+            tail -c 65536 "$apt_update_log" >&2
+            exit "$apt_update_status"
+          fi
+          set +e
+          prlimit --fsize=8388608:8388608 -- \
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+            --yes \
+            --no-install-recommends \
+            qemu-system-x86 \
+            qemu-utils \
+            cloud-image-utils \
+            openssh-client \
+            curl \
+            jq \
+            acl \
+            python3 \
+            util-linux \
+            >"$apt_install_log" 2>&1
+          apt_install_status=$?
+          set -e
+          if test "$apt_install_status" -ne 0; then
+            tail -c 65536 "$apt_install_log" >&2
+            exit "$apt_install_status"
+          fi
+
+          dpkg-query --show \
+            --showformat='${binary:Package}\t${Version}\n' \
+            qemu-system-x86 \
+            qemu-utils \
+            cloud-image-utils \
+            openssh-client \
+            curl \
+            jq \
+            acl \
+            python3 \
+            util-linux
+          qemu-system-x86_64 --version
+          qemu-img --version
+          ssh -V
+          curl --version
+          jq --version
+          setfacl --version
+
+      - name: Create the bounded evidence directory
+        run: |
+          set -euo pipefail
+          umask 077
+          output_dir="$RUNNER_TEMP/helper-boundary-evidence"
+          test ! -e "$output_dir"
+          test ! -L "$output_dir"
+          install -d -m 0700 -- "$output_dir"
+          test -d "$output_dir"
+          test ! -L "$output_dir"
+          test "$(stat -c '%a' -- "$output_dir")" = 700
+          test "$(stat -c '%u' -- "$output_dir")" = "$(id -u)"
+          printf 'VOLPAROSSA_EVIDENCE_OUTPUT=%s\n' "$output_dir" >>"$GITHUB_ENV"
+
+      - name: Require usable KVM without emulation fallback
+        run: |
+          set -euo pipefail
+          umask 077
+          test -c /dev/kvm
+
+          acl_snapshot="$RUNNER_TEMP/kvm-acl.before"
+          acl_identity="$RUNNER_TEMP/kvm-device.identity"
+          test ! -e "$acl_snapshot"
+          test ! -L "$acl_snapshot"
+          test ! -e "$acl_identity"
+          test ! -L "$acl_identity"
+          sudo getfacl --absolute-names --numeric /dev/kvm >"$acl_snapshot"
+          stat -Lc '%d:%i:%t:%T:%F' /dev/kvm >"$acl_identity"
+          chmod 0600 "$acl_snapshot" "$acl_identity"
+
+          runner_user=$(id -un)
+          sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm
+          runner_acl=$(
+            getfacl --absolute-names --omit-header /dev/kvm \
+              | awk -F: -v user="$runner_user" \
+                  '$1 == "user" && $2 == user { print $3 }'
+          )
+          test "$runner_acl" = rw-
+          test -r /dev/kvm
+          test -w /dev/kvm
+          qemu-system-x86_64 -accel help | grep -Fx kvm
+
+          kvm_log="$RUNNER_TEMP/kvm-preflight.log"
+          set +e
+          timeout --signal=TERM --kill-after=2s 3s \
+            prlimit --fsize=1048576:1048576 -- \
+              qemu-system-x86_64 \
+              -machine q35,accel=kvm \
+              -cpu host \
+              -m 64M \
+              -no-user-config \
+              -nodefaults \
+              -display none \
+              -monitor none \
+              -serial none \
+              -S \
+              >"$kvm_log" 2>&1
+          kvm_status=$?
+          set -e
+          cat "$kvm_log"
+          test "$kvm_status" -eq 124
+
+      - name: Download and verify the pinned Debian 13 image
+        run: |
+          set -euo pipefail
+          umask 077
+
+          manifest=tests/helper/debian13-amd64-image-v1.json
+          manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
+          image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
+          image_filename=debian-13-genericcloud-amd64-20260826-2582.qcow2
+
+          test -f "$manifest"
+          test ! -L "$manifest"
+          test "$(stat -Lc '%h' "$manifest")" = 1
+          printf '%s  %s\n' "$manifest_sha256" "$manifest" \
+            | sha256sum --check --strict -
+          jq -e \
+            --arg filename "$image_filename" \
+            --arg sha512 "$image_sha512" \
+            '. == {
+              architecture: "amd64",
+              checksum_provenance: "manually-reviewed-upstream-sha512-no-detached-signature",
+              checksum_url: ("https://cloud.debian.org/images/cloud/trixie/20260826-2582/SHA512SUMS"),
+              debian_version: "13",
+              filename: $filename,
+              format: "qcow2",
+              image_kind: "reviewed-debian-genericcloud",
+              release_build: "20260826-2582",
+              release_codename: "trixie",
+              release_date: "2026-08-26",
+              schema_version: 1,
+              sha512: $sha512,
+              systemd_version: 257,
+              url: ("https://cloud.debian.org/images/cloud/trixie/20260826-2582/" + $filename)
+            }' "$manifest" >/dev/null
+          jq -S -c . "$manifest" | cmp -s - "$manifest"
+
+          image_url=$(jq -er '.url | select(type == "string" and length > 0)' "$manifest")
+
+          image_path="$RUNNER_TEMP/$image_filename"
+          test ! -e "$image_path"
+          curl \
+            --fail \
+            --show-error \
+            --silent \
+            --location \
+            --connect-timeout 30 \
+            --max-time 1200 \
+            --max-filesize 2147483648 \
+            --max-redirs 3 \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --output "$image_path" \
+            "$image_url"
+          chmod 0600 "$image_path"
+          printf '%s  %s\n' "$image_sha512" "$image_path" \
+            | sha512sum --check --strict -
+          test -f "$image_path"
+          test ! -L "$image_path"
+          printf 'VOLPAROSSA_VM_IMAGE=%s\n' "$image_path" >>"$GITHUB_ENV"
+
+      - name: Run the disposable Debian 13 proof VM
+        id: vm_proof
+        run: |
+          set -euo pipefail
+          image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
+          set +e
+          tests/helper/run-helper-boundary-evidence-vm.sh \
+            --execute \
+            --yes \
+            --image "$VOLPAROSSA_VM_IMAGE" \
+            --output "$VOLPAROSSA_EVIDENCE_OUTPUT" \
+            --expected-commit "$GITHUB_SHA"
+          proof_status=$?
+          printf '%s  %s\n' "$image_sha512" "$VOLPAROSSA_VM_IMAGE" \
+            | sha512sum --check --strict -
+          image_recheck_status=$?
+          set -e
+          if test "$image_recheck_status" -ne 0; then
+            proof_status=1
+          fi
+          printf 'exit_code=%s\n' "$proof_status" >>"$GITHUB_OUTPUT"
+
+      - name: Fence the retained artifacts
+        id: retained_artifacts
+        if: always()
+        env:
+          PROOF_EXIT_CODE: ${{ steps.vm_proof.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          umask 077
+          source_dir="$RUNNER_TEMP/helper-boundary-evidence"
+          retained_dir="$RUNNER_TEMP/helper-boundary-retained"
+          test ! -e "$retained_dir"
+          test ! -L "$retained_dir"
+          install -d -m 0700 -- "$retained_dir"
+          test -d "$retained_dir"
+          test ! -L "$retained_dir"
+          test "$(stat -c '%a' -- "$retained_dir")" = 700
+          test "$(stat -c '%u' -- "$retained_dir")" = "$(id -u)"
+
+          allowed_name() {
+            case "$1" in
+              helper-boundary-evidence-v1.json|\
+              helper-boundary-evidence-v1.json.sha256|\
+              vm-environment-v1.json|\
+              vm-console.log|\
+              helper-boundary-proof.stderr.log)
+                return 0
+                ;;
+              *) return 1 ;;
+            esac
+          }
+
+          require_no_private_key_marker() {
+            scan_path=$1
+            scan_name=$2
+            if grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$scan_path"; then
+              printf 'refusing evidence output containing private-key material: %s\n' \
+                "$scan_name" >&2
+              return 1
+            else
+              scan_status=$?
+              if test "$scan_status" -ne 1; then
+                printf 'refusing evidence output that could not be scanned safely: %s\n' \
+                  "$scan_name" >&2
+                return 1
+              fi
+            fi
+          }
+
+          if test -e "$source_dir" || test -L "$source_dir"; then
+            test -d "$source_dir"
+            test ! -L "$source_dir"
+            test "$(stat -c '%a' -- "$source_dir")" = 700
+            test "$(stat -c '%u' -- "$source_dir")" = "$(id -u)"
+
+            for candidate in "$source_dir"/* "$source_dir"/.[!.]* "$source_dir"/..?*; do
+              if test ! -e "$candidate" && test ! -L "$candidate"; then
+                continue
+              fi
+              name=${candidate##*/}
+              if ! allowed_name "$name"; then
+                printf 'refusing unexpected evidence output: %s\n' "$name" >&2
+                exit 1
+              fi
+              case "$name" in
+                helper-boundary-evidence-v1.json|helper-boundary-evidence-v1.json.sha256)
+                  if test "$PROOF_EXIT_CODE" != 0; then
+                    continue
+                  fi
+                  ;;
+              esac
+              test -f "$candidate"
+              test ! -L "$candidate"
+              test "$(stat -Lc '%h:%u:%a' -- "$candidate")" = \
+                "1:$(id -u):600"
+              size=$(stat -c '%s' -- "$candidate")
+              case "$name" in
+                helper-boundary-evidence-v1.json)
+                  test "$size" -ge 1
+                  test "$size" -le 32768
+                  ;;
+                helper-boundary-evidence-v1.json.sha256)
+                  test "$size" -eq 99
+                  ;;
+                vm-environment-v1.json)
+                  test "$size" -ge 1
+                  test "$size" -le 32768
+                  ;;
+                vm-console.log)
+                  test "$size" -le 16777216
+                  ;;
+                helper-boundary-proof.stderr.log)
+                  test "$size" -le 1048576
+                  ;;
+              esac
+              require_no_private_key_marker "$candidate" "$name"
+              retained_candidate=$retained_dir/$name
+              install -m 0600 -- "$candidate" "$retained_candidate"
+              cmp -s -- "$candidate" "$retained_candidate"
+              require_no_private_key_marker "$retained_candidate" "$name"
+            done
+          fi
+
+          if find "$retained_dir" -mindepth 1 -maxdepth 1 -type f -print -quit \
+              | grep -q .; then
+            printf '%s\n' 'any=true' >>"$GITHUB_OUTPUT"
+          else
+            printf '%s\n' 'any=false' >>"$GITHUB_OUTPUT"
+          fi
+
+          if test -f "$retained_dir/vm-environment-v1.json" \
+              || test -f "$retained_dir/vm-console.log" \
+              || test -f "$retained_dir/helper-boundary-proof.stderr.log"; then
+            printf '%s\n' 'diagnostics_any=true' >>"$GITHUB_OUTPUT"
+          else
+            printf '%s\n' 'diagnostics_any=false' >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Revalidate the exact retained evidence on the host
+        id: host_validation
+        if: steps.vm_proof.outputs.exit_code == '0'
+        run: |
+          set -euo pipefail
+          retained_dir="$RUNNER_TEMP/helper-boundary-retained"
+          report="$retained_dir/helper-boundary-evidence-v1.json"
+          report_hash="$retained_dir/helper-boundary-evidence-v1.json.sha256"
+          environment="$retained_dir/vm-environment-v1.json"
+          console="$retained_dir/vm-console.log"
+          proof_stderr="$retained_dir/helper-boundary-proof.stderr.log"
+          validator_stdout="$RUNNER_TEMP/helper-boundary-validator.stdout"
+          validator_stderr="$RUNNER_TEMP/helper-boundary-validator.stderr"
+
+          require_source_fence() {
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+            test -z "$(git status --short --untracked-files=all)"
+          }
+
+          require_source_fence
+          for evidence_file in \
+            "$report" \
+            "$report_hash" \
+            "$environment" \
+            "$console" \
+            "$proof_stderr"
+          do
+            test -f "$evidence_file"
+            test ! -L "$evidence_file"
+          done
+
+          set +e
+          tests/helper/validate-helper-boundary-evidence-v1.sh "$report" \
+            >"$validator_stdout" 2>"$validator_stderr"
+          validator_status=$?
+          set -e
+          if test "$validator_status" -ne 0; then
+            cat "$validator_stderr" >&2
+            exit "$validator_status"
+          fi
+          test ! -s "$validator_stdout"
+          test ! -s "$validator_stderr"
+          jq -e --arg commit "$GITHUB_SHA" \
+            '.observed_source.commit_sha == $commit' \
+            "$report" >/dev/null
+          test "$(stat -c '%s' -- "$report_hash")" -eq 99
+          grep -Eq \
+            '^[0-9a-f]{64}  helper-boundary-evidence-v1\.json$' \
+            "$report_hash"
+          (
+            cd "$retained_dir"
+            sha256sum --check --strict helper-boundary-evidence-v1.json.sha256
+          )
+          environment_validator_stdout="$RUNNER_TEMP/vm-environment-validator.stdout"
+          environment_validator_stderr="$RUNNER_TEMP/vm-environment-validator.stderr"
+          tests/helper/validate-helper-boundary-vm-environment-v1.sh \
+            "$environment" \
+            "$report" \
+            "$GITHUB_SHA" \
+            184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003 \
+            >"$environment_validator_stdout" 2>"$environment_validator_stderr"
+          test ! -s "$environment_validator_stdout"
+          test ! -s "$environment_validator_stderr"
+          require_source_fence
+
+          chmod 0400 -- \
+            "$report" \
+            "$report_hash" \
+            "$environment" \
+            "$console" \
+            "$proof_stderr"
+          chmod 0500 -- "$retained_dir"
+
+      - name: Restore the exact KVM device ACL
+        id: restore_kvm_acl
+        if: always()
+        run: |
+          set -euo pipefail
+          umask 077
+          acl_snapshot="$RUNNER_TEMP/kvm-acl.before"
+          acl_identity="$RUNNER_TEMP/kvm-device.identity"
+          if test -e "$acl_snapshot" || test -L "$acl_snapshot" \
+              || test -e "$acl_identity" || test -L "$acl_identity"; then
+            test -f "$acl_snapshot"
+            test ! -L "$acl_snapshot"
+            test -f "$acl_identity"
+            test ! -L "$acl_identity"
+            test "$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm)" = "$(cat "$acl_identity")"
+            sudo setfacl --restore="$acl_snapshot"
+            restored_acl="$RUNNER_TEMP/kvm-acl.restored"
+            test ! -e "$restored_acl"
+            sudo getfacl --absolute-names --numeric /dev/kvm >"$restored_acl"
+            cmp -s "$acl_snapshot" "$restored_acl"
+          fi
+
+      - name: Upload bounded helper-boundary evidence
+        id: pass_artifact_upload
+        if: >-
+          always() &&
+          steps.vm_proof.outputs.exit_code == '0' &&
+          steps.host_validation.outcome == 'success' &&
+          steps.restore_kvm_acl.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: helper-boundary-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/helper-boundary-retained/helper-boundary-evidence-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/helper-boundary-evidence-v1.json.sha256
+            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/vm-console.log
+            ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload bounded failure diagnostics
+        id: failure_artifact_upload
+        if: >-
+          always() &&
+          (steps.vm_proof.outputs.exit_code != '0' ||
+          steps.host_validation.outcome != 'success' ||
+          steps.restore_kvm_acl.outcome != 'success') &&
+          steps.retained_artifacts.outputs.diagnostics_any == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: helper-boundary-diagnostics-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/vm-console.log
+            ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Require a retained PASS
+        if: always()
+        env:
+          PROOF_EXIT_CODE: ${{ steps.vm_proof.outputs.exit_code }}
+          HOST_VALIDATION_OUTCOME: ${{ steps.host_validation.outcome }}
+          RETAINED_ARTIFACTS_OUTCOME: ${{ steps.retained_artifacts.outcome }}
+          PASS_ARTIFACT_UPLOAD_OUTCOME: ${{ steps.pass_artifact_upload.outcome }}
+          RESTORE_KVM_ACL_OUTCOME: ${{ steps.restore_kvm_acl.outcome }}
+        run: |
+          set -euo pipefail
+          test "$PROOF_EXIT_CODE" = 0
+          test "$HOST_VALIDATION_OUTCOME" = success
+          test "$RETAINED_ARTIFACTS_OUTCOME" = success
+          test "$PASS_ARTIFACT_UPLOAD_OUTCOME" = success
+          test "$RESTORE_KVM_ACL_OUTCOME" = success
