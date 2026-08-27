@@ -339,19 +339,19 @@ validate_supervisor_record() {
     jq -e -s 'length == 1' "$supervisor_record" >/dev/null 2>&1 || return 1
     jq -S -c . "$supervisor_record" | cmp -s - "$supervisor_record" || return 1
     if [ "$supervisor_state" = ready ]; then
-        jq -e '. == {protocol: "volparossa-qemu-pidfd-supervisor-v2", state: "ready"}' \
+        jq -e '. == {protocol: "volparossa-qemu-pidfd-supervisor-v3", state: "ready"}' \
             "$supervisor_record" >/dev/null
     elif [ "$supervisor_state" = status ]; then
         jq -e '
           . == {
             error: "supervisor-failure",
-            protocol: "volparossa-qemu-pidfd-supervisor-v2",
+            protocol: "volparossa-qemu-pidfd-supervisor-v3",
             state: "failed"
           }
           or (
             type == "object"
             and keys == (["exit_code", "exit_signal", "protocol", "state", "termination", "trigger"] | sort)
-            and .protocol == "volparossa-qemu-pidfd-supervisor-v2"
+            and .protocol == "volparossa-qemu-pidfd-supervisor-v3"
             and .state == "exited"
             and ((.exit_code | type == "number") != (.exit_signal | type == "number"))
             and (.exit_code == null or (.exit_code >= 0 and .exit_code <= 255 and (.exit_code | floor) == .exit_code))
@@ -376,6 +376,46 @@ validate_supervisor_stderr() {
     [ "$supervisor_stderr_size" -le 917504 ]
 }
 
+validate_supervisor_qmp() {
+    supervisor_qmp=$1
+    [ -f "$supervisor_qmp" ] && [ ! -L "$supervisor_qmp" ] || return 1
+    [ "$(stat -c '%h:%u:%a' "$supervisor_qmp" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    supervisor_qmp_size=$(stat -c '%s' "$supervisor_qmp") || return 1
+    [ "$supervisor_qmp_size" -le 65536 ] || return 1
+    jq -e -s 'length == 1' "$supervisor_qmp" >/dev/null 2>&1 || return 1
+    jq -S -c . "$supervisor_qmp" | cmp -s - "$supervisor_qmp" || return 1
+    jq -e '
+      type == "object"
+      and keys == (["events", "protocol", "state", "truncated"] | sort)
+      and .protocol == "volparossa-qemu-pidfd-supervisor-v3"
+      and (.state == "final" or .state == "failed")
+      and (.truncated | type == "boolean")
+      and (.events | type == "array" and length <= 64)
+      and all(.events[];
+        if .event == "STOP" then
+          . == {event: "STOP"}
+        elif .event == "RESET" or .event == "SHUTDOWN" then
+          type == "object"
+          and keys == (["event", "guest", "reason"] | sort)
+          and (.guest | type == "boolean")
+          and (.reason == "unavailable" or .reason == "guest-panic"
+            or .reason == "guest-reset" or .reason == "guest-shutdown"
+            or .reason == "host-error" or .reason == "host-qmp-quit"
+            or .reason == "host-qmp-system-reset" or .reason == "host-signal"
+            or .reason == "host-ui" or .reason == "none"
+            or .reason == "snapshot-load" or .reason == "subsystem-reset")
+        elif .event == "GUEST_PANICKED" then
+          type == "object"
+          and keys == (["action", "event"] | sort)
+          and (.action == "pause" or .action == "poweroff"
+            or .action == "run" or .action == "unavailable")
+        else false
+        end)
+      and (if .truncated then .state == "failed" else true end)' \
+        "$supervisor_qmp" >/dev/null
+}
+
 wait_for_supervisor_ready() {
     waited_limit=$1
     waited_count=0
@@ -393,6 +433,18 @@ wait_for_supervisor_ready() {
         waited_count=$((waited_count + 1))
     done
     return 1
+}
+
+publish_reap_failure_diagnostics() {
+    reaped_control=$1
+    case $reaped_control in
+        "$run_directory"/qemu-provisioning) reaped_phase=provisioning ;;
+        "$run_directory"/qemu-proof) reaped_phase=proof ;;
+        *) return 1 ;;
+    esac
+    publish_qemu_failure_diagnostics \
+        "$reaped_phase" "$reaped_control/status" "$reaped_control/qmp" \
+        "$reaped_control/stderr"
 }
 
 reap_qemu() {
@@ -413,6 +465,11 @@ reap_qemu() {
         safe_to_remove=no
         return 1
     }
+    validate_supervisor_qmp "$qemu_control/qmp" || {
+        printf '%s\n' 'QEMU supervisor QMP record is not canonical' >&2
+        safe_to_remove=no
+        return 1
+    }
     validate_supervisor_stderr "$qemu_control/stderr" || {
         printf '%s\n' 'QEMU supervisor stderr is not private and bounded' >&2
         safe_to_remove=no
@@ -420,6 +477,10 @@ reap_qemu() {
     }
     qemu_status_state=$(jq -r '.state' "$qemu_control/status")
     if [ "$qemu_status_state" = failed ]; then
+        if [ "$require_clean_exit" = yes ] \
+            && ! publish_reap_failure_diagnostics "$qemu_control"; then
+            printf '%s\n' 'failed QEMU diagnostics could not be published' >&2
+        fi
         atomic_empty_file "$qemu_control/ack" || {
             printf '%s\n' 'QEMU supervisor acknowledgement could not be published' >&2
             safe_to_remove=no
@@ -443,6 +504,25 @@ reap_qemu() {
     qemu_exit_signal=$(jq -r '.exit_signal // "null"' "$qemu_control/status")
     qemu_trigger=$(jq -r '.trigger' "$qemu_control/status")
     qemu_termination=$(jq -r '.termination' "$qemu_control/status")
+    qemu_clean_shutdown=no
+    if jq -e '
+      .state == "final"
+      and .truncated == false
+      and .events[-1] == {
+        event: "SHUTDOWN", guest: true, reason: "guest-shutdown"
+      }' "$qemu_control/qmp" >/dev/null; then
+        qemu_clean_shutdown=yes
+    fi
+    qemu_clean_lifecycle=no
+    if [ "$qemu_exit_code" = 0 ] && [ "$qemu_exit_signal" = null ] \
+        && [ "$qemu_trigger" = child-exit ] && [ "$qemu_termination" = none ] \
+        && [ "$qemu_clean_shutdown" = yes ]; then
+        qemu_clean_lifecycle=yes
+    fi
+    if [ "$require_clean_exit" = yes ] && [ "$qemu_clean_lifecycle" != yes ] \
+        && ! publish_reap_failure_diagnostics "$qemu_control"; then
+        printf '%s\n' 'non-clean QEMU diagnostics could not be published' >&2
+    fi
     atomic_empty_file "$qemu_control/ack" || {
         printf '%s\n' 'QEMU supervisor acknowledgement could not be published' >&2
         safe_to_remove=no
@@ -464,6 +544,11 @@ reap_qemu() {
     }; then
         printf 'QEMU did not exit cleanly: code=%s signal=%s trigger=%s termination=%s\n' \
             "$qemu_exit_code" "$qemu_exit_signal" "$qemu_trigger" "$qemu_termination" >&2
+        return 1
+    fi
+    if [ "$require_clean_exit" = yes ] && [ "$qemu_clean_shutdown" != yes ]; then
+        printf '%s\n' \
+            'QEMU exit lacks the exact final guest-shutdown QMP event' >&2
         return 1
     fi
 }
@@ -539,9 +624,11 @@ publish_console() {
 publish_qemu_failure_diagnostics() {
     qemu_failure_phase=$1
     qemu_failure_status=$2
-    qemu_failure_stderr=$3
+    qemu_failure_qmp=$3
+    qemu_failure_stderr=$4
     case $qemu_failure_phase in provisioning|proof) ;; *) return 1 ;; esac
     validate_supervisor_record "$qemu_failure_status" status || return 1
+    validate_supervisor_qmp "$qemu_failure_qmp" || return 1
     validate_supervisor_stderr "$qemu_failure_stderr" || return 1
     require_no_private_key_marker "$qemu_failure_stderr" || return 1
     [ -f "$proof_stderr_log" ] && [ ! -L "$proof_stderr_log" ] \
@@ -551,6 +638,8 @@ publish_qemu_failure_diagnostics() {
         printf 'qemu_phase=%s\n' "$qemu_failure_phase"
         printf 'qemu_supervisor_status='
         jq -S -c . "$qemu_failure_status"
+        printf 'qemu_event_record='
+        jq -S -c . "$qemu_failure_qmp"
         printf '%s\n' 'qemu_stderr_tail_begin'
         cat "$qemu_failure_stderr"
         printf '\n%s\n' 'qemu_stderr_tail_end'
@@ -575,7 +664,7 @@ discard_console_publish_temporary() {
     console_publish_temporary=
 }
 
-scrub_supervisor_stderr() {
+scrub_supervisor_diagnostics() {
     supervisor_control_directory=$1
     case $supervisor_control_directory in
         "$run_directory"/qemu-provisioning|"$run_directory"/qemu-proof) ;;
@@ -589,6 +678,33 @@ scrub_supervisor_stderr() {
         && [ ! -L "$supervisor_control_directory" ] \
         && [ "$(stat -c '%u:%a' "$supervisor_control_directory" 2>/dev/null || true)" \
             = "$(id -u):700" ] || return 1
+
+    supervisor_qmp=$supervisor_control_directory/qmp
+    if [ -e "$supervisor_qmp" ] || [ -L "$supervisor_qmp" ]; then
+        validate_supervisor_qmp "$supervisor_qmp" || return 1
+        rm -f -- "$supervisor_qmp" || return 1
+    fi
+
+    for supervisor_qmp_temporary in \
+        "$supervisor_control_directory"/.qmp.*.tmp
+    do
+        if [ ! -e "$supervisor_qmp_temporary" ] \
+            && [ ! -L "$supervisor_qmp_temporary" ]; then
+            continue
+        fi
+        supervisor_qmp_temporary_name=${supervisor_qmp_temporary##*/}
+        printf '%s\n' "$supervisor_qmp_temporary_name" \
+            | grep -Eq '^\.qmp\.[0-9]+\.tmp$' || return 1
+        [ -f "$supervisor_qmp_temporary" ] \
+            && [ ! -L "$supervisor_qmp_temporary" ] \
+            && [ "$(stat -c '%h:%u:%a' \
+                "$supervisor_qmp_temporary" 2>/dev/null || true)" \
+                = "1:$(id -u):600" ] || return 1
+        supervisor_qmp_temporary_size=$(stat -c '%s' \
+            "$supervisor_qmp_temporary") || return 1
+        [ "$supervisor_qmp_temporary_size" -le 65536 ] || return 1
+        rm -f -- "$supervisor_qmp_temporary" || return 1
+    done
 
     supervisor_stderr=$supervisor_control_directory/stderr
     if [ -e "$supervisor_stderr" ] || [ -L "$supervisor_stderr" ]; then
@@ -645,8 +761,8 @@ scrub_sensitive_run_state() {
     if [ -e "$run_directory/source" ] || [ -L "$run_directory/source" ]; then
         rm -rf --one-file-system -- "$run_directory/source" || return 1
     fi
-    scrub_supervisor_stderr "$run_directory/qemu-provisioning" || return 1
-    scrub_supervisor_stderr "$run_directory/qemu-proof" || return 1
+    scrub_supervisor_diagnostics "$run_directory/qemu-provisioning" || return 1
+    scrub_supervisor_diagnostics "$run_directory/qemu-proof" || return 1
     find "$run_directory" -mindepth 1 -maxdepth 1 \
         \( -type f -o -type p -o -type l \) \
         \( -name 'bounded.*' -o -name 'console.*' \) -delete \
@@ -1051,7 +1167,8 @@ start_vm() {
     esac
     python3 "$qemu_supervisor" \
         --grace-seconds 5 --term-seconds 5 --kill-seconds 5 \
-        --ack-timeout-seconds 30 "$qemu_control" -- \
+        --ack-timeout-seconds 30 --qmp-stdio --qmp-timeout-seconds 10 \
+        "$qemu_control" -- \
         "$qemu_system" \
         -name "volparossa-helper-boundary-$vm_phase" \
         -no-user-config -nodefaults \
@@ -1059,7 +1176,7 @@ start_vm() {
         -drive "if=virtio,format=qcow2,file=$overlay" \
         -drive "if=virtio,format=raw,readonly=on,file=$seed" \
         -device virtio-rng-pci -device virtio-net-pci,netdev=net0 \
-        -netdev "$qemu_netdev" -display none -monitor none \
+        -netdev "$qemu_netdev" -display none -S -qmp stdio \
         -serial "file:$console_fifo" -no-reboot \
         -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
         9>&- </dev/null >/dev/null 2>&1 &
@@ -1073,12 +1190,14 @@ start_vm() {
         0) ;;
         2)
             qemu_failure_status=$qemu_control/status
+            qemu_failure_qmp=$qemu_control/qmp
             qemu_failure_stderr=$qemu_control/stderr
             if ! reap_qemu no; then
                 printf '%s\n' 'the failed QEMU lifecycle could not be reaped cleanly' >&2
             fi
             if ! publish_qemu_failure_diagnostics \
-                "$vm_phase" "$qemu_failure_status" "$qemu_failure_stderr"; then
+                "$vm_phase" "$qemu_failure_status" "$qemu_failure_qmp" \
+                "$qemu_failure_stderr"; then
                 printf '%s\n' 'bounded QEMU failure diagnostics could not be published' >&2
             fi
             failed "the QEMU supervisor failed before ready for $vm_phase"
@@ -1087,12 +1206,14 @@ start_vm() {
             validate_supervisor_record "$qemu_control/ready" ready \
                 || failed "the QEMU supervisor ready record is invalid for $vm_phase"
             qemu_failure_status=$qemu_control/status
+            qemu_failure_qmp=$qemu_control/qmp
             qemu_failure_stderr=$qemu_control/stderr
             if ! reap_qemu no; then
                 printf '%s\n' 'the exited QEMU lifecycle could not be reaped cleanly' >&2
             fi
             if ! publish_qemu_failure_diagnostics \
-                "$vm_phase" "$qemu_failure_status" "$qemu_failure_stderr"; then
+                "$vm_phase" "$qemu_failure_status" "$qemu_failure_qmp" \
+                "$qemu_failure_stderr"; then
                 printf '%s\n' 'bounded QEMU failure diagnostics could not be published' >&2
             fi
             failed "QEMU exited after supervisor readiness for $vm_phase"
@@ -1102,16 +1223,26 @@ start_vm() {
     validate_supervisor_record "$qemu_control/ready" ready \
         || failed "the QEMU supervisor ready record is invalid for $vm_phase"
     if ! wait_for_ssh; then
+        qemu_failed_before_ssh=no
         if [ -f "$qemu_control/status" ] && [ ! -L "$qemu_control/status" ]; then
-            qemu_failure_status=$qemu_control/status
-            qemu_failure_stderr=$qemu_control/stderr
-            if ! reap_qemu no; then
-                printf '%s\n' 'the exited QEMU lifecycle could not be reaped cleanly' >&2
-            fi
-            if ! publish_qemu_failure_diagnostics \
-                "$vm_phase" "$qemu_failure_status" "$qemu_failure_stderr"; then
-                printf '%s\n' 'bounded QEMU failure diagnostics could not be published' >&2
-            fi
+            qemu_failed_before_ssh=yes
+        fi
+        qemu_failure_status=$qemu_control/status
+        qemu_failure_qmp=$qemu_control/qmp
+        qemu_failure_stderr=$qemu_control/stderr
+        if [ "$qemu_failed_before_ssh" = no ]; then
+            atomic_empty_file "$qemu_control/stop" \
+                || failed "the stalled QEMU stop request failed for $vm_phase"
+        fi
+        if ! reap_qemu no; then
+            printf '%s\n' 'the pre-SSH QEMU lifecycle could not be reaped cleanly' >&2
+        fi
+        if ! publish_qemu_failure_diagnostics \
+            "$vm_phase" "$qemu_failure_status" "$qemu_failure_qmp" \
+            "$qemu_failure_stderr"; then
+            printf '%s\n' 'bounded QEMU failure diagnostics could not be published' >&2
+        fi
+        if [ "$qemu_failed_before_ssh" = yes ]; then
             failed "QEMU exited after readiness before pinned guest SSH for $vm_phase"
         fi
         failed "the exact pinned guest did not expose SSH for $vm_phase"
