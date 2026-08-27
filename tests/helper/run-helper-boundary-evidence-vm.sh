@@ -1165,6 +1165,11 @@ start_vm() {
         restricted) qemu_netdev='user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:22222-:22' ;;
         *) failed 'internal VM network phase is invalid' ;;
     esac
+    # Retained main run 33114535362 proved that the pinned legacy-BIOS GRUB
+    # requested a guest reset before its first kernel-loading message in a
+    # q35 -nodefaults configuration without VGA. That does not prove causality;
+    # keep the display headless while testing the smallest remaining hypothesis:
+    # one fixed VGA device for the load_video path.
     python3 "$qemu_supervisor" \
         --grace-seconds 5 --term-seconds 5 --kill-seconds 5 \
         --ack-timeout-seconds 30 --qmp-stdio --qmp-timeout-seconds 10 \
@@ -1173,6 +1178,7 @@ start_vm() {
         -name "volparossa-helper-boundary-$vm_phase" \
         -no-user-config -nodefaults \
         -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
+        -device VGA,id=video0,bus=pcie.0,addr=0x1 \
         -drive "if=virtio,format=qcow2,file=$overlay" \
         -drive "if=virtio,format=raw,readonly=on,file=$seed" \
         -device virtio-rng-pci -device virtio-net-pci,netdev=net0 \
