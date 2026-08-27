@@ -312,7 +312,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   Production publication remains deliberately disconnected from `ProductionServer`, `HelperEngine`
   and every request path. No production terminal consumer of the in-process observer,
   cross-process/restart-stable manager-inventory reconciliation or adoption,
-  inherited-custody recovery, request-path issuance writer,
+  exact-set inherited-custody/journal join, request-path issuance writer,
   `MayOwnPrepare` reaper or complete restart settlement exists. Startup therefore continues to block
   on `MayOwnCustody` before retiring any `Intent`; AV1-10 remains Open and this slice adds no
   scorecard, datapath or acceptance points.
@@ -348,18 +348,22 @@ single clean-build A01--A15 run; the score is not a release claim.
   `CAP_SYS_ADMIN`) and
   reject `CAP_SYS_PTRACE`; they also require `LimitCORE=0`, `NotifyAccess=main`, a 128-entry
   descriptor store (two descriptors for each of at most 64 workers), preserve that store while the
-  unit is retained, and explicitly keep control-group kill escalation. Before constructing Tokio,
-  production parses the exact PID/even-count/fixed-name activation tuple and caps it at 128. A
-  one-shot audited raw-FD boundary seals the complete contiguous advertised range beginning at fd 3
-  `CLOEXEC` and duplicates every descriptor into a new Rust owner without claiming the raw source
-  entries. Each two-entry opaque-name group must then canonicalise, independent of input order, to
-  exactly one `PID_FS_MAGIC` pidfd and one typed `CLONE_NEWNET` namespace owner. Repeated
+  unit is retained, and explicitly keep control-group kill escalation. Before tracing or Tokio, a
+  separate executable-entry crate performs the only explicit unsafe helper-startup assertion. Its
+  one-shot audited raw-FD boundary latches before reading the exact activation tuple, validates the
+  current PID and a positive count of at most 128, reserves and preflights the complete contiguous
+  range beginning at fd 3, seals it `CLOEXEC`, removes all three `LISTEN_*` variables, and takes the
+  original slots directly into affine Rust ownership without duplication. Exact absence returns an
+  opaque empty proof token. The helper library remains `unsafe_code = "forbid"`, consumes that token,
+  and requires an even count plus exact fixed names. Each two-entry opaque-name group must then
+  canonicalise, independent of input order, to exactly one `PID_FS_MAGIC` pidfd and one typed
+  `CLONE_NEWNET` namespace owner. Repeated
   kernel-object identity within or across names fails closed even when mutable descriptor status
   flags differ.
-  Production still refuses startup while any inherited group exists because durable journal
-  correlation and a recovery executor do not exist yet. The snapshot is process-latched. Exact,
-  I/O-safe consumption of the still-open sealed source range remains a blocker for positive
-  adoption. A dormant
+  Production still refuses startup while any inherited group exists because the all-or-nothing
+  durable-journal/manager-inventory join and a custody-capable restart-settlement executor do not
+  exist yet. The snapshot is process-latched, and dropping the refused set closes the exact
+  process-local source slots; source ownership is no longer a positive-adoption blocker. A dormant
   publication component sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.

@@ -181,13 +181,22 @@ temporary entry, and byte-exact durable snapshot. Any uncertainty poisons the ac
 
 ### Production fail-closed inherited-custody capture
 
-Before constructing Tokio or binding the helper socket, the production entry parses systemd's
-complete `LISTEN_PID`/`LISTEN_FDS`/`LISTEN_FDNAMES` tuple. The descriptor count must be positive,
-even and at most 128, and every name is parsed directly into the fixed lowercase opaque
-`CustodyFdName` buffer before descriptor-table mutation. The one-shot Linux-UAPI boundary seals
-the complete contiguous advertised range beginning at fd 3 `CLOEXEC` and duplicates every entry
-into a new Rust owner without claiming ownership of the raw source entries. The shipped production
-entry treats every failure after the one-shot latch as terminal for that process.
+Before constructing tracing, Tokio or the helper socket, the separate executable-entry crate makes
+the only explicit unsafe startup assertion in the helper process. The one-shot Linux-UAPI boundary
+consumes its latch before inspecting systemd's complete
+`LISTEN_PID`/`LISTEN_FDS`/`LISTEN_FDNAMES` tuple, requires the exact current PID and a positive count
+of at most 128, reserves all owner storage, and preflights the complete contiguous range beginning
+at fd 3 with `CLOEXEC` readback. It then removes all three activation variables and takes each
+original raw descriptor slot directly into affine `OwnedFd` ownership. It does not duplicate the
+range. PID 1 may still retain its independent descriptor-store copies referring to the same open
+file descriptions. The owner-forming loop performs no syscall or fallible allocation after its
+first owner exists. Exact absence produces an opaque empty token, so safe helper code cannot bypass
+the one-shot boundary with an ordinary `None`. The shipped entry treats every takeover failure as
+terminal for that process; internal worker, nft frontend and live-proof invocations never call it.
+
+The safe helper library consumes that unforgeable token, requires a positive even count for a
+present set, and parses every advertised name directly into the fixed lowercase opaque
+`CustodyFdName` buffer before grouping owners.
 
 Each same-name pair is then classified without trusting descriptor order. A pidfd is accepted only
 when `fstatfs(2)` returns Debian 13's `PID_FS_MAGIC`; a network namespace is accepted only when
@@ -200,14 +209,12 @@ duplicate roles, incomplete groups and identity reuse fail closed. Type classifi
 accepts an exited pidfd: capture proves object type, not worker liveness or cleanup.
 
 This is still a refusal boundary, not production recovery. Any non-empty captured set blocks
-startup and drops its captured duplicate owners without constructing the runtime or publishing the
-socket. The capture does not yet prove that a particular pidfd and namespace belong to the same
-worker, bind the pair to durable journal evidence, reconcile manager inventory, remove manager
-custody or reap kernel state. The sealed original advertised range also remains open: closing it
-through the current public safe count-only UAPI would invalidate possible Rust-owned descriptors
-without an ownership proof. A later explicit startup-ownership boundary must resolve that
-I/O-safety requirement before positive adoption. Those proofs remain mandatory before the refusal
-may be replaced by adoption.
+startup and drops its exact source-slot owners without constructing the runtime or publishing the
+socket. The takeover creates no additional process-local source alias; dropping the refused set
+closes every captured source slot. The capture does not yet
+prove that a particular pidfd and namespace belong to the same worker, join the complete inherited
+set to durable journal evidence and stable manager inventory, remove manager custody, or reap
+kernel state. Those proofs remain mandatory before the refusal may be replaced by adoption.
 
 ### Production-dormant systemd descriptor-store publication boundary
 
@@ -845,9 +852,9 @@ state.
 
 The supervisor and publisher remain private and dormant, with no server, engine or request-path
 caller and no production terminal consumer. Startup preserves unresolved manager ownership by
-refusing any `MayOwnCustody` snapshot before retiring an `Intent`; manager-inventory
-adoption/reconciliation, inherited-descriptor consumption and a restart reaper are still required
-before that phase can progress rather than block startup.
+refusing any `MayOwnCustody` snapshot before retiring an `Intent`; an all-or-nothing join of the
+affinely consumed inherited set to durable journal records and stable manager inventory, followed
+by a restart reaper, is still required before that phase can progress rather than block startup.
 
 Production wiring remains a separate audited change with these explicit blockers:
 
