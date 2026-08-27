@@ -94,6 +94,7 @@ impl InheritedCustody {
 pub(crate) enum StartupCustodyDisposition {
     ExactPresent,
     ExactNoStoredCustody,
+    CleanupConfirmedNoStoredCustody,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -110,7 +111,8 @@ impl fmt::Debug for ClassifiedStartupCustodyTarget {
 
 /// Read-only exact classification which retains every affine inherited descriptor owner.
 ///
-/// Neither disposition proves cleanup, authorizes adoption or permits a journal transition.
+/// This classification is observation-only: it neither authorizes cleanup or adoption nor
+/// performs a journal transition. Any durable cleanup authority remains owned by the journal.
 #[must_use = "startup custody classification retains affine descriptor owners and is not cleanup authority"]
 pub(crate) struct StartupCustodyClassification {
     custody: InheritedCustody,
@@ -136,11 +138,28 @@ impl fmt::Debug for StartupCustodyClassification {
             .iter()
             .filter(|entry| entry.target.phase() == StartupCustodyPhase::MayOwnPrepare)
             .count();
+        let cleanup_confirmed = self
+            .classified
+            .iter()
+            .filter(|entry| entry.target.phase() == StartupCustodyPhase::CleanupConfirmed)
+            .count();
+        let cleanup_confirmed_no_store = self
+            .classified
+            .iter()
+            .filter(|entry| {
+                entry.disposition == StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
+            })
+            .count();
         formatter
             .debug_struct("StartupCustodyClassification")
             .field("target_count", &self.classified.len())
             .field("exact_present_count", &exact_present)
             .field("may_own_prepare_count", &may_own_prepare)
+            .field("cleanup_confirmed_count", &cleanup_confirmed)
+            .field(
+                "cleanup_confirmed_no_store_count",
+                &cleanup_confirmed_no_store,
+            )
             .field("descriptor_bundle_count", &self.custody.bundles.len())
             .finish_non_exhaustive()
     }
@@ -306,14 +325,19 @@ fn classify_journal_targets(
                     "durable journal custody exists under another inherited name",
                 ));
             }
-            None if target.phase() == StartupCustodyPhase::MayOwnCustody => {
-                StartupCustodyDisposition::ExactNoStoredCustody
-            }
-            None => {
-                return Err(invalid_data(
-                    "MayOwnPrepare custody is absent from the inherited and manager sets",
-                ));
-            }
+            None => match target.phase() {
+                StartupCustodyPhase::MayOwnCustody => {
+                    StartupCustodyDisposition::ExactNoStoredCustody
+                }
+                StartupCustodyPhase::CleanupConfirmed => {
+                    StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
+                }
+                StartupCustodyPhase::MayOwnPrepare => {
+                    return Err(invalid_data(
+                        "MayOwnPrepare custody is absent from the inherited and manager sets",
+                    ));
+                }
+            },
         };
         classified.push(ClassifiedStartupCustodyTarget {
             target: *target,
@@ -860,6 +884,7 @@ mod tests {
         for phase in [
             StartupCustodyPhase::MayOwnCustody,
             StartupCustodyPhase::MayOwnPrepare,
+            StartupCustodyPhase::CleanupConfirmed,
         ] {
             let custody = captured_custody(21);
             let (_, durable) = custody
@@ -921,6 +946,28 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "MayOwnPrepare custody is absent from the inherited and manager sets"
+        );
+    }
+
+    #[test]
+    fn absent_cleanup_confirmed_has_a_distinct_non_final_classification() {
+        let custody = InheritedCustody {
+            bundles: BTreeMap::new(),
+        };
+        let target = startup_target(
+            31,
+            StartupCustodyPhase::CleanupConfirmed,
+            synthetic_durable_binding(31),
+        );
+
+        let classified = classify_journal_targets(&[target], &BTreeMap::new())
+            .expect("cleanup-confirmed no-stored-custody classification");
+
+        assert!(custody.is_empty());
+        assert_eq!(classified.len(), 1);
+        assert_eq!(
+            classified[0].disposition,
+            StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
         );
     }
 

@@ -39,10 +39,11 @@ use volparossa_routing::PrepareIntent;
 use crate::deadline::HardDeadline;
 
 use super::{
-    ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16, JournalConfig,
-    JournalEpochId, JournalError, JournalSnapshot, NewOwnershipIntent, OwnershipId,
-    OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1, PrepareRecoveryEvidenceV1,
-    RecoveryAttemptError, RecoveryExecutor, RuntimeId, open_verified_parent, random_ownership_id,
+    CleanupExecutor, ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16,
+    JournalConfig, JournalEpochId, JournalError, JournalSnapshot, ManagerAbsenceExecutor,
+    NewOwnershipIntent, OwnershipId, OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1,
+    PrepareRecoveryEvidenceV1, RuntimeId, SettlementAttemptError, open_verified_parent,
+    random_ownership_id,
 };
 #[cfg(test)]
 use super::{DurableCustodyDescriptorIdentity, DurableCustodyDescriptorIdentityParts};
@@ -340,6 +341,7 @@ fn custody_name_digest_for_coordinates(
 pub(crate) enum StartupCustodyPhase {
     MayOwnCustody,
     MayOwnPrepare,
+    CleanupConfirmed,
 }
 
 /// Opaque, copyable correlation evidence from one exact locked journal snapshot.
@@ -784,7 +786,12 @@ enum Operation {
         key: OwnershipCoordinates,
         reply: ReplySender<()>,
     },
-    ConfirmRecoveredAbsent {
+    ConfirmCleanup {
+        deadline: HardDeadline,
+        key: OwnershipCoordinates,
+        reply: ReplySender<()>,
+    },
+    ConfirmManagerAbsent {
         deadline: HardDeadline,
         key: OwnershipCoordinates,
         reply: ReplySender<()>,
@@ -827,7 +834,8 @@ impl Operation {
             | Self::MarkCustody { deadline, .. }
             | Self::ArmCustody { deadline, .. }
             | Self::RetireNeverDispatched { deadline, .. }
-            | Self::ConfirmRecoveredAbsent { deadline, .. } => *deadline,
+            | Self::ConfirmCleanup { deadline, .. }
+            | Self::ConfirmManagerAbsent { deadline, .. } => *deadline,
             #[cfg(test)]
             Self::PanicAfterRegister { deadline, .. } | Self::TestBarrier { deadline, .. } => {
                 *deadline
@@ -851,7 +859,8 @@ impl Operation {
                 reply.complete_unstarted_deadline();
             }
             Self::RetireNeverDispatched { reply, .. }
-            | Self::ConfirmRecoveredAbsent { reply, .. } => {
+            | Self::ConfirmCleanup { reply, .. }
+            | Self::ConfirmManagerAbsent { reply, .. } => {
                 reply.complete_unstarted_deadline();
             }
             #[cfg(test)]
@@ -1004,19 +1013,39 @@ impl ActorClient {
     }
 
     #[cfg(test)]
-    fn confirm_pending(
+    fn confirm_cleanup_pending(
         &self,
         key: OwnershipCoordinates,
     ) -> Result<PendingReply<()>, DurableOwnershipError> {
-        self.confirm_pending_until(key, default_actor_deadline()?)
+        self.confirm_cleanup_pending_until(key, default_actor_deadline()?)
     }
 
-    fn confirm_pending_until(
+    fn confirm_cleanup_pending_until(
         &self,
         key: OwnershipCoordinates,
         deadline: HardDeadline,
     ) -> Result<PendingReply<()>, DurableOwnershipError> {
-        self.submit(deadline, |reply| Operation::ConfirmRecoveredAbsent {
+        self.submit(deadline, |reply| Operation::ConfirmCleanup {
+            deadline,
+            key,
+            reply,
+        })
+    }
+
+    #[cfg(test)]
+    fn confirm_manager_absent_pending(
+        &self,
+        key: OwnershipCoordinates,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.confirm_manager_absent_pending_until(key, default_actor_deadline()?)
+    }
+
+    fn confirm_manager_absent_pending_until(
+        &self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::ConfirmManagerAbsent {
             deadline,
             key,
             reply,
@@ -1257,7 +1286,7 @@ impl DurableOwnershipActor {
     ) -> Result<Self, DurableOwnershipError>
     where
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         Self::spawn_with_executor_factory_until(config, executor_factory, default_actor_deadline()?)
     }
@@ -1269,7 +1298,7 @@ impl DurableOwnershipActor {
     ) -> Result<Self, DurableOwnershipError>
     where
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         Self::spawn_inner(config, || {}, || {}, executor_factory, deadline)
     }
@@ -1281,7 +1310,7 @@ impl DurableOwnershipActor {
     ) -> Result<DurableOwnershipStartup, DurableOwnershipError>
     where
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         Self::begin_inner(config, || {}, || {}, executor_factory, deadline)
     }
@@ -1295,7 +1324,7 @@ impl DurableOwnershipActor {
     where
         StartupHook: FnOnce() + Send + 'static,
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         Self::spawn_with_startup_hook_until(
             config,
@@ -1315,7 +1344,7 @@ impl DurableOwnershipActor {
     where
         StartupHook: FnOnce() + Send + 'static,
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         Self::spawn_inner(config, || {}, startup_hook, executor_factory, deadline)
     }
@@ -1330,7 +1359,7 @@ impl DurableOwnershipActor {
     where
         PreStartupHook: FnOnce() + Send + 'static,
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         Self::spawn_inner(config, pre_startup_hook, || {}, executor_factory, deadline)
     }
@@ -1346,7 +1375,7 @@ impl DurableOwnershipActor {
         PreStartupHook: FnOnce() + Send + 'static,
         StartupHook: FnOnce() + Send + 'static,
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         Self::begin_inner(
             config,
@@ -1369,7 +1398,7 @@ impl DurableOwnershipActor {
         PreStartupHook: FnOnce() + Send + 'static,
         StartupHook: FnOnce() + Send + 'static,
         ExecutorFactory: FnOnce() -> Executor + Send + 'static,
-        Executor: RecoveryExecutor + Send + 'static,
+        Executor: CleanupExecutor + ManagerAbsenceExecutor + Send + 'static,
     {
         ensure_deadline_before_acceptance(deadline)?;
         let lifecycle = Arc::new(LifecycleState::new());
@@ -1619,14 +1648,14 @@ impl DurableOwnershipActor {
     }
 
     #[cfg(test)]
-    pub(super) fn confirm_recovered_absent(
+    pub(super) fn confirm_cleanup(
         &self,
         key: &DurableOwnershipKey,
     ) -> Result<(), DurableOwnershipError> {
-        self.confirm_recovered_absent_until(key, default_actor_deadline()?)
+        self.confirm_cleanup_until(key, default_actor_deadline()?)
     }
 
-    pub(super) fn confirm_recovered_absent_until(
+    pub(super) fn confirm_cleanup_until(
         &self,
         key: &DurableOwnershipKey,
         deadline: HardDeadline,
@@ -1634,7 +1663,27 @@ impl DurableOwnershipActor {
         self.client
             .as_ref()
             .ok_or(DurableOwnershipError::Unavailable)?
-            .confirm_pending_until(key.coordinates, deadline)?
+            .confirm_cleanup_pending_until(key.coordinates, deadline)?
+            .wait()
+    }
+
+    #[cfg(test)]
+    pub(super) fn confirm_manager_absent(
+        &self,
+        key: &DurableOwnershipKey,
+    ) -> Result<(), DurableOwnershipError> {
+        self.confirm_manager_absent_until(key, default_actor_deadline()?)
+    }
+
+    pub(super) fn confirm_manager_absent_until(
+        &self,
+        key: &DurableOwnershipKey,
+        deadline: HardDeadline,
+    ) -> Result<(), DurableOwnershipError> {
+        self.client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?
+            .confirm_manager_absent_pending_until(key.coordinates, deadline)?
             .wait()
     }
 
@@ -1787,6 +1836,7 @@ fn project_startup_custody_targets(
         let phase = match record.phase {
             OwnershipPhase::MayOwnCustody => StartupCustodyPhase::MayOwnCustody,
             OwnershipPhase::MayOwnPrepare => StartupCustodyPhase::MayOwnPrepare,
+            OwnershipPhase::CleanupConfirmed => StartupCustodyPhase::CleanupConfirmed,
             OwnershipPhase::Intent | OwnershipPhase::Absent => continue,
         };
         let Some(PrepareRecoveryEvidenceV1::CustodyBound { binding, .. }) =
@@ -1827,7 +1877,7 @@ struct ActorCore<Executor> {
     revision: u64,
 }
 
-impl<Executor: RecoveryExecutor> ActorCore<Executor> {
+impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
     fn new(journal: OwnershipJournal, executor: Executor) -> Result<Self, FailureDisposition> {
         let revision = journal
             .snapshot()
@@ -1845,73 +1895,68 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(self.classify_journal_error(error)),
         };
-        // Phase 4 means a descriptor-store publication may already have happened. Until startup
-        // adoption is implemented, refuse the complete snapshot before retiring even one Intent;
-        // an extra or missing inherited bundle is not absence evidence.
-        if snapshot
-            .records
-            .values()
-            .any(|record| record.phase == OwnershipPhase::MayOwnCustody)
-        {
-            return Err(FailureDisposition::Continue(
-                DurableOwnershipError::RecoveryNotConfirmed,
-            ));
-        }
-        let pending = snapshot
+        // Settle custody-bearing records before retiring any Intent. Production cannot enter this
+        // sweep with such a record: its lock-holding startup guard allows only an empty projected
+        // set. The generic actor path exists for exact executor/crash tests and preserves the same
+        // two distinct proofs required by later production composition.
+        let custody_pending = snapshot
             .records
             .values()
             .filter_map(|record| {
                 matches!(
                     record.phase,
-                    OwnershipPhase::Intent | OwnershipPhase::MayOwnPrepare
+                    OwnershipPhase::MayOwnCustody
+                        | OwnershipPhase::MayOwnPrepare
+                        | OwnershipPhase::CleanupConfirmed
                 )
                 .then_some((record.ownership_id, record.generation, record.phase))
             })
             .collect::<Vec<_>>();
-        for (ownership_id, generation, phase) in pending {
+        let intents = snapshot
+            .records
+            .values()
+            .filter(|record| record.phase == OwnershipPhase::Intent)
+            .map(|record| (record.ownership_id, record.generation))
+            .collect::<Vec<_>>();
+        for (ownership_id, generation, phase) in custody_pending {
             if deadline.ensure_remaining().is_err() {
                 return Err(FailureDisposition::Continue(
                     DurableOwnershipError::DeadlineElapsed,
                 ));
             }
-            match phase {
-                OwnershipPhase::Intent => {
-                    self.revision = self
-                        .journal
-                        .mark_intent_absent(self.revision, ownership_id, generation)
-                        .map_err(|error| self.classify_journal_error(error))?;
-                }
-                OwnershipPhase::MayOwnPrepare => {
-                    self.revision = match self.journal.recover_may_own_prepare(
-                        self.revision,
-                        ownership_id,
-                        generation,
-                        &mut self.executor,
-                        deadline,
-                    ) {
-                        Ok(revision) => revision,
-                        Err(RecoveryAttemptError::Deadline) => {
-                            return Err(FailureDisposition::Continue(
-                                DurableOwnershipError::DeadlineElapsed,
-                            ));
-                        }
-                        Err(RecoveryAttemptError::Executor(_)) => {
-                            return Err(FailureDisposition::Continue(
-                                DurableOwnershipError::RecoveryNotConfirmed,
-                            ));
-                        }
-                        Err(RecoveryAttemptError::Journal(error)) => {
-                            return Err(self.classify_journal_error(error));
-                        }
-                    };
-                }
-                OwnershipPhase::MayOwnCustody => {
-                    return Err(FailureDisposition::Continue(
-                        DurableOwnershipError::RecoveryNotConfirmed,
-                    ));
-                }
-                OwnershipPhase::Absent => {}
+            if phase != OwnershipPhase::CleanupConfirmed {
+                self.revision = match self.journal.confirm_cleanup(
+                    self.revision,
+                    ownership_id,
+                    generation,
+                    &mut self.executor,
+                    deadline,
+                ) {
+                    Ok(revision) => revision,
+                    Err(error) => return Err(self.classify_settlement_error(error)),
+                };
             }
+            self.revision = match self.journal.confirm_manager_absent(
+                self.revision,
+                ownership_id,
+                generation,
+                &mut self.executor,
+                deadline,
+            ) {
+                Ok(revision) => revision,
+                Err(error) => return Err(self.classify_settlement_error(error)),
+            };
+        }
+        for (ownership_id, generation) in intents {
+            if deadline.ensure_remaining().is_err() {
+                return Err(FailureDisposition::Continue(
+                    DurableOwnershipError::DeadlineElapsed,
+                ));
+            }
+            self.revision = self
+                .journal
+                .mark_intent_absent(self.revision, ownership_id, generation)
+                .map_err(|error| self.classify_journal_error(error))?;
         }
         let snapshot = match self.journal.snapshot() {
             Ok(snapshot) => snapshot,
@@ -2018,7 +2063,7 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
         }
     }
 
-    fn confirm(
+    fn confirm_cleanup(
         &mut self,
         key: OwnershipCoordinates,
         deadline: HardDeadline,
@@ -2026,7 +2071,7 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
         if let Err(error) = self.validate_key(key) {
             return OperationOutcome::failure(error);
         }
-        match self.journal.recover_may_own_prepare(
+        match self.journal.confirm_cleanup(
             self.revision,
             key.ownership_id,
             key.generation,
@@ -2037,15 +2082,61 @@ impl<Executor: RecoveryExecutor> ActorCore<Executor> {
                 self.revision = revision;
                 OperationOutcome::Complete(Ok(()))
             }
-            Err(RecoveryAttemptError::Executor(_)) => {
+            Err(SettlementAttemptError::Executor(_)) => {
                 OperationOutcome::Complete(Err(DurableOwnershipError::RecoveryNotConfirmed))
             }
-            Err(RecoveryAttemptError::Deadline) => {
+            Err(SettlementAttemptError::Deadline) => {
                 OperationOutcome::Complete(Err(DurableOwnershipError::DeadlineElapsed))
             }
-            Err(RecoveryAttemptError::Journal(error)) => {
+            Err(SettlementAttemptError::Journal(error)) => {
                 OperationOutcome::failure(self.classify_journal_error(error))
             }
+        }
+    }
+
+    fn confirm_manager_absent(
+        &mut self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> OperationOutcome<()> {
+        if let Err(error) = self.validate_key(key) {
+            return OperationOutcome::failure(error);
+        }
+        match self.journal.confirm_manager_absent(
+            self.revision,
+            key.ownership_id,
+            key.generation,
+            &mut self.executor,
+            deadline,
+        ) {
+            Ok(revision) => {
+                self.revision = revision;
+                OperationOutcome::Complete(Ok(()))
+            }
+            Err(SettlementAttemptError::Executor(_)) => {
+                OperationOutcome::Complete(Err(DurableOwnershipError::RecoveryNotConfirmed))
+            }
+            Err(SettlementAttemptError::Deadline) => {
+                OperationOutcome::Complete(Err(DurableOwnershipError::DeadlineElapsed))
+            }
+            Err(SettlementAttemptError::Journal(error)) => {
+                OperationOutcome::failure(self.classify_journal_error(error))
+            }
+        }
+    }
+
+    fn classify_settlement_error<ExecutorError>(
+        &mut self,
+        error: SettlementAttemptError<ExecutorError>,
+    ) -> FailureDisposition {
+        match error {
+            SettlementAttemptError::Executor(_) => {
+                FailureDisposition::Continue(DurableOwnershipError::RecoveryNotConfirmed)
+            }
+            SettlementAttemptError::Deadline => {
+                FailureDisposition::Continue(DurableOwnershipError::DeadlineElapsed)
+            }
+            SettlementAttemptError::Journal(error) => self.classify_journal_error(error),
         }
     }
 
@@ -2218,7 +2309,7 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
     PreStartupHook: FnOnce(),
     StartupHook: FnOnce(),
     ExecutorFactory: FnOnce() -> Executor,
-    Executor: RecoveryExecutor,
+    Executor: CleanupExecutor + ManagerAbsenceExecutor,
 {
     let ActorThreadContext {
         receiver,
@@ -2372,7 +2463,7 @@ fn retain_startup_lock_until_owner_drop(control_receiver: &Receiver<StartupContr
     while control_receiver.recv().is_ok() {}
 }
 
-fn run_actor_commands<Executor: RecoveryExecutor>(
+fn run_actor_commands<Executor: CleanupExecutor + ManagerAbsenceExecutor>(
     core: &mut ActorCore<Executor>,
     receiver: &Receiver<Command>,
     lifecycle: &Arc<LifecycleState>,
@@ -2445,7 +2536,7 @@ fn terminal_start_failure(failure: FailureDisposition) -> (DurableOwnershipError
     }
 }
 
-fn process_operation<Executor: RecoveryExecutor>(
+fn process_operation<Executor: CleanupExecutor + ManagerAbsenceExecutor>(
     core: &mut ActorCore<Executor>,
     operation: Operation,
     lifecycle: &Arc<LifecycleState>,
@@ -2491,13 +2582,31 @@ fn process_operation<Executor: RecoveryExecutor>(
             reply.arm();
             finish_operation(reply, core.retire(key), lifecycle, admission)
         }
-        Operation::ConfirmRecoveredAbsent {
+        Operation::ConfirmCleanup {
             deadline,
             key,
             mut reply,
         } => {
             reply.arm();
-            finish_operation(reply, core.confirm(key, deadline), lifecycle, admission)
+            finish_operation(
+                reply,
+                core.confirm_cleanup(key, deadline),
+                lifecycle,
+                admission,
+            )
+        }
+        Operation::ConfirmManagerAbsent {
+            deadline,
+            key,
+            mut reply,
+        } => {
+            reply.arm();
+            finish_operation(
+                reply,
+                core.confirm_manager_absent(key, deadline),
+                lifecycle,
+                admission,
+            )
         }
         #[cfg(test)]
         Operation::PanicAfterRegister {

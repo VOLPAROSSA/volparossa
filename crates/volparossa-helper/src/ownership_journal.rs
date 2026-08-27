@@ -3,9 +3,10 @@
 //! Helper v3 never parses or executes cleanup from the former v1 journal. If that journal exists,
 //! production startup stops and an operator must inspect the host explicitly. Production now opens
 //! the v3 store through one canonical locked actor before publishing its cleanup token or socket.
-//! The installed recovery executor deliberately refuses `MayOwnPrepare`: until restart-stable
-//! namespace custody exists, startup may settle never-dispatched `Intent` records but can never
-//! claim that potentially created kernel state is absent.
+//! Startup projects custody-bound `MayOwnCustody`, `MayOwnPrepare` and `CleanupConfirmed` records
+//! without mutation. The installed production executor deliberately refuses both the trusted
+//! worker-plus-kernel cleanup proof and the distinct stable manager-absence proof, so only an empty
+//! projection may continue to settle never-dispatched `Intent` records until composition is wired.
 
 #![allow(dead_code)] // The production actor is live; mutation APIs remain private until wiring.
 
@@ -97,15 +98,28 @@ pub(crate) fn journal_bytes_have_exact_custody_phase_for_test(
 struct ExactTestRecoveryExecutor;
 
 #[cfg(test)]
-impl RecoveryExecutor for ExactTestRecoveryExecutor {
+impl CleanupExecutor for ExactTestRecoveryExecutor {
     type Error = std::convert::Infallible;
 
-    fn confirm_absent(
+    fn confirm_cleanup(
         &mut self,
-        target: &RecoveryTarget,
+        target: &CleanupTarget,
         _deadline: HardDeadline,
-    ) -> Result<ConfirmedAbsentProof, Self::Error> {
-        Ok(target.confirmed_absent())
+    ) -> Result<ConfirmedCleanupProof, Self::Error> {
+        Ok(target.confirmed_cleanup())
+    }
+}
+
+#[cfg(test)]
+impl ManagerAbsenceExecutor for ExactTestRecoveryExecutor {
+    type Error = std::convert::Infallible;
+
+    fn confirm_manager_absent(
+        &mut self,
+        target: &ManagerAbsenceTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+        Ok(target.confirmed_manager_absent())
     }
 }
 
@@ -209,14 +223,26 @@ struct RefuseMayOwnRecovery;
 #[derive(Debug, Eq, PartialEq)]
 struct MayOwnRecoveryUnavailable;
 
-impl RecoveryExecutor for RefuseMayOwnRecovery {
+impl CleanupExecutor for RefuseMayOwnRecovery {
     type Error = MayOwnRecoveryUnavailable;
 
-    fn confirm_absent(
+    fn confirm_cleanup(
         &mut self,
-        _target: &RecoveryTarget,
+        _target: &CleanupTarget,
         _deadline: HardDeadline,
-    ) -> Result<ConfirmedAbsentProof, Self::Error> {
+    ) -> Result<ConfirmedCleanupProof, Self::Error> {
+        Err(MayOwnRecoveryUnavailable)
+    }
+}
+
+impl ManagerAbsenceExecutor for RefuseMayOwnRecovery {
+    type Error = MayOwnRecoveryUnavailable;
+
+    fn confirm_manager_absent(
+        &mut self,
+        _target: &ManagerAbsenceTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
         Err(MayOwnRecoveryUnavailable)
     }
 }
@@ -519,6 +545,7 @@ enum OwnershipPhase {
     MayOwnPrepare = 2,
     Absent = 3,
     MayOwnCustody = 4,
+    CleanupConfirmed = 5,
 }
 
 impl TryFrom<u8> for OwnershipPhase {
@@ -530,6 +557,7 @@ impl TryFrom<u8> for OwnershipPhase {
             2 => Ok(Self::MayOwnPrepare),
             3 => Ok(Self::Absent),
             4 => Ok(Self::MayOwnCustody),
+            5 => Ok(Self::CleanupConfirmed),
             _ => Err(JournalError::InvalidRecord),
         }
     }
@@ -825,7 +853,7 @@ impl OwnershipRecord {
             (self.phase, self.absent_origin, self.recovery_evidence),
             (OwnershipPhase::Intent, None, None)
                 | (
-                    OwnershipPhase::MayOwnCustody,
+                    OwnershipPhase::MayOwnCustody | OwnershipPhase::CleanupConfirmed,
                     None,
                     Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
                 )
@@ -931,7 +959,12 @@ impl OwnershipRecord {
                 Some(AbsentOrigin::NeverDispatched),
                 None
             ) | (
-                OwnershipPhase::MayOwnPrepare,
+                OwnershipPhase::MayOwnCustody | OwnershipPhase::MayOwnPrepare,
+                OwnershipPhase::CleanupConfirmed,
+                None,
+                Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+            ) | (
+                OwnershipPhase::CleanupConfirmed,
                 OwnershipPhase::Absent,
                 Some(AbsentOrigin::RecoveredMayOwn),
                 None
@@ -939,7 +972,13 @@ impl OwnershipRecord {
         );
         let custody_evidence_is_preserved = !matches!(
             (self.phase, next),
-            (OwnershipPhase::MayOwnCustody, OwnershipPhase::MayOwnPrepare)
+            (
+                OwnershipPhase::MayOwnCustody,
+                OwnershipPhase::MayOwnPrepare | OwnershipPhase::CleanupConfirmed
+            ) | (
+                OwnershipPhase::MayOwnPrepare,
+                OwnershipPhase::CleanupConfirmed
+            )
         ) || self.recovery_evidence == recovery_evidence;
         if !transition_is_valid || !custody_evidence_is_preserved {
             return Err(JournalError::InvalidTransition);
@@ -1655,11 +1694,11 @@ impl fmt::Debug for MarkedMayOwnPrepare {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-struct RecoveryTarget {
+struct CleanupTarget {
     exact_record: OwnershipRecord,
 }
 
-impl RecoveryTarget {
+impl CleanupTarget {
     /// Re-derive the exact public kernel markers committed by this validated durable record.
     ///
     /// These descriptors let a future trusted recovery backend inventory exact resources. They do
@@ -1669,46 +1708,88 @@ impl RecoveryTarget {
     }
 
     /// Constructs only a typed echo, not cryptographic or kernel evidence. A trusted executor may
-    /// call this only after a complete exact-owner inventory has proved absence. This dormant
-    /// slice deliberately provides no production executor.
-    fn confirmed_absent(&self) -> ConfirmedAbsentProof {
-        ConfirmedAbsentProof {
+    /// call this only after both trusted-worker teardown and exact kernel cleanup have completed.
+    /// This dormant slice deliberately provides no production executor.
+    fn confirmed_cleanup(&self) -> ConfirmedCleanupProof {
+        ConfirmedCleanupProof {
             exact_record: self.exact_record.clone(),
         }
     }
 }
 
-impl fmt::Debug for RecoveryTarget {
+impl fmt::Debug for CleanupTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RecoveryTarget(<redacted>)")
+        formatter.write_str("CleanupTarget(<redacted>)")
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
-struct ConfirmedAbsentProof {
+/// Exact-record-bound affine proof that worker and kernel cleanup completed.
+struct ConfirmedCleanupProof {
     exact_record: OwnershipRecord,
 }
 
-impl fmt::Debug for ConfirmedAbsentProof {
+impl fmt::Debug for ConfirmedCleanupProof {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ConfirmedAbsentProof(<redacted>)")
+        formatter.write_str("ConfirmedCleanupProof(<redacted>)")
     }
 }
 
-/// Trusted recovery boundary; implementations must prove absence before returning the exact echo.
-/// The test fake below is the only implementation until production recovery is separately wired.
-trait RecoveryExecutor {
+/// Trusted cleanup boundary; implementations must prove worker and kernel cleanup before echoing.
+trait CleanupExecutor {
     type Error;
 
-    fn confirm_absent(
+    fn confirm_cleanup(
         &mut self,
-        target: &RecoveryTarget,
+        target: &CleanupTarget,
         deadline: HardDeadline,
-    ) -> Result<ConfirmedAbsentProof, Self::Error>;
+    ) -> Result<ConfirmedCleanupProof, Self::Error>;
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct ManagerAbsenceTarget {
+    exact_record: OwnershipRecord,
+}
+
+impl ManagerAbsenceTarget {
+    /// Construct the distinct affine proof only after an exact stable manager inventory excludes
+    /// this custody name. `ExactNoStoredCustody` alone is not manager-absence evidence.
+    fn confirmed_manager_absent(&self) -> ConfirmedManagerAbsentProof {
+        ConfirmedManagerAbsentProof {
+            exact_record: self.exact_record.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for ManagerAbsenceTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManagerAbsenceTarget(<redacted>)")
+    }
+}
+
+/// Exact-record-bound affine proof from a distinct stable manager-absence observation.
+struct ConfirmedManagerAbsentProof {
+    exact_record: OwnershipRecord,
+}
+
+impl fmt::Debug for ConfirmedManagerAbsentProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ConfirmedManagerAbsentProof(<redacted>)")
+    }
+}
+
+/// Trusted manager boundary; implementations must prove exact stable absence before echoing.
+trait ManagerAbsenceExecutor {
+    type Error;
+
+    fn confirm_manager_absent(
+        &mut self,
+        target: &ManagerAbsenceTarget,
+        deadline: HardDeadline,
+    ) -> Result<ConfirmedManagerAbsentProof, Self::Error>;
 }
 
 #[derive(Debug)]
-enum RecoveryAttemptError<ExecutorError> {
+enum SettlementAttemptError<ExecutorError> {
     Journal(JournalError),
     Executor(ExecutorError),
     Deadline,
@@ -2109,15 +2190,15 @@ impl OwnershipJournal {
         self.compare_and_swap(expected_revision, next)
     }
 
-    fn recover_may_own_prepare<Executor: RecoveryExecutor>(
+    fn confirm_cleanup<Executor: CleanupExecutor>(
         &mut self,
         expected_revision: u64,
         ownership_id: OwnershipId,
         generation: NonZeroU64,
         executor: &mut Executor,
         deadline: HardDeadline,
-    ) -> Result<u64, RecoveryAttemptError<Executor::Error>> {
-        self.recover_may_own_prepare_observed(
+    ) -> Result<u64, SettlementAttemptError<Executor::Error>> {
+        self.confirm_cleanup_observed(
             expected_revision,
             ownership_id,
             generation,
@@ -2127,7 +2208,7 @@ impl OwnershipJournal {
         )
     }
 
-    fn recover_may_own_prepare_observed<Executor: RecoveryExecutor>(
+    fn confirm_cleanup_observed<Executor: CleanupExecutor>(
         &mut self,
         expected_revision: u64,
         ownership_id: OwnershipId,
@@ -2135,59 +2216,60 @@ impl OwnershipJournal {
         executor: &mut Executor,
         deadline: HardDeadline,
         observer: &mut impl PersistObserver,
-    ) -> Result<u64, RecoveryAttemptError<Executor::Error>> {
+    ) -> Result<u64, SettlementAttemptError<Executor::Error>> {
         self.ensure_expected_revision(expected_revision)
-            .map_err(RecoveryAttemptError::Journal)?;
+            .map_err(SettlementAttemptError::Journal)?;
         let record = self
             .snapshot
             .records
             .get(&ownership_id)
             .filter(|record| record.generation == generation)
             .cloned()
-            .ok_or(RecoveryAttemptError::Journal(JournalError::InvalidRecord))?;
-        if record.phase == OwnershipPhase::Absent {
-            // Only a recovery-produced tombstone may suppress the trusted executor on retry.
-            if record.absent_origin != Some(AbsentOrigin::RecoveredMayOwn) {
-                return Err(RecoveryAttemptError::Journal(
-                    JournalError::InvalidTransition,
-                ));
-            }
+            .ok_or(SettlementAttemptError::Journal(JournalError::InvalidRecord))?;
+        if record.phase == OwnershipPhase::CleanupConfirmed {
+            // A lost reply may retry only the exact already-durable cleanup transition. The
+            // distinct manager-absence transition cannot run without receiving this result.
             self.ensure_durable_matches()
-                .map_err(RecoveryAttemptError::Journal)?;
+                .map_err(SettlementAttemptError::Journal)?;
             return Ok(self.snapshot.revision);
         }
-        if record.phase != OwnershipPhase::MayOwnPrepare || record.recovery_evidence.is_none() {
-            return Err(RecoveryAttemptError::Journal(
+        if !matches!(
+            (record.phase, record.recovery_evidence),
+            (
+                OwnershipPhase::MayOwnCustody | OwnershipPhase::MayOwnPrepare,
+                Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+            )
+        ) {
+            return Err(SettlementAttemptError::Journal(
                 JournalError::InvalidTransition,
             ));
         }
         self.ensure_durable_matches()
-            .map_err(RecoveryAttemptError::Journal)?;
-        let target = RecoveryTarget {
+            .map_err(SettlementAttemptError::Journal)?;
+        let target = CleanupTarget {
             exact_record: record,
         };
         deadline
             .ensure_remaining()
-            .map_err(|_| RecoveryAttemptError::Deadline)?;
+            .map_err(|_| SettlementAttemptError::Deadline)?;
         let proof = executor
-            .confirm_absent(&target, deadline)
-            .map_err(RecoveryAttemptError::Executor)?;
+            .confirm_cleanup(&target, deadline)
+            .map_err(SettlementAttemptError::Executor)?;
         if proof.exact_record != target.exact_record {
-            return Err(RecoveryAttemptError::Journal(JournalError::ProofMismatch));
+            return Err(SettlementAttemptError::Journal(JournalError::ProofMismatch));
         }
         let mut next = self.snapshot.clone();
-        next.records
+        let next_record = next
+            .records
             .get_mut(&ownership_id)
-            .expect("checked ownership")
-            .advance(
-                OwnershipPhase::Absent,
-                None,
-                Some(AbsentOrigin::RecoveredMayOwn),
-            )
-            .map_err(RecoveryAttemptError::Journal)?;
+            .expect("checked ownership");
+        let recovery_evidence = next_record.recovery_evidence;
+        next_record
+            .advance(OwnershipPhase::CleanupConfirmed, recovery_evidence, None)
+            .map_err(SettlementAttemptError::Journal)?;
         deadline
             .ensure_remaining()
-            .map_err(|_| RecoveryAttemptError::Deadline)?;
+            .map_err(|_| SettlementAttemptError::Deadline)?;
         match self.compare_and_swap_observed_with_deadline(
             expected_revision,
             next,
@@ -2199,9 +2281,112 @@ impl OwnershipJournal {
                 if error.kind() == io::ErrorKind::TimedOut
                     && deadline.ensure_remaining().is_err() =>
             {
-                Err(RecoveryAttemptError::Deadline)
+                Err(SettlementAttemptError::Deadline)
             }
-            Err(error) => Err(RecoveryAttemptError::Journal(error)),
+            Err(error) => Err(SettlementAttemptError::Journal(error)),
+        }
+    }
+
+    fn confirm_manager_absent<Executor: ManagerAbsenceExecutor>(
+        &mut self,
+        expected_revision: u64,
+        ownership_id: OwnershipId,
+        generation: NonZeroU64,
+        executor: &mut Executor,
+        deadline: HardDeadline,
+    ) -> Result<u64, SettlementAttemptError<Executor::Error>> {
+        self.confirm_manager_absent_observed(
+            expected_revision,
+            ownership_id,
+            generation,
+            executor,
+            deadline,
+            &mut NoFailPersistObserver,
+        )
+    }
+
+    fn confirm_manager_absent_observed<Executor: ManagerAbsenceExecutor>(
+        &mut self,
+        expected_revision: u64,
+        ownership_id: OwnershipId,
+        generation: NonZeroU64,
+        executor: &mut Executor,
+        deadline: HardDeadline,
+        observer: &mut impl PersistObserver,
+    ) -> Result<u64, SettlementAttemptError<Executor::Error>> {
+        self.ensure_expected_revision(expected_revision)
+            .map_err(SettlementAttemptError::Journal)?;
+        let record = self
+            .snapshot
+            .records
+            .get(&ownership_id)
+            .filter(|record| record.generation == generation)
+            .cloned()
+            .ok_or(SettlementAttemptError::Journal(JournalError::InvalidRecord))?;
+        if record.phase == OwnershipPhase::Absent {
+            // Only the exact second transition's tombstone may suppress manager observation on a
+            // lost-reply retry; NeverDispatched cannot stand in for manager absence.
+            if record.absent_origin != Some(AbsentOrigin::RecoveredMayOwn) {
+                return Err(SettlementAttemptError::Journal(
+                    JournalError::InvalidTransition,
+                ));
+            }
+            self.ensure_durable_matches()
+                .map_err(SettlementAttemptError::Journal)?;
+            return Ok(self.snapshot.revision);
+        }
+        if !matches!(
+            (record.phase, record.recovery_evidence),
+            (
+                OwnershipPhase::CleanupConfirmed,
+                Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+            )
+        ) {
+            return Err(SettlementAttemptError::Journal(
+                JournalError::InvalidTransition,
+            ));
+        }
+        self.ensure_durable_matches()
+            .map_err(SettlementAttemptError::Journal)?;
+        let target = ManagerAbsenceTarget {
+            exact_record: record,
+        };
+        deadline
+            .ensure_remaining()
+            .map_err(|_| SettlementAttemptError::Deadline)?;
+        let proof = executor
+            .confirm_manager_absent(&target, deadline)
+            .map_err(SettlementAttemptError::Executor)?;
+        if proof.exact_record != target.exact_record {
+            return Err(SettlementAttemptError::Journal(JournalError::ProofMismatch));
+        }
+        let mut next = self.snapshot.clone();
+        next.records
+            .get_mut(&ownership_id)
+            .expect("checked ownership")
+            .advance(
+                OwnershipPhase::Absent,
+                None,
+                Some(AbsentOrigin::RecoveredMayOwn),
+            )
+            .map_err(SettlementAttemptError::Journal)?;
+        deadline
+            .ensure_remaining()
+            .map_err(|_| SettlementAttemptError::Deadline)?;
+        match self.compare_and_swap_observed_with_deadline(
+            expected_revision,
+            next,
+            observer,
+            Some(deadline),
+        ) {
+            Ok(revision) => Ok(revision),
+            Err(JournalError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+                    && deadline.ensure_remaining().is_err() =>
+            {
+                Err(SettlementAttemptError::Deadline)
+            }
+            Err(error) => Err(SettlementAttemptError::Journal(error)),
         }
     }
 
@@ -2943,13 +3128,28 @@ mod tests {
         HardDeadline::after(Duration::from_secs(1)).expect("live recovery deadline")
     }
 
-    fn recover_fixture<Executor: RecoveryExecutor>(
+    fn confirm_cleanup_fixture<Executor: CleanupExecutor>(
         journal: &mut OwnershipJournal,
         expected_revision: u64,
         inserted: InsertedOwnership,
         executor: &mut Executor,
-    ) -> Result<u64, RecoveryAttemptError<Executor::Error>> {
-        journal.recover_may_own_prepare(
+    ) -> Result<u64, SettlementAttemptError<Executor::Error>> {
+        journal.confirm_cleanup(
+            expected_revision,
+            inserted.ownership_id,
+            inserted.generation,
+            executor,
+            recovery_deadline(),
+        )
+    }
+
+    fn confirm_manager_absent_fixture<Executor: ManagerAbsenceExecutor>(
+        journal: &mut OwnershipJournal,
+        expected_revision: u64,
+        inserted: InsertedOwnership,
+        executor: &mut Executor,
+    ) -> Result<u64, SettlementAttemptError<Executor::Error>> {
+        journal.confirm_manager_absent(
             expected_revision,
             inserted.ownership_id,
             inserted.generation,
@@ -3095,7 +3295,7 @@ mod tests {
                 .then_some(AbsentOrigin::NeverDispatched),
             reconcile: None,
             recovery_evidence: match phase {
-                OwnershipPhase::MayOwnCustody => {
+                OwnershipPhase::MayOwnCustody | OwnershipPhase::CleanupConfirmed => {
                     let exact_anchor = anchor(7);
                     Some(
                         PrepareRecoveryEvidenceV1::custody_bound(
@@ -3246,7 +3446,7 @@ mod tests {
         assert!(!first.ownership_alias().contains(&"02".repeat(32)));
         assert_eq!(format!("{first:?}"), "DurableWireguardResource(<redacted>)");
 
-        let target = RecoveryTarget {
+        let target = CleanupTarget {
             exact_record: exact.clone(),
         };
         assert_eq!(
@@ -3500,7 +3700,7 @@ mod tests {
         armed_record
             .advance(OwnershipPhase::MayOwnPrepare, Some(exact_evidence), None)
             .expect("exact custody evidence survives arming");
-        let armed_encoded = snapshot_with(vec![armed_record])
+        let armed_encoded = snapshot_with(vec![armed_record.clone()])
             .encode()
             .expect("custody-bound phase-2 encoding");
         let custody_evidence_start = encoded.len() - DIGEST_BYTES - CUSTODY_EVIDENCE_BYTES;
@@ -3508,6 +3708,31 @@ mod tests {
         assert_eq!(
             &encoded[custody_evidence_start..encoded.len() - DIGEST_BYTES],
             &armed_encoded[armed_evidence_start..armed_encoded.len() - DIGEST_BYTES]
+        );
+        let mut cleanup_confirmed = armed_record;
+        cleanup_confirmed
+            .advance(OwnershipPhase::CleanupConfirmed, Some(exact_evidence), None)
+            .expect("exact custody evidence survives cleanup confirmation");
+        let cleanup_snapshot = snapshot_with(vec![cleanup_confirmed.clone()]);
+        let cleanup_encoded = cleanup_snapshot
+            .encode()
+            .expect("canonical phase-5 encoding");
+        let cleanup_evidence_start = cleanup_encoded.len() - DIGEST_BYTES - CUSTODY_EVIDENCE_BYTES;
+        let cleanup_evidence_tag = cleanup_evidence_start;
+        let cleanup_phase_offset = cleanup_evidence_tag - 3;
+        assert_eq!(
+            cleanup_encoded[cleanup_phase_offset], 5,
+            "CleanupConfirmed phase tag is frozen at five"
+        );
+        assert_eq!(cleanup_encoded[cleanup_phase_offset + 1], 0);
+        assert_eq!(cleanup_encoded[cleanup_evidence_tag], 2);
+        assert_eq!(
+            &encoded[custody_evidence_start..encoded.len() - DIGEST_BYTES],
+            &cleanup_encoded[cleanup_evidence_start..cleanup_encoded.len() - DIGEST_BYTES]
+        );
+        assert_eq!(
+            JournalSnapshot::decode(&cleanup_encoded).expect("phase-5 decode"),
+            cleanup_snapshot
         );
         for length in 0..encoded.len() {
             assert!(
@@ -3672,6 +3897,22 @@ mod tests {
                 OwnershipPhase::Absent,
                 None,
                 Some(AbsentOrigin::NeverDispatched),
+            ),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert!(matches!(
+            recovered_with_never_dispatched_origin.advance(
+                OwnershipPhase::Absent,
+                None,
+                Some(AbsentOrigin::RecoveredMayOwn),
+            ),
+            Err(JournalError::InvalidTransition)
+        ));
+        assert!(matches!(
+            recovered_with_never_dispatched_origin.advance(
+                OwnershipPhase::CleanupConfirmed,
+                recovered_with_never_dispatched_origin.recovery_evidence,
+                None,
             ),
             Err(JournalError::InvalidTransition)
         ));
@@ -3958,16 +4199,33 @@ mod tests {
         calls: usize,
     }
 
-    impl RecoveryExecutor for FakeRecoveryExecutor {
+    impl CleanupExecutor for FakeRecoveryExecutor {
         type Error = ();
 
-        fn confirm_absent(
+        fn confirm_cleanup(
             &mut self,
-            target: &RecoveryTarget,
+            target: &CleanupTarget,
             _deadline: HardDeadline,
-        ) -> Result<ConfirmedAbsentProof, Self::Error> {
+        ) -> Result<ConfirmedCleanupProof, Self::Error> {
             self.calls += 1;
-            let mut proof = target.confirmed_absent();
+            let mut proof = target.confirmed_cleanup();
+            if !self.exact {
+                proof.exact_record.context_id = id16(99);
+            }
+            Ok(proof)
+        }
+    }
+
+    impl ManagerAbsenceExecutor for FakeRecoveryExecutor {
+        type Error = ();
+
+        fn confirm_manager_absent(
+            &mut self,
+            target: &ManagerAbsenceTarget,
+            _deadline: HardDeadline,
+        ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+            self.calls += 1;
+            let mut proof = target.confirmed_manager_absent();
             if !self.exact {
                 proof.exact_record.context_id = id16(99);
             }
@@ -3977,14 +4235,26 @@ mod tests {
 
     struct ErrorRecoveryExecutor;
 
-    impl RecoveryExecutor for ErrorRecoveryExecutor {
+    impl CleanupExecutor for ErrorRecoveryExecutor {
         type Error = &'static str;
 
-        fn confirm_absent(
+        fn confirm_cleanup(
             &mut self,
-            _target: &RecoveryTarget,
+            _target: &CleanupTarget,
             _deadline: HardDeadline,
-        ) -> Result<ConfirmedAbsentProof, Self::Error> {
+        ) -> Result<ConfirmedCleanupProof, Self::Error> {
+            Err("injected recovery failure")
+        }
+    }
+
+    impl ManagerAbsenceExecutor for ErrorRecoveryExecutor {
+        type Error = &'static str;
+
+        fn confirm_manager_absent(
+            &mut self,
+            _target: &ManagerAbsenceTarget,
+            _deadline: HardDeadline,
+        ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
             Err("injected recovery failure")
         }
     }
@@ -3994,20 +4264,37 @@ mod tests {
         observed_deadline: Option<HardDeadline>,
     }
 
-    impl RecoveryExecutor for ExpiringRecoveryExecutor {
+    impl CleanupExecutor for ExpiringRecoveryExecutor {
         type Error = ();
 
-        fn confirm_absent(
+        fn confirm_cleanup(
             &mut self,
-            target: &RecoveryTarget,
+            target: &CleanupTarget,
             deadline: HardDeadline,
-        ) -> Result<ConfirmedAbsentProof, Self::Error> {
+        ) -> Result<ConfirmedCleanupProof, Self::Error> {
             self.calls += 1;
             self.observed_deadline = Some(deadline);
             while let Ok(remaining) = deadline.remaining() {
                 thread::sleep(remaining.min(Duration::from_millis(2)));
             }
-            Ok(target.confirmed_absent())
+            Ok(target.confirmed_cleanup())
+        }
+    }
+
+    impl ManagerAbsenceExecutor for ExpiringRecoveryExecutor {
+        type Error = ();
+
+        fn confirm_manager_absent(
+            &mut self,
+            target: &ManagerAbsenceTarget,
+            deadline: HardDeadline,
+        ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+            self.calls += 1;
+            self.observed_deadline = Some(deadline);
+            while let Ok(remaining) = deadline.remaining() {
+                thread::sleep(remaining.min(Duration::from_millis(2)));
+            }
+            Ok(target.confirmed_manager_absent())
         }
     }
 
@@ -4606,6 +4893,155 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Audit both proof boundaries at both rename crash windows.
+    fn settlement_transition_failpoints_preserve_or_poison_each_phase_exactly() {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
+        let inserted = journal
+            .insert_intent(0, intent(2, 3))
+            .expect("durable intent");
+        mark_and_arm_custody_fixture(&mut journal, 1, inserted, anchor(7));
+
+        let may_own_snapshot = journal.snapshot().expect("MayOwn snapshot").clone();
+        let may_own_bytes = fs::read(&config.journal_path).expect("MayOwn bytes");
+        let mut cleanup_pre_rename = FailingObserver {
+            steps: vec![PersistStep::BeforeRename],
+        };
+        let mut cleanup_executor = FakeRecoveryExecutor {
+            exact: true,
+            calls: 0,
+        };
+        assert!(matches!(
+            journal.confirm_cleanup_observed(
+                3,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut cleanup_executor,
+                recovery_deadline(),
+                &mut cleanup_pre_rename,
+            ),
+            Err(SettlementAttemptError::Journal(JournalError::Io(_)))
+        ));
+        assert_eq!(cleanup_executor.calls, 1);
+        assert_eq!(
+            journal.snapshot().expect("retryable MayOwn snapshot"),
+            &may_own_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("retryable MayOwn bytes"),
+            may_own_bytes
+        );
+        journal
+            .confirm_retry_safe_after_definite_failure()
+            .expect("pre-rename cleanup failure is retry-safe");
+
+        let mut cleanup_post_rename = FailingObserver {
+            steps: vec![PersistStep::AfterRename],
+        };
+        assert!(matches!(
+            journal.confirm_cleanup_observed(
+                3,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut cleanup_executor,
+                recovery_deadline(),
+                &mut cleanup_post_rename,
+            ),
+            Err(SettlementAttemptError::Journal(
+                JournalError::PersistUncertain
+            ))
+        ));
+        assert_eq!(cleanup_executor.calls, 2);
+        assert!(matches!(journal.snapshot(), Err(JournalError::Poisoned)));
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone())
+            .expect("restart after ambiguous cleanup confirmation");
+        let cleanup_snapshot = journal
+            .snapshot()
+            .expect("durable CleanupConfirmed snapshot")
+            .clone();
+        let cleanup_record = cleanup_snapshot
+            .records
+            .get(&inserted.ownership_id)
+            .expect("CleanupConfirmed record");
+        assert_eq!(cleanup_snapshot.revision, 4);
+        assert_eq!(cleanup_record.phase, OwnershipPhase::CleanupConfirmed);
+        assert_eq!(cleanup_record.absent_origin, None);
+        assert!(matches!(
+            cleanup_record.recovery_evidence,
+            Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+        ));
+        let cleanup_bytes = fs::read(&config.journal_path).expect("CleanupConfirmed bytes");
+
+        let mut manager_pre_rename = FailingObserver {
+            steps: vec![PersistStep::BeforeRename],
+        };
+        let mut manager_executor = FakeRecoveryExecutor {
+            exact: true,
+            calls: 0,
+        };
+        assert!(matches!(
+            journal.confirm_manager_absent_observed(
+                4,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut manager_executor,
+                recovery_deadline(),
+                &mut manager_pre_rename,
+            ),
+            Err(SettlementAttemptError::Journal(JournalError::Io(_)))
+        ));
+        assert_eq!(manager_executor.calls, 1);
+        assert_eq!(
+            journal
+                .snapshot()
+                .expect("retryable CleanupConfirmed snapshot"),
+            &cleanup_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("retryable CleanupConfirmed bytes"),
+            cleanup_bytes
+        );
+        journal
+            .confirm_retry_safe_after_definite_failure()
+            .expect("pre-rename manager failure is retry-safe");
+
+        let mut manager_post_rename = FailingObserver {
+            steps: vec![PersistStep::AfterRename],
+        };
+        assert!(matches!(
+            journal.confirm_manager_absent_observed(
+                4,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut manager_executor,
+                recovery_deadline(),
+                &mut manager_post_rename,
+            ),
+            Err(SettlementAttemptError::Journal(
+                JournalError::PersistUncertain
+            ))
+        ));
+        assert_eq!(manager_executor.calls, 2);
+        assert!(matches!(journal.snapshot(), Err(JournalError::Poisoned)));
+        drop(journal);
+
+        let journal = OwnershipJournal::open(config)
+            .expect("restart after ambiguous manager-absence confirmation");
+        let absent = journal
+            .snapshot()
+            .expect("durable Absent snapshot")
+            .records
+            .get(&inserted.ownership_id)
+            .expect("RecoveredMayOwn tombstone");
+        assert_eq!(absent.phase, OwnershipPhase::Absent);
+        assert_eq!(absent.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
+        assert!(absent.recovery_evidence.is_none());
+    }
+
+    #[test]
     fn interposed_transitions_are_never_misreported_as_insert_or_arm_retries() {
         let directory = tempdir().expect("temporary directory");
         let config = test_config(directory.path());
@@ -4751,14 +5187,14 @@ mod tests {
             before
         );
         assert!(matches!(
-            journal.recover_may_own_prepare(
+            journal.confirm_cleanup(
                 2,
                 inserted.ownership_id,
                 inserted.generation,
                 &mut PanicIfRecoveryRuns,
                 recovery_deadline(),
             ),
-            Err(RecoveryAttemptError::Journal(
+            Err(SettlementAttemptError::Journal(
                 JournalError::InvalidTransition
             ))
         ));
@@ -4766,20 +5202,33 @@ mod tests {
 
     struct PanicIfRecoveryRuns;
 
-    impl RecoveryExecutor for PanicIfRecoveryRuns {
+    impl CleanupExecutor for PanicIfRecoveryRuns {
         type Error = ();
 
-        fn confirm_absent(
+        fn confirm_cleanup(
             &mut self,
-            _target: &RecoveryTarget,
+            _target: &CleanupTarget,
             _deadline: HardDeadline,
-        ) -> Result<ConfirmedAbsentProof, Self::Error> {
-            panic!("an already-Absent retry must not run recovery again")
+        ) -> Result<ConfirmedCleanupProof, Self::Error> {
+            panic!("an already-CleanupConfirmed retry must not run cleanup again")
+        }
+    }
+
+    impl ManagerAbsenceExecutor for PanicIfRecoveryRuns {
+        type Error = ();
+
+        fn confirm_manager_absent(
+            &mut self,
+            _target: &ManagerAbsenceTarget,
+            _deadline: HardDeadline,
+        ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+            panic!("an already-Absent retry must not observe manager absence again")
         }
     }
 
     #[test]
-    fn lost_recovery_reply_restarts_to_absent_without_rerunning_executor() {
+    #[allow(clippy::too_many_lines)] // Exercise both lost-reply retries and stale revisions inline.
+    fn lost_replies_retry_both_settlement_phases_without_rerunning_executors() {
         let directory = tempdir().expect("temporary directory");
         let config = test_config(directory.path());
         let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
@@ -4788,7 +5237,7 @@ mod tests {
             .expect("durable intent");
         mark_and_arm_custody_fixture(&mut journal, 1, inserted, anchor(7));
         journal
-            .recover_may_own_prepare(
+            .confirm_cleanup(
                 3,
                 inserted.ownership_id,
                 inserted.generation,
@@ -4798,53 +5247,101 @@ mod tests {
                 },
                 recovery_deadline(),
             )
-            .expect("durable recovery whose reply is discarded");
+            .expect("durable cleanup confirmation whose reply is discarded");
         drop(journal);
 
         let mut journal = OwnershipJournal::open(config.clone()).expect("restart journal");
-        let before = fs::read(&config.journal_path).expect("durable recovered bytes");
+        let before_cleanup_retry =
+            fs::read(&config.journal_path).expect("durable CleanupConfirmed bytes");
         for wrong_revision in [3, 5] {
             assert!(matches!(
-                journal.recover_may_own_prepare(
+                journal.confirm_cleanup(
                     wrong_revision,
                     inserted.ownership_id,
                     inserted.generation,
                     &mut PanicIfRecoveryRuns,
                     recovery_deadline(),
                 ),
-                Err(RecoveryAttemptError::Journal(
+                Err(SettlementAttemptError::Journal(
                     JournalError::RevisionConflict
                 ))
             ));
         }
         assert_eq!(
-            fs::read(&config.journal_path).expect("bytes after stale recovered retry"),
-            before
+            fs::read(&config.journal_path).expect("bytes after stale cleanup retry"),
+            before_cleanup_retry
         );
         assert_eq!(
             journal
-                .recover_may_own_prepare(
+                .confirm_cleanup(
                     4,
                     inserted.ownership_id,
                     inserted.generation,
                     &mut PanicIfRecoveryRuns,
                     recovery_deadline(),
                 )
-                .expect("exact recovered retry at current revision skips executor"),
+                .expect("exact cleanup retry at current revision skips executor"),
             4
         );
         assert_eq!(
-            fs::read(&config.journal_path).expect("bytes after exact recovered retry"),
-            before
+            fs::read(&config.journal_path).expect("bytes after exact cleanup retry"),
+            before_cleanup_retry
+        );
+        journal
+            .confirm_manager_absent(
+                4,
+                inserted.ownership_id,
+                inserted.generation,
+                &mut FakeRecoveryExecutor {
+                    exact: true,
+                    calls: 0,
+                },
+                recovery_deadline(),
+            )
+            .expect("durable manager-absence confirmation whose reply is discarded");
+        drop(journal);
+
+        let mut journal = OwnershipJournal::open(config.clone()).expect("second restart journal");
+        let before_absent_retry = fs::read(&config.journal_path).expect("durable Absent bytes");
+        for wrong_revision in [4, 6] {
+            assert!(matches!(
+                journal.confirm_manager_absent(
+                    wrong_revision,
+                    inserted.ownership_id,
+                    inserted.generation,
+                    &mut PanicIfRecoveryRuns,
+                    recovery_deadline(),
+                ),
+                Err(SettlementAttemptError::Journal(
+                    JournalError::RevisionConflict
+                ))
+            ));
+        }
+        assert_eq!(
+            journal
+                .confirm_manager_absent(
+                    5,
+                    inserted.ownership_id,
+                    inserted.generation,
+                    &mut PanicIfRecoveryRuns,
+                    recovery_deadline(),
+                )
+                .expect("exact Absent retry skips manager observer"),
+            5
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("bytes after exact Absent retry"),
+            before_absent_retry
         );
         assert!(matches!(
-            journal.mark_intent_absent(4, inserted.ownership_id, inserted.generation),
+            journal.mark_intent_absent(5, inserted.ownership_id, inserted.generation),
             Err(JournalError::InvalidTransition)
         ));
     }
 
     #[test]
-    fn may_own_requires_exact_typed_proof_and_no_dispatch_api_cannot_bypass_it() {
+    #[allow(clippy::too_many_lines)] // Keep both exact proof/mismatch boundaries in one audit.
+    fn both_settlement_phases_require_distinct_exact_proofs_and_cannot_be_bypassed() {
         let directory = tempdir().expect("temporary directory");
         let config = test_config(directory.path());
         let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
@@ -4862,8 +5359,8 @@ mod tests {
             calls: 0,
         };
         assert!(matches!(
-            recover_fixture(&mut journal, 1, inserted, &mut stale),
-            Err(RecoveryAttemptError::Journal(
+            confirm_cleanup_fixture(&mut journal, 1, inserted, &mut stale),
+            Err(SettlementAttemptError::Journal(
                 JournalError::RevisionConflict
             ))
         ));
@@ -4892,8 +5389,8 @@ mod tests {
             calls: 0,
         };
         assert!(matches!(
-            recover_fixture(&mut journal, 3, inserted, &mut wrong),
-            Err(RecoveryAttemptError::Journal(JournalError::ProofMismatch))
+            confirm_cleanup_fixture(&mut journal, 3, inserted, &mut wrong),
+            Err(SettlementAttemptError::Journal(JournalError::ProofMismatch))
         ));
         assert_eq!(wrong.calls, 1);
         assert_eq!(journal.snapshot().expect("still usable"), &before_snapshot);
@@ -4903,8 +5400,10 @@ mod tests {
         );
 
         assert!(matches!(
-            recover_fixture(&mut journal, 3, inserted, &mut ErrorRecoveryExecutor),
-            Err(RecoveryAttemptError::Executor("injected recovery failure"))
+            confirm_cleanup_fixture(&mut journal, 3, inserted, &mut ErrorRecoveryExecutor),
+            Err(SettlementAttemptError::Executor(
+                "injected recovery failure"
+            ))
         ));
         assert_eq!(
             journal.snapshot().expect("executor error is retryable"),
@@ -4920,8 +5419,61 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            recover_fixture(&mut journal, 3, inserted, &mut exact).expect("exact typed proof"),
+            confirm_cleanup_fixture(&mut journal, 3, inserted, &mut exact)
+                .expect("exact cleanup proof"),
             4
+        );
+        let cleanup_confirmed = journal
+            .snapshot()
+            .expect("usable cleanup-confirmed journal")
+            .records
+            .get(&inserted.ownership_id)
+            .expect("cleanup-confirmed record");
+        assert_eq!(cleanup_confirmed.phase, OwnershipPhase::CleanupConfirmed);
+        assert_eq!(cleanup_confirmed.absent_origin, None);
+        assert!(matches!(
+            cleanup_confirmed.recovery_evidence,
+            Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+        ));
+
+        let cleanup_snapshot = journal.snapshot().expect("cleanup snapshot").clone();
+        let cleanup_bytes = fs::read(&config.journal_path).expect("cleanup bytes");
+        let mut wrong_manager = FakeRecoveryExecutor {
+            exact: false,
+            calls: 0,
+        };
+        assert!(matches!(
+            confirm_manager_absent_fixture(&mut journal, 4, inserted, &mut wrong_manager),
+            Err(SettlementAttemptError::Journal(JournalError::ProofMismatch))
+        ));
+        assert_eq!(wrong_manager.calls, 1);
+        assert_eq!(
+            journal.snapshot().expect("manager mismatch inert"),
+            &cleanup_snapshot
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("manager mismatch bytes"),
+            cleanup_bytes
+        );
+        assert!(matches!(
+            confirm_manager_absent_fixture(&mut journal, 4, inserted, &mut ErrorRecoveryExecutor,),
+            Err(SettlementAttemptError::Executor(
+                "injected recovery failure"
+            ))
+        ));
+        assert_eq!(
+            journal.snapshot().expect("manager error inert"),
+            &cleanup_snapshot
+        );
+
+        let mut exact_manager = FakeRecoveryExecutor {
+            exact: true,
+            calls: 0,
+        };
+        assert_eq!(
+            confirm_manager_absent_fixture(&mut journal, 4, inserted, &mut exact_manager)
+                .expect("exact distinct manager-absence proof"),
+            5
         );
         let recovered = journal
             .snapshot()
@@ -4935,7 +5487,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_recovery_and_late_exact_proof_leave_snapshot_and_bytes_unchanged() {
+    fn expired_cleanup_and_late_exact_proof_leave_snapshot_and_bytes_unchanged() {
         let directory = tempdir().expect("temporary directory");
         let config = test_config(directory.path());
         let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
@@ -4956,14 +5508,14 @@ mod tests {
             thread::yield_now();
         }
         assert!(matches!(
-            journal.recover_may_own_prepare(
+            journal.confirm_cleanup(
                 3,
                 inserted.ownership_id,
                 inserted.generation,
                 &mut never_started,
                 expired_before_executor,
             ),
-            Err(RecoveryAttemptError::Deadline)
+            Err(SettlementAttemptError::Deadline)
         ));
         assert_eq!(never_started.calls, 0);
         assert_eq!(
@@ -4982,14 +5534,14 @@ mod tests {
             observed_deadline: None,
         };
         assert!(matches!(
-            journal.recover_may_own_prepare(
+            journal.confirm_cleanup(
                 3,
                 inserted.ownership_id,
                 inserted.generation,
                 &mut blocked,
                 deadline,
             ),
-            Err(RecoveryAttemptError::Deadline)
+            Err(SettlementAttemptError::Deadline)
         ));
         assert_eq!(blocked.calls, 1);
         assert_eq!(blocked.observed_deadline, Some(deadline));
@@ -5004,7 +5556,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_expiry_after_encoding_stops_before_creating_the_next_file() {
+    fn cleanup_expiry_after_encoding_stops_before_creating_the_next_file() {
         let directory = tempdir().expect("temporary directory");
         let config = test_config(directory.path());
         let mut journal = OwnershipJournal::open(config.clone()).expect("new journal");
@@ -5026,7 +5578,7 @@ mod tests {
         };
 
         assert!(matches!(
-            journal.recover_may_own_prepare_observed(
+            journal.confirm_cleanup_observed(
                 3,
                 inserted.ownership_id,
                 inserted.generation,
@@ -5034,7 +5586,7 @@ mod tests {
                 deadline,
                 &mut observer,
             ),
-            Err(RecoveryAttemptError::Deadline)
+            Err(SettlementAttemptError::Deadline)
         ));
         assert_eq!(exact.calls, 1);
         assert_eq!(observer.steps, vec![PersistStep::BeforeCreate]);
@@ -5554,15 +6106,22 @@ mod tests {
     }
 
     #[test]
-    fn production_recovery_boundary_never_claims_may_own_absence() {
-        let target = RecoveryTarget {
-            exact_record: record(epoch(1), 2, 3, 4, 1, OwnershipPhase::MayOwnPrepare),
+    fn production_settlement_boundary_refuses_both_distinct_proofs() {
+        let cleanup_target = CleanupTarget {
+            exact_record: record(epoch(1), 2, 3, 4, 1, OwnershipPhase::MayOwnCustody),
+        };
+        let manager_absence_target = ManagerAbsenceTarget {
+            exact_record: record(epoch(1), 5, 6, 7, 2, OwnershipPhase::CleanupConfirmed),
         };
         let mut executor = RefuseMayOwnRecovery;
-        assert_eq!(
-            executor.confirm_absent(&target, recovery_deadline()),
+        assert!(matches!(
+            executor.confirm_cleanup(&cleanup_target, recovery_deadline()),
             Err(MayOwnRecoveryUnavailable)
-        );
+        ));
+        assert!(matches!(
+            executor.confirm_manager_absent(&manager_absence_target, recovery_deadline()),
+            Err(MayOwnRecoveryUnavailable)
+        ));
     }
 
     #[test]
@@ -5586,7 +6145,8 @@ mod tests {
         assert!(!wrapper.contains("mark_custody_until"));
         assert!(!wrapper.contains("arm_custody_until"));
         assert!(!wrapper.contains("retire_never_dispatched"));
-        assert!(!wrapper.contains("confirm_recovered_absent"));
+        assert!(!wrapper.contains("confirm_cleanup_until"));
+        assert!(!wrapper.contains("confirm_manager_absent_until"));
     }
 
     #[test]
