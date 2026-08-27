@@ -901,6 +901,8 @@ esac
 printf '[127.0.0.1]:22222 %s\n' "$guest_host_public_key" >"$known_hosts"
 chmod 0600 "$known_hosts"
 
+# Supplying ssh_keys already suppresses host-key generation. The pinned
+# cloud-init schema requires ssh_genkeytypes to be non-empty when present.
 {
     printf '%s\n' '#cloud-config' \
         'users:' \
@@ -916,7 +918,6 @@ chmod 0600 "$known_hosts"
         'ssh_pwauth: false' \
         'disable_root: true' \
         'ssh_deletekeys: true' \
-        'ssh_genkeytypes: []' \
         'ssh_keys:' \
         '  ed25519_private: |'
     sed 's/^/    /' "$guest_host_key"
