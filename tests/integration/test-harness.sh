@@ -56,6 +56,7 @@ command -v jq >/dev/null 2>&1 || {
 
 for script_path in \
     tests/helper/lib/live-worker-proof-capture.sh \
+    tests/helper/lib/production-ipc-unit-hook.sh \
     tests/helper/require-live-worker-identity-proof.sh \
     tests/helper/test-live-worker-identity-contract.sh \
     tests/integration/run.sh \

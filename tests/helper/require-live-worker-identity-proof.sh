@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Stage one real helper worker-identity proof inside a disposable systemd service.
+# Stage sequential live worker-identity and production IPC proofs in disposable systemd services.
 set -eu
 
 export LC_ALL=C
@@ -27,24 +27,34 @@ print_plan() {
         '  require a disposable Debian 13 amd64 VM, root, and the exact systemd v257 manager;' \
         '  copy the already-built real helper into one validated root-only temporary stage;' \
         '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
-        '  bind account files and the system bus socket read-only inside one transient service;' \
+        '  bind account files and the system bus socket read-only in two sequential invocations;' \
         '  pin its D-Bus system address to that verified socket inside the private /run;' \
         '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
+        '  require the host /run/volparossa path absent before and after both private unit runs;' \
         '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
         '    FileDescriptorStorePreserve=yes on that transient service;' \
         '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
         '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
+        '  cap every transient-unit file write at 1 MiB and the production runtime at three minutes;' \
+        '  discard production runtime stdout and stderr through exact systemd null streams;' \
         '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
         '  invoke only --internal-worker-v3-live-proof and require its exact two success records;' \
         '  after main exit require exactly two descriptors in the systemd descriptor store;' \
         '  bind normal retirement to the exact JSON InvocationID returned for that run;' \
         '  recover tentative ownership only from its exact marker and current nonzero manager ID;' \
-        '  stop the exact random unit, clean only its fdstore, reset/collect it, and remove the stage;' \
+        '  stop, clean only its fdstore, and collect that exact first invocation;' \
+        '  only after the unit is not-found, reuse its random name with a new exact marker and ID;' \
+        '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
+        '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
+        '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
+        '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
+        '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
+        '  collect that exact second invocation and remove the validated temporary stage;' \
         '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
         '    and network digests.' \
-        'This stages only the helper identity component. It creates no host account, link,' \
+        'This stages the helper identity and production IPC boundary. It creates no host account, link,' \
         'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
-        'It is not production-service, restart-recovery, datapath, or A01-A15 evidence.'
+        'It is not package-install, restart-recovery, CleanupOwned, datapath, or A01-A15 evidence.'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -133,8 +143,9 @@ if ! systemd-detect-virt --vm --quiet; then
 fi
 
 for command_name in \
-    awk chmod chown cmp cp dpkg find getent id install ip jq mkfifo mktemp nft paste readlink rm sed \
-    sha256sum sort stat systemctl systemd-detect-virt systemd-run tc tr uname
+    awk cat chmod chown cmp cp dpkg find flock getent id install ip jq mkfifo mktemp mv nft \
+    paste readlink rm sed setpriv sha256sum sleep sort stat systemctl systemd-detect-virt \
+    systemd-run tc tr uname
 do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         blocked "required Debian tool is unavailable: $command_name"
@@ -158,6 +169,10 @@ if [ ! -S "$system_bus_socket" ] || [ -L "$system_bus_socket" ] \
         != 'socket:0:0' ]; then
     blocked 'the canonical root-owned system bus socket is unavailable'
 fi
+host_runtime_directory=/run/volparossa
+if [ -e "$host_runtime_directory" ] || [ -L "$host_runtime_directory" ]; then
+    blocked 'the disposable host /run/volparossa path must initially be absent'
+fi
 
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
@@ -167,11 +182,23 @@ export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID
 # shellcheck source=tests/helper/lib/live-worker-proof-capture.sh
 . "$script_directory/lib/live-worker-proof-capture.sh"
 helper_source=$repository_directory/target/debug/volparossa-helper
+ipc_probe_source=$repository_directory/target/debug/examples/volparossa-helper-production-ipc-probe
+ipc_hook_source=$script_directory/lib/production-ipc-unit-hook.sh
 if [ ! -f "$helper_source" ] || [ ! -x "$helper_source" ] || [ -L "$helper_source" ]; then
     blocked 'build target/debug/volparossa-helper as an unprivileged workspace user first'
 fi
 if [ "$(stat -Lc '%F:%h' "$helper_source")" != 'regular file:1' ]; then
     blocked 'the helper source must be one executable regular file with one hard link'
+fi
+if [ ! -f "$ipc_probe_source" ] || [ ! -x "$ipc_probe_source" ] \
+    || [ -L "$ipc_probe_source" ] \
+    || [ "$(stat -Lc '%F:%h' "$ipc_probe_source" 2>/dev/null || true)" != 'regular file:1' ]; then
+    blocked 'build the production IPC probe as an unprivileged workspace user first'
+fi
+if [ ! -f "$ipc_hook_source" ] || [ ! -x "$ipc_hook_source" ] \
+    || [ -L "$ipc_hook_source" ] \
+    || [ "$(stat -Lc '%F:%h' "$ipc_hook_source" 2>/dev/null || true)" != 'regular file:1' ]; then
+    blocked 'the production IPC unit hook must be one executable regular file with one hard link'
 fi
 
 if [ "$(stat -c '%F:%u:%g:%a' /var/tmp)" != 'directory:0:0:1777' ]; then
@@ -297,6 +324,51 @@ unit_fdstore_count() {
     esac
 }
 
+retired_runtime_is_absent() {
+    [ "$#" -eq 4 ] || return 1
+    retired_unit_name=$1
+    retired_control_group=$2
+    retired_main_pid=$3
+    retired_executable_metadata=$4
+    case $retired_unit_name in
+        volparossa-helper-live-proof-[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9].service) ;;
+        *) return 1 ;;
+    esac
+    [ "$retired_control_group" = "/system.slice/$retired_unit_name" ] || return 1
+    case $retired_main_pid in
+        0) [ -z "$retired_executable_metadata" ] || return 1 ;;
+        ''|*[!0-9]*) return 1 ;;
+        *) [ "$retired_main_pid" -le 4194304 ] || return 1
+            [ -n "$retired_executable_metadata" ] || return 1
+            ;;
+    esac
+    retired_cgroup_path=/sys/fs/cgroup$retired_control_group
+    retired_attempt=0
+    while :; do
+        retired_cgroup_present=no
+        if [ -e "$retired_cgroup_path" ] || [ -L "$retired_cgroup_path" ]; then
+            retired_cgroup_present=yes
+        fi
+        retired_process_present=no
+        if [ "$retired_main_pid" -ne 0 ] \
+            && { [ -e "/proc/$retired_main_pid/exe" ] \
+                || [ -L "/proc/$retired_main_pid/exe" ]; }; then
+            retired_observed_executable=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
+                "/proc/$retired_main_pid/exe" 2>/dev/null) \
+                || retired_observed_executable=
+            if [ "$retired_observed_executable" = "$retired_executable_metadata" ]; then
+                retired_process_present=yes
+            fi
+        fi
+        if [ "$retired_cgroup_present:$retired_process_present" = no:no ]; then
+            return 0
+        fi
+        retired_attempt=$((retired_attempt + 1))
+        [ "$retired_attempt" -lt 1200 ] || return 1
+        sleep 0.05
+    done
+}
+
 adopt_tentative_unit() {
     [ "$unit_owned" = no ] || return 1
     [ "$unit_may_own" = yes ] || return 1
@@ -377,7 +449,7 @@ retire_unit() {
             *) return 1 ;;
         esac
         retire_attempt=$((retire_attempt + 1))
-        [ "$retire_attempt" -lt 400 ] || return 1
+        [ "$retire_attempt" -lt 1200 ] || return 1
         sleep 0.05
     done
 
@@ -410,7 +482,7 @@ retire_unit() {
                 *) return 1 ;;
             esac
             retire_attempt=$((retire_attempt + 1))
-            [ "$retire_attempt" -lt 400 ] || return 1
+            [ "$retire_attempt" -lt 1200 ] || return 1
             sleep 0.05
         done
     fi
@@ -461,7 +533,7 @@ retire_unit() {
         retire_fdstore_count=$(unit_fdstore_count) || return 1
         [ "$retire_fdstore_count" -eq 0 ] || return 1
         retire_attempt=$((retire_attempt + 1))
-        [ "$retire_attempt" -lt 400 ] || return 1
+        [ "$retire_attempt" -lt 1200 ] || return 1
         sleep 0.05
     done
 }
@@ -580,6 +652,42 @@ if [ "$source_before" != "$source_after" ] \
     failed 'the real helper changed while copied or the staged image is unsafe'
 fi
 
+ipc_probe_before=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source")
+ipc_probe_digest_before=$(vp_capture_sha256_file "$ipc_probe_source") \
+    || failed 'the production IPC probe source could not be hashed'
+install -o root -g "$agent_gid" -m 0550 "$ipc_probe_source" \
+    "$temporary_stage/production-ipc-probe"
+ipc_probe_after=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source")
+ipc_probe_digest_after=$(vp_capture_sha256_file "$ipc_probe_source") \
+    || failed 'the production IPC probe source could not be re-hashed'
+staged_ipc_probe_digest=$(vp_capture_sha256_file "$temporary_stage/production-ipc-probe") \
+    || failed 'the staged production IPC probe could not be hashed'
+if [ "$ipc_probe_before" != "$ipc_probe_after" ] \
+    || [ "$ipc_probe_digest_before" != "$ipc_probe_digest_after" ] \
+    || [ "$ipc_probe_digest_before" != "$staged_ipc_probe_digest" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$temporary_stage/production-ipc-probe")" \
+        != "regular file:0:$agent_gid:550:1" ]; then
+    failed 'the production IPC probe changed while copied or its staged image is unsafe'
+fi
+
+ipc_hook_before=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source")
+ipc_hook_digest_before=$(vp_capture_sha256_file "$ipc_hook_source") \
+    || failed 'the production IPC hook source could not be hashed'
+install -o root -g root -m 0500 "$ipc_hook_source" \
+    "$temporary_stage/production-ipc-hook"
+ipc_hook_after=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source")
+ipc_hook_digest_after=$(vp_capture_sha256_file "$ipc_hook_source") \
+    || failed 'the production IPC hook source could not be re-hashed'
+staged_ipc_hook_digest=$(vp_capture_sha256_file "$temporary_stage/production-ipc-hook") \
+    || failed 'the staged production IPC hook could not be hashed'
+if [ "$ipc_hook_before" != "$ipc_hook_after" ] \
+    || [ "$ipc_hook_digest_before" != "$ipc_hook_digest_after" ] \
+    || [ "$ipc_hook_digest_before" != "$staged_ipc_hook_digest" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$temporary_stage/production-ipc-hook")" \
+        != 'regular file:0:0:500:1' ]; then
+    failed 'the production IPC hook changed while copied or its staged image is unsafe'
+fi
+
 printf '%s\n' \
     'root:x:0:0:root:/root:/bin/sh' \
     "volparossa:x:$agent_uid:$agent_gid:VOLPAROSSA staged agent:/var/lib/volparossa:/usr/sbin/nologin" \
@@ -621,8 +729,10 @@ if [ "$(stat -Lc '%F:%u:%g:%a:%h' "$temporary_stage/shadow")" \
 fi
 install -o root -g root -m 0600 /dev/null "$temporary_stage/proof.stdout"
 install -o root -g root -m 0600 /dev/null "$temporary_stage/proof.stderr"
+install -d -o root -g "$agent_gid" -m 0750 "$temporary_stage/production-runtime"
+install -d -o root -g root -m 2700 "$temporary_stage/production-output"
 
-state_records='accounts namespaces mounts resolver sysctls links addresses routes rules nexthops qdiscs nftables wireguard legacy_ipv4_firewall legacy_ipv6_firewall'
+state_records='production_runtime_path accounts namespaces mounts resolver sysctls links addresses routes rules nexthops qdiscs nftables wireguard legacy_ipv4_firewall legacy_ipv6_firewall'
 
 publish_optional_digest_record() {
     [ "$#" -eq 2 ] || failed 'invalid optional state publication request'
@@ -659,6 +769,12 @@ capture_host_state() {
     install -d -o root -g root -m 0700 "$destination"
     capture_directory=$destination/captures
     install -d -o root -g root -m 0700 "$capture_directory"
+
+    if [ -e "$host_runtime_directory" ] || [ -L "$host_runtime_directory" ]; then
+        failed 'the host /run/volparossa path is not absent at a state fence'
+    fi
+    vp_capture_run "$destination/production_runtime_path" printf '%s\n' ABSENT \
+        || failed 'host /run/volparossa absence could not be published'
 
     accounts_capture=$capture_directory/accounts.validated
     : >"$accounts_capture"
@@ -905,6 +1021,7 @@ systemd-run \
     --property=SupplementaryGroups= \
     --property=UMask=0077 \
     --property=LimitCORE=0 \
+    --property=LimitFSIZE=1048576 \
     --property=NoNewPrivileges=yes \
     --property="CapabilityBoundingSet=$capabilities" \
     --property="AmbientCapabilities=$capabilities" \
@@ -1142,15 +1259,518 @@ else
     observed_private_network=
     proof_ok=no
 fi
+if capture_unit_property ControlGroup "$temporary_stage/unit-control-group"; then
+    worker_control_group=$(cat "$temporary_stage/unit-control-group") || proof_ok=no
+else
+    worker_control_group=
+    proof_ok=no
+fi
 if [ "$observed_bounding" != "$capabilities" ] \
     || [ "$observed_ambient" != "$capabilities" ] \
-    || [ "$observed_private_network" != yes ]; then
+    || [ "$observed_private_network" != yes ] \
+    || [ "$worker_control_group" != "/system.slice/$unit_name" ]; then
     proof_ok=no
 fi
 
+worker_unit_name=$unit_name
+worker_invocation_id=$unit_invocation_id
+worker_ownership_marker=$unit_ownership_marker
 if ! retire_unit; then
     cleanup_error=yes
     proof_ok=no
+fi
+
+if [ "$proof_ok" = yes ]; then
+    if [ -n "$unit_name" ] || [ "$unit_owned" != no ] || [ "$unit_may_own" != no ]; then
+        proof_ok=no
+    else
+        unit_name=$worker_unit_name
+        reuse_load_state=$(unit_load_state) || reuse_load_state=
+        if [ "$reuse_load_state" != not-found ] \
+            || ! retired_runtime_is_absent \
+                "$worker_unit_name" "$worker_control_group" 0 ''; then
+            proof_ok=no
+        fi
+    fi
+fi
+
+if [ "$proof_ok" = yes ]; then
+    production_marker_line=$(printf '%s\n%s\n%s\n' \
+        'VOLPAROSSA helper production IPC transient ownership marker v1' \
+        "$unit_name" "$temporary_stage_identity" | sha256sum) \
+        || failed 'production IPC ownership marker could not be derived'
+    production_marker_digest=$(vp_capture_checksum_from_line "$production_marker_line") \
+        || failed 'production IPC ownership marker is non-canonical'
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-$production_marker_digest
+    if ! unit_ownership_marker_is_safe "$unit_ownership_marker" \
+        || [ "$unit_ownership_marker" = "$worker_ownership_marker" ]; then
+        failed 'production IPC ownership marker is unsafe or reused'
+    fi
+
+    production_helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-production:norbind"
+    production_probe_bind="$temporary_stage/production-ipc-probe:/run/volparossa-helper-production-ipc-probe:norbind"
+    production_hook_bind="$temporary_stage/production-ipc-hook:/run/volparossa-helper-production-ipc-hook:norbind"
+    production_runtime_bind="$temporary_stage/production-runtime:/run/volparossa:norbind"
+    production_output_bind="$temporary_stage/production-output:/run/volparossa-helper-production-proof:norbind"
+
+    unit_may_own=yes
+    set +e
+    systemd-run \
+        --json=short \
+        --ignore-failure \
+        --collect \
+        --unit="$unit_name" \
+        --description="$unit_ownership_marker" \
+        --service-type=exec \
+        --property=Restart=no \
+        --property=RuntimeMaxSec=180s \
+        --property=NotifyAccess=main \
+        --property=FileDescriptorStoreMax=128 \
+        --property=FileDescriptorStorePreserve=yes \
+        --property=User=0 \
+        --property=Group="$agent_gid" \
+        --property=SupplementaryGroups= \
+        --property=UMask=0077 \
+        --property=LimitCORE=0 \
+        --property=LimitFSIZE=1048576 \
+        --property=NoNewPrivileges=yes \
+        --property="CapabilityBoundingSet=$capabilities" \
+        --property="AmbientCapabilities=$capabilities" \
+        --property=PrivateNetwork=yes \
+        --property=PrivateMounts=yes \
+        --property=PrivateTmp=yes \
+        --property=PrivateDevices=no \
+        --property=DevicePolicy=closed \
+        --property='DeviceAllow=/dev/net/tun rw' \
+        --property=ProtectSystem=strict \
+        --property=ProtectHome=yes \
+        --property=ProtectControlGroups=yes \
+        --property=ProtectKernelModules=yes \
+        --property=ProtectKernelLogs=yes \
+        --property=ProtectClock=yes \
+        --property=ProtectHostname=yes \
+        --property=LockPersonality=yes \
+        --property=MemoryDenyWriteExecute=yes \
+        --property=RestrictRealtime=yes \
+        --property=RestrictSUIDSGID=yes \
+        --property=RestrictNamespaces=net \
+        --property=SystemCallArchitectures=native \
+        --property='SystemCallFilter=@system-service @network-io @mount seccomp' \
+        --property=SystemCallErrorNumber=EPERM \
+        --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+        --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
+        --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind" \
+        --property="BindPaths=$production_runtime_bind $production_output_bind" \
+        --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+        --property="ExecStartPost=/run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid" \
+        --property="ExecStopPost=/run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid" \
+        --property=KillSignal=SIGTERM \
+        --property=KillMode=control-group \
+        --property=SendSIGKILL=yes \
+        --property=TimeoutStartSec=90s \
+        --property=TimeoutStopSec=45s \
+        --property=TasksMax=64 \
+        --property=SetLoginEnvironment=no \
+        --property=StandardOutput=null \
+        --property=StandardError=null \
+        /run/volparossa-helper-production \
+        >"$temporary_stage/systemd-run-production.stdout" \
+        2>"$temporary_stage/systemd-run-production.stderr"
+    production_run_status=$?
+    set -e
+
+    production_ok=yes
+    if [ "$production_run_status" -ne 0 ]; then
+        production_ok=no
+    elif ! vp_capture_file_is_safe "$temporary_stage/systemd-run-production.stdout" \
+        || ! vp_capture_file_is_safe "$temporary_stage/systemd-run-production.stderr"; then
+        production_ok=no
+    else
+        production_invocation_id=$(jq -ers --arg expected_unit "$unit_name" '
+            if length == 1
+                and (.[0] | type) == "object"
+                and (.[0] | keys) == ["invocation_id", "unit"]
+                and .[0].unit == $expected_unit
+                and (.[0].invocation_id | type) == "string"
+            then .[0].invocation_id
+            else empty
+            end
+        ' "$temporary_stage/systemd-run-production.stdout" 2>/dev/null) \
+            || production_invocation_id=
+        if ! unit_invocation_id_is_safe "$production_invocation_id" \
+            || [ "$production_invocation_id" = "$worker_invocation_id" ] \
+            || [ -s "$temporary_stage/systemd-run-production.stderr" ]; then
+            production_ok=no
+        else
+            observed_unit_invocation_id=$(unit_current_invocation_id) \
+                || observed_unit_invocation_id=
+            if ! unit_description_matches_marker \
+                || [ "$observed_unit_invocation_id" != "$production_invocation_id" ]; then
+                production_ok=no
+            else
+                unit_invocation_id=$production_invocation_id
+                unit_owned=yes
+                unit_may_own=no
+            fi
+        fi
+    fi
+
+    if [ "$unit_owned" = yes ]; then
+        poll_attempt=0
+        while :; do
+            if ! unit_invocation_is_current; then
+                production_ok=no
+                break
+            fi
+            active_state=$(systemctl show --property=ActiveState --value \
+                "$unit_name" 2>/dev/null) || {
+                production_ok=no
+                break
+            }
+            sub_state=$(systemctl show --property=SubState --value \
+                "$unit_name" 2>/dev/null) || {
+                production_ok=no
+                break
+            }
+            if [ "$active_state:$sub_state" = active:running ]; then
+                break
+            fi
+            case $active_state in
+                failed|inactive) production_ok=no; break ;;
+            esac
+            poll_attempt=$((poll_attempt + 1))
+            if [ "$poll_attempt" -ge 2000 ]; then
+                production_ok=no
+                break
+            fi
+            sleep 0.05
+        done
+    else
+        production_ok=no
+    fi
+
+    if capture_unit_property ActiveState "$temporary_stage/production-active-state"; then
+        production_active_state=$(cat "$temporary_stage/production-active-state") \
+            || production_ok=no
+    else
+        production_active_state=
+        production_ok=no
+    fi
+    if capture_unit_property SubState "$temporary_stage/production-sub-state"; then
+        production_sub_state=$(cat "$temporary_stage/production-sub-state") \
+            || production_ok=no
+    else
+        production_sub_state=
+        production_ok=no
+    fi
+    if capture_unit_property Result "$temporary_stage/production-result"; then
+        production_result=$(cat "$temporary_stage/production-result") || production_ok=no
+    else
+        production_result=
+        production_ok=no
+    fi
+    if capture_unit_property MainPID "$temporary_stage/production-main-pid"; then
+        production_main_pid=$(cat "$temporary_stage/production-main-pid") || production_ok=no
+    else
+        production_main_pid=
+        production_ok=no
+    fi
+    case $production_main_pid in
+        ''|0|*[!0-9]*) production_ok=no ;;
+    esac
+    if [ "$production_active_state" != active ] \
+        || [ "$production_sub_state" != running ] \
+        || [ "$production_result" != success ]; then
+        production_ok=no
+    fi
+
+    if capture_unit_property NotifyAccess "$temporary_stage/production-notify-access"; then
+        production_notify_access=$(cat "$temporary_stage/production-notify-access") \
+            || production_ok=no
+    else
+        production_notify_access=
+        production_ok=no
+    fi
+    if capture_unit_property Description "$temporary_stage/production-description"; then
+        production_description=$(cat "$temporary_stage/production-description") \
+            || production_ok=no
+    else
+        production_description=
+        production_ok=no
+    fi
+    if capture_unit_property Environment "$temporary_stage/production-environment"; then
+        production_environment=$(cat "$temporary_stage/production-environment") \
+            || production_ok=no
+    else
+        production_environment=
+        production_ok=no
+    fi
+    if capture_unit_property FileDescriptorStoreMax \
+        "$temporary_stage/production-fdstore-max"; then
+        production_fdstore_max=$(cat "$temporary_stage/production-fdstore-max") \
+            || production_ok=no
+    else
+        production_fdstore_max=
+        production_ok=no
+    fi
+    if capture_unit_property FileDescriptorStorePreserve \
+        "$temporary_stage/production-fdstore-preserve"; then
+        production_fdstore_preserve=$(cat "$temporary_stage/production-fdstore-preserve") \
+            || production_ok=no
+    else
+        production_fdstore_preserve=
+        production_ok=no
+    fi
+    if capture_unit_property NFileDescriptorStore \
+        "$temporary_stage/production-fdstore-count"; then
+        production_fdstore_count=$(cat "$temporary_stage/production-fdstore-count") \
+            || production_ok=no
+    else
+        production_fdstore_count=
+        production_ok=no
+    fi
+    if capture_unit_property RuntimeMaxUSec \
+        "$temporary_stage/production-runtime-max"; then
+        production_runtime_max=$(cat "$temporary_stage/production-runtime-max") \
+            || production_ok=no
+    else
+        production_runtime_max=
+        production_ok=no
+    fi
+    if capture_unit_property LimitFSIZE "$temporary_stage/production-limit-fsize"; then
+        production_limit_fsize=$(cat "$temporary_stage/production-limit-fsize") \
+            || production_ok=no
+    else
+        production_limit_fsize=
+        production_ok=no
+    fi
+    if capture_unit_property LimitFSIZESoft \
+        "$temporary_stage/production-limit-fsize-soft"; then
+        production_limit_fsize_soft=$(cat "$temporary_stage/production-limit-fsize-soft") \
+            || production_ok=no
+    else
+        production_limit_fsize_soft=
+        production_ok=no
+    fi
+    if capture_unit_property StandardOutput \
+        "$temporary_stage/production-standard-output"; then
+        production_standard_output=$(cat "$temporary_stage/production-standard-output") \
+            || production_ok=no
+    else
+        production_standard_output=
+        production_ok=no
+    fi
+    if capture_unit_property StandardError \
+        "$temporary_stage/production-standard-error"; then
+        production_standard_error=$(cat "$temporary_stage/production-standard-error") \
+            || production_ok=no
+    else
+        production_standard_error=
+        production_ok=no
+    fi
+    if [ "$production_notify_access" != main ] \
+        || [ "$production_description" != "$unit_ownership_marker" ] \
+        || [ "$production_environment" \
+            != DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ] \
+        || [ "$production_fdstore_max" != 128 ] \
+        || [ "$production_fdstore_preserve" != yes ] \
+        || [ "$production_fdstore_count" != 0 ] \
+        || [ "$production_runtime_max" != 3min ] \
+        || [ "$production_limit_fsize" != 1048576 ] \
+        || [ "$production_limit_fsize_soft" != 1048576 ] \
+        || [ "$production_standard_output" != null ] \
+        || [ "$production_standard_error" != null ]; then
+        production_ok=no
+    fi
+
+    if capture_unit_property CapabilityBoundingSet \
+        "$temporary_stage/production-bounding.raw" \
+        && normalize_capabilities "$temporary_stage/production-bounding.raw" \
+            "$temporary_stage/production-bounding.normalized"; then
+        production_bounding=$(cat "$temporary_stage/production-bounding.normalized") \
+            || production_ok=no
+    else
+        production_bounding=
+        production_ok=no
+    fi
+    if capture_unit_property AmbientCapabilities "$temporary_stage/production-ambient.raw" \
+        && normalize_capabilities "$temporary_stage/production-ambient.raw" \
+            "$temporary_stage/production-ambient.normalized"; then
+        production_ambient=$(cat "$temporary_stage/production-ambient.normalized") \
+            || production_ok=no
+    else
+        production_ambient=
+        production_ok=no
+    fi
+    if capture_unit_property PrivateNetwork "$temporary_stage/production-private-network"; then
+        production_private_network=$(cat "$temporary_stage/production-private-network") \
+            || production_ok=no
+    else
+        production_private_network=
+        production_ok=no
+    fi
+    if capture_unit_property ControlGroup "$temporary_stage/production-control-group"; then
+        production_control_group=$(cat "$temporary_stage/production-control-group") \
+            || production_ok=no
+    else
+        production_control_group=
+        production_ok=no
+    fi
+    if [ "$production_bounding" != "$capabilities" ] \
+        || [ "$production_ambient" != "$capabilities" ] \
+        || [ "$production_private_network" != yes ] \
+        || [ "$production_control_group" != "/system.slice/$unit_name" ]; then
+        production_ok=no
+    fi
+
+    production_identity=$temporary_stage/production-output/unit.identity
+    if vp_capture_file_is_safe "$production_identity"; then
+        identity_invocation=$(sed -n '1p' "$production_identity") || production_ok=no
+        identity_main_pid=$(sed -n '2p' "$production_identity") || production_ok=no
+        identity_executable=$(sed -n '3p' "$production_identity") || production_ok=no
+        identity_extra=$(sed -n '4p' "$production_identity") || production_ok=no
+        if [ "$identity_invocation" != "$unit_invocation_id" ] \
+            || [ "$identity_main_pid" != "$production_main_pid" ] \
+            || [ -z "$identity_executable" ] || [ -n "$identity_extra" ]; then
+            production_ok=no
+        fi
+    else
+        production_ok=no
+    fi
+
+    production_socket_identity_file=$temporary_stage/production-output/socket.identity
+    if vp_capture_file_is_safe "$production_socket_identity_file"; then
+        expected_production_socket_identity=$(cat "$production_socket_identity_file") \
+            || production_ok=no
+    else
+        expected_production_socket_identity=
+        production_ok=no
+    fi
+    production_socket_identity=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
+        "$temporary_stage/production-runtime/helper.sock" 2>/dev/null) \
+        || production_socket_identity=
+    case $production_socket_identity in
+        *":socket:0:$agent_gid:660:1") ;;
+        *) production_ok=no ;;
+    esac
+    if [ "$production_socket_identity" != "$expected_production_socket_identity" ]; then
+        production_ok=no
+    fi
+
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_IPC_WRONG_UID_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
+        >"$temporary_stage/expected-production-start.pass"
+    if ! vp_capture_file_is_safe "$temporary_stage/production-output/start.pass" \
+        || ! cmp -s "$temporary_stage/expected-production-start.pass" \
+            "$temporary_stage/production-output/start.pass"; then
+        production_ok=no
+    fi
+
+    if [ "$(stat -c '%F:%u:%g:%a' "$temporary_stage/production-runtime" \
+        2>/dev/null || true)" != "directory:0:$agent_gid:750" ] \
+        || [ "$(stat -c '%F:%u:%g:%a:%h' \
+            "$temporary_stage/production-runtime/helper.sock" 2>/dev/null || true)" \
+            != "socket:0:$agent_gid:660:1" ] \
+        || [ "$(stat -c '%F:%u:%g:%a:%h:%s' \
+            "$temporary_stage/production-runtime/helper.cleanup-token" 2>/dev/null || true)" \
+            != "regular file:0:$agent_gid:640:1:32" ] \
+        || [ "$(stat -c '%F:%u:%g:%a:%h' \
+            "$temporary_stage/production-runtime/helper.ownership-v3.lock" \
+            2>/dev/null || true)" != "regular file:0:$agent_gid:600:1" ] \
+        || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
+        || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
+        production_ok=no
+    fi
+    if [ -e "$temporary_stage/production-runtime/helper.ownership-v3" ] \
+        || [ -L "$temporary_stage/production-runtime/helper.ownership-v3" ]; then
+        if [ "$(stat -c '%F:%u:%g:%a:%h' \
+            "$temporary_stage/production-runtime/helper.ownership-v3" \
+            2>/dev/null || true)" != "regular file:0:$agent_gid:600:1" ]; then
+            production_ok=no
+        fi
+    fi
+
+    if ! unit_invocation_is_current; then
+        production_ok=no
+    fi
+    final_main_pid=$(systemctl show --property=MainPID --value "$unit_name" 2>/dev/null) \
+        || final_main_pid=
+    if [ "$final_main_pid" != "$production_main_pid" ]; then
+        production_ok=no
+    fi
+
+    production_unit_name=$unit_name
+    if ! retire_unit; then
+        cleanup_error=yes
+        production_ok=no
+    fi
+    if [ -n "$unit_name" ] || [ "$unit_owned" != no ] || [ "$unit_may_own" != no ]; then
+        production_ok=no
+    else
+        unit_name=$production_unit_name
+        production_retired_load_state=$(unit_load_state) || production_retired_load_state=
+        if [ "$production_retired_load_state" != not-found ] \
+            || ! retired_runtime_is_absent "$production_unit_name" \
+                "$production_control_group" "$production_main_pid" \
+                "$identity_executable"; then
+            production_ok=no
+        fi
+        forget_unit_ownership
+    fi
+    production_lock_path=$temporary_stage/production-runtime/helper.ownership-v3.lock
+    production_lock_identity_file=$temporary_stage/production-output/lock.identity
+    if vp_capture_file_is_safe "$production_lock_identity_file"; then
+        expected_production_lock_identity=$(cat "$production_lock_identity_file") \
+            || production_ok=no
+    else
+        expected_production_lock_identity=
+        production_ok=no
+    fi
+    production_lock_path_before=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
+        "$production_lock_path" 2>/dev/null) || production_lock_path_before=
+    case $production_lock_path_before in
+        *":regular file:0:$agent_gid:600:1") ;;
+        *) production_ok=no ;;
+    esac
+    if [ "$production_lock_path_before" != "$expected_production_lock_identity" ]; then
+        production_ok=no
+    fi
+    if exec 9<>"$production_lock_path"; then
+        production_lock_fd_identity=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
+            /proc/self/fd/9 2>/dev/null) || production_lock_fd_identity=
+        if [ "$production_lock_fd_identity" != "$expected_production_lock_identity" ] \
+            || ! /usr/bin/flock -n 9; then
+            production_ok=no
+        fi
+        production_lock_path_after=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
+            "$production_lock_path" 2>/dev/null) || production_lock_path_after=
+        if [ "$production_lock_path_after" != "$expected_production_lock_identity" ]; then
+            production_ok=no
+        fi
+        exec 9>&-
+    else
+        production_ok=no
+    fi
+    printf '%s\n' 'VOLPAROSSA_HELPER_V3_IPC_CLEAN_SHUTDOWN_V1=pass' \
+        >"$temporary_stage/expected-production-stop.pass"
+    if ! vp_capture_file_is_safe "$temporary_stage/production-output/stop.pass" \
+        || ! cmp -s "$temporary_stage/expected-production-stop.pass" \
+            "$temporary_stage/production-output/stop.pass" \
+        || [ -e "$temporary_stage/production-runtime/helper.sock" ] \
+        || [ -L "$temporary_stage/production-runtime/helper.sock" ] \
+        || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
+        || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
+        production_ok=no
+    fi
+    if [ "$production_ok" != yes ]; then
+        proof_ok=no
+    fi
 fi
 capture_host_state "$temporary_stage/after"
 after_digest=$(state_digest "$temporary_stage/after")
@@ -1165,12 +1785,12 @@ if [ -n "$changed_records" ] || [ "$before_digest" != "$after_digest" ]; then
     failed 'privacy-safe before/after host-state digests differ'
 fi
 if [ "$proof_ok" != yes ]; then
-    failed 'the staged helper did not produce the exact live identity/fdstore proof'
+    failed 'the staged helper did not produce the exact identity/fdstore and production IPC proofs'
 fi
 
 printf '%s\n' \
-    'PASS: staged helper identity, exact two-FD systemd custody, confinement, reap, and pin release were proved.' \
+    'PASS: staged helper identity, exact two-FD custody, production IPC, clean stop, confinement, and pin release were proved.' \
     "HOST_STATE_BEFORE_SHA256=$before_digest" \
     "HOST_STATE_AFTER_SHA256=$after_digest" \
-    'SCOPE=STAGED_HELPER_COMPONENT_ONLY' \
-    'No host account or network configuration was changed; this is not a VPN datapath or A01-A15 acceptance result.'
+    'SCOPE=STAGED_HELPER_IDENTITY_AND_PRODUCTION_IPC_BOUNDARY_ONLY' \
+    'No CleanupOwned result is claimed; no host account or network configuration was changed, and this is not A01-A15 evidence.'
