@@ -1,17 +1,19 @@
 //! Fail-closed systemd descriptor-store startup boundary.
 //!
 //! Debian 13 systemd may return descriptor-store entries to the service on restart. The current
-//! production recovery executor cannot consume those entries yet, so startup snapshots the exact
-//! inherited descriptor range before any thread or worker can be created, canonicalises each pair
-//! into typed pidfd/network-namespace ownership, validates identity separation and the exact
-//! bounded naming shape, and then refuses to publish the helper socket while any bundle exists.
+//! production recovery executor cannot consume those entries yet, so the executable bootstrap
+//! transfers one affine snapshot of the exact inherited descriptor range before any thread or
+//! worker can be created. This module consumes that snapshot, canonicalises each pair into typed
+//! pidfd/network-namespace ownership, validates identity separation and the exact bounded naming
+//! shape, and then refuses to publish the helper socket while any bundle exists.
 //! This prevents inherited recovery capability from being silently ignored or leaked into a
 //! child. A later slice must additionally prove durable-journal binding and exact cleanup before it
 //! may replace the final refusal with recovery.
 
 use std::{
     collections::BTreeMap,
-    env, fmt, io,
+    ffi::OsStr,
+    fmt, io,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
 };
 
@@ -19,7 +21,6 @@ use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 
 use crate::systemd_fdstore::{BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName};
 
-const SYSTEMD_DESCRIPTOR_START: usize = 3;
 const DESCRIPTORS_PER_CUSTODY_BUNDLE: usize = 2;
 const MAX_WORKER_CUSTODY_BUNDLES: usize = 64;
 const MAX_INHERITED_CUSTODY_DESCRIPTORS: usize =
@@ -30,7 +31,7 @@ const CUSTODY_FD_NAME_DIGEST_BYTES: usize = 32;
 pub(super) const CUSTODY_FD_NAME_BYTES: usize =
     CUSTODY_FD_NAME_PREFIX.len() + CUSTODY_FD_NAME_DIGEST_BYTES * 2;
 
-#[must_use = "dropping inherited custody releases its typed duplicate references"]
+#[must_use = "dropping inherited custody releases its exact typed descriptor owners"]
 struct InheritedCustodyBundle {
     pidfd: OwnedFd,
     network_namespace: OwnedFd,
@@ -43,7 +44,7 @@ impl fmt::Debug for InheritedCustodyBundle {
     }
 }
 
-#[must_use = "dropping inherited custody releases every captured duplicate reference"]
+#[must_use = "dropping inherited custody releases every captured descriptor owner"]
 struct InheritedCustody {
     bundles: BTreeMap<CustodyFdName, InheritedCustodyBundle>,
 }
@@ -54,17 +55,32 @@ impl InheritedCustody {
     }
 }
 
-/// Snapshot all systemd-owned startup descriptors before any production thread can exist.
+/// Consume the complete affine systemd startup snapshot into typed custody bundles.
 ///
-/// The audited Linux-UAPI boundary contains the unavoidable one-shot raw-FD snapshot. This crate
-/// keeps `unsafe_code = "forbid"`; all validation of the resulting duplicates uses `OwnedFd`.
-fn capture_inherited_custody() -> Result<InheritedCustody, io::Error> {
-    let Some(names) = advertised_descriptor_count()? else {
+/// The audited Linux-UAPI boundary has already taken exact ownership of systemd's raw descriptor
+/// range. This crate keeps `unsafe_code = "forbid"`; it only consumes the resulting affine
+/// `OwnedFd` set and never reopens or duplicates a descriptor by number.
+fn capture_inherited_custody(
+    inherited: volparossa_linux_uapi::SystemdListenFdSet,
+) -> Result<InheritedCustody, io::Error> {
+    let expected_count = inherited.len();
+    let (fd_names, received) = inherited.into_parts();
+    if received.len() != expected_count {
+        return Err(invalid_data("inherited descriptor count changed"));
+    }
+    if expected_count == 0 {
+        if fd_names.is_some() {
+            return Err(invalid_data("absent descriptor names are inconsistent"));
+        }
         return Ok(InheritedCustody {
             bundles: BTreeMap::new(),
         });
-    };
-    let received = volparossa_linux_uapi::duplicate_systemd_listen_descriptors(names.len())?;
+    }
+
+    let fd_names = fd_names
+        .as_deref()
+        .ok_or_else(|| invalid_data("inherited descriptor names are absent"))?;
+    let names = advertised_descriptor_names_from(fd_names, expected_count)?;
     let entries = names
         .into_iter()
         .zip(received)
@@ -74,8 +90,14 @@ fn capture_inherited_custody() -> Result<InheritedCustody, io::Error> {
 }
 
 /// Refuse inherited custody until the production restart reaper can consume it exactly.
-pub(crate) fn refuse_unrecoverable_inherited_custody() -> Result<(), io::Error> {
-    let custody = capture_inherited_custody()?;
+pub(crate) fn refuse_unrecoverable_inherited_custody(
+    inherited: volparossa_linux_uapi::SystemdListenFdSet,
+) -> Result<(), io::Error> {
+    let custody = capture_inherited_custody(inherited)?;
+    refuse_unrecoverable_custody(&custody)
+}
+
+fn refuse_unrecoverable_custody(custody: &InheritedCustody) -> Result<(), io::Error> {
     if custody.is_empty() {
         Ok(())
     } else {
@@ -86,65 +108,47 @@ pub(crate) fn refuse_unrecoverable_inherited_custody() -> Result<(), io::Error> 
     }
 }
 
-fn advertised_descriptor_count() -> Result<Option<Vec<CustodyFdName>>, io::Error> {
-    advertised_descriptor_count_from(
-        env::var_os("LISTEN_PID"),
-        env::var_os("LISTEN_FDS"),
-        env::var_os("LISTEN_FDNAMES"),
-        std::process::id(),
-    )
+#[cfg(test)]
+pub(crate) fn refuse_empty_inherited_custody_for_test() -> Result<(), io::Error> {
+    refuse_unrecoverable_custody(&InheritedCustody {
+        bundles: BTreeMap::new(),
+    })
 }
 
-fn advertised_descriptor_count_from(
-    listen_pid: Option<std::ffi::OsString>,
-    listen_fds: Option<std::ffi::OsString>,
-    listen_fd_names: Option<std::ffi::OsString>,
-    current_pid: u32,
-) -> Result<Option<Vec<CustodyFdName>>, io::Error> {
-    match (listen_pid, listen_fds, listen_fd_names) {
-        (None, None, None) => Ok(None),
-        (Some(pid), Some(count), Some(names)) => {
-            pid.to_str()
-                .and_then(|value| value.parse::<u32>().ok())
-                .filter(|value| *value == current_pid)
-                .ok_or_else(|| invalid_data("systemd descriptor PID binding is invalid"))?;
-            let count = count
-                .to_str()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|value| {
-                    *value > 0
-                        && *value <= MAX_INHERITED_CUSTODY_DESCRIPTORS
-                        && *value % DESCRIPTORS_PER_CUSTODY_BUNDLE == 0
-                        && value.checked_add(SYSTEMD_DESCRIPTOR_START).is_some()
-                })
-                .ok_or_else(|| invalid_data("systemd descriptor count is invalid"))?;
-            let names = names
-                .to_str()
-                .ok_or_else(|| invalid_data("systemd descriptor names are not UTF-8"))?;
-            let expected_name_bytes = count
-                .checked_mul(CUSTODY_FD_NAME_BYTES)
-                .and_then(|bytes| bytes.checked_add(count - 1))
-                .ok_or_else(|| invalid_data("systemd descriptor names are invalid"))?;
-            if names.len() != expected_name_bytes {
-                return Err(invalid_data("systemd descriptor names are invalid"));
-            }
-            let mut parsed = Vec::with_capacity(count);
-            for name in names.split(':') {
-                if parsed.len() == count {
-                    return Err(invalid_data("systemd descriptor names are invalid"));
-                }
-                parsed.push(
-                    CustodyFdName::parse(name)
-                        .map_err(|_| invalid_data("systemd descriptor names are invalid"))?,
-                );
-            }
-            if parsed.len() != count {
-                return Err(invalid_data("systemd descriptor names are invalid"));
-            }
-            Ok(Some(parsed))
-        }
-        _ => Err(invalid_data("systemd descriptor environment is incomplete")),
+fn advertised_descriptor_names_from(
+    fd_names: &OsStr,
+    count: usize,
+) -> Result<Vec<CustodyFdName>, io::Error> {
+    if count == 0
+        || count > MAX_INHERITED_CUSTODY_DESCRIPTORS
+        || count % DESCRIPTORS_PER_CUSTODY_BUNDLE != 0
+    {
+        return Err(invalid_data("systemd descriptor count is invalid"));
     }
+    let names = fd_names
+        .to_str()
+        .ok_or_else(|| invalid_data("systemd descriptor names are not UTF-8"))?;
+    let expected_name_bytes = count
+        .checked_mul(CUSTODY_FD_NAME_BYTES)
+        .and_then(|bytes| bytes.checked_add(count - 1))
+        .ok_or_else(|| invalid_data("systemd descriptor names are invalid"))?;
+    if names.len() != expected_name_bytes {
+        return Err(invalid_data("systemd descriptor names are invalid"));
+    }
+    let mut parsed = Vec::with_capacity(count);
+    for name in names.split(':') {
+        if parsed.len() == count {
+            return Err(invalid_data("systemd descriptor names are invalid"));
+        }
+        parsed.push(
+            CustodyFdName::parse(name)
+                .map_err(|_| invalid_data("systemd descriptor names are invalid"))?,
+        );
+    }
+    if parsed.len() != count {
+        return Err(invalid_data("systemd descriptor names are invalid"));
+    }
+    Ok(parsed)
 }
 
 fn validate_inherited_custody(
@@ -283,9 +287,11 @@ fn rustix_io(error: rustix::io::Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::OsString,
         fs::File,
         os::fd::{AsRawFd, OwnedFd},
-        process::{Command, Stdio},
+        os::unix::ffi::OsStringExt,
+        process::Command,
     };
 
     use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
@@ -293,8 +299,6 @@ mod tests {
     use tempfile::tempfile;
 
     use super::*;
-
-    const TYPED_CUSTODY_FIXTURE: &str = "VOLPAROSSA_TYPED_CUSTODY_FIXTURE";
 
     fn descriptor() -> OwnedFd {
         tempfile().expect("create descriptor fixture").into()
@@ -318,59 +322,35 @@ mod tests {
         CustodyFdName::parse(&custody_name(seed)).expect("valid typed custody name")
     }
 
-    fn proc_descriptor_flags(descriptor: i32) -> u32 {
-        let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{descriptor}"))
-            .expect("read descriptor info");
-        let flags = fdinfo
-            .lines()
-            .find_map(|line| line.strip_prefix("flags:"))
-            .expect("descriptor flags field");
-        u32::from_str_radix(flags.trim(), 8).expect("octal descriptor flags")
-    }
-
     #[test]
-    fn absent_environment_is_the_only_unmanaged_shape() {
-        assert_eq!(
-            advertised_descriptor_count_from(None, None, None, 7).expect("absent environment"),
-            None
-        );
-        for malformed in [
-            (Some("7".into()), None, None),
-            (None, Some("2".into()), Some(custody_name(1).into())),
+    fn descriptor_names_require_an_even_bounded_exact_shape() {
+        for (names, count) in [
+            (OsString::new(), 0),
+            (custody_name(1).into(), 1),
+            (custody_name(1).into(), 2),
             (
-                Some("8".into()),
-                Some("2".into()),
-                Some(custody_name(1).into()),
+                format!(
+                    "{}:{}:{}",
+                    custody_name(1),
+                    custody_name(1),
+                    custody_name(1)
+                )
+                .into(),
+                2,
             ),
+            ("x".repeat(16 * 1_024).into(), 2),
             (
-                Some("7".into()),
-                Some("0".into()),
-                Some(custody_name(1).into()),
-            ),
-            (Some("7".into()), Some("2".into()), Some("".into())),
-            (
-                Some("7".into()),
-                Some("2".into()),
-                Some(
-                    format!(
-                        "{}:{}:{}",
-                        custody_name(1),
-                        custody_name(1),
-                        custody_name(1)
-                    )
+                std::iter::repeat_n(custody_name(2), 129)
+                    .collect::<Vec<_>>()
+                    .join(":")
                     .into(),
-                ),
-            ),
-            (
-                Some("7".into()),
-                Some("1".into()),
-                Some("x".repeat(16 * 1_024).into()),
+                129,
             ),
         ] {
-            assert!(
-                advertised_descriptor_count_from(malformed.0, malformed.1, malformed.2, 7).is_err()
-            );
+            assert!(advertised_descriptor_names_from(&names, count).is_err());
         }
+        let non_utf8 = OsString::from_vec(vec![0xff; CUSTODY_FD_NAME_BYTES * 2 + 1]);
+        assert!(advertised_descriptor_names_from(&non_utf8, 2).is_err());
     }
 
     #[test]
@@ -386,14 +366,8 @@ mod tests {
             "0".repeat(63)
         )));
         let names = format!("{}:{}", custody_name(1), custody_name(1));
-        let parsed = advertised_descriptor_count_from(
-            Some("7".into()),
-            Some("2".into()),
-            Some(names.into()),
-            7,
-        )
-        .expect("parse exact fixed names")
-        .expect("advertised descriptors");
+        let parsed = advertised_descriptor_names_from(OsStr::new(&names), 2)
+            .expect("parse exact fixed names");
         assert_eq!(parsed, vec![typed_custody_name(1); 2]);
         assert_eq!(format!("{:?}", parsed[0]), "CustodyFdName(<redacted>)");
     }
@@ -401,50 +375,19 @@ mod tests {
     #[test]
     fn descriptor_advertisement_bounds_are_exact() {
         let one_name = custody_name(1);
-        assert!(
-            advertised_descriptor_count_from(
-                Some("7".into()),
-                Some("1".into()),
-                Some(one_name.into()),
-                7,
-            )
-            .is_err()
-        );
+        assert!(advertised_descriptor_names_from(OsStr::new(&one_name), 1).is_err());
 
         let maximum_names = std::iter::repeat_n(custody_name(2), 128)
             .collect::<Vec<_>>()
             .join(":");
-        let parsed = advertised_descriptor_count_from(
-            Some("7".into()),
-            Some("128".into()),
-            Some(maximum_names.into()),
-            7,
-        )
-        .expect("parse maximum descriptor count")
-        .expect("maximum descriptors are advertised");
+        let parsed = advertised_descriptor_names_from(OsStr::new(&maximum_names), 128)
+            .expect("parse maximum descriptor count");
         assert_eq!(parsed.len(), 128);
 
         let excessive_names = std::iter::repeat_n(custody_name(3), 129)
             .collect::<Vec<_>>()
             .join(":");
-        assert!(
-            advertised_descriptor_count_from(
-                Some("7".into()),
-                Some("129".into()),
-                Some(excessive_names.into()),
-                7,
-            )
-            .is_err()
-        );
-        assert!(
-            advertised_descriptor_count_from(
-                Some("7".into()),
-                Some("not-a-number".into()),
-                Some(format!("{}:{}", custody_name(4), custody_name(4)).into()),
-                7,
-            )
-            .is_err()
-        );
+        assert!(advertised_descriptor_names_from(OsStr::new(&excessive_names), 129).is_err());
     }
 
     #[test]
@@ -492,76 +435,40 @@ mod tests {
     }
 
     #[test]
-    fn real_fd_three_and_four_are_typed_in_both_physical_orders() {
-        if env::var_os(TYPED_CUSTODY_FIXTURE).is_some() {
-            let custody = capture_inherited_custody().expect("capture real inherited custody");
-            assert_eq!(custody.bundles.len(), 1);
+    fn bundle_retains_exact_owner_numbers_in_both_orders() {
+        for reversed in [false, true] {
+            let pidfd = pidfd();
+            let network_namespace = network_namespace();
+            let source_numbers = [pidfd.as_raw_fd(), network_namespace.as_raw_fd()];
+            let entries = if reversed {
+                vec![network_namespace, pidfd]
+            } else {
+                vec![pidfd, network_namespace]
+            };
+            let custody = validate_inherited_custody(
+                2,
+                entries
+                    .into_iter()
+                    .map(|descriptor| (Some(typed_custody_name(7)), descriptor))
+                    .collect(),
+            )
+            .expect("adopt exact source owners");
             let bundle = custody.bundles.values().next().expect("captured pair");
-            assert_eq!(
-                inherited_descriptor_role(bundle.pidfd.as_fd()).expect("captured pidfd role"),
-                InheritedDescriptorRole::Pidfd
-            );
-            assert_eq!(
-                inherited_descriptor_role(bundle.network_namespace.as_fd())
-                    .expect("captured namespace role"),
-                InheritedDescriptorRole::NetworkNamespace
-            );
-            for descriptor in [&bundle.pidfd, &bundle.network_namespace] {
-                assert!(descriptor.as_raw_fd() > 4);
-                let flags = FdFlag::from_bits_truncate(
-                    fcntl(descriptor, FcntlArg::F_GETFD).expect("captured descriptor flags"),
-                );
-                assert_eq!(flags, FdFlag::FD_CLOEXEC);
-            }
-            for source in [3, 4] {
-                std::fs::read_link(format!("/proc/self/fd/{source}"))
-                    .expect("sealed source descriptor remains open");
-                assert_ne!(
-                    proc_descriptor_flags(source) & libc::O_CLOEXEC as u32,
-                    0,
-                    "source descriptor {source} must remain CLOEXEC"
-                );
-            }
+            let mut retained_numbers = [
+                bundle.pidfd.as_raw_fd(),
+                bundle.network_namespace.as_raw_fd(),
+            ];
+            let mut expected_numbers = source_numbers;
+            retained_numbers.sort_unstable();
+            expected_numbers.sort_unstable();
+            assert_eq!(retained_numbers, expected_numbers);
             bundle
                 .verify_retained_binding()
                 .expect("captured role binding remains exact");
-            return;
-        }
 
-        let executable = env::current_exe().expect("current test executable");
-        let name = custody_name(7);
-        let names = format!("{name}:{name}");
-        let script = r#"
-exec 3<&0
-exec 4>&1
-exec 0</dev/null
-exec 1>&2
-exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES="$1" VOLPAROSSA_TYPED_CUSTODY_FIXTURE=1 "$0" --exact systemd_custody::tests::real_fd_three_and_four_are_typed_in_both_physical_orders --nocapture --test-threads=1
-"#;
-        for reversed in [false, true] {
-            let pidfd = Stdio::from(pidfd());
-            let network_namespace = Stdio::from(network_namespace());
-            let (stdin, stdout) = if reversed {
-                (network_namespace, pidfd)
-            } else {
-                (pidfd, network_namespace)
-            };
-            let output = Command::new("/bin/sh")
-                .arg("-eu")
-                .arg("-c")
-                .arg(script)
-                .arg(&executable)
-                .arg(&names)
-                .stdin(stdin)
-                .stdout(stdout)
-                .stderr(Stdio::piped())
-                .output()
-                .expect("run real inherited-custody fixture");
-            assert!(
-                output.status.success(),
-                "real inherited-custody fixture failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let error = refuse_unrecoverable_custody(&custody)
+                .expect_err("non-empty inherited custody must block startup");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         }
     }
 

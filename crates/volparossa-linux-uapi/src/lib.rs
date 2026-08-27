@@ -4,7 +4,7 @@
 //! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], the fixed
 //! [`socket_network_namespace`] and close-on-exec duplication wrappers, taking immediate RAII
 //! ownership of descriptors installed by the bounded receive helpers, the one-shot bounded
-//! [`duplicate_systemd_listen_descriptors`] startup snapshot, the
+//! [`take_systemd_listen_fd_set_once`] startup takeover, the
 //! [`install_close_range_on_exec`] process hook, the read-only
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
@@ -29,6 +29,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
+    env,
+    ffi::{OsStr, OsString},
+    fmt,
     io::{self, IoSlice, IoSliceMut},
     mem,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
@@ -71,7 +74,7 @@ const PID_ONE_LIFECYCLE_MASK_BITS: u64 = signal_bit(libc::SIGHUP)
     | signal_bit(libc::SIGINT)
     | signal_bit(libc::SIGTERM)
     | signal_bit(libc::SIGCHLD);
-static SYSTEMD_DESCRIPTORS_SNAPSHOTTED: AtomicBool = AtomicBool::new(false);
+static SYSTEMD_DESCRIPTORS_TAKEN: AtomicBool = AtomicBool::new(false);
 
 // glibc's amd64 `sigaction(2)` trampoline adds this Linux-internal flag to the action returned by
 // an exact readback. It is not caller selectable through this API and does not alter delivery.
@@ -136,78 +139,231 @@ pub fn duplicate_descriptor_cloexec<Fd: AsRawFd + ?Sized>(source: &Fd) -> io::Re
     Ok(duplicate)
 }
 
-/// Takes a one-time owned snapshot of systemd's contiguous descriptor range.
+/// Affine ownership of one exact systemd `LISTEN_FDS` activation range.
 ///
-/// The range starts at descriptor three as required by `sd_listen_fds(3)`. Every descriptor is
-/// preflighted and changed to close-on-exec, then duplicated with `F_DUPFD_CLOEXEC`. The returned
-/// descriptors are therefore newly created kernel objects with exactly one Rust owner; this safe
-/// API never claims ownership of a raw descriptor that another safe caller might already own.
-/// Storage is reserved before duplication. At most 128 descriptors (two per bounded helper worker)
-/// are accepted.
+/// The descriptors remain in their original contiguous slots starting at descriptor three. The
+/// raw `LISTEN_FDNAMES` value is retained without interpreting application-specific names. This
+/// type is intentionally not cloneable and exposes ownership only through a consuming operation.
+#[must_use = "dropping the activation set closes every inherited descriptor"]
+pub struct SystemdListenFdSet {
+    fd_names: Option<OsString>,
+    descriptors: Vec<OwnedFd>,
+}
+
+impl SystemdListenFdSet {
+    /// Returns the exact number of inherited descriptors, or zero for exact absence.
+    pub fn len(&self) -> usize {
+        self.descriptors.len()
+    }
+
+    /// Returns whether the exact activation environment was absent.
+    pub fn is_empty(&self) -> bool {
+        self.descriptors.is_empty()
+    }
+
+    /// Borrows the uninterpreted `LISTEN_FDNAMES` value captured with this descriptor range.
+    pub fn fd_names(&self) -> Option<&OsStr> {
+        self.fd_names.as_deref()
+    }
+
+    /// Consumes the affine set into its raw name advertisement and ordered descriptor owners.
+    pub fn into_parts(self) -> (Option<OsString>, Vec<OwnedFd>) {
+        (self.fd_names, self.descriptors)
+    }
+}
+
+impl fmt::Debug for SystemdListenFdSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SystemdListenFdSet(<redacted>)")
+    }
+}
+
+struct SystemdListenEnvironment {
+    fd_names: OsString,
+    count: usize,
+    end: RawFd,
+}
+
+struct PreparedSystemdListenFdRange {
+    start: RawFd,
+    end: RawFd,
+    descriptors: Vec<OwnedFd>,
+}
+
+/// Takes exclusive ownership of systemd's exact inherited descriptor range once.
 ///
-/// This process-global operation may succeed or fail only once. A second attempt is rejected so a
-/// startup caller cannot accidentally treat a later descriptor-table state as the same activation
-/// snapshot. On error after the one-time latch is acquired, the process must terminate rather than
-/// retry.
+/// The one-shot latch is consumed before the environment is inspected. Consequently an absent or
+/// malformed activation environment is also terminal for this process. A present activation
+/// requires all three standard variables, an exact current `LISTEN_PID`, a count in `1..=128`, and
+/// a complete contiguous range beginning at descriptor three. `LISTEN_FDNAMES` is retained
+/// verbatim for the application to validate. Exact absence returns an empty affine token instead
+/// of an optional value, so callers cannot bypass the fact that the process-global snapshot has
+/// already been consumed.
+///
+/// Storage allocation, range preflight, adding `FD_CLOEXEC`, and flag readback all complete before
+/// the activation environment is removed and the first raw descriptor becomes an [`OwnedFd`].
+/// After that ownership boundary the function performs no syscall or fallible allocation: every
+/// distinct raw slot moves exactly once into reserved RAII storage.
+///
+/// # Safety
+///
+/// This must be the process's first and only systemd activation takeover after `exec`. If
+/// `LISTEN_FDS` advertises `N`, systemd must have transferred sole ownership of every descriptor
+/// table slot in `3..3+N` to this process. No Rust or foreign owner in this process may already
+/// manage any advertised raw slot. PID 1 may, and for descriptor-store custody normally does,
+/// retain a separate descriptor referring to the same underlying open file description. No other
+/// thread, signal handler, callback, or concurrent environment mutation may inspect, close,
+/// duplicate, replace, or allocate descriptors while this function runs. After success the caller
+/// must use only the returned owners, never the original raw numbers independently. After any
+/// error the process must terminate without retrying or continuing startup.
 ///
 /// # Errors
 ///
-/// Returns an error for a zero or excessive count, repeated adoption, allocation failure, a gap
-/// or invalid descriptor in the advertised range, or failed close-on-exec duplication/readback.
-pub fn duplicate_systemd_listen_descriptors(count: usize) -> io::Result<Vec<OwnedFd>> {
-    duplicate_contiguous_descriptors_once(
+/// Returns an error for a repeated attempt, incomplete or invalid environment, PID mismatch, zero
+/// or excessive count, range overflow, allocation failure, a descriptor gap, or failed
+/// close-on-exec update/readback. Every outcome permanently consumes the process-global latch.
+pub unsafe fn take_systemd_listen_fd_set_once() -> io::Result<SystemdListenFdSet> {
+    acquire_systemd_descriptor_take(&SYSTEMD_DESCRIPTORS_TAKEN)?;
+    let environment = parse_systemd_listen_environment(
+        env::var_os("LISTEN_PID"),
+        env::var_os("LISTEN_FDS"),
+        env::var_os("LISTEN_FDNAMES"),
+        std::process::id(),
+    )?;
+    let Some(environment) = environment else {
+        return Ok(SystemdListenFdSet {
+            fd_names: None,
+            descriptors: Vec::new(),
+        });
+    };
+    let prepared = prepare_contiguous_descriptor_range(
         MIN_PRIVATE_DESCRIPTOR,
-        count,
-        &SYSTEMD_DESCRIPTORS_SNAPSHOTTED,
-    )
+        environment.count,
+        environment.end,
+    )?;
+    // SAFETY: the startup contract excludes every concurrent environment reader or writer. The
+    // raw name value has already moved into `environment`, and removing stale activation metadata
+    // cannot affect the fully preflighted descriptor table.
+    unsafe { unset_systemd_listen_environment() };
+    // SAFETY: the caller promises sole process-local ownership of this exact systemd range. The
+    // prepared value proves allocation, bounds, validity and CLOEXEC readback all completed.
+    let descriptors = unsafe { take_prepared_systemd_listen_fd_range(prepared) };
+    Ok(SystemdListenFdSet {
+        fd_names: Some(environment.fd_names),
+        descriptors,
+    })
 }
 
-fn duplicate_contiguous_descriptors_once(
-    start: RawFd,
-    count: usize,
-    latch: &AtomicBool,
-) -> io::Result<Vec<OwnedFd>> {
-    if start < MIN_PRIVATE_DESCRIPTOR || count == 0 || count > MAX_SYSTEMD_INHERITED_DESCRIPTORS {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "inherited descriptor range is invalid",
-        ));
-    }
-    let count_raw = RawFd::try_from(count).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "inherited descriptor count overflows",
-        )
-    })?;
-    let end = start.checked_add(count_raw).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "inherited descriptor range overflows",
-        )
-    })?;
+fn acquire_systemd_descriptor_take(latch: &AtomicBool) -> io::Result<()> {
     latch
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
         .map_err(|_| {
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "inherited descriptors were already adopted",
+                "systemd descriptors were already taken",
             )
-        })?;
+        })
+}
 
+fn parse_systemd_listen_environment(
+    listen_pid: Option<OsString>,
+    listen_fds: Option<OsString>,
+    listen_fd_names: Option<OsString>,
+    current_pid: u32,
+) -> io::Result<Option<SystemdListenEnvironment>> {
+    let (pid, count, fd_names) = match (listen_pid, listen_fds, listen_fd_names) {
+        (None, None, None) => return Ok(None),
+        (Some(pid), Some(count), Some(fd_names)) => (pid, count, fd_names),
+        _ => return Err(invalid_data("systemd activation environment is incomplete")),
+    };
+    pid.to_str()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid == current_pid)
+        .ok_or_else(|| invalid_data("systemd activation PID is invalid"))?;
+    let count = count
+        .to_str()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0 && *count <= MAX_SYSTEMD_INHERITED_DESCRIPTORS)
+        .ok_or_else(|| invalid_data("systemd activation descriptor count is invalid"))?;
+    let count_raw = RawFd::try_from(count)
+        .map_err(|_| invalid_data("systemd activation descriptor count overflows"))?;
+    let end = MIN_PRIVATE_DESCRIPTOR
+        .checked_add(count_raw)
+        .ok_or_else(|| invalid_data("systemd activation descriptor range overflows"))?;
+    Ok(Some(SystemdListenEnvironment {
+        fd_names,
+        count,
+        end,
+    }))
+}
+
+fn prepare_contiguous_descriptor_range(
+    start: RawFd,
+    count: usize,
+    end: RawFd,
+) -> io::Result<PreparedSystemdListenFdRange> {
+    if start < MIN_PRIVATE_DESCRIPTOR
+        || count == 0
+        || count > MAX_SYSTEMD_INHERITED_DESCRIPTORS
+        || RawFd::try_from(count)
+            .ok()
+            .and_then(|count| start.checked_add(count))
+            != Some(end)
+    {
+        return Err(invalid_data(
+            "systemd activation descriptor range is invalid",
+        ));
+    }
     let mut descriptors = Vec::new();
     descriptors
         .try_reserve_exact(count)
-        .map_err(|_| io::Error::other("inherited descriptor owner allocation failed"))?;
+        .map_err(|_| io::Error::other("systemd descriptor owner allocation failed"))?;
     for descriptor in start..end {
         seal_raw_descriptor_cloexec(descriptor)?;
     }
-    for descriptor in start..end {
-        let duplicate = retry_raw_fcntl(descriptor, libc::F_DUPFD_CLOEXEC, MIN_PRIVATE_DESCRIPTOR)?;
-        // SAFETY: `F_DUPFD_CLOEXEC` returned a newly allocated descriptor. No pre-existing Rust
-        // owner can refer to that new table entry, and it moves immediately into RAII ownership.
-        descriptors.push(unsafe { OwnedFd::from_raw_fd(duplicate) });
+    Ok(PreparedSystemdListenFdRange {
+        start,
+        end,
+        descriptors,
+    })
+}
+
+/// Claim one completely prepared raw range without duplication.
+///
+/// # Safety
+///
+/// Every raw slot in the prepared range must remain valid and solely owned within this process by
+/// the caller, with no Rust I/O-safety owner. Nothing may mutate the process descriptor table
+/// between preparation and this operation. PID 1 retaining separate descriptors for the same
+/// underlying open file descriptions is permitted.
+unsafe fn take_prepared_systemd_listen_fd_range(
+    mut prepared: PreparedSystemdListenFdRange,
+) -> Vec<OwnedFd> {
+    for descriptor in prepared.start..prepared.end {
+        // SAFETY: the function contract provides sole ownership of each distinct raw slot. The
+        // complete range was preflighted above, and reserved capacity makes every following push
+        // allocation-free and infallible.
+        prepared
+            .descriptors
+            .push(unsafe { OwnedFd::from_raw_fd(descriptor) });
     }
-    Ok(descriptors)
+    prepared.descriptors
+}
+
+/// Remove the activation variables after their exact value and descriptor range are retained.
+///
+/// # Safety
+///
+/// No other thread, callback, signal handler, or foreign code may access the process environment.
+unsafe fn unset_systemd_listen_environment() {
+    // SAFETY: the function contract excludes concurrent environment access for all three fixed
+    // mutations, and no caller-controlled key is accepted.
+    unsafe {
+        env::remove_var("LISTEN_PID");
+        env::remove_var("LISTEN_FDS");
+        env::remove_var("LISTEN_FDNAMES");
+    }
 }
 
 fn seal_raw_descriptor_cloexec(descriptor: RawFd) -> io::Result<()> {
@@ -1653,7 +1809,7 @@ mod tests {
         io::{Read as _, Write as _},
         os::{
             fd::AsRawFd as _,
-            unix::{fs::MetadataExt as _, net::UnixStream},
+            unix::{ffi::OsStringExt as _, fs::MetadataExt as _, net::UnixStream},
         },
         process::{Command, Stdio},
     };
@@ -1669,6 +1825,9 @@ mod tests {
     const SIGCHLD_ACTION_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SIGCHLD_ACTION_CHILD";
     const SOCKET_NETWORK_NAMESPACE_CHILD_ENV: &str =
         "VOLPAROSSA_UAPI_SOCKET_NETWORK_NAMESPACE_CHILD";
+    const SYSTEMD_LISTEN_FD_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SYSTEMD_LISTEN_FD_CHILD";
+    const SYSTEMD_LISTEN_LATCH_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SYSTEMD_LISTEN_LATCH_CHILD";
+    const SYSTEMD_LISTEN_GAP_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SYSTEMD_LISTEN_GAP_CHILD";
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     const SECCOMP_CHILD_ENV: &str = "VOLPAROSSA_UAPI_SECCOMP_CHILD";
 
@@ -1728,58 +1887,338 @@ mod tests {
     }
 
     #[test]
-    fn systemd_descriptor_snapshot_is_bounded_sealed_owned_and_one_shot() {
-        let (first, second) = UnixStream::pair().expect("open inherited descriptor pair");
-        let start = first.as_raw_fd();
-        let latch = AtomicBool::new(false);
-        fcntl(&first, FcntlArg::F_SETFD(FdFlag::empty()))
-            .expect("model inheritable systemd descriptor");
+    fn systemd_listen_environment_is_exact_bounded_and_keeps_raw_names() {
+        assert!(
+            parse_systemd_listen_environment(None, None, None, 7)
+                .expect("exact absence")
+                .is_none()
+        );
 
-        let snapshot = duplicate_contiguous_descriptors_once(start, 1, &latch)
-            .expect("snapshot contiguous inherited descriptors");
-        assert_eq!(snapshot.len(), 1);
-        assert_ne!(snapshot[0].as_raw_fd(), start);
-        for descriptor in [&first, &second] {
-            let flags = FdFlag::from_bits_truncate(
-                fcntl(descriptor, FcntlArg::F_GETFD).expect("read inherited descriptor flags"),
+        let raw_names = OsString::from_vec(vec![b'f', 0xff, b':', b's', 0xfe]);
+        let environment = parse_systemd_listen_environment(
+            Some("7".into()),
+            Some("2".into()),
+            Some(raw_names.clone()),
+            7,
+        )
+        .expect("valid activation")
+        .expect("present activation");
+        assert_eq!(environment.fd_names, raw_names);
+        assert_eq!(environment.count, 2);
+        assert_eq!(environment.end, 5);
+
+        for malformed in [
+            (Some("7".into()), None, None),
+            (None, Some("2".into()), Some("a:b".into())),
+            (Some("8".into()), Some("2".into()), Some("a:b".into())),
+            (Some("7".into()), Some("0".into()), Some("".into())),
+            (Some("7".into()), Some("129".into()), Some("x".into())),
+            (
+                Some("7".into()),
+                Some("18446744073709551615".into()),
+                Some("x".into()),
+            ),
+            (
+                Some("not-a-pid".into()),
+                Some("2".into()),
+                Some("a:b".into()),
+            ),
+        ] {
+            assert!(
+                parse_systemd_listen_environment(malformed.0, malformed.1, malformed.2, 7,)
+                    .is_err()
             );
-            assert_eq!(flags, FdFlag::FD_CLOEXEC);
         }
-        drop(snapshot);
-        first
-            .set_nonblocking(true)
-            .expect("original first owner remains valid");
-        second
-            .set_nonblocking(true)
-            .expect("original second owner remains valid");
-        assert_eq!(
-            duplicate_contiguous_descriptors_once(start, 1, &latch)
-                .expect_err("second ownership attempt must fail")
-                .kind(),
-            io::ErrorKind::AlreadyExists
+
+        let maximum = parse_systemd_listen_environment(
+            Some("7".into()),
+            Some(MAX_SYSTEMD_INHERITED_DESCRIPTORS.to_string().into()),
+            Some("raw-names-are-validated-by-the-consumer".into()),
+            7,
+        )
+        .expect("maximum activation")
+        .expect("present maximum");
+        assert_eq!(maximum.count, MAX_SYSTEMD_INHERITED_DESCRIPTORS);
+    }
+
+    #[test]
+    fn systemd_take_preflights_everything_before_the_allocation_free_owner_loop() {
+        let source = include_str!("lib.rs");
+        let prepare_start = source
+            .find("fn prepare_contiguous_descriptor_range")
+            .expect("raw preparation function");
+        let prepare_end = source[prepare_start..]
+            .find("unsafe fn take_prepared_systemd_listen_fd_range")
+            .map(|offset| prepare_start + offset)
+            .expect("end of raw preparation function");
+        let preparation = &source[prepare_start..prepare_end];
+        let reserve = preparation
+            .find(".try_reserve_exact(count)")
+            .expect("fallible reservation");
+        let preflight = preparation
+            .find("seal_raw_descriptor_cloexec(descriptor)?")
+            .expect("complete raw preflight");
+        assert!(reserve < preflight);
+        assert!(!preparation.contains("OwnedFd::from_raw_fd"));
+
+        let owner_start = prepare_end;
+        let owner_end = source[owner_start..]
+            .find("unsafe fn unset_systemd_listen_environment")
+            .map(|offset| owner_start + offset)
+            .expect("end of raw ownership function");
+        let ownership_loop = &source[owner_start..owner_end];
+        let ownership = ownership_loop
+            .find("OwnedFd::from_raw_fd(descriptor)")
+            .expect("exact raw ownership boundary");
+        let after_ownership = &ownership_loop[ownership..];
+        for forbidden in [
+            "try_reserve",
+            "seal_raw_descriptor_cloexec",
+            "retry_raw_fcntl",
+            "libc::",
+        ] {
+            assert!(
+                !after_ownership.contains(forbidden),
+                "post-ownership loop contains forbidden operation {forbidden}"
+            );
+        }
+
+        let public_start = source
+            .find("pub unsafe fn take_systemd_listen_fd_set_once")
+            .expect("public startup takeover");
+        let public_end = source[public_start..]
+            .find("fn acquire_systemd_descriptor_take")
+            .map(|offset| public_start + offset)
+            .expect("end of public startup takeover");
+        let public_takeover = &source[public_start..public_end];
+        let prepare = public_takeover
+            .find("prepare_contiguous_descriptor_range")
+            .expect("prepare range before ownership");
+        let unset = public_takeover
+            .find("unset_systemd_listen_environment")
+            .expect("consume environment before ownership");
+        let take = public_takeover
+            .find("take_prepared_systemd_listen_fd_range")
+            .expect("take prepared range");
+        assert!(prepare < unset);
+        assert!(unset < take);
+    }
+
+    #[test]
+    fn systemd_listen_latch_is_consumed_before_absent_or_malformed_parsing() {
+        for environment in [
+            (None, None, None),
+            (Some("7".into()), None, Some("incomplete".into())),
+        ] {
+            let latch = AtomicBool::new(false);
+            acquire_systemd_descriptor_take(&latch).expect("first take");
+            let _ =
+                parse_systemd_listen_environment(environment.0, environment.1, environment.2, 7);
+            assert_eq!(
+                acquire_systemd_descriptor_take(&latch)
+                    .expect_err("second take rejected")
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_listen_fd_set_owns_exact_original_range_and_drop_closes_it() {
+        if env::var_os(SYSTEMD_LISTEN_FD_CHILD_ENV).is_some() {
+            let status_flags_before = [
+                retry_raw_fcntl(3, libc::F_GETFL, 0).expect("read fd 3 status flags"),
+                retry_raw_fcntl(4, libc::F_GETFL, 0).expect("read fd 4 status flags"),
+            ];
+            // SAFETY: the subprocess shell transferred exclusive fd 3 and 4 ownership, no Rust
+            // owner was constructed for either slot, and this exact test runs alone.
+            let set = unsafe { take_systemd_listen_fd_set_once() }
+                .expect("take inherited descriptor range");
+            assert_eq!(set.len(), 2);
+            assert!(!set.is_empty());
+            assert_eq!(set.fd_names(), Some(OsStr::new("first:second")));
+            for variable in ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
+                assert_eq!(
+                    env::var_os(variable),
+                    None,
+                    "successful takeover must consume {variable}"
+                );
+            }
+            assert_eq!(format!("{set:?}"), "SystemdListenFdSet(<redacted>)");
+            let (names, descriptors) = set.into_parts();
+            assert_eq!(names.as_deref(), Some(OsStr::new("first:second")));
+            assert_eq!(
+                descriptors
+                    .iter()
+                    .map(AsRawFd::as_raw_fd)
+                    .collect::<Vec<_>>(),
+                vec![3, 4]
+            );
+            for (index, descriptor) in descriptors.iter().enumerate() {
+                let descriptor_flags = FdFlag::from_bits_truncate(
+                    fcntl(descriptor, FcntlArg::F_GETFD).expect("read owned descriptor flags"),
+                );
+                assert_eq!(descriptor_flags, FdFlag::FD_CLOEXEC);
+                assert_eq!(
+                    fcntl(descriptor, FcntlArg::F_GETFL).expect("read owned status flags"),
+                    status_flags_before[index]
+                );
+            }
+            drop(descriptors);
+            for descriptor in [3, 4] {
+                assert_eq!(
+                    retry_raw_fcntl(descriptor, libc::F_GETFD, 0)
+                        .expect_err("dropped owner closes original slot")
+                        .raw_os_error(),
+                    Some(libc::EBADF)
+                );
+            }
+
+            let replacements = [
+                File::open("/dev/null").expect("reuse fd 3"),
+                File::open("/dev/null").expect("reuse fd 4"),
+            ];
+            assert_eq!(replacements[0].as_raw_fd(), 3);
+            assert_eq!(replacements[1].as_raw_fd(), 4);
+            // SAFETY: this deliberate second call exercises only the latch, which rejects before
+            // inspecting or taking the replacement descriptors.
+            assert_eq!(
+                unsafe { take_systemd_listen_fd_set_once() }
+                    .expect_err("one-shot take rejects a second call")
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            for replacement in &replacements {
+                fcntl(replacement, FcntlArg::F_GETFD)
+                    .expect("second take did not touch replacement descriptor");
+            }
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        let script = r#"
+exec 3</dev/null
+exec 4>/dev/null
+exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_SYSTEMD_LISTEN_FD_CHILD=1 "$0" --exact tests::systemd_listen_fd_set_owns_exact_original_range_and_drop_closes_it --nocapture --test-threads=1
+"#;
+        let output = Command::new("/bin/sh")
+            .arg("-eu")
+            .arg("-c")
+            .arg(script)
+            .arg(executable)
+            .output()
+            .expect("run exact systemd descriptor child");
+        assert!(
+            output.status.success(),
+            "systemd descriptor child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
     #[test]
-    fn systemd_descriptor_snapshot_rejects_counts_before_consuming_latch() {
-        let latch = AtomicBool::new(false);
-        assert_eq!(
-            duplicate_contiguous_descriptors_once(MIN_PRIVATE_DESCRIPTOR, 0, &latch)
-                .expect_err("empty inheritance rejected")
-                .kind(),
-            io::ErrorKind::InvalidInput
+    fn public_systemd_listen_take_consumes_absent_and_malformed_attempts() {
+        if let Some(mode) = env::var_os(SYSTEMD_LISTEN_LATCH_CHILD_ENV) {
+            if mode == "absent" {
+                // SAFETY: exact absence claims no raw descriptor and the isolated subprocess has
+                // no concurrent activation consumer.
+                let set = unsafe { take_systemd_listen_fd_set_once() }
+                    .expect("take exact absent activation");
+                assert!(set.is_empty());
+                assert_eq!(set.len(), 0);
+                assert_eq!(set.fd_names(), None);
+                let (names, descriptors) = set.into_parts();
+                assert_eq!(names, None);
+                assert!(descriptors.is_empty());
+            } else {
+                // SAFETY: malformed metadata is rejected before any raw descriptor is claimed;
+                // the isolated subprocess has no concurrent activation consumer.
+                assert_eq!(
+                    unsafe { take_systemd_listen_fd_set_once() }
+                        .expect_err("malformed activation rejected")
+                        .kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+            // SAFETY: the second invocation is guaranteed to stop at the consumed latch.
+            assert_eq!(
+                unsafe { take_systemd_listen_fd_set_once() }
+                    .expect_err("absent or malformed first take consumes latch")
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        for mode in ["absent", "malformed"] {
+            let mut command = Command::new(&executable);
+            command
+                .arg("--exact")
+                .arg("tests::public_systemd_listen_take_consumes_absent_and_malformed_attempts")
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env(SYSTEMD_LISTEN_LATCH_CHILD_ENV, mode)
+                .env_remove("LISTEN_PID")
+                .env_remove("LISTEN_FDNAMES");
+            if mode == "absent" {
+                command.env_remove("LISTEN_FDS");
+            } else {
+                command.env("LISTEN_FDS", "2");
+            }
+            let output = command.output().expect("run latch subprocess");
+            assert!(
+                output.status.success(),
+                "{mode} latch child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_descriptor_range_gap_fails_before_any_owner_is_formed() {
+        if env::var_os(SYSTEMD_LISTEN_GAP_CHILD_ENV).is_some() {
+            let source = File::open("/dev/null").expect("open gap source");
+            let first = retry_raw_fcntl(source.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10_000)
+                .expect("install first high descriptor");
+            let middle = retry_raw_fcntl(source.as_raw_fd(), libc::F_DUPFD_CLOEXEC, first + 1)
+                .expect("install middle high descriptor");
+            let last = retry_raw_fcntl(source.as_raw_fd(), libc::F_DUPFD_CLOEXEC, middle + 1)
+                .expect("install last high descriptor");
+            assert_eq!(middle, first + 1);
+            assert_eq!(last, middle + 1);
+            // SAFETY: each successful F_DUPFD_CLOEXEC result is a fresh descriptor with no other
+            // Rust owner. Moving the middle slot into a temporary owner closes exactly that gap.
+            drop(unsafe { OwnedFd::from_raw_fd(middle) });
+            // First and last are exclusively owned raw fixtures. The deliberate middle gap makes
+            // preflight fail before the function forms any owner.
+            let Err(error) = prepare_contiguous_descriptor_range(first, 3, first + 3) else {
+                panic!("descriptor gap was accepted");
+            };
+            assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+            for descriptor in [first, last] {
+                retry_raw_fcntl(descriptor, libc::F_GETFD, 0)
+                    .expect("preflight failure leaves valid raw fixture open");
+                // SAFETY: the failed takeover formed no owners, so the test still exclusively
+                // owns each raw F_DUPFD_CLOEXEC result and closes it exactly once here.
+                drop(unsafe { OwnedFd::from_raw_fd(descriptor) });
+            }
+            return;
+        }
+
+        let executable = env::current_exe().expect("current test executable");
+        let output = Command::new(executable)
+            .arg("--exact")
+            .arg("tests::systemd_descriptor_range_gap_fails_before_any_owner_is_formed")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(SYSTEMD_LISTEN_GAP_CHILD_ENV, "1")
+            .output()
+            .expect("run descriptor gap child");
+        assert!(
+            output.status.success(),
+            "descriptor gap child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            duplicate_contiguous_descriptors_once(
-                MIN_PRIVATE_DESCRIPTOR,
-                MAX_SYSTEMD_INHERITED_DESCRIPTORS + 1,
-                &latch,
-            )
-            .expect_err("excess inheritance rejected")
-            .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert!(!latch.load(Ordering::Acquire));
     }
 
     #[test]

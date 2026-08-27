@@ -62,7 +62,7 @@ test-helper-live-worker-identity-preview:
     ./tests/helper/require-live-worker-identity-proof.sh --preview
 
 build-helper-live-worker-identity-proof:
-    cargo build --locked -p volparossa-helper
+    cargo build --locked -p volparossa-helper-entry
     cargo build --locked -p volparossa-helper \
         --example volparossa-helper-production-ipc-probe
     install -m 0755 target/debug/volparossa-helper \

@@ -1,0 +1,42 @@
+[package]
+name = "volparossa-helper-entry"
+description = "Audited executable bootstrap for the VOLPAROSSA privileged helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+
+[[bin]]
+name = "volparossa-helper"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+volparossa-helper = { path = "../volparossa-helper", version = "=0.1.0" }
+volparossa-linux-uapi = { path = "../volparossa-linux-uapi", version = "=0.1.0" }
+
+[dev-dependencies]
+rustix.workspace = true
+
+# This executable entry is the single process-start boundary that asserts ownership of systemd's
+# inherited raw descriptor range. The helper library itself continues to inherit the workspace's
+# stronger `unsafe_code = "forbid"`; every other lint remains identical here.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+alloc_instead_of_core = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

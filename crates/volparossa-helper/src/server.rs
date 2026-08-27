@@ -15,7 +15,7 @@ use tokio::{
     task::JoinSet,
     time::timeout,
 };
-use volparossa_linux_uapi::send_fd_with_binding;
+use volparossa_linux_uapi::{SystemdListenFdSet, send_fd_with_binding};
 use volparossa_routing::{
     HelperRequest, MAX_HELPER_FRAME, decode_request, descriptor_fd_binding, encode_response,
     helper_response, safe_preview,
@@ -102,11 +102,23 @@ pub enum ServerError {
 /// Returns an error when inherited custody cannot be recovered, runtime construction, protected
 /// helper startup, service I/O, in-memory cleanup, or durable ownership shutdown cannot be
 /// completed.
-pub fn run_production_server() -> Result<(), ServerError> {
+pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), ServerError> {
     if Handle::try_current().is_ok() {
         return Err(ServerError::RuntimeContextConflict);
     }
-    refuse_unrecoverable_inherited_custody().map_err(|_| ServerError::InheritedCustody)?;
+    refuse_unrecoverable_inherited_custody(inherited).map_err(|_| ServerError::InheritedCustody)?;
+    let runtime = Builder::new_multi_thread().enable_all().build()?;
+    let server = bind_production_socket()?;
+    runtime.block_on(run_server(server))
+}
+
+#[cfg(test)]
+fn run_production_server_with_empty_custody_for_test() -> Result<(), ServerError> {
+    if Handle::try_current().is_ok() {
+        return Err(ServerError::RuntimeContextConflict);
+    }
+    crate::systemd_custody::refuse_empty_inherited_custody_for_test()
+        .map_err(|_| ServerError::InheritedCustody)?;
     let runtime = Builder::new_multi_thread().enable_all().build()?;
     let server = bind_production_socket()?;
     runtime.block_on(run_server(server))
@@ -421,17 +433,14 @@ impl ConnectionError {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::File,
         io::{Read, Write},
         os::fd::OwnedFd,
         os::unix::net::UnixStream as StdUnixStream,
-        process::{Command, Stdio},
         sync::Arc,
     };
 
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use nix::unistd::{getegid, geteuid};
-    use rustix::process::{PidfdFlags, getpid, pidfd_open};
     use volparossa_linux_uapi::receive_fd_with_binding;
     use volparossa_routing::{
         AcquireIngressSocket, AcquireTransportSocket, BindHelperRuntime, CleanupOwned,
@@ -442,8 +451,6 @@ mod tests {
     };
 
     use super::*;
-
-    const INHERITED_CUSTODY_FIXTURE: &str = "VOLPAROSSA_INHERITED_CUSTODY_FIXTURE";
 
     #[tokio::test]
     async fn peer_credentials_and_bounded_frame_work_without_network_changes() {
@@ -788,7 +795,7 @@ mod tests {
             .find("Handle::try_current().is_ok()")
             .expect("nested-runtime preflight");
         let custody = entry
-            .find("refuse_unrecoverable_inherited_custody()")
+            .find("refuse_unrecoverable_inherited_custody(inherited)")
             .expect("inherited custody preflight");
         let runtime = entry
             .find("Builder::new_multi_thread().enable_all().build()?")
@@ -816,62 +823,10 @@ mod tests {
     }
 
     #[test]
-    fn inherited_custody_subprocess_fixture() {
-        if std::env::var_os(INHERITED_CUSTODY_FIXTURE).is_none() {
-            return;
-        }
-        let result = run_production_server();
-        assert!(matches!(result, Err(ServerError::InheritedCustody)));
-    }
-
-    #[test]
-    fn inherited_custody_is_refused_through_real_fd_three_and_four() {
-        let executable = std::env::current_exe().expect("current test executable");
-        let name = format!("volparossa-custody-v1-{}", "0".repeat(64));
-        let names = format!("{name}:{name}");
-        let script = r#"
-exec 3<&0
-exec 4>&1
-exec 0</dev/null
-exec 1>&2
-exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES="$1" VOLPAROSSA_INHERITED_CUSTODY_FIXTURE=1 "$0" --exact server::tests::inherited_custody_subprocess_fixture --nocapture
-"#;
-        for reversed in [false, true] {
-            let pidfd = Stdio::from(
-                pidfd_open(getpid(), PidfdFlags::empty())
-                    .expect("open current-process pidfd fixture"),
-            );
-            let network_namespace = Stdio::from(
-                File::open("/proc/self/ns/net").expect("open network namespace fixture"),
-            );
-            let (stdin, stdout) = if reversed {
-                (network_namespace, pidfd)
-            } else {
-                (pidfd, network_namespace)
-            };
-            let output = Command::new("/bin/sh")
-                .arg("-eu")
-                .arg("-c")
-                .arg(script)
-                .arg(&executable)
-                .arg(&names)
-                .stdin(stdin)
-                .stdout(stdout)
-                .stderr(Stdio::piped())
-                .output()
-                .expect("run inherited-custody subprocess");
-            assert!(
-                output.status.success(),
-                "subprocess failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    #[test]
     fn nested_runtime_is_rejected_before_any_production_startup() {
         let runtime = Builder::new_current_thread().build().expect("test runtime");
-        let result = runtime.block_on(async { run_production_server() });
+        let result =
+            runtime.block_on(async { run_production_server_with_empty_custody_for_test() });
         assert!(matches!(result, Err(ServerError::RuntimeContextConflict)));
     }
 }

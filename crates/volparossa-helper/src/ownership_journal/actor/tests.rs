@@ -1987,7 +1987,7 @@ fn affine_actor_api_is_bounded_redacted_and_only_wrapped_for_production() {
 
     let actor_source = include_str!("../actor.rs");
     let library_source = include_str!("../../lib.rs");
-    let main_source = include_str!("../../main.rs");
+    let main_source = include_str!("../../../../volparossa-helper-entry/src/main.rs");
     let engine_source = include_str!("../../engine_v3.rs");
     let server_source = include_str!("../../server.rs");
     assert!(actor_source.contains("sync_channel(COMMAND_CHANNEL_CAPACITY)"));
