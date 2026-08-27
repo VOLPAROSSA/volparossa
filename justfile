@@ -58,6 +58,9 @@ test-netns-fixed-icmp-echo-proof:
 test-helper-live-worker-identity-contract:
     ./tests/helper/test-live-worker-identity-contract.sh
 
+test-helper-boundary-evidence:
+    ./tests/helper/test-helper-boundary-evidence-v1.sh
+
 test-helper-live-worker-identity-preview:
     ./tests/helper/require-live-worker-identity-proof.sh --preview
 

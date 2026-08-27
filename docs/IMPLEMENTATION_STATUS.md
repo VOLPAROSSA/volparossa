@@ -142,11 +142,19 @@ single clean-build A01--A15 run; the score is not a release claim.
   stdout/stderr go to `null`. Normal `SIGTERM` retirement must leave the journal byte-for-byte and
   metadata-identical, release the same captured lock inode that was proven exclusively held while
   the helper ran, remove the socket, empty the descriptor store and remove the exact old process and
-  cgroup. Both phases use a private runtime bind and
-  require host `/run/volparossa` to remain absent. The expanded driver and its local contracts pass,
-  but it has not yet run in the required disposable Debian 13 VM, validates no installed package or
-  shipped-unit restart behavior, and closes no checkbox or scorecard row until durable live evidence
-  exists.
+  cgroup. Both phases use a private runtime bind and require host `/run/volparossa` to remain
+  absent. A successful execute-mode run now emits one bounded canonical helper-boundary evidence-v1
+  JSON document on stdout only after separate observed clean-source and executed-artifact
+  bookends, both distinct invocations, retirement, equal digests for the exact enumerated host
+  records at two fences, strict semantic validation and removal of the root-only stage; human
+  output is confined to stderr. It does not infer that a pre-existing binary was built from the
+  observed commit. Its validator rejects reordered or missing
+  checks and malformed or internally inconsistent false-PASS combinations; it is not a
+  cryptographic attestation of who ran the producer. The expanded driver and its local contracts pass,
+  but it has not yet run in a trusted job which builds the artifacts from one unchanged clean
+  commit immediately before the required disposable Debian 13 VM proof,
+  validates no installed package or shipped-unit restart behavior, and closes no checkbox or
+  scorecard row until durable live evidence exists.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

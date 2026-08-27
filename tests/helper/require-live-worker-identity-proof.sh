@@ -25,6 +25,7 @@ print_plan() {
     printf '%s\n' \
         'VOLPAROSSA live worker-identity proof plan:' \
         '  require a disposable Debian 13 amd64 VM, root, and the exact systemd v257 manager;' \
+        '  bookend one unchanged clean Git revision and three exact staged artifact hashes;' \
         '  copy the already-built real helper into one validated root-only temporary stage;' \
         '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
         '  bind account files and the system bus socket read-only in two sequential invocations;' \
@@ -51,7 +52,8 @@ print_plan() {
         '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
         '  collect that exact second invocation and remove the validated temporary stage;' \
         '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
-        '    and network digests.' \
+        '    and network digests;' \
+        '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
         'This stages the helper identity and production IPC boundary. It creates no host account, link,' \
         'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
         'It is not package-install, restart-recovery, CleanupOwned, datapath, or A01-A15 evidence.'
@@ -102,7 +104,7 @@ if [ "$approval" != yes ]; then
     exit 64
 fi
 
-print_plan
+print_plan >&2
 
 blocked() {
     printf 'BLOCKED: %s\n' "$1" >&2
@@ -143,7 +145,7 @@ if ! systemd-detect-virt --vm --quiet; then
 fi
 
 for command_name in \
-    awk cat chmod chown cmp cp dpkg find flock getent id install ip jq mkfifo mktemp mv nft \
+    awk cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
     paste readlink rm sed setpriv sha256sum sleep sort stat systemctl systemd-detect-virt \
     systemd-run tc tr uname
 do
@@ -176,6 +178,51 @@ fi
 
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
+evidence_validator=$script_directory/validate-helper-boundary-evidence-v1.sh
+if [ ! -f "$evidence_validator" ] || [ ! -x "$evidence_validator" ] \
+    || [ -L "$evidence_validator" ] \
+    || [ "$(stat -Lc '%F:%h' "$evidence_validator" 2>/dev/null || true)" != 'regular file:1' ]; then
+    blocked 'the helper-boundary evidence validator is not one executable regular file'
+fi
+repository_root=$(git -c safe.directory="$repository_directory" -C "$repository_directory" \
+    rev-parse --show-toplevel 2>/dev/null) \
+    || blocked 'the repository root cannot be established'
+if [ "$repository_root" != "$repository_directory" ]; then
+    blocked 'the live proof is not running from the exact repository root'
+fi
+source_commit=$(git -c safe.directory="$repository_directory" -C "$repository_directory" \
+    rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || blocked 'the source commit cannot be established'
+case ${#source_commit} in
+    40|64) ;;
+    *) blocked 'the source commit is not a canonical Git revision' ;;
+esac
+case $source_commit in
+    *[!0-9a-f]*|0000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000)
+        blocked 'the source commit is not a canonical Git revision'
+        ;;
+esac
+source_status=$(GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$repository_directory" \
+    -C "$repository_directory" status --porcelain=v1 --untracked-files=normal \
+    --ignore-submodules=none 2>/dev/null) \
+    || blocked 'the source worktree state cannot be established'
+if [ -n "$source_status" ]; then
+    blocked 'the source worktree must be clean before live evidence execution'
+fi
+kernel_release=$(uname -r) || blocked 'the kernel release cannot be established'
+virtualization=vm
+case $kernel_release in
+    ''|*[!A-Za-z0-9._+~-]*) blocked 'the kernel release is not bounded ASCII metadata' ;;
+esac
+case $kernel_release in
+    [A-Za-z0-9]*) ;;
+    *) blocked 'the kernel release is not bounded ASCII metadata' ;;
+esac
+if [ "${#kernel_release}" -gt 128 ] || [ "${#virtualization}" -gt 64 ]; then
+    blocked 'the execution environment metadata exceeds its fixed bound'
+fi
+started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+    || blocked 'the execution start time cannot be established'
 VP_CAPTURE_OWNER_UID=0
 VP_CAPTURE_OWNER_GID=0
 export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID
@@ -213,6 +260,10 @@ unit_may_own=no
 unit_invocation_id=
 unit_ownership_marker=
 cleanup_error=no
+worker_fdstore_before_retirement=
+worker_retired_load_state=
+production_fdstore_during_run=
+production_retired_load_state=
 
 unit_name_is_safe() {
     case $unit_name in
@@ -538,28 +589,42 @@ retire_unit() {
     done
 }
 
+remove_temporary_stage() {
+    if [ -n "$temporary_stage" ]; then
+        case $temporary_stage in
+            /var/tmp/volparossa-helper-live-proof.??????)
+                observed_identity=$(stat -Lc '%d:%i:%F:%u:%g:%a' "$temporary_stage" 2>/dev/null || true)
+                if [ "$observed_identity" = "$temporary_stage_identity" ]; then
+                    rm -rf --one-file-system -- "$temporary_stage" || return 1
+                    if [ -e "$temporary_stage" ] || [ -L "$temporary_stage" ]; then
+                        return 1
+                    fi
+                    temporary_stage=
+                    temporary_stage_identity=
+                elif [ ! -e "$temporary_stage" ] && [ ! -L "$temporary_stage" ]; then
+                    temporary_stage=
+                    temporary_stage_identity=
+                else
+                    printf 'Refusing to remove replaced proof stage: %s\n' "$temporary_stage" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                printf 'Refusing to remove unsafe proof stage: %s\n' "$temporary_stage" >&2
+                return 1
+                ;;
+        esac
+    fi
+}
+
 cleanup() {
     saved_status=$?
     trap - EXIT HUP INT TERM
     if ! retire_unit; then
         cleanup_error=yes
     fi
-    if [ -n "$temporary_stage" ]; then
-        case $temporary_stage in
-            /var/tmp/volparossa-helper-live-proof.??????)
-                observed_identity=$(stat -Lc '%d:%i:%F:%u:%g:%a' "$temporary_stage" 2>/dev/null || true)
-                if [ "$observed_identity" = "$temporary_stage_identity" ]; then
-                    rm -rf --one-file-system -- "$temporary_stage" || cleanup_error=yes
-                elif [ -e "$temporary_stage" ]; then
-                    printf 'Refusing to remove replaced proof stage: %s\n' "$temporary_stage" >&2
-                    cleanup_error=yes
-                fi
-                ;;
-            *)
-                printf 'Refusing to remove unsafe proof stage: %s\n' "$temporary_stage" >&2
-                cleanup_error=yes
-                ;;
-        esac
+    if ! remove_temporary_stage; then
+        cleanup_error=yes
     fi
     if [ "$cleanup_error" = yes ] && [ "$saved_status" -eq 0 ]; then
         saved_status=1
@@ -1207,6 +1272,7 @@ if [ "$observed_notify_access" != main ] \
     || [ "$observed_fdstore_preserve" != yes ] || [ "$observed_fdstore_count" != 2 ]; then
     proof_ok=no
 fi
+worker_fdstore_before_retirement=$observed_fdstore_count
 printf '%s\n' \
     'VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass' \
     'VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass' \
@@ -1289,6 +1355,7 @@ if [ "$proof_ok" = yes ]; then
     else
         unit_name=$worker_unit_name
         reuse_load_state=$(unit_load_state) || reuse_load_state=
+        worker_retired_load_state=$reuse_load_state
         if [ "$reuse_load_state" != not-found ] \
             || ! retired_runtime_is_absent \
                 "$worker_unit_name" "$worker_control_group" 0 ''; then
@@ -1588,6 +1655,7 @@ if [ "$proof_ok" = yes ]; then
         || [ "$production_standard_error" != null ]; then
         production_ok=no
     fi
+    production_fdstore_during_run=$production_fdstore_count
 
     if capture_unit_property CapabilityBoundingSet \
         "$temporary_stage/production-bounding.raw" \
@@ -1793,10 +1861,193 @@ fi
 if [ "$proof_ok" != yes ]; then
     failed 'the staged helper did not produce the exact identity/fdstore and production IPC proofs'
 fi
+if [ "$cleanup_error" != no ]; then
+    failed 'the staged proof recorded an earlier retirement or cleanup failure'
+fi
+if [ "$worker_fdstore_before_retirement" != 2 ] \
+    || [ "$worker_retired_load_state" != not-found ] \
+    || [ "$production_fdstore_during_run" != 0 ] \
+    || [ "$production_retired_load_state" != not-found ]; then
+    failed 'the retained fdstore or exact-unit retirement observations are incomplete'
+fi
+
+source_final=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source") \
+    || failed 'the helper source metadata could not be revalidated'
+source_digest_final=$(vp_capture_sha256_file "$helper_source") \
+    || failed 'the helper source could not be revalidated'
+staged_digest_final=$(vp_capture_sha256_file "$temporary_stage/volparossa-helper") \
+    || failed 'the staged helper could not be revalidated'
+ipc_probe_final=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_probe_source") \
+    || failed 'the production IPC probe metadata could not be revalidated'
+ipc_probe_digest_final=$(vp_capture_sha256_file "$ipc_probe_source") \
+    || failed 'the production IPC probe source could not be revalidated'
+staged_ipc_probe_digest_final=$(vp_capture_sha256_file \
+    "$temporary_stage/production-ipc-probe") \
+    || failed 'the staged production IPC probe could not be revalidated'
+ipc_hook_final=$(stat -Lc '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$ipc_hook_source") \
+    || failed 'the production IPC hook metadata could not be revalidated'
+ipc_hook_digest_final=$(vp_capture_sha256_file "$ipc_hook_source") \
+    || failed 'the production IPC hook source could not be revalidated'
+staged_ipc_hook_digest_final=$(vp_capture_sha256_file \
+    "$temporary_stage/production-ipc-hook") \
+    || failed 'the staged production IPC hook could not be revalidated'
+if [ "$source_before" != "$source_final" ] \
+    || [ "$source_digest_before" != "$source_digest_final" ] \
+    || [ "$staged_digest" != "$staged_digest_final" ] \
+    || [ "$ipc_probe_before" != "$ipc_probe_final" ] \
+    || [ "$ipc_probe_digest_before" != "$ipc_probe_digest_final" ] \
+    || [ "$staged_ipc_probe_digest" != "$staged_ipc_probe_digest_final" ] \
+    || [ "$ipc_hook_before" != "$ipc_hook_final" ] \
+    || [ "$ipc_hook_digest_before" != "$ipc_hook_digest_final" ] \
+    || [ "$staged_ipc_hook_digest" != "$staged_ipc_hook_digest_final" ]; then
+    failed 'a source or staged proof artifact changed during live execution'
+fi
+final_repository_root=$(git -c safe.directory="$repository_directory" \
+    -C "$repository_directory" rev-parse --show-toplevel 2>/dev/null) \
+    || failed 'the repository root could not be revalidated'
+final_source_commit=$(git -c safe.directory="$repository_directory" \
+    -C "$repository_directory" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || failed 'the source commit could not be revalidated'
+final_source_status=$(GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$repository_directory" \
+    -C "$repository_directory" status --porcelain=v1 --untracked-files=normal \
+    --ignore-submodules=none 2>/dev/null) \
+    || failed 'the source worktree state could not be revalidated'
+if [ "$final_repository_root" != "$repository_directory" ] \
+    || [ "$final_source_commit" != "$source_commit" ] \
+    || [ -n "$final_source_status" ]; then
+    failed 'the exact clean source revision changed during live execution'
+fi
+
+finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+    || failed 'the execution finish time cannot be established'
+generated_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+    || failed 'the report generation time cannot be established'
+report_path=$temporary_stage/helper-boundary-evidence-v1.json
+jq -n -S -c \
+    --arg source_commit "$source_commit" \
+    --arg helper_digest "$staged_digest" \
+    --arg probe_digest "$staged_ipc_probe_digest" \
+    --arg hook_digest "$staged_ipc_hook_digest" \
+    --arg kernel_release "$kernel_release" \
+    --arg virtualization "$virtualization" \
+    --arg started_at "$started_at" \
+    --arg finished_at "$finished_at" \
+    --arg generated_at "$generated_at" \
+    --arg worker_invocation "$worker_invocation_id" \
+    --arg production_invocation "$production_invocation_id" \
+    --arg before_digest "$before_digest" \
+    --arg after_digest "$after_digest" \
+    --arg state_records "$state_records" \
+    --arg worker_fdstore_before_retirement "$worker_fdstore_before_retirement" \
+    --arg worker_retired_load_state "$worker_retired_load_state" \
+    --arg production_fdstore_during_run "$production_fdstore_during_run" \
+    --arg production_retired_load_state "$production_retired_load_state" '
+    {
+      schema_version: 1,
+      report_kind: "volparossa-helper-boundary-evidence",
+      observed_source: {commit_sha: $source_commit, worktree_clean: true},
+      observed_artifact_hashes: {
+        volparossa_helper_sha256: $helper_digest,
+        production_ipc_probe_sha256: $probe_digest,
+        production_ipc_unit_hook_sha256: $hook_digest
+      },
+      environment: {
+        debian_version: "13",
+        dpkg_architecture: "amd64",
+        machine: "x86_64",
+        kernel_release: $kernel_release,
+        systemd_version: 257,
+        virtualization: $virtualization
+      },
+      started_at: $started_at,
+      finished_at: $finished_at,
+      generated_at: $generated_at,
+      invocation_ids: [$worker_invocation, $production_invocation],
+      worker: {
+        fdstore_before_retirement: ($worker_fdstore_before_retirement | tonumber),
+        unit_load_state_after_retirement: $worker_retired_load_state
+      },
+      production: {
+        argumentless: true,
+        fdstore_during_run: ($production_fdstore_during_run | tonumber),
+        unit_load_state_after_retirement: $production_retired_load_state
+      },
+      retirement: {journal_unchanged: true, lock_released: true, socket_absent: true},
+      enumerated_host_state: {
+        before_sha256: $before_digest,
+        after_sha256: $after_digest,
+        equal_at_fences: true,
+        records: ($state_records | split(" "))
+      },
+      scope: {
+        helper_boundary_only: true,
+        cleanup_owned: false,
+        restart_recovery: false,
+        installed_package: false,
+        datapath: false,
+        acceptance_a01_a15: false
+      },
+      checks: [
+        "OBSERVED_SOURCE_TREE_CLEAN",
+        "OBSERVED_ARTIFACT_HASHES",
+        "DEBIAN_13_AMD64_X86_64_SYSTEMD_257_VM",
+        "WORKER_INVOCATION_BOUND",
+        "WORKER_LIVE_IDENTITY",
+        "WORKER_FDSTORE_TWO_BEFORE_RETIREMENT",
+        "WORKER_RETIRED_UNIT_NOT_FOUND",
+        "PRODUCTION_DISTINCT_INVOCATION_BOUND",
+        "PRODUCTION_ARGUMENTLESS",
+        "PRODUCTION_IPC_BOUNDARY",
+        "PRODUCTION_FDSTORE_ZERO_DURING_RUN",
+        "PRODUCTION_RETIRED_UNIT_NOT_FOUND",
+        "RETIREMENT_JOURNAL_UNCHANGED",
+        "RETIREMENT_LOCK_RELEASED",
+        "RETIREMENT_SOCKET_ABSENT",
+        "ENUMERATED_HOST_STATE_EQUAL_AT_FENCES"
+      ] | map({id: ., result: "PASS"}),
+      overall: "PASS"
+    }
+' >"$report_path" || failed 'the canonical helper-boundary report could not be generated'
+chmod 0600 "$report_path" || failed 'the helper-boundary report mode could not be fixed'
+vp_capture_file_is_safe "$report_path" \
+    || failed 'the helper-boundary report is not one validated private file'
+validator_stdout=$temporary_stage/report-validator.stdout
+validator_stderr=$temporary_stage/report-validator.stderr
+install -o root -g root -m 0600 /dev/null "$validator_stdout" "$validator_stderr" \
+    || failed 'private validator output files could not be created'
+set +e
+"$evidence_validator" "$report_path" >"$validator_stdout" 2>"$validator_stderr"
+validator_status=$?
+set -e
+if ! vp_capture_file_is_safe "$validator_stdout" \
+    || ! vp_capture_file_is_safe "$validator_stderr" \
+    || [ "$validator_status" -ne 0 ] \
+    || [ -s "$validator_stdout" ] \
+    || [ -s "$validator_stderr" ]; then
+    failed 'the helper-boundary report failed strict validation'
+fi
+validated_report=$(cat "$report_path") \
+    || failed 'the validated helper-boundary report could not be retained for publication'
+if [ -z "$validated_report" ] || [ "${#validated_report}" -gt 65535 ]; then
+    failed 'the validated helper-boundary report has an invalid publication size'
+fi
+publication_source_commit=$(git -c safe.directory="$repository_directory" \
+    -C "$repository_directory" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || failed 'the source commit could not be publication-fenced'
+publication_source_status=$(GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$repository_directory" \
+    -C "$repository_directory" status --porcelain=v1 --untracked-files=normal \
+    --ignore-submodules=none 2>/dev/null) \
+    || failed 'the source worktree state could not be publication-fenced'
+if [ "$publication_source_commit" != "$source_commit" ] \
+    || [ -n "$publication_source_status" ]; then
+    failed 'the exact clean source revision changed before report publication'
+fi
+if ! remove_temporary_stage; then
+    cleanup_error=yes
+    failed 'the validated temporary proof stage could not be removed before publication'
+fi
 
 printf '%s\n' \
     'PASS: staged helper identity, exact two-FD custody, production IPC, clean stop, confinement, and pin release were proved.' \
-    "HOST_STATE_BEFORE_SHA256=$before_digest" \
-    "HOST_STATE_AFTER_SHA256=$after_digest" \
-    'SCOPE=STAGED_HELPER_IDENTITY_AND_PRODUCTION_IPC_BOUNDARY_ONLY' \
-    'No CleanupOwned result is claimed; no host account or network configuration was changed, and this is not A01-A15 evidence.'
+    'SCOPE: helper boundary only; no CleanupOwned, datapath, or A01-A15 result is claimed.' >&2
+printf '%s\n' "$validated_report"

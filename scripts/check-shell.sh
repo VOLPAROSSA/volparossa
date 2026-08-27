@@ -28,7 +28,9 @@ set -- \
     tests/helper/lib/live-worker-proof-capture.sh \
     tests/helper/lib/production-ipc-unit-hook.sh \
     tests/helper/require-live-worker-identity-proof.sh \
+    tests/helper/test-helper-boundary-evidence-v1.sh \
     tests/helper/test-live-worker-identity-contract.sh \
+    tests/helper/validate-helper-boundary-evidence-v1.sh \
     tests/integration/run.sh \
     tests/integration/test-harness.sh \
     tests/integration/validate-report.sh \

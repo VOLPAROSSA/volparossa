@@ -1710,6 +1710,25 @@ mod tests {
     }
 
     #[test]
+    fn helper_boundary_fixture_validates_against_normative_draft_2020_12_schema() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/helper/helper-boundary-evidence-v1.schema.json"
+        ))
+        .unwrap();
+        jsonschema::draft202012::meta::validate(&schema).unwrap();
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .should_validate_formats(true)
+            .build(&schema)
+            .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/helper/fixtures/helper-boundary-evidence-v1.pass.json"
+        ))
+        .unwrap();
+        assert!(validator.is_valid(&fixture));
+    }
+
+    #[test]
     fn suite_selection_is_exact_and_partial_suites_are_blocked() {
         let host_digest = digest('d');
         for (suite, selected) in [

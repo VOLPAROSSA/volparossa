@@ -58,7 +58,9 @@ for script_path in \
     tests/helper/lib/live-worker-proof-capture.sh \
     tests/helper/lib/production-ipc-unit-hook.sh \
     tests/helper/require-live-worker-identity-proof.sh \
+    tests/helper/test-helper-boundary-evidence-v1.sh \
     tests/helper/test-live-worker-identity-contract.sh \
+    tests/helper/validate-helper-boundary-evidence-v1.sh \
     tests/integration/run.sh \
     tests/integration/validate-report.sh \
     tests/netns/run-topology.sh \
@@ -79,6 +81,8 @@ do
     sh -n "$REPOSITORY_DIRECTORY/$script_path"
 done
 jq -e . "$REPOSITORY_DIRECTORY/tests/integration/acceptance-report.schema.json" >/dev/null
+jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-boundary-evidence-v1.schema.json" >/dev/null
+"$REPOSITORY_DIRECTORY/tests/helper/test-helper-boundary-evidence-v1.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-live-worker-identity-contract.sh"
 
 /bin/mkdir "$TEMPORARY_DIRECTORY/bin"
