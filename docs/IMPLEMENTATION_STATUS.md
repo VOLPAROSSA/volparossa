@@ -260,11 +260,22 @@ single clean-build A01--A15 run; the score is not a release claim.
   separate barrier and accepting success only after an exact complete descriptor-store inventory
   attestation. Before its first send it also rejects the target name or either role identity already
   present anywhere in the bounded inventory, including identity reuse under another name. The
-  adapter is called only by the private live-proof selector and has no production
-  worker, journal, server or engine caller, so the production handoff does not yet publish anything
-  to PID 1. Ambiguous or partially observed publication remains fail-closed;
-  it is never treated as restart custody and is not removed automatically. Ambiguous spawn remains
-  permanently fail-closed.
+  adapter has two private non-test callers: the live-proof selector and dormant supervisor
+  publisher. Neither is connected to `ProductionServer`, `HelperEngine` or a request path, so the
+  normal production handoff does not yet publish anything to PID 1. Ambiguous or partially
+  observed publication remains fail-closed;
+  it is never treated as restart custody and is not removed automatically. Each possibly sent
+  publication now poisons the gate before `sendmsg(2)` with an opaque monotone attempt identity
+  bound to the exact unit object path, `MainPID`, parsed notify endpoint, custody name and
+  role-ordered local identities; that identity is retained in the normal manager-may-own terminal.
+  A callerless observation-only reconciler holds that gate and borrows the affine owners while it
+  sends one causal non-mutating manager barrier, requires two identical complete bounded D-Bus
+  inventory identity projections plus exact service properties and remeasures the local binding. It
+  can report exact name/identity-correlated present, exact absent, or unresolved evidence, but uses
+  types which cannot arm/adopt/remove, advance the journal, open dispatch, clear poison or authorize
+  retry. Ambiguous spawn remains
+  permanently fail-closed. `SupervisorDropped` without a returned normal-failure attempt identity
+  is deliberately not reconcilable in this slice.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
   transiently retain a `Registered` owner while record or detached process ownership remains; after
   confirmed reap and complete six-index purge, that same owner settles without a second signal or
@@ -299,8 +310,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   `NEWNET` without altering host-network state.
 
   Production publication remains deliberately disconnected from `ProductionServer`, `HelperEngine`
-  and every request path. No production terminal consumer, manager-inventory
-  adoption/reconciliation, inherited-custody recovery, request-path issuance writer,
+  and every request path. No production terminal consumer of the in-process observer,
+  cross-process/restart-stable manager-inventory reconciliation or adoption,
+  inherited-custody recovery, request-path issuance writer,
   `MayOwnPrepare` reaper or complete restart settlement exists. Startup therefore continues to block
   on `MayOwnCustody` before retiring any `Intent`; AV1-10 remains Open and this slice adds no
   scorecard, datapath or acceptance points.
@@ -351,9 +363,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   publication component sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
-  From the first publish-send attempt, every non-success result remains manager-may-own until that
-  inventory proof, and no error path issues `FDSTOREREMOVE`. Only the private live-proof selector
-  calls it; there is still no production caller and no recorded live transient-unit result. This is
+  Every publication failure returned after the first send is manager-may-own, leaves the gate
+  permanently poisoned, and issues no `FDSTOREREMOVE`. A separate dormant observer can only
+  classify the exact poisoned in-process attempt after a barrier, two identical complete bounded
+  inventory identity projections, exact service properties and retained-binding revalidation; its
+  private evidence grants no mutation, adoption, arming or retry authority. Publication is
+  reachable only from the private live-proof selector and private dormant supervisor publisher,
+  while observation is callerless; none is connected to a
+  production server/engine/request path or has a recorded live transient-unit result. This is
   a fail-closed typed custody-capture bootstrap, dormant durable-journal/name/attestation binding
   and production-dormant publication foundation, not composed production adoption, restart
   recovery, or crash cleanup. The child
