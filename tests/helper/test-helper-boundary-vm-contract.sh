@@ -185,6 +185,11 @@ do
     grep -F -- "$exact_runner_text" "$runner" >/dev/null
 done
 
+if grep -F 'ssh_genkeytypes:' "$runner" >/dev/null; then
+    printf '%s\n' 'pre-supplied host keys must not emit a redundant generation list' >&2
+    exit 1
+fi
+
 vga_device='-device VGA,id=video0,bus=pcie.0,addr=0x1'
 test "$(grep -c -F -- "$vga_device" "$runner")" -eq 1
 vga_line=$(grep -n -m 1 -F -- "$vga_device" "$runner" | cut -d: -f1)
