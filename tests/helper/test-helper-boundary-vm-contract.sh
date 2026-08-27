@@ -153,6 +153,8 @@ fi
 for exact_runner_text in \
     '-machine q35,accel=kvm' \
     '-no-user-config -nodefaults' \
+    '-device VGA,id=video0,bus=pcie.0,addr=0x1' \
+    '-display none' \
     '-S -qmp stdio' \
     '--qmp-stdio --qmp-timeout-seconds 10' \
     "qemu_netdev='user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22'" \
@@ -182,6 +184,19 @@ for exact_runner_text in \
 do
     grep -F -- "$exact_runner_text" "$runner" >/dev/null
 done
+
+vga_device='-device VGA,id=video0,bus=pcie.0,addr=0x1'
+test "$(grep -c -F -- "$vga_device" "$runner")" -eq 1
+vga_line=$(grep -n -m 1 -F -- "$vga_device" "$runner" | cut -d: -f1)
+first_virtio_drive_line=$(
+    grep -n -m 1 -F -- '-drive "if=virtio,format=qcow2,file=$overlay"' "$runner" \
+        | cut -d: -f1
+)
+if [ -z "$vga_line" ] || [ -z "$first_virtio_drive_line" ] \
+    || [ "$vga_line" -ge "$first_virtio_drive_line" ]; then
+    printf '%s\n' 'the fixed VGA device must claim PCIe slot 1 before automatic virtio placement' >&2
+    exit 1
+fi
 
 # These searches intentionally match literal variables in the reviewed scripts.
 # shellcheck disable=SC2016
