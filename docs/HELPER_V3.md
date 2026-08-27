@@ -235,14 +235,24 @@ Only the durably confirmed `MayOwnCustody` token can derive an opaque, domain-se
 custody name from its exact journal epoch, context, ownership ID and generation without exposing
 those coordinates. A private dormant worker typestate first obtains the descriptor identities
 through the same measurement path used by descriptor-store publication, persists them with the
-complete worker anchor, and only then creates publication authority. It consumes the resulting
-inventory attestation only after fencing the original absolute deadline. This is not
-production composition: inherited descriptors are now snapshotted into typed local duplicate
-owners but still refused rather than journal-bound or adopted; there is no non-cancellable
-publication supervisor, manager reconciliation, restart reaper or request-path caller. Its
-executable live-proof path has not yet produced a recorded result inside the required disposable
-Debian 13 transient service.
-It therefore closes no production, crash-cleanup, datapath or acceptance milestone.
+complete worker anchor, and only then creates publication authority. A private dormant
+activation-fenced supervisor can synchronously take that complete affine owner before any publisher
+poll, reserve bounded terminal storage, and register its capacity permit and blocking-task handle
+before activation. It performs at most one descriptor-store publication attempt, never retries, and
+stores every resulting affine terminal before sending a non-authoritative completion notice.
+`BeforeSend` and `ManagerMayOwn` are both unresolved and never authorize retry. Dropping the waiter
+cannot cancel the owner-bearing work; an activated blocking publication survives outer-runtime
+shutdown, while a queued abort stores the unpublished owner without polling the publisher. A
+separately cloneable arm-only journal handle authorizes only the exact
+`MayOwnCustody -> MayOwnPrepare` transition; `ProductionOwnershipRuntime` remains the sole owner of
+actor startup, shutdown and thread settlement.
+
+This is not production composition. The supervisor entry point and production publisher remain
+private and unreachable from the server, engine and request path. Terminal storage has no
+production consumer or manager-inventory reconciliation, inherited descriptors are still refused
+rather than adopted, and no restart reaper exists. The executable live-proof path has not yet
+produced recorded evidence inside the required disposable Debian 13 transient service. This
+therefore closes no production, crash-cleanup, datapath or acceptance milestone.
 
 The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
 handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
@@ -790,25 +800,31 @@ derives and revalidates the worker's complete recovery anchor, freezes the exact
 pidfd/network-namespace identities through the descriptor-store adapter's measurement path, fences
 the deadline again, and durably advances `Intent -> MayOwnCustody`. Only the returned affine
 phase-4 token can derive the deterministic custody name and create one publication owner retaining
-that token, worker, recovery-pin source, pidfd/network-namespace pair and original deadline. It does
-not publish descriptors. A separate synchronous dormant transition fences the deadline, verifies
-the exact role-ordered inventory attestation, fences the deadline again, revalidates the complete
-worker recovery identity and only then advances `MayOwnCustody -> MayOwnPrepare`. Success keeps
-the durable token, registered worker owner, affine fence owner, recovery-pin source, custody name
-and attestation together. Every pre-arm failure retains or reconstructs the publication owner plus
-attestation; the defensive post-arm context-mismatch path retains the `MayOwnPrepare` composite,
-custody name and attestation. The pending fence deliberately remains closed after arming: this slice
-has no transition which consumes the composite authority and opens child dispatch. The handoff
-dispatches no child operation, sends zero protocol-request bytes, and
+that token, worker, recovery-pin source, pidfd/network-namespace pair and original deadline. The
+handoff itself does not publish descriptors. A private dormant supervisor synchronously consumes
+that owner, reserves one bounded terminal slot, and registers both its capacity permit and blocking
+task handle before activation. The blocking supervisor owns a private current-thread runtime for at
+most one descriptor-store publication attempt and never retries; after exact attestation it fences
+the deadline, verifies the role-ordered name and descriptor identities, revalidates the worker, and
+uses a separately cloneable arm-only handle to advance `MayOwnCustody -> MayOwnPrepare`.
+`BeforeSend`, `ManagerMayOwn`, explicit post-attestation failure, queued abort and success all retain
+the exact affine terminal available at that boundary. An unwind while the supervisor guard still
+owns the phase-4 publication stores `SupervisorDropped`; after that owner has been extracted, the
+guard instead aborts fail-closed rather than falsely claiming an in-memory terminal. Neither adapter
+failure authorizes retry. The terminal is stored before the non-authoritative completion is sent,
+dropping that waiter has no effect, and an activated blocking publication survives outer-runtime
+shutdown. A queued abort stores the phase-4 owner without polling the publisher. The pending fence
+deliberately remains closed after arming: this slice has no transition which consumes the
+`MayOwnPrepare` composite and opens child dispatch. It sends zero child protocol-request bytes and
 performs no WireGuard link/address, route, firewall, or dataplane configuration. Worker launch still
 creates the deliberately isolated process and anonymous `NEWNET`, without altering host-network
-state. The handoff remains private and dormant, with no server or engine caller, no restart reaper,
-and no cancellation-safe production settlement. A production publisher cannot safely be attached
-yet: once its future is first polled, neither a reported pre-send failure nor caller cancellation
-proves that an older deterministic-name attempt did not publish. Startup now preserves that
-ambiguity by refusing any `MayOwnCustody` snapshot before retiring an `Intent`; production still
-needs a non-cancellable supervisor plus manager-inventory adoption/reconciliation to progress that
-phase rather than block startup.
+state.
+
+The supervisor and publisher remain private and dormant, with no server, engine or request-path
+caller and no production terminal consumer. Startup preserves unresolved manager ownership by
+refusing any `MayOwnCustody` snapshot before retiring an `Intent`; manager-inventory
+adoption/reconciliation, inherited-descriptor consumption and a restart reaper are still required
+before that phase can progress rather than block startup.
 
 Production wiring remains a separate audited change with these explicit blockers:
 

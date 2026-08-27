@@ -202,9 +202,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   key. Custody marking consumes that key into `MayOwnCustody` only after persisting the complete
   worker anchor and exact role-ordered pidfd/network-namespace identities; arming consumes only that
   phase-4 token into `MayOwnPrepare` with borrowed owner-bound resources. Every error retains the
-  exact affine owner which still exists. Raw codec, issuance, custody marking, arming and recovery
-  authority remain private; no production request-path issuance/arming writer, inventory-attested
-  pidfd/network-namespace publication, absence-proving
+  exact affine owner which still exists. `ProductionOwnershipRuntime` may issue a separately
+  cloneable arm-only handle, but remains the sole owner of actor startup, shutdown and thread
+  settlement; that handle exposes no registration, custody-mark, retirement, recovery or lifecycle
+  authority. Raw codec, issuance, custody marking and recovery authority remain private; no
+  production request-path issuance/arming writer, inventory-attested pidfd/network-namespace
+  publication caller, absence-proving
   `MayOwnPrepare` recovery executor, restart reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live-root production lifecycle proof exists.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
@@ -277,21 +280,30 @@ single clean-build A01--A15 run; the score is not a release claim.
   It does not publish. A separate synchronous dormant transition fences that same deadline before
   and after exact role-ordered name/descriptor attestation, revalidates the complete worker recovery
   identity once more, checks the worker/token context before mutation, and only then advances
-  `MayOwnCustody -> MayOwnPrepare`. Success and every failure retain all authority and inventory
-  evidence which exists at that point. The fence remains closed after arming because this slice has
-  no authority-consuming transition that opens child dispatch. It
-  dispatches no child operation, sends zero protocol-request bytes, and performs no WireGuard
-  link/address, route, firewall, or dataplane configuration. Worker launch still creates the
-  deliberately isolated process and anonymous `NEWNET`, without altering host-network state. This
-  seam remains private and dormant with no server or engine caller. The production journal actor
-  owns startup/shutdown and may settle only never-dispatched `Intent`. Production publication is
-  deliberately still disconnected. Startup now blocks on `MayOwnCustody` before retiring any
-  `Intent`, preserving possible manager ownership without claiming adoption. A future
-  non-cancellable custody supervisor must own the affine token before its first poll, retain both
-  adapter failure classes as unresolved, reconcile inherited descriptors before startup can
-  progress, and store its terminal owner outcome before notifying a caller. No request-path
-  issuance/arming writer, `MayOwnPrepare` reaper, or cancellation-safe production settlement guard
-  exists. No scorecard, datapath, or acceptance checkbox closes.
+  `MayOwnCustody -> MayOwnPrepare`. A private dormant activation-fenced supervisor synchronously
+  takes the complete phase-4 publication owner before its first publisher poll, registers bounded
+  capacity and terminal storage before activation, and performs at most one descriptor-store
+  publication attempt without retry. Once its blocking closure has activated and begun running,
+  Tokio cannot abort it; a queued cancellation instead stores the unpublished owner as
+  `SupervisorDropped`. It retains `BeforeSend`, `ManagerMayOwn`,
+  explicit post-attestation failure or queued-abort authority as unresolved and stores every success
+  or failure terminal before notifying a waiter. An unwind before the phase-4 owner is extracted
+  stores `SupervisorDropped`; after extraction the guard instead aborts fail-closed rather than
+  claiming an in-memory terminal. Dynamic tests cover success, both adapter failure classes without
+  retry, waiter cancellation, activated outer-runtime shutdown, queued abort without publisher
+  polling, shutdown-start rejection, completion observability and zero child request bytes. The
+  implementation itself orders authoritative terminal storage before the completion send. The fence
+  remains closed after arming because this slice has no
+  authority-consuming transition that opens child dispatch. It performs no WireGuard link/address,
+  route, firewall or dataplane configuration, and worker launch remains inside an anonymous
+  `NEWNET` without altering host-network state.
+
+  Production publication remains deliberately disconnected from `ProductionServer`, `HelperEngine`
+  and every request path. No production terminal consumer, manager-inventory
+  adoption/reconciliation, inherited-custody recovery, request-path issuance writer,
+  `MayOwnPrepare` reaper or complete restart settlement exists. Startup therefore continues to block
+  on `MayOwnCustody` before retiring any `Intent`; AV1-10 remains Open and this slice adds no
+  scorecard, datapath or acceptance points.
   Shutdown uses attempt-correlated `Pending`/`Retryable`/`Confirmed`/terminal-`Unresolved` states:
   an expired new attempt returns `Retryable` without changing state, orderly timeout retains exact
   workers and handles for a later upgrade, and a waiter accepts only completion published strictly
