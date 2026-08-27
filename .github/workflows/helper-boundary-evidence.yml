@@ -221,6 +221,28 @@ jobs:
         run: |
           set -euo pipefail
           image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
+
+          acl_snapshot="$RUNNER_TEMP/kvm-acl.before"
+          acl_identity="$RUNNER_TEMP/kvm-device.identity"
+          test -f "$acl_snapshot"
+          test ! -L "$acl_snapshot"
+          test -f "$acl_identity"
+          test ! -L "$acl_identity"
+          test "$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm)" = "$(cat "$acl_identity")"
+
+          # GitHub-hosted runner steps may not preserve an earlier device ACL.
+          # Reapply the same bounded grant immediately before the unprivileged runner.
+          runner_user=$(id -un)
+          sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm
+          runner_acl=$(
+            getfacl --absolute-names --omit-header /dev/kvm \
+              | awk -F: -v user="$runner_user" \
+                  '$1 == "user" && $2 == user { print $3 }'
+          )
+          test "$runner_acl" = rw-
+          test -r /dev/kvm
+          test -w /dev/kvm
+
           set +e
           tests/helper/run-helper-boundary-evidence-vm.sh \
             --execute \

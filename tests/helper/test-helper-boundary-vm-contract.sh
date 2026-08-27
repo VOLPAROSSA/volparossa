@@ -342,10 +342,37 @@ do
 done
 
 test "$(grep -h -- '-no-user-config' "$runner" "$workflow" | wc -l)" -eq 2
+test "$(grep -c -F 'sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm' "$workflow")" -eq 2
 grep -F "steps.restore_kvm_acl.outcome == 'success'" "$workflow" >/dev/null
 test "$(grep -c -F 'require_no_private_key_marker "$candidate" "$name"' "$workflow")" -eq 1
 test "$(grep -c -F 'require_no_private_key_marker "$retained_candidate" "$name"' "$workflow")" -eq 1
 grep -F 'if test "$scan_status" -ne 1; then' "$workflow" >/dev/null
+vm_step_line=$(grep -n -m 1 -F 'name: Run the disposable Debian 13 proof VM' "$workflow" | cut -d: -f1)
+vm_next_step_line=$(awk -v minimum="$vm_step_line" \
+    'NR > minimum && /^      - name:/ { print NR; exit }' "$workflow")
+if [ -z "$vm_step_line" ] || [ -z "$vm_next_step_line" ]; then
+    printf '%s\n' 'the bounded VM run step cannot be isolated' >&2
+    exit 1
+fi
+vm_step_fixture=$temporary_directory/vm-proof-step.yml
+sed -n "${vm_step_line},$((vm_next_step_line - 1))p" "$workflow" >"$vm_step_fixture"
+vm_identity_line=$(grep -n -m 1 -F 'test "$(stat -Lc' "$vm_step_fixture" | cut -d: -f1)
+vm_acl_line=$(grep -n -m 1 -F 'sudo setfacl --modify "u:${runner_user}:rw-" /dev/kvm' \
+    "$vm_step_fixture" | cut -d: -f1)
+vm_read_line=$(grep -n -m 1 -F 'test -r /dev/kvm' "$vm_step_fixture" | cut -d: -f1)
+vm_write_line=$(grep -n -m 1 -F 'test -w /dev/kvm' "$vm_step_fixture" | cut -d: -f1)
+vm_runner_line=$(grep -n -m 1 -F 'tests/helper/run-helper-boundary-evidence-vm.sh' \
+    "$vm_step_fixture" | cut -d: -f1)
+if [ -z "$vm_identity_line" ] || [ -z "$vm_acl_line" ] \
+    || [ -z "$vm_read_line" ] || [ -z "$vm_write_line" ] \
+    || [ -z "$vm_runner_line" ] \
+    || [ "$vm_identity_line" -ge "$vm_acl_line" ] \
+    || [ "$vm_acl_line" -ge "$vm_read_line" ] \
+    || [ "$vm_read_line" -ge "$vm_write_line" ] \
+    || [ "$vm_write_line" -ge "$vm_runner_line" ]; then
+    printf '%s\n' 'the KVM ACL is not reinforced inside the VM run step' >&2
+    exit 1
+fi
 restore_acl_line=$(grep -n -m 1 -F 'name: Restore the exact KVM device ACL' "$workflow" | cut -d: -f1)
 pass_upload_line=$(grep -n -m 1 -F 'name: Upload bounded helper-boundary evidence' "$workflow" | cut -d: -f1)
 if [ -z "$restore_acl_line" ] || [ -z "$pass_upload_line" ] \
