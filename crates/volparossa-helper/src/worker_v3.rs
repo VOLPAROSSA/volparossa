@@ -92,6 +92,26 @@ const MAX_SUPERVISORS: usize = DEFAULT_MAX_WORKERS;
 const MAX_CUSTODY_PUBLICATION_TERMINALS: usize = DEFAULT_MAX_WORKERS;
 static WORKER_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
+/// Affine ownership of the process-wide worker-spawn admission lock.
+///
+/// The contained lock guard is deliberately opaque: holding this value is the only capability it
+/// grants, and dropping it releases admission for another spawn attempt.
+#[must_use = "dropping the guard releases worker-spawn admission"]
+pub(crate) struct WorkerSpawnAdmissionGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Fixed failure classes for acquiring worker-spawn admission.
+#[derive(Debug, Error)]
+pub(crate) enum WorkerSpawnAdmissionError {
+    /// The caller's absolute admission deadline elapsed.
+    #[error("worker-spawn admission hard deadline elapsed")]
+    Deadline,
+    /// Evaluating the absolute deadline failed for another I/O reason.
+    #[error("worker-spawn admission deadline check failed")]
+    Io(#[source] io::Error),
+}
+
 const LIVE_PROOF_CUSTODY_FD_NAME: &str =
     "volparossa-custody-v1-4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c";
 
@@ -149,6 +169,15 @@ enum WorkerV3Error {
     SystemdCustodyInput(#[from] crate::systemd_fdstore::FdStoreError),
     #[error("worker systemd custody publication failed")]
     SystemdCustodyPublication(#[from] crate::systemd_fdstore::PublicationFailure),
+}
+
+impl From<WorkerSpawnAdmissionError> for WorkerV3Error {
+    fn from(error: WorkerSpawnAdmissionError) -> Self {
+        match error {
+            WorkerSpawnAdmissionError::Deadline => Self::Deadline,
+            WorkerSpawnAdmissionError::Io(error) => Self::Io(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -735,40 +764,55 @@ fn spawn_with_command_mode(
     {
         return Err(WorkerV3Error::Authentication);
     }
-    let _spawn_guard = lock_worker_spawn_until(binding.deadline)?;
+    let _spawn_admission = acquire_worker_spawn_admission_until(binding.deadline)?;
     ensure_worker_deadline(binding.deadline)?;
     spawn_with_command_locked(command, binding, observation_mode)
 }
 
-fn lock_worker_spawn_until(
+/// Acquires the process-wide worker-spawn capability before the supplied absolute deadline.
+pub(crate) fn acquire_worker_spawn_admission_until(
     deadline: HardDeadline,
-) -> Result<std::sync::MutexGuard<'static, ()>, WorkerV3Error> {
+) -> Result<WorkerSpawnAdmissionGuard, WorkerSpawnAdmissionError> {
     loop {
-        ensure_worker_deadline(deadline)?;
+        ensure_worker_spawn_admission_deadline(deadline)?;
         match WORKER_SPAWN_LOCK.try_lock() {
             Ok(guard) => {
-                ensure_worker_deadline(deadline)?;
-                return Ok(guard);
+                ensure_worker_spawn_admission_deadline(deadline)?;
+                return Ok(WorkerSpawnAdmissionGuard { _guard: guard });
             }
             Err(std::sync::TryLockError::Poisoned(error)) => {
-                ensure_worker_deadline(deadline)?;
-                return Ok(error.into_inner());
+                ensure_worker_spawn_admission_deadline(deadline)?;
+                return Ok(WorkerSpawnAdmissionGuard {
+                    _guard: error.into_inner(),
+                });
             }
             Err(std::sync::TryLockError::WouldBlock) => {
-                let remaining = deadline.remaining().map_err(|error| {
-                    if error.kind() == io::ErrorKind::TimedOut {
-                        WorkerV3Error::Deadline
-                    } else {
-                        WorkerV3Error::Io(error)
-                    }
-                })?;
+                let remaining = deadline
+                    .remaining()
+                    .map_err(classify_worker_spawn_admission_error)?;
                 thread::sleep(remaining.min(TERMINATION_POLL_INTERVAL));
             }
         }
     }
 }
 
-/// Spawns only while the caller holds `WORKER_SPAWN_LOCK`.
+fn ensure_worker_spawn_admission_deadline(
+    deadline: HardDeadline,
+) -> Result<(), WorkerSpawnAdmissionError> {
+    deadline
+        .ensure_remaining()
+        .map_err(classify_worker_spawn_admission_error)
+}
+
+fn classify_worker_spawn_admission_error(error: io::Error) -> WorkerSpawnAdmissionError {
+    if error.kind() == io::ErrorKind::TimedOut {
+        WorkerSpawnAdmissionError::Deadline
+    } else {
+        WorkerSpawnAdmissionError::Io(error)
+    }
+}
+
+/// Spawns only while the caller holds a `WorkerSpawnAdmissionGuard`.
 fn spawn_with_command_locked(
     mut command: Command,
     binding: WorkerSpawnBinding<'_>,
@@ -7406,9 +7450,10 @@ mod tests {
         context_id: ContextId,
         generation: u64,
     ) -> (Result<WorkerProcess, WorkerV3Error>, Duration) {
-        let _spawn_guard = WORKER_SPAWN_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_admission = acquire_worker_spawn_admission_until(
+            HardDeadline::after(SPAWN_TIMEOUT).expect("admission deadline"),
+        )
+        .expect("worker-spawn admission");
         let started = Instant::now();
         let result = spawn_with_command_locked(
             child_command(mode),
@@ -7607,9 +7652,10 @@ mod tests {
     }
 
     fn inheritable_parent_descriptor_is_confined_by_exec_fence_fixture() -> bool {
-        let _spawn_guard = WORKER_SPAWN_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_admission = acquire_worker_spawn_admission_until(
+            HardDeadline::after(SPAWN_TIMEOUT).expect("admission deadline"),
+        )
+        .expect("worker-spawn admission");
         let sentinel_source = fs::File::open("/dev/null").expect("sentinel source");
         // The child deliberately normalises raw fd 3, so the sentinel must sit above it to prove
         // that the general close-range fence, rather than fd-3 setup, prevents inheritance.
@@ -8681,7 +8727,7 @@ mod tests {
             .expect("locked spawn function");
         let mode_body = &source[mode_start..locked_start];
         let lock = mode_body
-            .find("lock_worker_spawn_until(binding.deadline)?")
+            .find("acquire_worker_spawn_admission_until(binding.deadline)?")
             .expect("deadline-bounded spawn lock");
         let locked_call = mode_body
             .rfind("spawn_with_command_locked(")
@@ -8734,10 +8780,55 @@ mod tests {
     }
 
     #[test]
-    fn spawn_until_times_out_while_lock_is_held_and_never_calls_command_spawn() {
-        let spawn_guard = WORKER_SPAWN_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fn worker_spawn_admission_is_opaque_affine_and_has_no_lock_bypass() {
+        let source = include_str!("worker_v3.rs");
+        let tests_start = source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("test boundary");
+        let production = &source[..tests_start];
+
+        assert_eq!(
+            production.matches("WORKER_SPAWN_LOCK").count(),
+            2,
+            "the private lock has one declaration and one admission-constructor use"
+        );
+
+        let guard_start = production
+            .find("pub(crate) struct WorkerSpawnAdmissionGuard {")
+            .expect("opaque admission guard");
+        let guard_end = production[guard_start..]
+            .find("\n}\n")
+            .map(|offset| guard_start + offset + 3)
+            .expect("admission guard end");
+        let guard = &production[guard_start..guard_end];
+        assert!(guard.contains("_guard: std::sync::MutexGuard<'static, ()>"));
+        assert!(!guard.contains("pub _guard"));
+        assert!(!guard.contains("pub(crate) _guard"));
+        assert!(!production.contains("impl Clone for WorkerSpawnAdmissionGuard"));
+        assert!(!production.contains("impl WorkerSpawnAdmissionGuard"));
+
+        let mode_start = production
+            .find("fn spawn_with_command_mode(")
+            .expect("spawn mode function");
+        let constructor_start = production
+            .find("pub(crate) fn acquire_worker_spawn_admission_until(")
+            .expect("shared admission constructor");
+        let mode = &production[mode_start..constructor_start];
+        assert_eq!(
+            mode.matches("acquire_worker_spawn_admission_until(binding.deadline)?")
+                .count(),
+            1,
+            "the existing spawn path must acquire the shared admission capability"
+        );
+        assert!(!mode.contains("WORKER_SPAWN_LOCK"));
+    }
+
+    #[test]
+    fn held_spawn_admission_times_out_before_command_spawn() {
+        let spawn_admission = acquire_worker_spawn_admission_until(
+            HardDeadline::after(Duration::from_secs(2)).expect("holder deadline"),
+        )
+        .expect("held worker-spawn admission");
         let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(0);
         let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(0);
         let worker = thread::spawn(move || {
@@ -8767,7 +8858,7 @@ mod tests {
             .expect("spawn lock acquisition must obey its hard deadline");
         assert!(matches!(result, Err(WorkerV3Error::Deadline)));
         assert!(elapsed < Duration::from_secs(2));
-        drop(spawn_guard);
+        drop(spawn_admission);
         worker.join().expect("spawn waiter");
     }
 

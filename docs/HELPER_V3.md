@@ -241,7 +241,7 @@ disposition is still only read-only startup classification rather than the actor
 manager-absence proof. Every partial, one-sided, wrong-name, wrong-binding or unstable case remains
 unresolved.
 
-A dormant observation-only seam can consume the complete affine classification and wait for exact
+A refusal-only observation seam can consume the complete affine classification and wait for exact
 inherited process-pidfd exit. Before its first wait, every pending `MayOwnCustody` or
 `MayOwnPrepare` target must be `ExactPresent`; an absent pending target fails the whole set without
 minting evidence. `CleanupConfirmed` targets are skipped because their earlier durable cleanup
@@ -262,31 +262,33 @@ This seam proves only that the exact inherited worker thread group exited. It do
 descendant exit, cgroup emptiness, network-namespace destruction, kernel cleanup, descriptor-store
 removal, journal settlement, adoption or readiness to publish the helper socket. The retained
 namespace descriptor intentionally keeps that namespace alive. The seam is synchronous and has no
-separate cancellation surface: expiry returns the entire classification unresolved. It has no
-production caller and therefore does not weaken the refusal boundary below. Any future settlement
-composition must retain and revalidate the exact startup journal guard across this observation, or
-freshly rejoin the result to journal and manager evidence before consuming authority.
+separate cancellation surface: expiry returns the entire classification unresolved. The
+production non-empty restart-refusal path now invokes it while retaining and revalidating the exact
+startup journal guard and holding the process-wide worker-spawn admission guard. It still consumes
+no cleanup or settlement authority and never permits socket publication.
 
-A second dormant, private sampler borrows that first seam's successful opaque exit-set capability
+A second private sampler borrows that first seam's successful opaque exit-set capability
 through every await. Cancelling its future therefore leaves the PR68 pidfd/namespace/custody owners
 with the caller, although partial manager/cgroup sampling state inside the cancelled future is
 discarded. Only a separate synchronous join consumes the exit capability. Every returned join
-outcome retains that capability and all complete sampling owners returned by the async layer. A
-future production composition must itself own and drive sampling non-cancellably; this dormant seam
-has no such outer owner. It resolves no new unit by PID. Instead, the retained unit object path and
-current `MainPID` scope are barrier-observed again on both sides of the first cgroup samples. This
-does not bind a systemd manager incarnation. Both fresh uncached inventory pairs must retain that
-opaque path/PID scope and exactly match freshly remeasured inherited descriptor bindings. One
-absolute deadline is stored in the sampling attempt and covers both manager bookends, cgroup
-capture, every bounded read, synchronous join, and final revalidation; expiry before join retains
-the supplied exit capability without join I/O. Attempts are also bound to the exact pending count,
-classified targets, and fresh manager/durable descriptor maps, so one exit set cannot consume
-another set's samples.
+outcome retains that capability and all complete sampling owners returned by the async layer. The
+synchronous production entry now drives that borrow non-cancellably and joins it before releasing
+the journal or spawn-admission guard. It resolves no new unit by PID. The original D-Bus unique-name
+owner, typed unit object path and `MainPID` scope are retained, so a manager restart or owner change
+fails closed. Both fresh uncached inventory pairs must retain that exact scope and exactly match
+freshly remeasured inherited descriptor bindings. One absolute deadline covers both manager and
+isolation bookends, cgroup capture, every bounded read, synchronous join, and final journal
+revalidation. Attempts are also bound to the exact pending count, classified targets, fresh
+manager/durable descriptor maps and unit invocation, so one exit set cannot consume another set's
+samples.
 
-The sampler parses the current process's single canonical unified-cgroup record, pins the fixed
-cgroup2 root with read-only `open()`, resolves and pins the service directory beneath it through
+The sampler requires the strict cgroup-namespace view `0::/`, pins the fixed cgroup2 root with
+read-only `open()`, resolves and pins the service directory beneath it through
 `openat2(BENEATH|NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS)`, and pins both the PID and cgroup namespace.
-Every complete revalidation reopens the fixed process records,
+Both the root and service descriptors must report a read-only mount. The service's kernfs file
+handle is obtained through one fixed audited `name_to_handle_at(AT_EMPTY_PATH)` wrapper; its
+nonzero `FILEID_KERNFS` value must exactly equal systemd's `ControlGroupId` and is never confused
+with `st_ino`. Every complete revalidation reopens the fixed process records,
 resolves the path beneath the retained root, remeasures directory and namespace identities, counts
 the pending target set back to the earlier nonzero pidfd-observation count, and remeasures each
 present custody binding. Only pending non-`CleanupConfirmed` targets must match the current pinned
@@ -300,20 +302,28 @@ singleton current `MainPID`. Repeated lines containing that same PID are accepte
 documents duplicate PID observations during iteration, while zero, noncanonical, overflowed, or
 different PIDs fail closed.
 
-The result is only bounded read-only quiescence sample/correlation evidence. `cgroup.type`,
-`cgroup.stat`, and `cgroup.procs` are separate, non-atomic reads; without admission, migration,
-freeze, or equivalent serialization, alternating process placement can make every projection pass
-even though set-wide absence never existed. It therefore proves neither continuous absence,
+Each isolation bookend additionally requires one stable nonzero 16-byte `InvocationID`, current
+`MainPID`, zero `ControlPID`, a canonical non-root `ControlGroup`, nonzero matching
+`ControlGroupId`, `Delegate=false`, empty delegate controllers/subgroup,
+`ProtectControlGroups=true`, `ProtectControlGroupsEx=strict`, `PrivatePIDs=no`,
+`KillMode=control-group`, and `SendSIGKILL=true`. The packaged unit enforces those values and removes
+the broad `@mount` syscall group both from its positive allowlist and through an explicit
+`SystemCallFilter=~@mount` subtraction while preserving the network-namespace syscalls required by
+the typed worker bootstrap.
+
+The result is still only bounded read-only quiescence sample/correlation evidence. `cgroup.type`,
+`cgroup.stat`, and `cgroup.procs` are separate, non-atomic reads. The process-wide spawn guard closes
+the helper's own admission path, but it does not serialize PID 1 or another privileged migration;
+alternating external placement can still make every projection pass even though set-wide absence
+never existed. It therefore proves neither continuous absence,
 instantaneous old-process absence, nor absence when sampling or join returns. It is unusable as
 cleanup authority. It exposes no PID, path, descriptor, signal, cgroup write, cleanup, journal,
-manager-removal, adoption, or server authority. This slice deliberately does not yet query and bind
-fresh systemd `ControlGroup`/`ControlGroupId`, `ControlPID`, `ProtectControlGroupsEx`, `Delegate`,
-`PrivatePIDs`, or `KillMode` properties, and therefore does not prove that an inherited writable
-cgroup descriptor, delegation, or migration path was impossible during sampling. The shipped
-`ProtectControlGroups=yes` setting is not treated as runtime proof here. It also proves no
-network-namespace destruction or kernel-resource cleanup, owns no startup guard or journal
-revalidation, has no production caller, leaves AV1-10 Open, and leaves the fixed alpha score at
-11/100 (11%).
+manager-removal, adoption, or server authority. The process-wide admission guard excludes only new
+workers created through this helper; it does not constrain PID 1 or another privileged actor. The
+configured and observed strict mount does not prove that no writable cgroup descriptor was
+inherited before startup. This slice therefore proves no network-namespace destruction,
+kernel-resource cleanup, manager removal or journal transition. It keeps the helper in the same
+non-empty refusal state, leaves AV1-10 Open, and leaves the fixed alpha score at 11/100 (11%).
 
 This is still a refusal boundary, not production recovery. Any non-empty journal target set blocks
 startup after read-only classification and drops its exact source-slot owners without publishing a
