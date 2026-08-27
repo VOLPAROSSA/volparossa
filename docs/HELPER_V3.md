@@ -211,8 +211,9 @@ may be replaced by adoption.
 
 ### Production-dormant systemd descriptor-store publication boundary
 
-The helper contains a private adapter for the systemd v257 descriptor-store protocol. Only the
-private live-proof selector calls it; no production worker, journal, server or engine path does. It
+The helper contains a private adapter for the systemd v257 descriptor-store protocol. Its two
+private non-test callers are the live-proof selector and the dormant supervisor publisher; neither
+is connected to `ProductionServer`, `HelperEngine` or a request path. It
 validates one fixed-shape opaque custody name, borrows exactly two already-owned descriptors,
 snapshots their kernel identities and sends them together in one `SCM_RIGHTS` datagram containing
 only the required `FDSTORE=1`, `FDNAME=` and `FDPOLL=0` assignments. It then sends `BARRIER=1`
@@ -227,9 +228,30 @@ successful barrier proves only that systemd processed earlier notifications. The
 accepts custody only after uncached D-Bus reads show stable pre/post `NFileDescriptorStore` counts
 and `DumpFileDescriptorStore()` supplies the exact complete, bounded descriptor multiset, including
 matching name, mode, device, inode, device-node and open-flag identity. Every failure after the
-publication datagram may have been accepted is classified as manager-may-own. Callers must retain
-their original affine descriptor owners; there is deliberately no automatic removal on an
+publication datagram may have been accepted is classified as manager-may-own and carries one
+opaque monotone in-process attempt identity into the retained supervisor terminal. The publication
+gate binds that attempt before `sendmsg(2)` to the exact typed unit object path, `MainPID`, parsed
+notify endpoint, fixed custody name and role-ordered local descriptor identities. A later caller
+cannot obtain a new attempt identity merely by encountering the existing poison. Callers must
+retain their original affine descriptor owners; there is deliberately no automatic removal on an
 ambiguous path.
+
+A separate dormant, observation-only reconciler can inspect only that exact poisoned in-process
+attempt. While borrowing both affine owners and holding the publication gate, it reopens the stored
+unit object directly, sends one non-mutating `BARRIER=1`, takes two complete bounded uncached D-Bus
+inventory identity projections, requires those projections and service properties to be identical,
+and remeasures the local role binding before accepting a result. It reports `ExactPresent` only for
+exactly two target name entries whose complete stat/status-flag identity multiset matches the
+retained pair; any same-kernel-object alias under another name fails closed even when flags differ.
+It reports
+`ExactAbsent` only when the target name and both kernel objects are absent everywhere. Partial,
+wrong, unstable, expired or otherwise ambiguous observations are `Unresolved`. Present and absent
+use private evidence types distinct from publication attestation, so they cannot arm a worker,
+adopt or remove custody, advance the journal, open dispatch, clear the permanent poison, or
+authorize publication retry. This is correlated inventory evidence, not proof of shared
+open-file-description identity. A `SupervisorDropped` terminal produced before a normal
+manager-may-own failure returns has no exported attempt identity and deliberately remains
+not reconcilable in this slice.
 
 Only the durably confirmed `MayOwnCustody` token can derive an opaque, domain-separated fixed
 custody name from its exact journal epoch, context, ownership ID and generation without exposing
@@ -249,8 +271,9 @@ actor startup, shutdown and thread settlement.
 
 This is not production composition. The supervisor entry point and production publisher remain
 private and unreachable from the server, engine and request path. Terminal storage has no
-production consumer or manager-inventory reconciliation, inherited descriptors are still refused
-rather than adopted, and no restart reaper exists. The executable live-proof path has not yet
+production consumer for the in-process observer; cross-process/restart-stable reconciliation,
+adoption and manager removal do not exist, inherited descriptors are still refused rather than
+adopted, and no restart reaper exists. The executable live-proof path has not yet
 produced recorded evidence inside the required disposable Debian 13 transient service. This
 therefore closes no production, crash-cleanup, datapath or acceptance milestone.
 
