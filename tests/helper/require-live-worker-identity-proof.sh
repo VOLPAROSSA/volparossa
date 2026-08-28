@@ -149,7 +149,7 @@ fi
 for command_name in \
     awk cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
     paste prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl systemd-detect-virt \
-    systemd-run tc tr uname
+    systemd-run tc tr uname wc
 do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         blocked "required Debian tool is unavailable: $command_name"
@@ -506,6 +506,413 @@ nftables_state_producer() {
             | del(.expires,.last,.used) else . end)
     '
 }
+
+# Capture the kernel-owned registration inventory for one legacy xtables
+# address family.  An absent proc record, an initialized family with no
+# tables, and a non-empty table inventory are deliberately distinct states.
+# The path and expected metadata are parameters so the unprivileged contract
+# test can exercise this parser without consulting the host network namespace.
+legacy_firewall_inventory_producer() {
+    [ "$#" -eq 4 ] || return 1
+    legacy_inventory_path=$1
+    legacy_inventory_uid=$2
+    legacy_inventory_gid=$3
+    legacy_inventory_mode=$4
+    case $legacy_inventory_path in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case $legacy_inventory_uid in
+        ''|*[!0-9]*|0[0-9]*) return 1 ;;
+    esac
+    case $legacy_inventory_gid in
+        ''|*[!0-9]*|0[0-9]*) return 1 ;;
+    esac
+    case $legacy_inventory_mode in
+        [0-7][0-7][0-7]) ;;
+        *) return 1 ;;
+    esac
+
+    if [ ! -e "$legacy_inventory_path" ] && [ ! -L "$legacy_inventory_path" ]; then
+        [ ! -e "$legacy_inventory_path" ] && [ ! -L "$legacy_inventory_path" ] \
+            || return 1
+        printf '%s\n' PROC_ABSENT
+        return 0
+    fi
+    [ -f "$legacy_inventory_path" ] && [ ! -L "$legacy_inventory_path" ] \
+        && [ -r "$legacy_inventory_path" ] || return 1
+    legacy_inventory_metadata_before=$(stat -Lc '%F:%u:%g:%a:%h:%d:%i' \
+        "$legacy_inventory_path" 2>/dev/null) || return 1
+    case $legacy_inventory_metadata_before in
+        "regular file:$legacy_inventory_uid:$legacy_inventory_gid:$legacy_inventory_mode:1:"*|\
+        "regular empty file:$legacy_inventory_uid:$legacy_inventory_gid:$legacy_inventory_mode:1:"*)
+            ;;
+        *) return 1 ;;
+    esac
+    legacy_inventory_records=$(awk 'END { print NR }' \
+        "$legacy_inventory_path" 2>/dev/null) || return 1
+    legacy_inventory_newlines=$(wc -l <"$legacy_inventory_path" 2>/dev/null) \
+        || return 1
+    case $legacy_inventory_records:$legacy_inventory_newlines in
+        *[!0-9:]*|:|*:|*:*:*) return 1 ;;
+    esac
+    [ "$legacy_inventory_records" = "$legacy_inventory_newlines" ] || return 1
+
+    awk '
+        BEGIN { count = 0; bytes = 0; bad = 0 }
+        {
+            if (length($0) < 1 || length($0) > 31 ||
+                $0 !~ /^[-A-Za-z0-9_.+]+$/ || seen[$0]++) {
+                bad = 1
+                exit
+            }
+            count++
+            bytes += length($0) + 1
+            if (count > 64 || bytes > 4096) {
+                bad = 1
+                exit
+            }
+            table[count] = $0
+        }
+        END {
+            if (bad) exit 1
+            if (count == 0) {
+                print "NO_TABLES"
+            } else {
+                print "PRESENT"
+                for (position = 1; position <= count; position++)
+                    print table[position]
+            }
+        }
+    ' "$legacy_inventory_path" 2>/dev/null || return 1
+
+    legacy_inventory_metadata_after=$(stat -Lc '%F:%u:%g:%a:%h:%d:%i' \
+        "$legacy_inventory_path" 2>/dev/null) || return 1
+    [ "$legacy_inventory_metadata_before" = "$legacy_inventory_metadata_after" ]
+}
+
+# The caller supplies a code-pinned absolute legacy binary.  Keeping the
+# producer generic permits a fixture executable in the contract test; the two
+# production call sites below are statically pinned to Debian's explicit
+# legacy binaries.  Suppress all tool diagnostics so only fixed gate labels
+# can escape into the evidence log.
+legacy_firewall_save_producer() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    legacy_save_tool=$1
+    legacy_save_owner_uid=$(id -u 2>/dev/null) || return 1
+    legacy_save_owner_gid=$(id -g 2>/dev/null) || return 1
+    legacy_save_link_before=$(stat -c '%F:%u:%g:%a:%h:%d:%i' \
+        "$legacy_save_tool" 2>/dev/null) || return 1
+    case $legacy_save_link_before in
+        "regular file:$legacy_save_owner_uid:$legacy_save_owner_gid:"*|\
+        "symbolic link:$legacy_save_owner_uid:$legacy_save_owner_gid:"*) ;;
+        *) return 1 ;;
+    esac
+    legacy_save_target_before=$(readlink -f -- "$legacy_save_tool" 2>/dev/null) \
+        || return 1
+    case $legacy_save_target_before in /*) ;; *) return 1 ;; esac
+    case $legacy_save_tool in
+        /usr/sbin/iptables-legacy-save|/usr/sbin/ip6tables-legacy-save)
+            case $legacy_save_link_before in
+                "symbolic link:0:0:777:1:"*) ;;
+                *) return 1 ;;
+            esac
+            [ "$(stat -Lc '%F:%u:%g:%a' /usr/sbin 2>/dev/null)" = \
+                'directory:0:0:755' ] || return 1
+            [ "$(readlink -- "$legacy_save_tool" 2>/dev/null)" = xtables-legacy-multi ] \
+                || return 1
+            [ "$legacy_save_target_before" = /usr/sbin/xtables-legacy-multi ] \
+                || return 1
+            ;;
+    esac
+    legacy_save_target_metadata_before=$(stat -Lc '%F:%u:%g:%a:%h:%d:%i' \
+        "$legacy_save_tool" 2>/dev/null) || return 1
+    legacy_save_target_digest_before=$(vp_capture_sha256_file \
+        "$legacy_save_target_before" 2>/dev/null) || return 1
+    legacy_save_target_mode=$(stat -Lc '%a' "$legacy_save_tool" 2>/dev/null) \
+        || return 1
+    case $legacy_save_target_metadata_before in
+        "regular file:$legacy_save_owner_uid:$legacy_save_owner_gid:$legacy_save_target_mode:1:"*) ;;
+        *) return 1 ;;
+    esac
+    vp_capture_mode_is_not_group_or_world_writable "$legacy_save_target_mode" \
+        && [ -x "$legacy_save_tool" ] || return 1
+
+    if "$legacy_save_tool" -M /bin/false 2>/dev/null; then
+        legacy_save_status=0
+    else
+        legacy_save_status=$?
+    fi
+    legacy_save_link_after=$(stat -c '%F:%u:%g:%a:%h:%d:%i' \
+        "$legacy_save_tool" 2>/dev/null) || return 1
+    legacy_save_target_after=$(readlink -f -- "$legacy_save_tool" 2>/dev/null) \
+        || return 1
+    legacy_save_target_metadata_after=$(stat -Lc '%F:%u:%g:%a:%h:%d:%i' \
+        "$legacy_save_tool" 2>/dev/null) || return 1
+    legacy_save_target_digest_after=$(vp_capture_sha256_file \
+        "$legacy_save_target_after" 2>/dev/null) || return 1
+    [ "$legacy_save_status" -eq 0 ] \
+        && [ "$legacy_save_link_before" = "$legacy_save_link_after" ] \
+        && [ "$legacy_save_target_before" = "$legacy_save_target_after" ] \
+        && [ "$legacy_save_target_metadata_before" = \
+            "$legacy_save_target_metadata_after" ] \
+        && [ "$legacy_save_target_digest_before" = \
+            "$legacy_save_target_digest_after" ]
+}
+
+# Remove only producer-owned timestamps and policy-chain counters.  In
+# particular, bracketed text in a rule or comment remains semantic input.
+legacy_firewall_save_normalizer() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        ipv4) legacy_save_program=iptables-save ;;
+        ipv6) legacy_save_program=ip6tables-save ;;
+        *) return 1 ;;
+    esac
+    awk -v program="$legacy_save_program" '
+        BEGIN {
+            generated = 0
+            completed = 0
+            tables = 0
+            commits = 0
+            in_table = 0
+            table_seen = 0
+            commit_seen = 0
+            bad = 0
+            ctime = "(Sun|Mon|Tue|Wed|Thu|Fri|Sat) " \
+                "(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) " \
+                "( [1-9]|[12][0-9]|3[01]) " \
+                "([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] " \
+                "[0-9][0-9][0-9][0-9]"
+        }
+        index($0, "# Generated by ") == 1 {
+            # Debian iptables-save.c formats PACKAGE_VERSION here; unlike the
+            # multi-call binary --version output, this header has no backend
+            # suffix.  Exact legacy authority is established by the tool pin.
+            pattern = "^# Generated by " program \
+                " v[0-9][0-9A-Za-z.+:~_-]* on " ctime "$"
+            if (in_table || $0 !~ pattern) {
+                bad = 1
+                exit
+            }
+            generated++
+            in_table = 1
+            table_seen = 0
+            commit_seen = 0
+            next
+        }
+        index($0, "# Completed on ") == 1 {
+            if (!in_table || !table_seen || !commit_seen ||
+                $0 !~ ("^# Completed on " ctime "$")) {
+                bad = 1
+                exit
+            }
+            completed++
+            in_table = 0
+            next
+        }
+        /^#/ {
+            bad = 1
+            exit
+        }
+        /^\*/ {
+            if (!in_table || table_seen || commit_seen ||
+                $0 !~ /^\*[-A-Za-z0-9_.+]+$/ || length($0) > 32) {
+                bad = 1
+                exit
+            }
+            table_seen = 1
+            tables++
+            print
+            next
+        }
+        /^:/ {
+            if (!in_table || !table_seen || commit_seen ||
+                $0 !~ / \[[0-9]+:[0-9]+\]$/) {
+                bad = 1
+                exit
+            }
+            sub(/ \[[0-9]+:[0-9]+\]$/, " [COUNTERS]")
+            print
+            next
+        }
+        $0 == "COMMIT" {
+            if (!in_table || !table_seen || commit_seen) {
+                bad = 1
+                exit
+            }
+            commit_seen = 1
+            commits++
+            print
+            next
+        }
+        {
+            if (!in_table || !table_seen || commit_seen || length($0) == 0) {
+                bad = 1
+                exit
+            }
+            print
+        }
+        END {
+            if (bad || in_table || generated == 0 ||
+                generated != completed || generated != tables ||
+                generated != commits) exit 1
+        }
+    ' 2>/dev/null
+}
+
+# Join a canonical inventory with its stable normalized dump.  Only this
+# joined private capture is hashed into the published host-state record.
+legacy_firewall_join_producer() {
+    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 1
+    legacy_join_inventory=$1
+    vp_capture_file_is_safe "$legacy_join_inventory" || return 1
+    awk '
+        NR == 1 {
+            marker = $0
+            if (marker != "PROC_ABSENT" && marker != "NO_TABLES" &&
+                marker != "PRESENT") exit 1
+            next
+        }
+        {
+            if (marker != "PRESENT" || length($0) < 1 || length($0) > 31 ||
+                $0 !~ /^[-A-Za-z0-9_.+]+$/ || seen[$0]++) exit 1
+            names++
+        }
+        END {
+            if (NR < 1 || (marker == "PRESENT" && names < 1) ||
+                (marker != "PRESENT" && NR != 1)) exit 1
+        }
+    ' "$legacy_join_inventory" 2>/dev/null || return 1
+    legacy_join_marker=$(sed -n '1p' "$legacy_join_inventory") || return 1
+    if [ "$legacy_join_marker" = PRESENT ]; then
+        [ "$#" -eq 2 ] || return 1
+        vp_capture_file_is_safe "$2" && [ -s "$2" ] || return 1
+        awk '
+            FNR == NR {
+                if (FNR == 1) {
+                    if ($0 != "PRESENT") bad = 1
+                    next
+                }
+                if (inventory[$0]++) bad = 1
+                inventory_count++
+                next
+            }
+            /^\*/ {
+                name = substr($0, 2)
+                if (dump[name]++) bad = 1
+                dump_count++
+            }
+            END {
+                if (bad || inventory_count < 1 ||
+                    inventory_count != dump_count) exit 1
+                for (name in inventory)
+                    if (!(name in dump)) exit 1
+                for (name in dump)
+                    if (!(name in inventory)) exit 1
+            }
+        ' "$legacy_join_inventory" "$2" 2>/dev/null || return 1
+    else
+        [ "$#" -eq 1 ] || return 1
+    fi
+    cat "$legacy_join_inventory" 2>/dev/null || return 1
+    if [ "$legacy_join_marker" = PRESENT ]; then
+        cat "$2" 2>/dev/null || return 1
+    fi
+}
+
+# Obtain two identical inventory observations and, when legacy tables exist,
+# two identical normalized all-table dumps.  A subshell-local EXIT trap removes
+# every intermediate and any failed stable output on all error paths.
+capture_stable_legacy_firewall_state() (
+    [ "$#" -eq 8 ] || return 1
+    legacy_stable_family=$1
+    legacy_stable_inventory_path=$2
+    legacy_stable_uid=$3
+    legacy_stable_gid=$4
+    legacy_stable_mode=$5
+    legacy_stable_tool=$6
+    legacy_stable_prefix=$7
+    legacy_stable_output=$8
+    case $legacy_stable_family in ipv4|ipv6) ;; *) return 1 ;; esac
+    for legacy_stable_path in "$legacy_stable_inventory_path" \
+        "$legacy_stable_tool" "$legacy_stable_prefix" "$legacy_stable_output"
+    do
+        case $legacy_stable_path in
+            /*) ;;
+            *) return 1 ;;
+        esac
+        case $legacy_stable_path in
+            /|*/../*|*/..|*/./*|*/.) return 1 ;;
+        esac
+    done
+
+    legacy_inventory_a=$legacy_stable_prefix.inventory-a
+    legacy_inventory_b=$legacy_stable_prefix.inventory-b
+    legacy_raw_a=$legacy_stable_prefix.raw-a
+    legacy_raw_b=$legacy_stable_prefix.raw-b
+    legacy_normalized_a=$legacy_stable_prefix.normalized-a
+    legacy_normalized_b=$legacy_stable_prefix.normalized-b
+    for legacy_stable_path in "$legacy_inventory_a" "$legacy_inventory_b" \
+        "$legacy_raw_a" "$legacy_raw_b" "$legacy_normalized_a" \
+        "$legacy_normalized_b" "$legacy_stable_output"
+    do
+        [ ! -e "$legacy_stable_path" ] && [ ! -L "$legacy_stable_path" ] \
+            || return 1
+    done
+
+    legacy_stable_success=no
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2317
+    legacy_stable_cleanup() {
+        rm -f -- "$legacy_inventory_a" "$legacy_inventory_b" \
+            "$legacy_raw_a" "$legacy_raw_b" "$legacy_normalized_a" \
+            "$legacy_normalized_b"
+        if [ "$legacy_stable_success" != yes ]; then
+            rm -f -- "$legacy_stable_output"
+        fi
+    }
+    trap 'legacy_stable_cleanup' 0
+    trap 'exit 1' HUP INT TERM
+
+    vp_capture_run "$legacy_inventory_a" legacy_firewall_inventory_producer \
+        "$legacy_stable_inventory_path" "$legacy_stable_uid" \
+        "$legacy_stable_gid" "$legacy_stable_mode" || return 1
+    legacy_stable_marker=$(sed -n '1p' "$legacy_inventory_a") || return 1
+    case $legacy_stable_marker in
+        PROC_ABSENT|NO_TABLES)
+            ;;
+        PRESENT)
+            vp_capture_run "$legacy_raw_a" legacy_firewall_save_producer \
+                "$legacy_stable_tool" || return 1
+            vp_capture_normalize "$legacy_raw_a" "$legacy_normalized_a" \
+                legacy_firewall_save_normalizer "$legacy_stable_family" || return 1
+            vp_capture_run "$legacy_raw_b" legacy_firewall_save_producer \
+                "$legacy_stable_tool" || return 1
+            vp_capture_normalize "$legacy_raw_b" "$legacy_normalized_b" \
+                legacy_firewall_save_normalizer "$legacy_stable_family" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    vp_capture_run "$legacy_inventory_b" legacy_firewall_inventory_producer \
+        "$legacy_stable_inventory_path" "$legacy_stable_uid" \
+        "$legacy_stable_gid" "$legacy_stable_mode" || return 1
+    cmp -s "$legacy_inventory_a" "$legacy_inventory_b" || return 1
+
+    if [ "$legacy_stable_marker" = PRESENT ]; then
+        cmp -s "$legacy_normalized_a" "$legacy_normalized_b" || return 1
+        vp_capture_run "$legacy_stable_output" legacy_firewall_join_producer \
+            "$legacy_inventory_a" "$legacy_normalized_a" || return 1
+    else
+        vp_capture_run "$legacy_stable_output" legacy_firewall_join_producer \
+            "$legacy_inventory_a" || return 1
+    fi
+    legacy_stable_success=yes
+)
 
 helper_source=$repository_directory/target/debug/volparossa-helper
 ipc_probe_source=$repository_directory/target/debug/examples/volparossa-helper-production-ipc-probe
@@ -1174,16 +1581,6 @@ install -d -o root -g root -m 2700 "$temporary_stage/production-output"
 
 state_records='production_runtime_path accounts namespaces mounts resolver sysctls links addresses routes rules nexthops qdiscs nftables wireguard legacy_ipv4_firewall legacy_ipv6_firewall'
 
-publish_optional_digest_record() {
-    [ "$#" -eq 2 ] || failed 'invalid optional state publication request'
-    optional_capture=$1
-    optional_record=$2
-    optional_digest=$(vp_capture_sha256 "$optional_capture") \
-        || failed 'an optional host-state capture could not be hashed'
-    vp_capture_run "$optional_record" printf '%s\n%s\n' PRESENT "$optional_digest" \
-        || failed 'an optional host-state digest could not be published'
-}
-
 publish_streamed_digest_record() {
     [ "$#" -eq 2 ] || failed 'invalid streamed state publication request'
     streamed_digest_capture=$1
@@ -1350,13 +1747,44 @@ capture_host_state() {
     vp_capture_publish_digest "$capture_directory/qdiscs.normalized" "$destination/qdiscs" \
         || failed 'host qdisc capture could not be published'
 
-    vp_capture_run "$capture_directory/nftables.raw" nft --json list ruleset \
-        || failed 'host nftables producer failed'
-    vp_capture_normalize "$capture_directory/nftables.raw" \
-        "$capture_directory/nftables.normalized" nftables_state_producer \
-        || failed 'host nftables normalization failed'
-    vp_capture_publish_digest "$capture_directory/nftables.normalized" "$destination/nftables" \
-        || failed 'host nftables capture could not be published'
+    # The nftables JSON ruleset is also the authoritative state for
+    # iptables-nft.  Bookend the separately registered legacy x_tables planes
+    # with two identical normalized nft observations.  Never consult Debian's
+    # mutable generic iptables alternatives.
+    vp_capture_run "$capture_directory/nftables-a.raw" nft --json list ruleset \
+        2>/dev/null \
+        || failed 'host nftables first producer failed'
+    vp_capture_normalize "$capture_directory/nftables-a.raw" \
+        "$capture_directory/nftables-a.normalized" nftables_state_producer \
+        || failed 'host nftables first normalization failed'
+
+    capture_stable_legacy_firewall_state ipv4 /proc/self/net/ip_tables_names \
+        0 0 440 /usr/sbin/iptables-legacy-save \
+        "$capture_directory/legacy-ipv4" "$capture_directory/legacy-ipv4.stable" \
+        || failed 'host legacy IPv4 firewall capture was not stable'
+    capture_stable_legacy_firewall_state ipv6 /proc/self/net/ip6_tables_names \
+        0 0 440 /usr/sbin/ip6tables-legacy-save \
+        "$capture_directory/legacy-ipv6" "$capture_directory/legacy-ipv6.stable" \
+        || failed 'host legacy IPv6 firewall capture was not stable'
+
+    vp_capture_run "$capture_directory/nftables-b.raw" nft --json list ruleset \
+        2>/dev/null \
+        || failed 'host nftables second producer failed'
+    vp_capture_normalize "$capture_directory/nftables-b.raw" \
+        "$capture_directory/nftables-b.normalized" nftables_state_producer \
+        || failed 'host nftables second normalization failed'
+    cmp -s "$capture_directory/nftables-a.normalized" \
+        "$capture_directory/nftables-b.normalized" \
+        || failed 'host nftables capture was not stable'
+
+    vp_capture_publish_digest "$capture_directory/nftables-a.normalized" \
+        "$destination/nftables" || failed 'host nftables capture could not be published'
+    vp_capture_publish_digest "$capture_directory/legacy-ipv4.stable" \
+        "$destination/legacy_ipv4_firewall" \
+        || failed 'host legacy IPv4 firewall capture could not be published'
+    vp_capture_publish_digest "$capture_directory/legacy-ipv6.stable" \
+        "$destination/legacy_ipv6_firewall" \
+        || failed 'host legacy IPv6 firewall capture could not be published'
 
     # `wg dump` contains private key material. A validated 0600 FIFO streams it
     # directly to a separately checked SHA-256 consumer; raw bytes never enter
@@ -1371,30 +1799,6 @@ capture_host_state() {
         publish_absent_record "$destination/wireguard"
     fi
 
-    if command -v iptables-save >/dev/null 2>&1; then
-        vp_capture_run "$capture_directory/iptables.raw" iptables-save \
-            || failed 'host legacy IPv4 firewall producer failed'
-        vp_capture_normalize "$capture_directory/iptables.raw" \
-            "$capture_directory/iptables.normalized" \
-            sed -E 's/\[[0-9]+:[0-9]+\]/[COUNTERS]/g' \
-            || failed 'host legacy IPv4 firewall normalization failed'
-        publish_optional_digest_record "$capture_directory/iptables.normalized" \
-            "$destination/legacy_ipv4_firewall"
-    else
-        publish_absent_record "$destination/legacy_ipv4_firewall"
-    fi
-    if command -v ip6tables-save >/dev/null 2>&1; then
-        vp_capture_run "$capture_directory/ip6tables.raw" ip6tables-save \
-            || failed 'host legacy IPv6 firewall producer failed'
-        vp_capture_normalize "$capture_directory/ip6tables.raw" \
-            "$capture_directory/ip6tables.normalized" \
-            sed -E 's/\[[0-9]+:[0-9]+\]/[COUNTERS]/g' \
-            || failed 'host legacy IPv6 firewall normalization failed'
-        publish_optional_digest_record "$capture_directory/ip6tables.normalized" \
-            "$destination/legacy_ipv6_firewall"
-    else
-        publish_absent_record "$destination/legacy_ipv6_firewall"
-    fi
 }
 
 state_digest() {

@@ -236,14 +236,16 @@ if ! awk '
         expected["rules"] = "rule_state_producer"
         expected["nexthops"] = "nexthop_state_producer"
         expected["qdiscs"] = "qdisc_state_producer"
-        expected["nftables"] = "nftables_state_producer"
+        expected["nftables-a"] = "nftables_state_producer"
+        expected["nftables-b"] = "nftables_state_producer"
         label["links"] = "host link normalization failed"
         label["addresses"] = "host address normalization failed"
         label["routes"] = "host route normalization failed"
         label["rules"] = "host rule normalization failed"
         label["nexthops"] = "host nexthop normalization failed"
         label["qdiscs"] = "host qdisc normalization failed"
-        label["nftables"] = "host nftables normalization failed"
+        label["nftables-a"] = "host nftables first normalization failed"
+        label["nftables-b"] = "host nftables second normalization failed"
     }
     $0 == "capture_host_state() {" { in_capture = 1; next }
     in_capture && $0 == "}" { in_capture = 0; next }
@@ -252,7 +254,8 @@ if ! awk '
         for (site in expected) {
             target = "$capture_directory/" site ".normalized"
             if (index($0, target) > 0 \
-                && index($0, "vp_capture_publish_digest") == 0) {
+                && index($0, "vp_capture_publish_digest") == 0 \
+                && seen[site] == 0) {
                 if (active != "") exit 1
                 active = site
                 command = $0
@@ -765,6 +768,667 @@ if link_state_producer unexpected >/dev/null 2>&1 \
     || qdisc_state_producer unexpected >/dev/null 2>&1 \
     || nftables_state_producer unexpected >/dev/null 2>&1; then
     printf '%s\n' 'network-state normalizer accepted an invalid arity' >&2
+    exit 1
+fi
+
+# Exercise the gate's real legacy-xtables inventory, producer, normalizer,
+# join, and stable-capture functions.  Every executable below is a private
+# fixture; this test never invokes a host firewall frontend.
+legacy_firewall_functions=$temporary_directory/legacy-firewall-functions.sh
+{
+    sed -n '/^legacy_firewall_inventory_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^legacy_firewall_save_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^legacy_firewall_save_normalizer() {$/,/^}$/p' "$gate"
+    sed -n '/^legacy_firewall_join_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^capture_stable_legacy_firewall_state() ($/,/^)$/p' "$gate"
+} >"$legacy_firewall_functions"
+for legacy_function in \
+    legacy_firewall_inventory_producer \
+    legacy_firewall_save_producer \
+    legacy_firewall_save_normalizer \
+    legacy_firewall_join_producer
+do
+    if [ "$(grep -c "^$legacy_function() {$" "$legacy_firewall_functions")" -ne 1 ]; then
+        printf 'legacy firewall function cannot be isolated: %s\n' \
+            "$legacy_function" >&2
+        exit 1
+    fi
+done
+if [ "$(grep -c '^capture_stable_legacy_firewall_state() ($' \
+        "$legacy_firewall_functions")" -ne 1 ]; then
+    printf '%s\n' 'stable legacy firewall capture cannot be isolated' >&2
+    exit 1
+fi
+sh -n "$legacy_firewall_functions"
+
+# Keep the production authority and observation order pinned independently of
+# the fixture-driven tests below.  In particular, Debian's mutable generic
+# alternatives must never enter this gate: iptables-nft is already represented
+# by the nft JSON bookends.
+legacy_host_capture_function=$temporary_directory/legacy-host-capture-function.sh
+sed -n '/^capture_host_state() {$/,/^}$/p' "$gate" \
+    >"$legacy_host_capture_function"
+# These are literal gate-source fragments; the trailing backslashes and
+# dollar-prefixed names must not be interpreted by this test shell.
+# shellcheck disable=SC1003,SC2016
+if [ "$(grep -c '^capture_host_state() {$' \
+        "$legacy_host_capture_function")" -ne 1 ] \
+    || grep -Eq '(^|[[:space:]])(iptables-save|ip6tables-save)([[:space:]\\]|$)' \
+        "$legacy_host_capture_function" \
+    || [ "$(grep -Fc \
+        'capture_stable_legacy_firewall_state ipv4 /proc/self/net/ip_tables_names \' \
+        "$legacy_host_capture_function")" -ne 1 ] \
+    || [ "$(grep -Fc '0 0 440 /usr/sbin/iptables-legacy-save \' \
+        "$legacy_host_capture_function")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        'capture_stable_legacy_firewall_state ipv6 /proc/self/net/ip6_tables_names \' \
+        "$legacy_host_capture_function")" -ne 1 ] \
+    || [ "$(grep -Fc '0 0 440 /usr/sbin/ip6tables-legacy-save \' \
+        "$legacy_host_capture_function")" -ne 1 ]; then
+    printf '%s\n' 'legacy firewall production authority is not exact' >&2
+    exit 1
+fi
+# These are also literal extracted-function fragments.
+# shellcheck disable=SC1003,SC2016
+if [ "$(grep -Fc \
+        'vp_capture_run "$legacy_inventory_a" legacy_firewall_inventory_producer \' \
+        "$legacy_firewall_functions")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        'vp_capture_run "$legacy_inventory_b" legacy_firewall_inventory_producer \' \
+        "$legacy_firewall_functions")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        'vp_capture_run "$legacy_raw_a" legacy_firewall_save_producer \' \
+        "$legacy_firewall_functions")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        'vp_capture_run "$legacy_raw_b" legacy_firewall_save_producer \' \
+        "$legacy_firewall_functions")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        'if "$legacy_save_tool" -M /bin/false 2>/dev/null; then' \
+        "$legacy_firewall_functions")" -ne 1 ] \
+    || [ "$(grep -Fc 'legacy_save_target_digest_before=$(vp_capture_sha256_file \' \
+        "$legacy_firewall_functions")" -ne 1 ] \
+    || [ "$(grep -Fc 'legacy_save_target_digest_after=$(vp_capture_sha256_file \' \
+        "$legacy_firewall_functions")" -ne 1 ]; then
+    printf '%s\n' 'legacy firewall bookends or exact producer command changed' >&2
+    exit 1
+fi
+if ! awk '
+    /nftables-a\.raw" nft --json list ruleset/ {
+        if (++nft_a != 1) exit 1
+        nft_a_line = NR
+        nft_a_stderr_pending = 1
+        next
+    }
+    nft_a_stderr_pending {
+        if ($0 != "        2>/dev/null " "\\") exit 1
+        nft_a_stderr++
+        nft_a_stderr_pending = 0
+        next
+    }
+    /capture_stable_legacy_firewall_state ipv4 \/proc\/self\/net\/ip_tables_names/ {
+        if (++legacy_v4 != 1) exit 1
+        legacy_v4_line = NR
+    }
+    /capture_stable_legacy_firewall_state ipv6 \/proc\/self\/net\/ip6_tables_names/ {
+        if (++legacy_v6 != 1) exit 1
+        legacy_v6_line = NR
+    }
+    /nftables-b\.raw" nft --json list ruleset/ {
+        if (++nft_b != 1) exit 1
+        nft_b_line = NR
+        nft_b_stderr_pending = 1
+        next
+    }
+    nft_b_stderr_pending {
+        if ($0 != "        2>/dev/null " "\\") exit 1
+        nft_b_stderr++
+        nft_b_stderr_pending = 0
+        next
+    }
+    /cmp -s "\$capture_directory\/nftables-a\.normalized"/ {
+        if (++nft_cmp != 1) exit 1
+        nft_cmp_line = NR
+    }
+    /vp_capture_publish_digest "\$capture_directory\/nftables-a\.normalized"/ {
+        if (++publish_nft != 1) exit 1
+        publish_nft_line = NR
+    }
+    /vp_capture_publish_digest "\$capture_directory\/legacy-ipv4\.stable"/ {
+        if (++publish_v4 != 1) exit 1
+        publish_v4_line = NR
+    }
+    /vp_capture_publish_digest "\$capture_directory\/legacy-ipv6\.stable"/ {
+        if (++publish_v6 != 1) exit 1
+        publish_v6_line = NR
+    }
+    END {
+        if (nft_a != 1 || nft_a_stderr != 1 || nft_a_stderr_pending ||
+            legacy_v4 != 1 || legacy_v6 != 1 || nft_b != 1 ||
+            nft_b_stderr != 1 || nft_b_stderr_pending ||
+            nft_cmp != 1 || publish_nft != 1 || publish_v4 != 1 ||
+            publish_v6 != 1 ||
+            !(nft_a_line < legacy_v4_line &&
+                legacy_v4_line < legacy_v6_line &&
+                legacy_v6_line < nft_b_line &&
+                nft_b_line < nft_cmp_line &&
+                nft_cmp_line < publish_nft_line &&
+                publish_nft_line < publish_v4_line &&
+                publish_v4_line < publish_v6_line)) exit 1
+    }
+' "$legacy_host_capture_function"; then
+    printf '%s\n' 'legacy firewall state is not enclosed by unpublished nft bookends' >&2
+    exit 1
+fi
+# The function path is generated from the reviewed gate above.
+# shellcheck disable=SC1090
+. "$legacy_firewall_functions"
+
+legacy_fixture_uid=$(id -u)
+legacy_fixture_gid=$(id -g)
+legacy_fixture_mode=600
+legacy_absent_inventory=$temporary_directory/legacy-absent.inventory
+legacy_empty_inventory=$temporary_directory/legacy-empty.inventory
+legacy_present_inventory=$temporary_directory/legacy-present.inventory
+: >"$legacy_empty_inventory"
+printf '%s\n' filter >"$legacy_present_inventory"
+chmod 0600 "$legacy_empty_inventory" "$legacy_present_inventory"
+
+legacy_inventory_absent_capture=$temporary_directory/legacy-inventory-absent.capture
+legacy_inventory_empty_capture=$temporary_directory/legacy-inventory-empty.capture
+legacy_inventory_present_capture=$temporary_directory/legacy-inventory-present.capture
+vp_capture_run "$legacy_inventory_absent_capture" legacy_firewall_inventory_producer \
+    "$legacy_absent_inventory" "$legacy_fixture_uid" "$legacy_fixture_gid" \
+    "$legacy_fixture_mode"
+vp_capture_run "$legacy_inventory_empty_capture" legacy_firewall_inventory_producer \
+    "$legacy_empty_inventory" "$legacy_fixture_uid" "$legacy_fixture_gid" \
+    "$legacy_fixture_mode"
+vp_capture_run "$legacy_inventory_present_capture" legacy_firewall_inventory_producer \
+    "$legacy_present_inventory" "$legacy_fixture_uid" "$legacy_fixture_gid" \
+    "$legacy_fixture_mode"
+if [ "$(cat "$legacy_inventory_absent_capture")" != PROC_ABSENT ] \
+    || [ "$(cat "$legacy_inventory_empty_capture")" != NO_TABLES ] \
+    || [ "$(sed -n '1p' "$legacy_inventory_present_capture")" != PRESENT ] \
+    || [ "$(sed -n '2p' "$legacy_inventory_present_capture")" != filter ] \
+    || [ -n "$(sed -n '3p' "$legacy_inventory_present_capture")" ] \
+    || cmp -s "$legacy_inventory_absent_capture" "$legacy_inventory_empty_capture" \
+    || cmp -s "$legacy_inventory_empty_capture" "$legacy_inventory_present_capture"; then
+    printf '%s\n' 'legacy proc absent, empty, and present states are not canonical and distinct' >&2
+    exit 1
+fi
+
+legacy_inventory_failure_gate() {
+    [ "$#" -eq 2 ] || return 78
+    legacy_inventory_failure_label=$1
+    legacy_inventory_failure_input=$2
+    legacy_inventory_failure_output=$temporary_directory/legacy-inventory-$legacy_inventory_failure_label.capture
+    vp_capture_run "$legacy_inventory_failure_output" \
+        legacy_firewall_inventory_producer "$legacy_inventory_failure_input" \
+        "$legacy_fixture_uid" "$legacy_fixture_gid" "$legacy_fixture_mode" \
+        || return 77
+}
+
+legacy_inventory_duplicate=$temporary_directory/legacy-inventory-duplicate.raw
+legacy_inventory_blank=$temporary_directory/legacy-inventory-blank.raw
+legacy_inventory_invalid=$temporary_directory/legacy-inventory-invalid.raw
+legacy_inventory_long=$temporary_directory/legacy-inventory-long.raw
+legacy_inventory_many=$temporary_directory/legacy-inventory-many.raw
+legacy_inventory_no_lf=$temporary_directory/legacy-inventory-no-lf.raw
+legacy_inventory_wrong_mode=$temporary_directory/legacy-inventory-wrong-mode.raw
+legacy_inventory_symlink=$temporary_directory/legacy-inventory-symlink.raw
+printf '%s\n%s\n' filter filter >"$legacy_inventory_duplicate"
+printf '\n' >"$legacy_inventory_blank"
+printf '%s\n' 'filter table' >"$legacy_inventory_invalid"
+printf '%s\n' 12345678901234567890123456789012 >"$legacy_inventory_long"
+awk 'BEGIN { for (i = 1; i <= 65; i++) print "table" i }' >"$legacy_inventory_many"
+printf '%s' filter >"$legacy_inventory_no_lf"
+printf '%s\n' filter >"$legacy_inventory_wrong_mode"
+chmod 0644 "$legacy_inventory_wrong_mode"
+ln -s -- "$legacy_present_inventory" "$legacy_inventory_symlink"
+for legacy_inventory_failure_label in \
+    duplicate blank invalid long many no-lf wrong-mode symlink
+do
+    case $legacy_inventory_failure_label in
+        duplicate) legacy_inventory_failure_input=$legacy_inventory_duplicate ;;
+        blank) legacy_inventory_failure_input=$legacy_inventory_blank ;;
+        invalid) legacy_inventory_failure_input=$legacy_inventory_invalid ;;
+        long) legacy_inventory_failure_input=$legacy_inventory_long ;;
+        many) legacy_inventory_failure_input=$legacy_inventory_many ;;
+        no-lf) legacy_inventory_failure_input=$legacy_inventory_no_lf ;;
+        wrong-mode) legacy_inventory_failure_input=$legacy_inventory_wrong_mode ;;
+        symlink) legacy_inventory_failure_input=$legacy_inventory_symlink ;;
+    esac
+    expect_status 77 legacy_inventory_failure_gate \
+        "$legacy_inventory_failure_label" "$legacy_inventory_failure_input"
+    legacy_inventory_failure_output=$temporary_directory/legacy-inventory-$legacy_inventory_failure_label.capture
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+        || [ -e "$legacy_inventory_failure_output" ] \
+        || [ -L "$legacy_inventory_failure_output" ]; then
+        printf 'invalid legacy inventory escaped diagnostics or partial state: %s\n' \
+            "$legacy_inventory_failure_label" >&2
+        exit 1
+    fi
+done
+
+legacy_fake_tool=$temporary_directory/legacy-firewall-save-fixture
+# The single quotes intentionally defer fixture variables to the generated
+# executable rather than expanding them in this contract-test process.
+# shellcheck disable=SC2016
+printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    '[ "$#" -eq 2 ] && [ "$1" = -M ] && [ "$2" = /bin/false ] || exit 91' \
+    'if [ -n "${VP_LEGACY_FIXTURE_LOG:-}" ]; then' \
+    '    printf "%s|%s\n" "$1" "$2" >>"$VP_LEGACY_FIXTURE_LOG"' \
+    'fi' \
+    'fixture_count=0' \
+    'if [ -n "${VP_LEGACY_FIXTURE_COUNT:-}" ] && [ -f "$VP_LEGACY_FIXTURE_COUNT" ]; then' \
+    '    fixture_count=$(cat "$VP_LEGACY_FIXTURE_COUNT")' \
+    'fi' \
+    'fixture_count=$((fixture_count + 1))' \
+    'if [ -n "${VP_LEGACY_FIXTURE_COUNT:-}" ]; then' \
+    '    printf "%s\n" "$fixture_count" >"$VP_LEGACY_FIXTURE_COUNT"' \
+    'fi' \
+    'case ${VP_LEGACY_FIXTURE_MODE:-stable-v4} in' \
+    '    must-not-run)' \
+    '        printf "%s\n" legacy-tool-was-invoked >&2' \
+    '        exit 92' \
+    '        ;;' \
+    '    fail)' \
+    '        printf "%s\n" volparossa-private-firewall-stdout.invalid' \
+    '        printf "%s\n" volparossa-private-firewall-stderr.invalid >&2' \
+    '        exit 19' \
+    '        ;;' \
+    '    malformed)' \
+    '        printf "%s\n" volparossa-private-firewall-parser.invalid' \
+    '        ;;' \
+    '    inventory-drift)' \
+    '        if [ "$fixture_count" -eq 1 ]; then' \
+    '            printf "%s\n" nat >"$VP_LEGACY_FIXTURE_INVENTORY"' \
+    '        fi' \
+    '        printf "%s\n" "# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        printf "%s\n" "*filter" ":INPUT ACCEPT [$fixture_count:$fixture_count]" "COMMIT"' \
+    '        printf "%s\n" "# Completed on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        ;;' \
+    '    save-drift)' \
+    '        printf "%s\n" "# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        printf "%s\n" "*filter" ":INPUT ACCEPT [$fixture_count:$fixture_count]"' \
+    '        if [ "$fixture_count" -eq 1 ]; then' \
+    '            printf "%s\n" "-A INPUT -j ACCEPT"' \
+    '        else' \
+    '            printf "%s\n" "-A INPUT -j DROP"' \
+    '        fi' \
+    '        printf "%s\n" "COMMIT"' \
+    '        printf "%s\n" "# Completed on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        ;;' \
+    '    stable-v4)' \
+    '        printf "%s\n" "# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        printf "%s\n" "*filter" ":INPUT ACCEPT [$fixture_count:$fixture_count]"' \
+    '        printf "%s\n" "-A INPUT -m comment --comment \"semantic [1:2]\" -j ACCEPT"' \
+    '        printf "%s\n" "COMMIT"' \
+    '        printf "%s\n" "# Completed on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        ;;' \
+    '    stable-v6)' \
+    '        printf "%s\n" "# Generated by ip6tables-save v1.8.11 on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        printf "%s\n" "*filter" ":INPUT ACCEPT [$fixture_count:$fixture_count]" "COMMIT"' \
+    '        printf "%s\n" "# Completed on Thu Aug 28 00:00:0${fixture_count} 2026"' \
+    '        ;;' \
+    '    *) exit 93 ;;' \
+    'esac' \
+    >"$legacy_fake_tool"
+chmod 0700 "$legacy_fake_tool"
+
+legacy_raw_first=$temporary_directory/legacy-raw-first.capture
+legacy_raw_second=$temporary_directory/legacy-raw-second.capture
+legacy_normalized_first=$temporary_directory/legacy-normalized-first.capture
+legacy_normalized_second=$temporary_directory/legacy-normalized-second.capture
+legacy_fixture_count=$temporary_directory/legacy-normalizer.count
+legacy_fixture_log=$temporary_directory/legacy-normalizer.log
+VP_LEGACY_FIXTURE_MODE=stable-v4
+VP_LEGACY_FIXTURE_COUNT=$legacy_fixture_count
+VP_LEGACY_FIXTURE_LOG=$legacy_fixture_log
+export VP_LEGACY_FIXTURE_MODE VP_LEGACY_FIXTURE_COUNT VP_LEGACY_FIXTURE_LOG
+vp_capture_run "$legacy_raw_first" legacy_firewall_save_producer "$legacy_fake_tool"
+vp_capture_run "$legacy_raw_second" legacy_firewall_save_producer "$legacy_fake_tool"
+vp_capture_normalize "$legacy_raw_first" "$legacy_normalized_first" \
+    legacy_firewall_save_normalizer ipv4
+vp_capture_normalize "$legacy_raw_second" "$legacy_normalized_second" \
+    legacy_firewall_save_normalizer ipv4
+if ! cmp -s "$legacy_normalized_first" "$legacy_normalized_second" \
+    || ! grep -Fx ':INPUT ACCEPT [COUNTERS]' "$legacy_normalized_first" >/dev/null \
+    || ! grep -Fx -- \
+        '-A INPUT -m comment --comment "semantic [1:2]" -j ACCEPT' \
+        "$legacy_normalized_first" >/dev/null \
+    || [ "$(grep -Fc -- '-M|/bin/false' "$legacy_fixture_log")" -ne 2 ]; then
+    printf '%s\n' 'legacy timestamp/counter normalization changed rule semantics or tool arguments' >&2
+    exit 1
+fi
+
+legacy_normalizer_failure_gate() {
+    [ "$#" -eq 3 ] || return 78
+    legacy_normalizer_failure_label=$1
+    legacy_normalizer_failure_family=$2
+    legacy_normalizer_failure_input=$3
+    legacy_normalizer_failure_output=$temporary_directory/legacy-normalizer-$legacy_normalizer_failure_label.capture
+    vp_capture_normalize "$legacy_normalizer_failure_input" \
+        "$legacy_normalizer_failure_output" legacy_firewall_save_normalizer \
+        "$legacy_normalizer_failure_family" || return 77
+}
+
+legacy_bad_timestamp=$temporary_directory/legacy-bad-timestamp.raw
+legacy_wrong_family=$temporary_directory/legacy-wrong-family.raw
+legacy_bad_counter=$temporary_directory/legacy-bad-counter.raw
+legacy_extra_comment=$temporary_directory/legacy-extra-comment.raw
+printf '%s\n' \
+    '# Generated by iptables-save v1.8.11 on volparossa-private-firewall-timestamp.invalid' \
+    '*filter' ':INPUT ACCEPT [0:0]' 'COMMIT' \
+    '# Completed on Thu Aug 28 00:00:00 2026' >"$legacy_bad_timestamp"
+printf '%s\n' \
+    '# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:00 2026' \
+    '*filter' ':INPUT ACCEPT [0:0]' 'COMMIT' \
+    '# Completed on Thu Aug 28 00:00:00 2026' >"$legacy_wrong_family"
+printf '%s\n' \
+    '# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:00 2026' \
+    '*filter' ':INPUT ACCEPT [not:a-counter]' 'COMMIT' \
+    '# Completed on Thu Aug 28 00:00:00 2026' >"$legacy_bad_counter"
+printf '%s\n' \
+    '# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:00 2026' \
+    '*filter' '# volparossa-private-firewall-comment.invalid' 'COMMIT' \
+    '# Completed on Thu Aug 28 00:00:00 2026' >"$legacy_extra_comment"
+for legacy_normalizer_failure_label in bad-timestamp wrong-family bad-counter extra-comment; do
+    case $legacy_normalizer_failure_label in
+        bad-timestamp)
+            legacy_normalizer_failure_family=ipv4
+            legacy_normalizer_failure_input=$legacy_bad_timestamp
+            ;;
+        wrong-family)
+            legacy_normalizer_failure_family=ipv6
+            legacy_normalizer_failure_input=$legacy_wrong_family
+            ;;
+        bad-counter)
+            legacy_normalizer_failure_family=ipv4
+            legacy_normalizer_failure_input=$legacy_bad_counter
+            ;;
+        extra-comment)
+            legacy_normalizer_failure_family=ipv4
+            legacy_normalizer_failure_input=$legacy_extra_comment
+            ;;
+    esac
+    expect_status 77 legacy_normalizer_failure_gate \
+        "$legacy_normalizer_failure_label" "$legacy_normalizer_failure_family" \
+        "$legacy_normalizer_failure_input"
+    legacy_normalizer_failure_output=$temporary_directory/legacy-normalizer-$legacy_normalizer_failure_label.capture
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+        || [ -e "$legacy_normalizer_failure_output" ]; then
+        printf 'invalid legacy save escaped diagnostics or normalized output: %s\n' \
+            "$legacy_normalizer_failure_label" >&2
+        exit 1
+    fi
+done
+if legacy_firewall_save_normalizer unexpected </dev/null >/dev/null 2>&1 \
+    || legacy_firewall_save_producer relative/path >/dev/null 2>&1; then
+    printf '%s\n' 'legacy save producer or normalizer accepted an invalid authority' >&2
+    exit 1
+fi
+
+# Prove the join is an exact set comparison, not a count or concatenation
+# shortcut.  Deliberately reverse the two valid table stanzas in the happy
+# path, then reject missing, extra, and duplicate table identities without
+# retaining producer output or leaking the private fixture marker.
+legacy_join_inventory=$temporary_directory/legacy-join.inventory
+legacy_join_raw=$temporary_directory/legacy-join.raw
+legacy_join_normalized=$temporary_directory/legacy-join.normalized
+legacy_join_output=$temporary_directory/legacy-join.output
+legacy_join_expected=$temporary_directory/legacy-join.expected
+printf '%s\n' PRESENT filter nat >"$legacy_join_inventory"
+printf '%s\n' \
+    '# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:00 2026' \
+    '*nat' ':PREROUTING ACCEPT [1:2]' 'COMMIT' \
+    '# Completed on Thu Aug 28 00:00:00 2026' \
+    '# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:01 2026' \
+    '*filter' ':INPUT ACCEPT [3:4]' 'COMMIT' \
+    '# Completed on Thu Aug 28 00:00:01 2026' >"$legacy_join_raw"
+vp_capture_normalize "$legacy_join_raw" "$legacy_join_normalized" \
+    legacy_firewall_save_normalizer ipv4
+vp_capture_run "$legacy_join_output" legacy_firewall_join_producer \
+    "$legacy_join_inventory" "$legacy_join_normalized"
+{
+    printf '%s\n' PRESENT filter nat
+    cat "$legacy_join_normalized"
+} >"$legacy_join_expected"
+if ! cmp -s "$legacy_join_expected" "$legacy_join_output"; then
+    printf '%s\n' 'legacy multi-table exact-set join rejected canonical reordered tables' >&2
+    exit 1
+fi
+
+legacy_join_failure_gate() {
+    [ "$#" -eq 2 ] || return 78
+    legacy_join_failure_label=$1
+    legacy_join_failure_dump=$2
+    legacy_join_failure_output=$temporary_directory/legacy-join-$legacy_join_failure_label.output
+    vp_capture_run "$legacy_join_failure_output" legacy_firewall_join_producer \
+        "$legacy_join_inventory" "$legacy_join_failure_dump" || return 77
+}
+
+legacy_join_missing=$temporary_directory/legacy-join-missing.normalized
+legacy_join_extra=$temporary_directory/legacy-join-extra.normalized
+legacy_join_duplicate=$temporary_directory/legacy-join-duplicate.normalized
+printf '%s\n' '*filter' ':INPUT ACCEPT [COUNTERS]' 'COMMIT' \
+    >"$legacy_join_missing"
+printf '%s\n' \
+    '*filter' ':INPUT ACCEPT [COUNTERS]' 'COMMIT' \
+    '*nat' ':PREROUTING ACCEPT [COUNTERS]' 'COMMIT' \
+    '*volparossa_private' ':PRIVATE ACCEPT [COUNTERS]' 'COMMIT' \
+    >"$legacy_join_extra"
+printf '%s\n' \
+    '*filter' ':INPUT ACCEPT [COUNTERS]' 'COMMIT' \
+    '*filter' ':OUTPUT ACCEPT [COUNTERS]' 'COMMIT' \
+    '*nat' ':PREROUTING ACCEPT [COUNTERS]' 'COMMIT' \
+    >"$legacy_join_duplicate"
+for legacy_join_failure_label in missing extra duplicate; do
+    case $legacy_join_failure_label in
+        missing) legacy_join_failure_dump=$legacy_join_missing ;;
+        extra) legacy_join_failure_dump=$legacy_join_extra ;;
+        duplicate) legacy_join_failure_dump=$legacy_join_duplicate ;;
+    esac
+    expect_status 77 legacy_join_failure_gate "$legacy_join_failure_label" \
+        "$legacy_join_failure_dump"
+    legacy_join_failure_output=$temporary_directory/legacy-join-$legacy_join_failure_label.output
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+        || grep -F 'volparossa_private' "$last_stdout" "$last_stderr" >/dev/null \
+        || [ -e "$legacy_join_failure_output" ] \
+        || [ -L "$legacy_join_failure_output" ]; then
+        printf 'inexact legacy table set leaked diagnostics or partial output: %s\n' \
+            "$legacy_join_failure_label" >&2
+        exit 1
+    fi
+done
+
+# A successful executable which changes only its own bytes during invocation
+# must be rejected by the target-digest bookends.  Its metadata and command
+# shape remain valid, so this is a behavioral check of digest timing rather
+# than another authority predicate.
+legacy_mutating_tool=$temporary_directory/legacy-firewall-save-mutating-fixture
+legacy_mutating_marker=$temporary_directory/legacy-firewall-save-mutating.marker
+legacy_mutating_output=$temporary_directory/legacy-firewall-save-mutating.output
+# The single quotes intentionally defer fixture variables to the executable.
+# shellcheck disable=SC2016
+printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    '[ "$#" -eq 2 ] && [ "$1" = -M ] && [ "$2" = /bin/false ] || exit 91' \
+    'printf "%s\n" "# self-mutation" >>"$0"' \
+    'printf "%s\n" completed >"$VP_LEGACY_MUTATING_MARKER"' \
+    'printf "%s\n" "# Generated by iptables-save v1.8.11 on Thu Aug 28 00:00:00 2026"' \
+    'printf "%s\n" "*filter" ":INPUT ACCEPT [0:0]" "COMMIT"' \
+    'printf "%s\n" "# Completed on Thu Aug 28 00:00:00 2026"' \
+    >"$legacy_mutating_tool"
+chmod 0700 "$legacy_mutating_tool"
+VP_LEGACY_MUTATING_MARKER=$legacy_mutating_marker
+export VP_LEGACY_MUTATING_MARKER
+legacy_mutating_digest_before=$(vp_capture_sha256_file "$legacy_mutating_tool")
+
+legacy_mutating_failure_gate() {
+    vp_capture_run "$legacy_mutating_output" legacy_firewall_save_producer \
+        "$legacy_mutating_tool" || return 77
+}
+
+expect_status 77 legacy_mutating_failure_gate
+legacy_mutating_digest_after=$(vp_capture_sha256_file "$legacy_mutating_tool")
+if [ "$legacy_mutating_digest_before" = "$legacy_mutating_digest_after" ] \
+    || [ "$(cat "$legacy_mutating_marker")" != completed ] \
+    || [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+    || [ -e "$legacy_mutating_output" ] || [ -L "$legacy_mutating_output" ]; then
+    printf '%s\n' 'legacy executable digest drift was not rejected cleanly' >&2
+    exit 1
+fi
+
+assert_legacy_capture_cleaned() {
+    [ "$#" -eq 2 ] || return 1
+    legacy_cleanup_prefix=$1
+    legacy_cleanup_output=$2
+    for legacy_cleanup_path in \
+        "$legacy_cleanup_prefix.inventory-a" "$legacy_cleanup_prefix.inventory-b" \
+        "$legacy_cleanup_prefix.raw-a" "$legacy_cleanup_prefix.raw-b" \
+        "$legacy_cleanup_prefix.normalized-a" "$legacy_cleanup_prefix.normalized-b" \
+        "$legacy_cleanup_output"
+    do
+        [ ! -e "$legacy_cleanup_path" ] && [ ! -L "$legacy_cleanup_path" ] \
+            || return 1
+    done
+}
+
+legacy_stable_failure_gate() {
+    [ "$#" -eq 3 ] || return 78
+    legacy_stable_failure_label=$1
+    legacy_stable_failure_inventory=$2
+    legacy_stable_failure_mode=$3
+    legacy_stable_failure_prefix=$temporary_directory/legacy-stable-$legacy_stable_failure_label
+    legacy_stable_failure_output=$temporary_directory/legacy-stable-$legacy_stable_failure_label.output
+    legacy_stable_failure_count=$temporary_directory/legacy-stable-$legacy_stable_failure_label.count
+    legacy_stable_failure_log=$temporary_directory/legacy-stable-$legacy_stable_failure_label.log
+    VP_LEGACY_FIXTURE_MODE=$legacy_stable_failure_mode
+    VP_LEGACY_FIXTURE_COUNT=$legacy_stable_failure_count
+    VP_LEGACY_FIXTURE_LOG=$legacy_stable_failure_log
+    VP_LEGACY_FIXTURE_INVENTORY=$legacy_stable_failure_inventory
+    export VP_LEGACY_FIXTURE_MODE VP_LEGACY_FIXTURE_COUNT \
+        VP_LEGACY_FIXTURE_LOG VP_LEGACY_FIXTURE_INVENTORY
+    capture_stable_legacy_firewall_state ipv4 \
+        "$legacy_stable_failure_inventory" "$legacy_fixture_uid" \
+        "$legacy_fixture_gid" "$legacy_fixture_mode" "$legacy_fake_tool" \
+        "$legacy_stable_failure_prefix" "$legacy_stable_failure_output" \
+        || return 77
+}
+
+legacy_absent_prefix=$temporary_directory/legacy-stable-absent
+legacy_absent_output=$temporary_directory/legacy-stable-absent.output
+legacy_absent_count=$temporary_directory/legacy-stable-absent.count
+legacy_absent_log=$temporary_directory/legacy-stable-absent.log
+VP_LEGACY_FIXTURE_MODE=must-not-run
+VP_LEGACY_FIXTURE_COUNT=$legacy_absent_count
+VP_LEGACY_FIXTURE_LOG=$legacy_absent_log
+export VP_LEGACY_FIXTURE_MODE VP_LEGACY_FIXTURE_COUNT VP_LEGACY_FIXTURE_LOG
+capture_stable_legacy_firewall_state ipv4 "$legacy_absent_inventory" \
+    "$legacy_fixture_uid" "$legacy_fixture_gid" "$legacy_fixture_mode" \
+    "$legacy_fake_tool" "$legacy_absent_prefix" "$legacy_absent_output"
+if [ "$(cat "$legacy_absent_output")" != PROC_ABSENT ] \
+    || [ -e "$legacy_absent_count" ] || [ -e "$legacy_absent_log" ]; then
+    printf '%s\n' 'proc-absent legacy state invoked a firewall frontend or joined incorrectly' >&2
+    exit 1
+fi
+
+legacy_empty_prefix=$temporary_directory/legacy-stable-empty
+legacy_empty_output=$temporary_directory/legacy-stable-empty.output
+legacy_empty_count=$temporary_directory/legacy-stable-empty.count
+legacy_empty_log=$temporary_directory/legacy-stable-empty.log
+VP_LEGACY_FIXTURE_MODE=must-not-run
+VP_LEGACY_FIXTURE_COUNT=$legacy_empty_count
+VP_LEGACY_FIXTURE_LOG=$legacy_empty_log
+export VP_LEGACY_FIXTURE_MODE VP_LEGACY_FIXTURE_COUNT VP_LEGACY_FIXTURE_LOG
+capture_stable_legacy_firewall_state ipv4 "$legacy_empty_inventory" \
+    "$legacy_fixture_uid" "$legacy_fixture_gid" "$legacy_fixture_mode" \
+    "$legacy_fake_tool" "$legacy_empty_prefix" "$legacy_empty_output"
+if [ "$(cat "$legacy_empty_output")" != NO_TABLES ] \
+    || [ -e "$legacy_empty_count" ] || [ -e "$legacy_empty_log" ]; then
+    printf '%s\n' 'empty legacy inventory invoked a firewall frontend or joined incorrectly' >&2
+    exit 1
+fi
+
+legacy_present_prefix=$temporary_directory/legacy-stable-present
+legacy_present_output=$temporary_directory/legacy-stable-present.output
+legacy_present_count=$temporary_directory/legacy-stable-present.count
+legacy_present_log=$temporary_directory/legacy-stable-present.log
+VP_LEGACY_FIXTURE_MODE=stable-v4
+VP_LEGACY_FIXTURE_COUNT=$legacy_present_count
+VP_LEGACY_FIXTURE_LOG=$legacy_present_log
+export VP_LEGACY_FIXTURE_MODE VP_LEGACY_FIXTURE_COUNT VP_LEGACY_FIXTURE_LOG
+capture_stable_legacy_firewall_state ipv4 "$legacy_present_inventory" \
+    "$legacy_fixture_uid" "$legacy_fixture_gid" "$legacy_fixture_mode" \
+    "$legacy_fake_tool" "$legacy_present_prefix" "$legacy_present_output"
+if [ "$(cat "$legacy_present_count")" -ne 2 ] \
+    || [ "$(grep -Fc -- '-M|/bin/false' "$legacy_present_log")" -ne 2 ] \
+    || [ "$(sed -n '1p' "$legacy_present_output")" != PRESENT ] \
+    || [ "$(sed -n '2p' "$legacy_present_output")" != filter ] \
+    || ! grep -Fx ':INPUT ACCEPT [COUNTERS]' "$legacy_present_output" >/dev/null \
+    || ! grep -Fx -- \
+        '-A INPUT -m comment --comment "semantic [1:2]" -j ACCEPT' \
+        "$legacy_present_output" >/dev/null; then
+    printf '%s\n' 'present legacy state did not require two stable exact-tool dumps' >&2
+    exit 1
+fi
+for legacy_present_intermediate in \
+    "$legacy_present_prefix.inventory-a" "$legacy_present_prefix.inventory-b" \
+    "$legacy_present_prefix.raw-a" "$legacy_present_prefix.raw-b" \
+    "$legacy_present_prefix.normalized-a" "$legacy_present_prefix.normalized-b"
+do
+    if [ -e "$legacy_present_intermediate" ] || [ -L "$legacy_present_intermediate" ]; then
+        printf '%s\n' 'successful legacy capture retained a private intermediate' >&2
+        exit 1
+    fi
+done
+
+legacy_failure_inventory=$temporary_directory/legacy-failure.inventory
+for legacy_stable_failure_label in producer parser inventory-drift save-drift; do
+    printf '%s\n' filter >"$legacy_failure_inventory"
+    chmod 0600 "$legacy_failure_inventory"
+    case $legacy_stable_failure_label in
+        producer) legacy_stable_failure_mode=fail ;;
+        parser) legacy_stable_failure_mode=malformed ;;
+        inventory-drift) legacy_stable_failure_mode=inventory-drift ;;
+        save-drift) legacy_stable_failure_mode=save-drift ;;
+    esac
+    expect_status 77 legacy_stable_failure_gate "$legacy_stable_failure_label" \
+        "$legacy_failure_inventory" "$legacy_stable_failure_mode"
+    legacy_stable_failure_prefix=$temporary_directory/legacy-stable-$legacy_stable_failure_label
+    legacy_stable_failure_output=$temporary_directory/legacy-stable-$legacy_stable_failure_label.output
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+        || grep -F 'volparossa-private-firewall-' \
+            "$last_stdout" "$last_stderr" >/dev/null \
+        || ! assert_legacy_capture_cleaned "$legacy_stable_failure_prefix" \
+            "$legacy_stable_failure_output"; then
+        printf 'failed legacy capture leaked diagnostics or partial state: %s\n' \
+            "$legacy_stable_failure_label" >&2
+        exit 1
+    fi
+done
+
+# A stable-field nftables difference must remain visible to the caller's
+# mandatory A/B comparison; only counters and documented telemetry normalize.
+legacy_nft_first=$temporary_directory/legacy-nft-first.raw
+legacy_nft_second=$temporary_directory/legacy-nft-second.raw
+legacy_nft_first_normalized=$temporary_directory/legacy-nft-first.normalized
+legacy_nft_second_normalized=$temporary_directory/legacy-nft-second.normalized
+printf '%s\n' \
+    '{"nftables":[{"table":{"family":"inet","name":"before"}}]}' \
+    >"$legacy_nft_first"
+printf '%s\n' \
+    '{"nftables":[{"table":{"family":"inet","name":"after"}}]}' \
+    >"$legacy_nft_second"
+vp_capture_normalize "$legacy_nft_first" "$legacy_nft_first_normalized" \
+    nftables_state_producer
+vp_capture_normalize "$legacy_nft_second" "$legacy_nft_second_normalized" \
+    nftables_state_producer
+if cmp -s "$legacy_nft_first_normalized" "$legacy_nft_second_normalized"; then
+    printf '%s\n' 'stable nftables drift disappeared during normalization' >&2
     exit 1
 fi
 
