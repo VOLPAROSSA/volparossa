@@ -641,7 +641,10 @@ exactly the reviewed seven bootstrap capabilities. The transient unit has `Priva
 temporary `/run`. Only the canonical root-owned system bus socket is bound read-only into that
 private `/run`, and the unit pins `DBUS_SYSTEM_BUS_ADDRESS` to that verified path, so the
 live-proof-only adapter cannot follow a manager-provided alternate address for its uncached systemd
-inventory reads.
+inventory reads. The staged helper aliases remain absolute, read-only `/run` paths; an exact
+`ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient property suppresses systemd v257's
+host-namespace executable preflight while preserving the driver's fixed child `PATH`. The driver
+reads that property back from PID 1 for both transient units before accepting their contracts.
 The first phase succeeds only with the two exact ordered helper records, an externally observed
 post-exit `NFileDescriptorStore=2`, confirmed worker reap and pin release. Before the first phase
 and after the fully retired second phase, the driver compares privacy-safe digests of account files,

@@ -2476,9 +2476,12 @@ for required_contract in \
     '--description="$unit_ownership_marker"' \
     '--property="CapabilityBoundingSet=$capabilities"' \
     '--property="AmbientCapabilities=$capabilities"' \
+    'helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"' \
+    'production_helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-production:norbind"' \
     '--property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind"' \
     '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind"' \
     '--property="BindPaths=$production_runtime_bind $production_output_bind"' \
+    "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" \
     '--property="ExecStartPost=/run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid"' \
     '--property="ExecStopPost=/run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid"' \
     'install -d -o root -g root -m 2700 "$temporary_stage/production-output"' \
@@ -2491,6 +2494,11 @@ for required_contract in \
     'systemctl show --property=Version --value' \
     "blocked 'execution requires exact systemd v257'" \
     'capture_unit_property Environment "$temporary_stage/unit-environment"' \
+    'capture_unit_property ExecSearchPath "$temporary_stage/unit-exec-search-path"' \
+    'capture_unit_property ExecSearchPath' \
+    '"$temporary_stage/production-exec-search-path"' \
+    '[ "$observed_exec_search_path" != '"'"'/usr/sbin /usr/bin /sbin /bin'"'"' ]' \
+    '!= '"'"'/usr/sbin /usr/bin /sbin /bin'"'"' ]' \
     '!= DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ]' \
     'parsed_invocation_id=$(jq -ers --arg expected_unit "$unit_name"' \
     'and (.[0] | keys) == ["invocation_id", "unit"]' \
@@ -2699,6 +2707,26 @@ do
         exit 1
     fi
 done
+if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 2 ]; then
+    printf '%s\n' 'both transient helper invocations lack the exact fixed executable search path' >&2
+    exit 1
+fi
+# These are literal source assignments; expansion here would defeat the check.
+# shellcheck disable=SC2016
+for exact_private_binding in \
+    'helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"' \
+    'production_helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-production:norbind"'
+do
+    if [ "$(grep -Fc -- "$exact_private_binding" "$gate")" -ne 1 ]; then
+        printf '%s\n' 'a transient helper private bind is absent or duplicated' >&2
+        exit 1
+    fi
+done
+if [ "$(grep -Ec '^[[:space:]]*/run/volparossa-helper-live-proof --internal-worker-v3-live-proof \\{1}$' "$gate")" -ne 1 ] \
+    || [ "$(grep -Ec '^[[:space:]]*/run/volparossa-helper-production \\{1}$' "$gate")" -ne 1 ]; then
+    printf '%s\n' 'transient helper main commands are not exact absolute private paths' >&2
+    exit 1
+fi
 for cgroup_assignment_contract in \
     'ProtectControlGroups=:2' \
     'Delegate=:2' \
