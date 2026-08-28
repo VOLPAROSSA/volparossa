@@ -2301,7 +2301,8 @@ printf '%s\n' \
     '  bookend one unchanged clean Git revision and three exact staged artifact hashes;' \
     '  copy the already-built real helper into one validated root-only temporary stage;' \
     '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
-    '  bind account files and the system bus socket read-only in two sequential invocations;' \
+    '  bind account files plus the system bus socket read-only in two sequential invocations;' \
+    '  bind the canonical systemd notify socket read-only inside both private /run trees;' \
     '  pin its D-Bus system address to that verified socket inside the private /run;' \
     '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
     '  require the host /run/volparossa path absent before and after both private unit runs;' \
@@ -2478,8 +2479,8 @@ for required_contract in \
     '--property="AmbientCapabilities=$capabilities"' \
     'helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"' \
     'production_helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-production:norbind"' \
-    '--property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind"' \
-    '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind"' \
+    '--property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind $notify_socket_bind"' \
+    '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind $notify_socket_bind"' \
     '--property="BindPaths=$production_runtime_bind $production_output_bind"' \
     "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" \
     '--property="ExecStartPost=/run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid"' \
@@ -2487,6 +2488,9 @@ for required_contract in \
     'install -d -o root -g root -m 2700 "$temporary_stage/production-output"' \
     '--property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket' \
     'system_bus_socket=/run/dbus/system_bus_socket' \
+    'notify_socket=/run/systemd/notify' \
+    'notify_socket_bind="$notify_socket:$notify_socket:norbind"' \
+    "blocked 'the canonical root-owned systemd notify socket is unavailable'" \
     'host_runtime_directory=/run/volparossa' \
     "blocked 'the disposable host /run/volparossa path must initially be absent'" \
     'state_records='"'"'production_runtime_path accounts namespaces mounts resolver sysctls links addresses routes rules nexthops qdiscs nftables wireguard legacy_ipv4_firewall legacy_ipv6_firewall'"'"'' \
@@ -2695,7 +2699,7 @@ if ! awk '
     exit 1
 fi
 for exact_cgroup_property in \
-    '--property=ProtectControlGroups=strict' \
+    '--property=ProtectControlGroupsEx=strict' \
     '--property=Delegate=no' \
     '--property=PrivatePIDs=no' \
     "--property='SystemCallFilter=@system-service @network-io seccomp'" \
@@ -2707,8 +2711,26 @@ do
         exit 1
     fi
 done
+if grep -F -- 'ProtectControlGroups=' "$gate" >/dev/null; then
+    printf '%s\n' 'a transient helper still assigns the boolean-only legacy cgroup property' >&2
+    exit 1
+fi
 if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 2 ]; then
     printf '%s\n' 'both transient helper invocations lack the exact fixed executable search path' >&2
+    exit 1
+fi
+# These are literal gate-source contracts; expansion here would defeat the checks.
+# shellcheck disable=SC1003,SC2016
+if [ "$(grep -Fc 'notify_socket=/run/systemd/notify' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'if [ ! -S "$notify_socket" ] || [ -L "$notify_socket" ] \' \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "stat -Lc '%F:%u:%g:%a:%h' \"\$notify_socket\" 2>/dev/null || true" \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "!= 'socket:0:0:777:1' ]; then" "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'notify_socket_bind="$notify_socket:$notify_socket:norbind"' \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc '$notify_socket_bind' "$gate")" -ne 2 ]; then
+    printf '%s\n' 'the exact canonical systemd notify-socket preflight and two binds are not pinned' >&2
     exit 1
 fi
 # These are literal source assignments; expansion here would defeat the check.
@@ -2728,7 +2750,7 @@ if [ "$(grep -Ec '^[[:space:]]*/run/volparossa-helper-live-proof --internal-work
     exit 1
 fi
 for cgroup_assignment_contract in \
-    'ProtectControlGroups=:2' \
+    'ProtectControlGroupsEx=:2' \
     'Delegate=:2' \
     'PrivatePIDs=:2' \
     'SystemCallFilter=:4'
