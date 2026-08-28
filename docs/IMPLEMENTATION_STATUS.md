@@ -152,6 +152,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   process credentials, invocation, mode and runtime-directory identity; generic non-root owners
   under `/run` remain rejected. Repeated private authority/object/target captures reject restart,
   replacement, mixed ownership, writable paths and content drift without publishing DNS state.
+  The seven network JSON state normalizers now require exact document and entry shapes, bind
+  separately captured IPv4/IPv6 route and rule records to their canonical source family, reject
+  malformed flags and suppress data-dependent parser stderr; only fixed failure labels can enter a
+  retained diagnostic artifact.
   A successful execute-mode run now emits one bounded canonical helper-boundary evidence-v1
   JSON document on stdout only after separate observed clean-source and executed-artifact
   bookends, both distinct invocations, retirement, equal digests for the exact enumerated host

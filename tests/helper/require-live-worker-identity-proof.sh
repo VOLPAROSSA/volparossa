@@ -356,6 +356,157 @@ resolver_state_producer() {
     vp_capture_file_is_safe "$1" && vp_capture_file_is_safe "$2" || return 1
     cat "$1" "$2"
 }
+
+quiet_jq() {
+    [ "$#" -ge 1 ] || return 1
+    jq "$@" 2>/dev/null
+}
+
+link_state_producer() {
+    [ "$#" -eq 0 ] || return 1
+    quiet_jq -S -c -s '
+        if (length == 1 and (.[0] | type) == "array") then .[0]
+        else error("link input must contain exactly one array") end
+        | if all(.[]; type == "object") then .
+          else error("link array entries must be objects") end
+        | map(del(.operstate,.link_netnsid,.promiscuity,.allmulti,.stats,.stats64)
+            | if has("flags") then
+                if ((.flags | type) == "array"
+                    and all(.flags[]; type == "string")) then
+                    .flags |= (map(select(. != "LOWER_UP" and . != "RUNNING"
+                        and . != "DORMANT" and . != "NO-CARRIER")) | sort)
+                else error("link flags must be a string array") end
+              else .flags = [] end
+            | if has("altnames") then
+                if ((.altnames | type) == "array"
+                    and all(.altnames[]; type == "string")) then
+                    .altnames |= sort
+                else error("link altnames must be a string array") end
+              else . end)
+        | sort_by(.ifindex,.ifname)
+    '
+}
+
+address_state_producer() {
+    [ "$#" -eq 0 ] || return 1
+    quiet_jq -S -c -s '
+        if (length == 1 and (.[0] | type) == "array") then .[0]
+        else error("address input must contain exactly one array") end
+        | if all(.[]; type == "object") then .
+          else error("address array entries must be objects") end
+        | map(if has("addr_info") then
+                if ((.addr_info | type) == "array"
+                    and all(.addr_info[]; type == "object")) then .
+                else error("addr_info must be an object array") end
+              else .addr_info = [] end
+            | {ifindex,ifname,addr_info:(.addr_info
+                | map(del(.valid_life_time,.preferred_life_time,.valid_lft,
+                    .preferred_lft,.tstamp,.cstamp,.tentative,.dadfailed,.deprecated,
+                    .optimistic))
+                | sort_by(.family,.local,(.peer // ""),.prefixlen,.scope,(.label // "")))})
+        | sort_by(.ifindex,.ifname)
+    '
+}
+
+route_state_producer() {
+    [ "$#" -eq 2 ] || return 1
+    # The jq program, not the shell, expands its slurpfile variables.
+    # shellcheck disable=SC2016
+    quiet_jq -S -c -n --slurpfile v4 "$1" --slurpfile v6 "$2" '
+        def tag_family($records; $expected):
+            if all($records[];
+                if type != "object" then false
+                elif has("family") then .family == $expected
+                else true end)
+            then ($records | map(.family = $expected))
+            else error("route entries have invalid address-family provenance") end;
+        if (($v4 | length) == 1 and ($v4[0] | type) == "array"
+            and ($v6 | length) == 1 and ($v6[0] | type) == "array") then
+            tag_family($v4[0]; "inet") + tag_family($v6[0]; "inet6")
+        else error("route inputs must each contain exactly one array") end
+        | walk(if type == "object" then
+            del(.expires,.used,.age,.lastuse,.users,.cache,.statistics)
+            | if has("flags") then
+                if (.flags | type) != "array" then
+                    error("route flags must be a string array")
+                elif all(.flags[]; type == "string") then
+                    .flags |= (map(select(. != "linkdown" and . != "dead" and . != "offload"
+                        and . != "trap" and . != "unresolved")) | sort)
+                else error("route flags must be a string array") end
+              else . end
+          else . end)
+        | sort_by((.family // ""),(.table // ""|tostring),(.dst // ""),(.src // ""),
+            (.metric // 0),(.protocol // ""),(.dev // ""),(.gateway // ""))
+    '
+}
+
+rule_state_producer() {
+    [ "$#" -eq 2 ] || return 1
+    # The jq program, not the shell, expands its slurpfile variables.
+    # shellcheck disable=SC2016
+    quiet_jq -S -c -n --slurpfile v4 "$1" --slurpfile v6 "$2" '
+        def tag_family($records; $expected):
+            if all($records[];
+                if type != "object" then false
+                elif has("family") then .family == $expected
+                else true end)
+            then ($records | map(.family = $expected))
+            else error("rule entries have invalid address-family provenance") end;
+        if (($v4 | length) == 1 and ($v4[0] | type) == "array"
+            and ($v6 | length) == 1 and ($v6[0] | type) == "array") then
+            tag_family($v4[0]; "inet") + tag_family($v6[0]; "inet6")
+        else error("rule inputs must each contain exactly one array") end
+        | sort_by(.family,.priority,(.table // ""|tostring),
+            (.src // ""),(.dst // ""))
+    '
+}
+
+nexthop_state_producer() {
+    [ "$#" -eq 0 ] || return 1
+    quiet_jq -S -c -s '
+        if (length == 1 and (.[0] | type) == "array") then .[0]
+        else error("nexthop input must contain exactly one array") end
+        | if all(.[]; type == "object") then .
+          else error("nexthop array entries must be objects") end
+        | walk(if type == "object" then del(.used,.age,.lastuse,.statistics)
+            | if has("flags") then
+                if (.flags | type) != "array" then
+                    error("nexthop flags must be a string array")
+                elif all(.flags[]; type == "string") then
+                    .flags |= (map(select(. != "offload" and . != "trap")) | sort)
+                else error("nexthop flags must be a string array") end
+              else . end else . end)
+        | sort_by(.id,(.dev // ""),(.via // ""|tostring))
+    '
+}
+
+qdisc_state_producer() {
+    [ "$#" -eq 0 ] || return 1
+    quiet_jq -S -c -s '
+        if (length == 1 and (.[0] | type) == "array") then .[0]
+        else error("qdisc input must contain exactly one array") end
+        | if all(.[]; type == "object") then .
+          else error("qdisc array entries must be objects") end
+        | walk(if type == "object" then
+            del(.refcnt,.bytes,.packets,.drops,.overlimits,.requeues,.backlog,.qlen,
+                .direct_packets_stat,.xstats) else . end)
+        | sort_by(.dev,(.parent // ""),(.handle // ""),.kind)
+    '
+}
+
+nftables_state_producer() {
+    [ "$#" -eq 0 ] || return 1
+    quiet_jq -S -c -s '
+        if (length == 1 and (.[0] | type) == "object"
+            and (.[0] | has("nftables")) and (.[0].nftables | type) == "array"
+            and all(.[0].nftables[]; type == "object")) then .[0]
+        else error("nftables input must contain one object-entry array") end
+        | walk(if type == "object" then
+            if has("counter") then .counter |= del(.packets,.bytes) else . end
+            | del(.expires,.last,.used) else . end)
+    '
+}
+
 helper_source=$repository_directory/target/debug/volparossa-helper
 ipc_probe_source=$repository_directory/target/debug/examples/volparossa-helper-production-ipc-probe
 ipc_hook_source=$script_directory/lib/production-ipc-unit-hook.sh
@@ -1151,26 +1302,15 @@ capture_host_state() {
     vp_capture_run "$capture_directory/links.raw" ip -json link show \
         || failed 'host link producer failed'
     vp_capture_normalize "$capture_directory/links.raw" "$capture_directory/links.normalized" \
-        jq -S -c '
-        map(del(.operstate,.link_netnsid,.promiscuity,.allmulti,.stats,.stats64)
-            | .flags=((.flags // []) | map(select(. != "LOWER_UP" and . != "RUNNING"
-                and . != "DORMANT" and . != "NO-CARRIER")) | sort)
-            | if has("altnames") then .altnames |= sort else . end)
-        | sort_by(.ifindex,.ifname)
-    ' || failed 'host link normalization failed'
+        link_state_producer || failed 'host link normalization failed'
     vp_capture_publish_digest "$capture_directory/links.normalized" "$destination/links" \
         || failed 'host link capture could not be published'
 
     vp_capture_run "$capture_directory/addresses.raw" ip -json address show \
         || failed 'host address producer failed'
     vp_capture_normalize "$capture_directory/addresses.raw" \
-        "$capture_directory/addresses.normalized" jq -S -c '
-        map({ifindex,ifname,addr_info:((.addr_info // [])
-            | map(del(.valid_life_time,.preferred_life_time,.valid_lft,.preferred_lft,
-                .tstamp,.cstamp,.tentative,.dadfailed,.deprecated,.optimistic))
-            | sort_by(.family,.local,(.peer // ""),.prefixlen,.scope,(.label // "")))})
-        | sort_by(.ifindex,.ifname)
-    ' || failed 'host address normalization failed'
+        "$capture_directory/addresses.normalized" address_state_producer \
+        || failed 'host address normalization failed'
     vp_capture_publish_digest "$capture_directory/addresses.normalized" "$destination/addresses" \
         || failed 'host address capture could not be published'
 
@@ -1178,17 +1318,8 @@ capture_host_state() {
         || failed 'host IPv4 route producer failed'
     vp_capture_run "$capture_directory/routes-v6.raw" ip -json -6 route show table all \
         || failed 'host IPv6 route producer failed'
-    vp_capture_run "$capture_directory/routes.normalized" jq -S -c -s '
-        add | walk(if type == "object" then
-            del(.expires,.used,.age,.lastuse,.users,.cache,.statistics)
-            | if ((.flags? // null)|type) == "array" then
-                .flags |= map(select(. != "linkdown" and . != "dead" and . != "offload"
-                    and . != "trap" and . != "unresolved")) | sort
-              else . end
-          else . end)
-        | sort_by((.family // ""),(.table // ""|tostring),(.dst // ""),(.src // ""),
-            (.metric // 0),(.protocol // ""),(.dev // ""),(.gateway // ""))
-    ' "$capture_directory/routes-v4.raw" "$capture_directory/routes-v6.raw" \
+    vp_capture_run "$capture_directory/routes.normalized" route_state_producer \
+        "$capture_directory/routes-v4.raw" "$capture_directory/routes-v6.raw" \
         || failed 'host route normalization failed'
     vp_capture_publish_digest "$capture_directory/routes.normalized" "$destination/routes" \
         || failed 'host route capture could not be published'
@@ -1197,10 +1328,8 @@ capture_host_state() {
         || failed 'host IPv4 rule producer failed'
     vp_capture_run "$capture_directory/rules-v6.raw" ip -json -6 rule show \
         || failed 'host IPv6 rule producer failed'
-    vp_capture_run "$capture_directory/rules.normalized" jq -S -c -s '
-        add | sort_by(.family,.priority,(.table // ""|tostring),
-            (.src // ""),(.dst // ""))
-    ' "$capture_directory/rules-v4.raw" "$capture_directory/rules-v6.raw" \
+    vp_capture_run "$capture_directory/rules.normalized" rule_state_producer \
+        "$capture_directory/rules-v4.raw" "$capture_directory/rules-v6.raw" \
         || failed 'host rule normalization failed'
     vp_capture_publish_digest "$capture_directory/rules.normalized" "$destination/rules" \
         || failed 'host rule capture could not be published'
@@ -1208,36 +1337,24 @@ capture_host_state() {
     vp_capture_run "$capture_directory/nexthops.raw" ip -json nexthop show \
         || failed 'host nexthop producer failed'
     vp_capture_normalize "$capture_directory/nexthops.raw" \
-        "$capture_directory/nexthops.normalized" jq -S -c '
-        walk(if type == "object" then del(.used,.age,.lastuse,.statistics)
-            | if ((.flags? // null)|type) == "array" then
-                .flags |= map(select(. != "offload" and . != "trap")) | sort
-              else . end else . end)
-        | sort_by(.id,(.dev // ""),(.via // ""|tostring))
-    ' || failed 'host nexthop normalization failed'
+        "$capture_directory/nexthops.normalized" nexthop_state_producer \
+        || failed 'host nexthop normalization failed'
     vp_capture_publish_digest "$capture_directory/nexthops.normalized" "$destination/nexthops" \
         || failed 'host nexthop capture could not be published'
 
     vp_capture_run "$capture_directory/qdiscs.raw" tc -json qdisc show \
         || failed 'host qdisc producer failed'
     vp_capture_normalize "$capture_directory/qdiscs.raw" \
-        "$capture_directory/qdiscs.normalized" jq -S -c '
-        walk(if type == "object" then
-            del(.refcnt,.bytes,.packets,.drops,.overlimits,.requeues,.backlog,.qlen,
-                .direct_packets_stat,.xstats) else . end)
-        | sort_by(.dev,(.parent // ""),(.handle // ""),.kind)
-    ' || failed 'host qdisc normalization failed'
+        "$capture_directory/qdiscs.normalized" qdisc_state_producer \
+        || failed 'host qdisc normalization failed'
     vp_capture_publish_digest "$capture_directory/qdiscs.normalized" "$destination/qdiscs" \
         || failed 'host qdisc capture could not be published'
 
     vp_capture_run "$capture_directory/nftables.raw" nft --json list ruleset \
         || failed 'host nftables producer failed'
     vp_capture_normalize "$capture_directory/nftables.raw" \
-        "$capture_directory/nftables.normalized" jq -S -c '
-        walk(if type == "object" then
-            if has("counter") then .counter |= del(.packets,.bytes) else . end
-            | del(.expires,.last,.used) else . end)
-    ' || failed 'host nftables normalization failed'
+        "$capture_directory/nftables.normalized" nftables_state_producer \
+        || failed 'host nftables normalization failed'
     vp_capture_publish_digest "$capture_directory/nftables.normalized" "$destination/nftables" \
         || failed 'host nftables capture could not be published'
 
