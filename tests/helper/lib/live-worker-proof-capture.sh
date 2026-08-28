@@ -10,10 +10,13 @@ vp_capture_file_is_safe() {
     [ "$#" -eq 1 ] || return 1
     vp_capture_checked_path=$1
     [ -f "$vp_capture_checked_path" ] && [ ! -L "$vp_capture_checked_path" ] || return 1
-    vp_capture_checked_metadata=$(stat -Lc '%F:%u:%g:%a:%h' \
+    # GNU stat labels a zero-length regular file "regular empty file" with %F.
+    # Use the numeric mode instead: 0x8000 (S_IFREG) | 0600 is exactly 0x8180,
+    # independently of whether the capture has content.
+    vp_capture_checked_metadata=$(stat -Lc '%f:%u:%g:%a:%h' \
         "$vp_capture_checked_path") || return 1
     [ "$vp_capture_checked_metadata" = \
-        "regular file:$VP_CAPTURE_OWNER_UID:$VP_CAPTURE_OWNER_GID:600:1" ]
+        "8180:$VP_CAPTURE_OWNER_UID:$VP_CAPTURE_OWNER_GID:600:1" ]
 }
 
 vp_capture_remove_failed_output() {

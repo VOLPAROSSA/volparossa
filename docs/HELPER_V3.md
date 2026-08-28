@@ -685,6 +685,12 @@ root-owned and non-writable. The pinned Debian proof additionally requires the r
 process-credential, runtime-directory, object, target, metadata and digest observations reject
 restart, replacement, mixed-owner authority, writable path components and other drift.
 
+Private capture metadata is checked through the numeric regular-file type and exact owner, mode and
+single-link tuple. It therefore accepts a successful zero-length stream without confusing GNU
+`stat`'s `regular empty file` label with a different file type. Whether a capture must be empty,
+non-empty or match a canonical shape is enforced separately at each semantic consumer; metadata
+acceptance alone never supplies that content claim.
+
 Only after the first transient unit is `not-found` and its exact cgroup is absent may the driver
 reuse that random unit name. The second invocation gets a separately derived ownership marker and a
 different nonzero `InvocationID`, runs the exact staged helper with no argument, and binds private

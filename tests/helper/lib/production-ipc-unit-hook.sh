@@ -53,8 +53,9 @@ invocation_id_is_safe() {
 private_file_is_safe() {
     [ "$#" -eq 1 ] || return 1
     [ -f "$1" ] && [ ! -L "$1" ] || return 1
-    [ "$(stat -Lc '%F:%u:%g:%a:%h' "$1" 2>/dev/null || true)" = \
-        'regular file:0:0:600:1' ]
+    # 0x8180 is S_IFREG | 0600 for both empty and non-empty regular files.
+    [ "$(stat -Lc '%f:%u:%g:%a:%h' "$1" 2>/dev/null || true)" = \
+        '8180:0:0:600:1' ]
 }
 
 write_private_file() {
@@ -137,10 +138,10 @@ capture_lock_identity() {
     [ "$#" -eq 1 ] || return 1
     hook_lock_gid=$1
     number_is_safe "$hook_lock_gid" || return 1
-    hook_lock_identity=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
+    hook_lock_identity=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
         "$journal_lock" 2>/dev/null) || return 1
     case $hook_lock_identity in
-        *":regular file:0:$hook_lock_gid:600:1") printf '%s\n' "$hook_lock_identity" ;;
+        *":8180:0:$hook_lock_gid:600:1") printf '%s\n' "$hook_lock_identity" ;;
         *) return 1 ;;
     esac
 }
@@ -281,11 +282,11 @@ validate_runtime_metadata() {
     [ "$(stat -c '%F:%u:%g:%a:%h:%s' "$cleanup_token" 2>/dev/null || true)" = \
         "regular file:0:$hook_agent_gid:640:1:32" ] || return 1
     if [ -e "$journal" ] || [ -L "$journal" ]; then
-        [ "$(stat -c '%F:%u:%g:%a:%h' "$journal" 2>/dev/null || true)" = \
-            "regular file:0:$hook_agent_gid:600:1" ] || return 1
+        [ "$(stat -c '%f:%u:%g:%a:%h' "$journal" 2>/dev/null || true)" = \
+            "8180:0:$hook_agent_gid:600:1" ] || return 1
     fi
-    [ "$(stat -c '%F:%u:%g:%a:%h' "$journal_lock" 2>/dev/null || true)" = \
-        "regular file:0:$hook_agent_gid:600:1" ] || return 1
+    [ "$(stat -c '%f:%u:%g:%a:%h' "$journal_lock" 2>/dev/null || true)" = \
+        "8180:0:$hook_agent_gid:600:1" ] || return 1
     [ ! -e "$journal_next" ] && [ ! -L "$journal_next" ]
 }
 
@@ -296,14 +297,14 @@ capture_journal_state() {
         printf '%s\n' ABSENT
         return 0
     fi
-    hook_journal_before=$(stat -c '%d:%i:%F:%u:%g:%a:%h:%s:%y:%z' \
+    hook_journal_before=$(stat -c '%d:%i:%f:%u:%g:%a:%h:%s:%y:%z' \
         "$journal" 2>/dev/null) || return 1
     case $hook_journal_before in
-        *":regular file:0:$hook_agent_gid:600:1:"*) ;;
+        *":8180:0:$hook_agent_gid:600:1:"*) ;;
         *) return 1 ;;
     esac
     hook_journal_checksum=$(checksum_file "$journal") || return 1
-    hook_journal_after=$(stat -c '%d:%i:%F:%u:%g:%a:%h:%s:%y:%z' \
+    hook_journal_after=$(stat -c '%d:%i:%f:%u:%g:%a:%h:%s:%y:%z' \
         "$journal" 2>/dev/null) || return 1
     [ "$hook_journal_before" = "$hook_journal_after" ] || return 1
     printf 'PRESENT\n%s\n%s\n' "$hook_journal_before" "$hook_journal_checksum"
@@ -356,7 +357,7 @@ start_hook() {
     if ! exec 8<>"$journal_lock"; then
         fail 'active ownership journal lock could not be opened'
     fi
-    hook_active_lock_fd_identity=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
+    hook_active_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
         /proc/self/fd/8 2>/dev/null) || fail 'active ownership journal lock FD is invalid'
     [ "$hook_active_lock_fd_identity" = "$hook_lock_identity" ] \
         || fail 'active ownership journal lock FD identity changed'
@@ -488,7 +489,7 @@ stop_hook() {
     if ! exec 9<>"$journal_lock"; then
         fail 'ownership journal lock could not be opened'
     fi
-    hook_lock_fd_identity=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
+    hook_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
         /proc/self/fd/9 2>/dev/null) || fail 'ownership journal lock FD is invalid'
     [ "$hook_lock_fd_identity" = "$hook_expected_lock_identity" ] \
         || fail 'ownership journal lock FD identity changed'
