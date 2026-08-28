@@ -119,9 +119,10 @@ the interval.
 
 The shared private-capture predicate validates the numeric regular-file type plus exact owner,
 mode and single-link metadata, independently of file length. Successful commands, probe stderr and
-validator streams may legitimately be zero bytes; their callers assert empty, non-empty or
-canonical content separately. Contract tests pin both zero-length acceptance and rejection of a
-wrong owner, wrong mode, symlink or additional hard link.
+validator streams may legitimately be zero bytes; where content has a semantic contract, callers
+assert empty, non-empty or canonical content separately. The ownership lock's bytes have no
+semantic meaning. Contract tests pin both zero-length acceptance and rejection of a wrong owner,
+wrong mode, symlink or additional hard link.
 
 The report carries those non-claims in its exact `scope` object: it is evidence only for the helper
 boundary and does not claim package behavior, restart recovery, `CleanupOwned`, a VPN datapath, or

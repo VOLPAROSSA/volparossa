@@ -184,7 +184,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   The private capture and production-lock metadata predicates now use the numeric regular-file
   type plus exact owner, mode and single-link fields, so intentionally empty successful stderr,
   validator and lock files are not misclassified by GNU `stat` as a different type. Content
-  emptiness, non-emptiness and shape remain separate fail-closed checks. The post-merge
+  emptiness, non-emptiness and shape remain separate fail-closed checks wherever content has a
+  semantic contract; lock contents carry no such claim. The post-merge
   [helper-boundary run 33136739229](https://github.com/VOLPAROSSA/volparossa/actions/runs/33136739229)
   at `d54057111dde8ea47970e8708aff7ea8e2af5eb6` retained only diagnostic artifact
   `9672404397` (API archive SHA-256
