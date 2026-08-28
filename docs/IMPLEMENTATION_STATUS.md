@@ -190,7 +190,17 @@ single clean-build A01--A15 run; the score is not a release claim.
   at `d54057111dde8ea47970e8708aff7ea8e2af5eb6` retained only diagnostic artifact
   `9672404397` (API archive SHA-256
   `e58e138016160e96174bcf174cbaa397083d1d3b0043c37ee7bf20c34025f531`) and exposed that
-  proof-control defect before report publication. It is not PASS evidence, so AV1-09 remains Open.
+  proof-control defect before report publication. After that defect was fixed, exact-main
+  [run 33141845396](https://github.com/VOLPAROSSA/volparossa/actions/runs/33141845396) at
+  `193d460c0f0ab20d968bd4589f03ea7908a2ce60` retained diagnostic artifact `9674312274`
+  (API archive SHA-256
+  `a7b9711f150f523acd32185367b823836053cee8a13c83a3f698f84bf201c697`) with the first fixed
+  rejection label `worker-launch-status`. Exact systemd v257 source and a non-mutating local
+  reproduction bind this to `systemd-run` preflighting the absolute private `/run` helper path in
+  the host namespace before PID 1 could create the unit. Both transient calls now provide and
+  read back one fixed `ExecSearchPath`, which suppresses that client-side preflight while retaining
+  absolute bound command paths and the fixed child `PATH`. Neither failed run is PASS evidence, so
+  AV1-09 remains Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

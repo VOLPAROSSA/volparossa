@@ -1896,6 +1896,10 @@ system_bus_bind="$system_bus_socket:$system_bus_socket:norbind"
 # The helper owns a 30-second spawn budget followed by a separate five-second
 # FD-store publication budget and bounded local retirement. Keep PID1's outer
 # limits strictly wider so they cannot pre-empt that fail-closed cleanup path.
+# Both staged helper entry paths exist only in the transient mount namespace. Merely
+# supplying the fixed distro-only search path prevents systemd-run v257 from
+# preflighting their absolute paths in the host namespace; those absolute
+# ExecStart paths remain unchanged and the child receives the gate's fixed PATH.
 unit_may_own=yes
 set +e
 systemd-run \
@@ -1945,6 +1949,7 @@ systemd-run \
     --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
     --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
     --property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind" \
+    --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
     --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     --property=KillMode=control-group \
     --property=SendSIGKILL=yes \
@@ -2082,6 +2087,13 @@ else
     observed_environment=
     record_proof_failure 'worker-unit-contract'
 fi
+if capture_unit_property ExecSearchPath "$temporary_stage/unit-exec-search-path"; then
+    observed_exec_search_path=$(cat "$temporary_stage/unit-exec-search-path") \
+        || record_proof_failure 'worker-unit-contract'
+else
+    observed_exec_search_path=
+    record_proof_failure 'worker-unit-contract'
+fi
 if capture_unit_property FileDescriptorStoreMax "$temporary_stage/unit-fdstore-max"; then
     observed_fdstore_max=$(cat "$temporary_stage/unit-fdstore-max") \
         || record_proof_failure 'worker-unit-contract'
@@ -2108,6 +2120,7 @@ if [ "$observed_notify_access" != main ] \
     || [ "$observed_description" != "$unit_ownership_marker" ] \
     || [ "$observed_environment" \
         != DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ] \
+    || [ "$observed_exec_search_path" != '/usr/sbin /usr/bin /sbin /bin' ] \
     || [ "$observed_fdstore_max" != 128 ] \
     || [ "$observed_fdstore_preserve" != yes ] || [ "$observed_fdstore_count" != 2 ]; then
     record_proof_failure 'worker-unit-contract'
@@ -2278,6 +2291,7 @@ if [ "$proof_ok" = yes ]; then
         --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
         --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind" \
         --property="BindPaths=$production_runtime_bind $production_output_bind" \
+        --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
         --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
         --property="ExecStartPost=/run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid" \
         --property="ExecStopPost=/run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid" \
@@ -2427,6 +2441,15 @@ if [ "$proof_ok" = yes ]; then
         production_environment=
         record_proof_failure 'production-unit-contract'
     fi
+    if capture_unit_property ExecSearchPath \
+        "$temporary_stage/production-exec-search-path"; then
+        production_exec_search_path=$(cat \
+            "$temporary_stage/production-exec-search-path") \
+            || record_proof_failure 'production-unit-contract'
+    else
+        production_exec_search_path=
+        record_proof_failure 'production-unit-contract'
+    fi
     if capture_unit_property FileDescriptorStoreMax \
         "$temporary_stage/production-fdstore-max"; then
         production_fdstore_max=$(cat "$temporary_stage/production-fdstore-max") \
@@ -2494,6 +2517,8 @@ if [ "$proof_ok" = yes ]; then
         || [ "$production_description" != "$unit_ownership_marker" ] \
         || [ "$production_environment" \
             != DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ] \
+        || [ "$production_exec_search_path" \
+            != '/usr/sbin /usr/bin /sbin /bin' ] \
         || [ "$production_fdstore_max" != 128 ] \
         || [ "$production_fdstore_preserve" != yes ] \
         || [ "$production_fdstore_count" != 0 ] \
