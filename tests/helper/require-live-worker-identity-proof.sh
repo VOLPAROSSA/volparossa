@@ -125,6 +125,11 @@ proof_failure_reason_is_safe() {
         worker-launch-status|\
         worker-launch-envelope|\
         worker-manager-binding|\
+        worker-helper-parent-contract|\
+        worker-helper-runtime-preparation|\
+        worker-helper-worker-spawn|\
+        worker-helper-publication|\
+        worker-helper-retirement-cleanup|\
         worker-terminal-state|\
         worker-unit-contract|\
         worker-proof-records|\
@@ -163,6 +168,63 @@ record_proof_failure() {
             production_ok=no
             ;;
     esac
+}
+
+record_helper_live_proof_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    vp_capture_file_is_safe "$1" || return 1
+    if printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=parent-contract' \
+        | cmp -s - "$1"; then
+        record_proof_failure 'worker-helper-parent-contract'
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=runtime-preparation' \
+        | cmp -s - "$1"; then
+        record_proof_failure 'worker-helper-runtime-preparation'
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=worker-spawn' \
+        | cmp -s - "$1"; then
+        record_proof_failure 'worker-helper-worker-spawn'
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+        | cmp -s - "$1"; then
+        record_proof_failure 'worker-helper-publication'
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=retirement-cleanup' \
+        | cmp -s - "$1"; then
+        record_proof_failure 'worker-helper-retirement-cleanup'
+    else
+        return 1
+    fi
+}
+
+classify_worker_live_proof_terminal() {
+    [ "$#" -eq 1 ] || return 1
+    if [ "$worker_manager_binding_ok" = yes ] \
+        && unit_invocation_is_current \
+        && [ "$active_state:$sub_state:$result:$exec_code:$exec_status" \
+            = failed:failed:exit-code:1:1 ]; then
+        record_helper_live_proof_failure_stage "$1" || true
+    fi
+    record_worker_launch_failure
+    if [ "$active_state" != active ] || [ "$sub_state" != exited ] \
+        || [ "$result" != success ] || [ "$exec_code" != 1 ] \
+        || [ "$exec_status" != 0 ]; then
+        record_proof_failure 'worker-terminal-state'
+    fi
+}
+
+record_worker_launch_failure() {
+    if [ "$run_status" -ne 0 ]; then
+        record_proof_failure 'worker-launch-status'
+    fi
+    if [ "$worker_launch_captures_ok" != yes ] \
+        || [ "$worker_launch_json_ok" != yes ] \
+        || [ "$worker_launch_stderr_empty" != yes ]; then
+        record_proof_failure 'worker-launch-envelope'
+    elif [ "$worker_manager_binding_ok" != yes ]; then
+        record_proof_failure 'worker-manager-binding'
+    fi
 }
 
 report_proof_failure() {
@@ -1975,12 +2037,16 @@ set -e
 unset production_ok
 proof_failure_reason=
 proof_ok=yes
-if [ "$run_status" -ne 0 ]; then
-    record_proof_failure 'worker-launch-status'
-elif ! vp_capture_file_is_safe "$temporary_stage/systemd-run.stdout" \
-    || ! vp_capture_file_is_safe "$temporary_stage/systemd-run.stderr"; then
-    record_proof_failure 'worker-launch-envelope'
-else
+worker_launch_captures_ok=no
+worker_launch_json_ok=no
+worker_manager_binding_ok=no
+worker_launch_stderr_empty=no
+if vp_capture_file_is_safe "$temporary_stage/systemd-run.stdout" \
+    && vp_capture_file_is_safe "$temporary_stage/systemd-run.stderr"; then
+    worker_launch_captures_ok=yes
+    if [ ! -s "$temporary_stage/systemd-run.stderr" ]; then
+        worker_launch_stderr_empty=yes
+    fi
     parsed_invocation_id=$(jq -ers --arg expected_unit "$unit_name" '
         if length == 1
             and (.[0] | type) == "object"
@@ -1991,21 +2057,24 @@ else
         else empty
         end
     ' "$temporary_stage/systemd-run.stdout" 2>/dev/null) || parsed_invocation_id=
-    if ! unit_invocation_id_is_safe "$parsed_invocation_id" \
-        || [ -s "$temporary_stage/systemd-run.stderr" ]; then
-        record_proof_failure 'worker-launch-envelope'
-    else
+    if unit_invocation_id_is_safe "$parsed_invocation_id"; then
+        worker_launch_json_ok=yes
         observed_unit_invocation_id=$(unit_current_invocation_id) \
             || observed_unit_invocation_id=
-        if ! unit_description_matches_marker \
-            || [ "$observed_unit_invocation_id" != "$parsed_invocation_id" ]; then
-            record_proof_failure 'worker-manager-binding'
-        else
+        if unit_description_matches_marker \
+            && [ "$observed_unit_invocation_id" = "$parsed_invocation_id" ]; then
             unit_invocation_id=$parsed_invocation_id
             unit_owned=yes
             unit_may_own=no
+            worker_manager_binding_ok=yes
         fi
     fi
+fi
+# Preserve the original generic first-failure precedence when no exact PID1
+# binding exists. Only a bound current invocation may defer these predicates
+# until after its helper-emitted stage has been considered.
+if [ "$worker_manager_binding_ok" != yes ]; then
+    record_worker_launch_failure
 fi
 poll_attempt=0
 while :; do
@@ -2070,10 +2139,19 @@ else
     exec_status=
     record_proof_failure 'worker-terminal-state'
 fi
-if [ "$active_state" != active ] || [ "$sub_state" != exited ] \
-    || [ "$result" != success ] || [ "$exec_status" != 0 ]; then
+if capture_unit_property ExecMainCode "$temporary_stage/unit-exec-code"; then
+    exec_code=$(cat "$temporary_stage/unit-exec-code") \
+        || record_proof_failure 'worker-terminal-state'
+else
+    exec_code=
     record_proof_failure 'worker-terminal-state'
 fi
+# A helper stage is diagnostic authority only after PID1 has bound this exact
+# invocation and reports that the staged main process itself returned the one
+# fixed failure exit code. The classifier accepts byte-exact, private captures
+# only; malformed, extra, truncated, or unknown records remain generic.
+classify_worker_live_proof_terminal "$temporary_stage/proof.stderr" \
+    || failed 'internal worker terminal classification is invalid'
 if capture_unit_property NotifyAccess "$temporary_stage/unit-notify-access"; then
     observed_notify_access=$(cat "$temporary_stage/unit-notify-access") \
         || record_proof_failure 'worker-unit-contract'
@@ -2150,8 +2228,8 @@ normalize_capabilities() {
     vp_capture_normalize "$1" "$2" awk -v expected="$capabilities" '
         BEGIN {
             expected_count = split(expected, ordered, " ")
-            for (index = 1; index <= expected_count; index++) {
-                allowed[ordered[index]] = 1
+            for (position = 1; position <= expected_count; position++) {
+                allowed[ordered[position]] = 1
             }
         }
         {

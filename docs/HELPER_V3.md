@@ -662,6 +662,17 @@ frontend; the mutable generic `iptables-save` alternatives are never used as evi
 backend. Each host-state fence takes two identical normalized nft JSON observations around the
 separate legacy captures.
 
+A failed live-proof helper main writes exactly one payload-free versioned phase record covering only
+parent-contract validation, production-runtime preparation, worker spawn, FD-store publication, or
+retirement cleanup. The driver maps it to a fixed retained label only when the private capture is
+byte-exact and safe, PID 1 still reports the same bound invocation, and the terminal tuple proves a
+normal `exit(1)` by main. Unknown, extra, truncated and otherwise malformed records, signals,
+manager drift and launch failures remain generic and never reflect raw stderr. A publication error
+remains the primary phase after all mandatory local cleanup attempts; an ambiguous child retirement
+or failed reservation settlement is classified as retirement cleanup. The two capability-set
+observations are normalized by the exact dynamically tested Debian-compatible awk body; its loop
+variables deliberately avoid names reserved by Debian's default `mawk`.
+
 Legacy `x_tables` custody is derived only from the current network namespace's
 `/proc/self/net/ip_tables_names` and `/proc/self/net/ip6_tables_names` inventories. Each family is
 kept distinct as proc entry absent, proc entry present with no registered tables, or a bounded

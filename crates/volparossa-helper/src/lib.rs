@@ -46,6 +46,8 @@ pub use engine::HelperEngine;
 pub use relay_fence::{INTERNAL_NFT_FRONTEND_ARGUMENT, run_internal_nft_frontend};
 pub use runtime::{AGENT_ACCOUNT, RUNTIME_DIRECTORY, SOCKET_PATH, TOKEN_PATH, WORKER_ACCOUNT};
 pub use server::{ServerError, run_production_server};
+#[doc(hidden)]
+pub use worker_v3::WorkerV3LiveProofFailureStage;
 
 /// Fixed private child-process selector; it is not an agent-facing helper operation.
 #[doc(hidden)]
@@ -68,4 +70,39 @@ pub fn run_internal_worker_v3_entry() -> bool {
 #[must_use]
 pub fn run_internal_worker_v3_live_proof() -> bool {
     worker_v3::run_internal_worker_v3_live_proof()
+}
+
+/// Runs the fixed production-image live proof and exposes only its payload-free failure phase.
+#[doc(hidden)]
+pub fn run_internal_worker_v3_live_proof_staged() -> Result<(), WorkerV3LiveProofFailureStage> {
+    worker_v3::run_internal_worker_v3_live_proof_staged()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::{needs_drop, size_of};
+
+    use super::*;
+
+    #[test]
+    fn staged_live_proof_api_exposes_exactly_five_payload_free_phases() {
+        let stages = [
+            WorkerV3LiveProofFailureStage::ParentContract,
+            WorkerV3LiveProofFailureStage::RuntimePreparation,
+            WorkerV3LiveProofFailureStage::WorkerSpawn,
+            WorkerV3LiveProofFailureStage::Publication,
+            WorkerV3LiveProofFailureStage::RetirementCleanup,
+        ];
+        assert_eq!(stages.len(), 5);
+        assert_eq!(size_of::<WorkerV3LiveProofFailureStage>(), 1);
+        assert!(!needs_drop::<WorkerV3LiveProofFailureStage>());
+    }
+
+    #[test]
+    fn legacy_boolean_live_proof_api_remains_available() {
+        let api: fn() -> bool = run_internal_worker_v3_live_proof;
+        let staged_api: fn() -> Result<(), WorkerV3LiveProofFailureStage> =
+            run_internal_worker_v3_live_proof_staged;
+        let _ = (api, staged_api);
+    }
 }

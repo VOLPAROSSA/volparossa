@@ -115,6 +115,20 @@ pub(crate) enum WorkerSpawnAdmissionError {
 const LIVE_PROOF_CUSTODY_FD_NAME: &str =
     "volparossa-custody-v1-4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c";
 
+/// Payload-free phase at which the fixed live proof failed.
+///
+/// The phase deliberately carries neither the internal error nor any runtime-derived data. It is
+/// suitable only for the private, versioned acceptance-proof diagnostic boundary.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerV3LiveProofFailureStage {
+    ParentContract,
+    RuntimePreparation,
+    WorkerSpawn,
+    Publication,
+    RetirementCleanup,
+}
+
 type ContextId = [u8; 16];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -976,25 +990,67 @@ fn spawn_worker_v3_until(
 
 /// Runs one fixed production-image bootstrap without exposing a production engine operation.
 pub(crate) fn run_internal_worker_v3_live_proof() -> bool {
-    run_internal_worker_v3_live_proof_inner().is_ok()
+    run_internal_worker_v3_live_proof_staged().is_ok()
 }
 
-fn run_internal_worker_v3_live_proof_inner() -> Result<(), WorkerV3Error> {
+/// Runs the fixed live proof and exposes only its payload-free failure phase.
+pub(crate) fn run_internal_worker_v3_live_proof_staged() -> Result<(), WorkerV3LiveProofFailureStage>
+{
+    run_internal_worker_v3_live_proof_inner()
+}
+
+const fn classify_worker_spawn_failure(
+    worker_retirement_succeeded: bool,
+    reservation_cleanup_succeeded: bool,
+) -> WorkerV3LiveProofFailureStage {
+    if worker_retirement_succeeded && reservation_cleanup_succeeded {
+        WorkerV3LiveProofFailureStage::WorkerSpawn
+    } else {
+        WorkerV3LiveProofFailureStage::RetirementCleanup
+    }
+}
+
+const fn classify_live_proof_completion(
+    publication_succeeded: bool,
+    retirement_cleanup_succeeded: bool,
+) -> Result<(), WorkerV3LiveProofFailureStage> {
+    if !publication_succeeded {
+        // Publication remains primary after every retirement and reservation cleanup attempt.
+        Err(WorkerV3LiveProofFailureStage::Publication)
+    } else if !retirement_cleanup_succeeded {
+        Err(WorkerV3LiveProofFailureStage::RetirementCleanup)
+    } else {
+        Ok(())
+    }
+}
+
+fn run_internal_worker_v3_live_proof_inner() -> Result<(), WorkerV3LiveProofFailureStage> {
     let effective_group = getegid().as_raw();
-    crate::worker_sandbox::validate_live_proof_parent_contract(effective_group)?;
-    let runtime = crate::runtime::prepare_production_runtime()?;
+    if crate::worker_sandbox::validate_live_proof_parent_contract(effective_group).is_err() {
+        return Err(WorkerV3LiveProofFailureStage::ParentContract);
+    }
+    let Ok(runtime) = crate::runtime::prepare_production_runtime() else {
+        return Err(WorkerV3LiveProofFailureStage::RuntimePreparation);
+    };
     if runtime.agent_gid != effective_group {
-        return Err(WorkerV3Error::Authentication);
+        return Err(WorkerV3LiveProofFailureStage::RuntimePreparation);
     }
 
     let mut registry = WorkerRegistry::new(1, 1, Duration::from_secs(30));
-    let reservation =
-        registry.reserve_generation([0x4c; 16], Duration::from_secs(30), Instant::now())?;
+    let Ok(reservation) =
+        registry.reserve_generation([0x4c; 16], Duration::from_secs(30), Instant::now())
+    else {
+        return Err(WorkerV3LiveProofFailureStage::WorkerSpawn);
+    };
     let spawned = match spawn_worker_v3(reservation) {
         Ok(spawned) => spawned,
         Err(WorkerSpawnFailure { error, reservation }) => {
-            registry.abandon_generation(reservation)?;
-            return Err(error);
+            let worker_retirement_succeeded = !matches!(error, WorkerV3Error::Ambiguous);
+            let reservation_cleanup_succeeded = registry.abandon_generation(reservation).is_ok();
+            return Err(classify_worker_spawn_failure(
+                worker_retirement_succeeded,
+                reservation_cleanup_succeeded,
+            ));
         }
     };
     let SpawnedWorker {
@@ -1063,7 +1119,7 @@ fn run_internal_worker_v3_live_proof_inner() -> Result<(), WorkerV3Error> {
             Err(WorkerV3Error::Ambiguous)
         }
     });
-    publication_result.and(local_cleanup_result)
+    classify_live_proof_completion(publication_result.is_ok(), local_cleanup_result.is_ok())
 }
 
 pub(crate) fn run_internal_worker_v3_entry() -> bool {
@@ -8632,6 +8688,40 @@ mod tests {
     }
 
     #[test]
+    fn live_proof_stage_classification_is_payload_free_and_preserves_failure_precedence() {
+        assert_eq!(
+            classify_worker_spawn_failure(true, true),
+            WorkerV3LiveProofFailureStage::WorkerSpawn
+        );
+        assert_eq!(
+            classify_worker_spawn_failure(true, false),
+            WorkerV3LiveProofFailureStage::RetirementCleanup
+        );
+        assert_eq!(
+            classify_worker_spawn_failure(false, true),
+            WorkerV3LiveProofFailureStage::RetirementCleanup
+        );
+        assert_eq!(
+            classify_worker_spawn_failure(false, false),
+            WorkerV3LiveProofFailureStage::RetirementCleanup
+        );
+        assert_eq!(classify_live_proof_completion(true, true), Ok(()));
+        assert_eq!(
+            classify_live_proof_completion(true, false),
+            Err(WorkerV3LiveProofFailureStage::RetirementCleanup)
+        );
+        assert_eq!(
+            classify_live_proof_completion(false, true),
+            Err(WorkerV3LiveProofFailureStage::Publication)
+        );
+        assert_eq!(
+            classify_live_proof_completion(false, false),
+            Err(WorkerV3LiveProofFailureStage::Publication),
+            "publication remains primary after a concurrent retirement-cleanup failure"
+        );
+    }
+
+    #[test]
     fn live_proof_uses_only_the_production_spawn_and_confirmed_retirement_path() {
         let source = include_str!("worker_v3.rs");
         let start = source
@@ -8643,8 +8733,13 @@ mod tests {
             .expect("worker entry boundary");
         let proof = &source[start..end];
         for required in [
-            "validate_live_proof_parent_contract(effective_group)?",
-            "prepare_production_runtime()?",
+            "validate_live_proof_parent_contract(effective_group).is_err()",
+            "let Ok(runtime) = crate::runtime::prepare_production_runtime() else",
+            "WorkerV3LiveProofFailureStage::ParentContract",
+            "WorkerV3LiveProofFailureStage::RuntimePreparation",
+            "WorkerV3LiveProofFailureStage::WorkerSpawn",
+            "let worker_retirement_succeeded = !matches!(error, WorkerV3Error::Ambiguous)",
+            "classify_worker_spawn_failure(",
             "process.has_complete_kernel_pins()",
             "let publication_result = (|| -> Result<(), WorkerV3Error> {",
             "HardDeadline::after(LIVE_FDSTORE_PUBLICATION_TIMEOUT)?",
@@ -8659,7 +8754,7 @@ mod tests {
             "process.terminate_bounded(TERMINATION_TIMEOUT)",
             "process.retirement_released_after_confirmed_reap()",
             "let registry_cleanup = registry.abandon_generation(reservation)",
-            "publication_result.and(local_cleanup_result)",
+            "classify_live_proof_completion(publication_result.is_ok(), local_cleanup_result.is_ok())",
         ] {
             assert!(
                 proof.contains(required),
@@ -8694,7 +8789,9 @@ mod tests {
             .find("let registry_cleanup = registry.abandon_generation(reservation)")
             .expect("reservation cleanup");
         let result_propagation = proof
-            .find("publication_result.and(local_cleanup_result)")
+            .find(
+                "classify_live_proof_completion(publication_result.is_ok(), local_cleanup_result.is_ok())",
+            )
             .expect("publication result after cleanup attempts");
         assert!(
             pinned < publication

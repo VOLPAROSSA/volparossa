@@ -211,8 +211,22 @@ single clean-build A01--A15 run; the score is not a release claim.
   standalone private `/run` does not automatically restore PID 1's notify socket, although both the
   live FD-store publication and production startup inventory require it. The gate therefore
   validates the canonical root-owned `/run/systemd/notify` socket and binds it read-only into both
-  transient mount namespaces. None of the failed runs is PASS evidence, so AV1-09 remains Open
-  until a new exact-main retained run succeeds.
+  transient mount namespaces. Exact-main
+  [run 33147652050](https://github.com/VOLPAROSSA/volparossa/actions/runs/33147652050) at
+  `d4687fe9dd07724ff438ff2ccfa653668b2f7d24` then retained diagnostic artifact `9676480232`
+  (API archive SHA-256
+  `4f3a3da89f630b052953951a026e51e5a9825b46743f16130d728ea7bbf659a4`) with the first fixed
+  rejection label `worker-terminal-state`. This proves that PID 1 reached the staged helper main
+  process, but not which internal live-proof boundary rejected. The artifact also exposed two
+  Debian `mawk` parse failures in the later capability normalizer because its loop variable used
+  awk's built-in `index` name. The normalizer now uses a non-reserved variable and its exact
+  production body is exercised dynamically by the shell contract test. A failed helper main now
+  emits exactly one payload-free, versioned stage record for parent contract, runtime preparation,
+  worker spawn, FD-store publication, or retirement cleanup. The driver accepts that record only
+  from a safe byte-exact private capture bound to the current manager invocation and the exact
+  `failed:failed:exit-code:1:1` terminal tuple; malformed, additional, truncated, unknown, signalled,
+  launch or manager failures retain a generic fixed label. None of the failed runs is PASS evidence,
+  so AV1-09 remains Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

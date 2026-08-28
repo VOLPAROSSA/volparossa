@@ -4,8 +4,9 @@ use std::{ffi::OsString, process::ExitCode};
 
 use volparossa_helper::{
     INTERNAL_NFT_FRONTEND_ARGUMENT, INTERNAL_WORKER_V3_ARGUMENT,
-    INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT, run_internal_nft_frontend,
-    run_internal_worker_v3_entry, run_internal_worker_v3_live_proof, run_production_server,
+    INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT, WorkerV3LiveProofFailureStage,
+    run_internal_nft_frontend, run_internal_worker_v3_entry,
+    run_internal_worker_v3_live_proof_staged, run_production_server,
 };
 use volparossa_linux_uapi::take_systemd_listen_fd_set_once;
 
@@ -13,6 +14,26 @@ const LIVE_PROOF_SUCCESS_RECORDS: [&str; 2] = [
     "VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass",
     "VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass",
 ];
+
+const fn live_proof_failure_record(stage: WorkerV3LiveProofFailureStage) -> &'static str {
+    match stage {
+        WorkerV3LiveProofFailureStage::ParentContract => {
+            "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=parent-contract"
+        }
+        WorkerV3LiveProofFailureStage::RuntimePreparation => {
+            "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=runtime-preparation"
+        }
+        WorkerV3LiveProofFailureStage::WorkerSpawn => {
+            "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=worker-spawn"
+        }
+        WorkerV3LiveProofFailureStage::Publication => {
+            "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication"
+        }
+        WorkerV3LiveProofFailureStage::RetirementCleanup => {
+            "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=retirement-cleanup"
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Invocation {
@@ -57,13 +78,18 @@ fn main() -> ExitCode {
             }
         }
         Ok(Invocation::InternalWorkerV3LiveProof) => {
-            if run_internal_worker_v3_live_proof() {
-                for record in LIVE_PROOF_SUCCESS_RECORDS {
-                    println!("{record}");
+            match run_internal_worker_v3_live_proof_staged() {
+                Ok(()) => {
+                    for record in LIVE_PROOF_SUCCESS_RECORDS {
+                        println!("{record}");
+                    }
+                    ExitCode::SUCCESS
                 }
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
+                Err(stage) => {
+                    let record = live_proof_failure_record(stage);
+                    eprintln!("{record}");
+                    ExitCode::FAILURE
+                }
             }
         }
         Ok(Invocation::Production) => run_production(),
@@ -112,6 +138,57 @@ mod tests {
                 "VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass",
             ]
         );
+    }
+
+    #[test]
+    fn live_proof_failure_records_are_exact_and_payload_free() {
+        assert_eq!(
+            [
+                WorkerV3LiveProofFailureStage::ParentContract,
+                WorkerV3LiveProofFailureStage::RuntimePreparation,
+                WorkerV3LiveProofFailureStage::WorkerSpawn,
+                WorkerV3LiveProofFailureStage::Publication,
+                WorkerV3LiveProofFailureStage::RetirementCleanup,
+            ]
+            .map(live_proof_failure_record),
+            [
+                "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=parent-contract",
+                "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=runtime-preparation",
+                "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=worker-spawn",
+                "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication",
+                "VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=retirement-cleanup",
+            ]
+        );
+    }
+
+    #[test]
+    fn live_proof_entry_has_one_fixed_failure_write_and_unchanged_success_loop() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("Ok(Invocation::InternalWorkerV3LiveProof) =>")
+            .expect("live-proof invocation arm");
+        let end = source[start..]
+            .find("Ok(Invocation::Production) =>")
+            .map(|offset| start + offset)
+            .expect("production invocation arm");
+        let live_proof = &source[start..end];
+        assert_eq!(
+            live_proof
+                .lines()
+                .filter(|line| line.trim() == "eprintln!(\"{record}\");")
+                .count(),
+            1
+        );
+        assert_eq!(
+            live_proof
+                .lines()
+                .filter(|line| line.trim() == "println!(\"{record}\");")
+                .count(),
+            1
+        );
+        assert!(live_proof.contains("for record in LIVE_PROOF_SUCCESS_RECORDS"));
+        assert!(!live_proof.contains("{stage:"));
+        assert!(!live_proof.contains("{stage:?}"));
     }
 
     #[test]

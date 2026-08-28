@@ -119,10 +119,19 @@ proof_failure_functions=$temporary_directory/proof-failure-functions.sh
 {
     sed -n '/^proof_failure_reason_is_safe() {$/,/^}$/p' "$gate"
     sed -n '/^record_proof_failure() {$/,/^}$/p' "$gate"
+    sed -n '/^record_helper_live_proof_failure_stage() {$/,/^}$/p' "$gate"
+    sed -n '/^classify_worker_live_proof_terminal() {$/,/^}$/p' "$gate"
+    sed -n '/^record_worker_launch_failure() {$/,/^}$/p' "$gate"
     sed -n '/^report_proof_failure() {$/,/^}$/p' "$gate"
 } >"$proof_failure_functions"
 if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^record_proof_failure() {$' "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^record_helper_live_proof_failure_stage() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^classify_worker_live_proof_terminal() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^record_worker_launch_failure() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_proof_failure() {$' "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the privacy-safe proof failure helpers are not uniquely extractable' >&2
     exit 1
@@ -134,6 +143,11 @@ printf '%s\n' \
     worker-launch-status \
     worker-launch-envelope \
     worker-manager-binding \
+    worker-helper-parent-contract \
+    worker-helper-runtime-preparation \
+    worker-helper-worker-spawn \
+    worker-helper-publication \
+    worker-helper-retirement-cleanup \
     worker-terminal-state \
     worker-unit-contract \
     worker-proof-records \
@@ -259,6 +273,274 @@ done <"$expected_proof_failure_reasons"
 if proof_failure_reason_is_safe 'worker-launch-status/private-record'; then
     printf '%s\n' 'an unbounded proof failure reason was accepted' >&2
     exit 1
+fi
+
+exercise_helper_failure_stage_mapping() (
+    [ "$#" -eq 2 ] || exit 98
+    stage_capture=$temporary_directory/helper-stage-$1.capture
+    printf 'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=%s\n' "$1" \
+        >"$stage_capture"
+    chmod 0600 "$stage_capture"
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    record_helper_live_proof_failure_stage "$stage_capture" || exit 97
+    [ "$proof_failure_reason" = "$2" ] \
+        && [ "$proof_ok" = no ] \
+        && [ "${production_ok+x}" != x ]
+)
+while read -r helper_stage helper_stage_reason; do
+    expect_status 0 exercise_helper_failure_stage_mapping \
+        "$helper_stage" "$helper_stage_reason"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'helper failure stage mapping emitted diagnostics: %s\n' \
+            "$helper_stage" >&2
+        exit 1
+    fi
+done <<'EOF'
+parent-contract worker-helper-parent-contract
+runtime-preparation worker-helper-runtime-preparation
+worker-spawn worker-helper-worker-spawn
+publication worker-helper-publication
+retirement-cleanup worker-helper-retirement-cleanup
+EOF
+
+reject_helper_failure_stage_capture() (
+    [ "$#" -eq 1 ] || exit 98
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    if record_helper_live_proof_failure_stage "$1"; then
+        exit 97
+    fi
+    [ -z "$proof_failure_reason" ] \
+        && [ "$proof_ok" = yes ] \
+        && [ "${production_ok+x}" != x ]
+)
+helper_stage_privacy_sentinel='private/helper/stage/value'
+helper_stage_unknown=$temporary_directory/helper-stage-unknown.capture
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=unknown' \
+    >"$helper_stage_unknown"
+helper_stage_extra=$temporary_directory/helper-stage-extra.capture
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+    "$helper_stage_privacy_sentinel" >"$helper_stage_extra"
+helper_stage_truncated=$temporary_directory/helper-stage-truncated.capture
+printf '%s' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=worker-spawn' \
+    >"$helper_stage_truncated"
+helper_stage_multiple=$temporary_directory/helper-stage-multiple.capture
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=parent-contract' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=retirement-cleanup' \
+    >"$helper_stage_multiple"
+helper_stage_embedded=$temporary_directory/helper-stage-embedded.capture
+printf 'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=%s\n' \
+    "$helper_stage_privacy_sentinel" >"$helper_stage_embedded"
+helper_stage_unsafe=$temporary_directory/helper-stage-unsafe.capture
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+    >"$helper_stage_unsafe"
+chmod 0600 \
+    "$helper_stage_unknown" \
+    "$helper_stage_extra" \
+    "$helper_stage_truncated" \
+    "$helper_stage_multiple" \
+    "$helper_stage_embedded"
+chmod 0644 "$helper_stage_unsafe"
+for rejected_stage_capture in \
+    "$helper_stage_unknown" \
+    "$helper_stage_extra" \
+    "$helper_stage_truncated" \
+    "$helper_stage_multiple" \
+    "$helper_stage_embedded" \
+    "$helper_stage_unsafe"
+do
+    expect_status 0 reject_helper_failure_stage_capture "$rejected_stage_capture"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+        || grep -F "$helper_stage_privacy_sentinel" \
+            "$last_stdout" "$last_stderr" >/dev/null; then
+        printf '%s\n' 'a rejected helper stage escaped privacy-safe diagnostics' >&2
+        exit 1
+    fi
+done
+expect_status 1 record_helper_live_proof_failure_stage
+if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+    printf '%s\n' 'invalid helper stage mapper arity emitted diagnostics' >&2
+    exit 1
+fi
+expect_status 1 record_helper_live_proof_failure_stage \
+    "$helper_stage_unknown" "$helper_stage_extra"
+if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+    printf '%s\n' 'invalid helper stage mapper arity emitted diagnostics' >&2
+    exit 1
+fi
+
+# ShellCheck cannot resolve the extracted classifier's reads of these fixture globals.
+# shellcheck disable=SC2034
+exercise_worker_terminal_decision() (
+    [ "$#" -eq 10 ] || exit 98
+    decision_name=$1
+    worker_manager_binding_ok=$2
+    decision_current=$3
+    decision_capture=$4
+    decision_tuple=$5
+    run_status=$6
+    worker_launch_captures_ok=$7
+    worker_launch_json_ok=$8
+    worker_launch_stderr_empty=$9
+    expected_decision=${10}
+    decision_stage=$temporary_directory/terminal-decision-$decision_name.capture
+    case $decision_capture in
+        exact)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+                >"$decision_stage"
+            chmod 0600 "$decision_stage"
+            ;;
+        empty)
+            : >"$decision_stage"
+            chmod 0600 "$decision_stage"
+            ;;
+        unknown)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=unknown' \
+                >"$decision_stage"
+            chmod 0600 "$decision_stage"
+            ;;
+        truncated)
+            printf '%s' \
+                'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+                >"$decision_stage"
+            chmod 0600 "$decision_stage"
+            ;;
+        unsafe)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+                >"$decision_stage"
+            chmod 0644 "$decision_stage"
+            ;;
+        *) exit 97 ;;
+    esac
+    case $decision_tuple in
+        failure)
+            active_state=failed
+            sub_state=failed
+            result=exit-code
+            exec_code=1
+            exec_status=1
+            ;;
+        mismatched)
+            active_state=failed
+            sub_state=failed
+            result=exit-code
+            exec_code=1
+            exec_status=2
+            ;;
+        success)
+            active_state=active
+            sub_state=exited
+            result=success
+            exec_code=1
+            exec_status=0
+            ;;
+        *) exit 96 ;;
+    esac
+    # Invoked indirectly by the extracted terminal classifier.
+    # shellcheck disable=SC2317
+    unit_invocation_is_current() {
+        [ "$decision_current" = yes ]
+    }
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    classify_worker_live_proof_terminal "$decision_stage" || exit 95
+    if [ "$expected_decision" = none ]; then
+        [ -z "$proof_failure_reason" ] && [ "$proof_ok" = yes ] \
+            && [ "${production_ok+x}" != x ]
+    else
+        [ "$proof_failure_reason" = "$expected_decision" ] \
+            && [ "$proof_ok" = no ] \
+            && [ "${production_ok+x}" != x ]
+    fi
+)
+while read -r decision_name decision_binding decision_current decision_capture \
+    decision_tuple decision_run decision_captures decision_json decision_stderr \
+    decision_expected
+do
+    expect_status 0 exercise_worker_terminal_decision \
+        "$decision_name" "$decision_binding" "$decision_current" \
+        "$decision_capture" "$decision_tuple" "$decision_run" \
+        "$decision_captures" "$decision_json" "$decision_stderr" \
+        "$decision_expected"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'worker terminal decision emitted diagnostics: %s\n' \
+            "$decision_name" >&2
+        exit 1
+    fi
+done <<'EOF'
+stage-wins yes yes exact failure 1 yes yes yes worker-helper-publication
+current-mismatch yes no exact failure 1 yes yes yes worker-launch-status
+binding-missing no yes exact failure 0 yes yes yes worker-manager-binding
+unknown-stage yes yes unknown failure 1 yes yes yes worker-launch-status
+truncated-stage yes yes truncated failure 1 yes yes yes worker-launch-status
+unsafe-stage yes yes unsafe failure 1 yes yes yes worker-launch-status
+terminal-mismatch yes yes exact mismatched 0 yes yes yes worker-terminal-state
+stage-before-envelope yes yes exact failure 0 yes yes no worker-helper-publication
+capture-envelope no yes empty failure 0 no no no worker-launch-envelope
+json-envelope no yes empty failure 0 yes no yes worker-launch-envelope
+clean-success yes yes empty success 0 yes yes yes none
+EOF
+
+# Exercise the exact capability normalizer with Debian's awk implementation.
+# The production regression here was caused by using awk's built-in `index`
+# function name as a loop variable, which mawk rejects while parsing.
+capability_normalizer=$temporary_directory/capability-normalizer.sh
+sed -n '/^normalize_capabilities() {$/,/^}$/p' "$gate" \
+    >"$capability_normalizer"
+if [ "$(grep -c '^normalize_capabilities() {$' "$capability_normalizer")" -ne 1 ]; then
+    printf '%s\n' 'the capability normalizer is not uniquely extractable' >&2
+    exit 1
+fi
+if grep -Eq 'for[[:space:]]*\([[:space:]]*index[[:space:]]*=' \
+    "$capability_normalizer"; then
+    printf '%s\n' 'the capability normalizer reused awk index as a loop variable' >&2
+    exit 1
+fi
+sh -n "$capability_normalizer"
+# shellcheck source=/dev/null
+. "$capability_normalizer"
+capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN'
+capability_raw=$temporary_directory/capabilities.raw
+capability_normalized=$temporary_directory/capabilities.normalized
+printf '%s\n' \
+    'cap_sys_admin cap_setuid CAP_SETPCAP cap_setgid' \
+    'cap_net_raw CAP_NET_ADMIN cap_kill' >"$capability_raw"
+chmod 0600 "$capability_raw"
+expect_status 0 normalize_capabilities "$capability_raw" "$capability_normalized"
+if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+    || [ "$(cat "$capability_normalized")" != "$capabilities" ]; then
+    printf '%s\n' 'the Debian-compatible capability normalization is not exact' >&2
+    exit 1
+fi
+normalize_capabilities_with_mawk() (
+    # Invoked indirectly by the extracted capability normalizer.
+    # shellcheck disable=SC2317
+    awk() {
+        command mawk "$@"
+    }
+    normalize_capabilities "$@"
+)
+if command -v mawk >/dev/null 2>&1; then
+    capability_mawk_normalized=$temporary_directory/capabilities.mawk.normalized
+    expect_status 0 normalize_capabilities_with_mawk \
+        "$capability_raw" "$capability_mawk_normalized"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+        || [ "$(cat "$capability_mawk_normalized")" != "$capabilities" ]; then
+        printf '%s\n' 'explicit mawk capability normalization is not exact' >&2
+        exit 1
+    fi
 fi
 
 report_worker_first_failure() (
@@ -2418,6 +2700,69 @@ if ! awk '
 fi
 
 if ! awk '
+    /^classify_worker_live_proof_terminal\(\) \{$/ {
+        classifier_definition = NR
+        in_classifier = 1
+        next
+    }
+    in_classifier && /^}$/ { in_classifier = 0; next }
+    in_classifier && /^    if \[ "\$worker_manager_binding_ok" = yes \] \\$/ {
+        helper_guard = NR
+    }
+    in_classifier && /&& unit_invocation_is_current \\$/ { current_invocation = NR }
+    in_classifier && /= failed:failed:exit-code:1:1 \]; then/ {
+        exact_failure_tuple = NR
+    }
+    in_classifier && /record_helper_live_proof_failure_stage "\$1"/ {
+        helper_stage_mapping = NR
+    }
+    in_classifier && /^    record_worker_launch_failure$/ {
+        generic_launch_fallback = NR
+    }
+    in_classifier && /^    if \[ "\$active_state" != active \]/ {
+        success_terminal_gate = NR
+    }
+    in_classifier && /record_proof_failure '\''worker-terminal-state'\''/ {
+        generic_terminal = NR
+    }
+    !in_classifier && /^    record_worker_launch_failure$/ {
+        early_launch_fallback = NR
+    }
+    /capture_unit_property ExecMainCode "\$temporary_stage\/unit-exec-code"/ {
+        exec_code_capture = NR
+    }
+    /classify_worker_live_proof_terminal "\$temporary_stage\/proof.stderr"/ {
+        classifier_call = NR
+    }
+    /^    record_proof_failure '\''worker-proof-records'\''$/ {
+        generic_proof_records = NR
+    }
+    END {
+        valid = classifier_definition > 0 && helper_guard > 0 && current_invocation > 0
+        valid = valid && exact_failure_tuple > 0 && helper_stage_mapping > 0
+        valid = valid && generic_launch_fallback > 0 && success_terminal_gate > 0
+        valid = valid && generic_terminal > 0 && early_launch_fallback > 0
+        valid = valid && exec_code_capture > 0 && classifier_call > 0
+        valid = valid && generic_proof_records > 0
+        valid = valid && classifier_definition < helper_guard
+        valid = valid && helper_guard < current_invocation
+        valid = valid && current_invocation < exact_failure_tuple
+        valid = valid && exact_failure_tuple < helper_stage_mapping
+        valid = valid && helper_stage_mapping < generic_launch_fallback
+        valid = valid && generic_launch_fallback < success_terminal_gate
+        valid = valid && success_terminal_gate < generic_terminal
+        valid = valid && early_launch_fallback < exec_code_capture
+        valid = valid && exec_code_capture < classifier_call
+        valid = valid && classifier_call < generic_proof_records
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' \
+        'helper failure stages are not bound before generic terminal diagnostics' >&2
+    exit 1
+fi
+
+if ! awk '
     /^adopt_tentative_unit\(\) \{$/ { in_adopt = 1; next }
     in_adopt && /^\}$/ { in_adopt = 0 }
     in_adopt && /adopted_invocation_id=\$\(unit_current_invocation_id/ { id_read = NR }
@@ -2499,6 +2844,7 @@ for required_contract in \
     "blocked 'execution requires exact systemd v257'" \
     'capture_unit_property Environment "$temporary_stage/unit-environment"' \
     'capture_unit_property ExecSearchPath "$temporary_stage/unit-exec-search-path"' \
+    'capture_unit_property ExecMainCode "$temporary_stage/unit-exec-code"' \
     'capture_unit_property ExecSearchPath' \
     '"$temporary_stage/production-exec-search-path"' \
     '[ "$observed_exec_search_path" != '"'"'/usr/sbin /usr/bin /sbin /bin'"'"' ]' \
@@ -2553,8 +2899,15 @@ for required_contract in \
     '[ "$poll_attempt" -ge 1000 ]' \
     'systemctl reset-failed "$unit_name"' \
     '--internal-worker-v3-live-proof' \
+    'worker_manager_binding_ok=yes' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=parent-contract' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=runtime-preparation' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=worker-spawn' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=retirement-cleanup' \
     'VOLPAROSSA_HELPER_LIVE_WORKER_PROOF_V1=pass' \
     'VOLPAROSSA_HELPER_LIVE_SYSTEMD_FDSTORE_PROOF_V1=pass' \
+    '|| [ -s "$temporary_stage/proof.stderr" ]; then' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
