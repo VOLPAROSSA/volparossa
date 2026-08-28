@@ -118,6 +118,72 @@ failed() {
     exit 1
 }
 
+proof_failure_reason_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        worker-launch-status|\
+        worker-launch-envelope|\
+        worker-manager-binding|\
+        worker-terminal-state|\
+        worker-unit-contract|\
+        worker-proof-records|\
+        worker-confinement|\
+        worker-retirement|\
+        production-launch-status|\
+        production-launch-envelope|\
+        production-manager-binding|\
+        production-running-state|\
+        production-unit-contract|\
+        production-confinement|\
+        production-process-identity|\
+        production-socket-identity|\
+        production-start-records|\
+        production-runtime-layout|\
+        production-process-stability|\
+        production-retirement|\
+        production-lock-release|\
+        production-stop-records)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+record_proof_failure() {
+    [ "$#" -eq 1 ] || failed 'internal proof failure recorder invocation is invalid'
+    proof_failure_reason_is_safe "$1" \
+        || failed 'internal proof failure reason is invalid'
+    if [ -z "${proof_failure_reason:-}" ]; then
+        proof_failure_reason=$1
+    fi
+    proof_ok=no
+    case $1 in
+        production-*)
+            production_ok=no
+            ;;
+    esac
+}
+
+report_proof_failure() {
+    [ "$#" -eq 1 ] || failed 'internal proof failure reporter invocation is invalid'
+    proof_failure_reason_is_safe "$1" \
+        || failed 'internal proof failure reason was not recorded'
+    if [ "${proof_failure_reason:-}" != "$1" ] || [ "${proof_ok:-}" != no ]; then
+        failed 'internal proof failure reason was not recorded'
+    fi
+    case $1 in
+        worker-*)
+            [ "${production_ok+x}" != x ] \
+                || failed 'internal proof failure state is inconsistent'
+            ;;
+        production-*)
+            [ "${production_ok:-}" = no ] \
+                || failed 'internal proof failure state is inconsistent'
+            ;;
+    esac
+    failed "predicate rejected: $1"
+}
+
 if [ "$(id -u)" -ne 0 ]; then
     blocked 'execution requires root inside the disposable VM'
 fi
@@ -1893,12 +1959,14 @@ systemd-run \
 run_status=$?
 set -e
 
+unset production_ok
+proof_failure_reason=
 proof_ok=yes
 if [ "$run_status" -ne 0 ]; then
-    proof_ok=no
+    record_proof_failure 'worker-launch-status'
 elif ! vp_capture_file_is_safe "$temporary_stage/systemd-run.stdout" \
     || ! vp_capture_file_is_safe "$temporary_stage/systemd-run.stderr"; then
-    proof_ok=no
+    record_proof_failure 'worker-launch-envelope'
 else
     parsed_invocation_id=$(jq -ers --arg expected_unit "$unit_name" '
         if length == 1
@@ -1912,13 +1980,13 @@ else
     ' "$temporary_stage/systemd-run.stdout" 2>/dev/null) || parsed_invocation_id=
     if ! unit_invocation_id_is_safe "$parsed_invocation_id" \
         || [ -s "$temporary_stage/systemd-run.stderr" ]; then
-        proof_ok=no
+        record_proof_failure 'worker-launch-envelope'
     else
         observed_unit_invocation_id=$(unit_current_invocation_id) \
             || observed_unit_invocation_id=
         if ! unit_description_matches_marker \
             || [ "$observed_unit_invocation_id" != "$parsed_invocation_id" ]; then
-            proof_ok=no
+            record_proof_failure 'worker-manager-binding'
         else
             unit_invocation_id=$parsed_invocation_id
             unit_owned=yes
@@ -1929,17 +1997,17 @@ fi
 poll_attempt=0
 while :; do
     if ! unit_invocation_is_current; then
-        proof_ok=no
+        record_proof_failure 'worker-terminal-state'
         break
     fi
     if ! active_state=$(systemctl show --property=ActiveState --value \
         "$unit_name" 2>/dev/null); then
-        proof_ok=no
+        record_proof_failure 'worker-terminal-state'
         break
     fi
     if ! sub_state=$(systemctl show --property=SubState --value \
         "$unit_name" 2>/dev/null); then
-        proof_ok=no
+        record_proof_failure 'worker-terminal-state'
         break
     fi
     if [ "$active_state:$sub_state" = active:exited ]; then
@@ -1950,7 +2018,7 @@ while :; do
     esac
     poll_attempt=$((poll_attempt + 1))
     if [ "$poll_attempt" -ge 1000 ]; then
-        proof_ok=no
+        record_proof_failure 'worker-terminal-state'
         break
     fi
     sleep 0.05
@@ -1962,69 +2030,79 @@ capture_unit_property() {
     vp_capture_run "$2" systemctl show --property="$1" --value "$unit_name"
 }
 if capture_unit_property ActiveState "$temporary_stage/unit-active-state"; then
-    active_state=$(cat "$temporary_stage/unit-active-state") || proof_ok=no
+    active_state=$(cat "$temporary_stage/unit-active-state") \
+        || record_proof_failure 'worker-terminal-state'
 else
     active_state=
-    proof_ok=no
+    record_proof_failure 'worker-terminal-state'
 fi
 if capture_unit_property SubState "$temporary_stage/unit-sub-state"; then
-    sub_state=$(cat "$temporary_stage/unit-sub-state") || proof_ok=no
+    sub_state=$(cat "$temporary_stage/unit-sub-state") \
+        || record_proof_failure 'worker-terminal-state'
 else
     sub_state=
-    proof_ok=no
+    record_proof_failure 'worker-terminal-state'
 fi
 if capture_unit_property Result "$temporary_stage/unit-result"; then
-    result=$(cat "$temporary_stage/unit-result") || proof_ok=no
+    result=$(cat "$temporary_stage/unit-result") \
+        || record_proof_failure 'worker-terminal-state'
 else
     result=
-    proof_ok=no
+    record_proof_failure 'worker-terminal-state'
 fi
 if capture_unit_property ExecMainStatus "$temporary_stage/unit-exec-status"; then
-    exec_status=$(cat "$temporary_stage/unit-exec-status") || proof_ok=no
+    exec_status=$(cat "$temporary_stage/unit-exec-status") \
+        || record_proof_failure 'worker-terminal-state'
 else
     exec_status=
-    proof_ok=no
+    record_proof_failure 'worker-terminal-state'
 fi
 if [ "$active_state" != active ] || [ "$sub_state" != exited ] \
     || [ "$result" != success ] || [ "$exec_status" != 0 ]; then
-    proof_ok=no
+    record_proof_failure 'worker-terminal-state'
 fi
 if capture_unit_property NotifyAccess "$temporary_stage/unit-notify-access"; then
-    observed_notify_access=$(cat "$temporary_stage/unit-notify-access") || proof_ok=no
+    observed_notify_access=$(cat "$temporary_stage/unit-notify-access") \
+        || record_proof_failure 'worker-unit-contract'
 else
     observed_notify_access=
-    proof_ok=no
+    record_proof_failure 'worker-unit-contract'
 fi
 if capture_unit_property Description "$temporary_stage/unit-description"; then
-    observed_description=$(cat "$temporary_stage/unit-description") || proof_ok=no
+    observed_description=$(cat "$temporary_stage/unit-description") \
+        || record_proof_failure 'worker-unit-contract'
 else
     observed_description=
-    proof_ok=no
+    record_proof_failure 'worker-unit-contract'
 fi
 if capture_unit_property Environment "$temporary_stage/unit-environment"; then
-    observed_environment=$(cat "$temporary_stage/unit-environment") || proof_ok=no
+    observed_environment=$(cat "$temporary_stage/unit-environment") \
+        || record_proof_failure 'worker-unit-contract'
 else
     observed_environment=
-    proof_ok=no
+    record_proof_failure 'worker-unit-contract'
 fi
 if capture_unit_property FileDescriptorStoreMax "$temporary_stage/unit-fdstore-max"; then
-    observed_fdstore_max=$(cat "$temporary_stage/unit-fdstore-max") || proof_ok=no
+    observed_fdstore_max=$(cat "$temporary_stage/unit-fdstore-max") \
+        || record_proof_failure 'worker-unit-contract'
 else
     observed_fdstore_max=
-    proof_ok=no
+    record_proof_failure 'worker-unit-contract'
 fi
 if capture_unit_property FileDescriptorStorePreserve \
     "$temporary_stage/unit-fdstore-preserve"; then
-    observed_fdstore_preserve=$(cat "$temporary_stage/unit-fdstore-preserve") || proof_ok=no
+    observed_fdstore_preserve=$(cat "$temporary_stage/unit-fdstore-preserve") \
+        || record_proof_failure 'worker-unit-contract'
 else
     observed_fdstore_preserve=
-    proof_ok=no
+    record_proof_failure 'worker-unit-contract'
 fi
 if capture_unit_property NFileDescriptorStore "$temporary_stage/unit-fdstore-count"; then
-    observed_fdstore_count=$(cat "$temporary_stage/unit-fdstore-count") || proof_ok=no
+    observed_fdstore_count=$(cat "$temporary_stage/unit-fdstore-count") \
+        || record_proof_failure 'worker-unit-contract'
 else
     observed_fdstore_count=
-    proof_ok=no
+    record_proof_failure 'worker-unit-contract'
 fi
 if [ "$observed_notify_access" != main ] \
     || [ "$observed_description" != "$unit_ownership_marker" ] \
@@ -2032,7 +2110,7 @@ if [ "$observed_notify_access" != main ] \
         != DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ] \
     || [ "$observed_fdstore_max" != 128 ] \
     || [ "$observed_fdstore_preserve" != yes ] || [ "$observed_fdstore_count" != 2 ]; then
-    proof_ok=no
+    record_proof_failure 'worker-unit-contract'
 fi
 worker_fdstore_before_retirement=$observed_fdstore_count
 printf '%s\n' \
@@ -2041,7 +2119,7 @@ printf '%s\n' \
     >"$temporary_stage/expected.stdout"
 if ! cmp -s "$temporary_stage/expected.stdout" "$temporary_stage/proof.stdout" \
     || [ -s "$temporary_stage/proof.stderr" ]; then
-    proof_ok=no
+    record_proof_failure 'worker-proof-records'
 fi
 
 normalize_capabilities() {
@@ -2071,36 +2149,40 @@ normalize_capabilities() {
 if capture_unit_property CapabilityBoundingSet "$temporary_stage/unit-bounding.raw" \
     && normalize_capabilities "$temporary_stage/unit-bounding.raw" \
         "$temporary_stage/unit-bounding.normalized"; then
-    observed_bounding=$(cat "$temporary_stage/unit-bounding.normalized") || proof_ok=no
+    observed_bounding=$(cat "$temporary_stage/unit-bounding.normalized") \
+        || record_proof_failure 'worker-confinement'
 else
     observed_bounding=
-    proof_ok=no
+    record_proof_failure 'worker-confinement'
 fi
 if capture_unit_property AmbientCapabilities "$temporary_stage/unit-ambient.raw" \
     && normalize_capabilities "$temporary_stage/unit-ambient.raw" \
         "$temporary_stage/unit-ambient.normalized"; then
-    observed_ambient=$(cat "$temporary_stage/unit-ambient.normalized") || proof_ok=no
+    observed_ambient=$(cat "$temporary_stage/unit-ambient.normalized") \
+        || record_proof_failure 'worker-confinement'
 else
     observed_ambient=
-    proof_ok=no
+    record_proof_failure 'worker-confinement'
 fi
 if capture_unit_property PrivateNetwork "$temporary_stage/unit-private-network"; then
-    observed_private_network=$(cat "$temporary_stage/unit-private-network") || proof_ok=no
+    observed_private_network=$(cat "$temporary_stage/unit-private-network") \
+        || record_proof_failure 'worker-confinement'
 else
     observed_private_network=
-    proof_ok=no
+    record_proof_failure 'worker-confinement'
 fi
 if capture_unit_property ControlGroup "$temporary_stage/unit-control-group"; then
-    worker_control_group=$(cat "$temporary_stage/unit-control-group") || proof_ok=no
+    worker_control_group=$(cat "$temporary_stage/unit-control-group") \
+        || record_proof_failure 'worker-confinement'
 else
     worker_control_group=
-    proof_ok=no
+    record_proof_failure 'worker-confinement'
 fi
 if [ "$observed_bounding" != "$capabilities" ] \
     || [ "$observed_ambient" != "$capabilities" ] \
     || [ "$observed_private_network" != yes ] \
     || [ "$worker_control_group" != "/system.slice/$unit_name" ]; then
-    proof_ok=no
+    record_proof_failure 'worker-confinement'
 fi
 
 worker_unit_name=$unit_name
@@ -2108,12 +2190,12 @@ worker_invocation_id=$unit_invocation_id
 worker_ownership_marker=$unit_ownership_marker
 if ! retire_unit; then
     cleanup_error=yes
-    proof_ok=no
+    record_proof_failure 'worker-retirement'
 fi
 
 if [ "$proof_ok" = yes ]; then
     if [ -n "$unit_name" ] || [ "$unit_owned" != no ] || [ "$unit_may_own" != no ]; then
-        proof_ok=no
+        record_proof_failure 'worker-retirement'
     else
         unit_name=$worker_unit_name
         reuse_load_state=$(unit_load_state) || reuse_load_state=
@@ -2121,7 +2203,7 @@ if [ "$proof_ok" = yes ]; then
         if [ "$reuse_load_state" != not-found ] \
             || ! retired_runtime_is_absent \
                 "$worker_unit_name" "$worker_control_group" 0 ''; then
-            proof_ok=no
+            record_proof_failure 'worker-retirement'
         fi
     fi
 fi
@@ -2216,10 +2298,10 @@ if [ "$proof_ok" = yes ]; then
 
     production_ok=yes
     if [ "$production_run_status" -ne 0 ]; then
-        production_ok=no
+        record_proof_failure 'production-launch-status'
     elif ! vp_capture_file_is_safe "$temporary_stage/systemd-run-production.stdout" \
         || ! vp_capture_file_is_safe "$temporary_stage/systemd-run-production.stderr"; then
-        production_ok=no
+        record_proof_failure 'production-launch-envelope'
     else
         production_invocation_id=$(jq -ers --arg expected_unit "$unit_name" '
             if length == 1
@@ -2235,13 +2317,13 @@ if [ "$proof_ok" = yes ]; then
         if ! unit_invocation_id_is_safe "$production_invocation_id" \
             || [ "$production_invocation_id" = "$worker_invocation_id" ] \
             || [ -s "$temporary_stage/systemd-run-production.stderr" ]; then
-            production_ok=no
+            record_proof_failure 'production-launch-envelope'
         else
             observed_unit_invocation_id=$(unit_current_invocation_id) \
                 || observed_unit_invocation_id=
             if ! unit_description_matches_marker \
                 || [ "$observed_unit_invocation_id" != "$production_invocation_id" ]; then
-                production_ok=no
+                record_proof_failure 'production-manager-binding'
             else
                 unit_invocation_id=$production_invocation_id
                 unit_owned=yes
@@ -2254,154 +2336,159 @@ if [ "$proof_ok" = yes ]; then
         poll_attempt=0
         while :; do
             if ! unit_invocation_is_current; then
-                production_ok=no
+                record_proof_failure 'production-running-state'
                 break
             fi
             active_state=$(systemctl show --property=ActiveState --value \
                 "$unit_name" 2>/dev/null) || {
-                production_ok=no
+                record_proof_failure 'production-running-state'
                 break
             }
             sub_state=$(systemctl show --property=SubState --value \
                 "$unit_name" 2>/dev/null) || {
-                production_ok=no
+                record_proof_failure 'production-running-state'
                 break
             }
             if [ "$active_state:$sub_state" = active:running ]; then
                 break
             fi
             case $active_state in
-                failed|inactive) production_ok=no; break ;;
+                failed|inactive)
+                    record_proof_failure 'production-running-state'
+                    break
+                    ;;
             esac
             poll_attempt=$((poll_attempt + 1))
             if [ "$poll_attempt" -ge 2000 ]; then
-                production_ok=no
+                record_proof_failure 'production-running-state'
                 break
             fi
             sleep 0.05
         done
     else
-        production_ok=no
+        record_proof_failure 'production-running-state'
     fi
 
     if capture_unit_property ActiveState "$temporary_stage/production-active-state"; then
         production_active_state=$(cat "$temporary_stage/production-active-state") \
-            || production_ok=no
+            || record_proof_failure 'production-running-state'
     else
         production_active_state=
-        production_ok=no
+        record_proof_failure 'production-running-state'
     fi
     if capture_unit_property SubState "$temporary_stage/production-sub-state"; then
         production_sub_state=$(cat "$temporary_stage/production-sub-state") \
-            || production_ok=no
+            || record_proof_failure 'production-running-state'
     else
         production_sub_state=
-        production_ok=no
+        record_proof_failure 'production-running-state'
     fi
     if capture_unit_property Result "$temporary_stage/production-result"; then
-        production_result=$(cat "$temporary_stage/production-result") || production_ok=no
+        production_result=$(cat "$temporary_stage/production-result") \
+            || record_proof_failure 'production-running-state'
     else
         production_result=
-        production_ok=no
+        record_proof_failure 'production-running-state'
     fi
     if capture_unit_property MainPID "$temporary_stage/production-main-pid"; then
-        production_main_pid=$(cat "$temporary_stage/production-main-pid") || production_ok=no
+        production_main_pid=$(cat "$temporary_stage/production-main-pid") \
+            || record_proof_failure 'production-running-state'
     else
         production_main_pid=
-        production_ok=no
+        record_proof_failure 'production-running-state'
     fi
     case $production_main_pid in
-        ''|0|*[!0-9]*) production_ok=no ;;
+        ''|0|*[!0-9]*) record_proof_failure 'production-running-state' ;;
     esac
     if [ "$production_active_state" != active ] \
         || [ "$production_sub_state" != running ] \
         || [ "$production_result" != success ]; then
-        production_ok=no
+        record_proof_failure 'production-running-state'
     fi
 
     if capture_unit_property NotifyAccess "$temporary_stage/production-notify-access"; then
         production_notify_access=$(cat "$temporary_stage/production-notify-access") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_notify_access=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property Description "$temporary_stage/production-description"; then
         production_description=$(cat "$temporary_stage/production-description") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_description=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property Environment "$temporary_stage/production-environment"; then
         production_environment=$(cat "$temporary_stage/production-environment") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_environment=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property FileDescriptorStoreMax \
         "$temporary_stage/production-fdstore-max"; then
         production_fdstore_max=$(cat "$temporary_stage/production-fdstore-max") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_fdstore_max=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property FileDescriptorStorePreserve \
         "$temporary_stage/production-fdstore-preserve"; then
         production_fdstore_preserve=$(cat "$temporary_stage/production-fdstore-preserve") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_fdstore_preserve=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property NFileDescriptorStore \
         "$temporary_stage/production-fdstore-count"; then
         production_fdstore_count=$(cat "$temporary_stage/production-fdstore-count") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_fdstore_count=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property RuntimeMaxUSec \
         "$temporary_stage/production-runtime-max"; then
         production_runtime_max=$(cat "$temporary_stage/production-runtime-max") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_runtime_max=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property LimitFSIZE "$temporary_stage/production-limit-fsize"; then
         production_limit_fsize=$(cat "$temporary_stage/production-limit-fsize") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_limit_fsize=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property LimitFSIZESoft \
         "$temporary_stage/production-limit-fsize-soft"; then
         production_limit_fsize_soft=$(cat "$temporary_stage/production-limit-fsize-soft") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_limit_fsize_soft=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property StandardOutput \
         "$temporary_stage/production-standard-output"; then
         production_standard_output=$(cat "$temporary_stage/production-standard-output") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_standard_output=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if capture_unit_property StandardError \
         "$temporary_stage/production-standard-error"; then
         production_standard_error=$(cat "$temporary_stage/production-standard-error") \
-            || production_ok=no
+            || record_proof_failure 'production-unit-contract'
     else
         production_standard_error=
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     if [ "$production_notify_access" != main ] \
         || [ "$production_description" != "$unit_ownership_marker" ] \
@@ -2415,7 +2502,7 @@ if [ "$proof_ok" = yes ]; then
         || [ "$production_limit_fsize_soft" != 1048576 ] \
         || [ "$production_standard_output" != null ] \
         || [ "$production_standard_error" != null ]; then
-        production_ok=no
+        record_proof_failure 'production-unit-contract'
     fi
     production_fdstore_during_run=$production_fdstore_count
 
@@ -2424,73 +2511,77 @@ if [ "$proof_ok" = yes ]; then
         && normalize_capabilities "$temporary_stage/production-bounding.raw" \
             "$temporary_stage/production-bounding.normalized"; then
         production_bounding=$(cat "$temporary_stage/production-bounding.normalized") \
-            || production_ok=no
+            || record_proof_failure 'production-confinement'
     else
         production_bounding=
-        production_ok=no
+        record_proof_failure 'production-confinement'
     fi
     if capture_unit_property AmbientCapabilities "$temporary_stage/production-ambient.raw" \
         && normalize_capabilities "$temporary_stage/production-ambient.raw" \
             "$temporary_stage/production-ambient.normalized"; then
         production_ambient=$(cat "$temporary_stage/production-ambient.normalized") \
-            || production_ok=no
+            || record_proof_failure 'production-confinement'
     else
         production_ambient=
-        production_ok=no
+        record_proof_failure 'production-confinement'
     fi
     if capture_unit_property PrivateNetwork "$temporary_stage/production-private-network"; then
         production_private_network=$(cat "$temporary_stage/production-private-network") \
-            || production_ok=no
+            || record_proof_failure 'production-confinement'
     else
         production_private_network=
-        production_ok=no
+        record_proof_failure 'production-confinement'
     fi
     if capture_unit_property ControlGroup "$temporary_stage/production-control-group"; then
         production_control_group=$(cat "$temporary_stage/production-control-group") \
-            || production_ok=no
+            || record_proof_failure 'production-confinement'
     else
         production_control_group=
-        production_ok=no
+        record_proof_failure 'production-confinement'
     fi
     if [ "$production_bounding" != "$capabilities" ] \
         || [ "$production_ambient" != "$capabilities" ] \
         || [ "$production_private_network" != yes ] \
         || [ "$production_control_group" != "/system.slice/$unit_name" ]; then
-        production_ok=no
+        record_proof_failure 'production-confinement'
     fi
 
     production_identity=$temporary_stage/production-output/unit.identity
     if vp_capture_file_is_safe "$production_identity"; then
-        identity_invocation=$(sed -n '1p' "$production_identity") || production_ok=no
-        identity_main_pid=$(sed -n '2p' "$production_identity") || production_ok=no
-        identity_executable=$(sed -n '3p' "$production_identity") || production_ok=no
-        identity_extra=$(sed -n '4p' "$production_identity") || production_ok=no
+        identity_invocation=$(sed -n '1p' "$production_identity") \
+            || record_proof_failure 'production-process-identity'
+        identity_main_pid=$(sed -n '2p' "$production_identity") \
+            || record_proof_failure 'production-process-identity'
+        identity_executable=$(sed -n '3p' "$production_identity") \
+            || record_proof_failure 'production-process-identity'
+        identity_extra=$(sed -n '4p' "$production_identity") \
+            || record_proof_failure 'production-process-identity'
         if [ "$identity_invocation" != "$unit_invocation_id" ] \
             || [ "$identity_main_pid" != "$production_main_pid" ] \
             || [ -z "$identity_executable" ] || [ -n "$identity_extra" ]; then
-            production_ok=no
+            record_proof_failure 'production-process-identity'
         fi
     else
-        production_ok=no
+        record_proof_failure 'production-process-identity'
     fi
 
     production_socket_identity_file=$temporary_stage/production-output/socket.identity
     if vp_capture_file_is_safe "$production_socket_identity_file"; then
         expected_production_socket_identity=$(cat "$production_socket_identity_file") \
-            || production_ok=no
+            || record_proof_failure 'production-socket-identity'
     else
         expected_production_socket_identity=
-        production_ok=no
+        record_proof_failure 'production-socket-identity'
     fi
     production_socket_identity=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
         "$temporary_stage/production-runtime/helper.sock" 2>/dev/null) \
         || production_socket_identity=
     case $production_socket_identity in
         *":socket:0:$agent_gid:660:1") ;;
-        *) production_ok=no ;;
+        *) record_proof_failure 'production-socket-identity' ;;
     esac
     if [ "$production_socket_identity" != "$expected_production_socket_identity" ]; then
-        production_ok=no
+        record_proof_failure 'production-socket-identity'
     fi
 
     printf '%s\n' \
@@ -2505,7 +2596,7 @@ if [ "$proof_ok" = yes ]; then
     if ! vp_capture_file_is_safe "$temporary_stage/production-output/start.pass" \
         || ! cmp -s "$temporary_stage/expected-production-start.pass" \
             "$temporary_stage/production-output/start.pass"; then
-        production_ok=no
+        record_proof_failure 'production-start-records'
     fi
 
     if [ "$(stat -c '%F:%u:%g:%a' "$temporary_stage/production-runtime" \
@@ -2521,33 +2612,33 @@ if [ "$proof_ok" = yes ]; then
             2>/dev/null || true)" != "8180:0:$agent_gid:600:1" ] \
         || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
         || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
-        production_ok=no
+        record_proof_failure 'production-runtime-layout'
     fi
     if [ -e "$temporary_stage/production-runtime/helper.ownership-v3" ] \
         || [ -L "$temporary_stage/production-runtime/helper.ownership-v3" ]; then
         if [ "$(stat -c '%f:%u:%g:%a:%h' \
             "$temporary_stage/production-runtime/helper.ownership-v3" \
             2>/dev/null || true)" != "8180:0:$agent_gid:600:1" ]; then
-            production_ok=no
+            record_proof_failure 'production-runtime-layout'
         fi
     fi
 
     if ! unit_invocation_is_current; then
-        production_ok=no
+        record_proof_failure 'production-process-stability'
     fi
     final_main_pid=$(systemctl show --property=MainPID --value "$unit_name" 2>/dev/null) \
         || final_main_pid=
     if [ "$final_main_pid" != "$production_main_pid" ]; then
-        production_ok=no
+        record_proof_failure 'production-process-stability'
     fi
 
     production_unit_name=$unit_name
     if ! retire_unit; then
         cleanup_error=yes
-        production_ok=no
+        record_proof_failure 'production-retirement'
     fi
     if [ -n "$unit_name" ] || [ "$unit_owned" != no ] || [ "$unit_may_own" != no ]; then
-        production_ok=no
+        record_proof_failure 'production-retirement'
     else
         unit_name=$production_unit_name
         production_retired_load_state=$(unit_load_state) || production_retired_load_state=
@@ -2555,7 +2646,7 @@ if [ "$proof_ok" = yes ]; then
             || ! retired_runtime_is_absent "$production_unit_name" \
                 "$production_control_group" "$production_main_pid" \
                 "$identity_executable"; then
-            production_ok=no
+            record_proof_failure 'production-retirement'
         fi
         forget_unit_ownership
     fi
@@ -2563,35 +2654,35 @@ if [ "$proof_ok" = yes ]; then
     production_lock_identity_file=$temporary_stage/production-output/lock.identity
     if vp_capture_file_is_safe "$production_lock_identity_file"; then
         expected_production_lock_identity=$(cat "$production_lock_identity_file") \
-            || production_ok=no
+            || record_proof_failure 'production-lock-release'
     else
         expected_production_lock_identity=
-        production_ok=no
+        record_proof_failure 'production-lock-release'
     fi
     production_lock_path_before=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
         "$production_lock_path" 2>/dev/null) || production_lock_path_before=
     case $production_lock_path_before in
         *":8180:0:$agent_gid:600:1") ;;
-        *) production_ok=no ;;
+        *) record_proof_failure 'production-lock-release' ;;
     esac
     if [ "$production_lock_path_before" != "$expected_production_lock_identity" ]; then
-        production_ok=no
+        record_proof_failure 'production-lock-release'
     fi
     if exec 9<>"$production_lock_path"; then
         production_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
             /proc/self/fd/9 2>/dev/null) || production_lock_fd_identity=
         if [ "$production_lock_fd_identity" != "$expected_production_lock_identity" ] \
             || ! /usr/bin/flock -n 9; then
-            production_ok=no
+            record_proof_failure 'production-lock-release'
         fi
         production_lock_path_after=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
             "$production_lock_path" 2>/dev/null) || production_lock_path_after=
         if [ "$production_lock_path_after" != "$expected_production_lock_identity" ]; then
-            production_ok=no
+            record_proof_failure 'production-lock-release'
         fi
         exec 9>&-
     else
-        production_ok=no
+        record_proof_failure 'production-lock-release'
     fi
     printf '%s\n' 'VOLPAROSSA_HELPER_V3_IPC_CLEAN_SHUTDOWN_V1=pass' \
         >"$temporary_stage/expected-production-stop.pass"
@@ -2602,10 +2693,10 @@ if [ "$proof_ok" = yes ]; then
         || [ -L "$temporary_stage/production-runtime/helper.sock" ] \
         || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
         || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
-        production_ok=no
+        record_proof_failure 'production-stop-records'
     fi
-    if [ "$production_ok" != yes ]; then
-        proof_ok=no
+    if [ "$production_ok" != "$proof_ok" ]; then
+        failed 'internal production proof failure state is inconsistent'
     fi
 fi
 capture_host_state "$temporary_stage/after"
@@ -2621,7 +2712,7 @@ if [ -n "$changed_records" ] || [ "$before_digest" != "$after_digest" ]; then
     failed 'privacy-safe before/after host-state digests differ'
 fi
 if [ "$proof_ok" != yes ]; then
-    failed 'the staged helper did not produce the exact identity/fdstore and production IPC proofs'
+    report_proof_failure "$proof_failure_reason"
 fi
 if [ "$cleanup_error" != no ]; then
     failed 'the staged proof recorded an earlier retirement or cleanup failure'

@@ -113,6 +113,280 @@ expect_status() {
     fi
 }
 
+# Retained VM evidence may expose only one fixed, privacy-safe predicate group.
+# Exercise the exact gate helpers and pin both the allowlist and first-failure rule.
+proof_failure_functions=$temporary_directory/proof-failure-functions.sh
+{
+    sed -n '/^proof_failure_reason_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^record_proof_failure() {$/,/^}$/p' "$gate"
+    sed -n '/^report_proof_failure() {$/,/^}$/p' "$gate"
+} >"$proof_failure_functions"
+if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^record_proof_failure() {$' "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_proof_failure() {$' "$proof_failure_functions")" -ne 1 ]; then
+    printf '%s\n' 'the privacy-safe proof failure helpers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$proof_failure_functions"
+
+expected_proof_failure_reasons=$temporary_directory/expected-proof-failure-reasons
+printf '%s\n' \
+    worker-launch-status \
+    worker-launch-envelope \
+    worker-manager-binding \
+    worker-terminal-state \
+    worker-unit-contract \
+    worker-proof-records \
+    worker-confinement \
+    worker-retirement \
+    production-launch-status \
+    production-launch-envelope \
+    production-manager-binding \
+    production-running-state \
+    production-unit-contract \
+    production-confinement \
+    production-process-identity \
+    production-socket-identity \
+    production-start-records \
+    production-runtime-layout \
+    production-process-stability \
+    production-retirement \
+    production-lock-release \
+    production-stop-records \
+    | sort -u >"$expected_proof_failure_reasons"
+
+observed_proof_failure_allowlist=$temporary_directory/observed-proof-failure-allowlist
+sed -n '/^proof_failure_reason_is_safe() {$/,/^}$/p' "$gate" \
+    | sed -nE 's/^[[:space:]]*([a-z][a-z-]*)(\|\\|\))[[:space:]]*$/\1/p' \
+    | sort -u >"$observed_proof_failure_allowlist"
+observed_proof_failure_calls=$temporary_directory/observed-proof-failure-calls
+sed -n "s/.*record_proof_failure '\([a-z][a-z-]*\)'.*/\1/p" "$gate" \
+    | sort -u >"$observed_proof_failure_calls"
+if ! cmp -s "$expected_proof_failure_reasons" "$observed_proof_failure_allowlist" \
+    || ! cmp -s "$expected_proof_failure_reasons" "$observed_proof_failure_calls"; then
+    printf '%s\n' 'the recorded proof failures do not equal the fixed reason allowlist' >&2
+    exit 1
+fi
+all_proof_failure_calls=$(grep -Ec 'record_proof_failure[[:space:]]' "$gate")
+literal_proof_failure_calls=$(grep -Ec \
+    "record_proof_failure '[a-z][a-z-]*'" "$gate")
+if [ "$all_proof_failure_calls" -ne "$literal_proof_failure_calls" ]; then
+    printf '%s\n' 'proof failure state can bypass the literal first-failure recorder' >&2
+    exit 1
+fi
+if ! awk '
+    /^record_proof_failure\(\) \{$/ { in_recorder = 1; next }
+    in_recorder && /^}$/ { in_recorder = 0; next }
+    /^[[:space:]]*unset[[:space:]]+production_ok[[:space:]]*$/ {
+        production_unset++
+        production_unset_line = NR
+        next
+    }
+    /(^|[^[:alnum:]_])(proof_ok|production_ok|proof_failure_reason)[[:space:]]*=/ {
+        assignment = $0
+        sub(/^[[:space:]]*/, "", assignment)
+        if (in_recorder) {
+            if (assignment == "proof_ok=no") proof_no++
+            else if (assignment == "production_ok=no") production_no++
+            else if (assignment == "proof_failure_reason=$1") reason_record++
+            else invalid++
+        } else {
+            if (assignment == "proof_ok=yes") {
+                proof_yes++
+                proof_yes_line = NR
+            } else if (assignment == "production_ok=yes") {
+                production_yes++
+                production_yes_line = NR
+            } else if (assignment == "proof_failure_reason=") {
+                reason_initial++
+                reason_initial_line = NR
+            } else invalid++
+        }
+    }
+    END {
+        valid = invalid == 0 && proof_no == 1 && production_no == 1
+        valid = valid && reason_record == 1 && proof_yes == 1
+        valid = valid && production_yes == 1 && reason_initial == 1
+        valid = valid && production_unset == 1
+        valid = valid && production_unset_line < reason_initial_line
+        valid = valid && reason_initial_line < proof_yes_line
+        valid = valid && proof_yes_line < production_yes_line
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'proof failure state has a direct or non-canonical assignment' >&2
+    exit 1
+fi
+if ! awk '
+    /^[[:space:]]*production_ok=yes$/ { production_boundary = NR }
+    /record_proof_failure .*worker-/ {
+        worker_calls++
+        if (production_boundary > 0) invalid++
+    }
+    /record_proof_failure .*production-/ {
+        production_calls++
+        if (production_boundary == 0) invalid++
+    }
+    END {
+        if (invalid > 0 || worker_calls == 0 || production_calls == 0) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'worker or production failure labels escaped their exact phase' >&2
+    exit 1
+fi
+# These are literal gate-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'report_proof_failure "$proof_failure_reason"' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'failed "predicate rejected: $1"' \
+        "$proof_failure_functions")" -ne 1 ]; then
+    printf '%s\n' 'the final proof failure does not use the revalidating reporter once' >&2
+    exit 1
+fi
+
+failed() {
+    printf 'diagnostic failure: %s\n' "$1" >&2
+    exit 1
+}
+# shellcheck source=/dev/null
+. "$proof_failure_functions"
+while IFS= read -r proof_failure_reason_under_test; do
+    proof_failure_reason_is_safe "$proof_failure_reason_under_test" || {
+        printf 'allowlisted proof failure was rejected: %s\n' \
+            "$proof_failure_reason_under_test" >&2
+        exit 1
+    }
+done <"$expected_proof_failure_reasons"
+if proof_failure_reason_is_safe 'worker-launch-status/private-record'; then
+    printf '%s\n' 'an unbounded proof failure reason was accepted' >&2
+    exit 1
+fi
+
+report_worker_first_failure() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    record_proof_failure 'worker-launch-status'
+    record_proof_failure 'worker-proof-records'
+    if [ "$proof_ok" != no ] || [ "${production_ok+x}" = x ] \
+        || [ "$proof_failure_reason" != worker-launch-status ]; then
+        exit 99
+    fi
+    report_proof_failure "$proof_failure_reason"
+)
+expect_status 1 report_worker_first_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx 'diagnostic failure: predicate rejected: worker-launch-status' \
+        "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the worker diagnostic did not retain only its first fixed reason' >&2
+    exit 1
+fi
+
+report_allowlisted_unrecorded_failure() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    report_proof_failure 'worker-unit-contract'
+)
+expect_status 1 report_allowlisted_unrecorded_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx \
+        'diagnostic failure: internal proof failure reason was not recorded' \
+        "$last_stderr" >/dev/null \
+    || grep -F 'worker-unit-contract' "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the reporter accepted an allowlisted but unrecorded reason' >&2
+    exit 1
+fi
+
+report_mismatched_first_failure() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    record_proof_failure 'worker-launch-status'
+    report_proof_failure 'worker-proof-records'
+)
+expect_status 1 report_mismatched_first_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx \
+        'diagnostic failure: internal proof failure reason was not recorded' \
+        "$last_stderr" >/dev/null \
+    || grep -E 'worker-(launch-status|proof-records)' "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the reporter accepted a reason other than the recorded first failure' >&2
+    exit 1
+fi
+
+report_unfailed_status() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    record_proof_failure 'worker-launch-status'
+    proof_ok=yes
+    report_proof_failure "$proof_failure_reason"
+)
+expect_status 1 report_unfailed_status
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx \
+        'diagnostic failure: internal proof failure reason was not recorded' \
+        "$last_stderr" >/dev/null \
+    || grep -F 'worker-launch-status' "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the reporter accepted a recorded reason without failed proof state' >&2
+    exit 1
+fi
+
+report_production_first_failure() (
+    proof_failure_reason=
+    proof_ok=yes
+    production_ok=yes
+    record_proof_failure 'production-running-state'
+    record_proof_failure 'production-stop-records'
+    if [ "$proof_ok" != no ] || [ "$production_ok" != no ] \
+        || [ "$proof_failure_reason" != production-running-state ]; then
+        exit 99
+    fi
+    report_proof_failure "$proof_failure_reason"
+)
+expect_status 1 report_production_first_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx 'diagnostic failure: predicate rejected: production-running-state' \
+        "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the production diagnostic did not retain only its first fixed reason' >&2
+    exit 1
+fi
+
+report_unsafe_failure() (
+    report_proof_failure 'worker-launch-status/private-record'
+)
+expect_status 1 report_unsafe_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx \
+        'diagnostic failure: internal proof failure reason was not recorded' \
+        "$last_stderr" >/dev/null \
+    || grep -F 'private-record' "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the proof failure reporter reflected an untrusted reason' >&2
+    exit 1
+fi
+
+record_unsafe_failure() (
+    proof_failure_reason=
+    proof_ok=yes
+    production_ok=yes
+    record_proof_failure 'production-running-state/private-record'
+)
+expect_status 1 record_unsafe_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx 'diagnostic failure: internal proof failure reason is invalid' \
+        "$last_stderr" >/dev/null \
+    || grep -F 'private-record' "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the proof failure recorder reflected an untrusted reason' >&2
+    exit 1
+fi
+
 # Capture safety is a metadata contract, not a non-empty-content contract.
 # Successful commands and validators legitimately produce zero-byte streams.
 empty_capture=$temporary_directory/empty.capture
