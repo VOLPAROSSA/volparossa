@@ -652,6 +652,14 @@ helper aliases remain absolute, read-only `/run` paths; an exact
 `ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient property suppresses systemd v257's
 host-namespace executable preflight while preserving the driver's fixed child `PATH`. The driver
 reads that property back from PID 1 for both transient units before accepting their contracts.
+Both units also pin and read back `CollectMode=inactive`: a real failure therefore remains loaded
+long enough for exact terminal inspection, while successful or reset units can still be collected
+during bounded retirement. Neither transient launch uses `--ignore-failure` or the aggressive
+`--collect` shortcut. The diagnostic phase uses blocking `Type=exec` startup: PID 1 completes the
+start job only after successful `execve`, after which `systemd-run` returns the already assigned
+`InvocationID` before the live proof finishes; its separate `RuntimeMaxSec=45s` is also read back
+exactly. The driver additionally reads back `Type=exec` for both units, `RemainAfterExit=yes` only
+for the diagnostic unit, and the production default `RemainAfterExit=no`.
 The first phase succeeds only with the two exact ordered helper records, an externally observed
 post-exit `NFileDescriptorStore=2`, confirmed worker reap and pin release. Before the first phase
 and after the fully retired second phase, the driver compares privacy-safe digests of account files,
@@ -736,8 +744,9 @@ targets the host path.
 The first transient proof unit intentionally differs from the shipped production unit in every
 following respect:
 
-- it is a collected `Type=oneshot` with `RemainAfterExit=yes`, a 45-second activation bound, no restart,
-  and the private proof selector instead of the production no-argument server;
+- it is a non-aggressively collected `Type=exec` with `RemainAfterExit=yes`, a 45-second activation
+  and runtime bound, no restart, and the private proof selector instead of the production
+  no-argument server;
 - it uses a collision-free numeric staged primary group and requests no additional
   `SupplementaryGroups=` entries, rather than resolving the installed `volparossa` group from the
   host account database. An empty `SupplementaryGroups=` assignment does not override groups from
@@ -752,10 +761,10 @@ following respect:
   `ReadWritePaths=/run/volparossa -/run/netns` contract;
 - it retains the shipped unit's exact `NotifyAccess=main`, 128-entry descriptor-store maximum and
   `FileDescriptorStorePreserve=yes` settings so the two published descriptors remain externally
-  observable after the one-shot main process exits;
+  observable after the diagnostic main process exits;
 - it captures stdout and stderr in the root-only stage, sets `TasksMax=16` and
   `SetLoginEnvironment=no`, and omits the production config condition/environment, ordering,
-  restart and install-target semantics that are irrelevant to the one-shot internal proof.
+  restart and install-target semantics that are irrelevant to the internal proof.
 
 The device policy, no-new-privileges setting, exact capability sets, system-call filter,
 namespace restriction, address-family restriction and remaining applicable hardening properties
@@ -763,14 +772,14 @@ match the shipped helper unit. Retirement addresses only the exact random transi
 boundedly for stop, and binds every stop, reset and clean operation to one exact current nonzero
 systemd v257 `InvocationID`. The normal route requires it to match the returned JSON ID; tentative
 recovery requires the exact per-stage marker before adopting the manager's current ID. A failed
-one-shot is reset to inactive before its descriptor store is cleaned. Retirement cleans only that
-unit's `fdstore`, requires either
+diagnostic unit is reset to inactive before its descriptor store is cleaned. Retirement cleans only
+that unit's `fdstore`, requires either
 `NFileDescriptorStore=0` or `LoadState=not-found`, resets it when still present and waits boundedly
-for collection; any ambiguous observation fails the gate. The driver has not yet produced evidence
-from the required disposable VM. Its second phase exercises the production server entry point, but
-not an installed package, the shipped unit file, restart policy, or inherited-descriptor
-adoption/recovery. Until a successful run is durably tied to the same clean commit, it is a reviewed
-driver rather than earned live-root, package, datapath, A14 or A15 evidence.
+for collection; any ambiguous observation fails the gate. The driver has not yet produced a
+successful evidence report from the required disposable VM. Its second phase exercises the
+production server entry point, but not an installed package, the shipped unit file, restart policy,
+or inherited-descriptor adoption/recovery. Until a successful run is durably tied to the same clean
+commit, it is a reviewed driver rather than earned live-root, package, datapath, A14 or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
