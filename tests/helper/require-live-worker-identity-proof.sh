@@ -28,7 +28,8 @@ print_plan() {
         '  bookend one unchanged clean Git revision and three exact staged artifact hashes;' \
         '  copy the already-built real helper into one validated root-only temporary stage;' \
         '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
-        '  bind account files and the system bus socket read-only in two sequential invocations;' \
+        '  bind account files plus the system bus socket read-only in two sequential invocations;' \
+        '  bind the canonical systemd notify socket read-only inside both private /run trees;' \
         '  pin its D-Bus system address to that verified socket inside the private /run;' \
         '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
         '  require the host /run/volparossa path absent before and after both private unit runs;' \
@@ -248,6 +249,12 @@ if [ ! -S "$system_bus_socket" ] || [ -L "$system_bus_socket" ] \
     || [ "$(stat -Lc '%F:%u:%g' "$system_bus_socket" 2>/dev/null || true)" \
         != 'socket:0:0' ]; then
     blocked 'the canonical root-owned system bus socket is unavailable'
+fi
+notify_socket=/run/systemd/notify
+if [ ! -S "$notify_socket" ] || [ -L "$notify_socket" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$notify_socket" 2>/dev/null || true)" \
+        != 'socket:0:0:777:1' ]; then
+    blocked 'the canonical root-owned systemd notify socket is unavailable'
 fi
 host_runtime_directory=/run/volparossa
 if [ -e "$host_runtime_directory" ] || [ -L "$host_runtime_directory" ]; then
@@ -1892,6 +1899,7 @@ capabilities='CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETPCAP CAP_SETU
 account_binds="$temporary_stage/passwd:/etc/passwd:norbind $temporary_stage/group:/etc/group:norbind $temporary_stage/shadow:/etc/shadow:norbind $temporary_stage/nsswitch.conf:/etc/nsswitch.conf:norbind"
 helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"
 system_bus_bind="$system_bus_socket:$system_bus_socket:norbind"
+notify_socket_bind="$notify_socket:$notify_socket:norbind"
 
 # The helper owns a 30-second spawn budget followed by a separate five-second
 # FD-store publication budget and bounded local retirement. Keep PID1's outer
@@ -1930,7 +1938,7 @@ systemd-run \
     --property='DeviceAllow=/dev/net/tun rw' \
     --property=ProtectSystem=strict \
     --property=ProtectHome=yes \
-    --property=ProtectControlGroups=strict \
+    --property=ProtectControlGroupsEx=strict \
     --property=Delegate=no \
     --property=PrivatePIDs=no \
     --property=ProtectKernelModules=yes \
@@ -1948,7 +1956,7 @@ systemd-run \
     --property=SystemCallErrorNumber=EPERM \
     --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
     --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
-    --property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind" \
+    --property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind $notify_socket_bind" \
     --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
     --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     --property=KillMode=control-group \
@@ -2271,7 +2279,7 @@ if [ "$proof_ok" = yes ]; then
         --property='DeviceAllow=/dev/net/tun rw' \
         --property=ProtectSystem=strict \
         --property=ProtectHome=yes \
-        --property=ProtectControlGroups=strict \
+        --property=ProtectControlGroupsEx=strict \
         --property=Delegate=no \
         --property=PrivatePIDs=no \
         --property=ProtectKernelModules=yes \
@@ -2289,7 +2297,7 @@ if [ "$proof_ok" = yes ]; then
         --property=SystemCallErrorNumber=EPERM \
         --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
         --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
-        --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind" \
+        --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind $notify_socket_bind" \
         --property="BindPaths=$production_runtime_bind $production_output_bind" \
         --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
         --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \

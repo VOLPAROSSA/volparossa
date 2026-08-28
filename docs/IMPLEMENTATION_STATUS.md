@@ -199,8 +199,20 @@ single clean-build A01--A15 run; the score is not a release claim.
   reproduction bind this to `systemd-run` preflighting the absolute private `/run` helper path in
   the host namespace before PID 1 could create the unit. Both transient calls now provide and
   read back one fixed `ExecSearchPath`, which suppresses that client-side preflight while retaining
-  absolute bound command paths and the fixed child `PATH`. Neither failed run is PASS evidence, so
-  AV1-09 remains Open until a new exact-main retained run succeeds.
+  absolute bound command paths and the fixed child `PATH`. Exact-main
+  [run 33144430325](https://github.com/VOLPAROSSA/volparossa/actions/runs/33144430325) at
+  `9cb0e984c9147888c5ac437c8089702c3b8f4ac3` retained diagnostic artifact `9675288585`
+  (API archive SHA-256
+  `53093ed0ef963b25e3d576d662adf1a4c5a549ea681fae53775157efbcab16d3`) and still stopped at
+  `worker-launch-status`. The exact systemd v257 property tables expose the next client-side
+  rejection: `ProtectControlGroups` accepts only a boolean while the required `strict` enum must be
+  sent as `ProtectControlGroupsEx`. Both transient calls now use that string-valued property and
+  the static contract forbids the invalid legacy spelling. The same source audit also shows that a
+  standalone private `/run` does not automatically restore PID 1's notify socket, although both the
+  live FD-store publication and production startup inventory require it. The gate therefore
+  validates the canonical root-owned `/run/systemd/notify` socket and binds it read-only into both
+  transient mount namespaces. None of the failed runs is PASS evidence, so AV1-09 remains Open
+  until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

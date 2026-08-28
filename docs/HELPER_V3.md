@@ -638,10 +638,17 @@ fixed path never raises that limit. It then creates collision-free synthetic ser
 binds the staged passwd, group, shadow and nsswitch files read-only, and grants the helper parent
 exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes`,
 `NotifyAccess=main`, `FileDescriptorStoreMax=128`, `FileDescriptorStorePreserve=yes`, and a private
-temporary `/run`. Only the canonical root-owned system bus socket is bound read-only into that
+temporary `/run`. The canonical root-owned system bus socket is bound read-only into that
 private `/run`, and the unit pins `DBUS_SYSTEM_BUS_ADDRESS` to that verified path, so the
 live-proof-only adapter cannot follow a manager-provided alternate address for its uncached systemd
-inventory reads. The staged helper aliases remain absolute, read-only `/run` paths; an exact
+inventory reads. The canonical root-owned `/run/systemd/notify` socket is also validated and bound
+read-only back into both private `/run` mount namespaces. This preserves the manager-provided
+`NOTIFY_SOCKET` endpoint needed by the live FD-store publication and the production startup
+inventory barrier; systemd v257 does not restore that socket automatically for a standalone
+`TemporaryFileSystem=/run`. Strict cgroup protection is submitted through the string-valued
+`ProtectControlGroupsEx=strict` D-Bus property. The legacy `ProtectControlGroups` property is
+boolean-only in systemd-run v257 and is deliberately forbidden by the static contract. The staged
+helper aliases remain absolute, read-only `/run` paths; an exact
 `ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient property suppresses systemd v257's
 host-namespace executable preflight while preserving the driver's fixed child `PATH`. The driver
 reads that property back from PID 1 for both transient units before accepting their contracts.
