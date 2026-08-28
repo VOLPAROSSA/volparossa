@@ -103,6 +103,20 @@ content digest are all bookended; only their private joined digest enters the be
 state comparison. Fixed rejection labels may identify the failed predicate but never print
 resolver bytes, DNS/search values, raw metadata, process IDs, invocation IDs or digests.
 
+The firewall fence treats canonical `nft --json list ruleset` output as the `nf_tables` authority,
+including rules reached through `iptables-nft`; it does not infer a legacy backend from whichever
+generic iptables alternative happens to be selected. Legacy IPv4 and IPv6 `x_tables` state is
+classified only through `/proc/self/net/ip_tables_names` and
+`/proc/self/net/ip6_tables_names`: the proc entry may be absent, present but empty, or present with a
+bounded table inventory. Only the last case executes the fixed absolute
+`/usr/sbin/iptables-legacy-save -M /bin/false` or
+`/usr/sbin/ip6tables-legacy-save -M /bin/false` producer exactly twice. Both normalized dumps, both
+inventory observations, and the nft JSON observations bracketing them must be identical or the gate
+fails closed. Raw inventories and rule dumps remain in validated private capture files and are
+removed; the comparison retains only SHA-256 digests and diagnostics use fixed labels. Equal
+before/after records establish stability at those fences, not continuous firewall stability during
+the interval.
+
 The report carries those non-claims in its exact `scope` object: it is evidence only for the helper
 boundary and does not claim package behavior, restart recovery, `CleanupOwned`, a VPN datapath, or
 any A01--A15 result. AV1-09 remains Open until

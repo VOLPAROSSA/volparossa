@@ -155,7 +155,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   The seven network JSON state normalizers now require exact document and entry shapes, bind
   separately captured IPv4/IPv6 route and rule records to their canonical source family, reject
   malformed flags and suppress data-dependent parser stderr; only fixed failure labels can enter a
-  retained diagnostic artifact.
+  retained diagnostic artifact. The firewall fence now treats canonical nft JSON as the
+  `nf_tables` authority and consults only `/proc/self/net/ip_tables_names` and
+  `/proc/self/net/ip6_tables_names` for separate legacy `x_tables` custody. It distinguishes absent,
+  empty and present inventories; a present family requires two identical normalized executions of
+  the fixed `/usr/sbin/iptables-legacy-save -M /bin/false` or
+  `/usr/sbin/ip6tables-legacy-save -M /bin/false` producer, with identical inventories and
+  bracketing nft observations. Raw table names and rules remain in the root-only stage; retained
+  records contain privacy-safe digests and diagnostics only fixed labels. Equality proves stable
+  observations at the two fences, not continuous stability between them.
   A successful execute-mode run now emits one bounded canonical helper-boundary evidence-v1
   JSON document on stdout only after separate observed clean-source and executed-artifact
   bookends, both distinct invocations, retirement, equal digests for the exact enumerated host

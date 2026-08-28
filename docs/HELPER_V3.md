@@ -646,17 +646,36 @@ The first phase succeeds only with the two exact ordered helper records, an exte
 post-exit `NFileDescriptorStore=2`, confirmed worker reap and pin release. Before the first phase
 and after the fully retired second phase, the driver compares privacy-safe digests of account files,
 mounts, resolver configuration, sysctls, links, addresses, routes, rules, nexthops, qdiscs,
-nftables, optional legacy iptables/ip6tables state and optional WireGuard state. A WireGuard dump
-is streamed through a validated private FIFO into a separately checked SHA-256 consumer and is
-never persisted or logged. Other host-network and firewall producer output exists only in validated
-mode-0600 files under the root-only temporary stage, is normalized in a separately checked step,
-and is removed with that stage; published comparison records contain only digests or explicit
-absence markers. Each JSON producer must yield exactly one expected top-level document and object
-entry shape. Separate IPv4 and IPv6 route/rule captures are tagged canonically from their invoking
-address family before they are joined; an explicit contradictory family fails closed. All seven
-network JSON normalizers suppress data-dependent parser diagnostics, so only their fixed failure
-labels can reach retained stderr. A generic regular resolver target must retain the capture owner's
-exact UID/GID pair. The only service-owned exception is the validated active
+`nf_tables`, legacy IPv4/IPv6 `x_tables` state and optional WireGuard state. Canonical
+`nft --json list ruleset` output is the authority for `nf_tables`, including the `iptables-nft`
+frontend; the mutable generic `iptables-save` alternatives are never used as evidence for a legacy
+backend. Each host-state fence takes two identical normalized nft JSON observations around the
+separate legacy captures.
+
+Legacy `x_tables` custody is derived only from the current network namespace's
+`/proc/self/net/ip_tables_names` and `/proc/self/net/ip6_tables_names` inventories. Each family is
+kept distinct as proc entry absent, proc entry present with no registered tables, or a bounded
+present table-name inventory. A present inventory additionally requires two successful, strictly
+normalized and byte-identical captures from the fixed absolute
+`/usr/sbin/iptables-legacy-save -M /bin/false` or
+`/usr/sbin/ip6tables-legacy-save -M /bin/false` producer; inventory observations before and after
+those dumps must also be identical. Absence or an empty inventory never falls back to a generic
+frontend, while malformed metadata, names, dump structure, counters or any drift fails closed.
+These observations prove stability within each capture and equality at the two outer host-state
+fences; they are not a continuous guarantee that firewall state was unchanged between those
+fences.
+
+A WireGuard dump is streamed through a validated private FIFO into a separately checked SHA-256
+consumer and is never persisted or logged. Other host-network and firewall producer output exists
+only in validated mode-0600 files under the root-only temporary stage, is normalized in a separately
+checked step, and is removed with that stage. Published comparison records contain only
+privacy-safe digests; retained diagnostics use fixed failure labels and never expose table names,
+rules or raw firewall output. Each JSON producer must yield exactly one expected top-level document
+and object entry shape. Separate IPv4 and IPv6 route/rule captures are tagged canonically from their
+invoking address family before they are joined; an explicit contradictory family fails closed. All
+seven network JSON normalizers suppress data-dependent parser diagnostics, so only their fixed
+failure labels can reach retained stderr. A generic regular resolver target must retain the capture
+owner's exact UID/GID pair. The only service-owned exception is the validated active
 `systemd-resolved` identity, and
 only for exact `/run/systemd/resolve/stub-resolv.conf` or
 `/run/systemd/resolve/resolv.conf`: the target must be mode `0644`, single-linked and at most 64 KiB,
