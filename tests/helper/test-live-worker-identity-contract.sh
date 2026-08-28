@@ -421,6 +421,19 @@ exercise_worker_terminal_decision() (
                 >"$decision_stage"
             chmod 0644 "$decision_stage"
             ;;
+        extra)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+                'private-stage-payload' >"$decision_stage"
+            chmod 0600 "$decision_stage"
+            ;;
+        multiple)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+                'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=worker-spawn' \
+                >"$decision_stage"
+            chmod 0600 "$decision_stage"
+            ;;
         *) exit 97 ;;
     esac
     case $decision_tuple in
@@ -444,6 +457,27 @@ exercise_worker_terminal_decision() (
             result=success
             exec_code=1
             exec_status=0
+            ;;
+        timeout)
+            active_state=failed
+            sub_state=failed
+            result=timeout
+            exec_code=2
+            exec_status=15
+            ;;
+        signal)
+            active_state=failed
+            sub_state=failed
+            result=signal
+            exec_code=2
+            exec_status=15
+            ;;
+        core)
+            active_state=failed
+            sub_state=failed
+            result=core-dump
+            exec_code=3
+            exec_status=6
             ;;
         *) exit 96 ;;
     esac
@@ -481,11 +515,20 @@ do
     fi
 done <<'EOF'
 stage-wins yes yes exact failure 1 yes yes yes worker-helper-publication
+stage-wins-after-exec yes yes exact failure 0 yes yes yes worker-helper-publication
 current-mismatch yes no exact failure 1 yes yes yes worker-launch-status
 binding-missing no yes exact failure 0 yes yes yes worker-manager-binding
 unknown-stage yes yes unknown failure 1 yes yes yes worker-launch-status
 truncated-stage yes yes truncated failure 1 yes yes yes worker-launch-status
 unsafe-stage yes yes unsafe failure 1 yes yes yes worker-launch-status
+unknown-stage-after-exec yes yes unknown failure 0 yes yes yes worker-terminal-state
+truncated-stage-after-exec yes yes truncated failure 0 yes yes yes worker-terminal-state
+unsafe-stage-after-exec yes yes unsafe failure 0 yes yes yes worker-terminal-state
+extra-stage-after-exec yes yes extra failure 0 yes yes yes worker-terminal-state
+multiple-stage-after-exec yes yes multiple failure 0 yes yes yes worker-terminal-state
+timeout-is-generic yes yes exact timeout 0 yes yes yes worker-terminal-state
+signal-is-generic yes yes exact signal 0 yes yes yes worker-terminal-state
+core-is-generic yes yes exact core 0 yes yes yes worker-terminal-state
 terminal-mismatch yes yes exact mismatched 0 yes yes yes worker-terminal-state
 stage-before-envelope yes yes exact failure 0 yes yes no worker-helper-publication
 capture-envelope no yes empty failure 0 no no no worker-launch-envelope
@@ -2590,10 +2633,14 @@ printf '%s\n' \
     '  require the host /run/volparossa path absent before and after both private unit runs;' \
     '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
     '    FileDescriptorStorePreserve=yes on that transient service;' \
+    '  start the diagnostic helper as blocking Type=exec, then poll its exact ID to terminal;' \
+    '  retain diagnostic success with RemainAfterExit=yes and failures with CollectMode=inactive;' \
+    '  forbid ignore-failure, aggressive collection, and asynchronous or waiting client modes;' \
     '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
     '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
     '  bound both large build-artifact staging copies at 128 MiB, then cap' \
     '    the proof process and every transient-unit file write at 1 MiB;' \
+    '  cap the diagnostic worker runtime at 45 seconds;' \
     '  cap the production runtime at three minutes;' \
     '  discard production runtime stdout and stderr through exact systemd null streams;' \
     '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
@@ -2808,6 +2855,8 @@ for required_contract in \
     '--property=NotifyAccess=main' \
     '--property=FileDescriptorStoreMax=128' \
     '--property=FileDescriptorStorePreserve=yes' \
+    '--property=CollectMode=inactive' \
+    '--property=RuntimeMaxSec=45s' \
     '--property=TimeoutStartSec=45s' \
     '--property=TimeoutStartSec=90s' \
     '--property=TimeoutStopSec=45s' \
@@ -2818,7 +2867,6 @@ for required_contract in \
     '--property=StandardError=null' \
     '--property=KillSignal=SIGTERM' \
     '--json=short' \
-    '--ignore-failure' \
     '--description="$unit_ownership_marker"' \
     '--property="CapabilityBoundingSet=$capabilities"' \
     '--property="AmbientCapabilities=$capabilities"' \
@@ -2844,11 +2892,27 @@ for required_contract in \
     "blocked 'execution requires exact systemd v257'" \
     'capture_unit_property Environment "$temporary_stage/unit-environment"' \
     'capture_unit_property ExecSearchPath "$temporary_stage/unit-exec-search-path"' \
+    'capture_unit_property CollectMode "$temporary_stage/unit-collect-mode"' \
+    'capture_unit_property Type "$temporary_stage/unit-type"' \
+    'capture_unit_property RemainAfterExit "$temporary_stage/unit-remain-after-exit"' \
+    'capture_unit_property RuntimeMaxUSec "$temporary_stage/unit-runtime-max"' \
     'capture_unit_property ExecMainCode "$temporary_stage/unit-exec-code"' \
     'capture_unit_property ExecSearchPath' \
     '"$temporary_stage/production-exec-search-path"' \
+    'capture_unit_property CollectMode' \
+    '"$temporary_stage/production-collect-mode"' \
+    'capture_unit_property Type "$temporary_stage/production-type"' \
+    'capture_unit_property RemainAfterExit' \
+    '"$temporary_stage/production-remain-after-exit"' \
     '[ "$observed_exec_search_path" != '"'"'/usr/sbin /usr/bin /sbin /bin'"'"' ]' \
+    '[ "$observed_collect_mode" != inactive ]' \
+    '[ "$observed_unit_type" != exec ]' \
+    '[ "$observed_remain_after_exit" != yes ]' \
+    '[ "$observed_runtime_max" != 45s ]' \
     '!= '"'"'/usr/sbin /usr/bin /sbin /bin'"'"' ]' \
+    '[ "$production_collect_mode" != inactive ]' \
+    '[ "$production_unit_type" != exec ]' \
+    '[ "$production_remain_after_exit" != no ]' \
     '!= DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ]' \
     'parsed_invocation_id=$(jq -ers --arg expected_unit "$unit_name"' \
     'and (.[0] | keys) == ["invocation_id", "unit"]' \
@@ -3002,6 +3066,99 @@ if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 2 ]; then
     printf '%s\n' 'both transient helper invocations do not have the exact file-size limit' >&2
     exit 1
 fi
+if ! awk '
+    /^[[:space:]]*systemd-run \\$/ {
+        if (in_run) invalid++
+        run_count++
+        in_run = 1
+        next
+    }
+    in_run {
+        argument_line = $0
+        sub(/^[[:space:]]*/, "", argument_line)
+        short_option_line = argument_line
+        gsub(/[\047\"]/, "", short_option_line)
+        if (short_option_line ~ /(^|[[:space:]])-[^-[:space:]]/) invalid++
+        if (argument_line ~ /^--/) {
+            option_copy = argument_line
+            if (gsub(/--/, "", option_copy) != 1) invalid++
+            if (argument_line !~ /^--json=/ \
+                && argument_line !~ /^--unit=/ \
+                && argument_line !~ /^--description=/ \
+                && argument_line !~ /^--service-type=/ \
+                && argument_line !~ /^--remain-after-exit([[:space:]]|\\|$)/ \
+                && argument_line !~ /^--property=/) invalid++
+        } else if (argument_line !~ /^\/run\/volparossa-helper-live-proof([[:space:]]|$)/ \
+            && argument_line !~ /^\/run\/volparossa-helper-production([[:space:]]|$)/ \
+            && argument_line !~ /^>/ \
+            && argument_line !~ /^2>/) invalid++
+        if (index($0, "--ignore-failure") > 0 \
+            || index($0, "--collect") > 0 \
+            || index($0, "--no-block") > 0 \
+            || index($0, "--wait") > 0 \
+            || index($0, "--pipe") > 0 \
+            || index($0, "--pty") > 0 \
+            || index($0, "--scope") > 0 \
+            || index($0, "--shell") > 0) invalid++
+
+        if (index($0, "--service-type=") > 0) type_assignments[run_count]++
+        if ($0 ~ /^[[:space:]]*--service-type=exec \\$/) exact_types[run_count]++
+        if (index($0, "Type=") > 0 \
+            && index($0, "--service-type=") == 0) invalid++
+
+        if (index($0, "CollectMode=") > 0) collect_assignments[run_count]++
+        if ($0 ~ /^[[:space:]]*--property=CollectMode=inactive \\$/) {
+            exact_collect_modes[run_count]++
+        }
+
+        if (index($0, "--remain-after-exit") > 0 \
+            || index($0, "RemainAfterExit=") > 0) remain_assignments[run_count]++
+        if ($0 ~ /^[[:space:]]*--remain-after-exit \\$/) exact_remain[run_count]++
+
+        if (index($0, "RuntimeMaxSec=") > 0) runtime_assignments[run_count]++
+        if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=45s \\$/) {
+            exact_worker_runtime[run_count]++
+        }
+        if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=180s \\$/) {
+            exact_production_runtime[run_count]++
+        }
+
+        if ($0 !~ /\\[[:space:]]*$/) {
+            in_run = 0
+            run_end_count++
+        }
+    }
+    END {
+        valid = !in_run && invalid == 0 && run_count == 2 && run_end_count == 2
+        for (run = 1; run <= 2; run++) {
+            valid = valid && type_assignments[run] == 1 && exact_types[run] == 1
+            valid = valid && collect_assignments[run] == 1
+            valid = valid && exact_collect_modes[run] == 1
+            valid = valid && runtime_assignments[run] == 1
+        }
+        valid = valid && remain_assignments[1] == 1 && exact_remain[1] == 1
+        valid = valid && remain_assignments[2] == 0 && exact_remain[2] == 0
+        valid = valid && exact_worker_runtime[1] == 1
+        valid = valid && exact_worker_runtime[2] == 0
+        valid = valid && exact_production_runtime[1] == 0
+        valid = valid && exact_production_runtime[2] == 1
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' \
+        'transient systemd-run argument blocks are not exact, blocking, and fail-observable' >&2
+    exit 1
+fi
+# These are literal gate-source contracts; expansion here would defeat the checks.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc -- '--property=RuntimeMaxSec=45s' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property RuntimeMaxUSec "$temporary_stage/unit-runtime-max"' \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- '[ "$observed_runtime_max" != 45s ]' "$gate")" -ne 1 ]; then
+    printf '%s\n' 'the diagnostic worker runtime is not bounded and read back exactly' >&2
+    exit 1
+fi
 # This is a literal gate-source contract, not a test-shell expansion.
 # shellcheck disable=SC2016
 if [ "$(grep -Fc -- \
@@ -3117,6 +3274,20 @@ do
         exit 1
     fi
 done
+if [ "$(grep -Fc -- 'capture_unit_property CollectMode' "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- 'collect_mode" != inactive' "$gate")" -ne 2 ]; then
+    printf '%s\n' \
+        'both transient units do not read back exact nonaggressive collection' >&2
+    exit 1
+fi
+if [ "$(grep -Fc -- 'capture_unit_property Type' "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- 'unit_type" != exec' "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- 'capture_unit_property RemainAfterExit' "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- 'remain_after_exit" !=' "$gate")" -ne 2 ]; then
+    printf '%s\n' \
+        'both transient units do not read back exact type and exit retention' >&2
+    exit 1
+fi
 if [ "$(grep -Fc -- '--property=RuntimeMaxSec=180s' "$gate")" -ne 1 ]; then
     printf '%s\n' 'production IPC invocation does not have one exact runtime limit' >&2
     exit 1

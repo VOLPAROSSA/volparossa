@@ -225,8 +225,22 @@ single clean-build A01--A15 run; the score is not a release claim.
   worker spawn, FD-store publication, or retirement cleanup. The driver accepts that record only
   from a safe byte-exact private capture bound to the current manager invocation and the exact
   `failed:failed:exit-code:1:1` terminal tuple; malformed, additional, truncated, unknown, signalled,
-  launch or manager failures retain a generic fixed label. None of the failed runs is PASS evidence,
-  so AV1-09 remains Open until a new exact-main retained run succeeds.
+  launch or manager failures retain a generic fixed label. Exact-main
+  [run 33151307859](https://github.com/VOLPAROSSA/volparossa/actions/runs/33151307859) at
+  `175defc28c8a1297a8ad23b919abe5c427630ed9` retained diagnostic artifact `9677903781`
+  (API archive SHA-256
+  `1a49ec8c21da443dfb3cac2804fcc859006fecb9122a36384256d2c824e8fc68`) with the same
+  `worker-terminal-state` label and no `mawk` error, proving the normalizer correction while still
+  withholding PASS. Exact systemd v257 source then exposed the deterministic launch-contract
+  mismatch: `--ignore-failure` converted the helper's diagnostic exit 1 into unit success, while
+  the classifier correctly required a failed terminal tuple; `--collect` could additionally
+  discard other failed terminal state before inspection. The diagnostic unit now uses blocking
+  `Type=exec` startup, so PID 1 completes the start job after successful exec, `systemd-run`
+  returns the already assigned invocation ID, and a later helper exit 1 remains a real unit
+  failure. Both transient units forbid those two shortcuts, pin and read back `Type=exec` and
+  `CollectMode=inactive`, and attest exact diagnostic/production `RemainAfterExit` values. The
+  diagnostic unit separately pins and reads back a 45-second runtime maximum. None of the failed
+  runs is PASS evidence, so AV1-09 remains Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

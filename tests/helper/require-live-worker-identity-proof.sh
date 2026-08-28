@@ -35,10 +35,14 @@ print_plan() {
         '  require the host /run/volparossa path absent before and after both private unit runs;' \
         '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
         '    FileDescriptorStorePreserve=yes on that transient service;' \
+        '  start the diagnostic helper as blocking Type=exec, then poll its exact ID to terminal;' \
+        '  retain diagnostic success with RemainAfterExit=yes and failures with CollectMode=inactive;' \
+        '  forbid ignore-failure, aggressive collection, and asynchronous or waiting client modes;' \
         '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
         '    CAP_SETUID, and CAP_SYS_ADMIN to the helper parent;' \
         '  bound both large build-artifact staging copies at 128 MiB, then cap' \
         '    the proof process and every transient-unit file write at 1 MiB;' \
+        '  cap the diagnostic worker runtime at 45 seconds;' \
         '  cap the production runtime at three minutes;' \
         '  discard production runtime stdout and stderr through exact systemd null streams;' \
         '  require its kernel supplementary-group vector to contain only the staged agent GID;' \
@@ -1970,16 +1974,20 @@ notify_socket_bind="$notify_socket:$notify_socket:norbind"
 # supplying the fixed distro-only search path prevents systemd-run v257 from
 # preflighting their absolute paths in the host namespace; those absolute
 # ExecStart paths remain unchanged and the child receives the gate's fixed PATH.
+# Type=exec lets PID 1 finish the start job after the staged image has executed,
+# so systemd-run can return its exact InvocationID before the live proof completes.
+# Failed units remain loaded for terminal classification; bounded retirement
+# resets and collects them later.
 unit_may_own=yes
 set +e
 systemd-run \
     --json=short \
-    --ignore-failure \
-    --collect \
     --unit="$unit_name" \
     --description="$unit_ownership_marker" \
-    --service-type=oneshot \
+    --service-type=exec \
     --remain-after-exit \
+    --property=CollectMode=inactive \
+    --property=RuntimeMaxSec=45s \
     --property=NotifyAccess=main \
     --property=FileDescriptorStoreMax=128 \
     --property=FileDescriptorStorePreserve=yes \
@@ -2180,6 +2188,34 @@ else
     observed_exec_search_path=
     record_proof_failure 'worker-unit-contract'
 fi
+if capture_unit_property CollectMode "$temporary_stage/unit-collect-mode"; then
+    observed_collect_mode=$(cat "$temporary_stage/unit-collect-mode") \
+        || record_proof_failure 'worker-unit-contract'
+else
+    observed_collect_mode=
+    record_proof_failure 'worker-unit-contract'
+fi
+if capture_unit_property Type "$temporary_stage/unit-type"; then
+    observed_unit_type=$(cat "$temporary_stage/unit-type") \
+        || record_proof_failure 'worker-unit-contract'
+else
+    observed_unit_type=
+    record_proof_failure 'worker-unit-contract'
+fi
+if capture_unit_property RemainAfterExit "$temporary_stage/unit-remain-after-exit"; then
+    observed_remain_after_exit=$(cat "$temporary_stage/unit-remain-after-exit") \
+        || record_proof_failure 'worker-unit-contract'
+else
+    observed_remain_after_exit=
+    record_proof_failure 'worker-unit-contract'
+fi
+if capture_unit_property RuntimeMaxUSec "$temporary_stage/unit-runtime-max"; then
+    observed_runtime_max=$(cat "$temporary_stage/unit-runtime-max") \
+        || record_proof_failure 'worker-unit-contract'
+else
+    observed_runtime_max=
+    record_proof_failure 'worker-unit-contract'
+fi
 if capture_unit_property FileDescriptorStoreMax "$temporary_stage/unit-fdstore-max"; then
     observed_fdstore_max=$(cat "$temporary_stage/unit-fdstore-max") \
         || record_proof_failure 'worker-unit-contract'
@@ -2207,6 +2243,10 @@ if [ "$observed_notify_access" != main ] \
     || [ "$observed_environment" \
         != DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ] \
     || [ "$observed_exec_search_path" != '/usr/sbin /usr/bin /sbin /bin' ] \
+    || [ "$observed_collect_mode" != inactive ] \
+    || [ "$observed_unit_type" != exec ] \
+    || [ "$observed_remain_after_exit" != yes ] \
+    || [ "$observed_runtime_max" != 45s ] \
     || [ "$observed_fdstore_max" != 128 ] \
     || [ "$observed_fdstore_preserve" != yes ] || [ "$observed_fdstore_count" != 2 ]; then
     record_proof_failure 'worker-unit-contract'
@@ -2330,11 +2370,10 @@ if [ "$proof_ok" = yes ]; then
     set +e
     systemd-run \
         --json=short \
-        --ignore-failure \
-        --collect \
         --unit="$unit_name" \
         --description="$unit_ownership_marker" \
         --service-type=exec \
+        --property=CollectMode=inactive \
         --property=Restart=no \
         --property=RuntimeMaxSec=180s \
         --property=NotifyAccess=main \
@@ -2536,6 +2575,31 @@ if [ "$proof_ok" = yes ]; then
         production_exec_search_path=
         record_proof_failure 'production-unit-contract'
     fi
+    if capture_unit_property CollectMode \
+        "$temporary_stage/production-collect-mode"; then
+        production_collect_mode=$(cat \
+            "$temporary_stage/production-collect-mode") \
+            || record_proof_failure 'production-unit-contract'
+    else
+        production_collect_mode=
+        record_proof_failure 'production-unit-contract'
+    fi
+    if capture_unit_property Type "$temporary_stage/production-type"; then
+        production_unit_type=$(cat "$temporary_stage/production-type") \
+            || record_proof_failure 'production-unit-contract'
+    else
+        production_unit_type=
+        record_proof_failure 'production-unit-contract'
+    fi
+    if capture_unit_property RemainAfterExit \
+        "$temporary_stage/production-remain-after-exit"; then
+        production_remain_after_exit=$(cat \
+            "$temporary_stage/production-remain-after-exit") \
+            || record_proof_failure 'production-unit-contract'
+    else
+        production_remain_after_exit=
+        record_proof_failure 'production-unit-contract'
+    fi
     if capture_unit_property FileDescriptorStoreMax \
         "$temporary_stage/production-fdstore-max"; then
         production_fdstore_max=$(cat "$temporary_stage/production-fdstore-max") \
@@ -2605,6 +2669,9 @@ if [ "$proof_ok" = yes ]; then
             != DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket ] \
         || [ "$production_exec_search_path" \
             != '/usr/sbin /usr/bin /sbin /bin' ] \
+        || [ "$production_collect_mode" != inactive ] \
+        || [ "$production_unit_type" != exec ] \
+        || [ "$production_remain_after_exit" != no ] \
         || [ "$production_fdstore_max" != 128 ] \
         || [ "$production_fdstore_preserve" != yes ] \
         || [ "$production_fdstore_count" != 0 ] \
