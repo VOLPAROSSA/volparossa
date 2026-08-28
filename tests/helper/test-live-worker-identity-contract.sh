@@ -163,6 +163,611 @@ stream_hasher_failure_gate() {
     )
 }
 
+# Exercise the gate's real network-state normalizers. In particular, keep each
+# flags sort scoped to its flags array rather than the enclosing object.
+network_state_producers=$temporary_directory/network-state-producers.sh
+{
+    sed -n '/^quiet_jq() {$/,/^}$/p' "$gate"
+    sed -n '/^link_state_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^address_state_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^route_state_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^rule_state_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^nexthop_state_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^qdisc_state_producer() {$/,/^}$/p' "$gate"
+    sed -n '/^nftables_state_producer() {$/,/^}$/p' "$gate"
+} >"$network_state_producers"
+if [ "$(grep -c '^quiet_jq() {$' "$network_state_producers")" -ne 1 ] \
+    || [ "$(grep -c '^link_state_producer() {$' "$network_state_producers")" -ne 1 ] \
+    || [ "$(grep -c '^address_state_producer() {$' "$network_state_producers")" -ne 1 ] \
+    || [ "$(grep -c '^route_state_producer() {$' "$network_state_producers")" -ne 1 ] \
+    || [ "$(grep -c '^rule_state_producer() {$' "$network_state_producers")" -ne 1 ] \
+    || [ "$(grep -c '^nexthop_state_producer() {$' "$network_state_producers")" -ne 1 ] \
+    || [ "$(grep -c '^qdisc_state_producer() {$' "$network_state_producers")" -ne 1 ] \
+    || [ "$(grep -c '^nftables_state_producer() {$' "$network_state_producers")" -ne 1 ]; then
+    printf '%s\n' 'the network-state normalizers cannot be isolated' >&2
+    exit 1
+fi
+sh -n "$network_state_producers"
+if [ "$(grep -Ec '^[[:space:]]*jq([[:space:]]|$)' \
+        "$network_state_producers")" -ne 1 ] \
+    || ! grep -Fx '    jq "$@" 2>/dev/null' "$network_state_producers" >/dev/null; then
+    printf '%s\n' 'network-state producers contain a bare jq bypass outside quiet_jq' >&2
+    exit 1
+fi
+if sed -n '/^capture_host_state() {$/,/^}$/p' "$gate" \
+    | grep -Eq '^[[:space:]]*jq([[:space:]]|$)'; then
+    printf '%s\n' 'host capture contains a bare jq bypass' >&2
+    exit 1
+fi
+# The function path is generated from the reviewed gate above.
+# shellcheck disable=SC1090
+. "$network_state_producers"
+
+if ! awk '
+    BEGIN {
+        required["link_state_producer"] = 1
+        required["address_state_producer"] = 1
+        required["route_state_producer"] = 1
+        required["rule_state_producer"] = 1
+        required["nexthop_state_producer"] = 1
+        required["qdisc_state_producer"] = 1
+        required["nftables_state_producer"] = 1
+    }
+    /^[a-z_]+_state_producer\(\) \{$/ {
+        producer = $1
+        sub(/\(\)$/, "", producer)
+        next
+    }
+    producer != "" && /quiet_jq / { quiet[producer]++ }
+    producer != "" && /^}$/ { producer = "" }
+    END {
+        for (producer in required) if (quiet[producer] != 1) exit 1
+    }
+' "$network_state_producers"; then
+    printf '%s\n' 'a network-state producer is not bound to exactly one quiet jq call' >&2
+    exit 1
+fi
+
+if ! awk '
+    BEGIN {
+        expected["links"] = "link_state_producer"
+        expected["addresses"] = "address_state_producer"
+        expected["routes"] = "route_state_producer"
+        expected["rules"] = "rule_state_producer"
+        expected["nexthops"] = "nexthop_state_producer"
+        expected["qdiscs"] = "qdisc_state_producer"
+        expected["nftables"] = "nftables_state_producer"
+        label["links"] = "host link normalization failed"
+        label["addresses"] = "host address normalization failed"
+        label["routes"] = "host route normalization failed"
+        label["rules"] = "host rule normalization failed"
+        label["nexthops"] = "host nexthop normalization failed"
+        label["qdiscs"] = "host qdisc normalization failed"
+        label["nftables"] = "host nftables normalization failed"
+    }
+    $0 == "capture_host_state() {" { in_capture = 1; next }
+    in_capture && $0 == "}" { in_capture = 0; next }
+    in_capture {
+        started = 0
+        for (site in expected) {
+            target = "$capture_directory/" site ".normalized"
+            if (index($0, target) > 0 \
+                && index($0, "vp_capture_publish_digest") == 0) {
+                if (active != "") exit 1
+                active = site
+                command = $0
+                started = 1
+                break
+            }
+        }
+        if (active != "" && !started) command = command "\n" $0
+        if (active != "" && index($0, label[active]) > 0) {
+            if (index(command, expected[active]) == 0) exit 1
+            seen[active]++
+            active = ""
+            command = ""
+        }
+    }
+    END {
+        if (active != "" || in_capture) exit 1
+        for (site in expected) if (seen[site] != 1) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'host capture does not use every exact quiet network-state producer' >&2
+    exit 1
+fi
+
+link_valid=$temporary_directory/link-valid.raw
+link_normalized=$temporary_directory/link-valid.normalized
+link_expected=$temporary_directory/link-valid.expected
+printf '%s\n' \
+    '[{"ifindex":2,"ifname":"wg0","flags":["RUNNING","POINTOPOINT"],"altnames":["zeta","alpha"],"operstate":"UP"},{"ifindex":3,"ifname":"wg1"}]' \
+    >"$link_valid"
+printf '%s\n' \
+    '[{"altnames":["alpha","zeta"],"flags":["POINTOPOINT"],"ifindex":2,"ifname":"wg0"},{"flags":[],"ifindex":3,"ifname":"wg1"}]' \
+    >"$link_expected"
+vp_capture_normalize "$link_valid" "$link_normalized" link_state_producer
+if ! cmp -s "$link_expected" "$link_normalized"; then
+    printf '%s\n' 'link records did not normalize deterministically' >&2
+    exit 1
+fi
+
+address_valid=$temporary_directory/address-valid.raw
+address_normalized=$temporary_directory/address-valid.normalized
+address_expected=$temporary_directory/address-valid.expected
+printf '%s\n' '[{"ifindex":2,"ifname":"wg0"}]' >"$address_valid"
+printf '%s\n' '[{"addr_info":[],"ifindex":2,"ifname":"wg0"}]' >"$address_expected"
+vp_capture_normalize "$address_valid" "$address_normalized" address_state_producer
+if ! cmp -s "$address_expected" "$address_normalized"; then
+    printf '%s\n' 'address records did not normalize deterministically' >&2
+    exit 1
+fi
+
+qdisc_valid=$temporary_directory/qdisc-valid.raw
+qdisc_normalized=$temporary_directory/qdisc-valid.normalized
+qdisc_expected=$temporary_directory/qdisc-valid.expected
+printf '%s\n' '[{"kind":"fq_codel","dev":"wg0","packets":7}]' >"$qdisc_valid"
+printf '%s\n' '[{"dev":"wg0","kind":"fq_codel"}]' >"$qdisc_expected"
+vp_capture_normalize "$qdisc_valid" "$qdisc_normalized" qdisc_state_producer
+if ! cmp -s "$qdisc_expected" "$qdisc_normalized"; then
+    printf '%s\n' 'qdisc records did not normalize deterministically' >&2
+    exit 1
+fi
+
+nftables_valid=$temporary_directory/nftables-valid.raw
+nftables_normalized=$temporary_directory/nftables-valid.normalized
+nftables_expected=$temporary_directory/nftables-valid.expected
+printf '%s\n' '{"nftables":[]}' >"$nftables_valid"
+printf '%s\n' '{"nftables":[]}' >"$nftables_expected"
+vp_capture_normalize "$nftables_valid" "$nftables_normalized" nftables_state_producer
+if ! cmp -s "$nftables_expected" "$nftables_normalized"; then
+    printf '%s\n' 'nftables records did not normalize deterministically' >&2
+    exit 1
+fi
+
+routes_empty=$temporary_directory/routes-empty.raw
+routes_first=$temporary_directory/routes-first.raw
+routes_first_v6=$temporary_directory/routes-first-v6.raw
+routes_second=$temporary_directory/routes-second.raw
+routes_second_v6=$temporary_directory/routes-second-v6.raw
+routes_first_normalized=$temporary_directory/routes-first.normalized
+routes_second_normalized=$temporary_directory/routes-second.normalized
+routes_expected=$temporary_directory/routes.expected
+printf '%s\n' '[]' >"$routes_empty"
+printf '%s\n' \
+    '[{"table":"main","dst":"default","protocol":"static","dev":"wg-alpha","flags":["pervasive","offload","onlink","dead"],"expires":3}]' \
+    >"$routes_first"
+printf '%s\n' \
+    '[{"table":"main","dst":"default","protocol":"static","dev":"wg-alpha","flags":["pervasive","offload","onlink","dead"],"expires":3}]' \
+    >"$routes_first_v6"
+printf '%s\n' \
+    '[{"flags":["dead","onlink","offload","pervasive"],"dev":"wg-alpha","protocol":"static","dst":"default","table":"main","expires":9}]' \
+    >"$routes_second"
+printf '%s\n' \
+    '[{"flags":["dead","onlink","offload","pervasive"],"dev":"wg-alpha","protocol":"static","dst":"default","table":"main","expires":9}]' \
+    >"$routes_second_v6"
+printf '%s\n' \
+    '[{"dev":"wg-alpha","dst":"default","family":"inet","flags":["onlink","pervasive"],"protocol":"static","table":"main"},{"dev":"wg-alpha","dst":"default","family":"inet6","flags":["onlink","pervasive"],"protocol":"static","table":"main"}]' \
+    >"$routes_expected"
+vp_capture_run "$routes_first_normalized" route_state_producer \
+    "$routes_first" "$routes_first_v6"
+vp_capture_run "$routes_second_normalized" route_state_producer \
+    "$routes_second" "$routes_second_v6"
+if ! cmp -s "$routes_expected" "$routes_first_normalized" \
+    || ! cmp -s "$routes_first_normalized" "$routes_second_normalized"; then
+    printf '%s\n' 'route flags did not normalize deterministically' >&2
+    exit 1
+fi
+route_without_flags=$temporary_directory/route-without-flags.raw
+route_without_flags_normalized=$temporary_directory/route-without-flags.normalized
+route_without_flags_expected=$temporary_directory/route-without-flags.expected
+printf '%s\n' \
+    '[{"family":"inet","table":"main","dst":"198.51.100.0/24","dev":"wg-no-flags"}]' \
+    >"$route_without_flags"
+printf '%s\n' \
+    '[{"dev":"wg-no-flags","dst":"198.51.100.0/24","family":"inet","table":"main"}]' \
+    >"$route_without_flags_expected"
+vp_capture_run "$route_without_flags_normalized" route_state_producer \
+    "$route_without_flags" "$routes_empty"
+if ! cmp -s "$route_without_flags_expected" "$route_without_flags_normalized"; then
+    printf '%s\n' 'a route with absent flags was not accepted canonically' >&2
+    exit 1
+fi
+
+rules_v4=$temporary_directory/rules-v4.raw
+rules_v6=$temporary_directory/rules-v6.raw
+rules_normalized=$temporary_directory/rules.normalized
+rules_expected=$temporary_directory/rules.expected
+printf '%s\n' \
+    '[{"family":"inet","priority":200,"table":"main"},{"table":"main","priority":100}]' \
+    >"$rules_v4"
+printf '%s\n' \
+    '[{"table":"main","priority":100}]' \
+    >"$rules_v6"
+printf '%s\n' \
+    '[{"family":"inet","priority":100,"table":"main"},{"family":"inet","priority":200,"table":"main"},{"family":"inet6","priority":100,"table":"main"}]' \
+    >"$rules_expected"
+vp_capture_run "$rules_normalized" rule_state_producer "$rules_v4" "$rules_v6"
+if ! cmp -s "$rules_expected" "$rules_normalized"; then
+    printf '%s\n' 'rule records did not normalize deterministically' >&2
+    exit 1
+fi
+
+nexthops_first=$temporary_directory/nexthops-first.raw
+nexthops_second=$temporary_directory/nexthops-second.raw
+nexthops_first_normalized=$temporary_directory/nexthops-first.normalized
+nexthops_second_normalized=$temporary_directory/nexthops-second.normalized
+nexthops_expected=$temporary_directory/nexthops.expected
+printf '%s\n' \
+    '[{"id":7,"dev":"wg-beta","via":{"family":"inet6","addr":"2001:db8::1"},"flags":["pervasive","trap","onlink","offload"],"used":4},{"id":8,"dev":"wg-no-flags"}]' \
+    >"$nexthops_first"
+printf '%s\n' \
+    '[{"dev":"wg-no-flags","id":8},{"used":8,"flags":["offload","onlink","trap","pervasive"],"via":{"addr":"2001:db8::1","family":"inet6"},"dev":"wg-beta","id":7}]' \
+    >"$nexthops_second"
+printf '%s\n' \
+    '[{"dev":"wg-beta","flags":["onlink","pervasive"],"id":7,"via":{"addr":"2001:db8::1","family":"inet6"}},{"dev":"wg-no-flags","id":8}]' \
+    >"$nexthops_expected"
+vp_capture_normalize "$nexthops_first" "$nexthops_first_normalized" \
+    nexthop_state_producer
+vp_capture_normalize "$nexthops_second" "$nexthops_second_normalized" \
+    nexthop_state_producer
+if ! cmp -s "$nexthops_expected" "$nexthops_first_normalized" \
+    || ! cmp -s "$nexthops_first_normalized" "$nexthops_second_normalized"; then
+    printf '%s\n' 'nexthop flags did not normalize deterministically' >&2
+    exit 1
+fi
+
+two_family_shape_failure_gate() {
+    [ "$#" -eq 4 ] || return 78
+    network_failure_producer=$1
+    network_failure_family=$2
+    network_failure_label=$3
+    network_failure_input=$4
+    network_failure_output=$temporary_directory/$network_failure_producer-$network_failure_family-$network_failure_label.normalized
+    case $network_failure_family in
+        v4)
+            vp_capture_run "$network_failure_output" "$network_failure_producer" \
+                "$network_failure_input" "$routes_empty" || return 77
+            ;;
+        v6)
+            vp_capture_run "$network_failure_output" "$network_failure_producer" \
+                "$routes_empty" "$network_failure_input" || return 77
+            ;;
+        *) return 78 ;;
+    esac
+}
+
+nexthop_shape_failure_gate() {
+    [ "$#" -eq 2 ] || return 78
+    nexthop_failure_label=$1
+    nexthop_failure_input=$2
+    nexthop_shape_output=$temporary_directory/nexthop-$nexthop_failure_label.normalized
+    vp_capture_normalize "$nexthop_failure_input" "$nexthop_shape_output" \
+        nexthop_state_producer || return 77
+}
+
+single_state_shape_failure_gate() {
+    [ "$#" -eq 3 ] || return 78
+    single_failure_producer=$1
+    single_failure_label=$2
+    single_failure_input=$3
+    single_failure_output=$temporary_directory/$single_failure_producer-$single_failure_label.normalized
+    vp_capture_normalize "$single_failure_input" "$single_failure_output" \
+        "$single_failure_producer" || return 77
+}
+
+quiet_jq_sort_failure_gate() {
+    quiet_sort_output=$temporary_directory/quiet-jq-sort.normalized
+    vp_capture_normalize "$network_object" "$quiet_sort_output" \
+        quiet_jq -c 'sort' || return 77
+}
+
+network_null=$temporary_directory/network-null.raw
+network_object=$temporary_directory/network-object.raw
+network_extra=$temporary_directory/network-extra.raw
+network_nonobject=$temporary_directory/network-nonobject.raw
+network_privacy_sentinel=volparossa-private-route-sentinel.invalid
+printf '%s\n' 'null' >"$network_null"
+printf '%s\n' \
+    '{"family":"inet","dst":"volparossa-private-route-sentinel.invalid","flags":["onlink"]}' \
+    >"$network_object"
+printf '%s\n%s\n' '[]' '[]' >"$network_extra"
+printf '%s\n' '[null]' >"$network_nonobject"
+expect_status 77 quiet_jq_sort_failure_gate
+if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+    || grep -F "$network_privacy_sentinel" \
+        "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'quiet jq exposed data-dependent sort diagnostics' >&2
+    exit 1
+fi
+if [ -e "$temporary_directory/quiet-jq-sort.normalized" ]; then
+    printf '%s\n' 'failed quiet jq sort left partial normalized state' >&2
+    exit 1
+fi
+for single_failure_producer in \
+    link_state_producer address_state_producer qdisc_state_producer nftables_state_producer
+do
+    for single_failure_label in null object extra nonobject; do
+        case $single_failure_label in
+            null) single_failure_input=$network_null ;;
+            object) single_failure_input=$network_object ;;
+            extra) single_failure_input=$network_extra ;;
+            nonobject) single_failure_input=$network_nonobject ;;
+        esac
+        expect_status 77 single_state_shape_failure_gate \
+            "$single_failure_producer" "$single_failure_label" "$single_failure_input"
+        if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+            || grep -F "$network_privacy_sentinel" \
+                "$last_stdout" "$last_stderr" >/dev/null; then
+            printf 'invalid %s %s input escaped parser diagnostics\n' \
+                "$single_failure_producer" "$single_failure_label" >&2
+            exit 1
+        fi
+        single_failure_output=$temporary_directory/$single_failure_producer-$single_failure_label.normalized
+        if [ -e "$single_failure_output" ]; then
+            printf 'invalid %s %s input left normalized capture state\n' \
+                "$single_failure_producer" "$single_failure_label" >&2
+            exit 1
+        fi
+    done
+done
+for network_failure_producer in route_state_producer rule_state_producer; do
+    for network_failure_family in v4 v6; do
+        for network_failure_label in null object extra nonobject; do
+            case $network_failure_label in
+                null) network_failure_input=$network_null ;;
+                object) network_failure_input=$network_object ;;
+                extra) network_failure_input=$network_extra ;;
+                nonobject) network_failure_input=$network_nonobject ;;
+            esac
+            expect_status 77 two_family_shape_failure_gate \
+                "$network_failure_producer" "$network_failure_family" \
+                "$network_failure_label" "$network_failure_input"
+            if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+                || grep -F "$network_privacy_sentinel" \
+                    "$last_stdout" "$last_stderr" >/dev/null; then
+                printf 'invalid %s %s %s input escaped parser diagnostics\n' \
+                    "$network_failure_producer" "$network_failure_family" \
+                    "$network_failure_label" >&2
+                exit 1
+            fi
+            network_failure_output=$temporary_directory/$network_failure_producer-$network_failure_family-$network_failure_label.normalized
+            if [ -e "$network_failure_output" ]; then
+                printf 'invalid %s %s %s input left normalized capture state\n' \
+                    "$network_failure_producer" "$network_failure_family" \
+                    "$network_failure_label" >&2
+                exit 1
+            fi
+        done
+    done
+done
+family_null=$temporary_directory/family-null.raw
+family_nonstring=$temporary_directory/family-nonstring.raw
+family_conflict_v4=$temporary_directory/family-conflict-v4.raw
+family_conflict_v6=$temporary_directory/family-conflict-v6.raw
+printf '%s\n' '[{"family":null}]' >"$family_null"
+printf '%s\n' '[{"family":7}]' >"$family_nonstring"
+printf '%s\n' '[{"family":"inet6"}]' >"$family_conflict_v4"
+printf '%s\n' '[{"family":"inet"}]' >"$family_conflict_v6"
+for network_failure_producer in route_state_producer rule_state_producer; do
+    for network_failure_family in v4 v6; do
+        for family_failure_label in null nonstring conflict; do
+            case $family_failure_label in
+                null) family_failure_input=$family_null ;;
+                nonstring) family_failure_input=$family_nonstring ;;
+                conflict)
+                    if [ "$network_failure_family" = v4 ]; then
+                        family_failure_input=$family_conflict_v4
+                    else
+                        family_failure_input=$family_conflict_v6
+                    fi
+                    ;;
+            esac
+            network_failure_label=family-$family_failure_label
+            expect_status 77 two_family_shape_failure_gate \
+                "$network_failure_producer" "$network_failure_family" \
+                "$network_failure_label" "$family_failure_input"
+            if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+                printf 'invalid %s %s family %s escaped parser diagnostics\n' \
+                    "$network_failure_producer" "$network_failure_family" \
+                    "$family_failure_label" >&2
+                exit 1
+            fi
+            network_failure_output=$temporary_directory/$network_failure_producer-$network_failure_family-$network_failure_label.normalized
+            if [ -e "$network_failure_output" ]; then
+                printf 'invalid %s %s family %s left normalized capture state\n' \
+                    "$network_failure_producer" "$network_failure_family" \
+                    "$family_failure_label" >&2
+                exit 1
+            fi
+        done
+    done
+done
+
+flags_null=$temporary_directory/flags-null.raw
+flags_scalar=$temporary_directory/flags-scalar.raw
+flags_nonstring=$temporary_directory/flags-nonstring.raw
+printf '%s\n' '[{"flags":null}]' >"$flags_null"
+printf '%s\n' '[{"flags":"onlink"}]' >"$flags_scalar"
+printf '%s\n' '[{"flags":["onlink",7]}]' >"$flags_nonstring"
+for flags_failure_label in null scalar nonstring; do
+    case $flags_failure_label in
+        null) flags_failure_input=$flags_null ;;
+        scalar) flags_failure_input=$flags_scalar ;;
+        nonstring) flags_failure_input=$flags_nonstring ;;
+    esac
+    single_failure_label=flags-$flags_failure_label
+    expect_status 77 single_state_shape_failure_gate \
+        link_state_producer "$single_failure_label" "$flags_failure_input"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'invalid link flags %s escaped parser diagnostics\n' \
+            "$flags_failure_label" >&2
+        exit 1
+    fi
+    if [ -e "$temporary_directory/link_state_producer-$single_failure_label.normalized" ]; then
+        printf 'invalid link flags %s left normalized capture state\n' \
+            "$flags_failure_label" >&2
+        exit 1
+    fi
+done
+
+altnames_null=$temporary_directory/altnames-null.raw
+altnames_scalar=$temporary_directory/altnames-scalar.raw
+altnames_nonstring=$temporary_directory/altnames-nonstring.raw
+printf '%s\n' '[{"altnames":null}]' >"$altnames_null"
+printf '%s\n' '[{"altnames":"wg-alt"}]' >"$altnames_scalar"
+printf '%s\n' '[{"altnames":["wg-alt",7]}]' >"$altnames_nonstring"
+for altnames_failure_label in null scalar nonstring; do
+    case $altnames_failure_label in
+        null) altnames_failure_input=$altnames_null ;;
+        scalar) altnames_failure_input=$altnames_scalar ;;
+        nonstring) altnames_failure_input=$altnames_nonstring ;;
+    esac
+    single_failure_label=altnames-$altnames_failure_label
+    expect_status 77 single_state_shape_failure_gate \
+        link_state_producer "$single_failure_label" "$altnames_failure_input"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'invalid link altnames %s escaped parser diagnostics\n' \
+            "$altnames_failure_label" >&2
+        exit 1
+    fi
+    if [ -e "$temporary_directory/link_state_producer-$single_failure_label.normalized" ]; then
+        printf 'invalid link altnames %s left normalized capture state\n' \
+            "$altnames_failure_label" >&2
+        exit 1
+    fi
+done
+
+addr_info_null=$temporary_directory/addr-info-null.raw
+addr_info_scalar=$temporary_directory/addr-info-scalar.raw
+addr_info_nonobject=$temporary_directory/addr-info-nonobject.raw
+printf '%s\n' '[{"addr_info":null}]' >"$addr_info_null"
+printf '%s\n' '[{"addr_info":"address"}]' >"$addr_info_scalar"
+printf '%s\n' '[{"addr_info":[null]}]' >"$addr_info_nonobject"
+for addr_info_failure_label in null scalar nonobject; do
+    case $addr_info_failure_label in
+        null) addr_info_failure_input=$addr_info_null ;;
+        scalar) addr_info_failure_input=$addr_info_scalar ;;
+        nonobject) addr_info_failure_input=$addr_info_nonobject ;;
+    esac
+    single_failure_label=addr-info-$addr_info_failure_label
+    expect_status 77 single_state_shape_failure_gate \
+        address_state_producer "$single_failure_label" "$addr_info_failure_input"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'invalid addr_info %s escaped parser diagnostics\n' \
+            "$addr_info_failure_label" >&2
+        exit 1
+    fi
+    if [ -e "$temporary_directory/address_state_producer-$single_failure_label.normalized" ]; then
+        printf 'invalid addr_info %s left normalized capture state\n' \
+            "$addr_info_failure_label" >&2
+        exit 1
+    fi
+done
+
+nftables_null=$temporary_directory/nftables-null.raw
+nftables_scalar=$temporary_directory/nftables-scalar.raw
+nftables_nonobject=$temporary_directory/nftables-nonobject.raw
+printf '%s\n' '{"nftables":null}' >"$nftables_null"
+printf '%s\n' '{"nftables":"rules"}' >"$nftables_scalar"
+printf '%s\n' '{"nftables":[null]}' >"$nftables_nonobject"
+for nftables_failure_label in null scalar nonobject; do
+    case $nftables_failure_label in
+        null) nftables_failure_input=$nftables_null ;;
+        scalar) nftables_failure_input=$nftables_scalar ;;
+        nonobject) nftables_failure_input=$nftables_nonobject ;;
+    esac
+    single_failure_label=nftables-$nftables_failure_label
+    expect_status 77 single_state_shape_failure_gate \
+        nftables_state_producer "$single_failure_label" "$nftables_failure_input"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'invalid nftables %s escaped parser diagnostics\n' \
+            "$nftables_failure_label" >&2
+        exit 1
+    fi
+    if [ -e "$temporary_directory/nftables_state_producer-$single_failure_label.normalized" ]; then
+        printf 'invalid nftables %s left normalized capture state\n' \
+            "$nftables_failure_label" >&2
+        exit 1
+    fi
+done
+for network_failure_family in v4 v6; do
+    for flags_failure_label in null scalar nonstring; do
+        case $flags_failure_label in
+            null) flags_failure_input=$flags_null ;;
+            scalar) flags_failure_input=$flags_scalar ;;
+            nonstring) flags_failure_input=$flags_nonstring ;;
+        esac
+        network_failure_label=flags-$flags_failure_label
+        expect_status 77 two_family_shape_failure_gate \
+            route_state_producer "$network_failure_family" \
+            "$network_failure_label" "$flags_failure_input"
+        if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+            printf 'invalid route %s flags %s escaped parser diagnostics\n' \
+                "$network_failure_family" "$flags_failure_label" >&2
+            exit 1
+        fi
+        network_failure_output=$temporary_directory/route_state_producer-$network_failure_family-$network_failure_label.normalized
+        if [ -e "$network_failure_output" ]; then
+            printf 'invalid route %s flags %s left normalized capture state\n' \
+                "$network_failure_family" "$flags_failure_label" >&2
+            exit 1
+        fi
+    done
+done
+for nexthop_failure_label in null object extra nonobject; do
+    case $nexthop_failure_label in
+        null) nexthop_failure_input=$network_null ;;
+        object) nexthop_failure_input=$network_object ;;
+        extra) nexthop_failure_input=$network_extra ;;
+        nonobject) nexthop_failure_input=$network_nonobject ;;
+    esac
+    expect_status 77 nexthop_shape_failure_gate \
+        "$nexthop_failure_label" "$nexthop_failure_input"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ] \
+        || grep -F "$network_privacy_sentinel" \
+            "$last_stdout" "$last_stderr" >/dev/null; then
+        printf 'invalid nexthop %s input escaped parser diagnostics\n' \
+            "$nexthop_failure_label" >&2
+        exit 1
+    fi
+    if [ -e "$temporary_directory/nexthop-$nexthop_failure_label.normalized" ]; then
+        printf 'invalid nexthop %s input left normalized capture state\n' \
+            "$nexthop_failure_label" >&2
+        exit 1
+    fi
+done
+for flags_failure_label in null scalar nonstring; do
+    case $flags_failure_label in
+        null) flags_failure_input=$flags_null ;;
+        scalar) flags_failure_input=$flags_scalar ;;
+        nonstring) flags_failure_input=$flags_nonstring ;;
+    esac
+    nexthop_failure_label=flags-$flags_failure_label
+    expect_status 77 nexthop_shape_failure_gate \
+        "$nexthop_failure_label" "$flags_failure_input"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'invalid nexthop flags %s escaped parser diagnostics\n' \
+            "$flags_failure_label" >&2
+        exit 1
+    fi
+    if [ -e "$temporary_directory/nexthop-$nexthop_failure_label.normalized" ]; then
+        printf 'invalid nexthop flags %s left normalized capture state\n' \
+            "$flags_failure_label" >&2
+        exit 1
+    fi
+done
+if link_state_producer unexpected >/dev/null 2>&1 \
+    || address_state_producer unexpected >/dev/null 2>&1 \
+    || route_state_producer "$routes_first" >/dev/null 2>&1 \
+    || rule_state_producer "$rules_v4" >/dev/null 2>&1 \
+    || nexthop_state_producer unexpected >/dev/null 2>&1 \
+    || qdisc_state_producer unexpected >/dev/null 2>&1 \
+    || nftables_state_producer unexpected >/dev/null 2>&1; then
+    printf '%s\n' 'network-state normalizer accepted an invalid arity' >&2
+    exit 1
+fi
+
 # Exercise the gate's real snapshot parser rather than a test-side copy. These
 # fixtures cover both accepted size boundaries and every metadata field that
 # grants authority to stage a workspace-owned executable as root.
