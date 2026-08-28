@@ -651,9 +651,15 @@ is streamed through a validated private FIFO into a separately checked SHA-256 c
 never persisted or logged. Other host-network and firewall producer output exists only in validated
 mode-0600 files under the root-only temporary stage, is normalized in a separately checked step,
 and is removed with that stage; published comparison records contain only digests or explicit
-absence markers. Resolver capture accepts either a regular Debian resolver file or a symlink whose
-resolved regular target remains below `/etc` or `/run`; repeated object, target, metadata and digest
-observations reject unsafe ownership, writable path components, target replacement and other drift.
+absence markers. A generic regular resolver target must retain the capture owner's exact UID/GID
+pair. The only service-owned exception is the validated active `systemd-resolved` identity, and
+only for exact `/run/systemd/resolve/stub-resolv.conf` or
+`/run/systemd/resolve/resolv.conf`: the target must be mode `0644`, single-linked and at most 64 KiB,
+while the exact service-owned runtime directory must be mode `0755` and every higher parent remains
+root-owned and non-writable. The pinned Debian proof additionally requires the root-owned
+`/etc/resolv.conf -> ../run/systemd/resolve/stub-resolv.conf` object. Repeated service-invocation,
+process-credential, runtime-directory, object, target, metadata and digest observations reject
+restart, replacement, mixed-owner authority, writable path components and other drift.
 
 Only after the first transient unit is `not-found` and its exact cgroup is absent may the driver
 reuse that random unit name. The second invocation gets a separately derived ownership marker and a

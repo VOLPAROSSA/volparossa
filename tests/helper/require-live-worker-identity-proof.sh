@@ -167,6 +167,16 @@ case $manager_state in
     running|degraded) ;;
     *) blocked 'the system systemd manager is not operational' ;;
 esac
+resolver_runtime_uid=$(id -u systemd-resolve 2>/dev/null) \
+    || blocked 'the systemd-resolved service UID is unavailable'
+resolver_runtime_gid=$(id -g systemd-resolve 2>/dev/null) \
+    || blocked 'the systemd-resolved service GID is unavailable'
+case $resolver_runtime_uid in
+    ''|0|0*|*[!0-9]*) blocked 'the systemd-resolved service UID is non-canonical' ;;
+esac
+case $resolver_runtime_gid in
+    ''|0|0*|*[!0-9]*) blocked 'the systemd-resolved service GID is non-canonical' ;;
+esac
 system_bus_socket=/run/dbus/system_bus_socket
 if [ ! -S "$system_bus_socket" ] || [ -L "$system_bus_socket" ] \
     || [ "$(stat -Lc '%F:%u:%g' "$system_bus_socket" 2>/dev/null || true)" \
@@ -227,9 +237,125 @@ started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
     || blocked 'the execution start time cannot be established'
 VP_CAPTURE_OWNER_UID=0
 VP_CAPTURE_OWNER_GID=0
-export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID
+VP_CAPTURE_RESOLVER_DIAGNOSTICS=yes
+export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID VP_CAPTURE_RESOLVER_DIAGNOSTICS
 # shellcheck source=tests/helper/lib/live-worker-proof-capture.sh
 . "$script_directory/lib/live-worker-proof-capture.sh"
+
+resolver_authority_record() {
+    [ "$#" -eq 0 ] || return 1
+    resolver_uid_before=$(id -u systemd-resolve 2>/dev/null) || return 1
+    resolver_gid_before=$(id -g systemd-resolve 2>/dev/null) || return 1
+    [ "$resolver_uid_before:$resolver_gid_before" = \
+        "$resolver_runtime_uid:$resolver_runtime_gid" ] || return 1
+
+    resolver_unit_raw=$(systemctl show systemd-resolved.service --no-pager \
+        --property=LoadState --property=ActiveState --property=SubState \
+        --property=User --property=Group --property=DynamicUser \
+        --property=RuntimeDirectory --property=RuntimeDirectoryMode \
+        --property=MainPID --property=InvocationID 2>/dev/null) || return 1
+    [ "${#resolver_unit_raw}" -le 4096 ] || return 1
+    resolver_unit_record=$(printf '%s\n' "$resolver_unit_raw" | awk -F= \
+        -v expected_uid="$resolver_runtime_uid" \
+        -v expected_gid="$resolver_runtime_gid" '
+        function reject() { failed = 1; exit }
+        {
+            separator = index($0, "=")
+            if (separator == 0) reject()
+            key = substr($0, 1, separator - 1)
+            value = substr($0, separator + 1)
+            if (seen[key]++) reject()
+            if (key == "LoadState") {
+                if (value != "loaded") reject()
+            } else if (key == "ActiveState") {
+                if (value != "active") reject()
+            } else if (key == "SubState") {
+                if (value != "running") reject()
+            } else if (key == "User") {
+                if (value != "systemd-resolve") reject()
+            } else if (key == "Group") {
+                if (value != "") reject()
+            } else if (key == "DynamicUser") {
+                if (value != "no") reject()
+            } else if (key == "RuntimeDirectory") {
+                if (value != "systemd/resolve") reject()
+            } else if (key == "RuntimeDirectoryMode") {
+                if (value != "0755") reject()
+            } else if (key == "MainPID") {
+                if (value !~ /^[1-9][0-9]*$/) reject()
+            } else if (key == "InvocationID") {
+                if (length(value) != 32 || value !~ /^[0-9a-f]+$/ \
+                    || value == "00000000000000000000000000000000") reject()
+            } else {
+                reject()
+            }
+            values[key] = value
+            count++
+        }
+        END {
+            if (failed || count != 10 \
+                || values["LoadState"] != "loaded" \
+                || values["ActiveState"] != "active" \
+                || values["SubState"] != "running" \
+                || values["User"] != "systemd-resolve" \
+                || values["Group"] != "" \
+                || values["DynamicUser"] != "no" \
+                || values["RuntimeDirectory"] != "systemd/resolve" \
+                || values["RuntimeDirectoryMode"] != "0755") exit 1
+            print "LoadState=" values["LoadState"]
+            print "ActiveState=" values["ActiveState"]
+            print "SubState=" values["SubState"]
+            print "User=" values["User"]
+            print "Group=" values["Group"]
+            print "DynamicUser=" values["DynamicUser"]
+            print "RuntimeDirectory=" values["RuntimeDirectory"]
+            print "RuntimeDirectoryMode=" values["RuntimeDirectoryMode"]
+            print "MainPID=" values["MainPID"]
+            print "InvocationID=" values["InvocationID"]
+            print "RuntimeUID=" expected_uid
+            print "RuntimeGID=" expected_gid
+        }
+    ') || return 1
+    resolver_main_pid=$(printf '%s\n' "$resolver_unit_record" \
+        | sed -n 's/^MainPID=//p') || return 1
+    case $resolver_main_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    resolver_process_uids=$(awk '
+        $1 == "Uid:" && NF == 5 { print $2 ":" $3 ":" $4 ":" $5 }
+    ' "/proc/$resolver_main_pid/status" 2>/dev/null) || return 1
+    resolver_process_gids=$(awk '
+        $1 == "Gid:" && NF == 5 { print $2 ":" $3 ":" $4 ":" $5 }
+    ' "/proc/$resolver_main_pid/status" 2>/dev/null) || return 1
+    [ "$resolver_process_uids" = \
+        "$resolver_runtime_uid:$resolver_runtime_uid:$resolver_runtime_uid:$resolver_runtime_uid" ] \
+        || return 1
+    [ "$resolver_process_gids" = \
+        "$resolver_runtime_gid:$resolver_runtime_gid:$resolver_runtime_gid:$resolver_runtime_gid" ] \
+        || return 1
+    [ "$(cat "/proc/$resolver_main_pid/comm" 2>/dev/null)" = systemd-resolve ] \
+        || return 1
+    resolver_uid_after=$(id -u systemd-resolve 2>/dev/null) || return 1
+    resolver_gid_after=$(id -g systemd-resolve 2>/dev/null) || return 1
+    [ "$resolver_uid_before:$resolver_gid_before" = \
+        "$resolver_uid_after:$resolver_gid_after" ] || return 1
+    printf '%s\n' "$resolver_unit_record"
+}
+
+resolver_object_contract_is_exact() {
+    [ "$(stat -c '%F:%u:%g:%a:%h' /etc/resolv.conf 2>/dev/null)" = \
+        'symbolic link:0:0:777:1' ] \
+        && [ "$(readlink -- /etc/resolv.conf 2>/dev/null)" = \
+            '../run/systemd/resolve/stub-resolv.conf' ] \
+        && [ "$(readlink -f -- /etc/resolv.conf 2>/dev/null)" = \
+            '/run/systemd/resolve/stub-resolv.conf' ]
+}
+
+resolver_state_producer() {
+    [ "$#" -eq 2 ] || return 1
+    vp_capture_file_is_safe "$1" && vp_capture_file_is_safe "$2" || return 1
+    cat "$1" "$2"
+}
 helper_source=$repository_directory/target/debug/volparossa-helper
 ipc_probe_source=$repository_directory/target/debug/examples/volparossa-helper-production-ipc-probe
 ipc_hook_source=$script_directory/lib/production-ipc-unit-hook.sh
@@ -981,9 +1107,26 @@ capture_host_state() {
     vp_capture_publish_digest "$capture_directory/mounts.raw" "$destination/mounts" \
         || failed 'host mount capture could not be published'
 
+    resolver_authority_before=$capture_directory/resolver-authority-before.validated
+    resolver_authority_after=$capture_directory/resolver-authority-after.validated
+    resolver_object_capture=$capture_directory/resolver-object.validated
     resolver_capture=$capture_directory/resolver.validated
-    vp_capture_resolver_snapshot /etc/resolv.conf "$resolver_capture" '/etc /run' \
+    vp_capture_run "$resolver_authority_before" resolver_authority_record \
+        || failed 'the systemd-resolved authority could not be captured safely'
+    resolver_object_contract_is_exact \
+        || failed 'the Debian resolver symlink is outside its exact contract'
+    vp_capture_resolver_snapshot /etc/resolv.conf "$resolver_object_capture" '/etc /run' \
+        /run/systemd/resolve "$resolver_runtime_uid" "$resolver_runtime_gid" \
         || failed 'resolver object or resolved target could not be captured safely'
+    resolver_object_contract_is_exact \
+        || failed 'the Debian resolver symlink changed during capture'
+    vp_capture_run "$resolver_authority_after" resolver_authority_record \
+        || failed 'the systemd-resolved authority could not be re-captured safely'
+    cmp -s "$resolver_authority_before" "$resolver_authority_after" \
+        || failed 'the systemd-resolved authority changed during capture'
+    vp_capture_run "$resolver_capture" resolver_state_producer \
+        "$resolver_authority_before" "$resolver_object_capture" \
+        || failed 'the resolver authority and object capture could not be joined safely'
     vp_capture_publish_digest "$resolver_capture" "$destination/resolver" \
         || failed 'resolver capture could not be published'
 

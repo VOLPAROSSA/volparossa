@@ -147,7 +147,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   proven exclusively held while the helper ran, remove the socket, empty the descriptor store and
   remove the exact old process and
   cgroup. Both phases use a private runtime bind and require host `/run/volparossa` to remain
-  absent. A successful execute-mode run now emits one bounded canonical helper-boundary evidence-v1
+  absent. The resolver host-state fence now binds the exact root-owned Debian symlink to only the
+  two fixed `systemd-resolved` targets and the current active service's exact non-root UID/GID,
+  process credentials, invocation, mode and runtime-directory identity; generic non-root owners
+  under `/run` remain rejected. Repeated private authority/object/target captures reject restart,
+  replacement, mixed ownership, writable paths and content drift without publishing DNS state.
+  A successful execute-mode run now emits one bounded canonical helper-boundary evidence-v1
   JSON document on stdout only after separate observed clean-source and executed-artifact
   bookends, both distinct invocations, retirement, equal digests for the exact enumerated host
   records at two fences, strict semantic validation and removal of the root-only stage; human

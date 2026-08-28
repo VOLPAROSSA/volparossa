@@ -16,6 +16,8 @@ ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 temporary_directory=$(mktemp -d /tmp/volparossa-helper-proof-contract.XXXXXX)
+resolver_authority_outside=
+resolver_runtime_directory=
 case $temporary_directory in
     /tmp/volparossa-helper-proof-contract.??????) ;;
     *)
@@ -24,6 +26,28 @@ case $temporary_directory in
         ;;
 esac
 cleanup() {
+    if [ -n "$resolver_authority_outside" ]; then
+        case $resolver_authority_outside in
+            /tmp/volparossa-resolver-authority-outside.??????)
+                rm -f -- "$resolver_authority_outside"
+                ;;
+            *)
+                printf 'unsafe resolver authority cleanup path: %s\n' \
+                    "$resolver_authority_outside" >&2
+                ;;
+        esac
+    fi
+    if [ -n "$resolver_runtime_directory" ]; then
+        case $resolver_runtime_directory in
+            /tmp/volparossa-resolver-runtime.??????)
+                rm -rf --one-file-system -- "$resolver_runtime_directory"
+                ;;
+            *)
+                printf 'unsafe resolver runtime cleanup path: %s\n' \
+                    "$resolver_runtime_directory" >&2
+                ;;
+        esac
+    fi
     rm -rf --one-file-system -- "$temporary_directory"
 }
 trap cleanup EXIT
@@ -278,12 +302,43 @@ fi
 
 resolver_fixture=$temporary_directory/resolver-fixture
 mkdir -m 0700 "$resolver_fixture"
+resolver_runtime_directory=$(mktemp -d /tmp/volparossa-resolver-runtime.XXXXXX)
+case $resolver_runtime_directory in
+    /tmp/volparossa-resolver-runtime.??????) ;;
+    *)
+        printf 'unsafe resolver runtime fixture path: %s\n' \
+            "$resolver_runtime_directory" >&2
+        exit 1
+        ;;
+esac
+chmod 0755 "$resolver_runtime_directory"
+resolver_allowed_roots="$temporary_directory $resolver_runtime_directory"
+resolver_runtime_uid=$(id -u)
+resolver_runtime_gid=$(id -g)
+resolver_other_capture_uid=0
+if [ "$resolver_runtime_gid" -eq 0 ]; then
+    resolver_other_capture_gid=1
+else
+    resolver_other_capture_gid=0
+fi
+if [ "$resolver_runtime_uid" -eq 1 ]; then
+    resolver_wrong_runtime_uid=2
+else
+    resolver_wrong_runtime_uid=1
+fi
+if [ "$resolver_runtime_gid" -eq 1 ]; then
+    resolver_wrong_runtime_gid=2
+else
+    resolver_wrong_runtime_gid=1
+fi
+
 resolver_regular=$resolver_fixture/regular.conf
 printf '%s\n' 'nameserver 192.0.2.53' >"$resolver_regular"
 chmod 0600 "$resolver_regular"
 resolver_regular_snapshot=$temporary_directory/resolver-regular.snapshot
 vp_capture_resolver_snapshot "$resolver_regular" "$resolver_regular_snapshot" \
-    "$resolver_fixture"
+    "$resolver_fixture" "$resolver_runtime_directory" \
+    "$resolver_runtime_uid" "$resolver_runtime_gid"
 vp_capture_file_is_safe "$resolver_regular_snapshot"
 grep -Fx REGULAR "$resolver_regular_snapshot" >/dev/null
 grep -Fx "$resolver_regular" "$resolver_regular_snapshot" >/dev/null
@@ -295,22 +350,202 @@ resolver_symlink=$resolver_fixture/resolv.conf
 ln -s symlink-target.conf "$resolver_symlink"
 resolver_symlink_snapshot=$temporary_directory/resolver-symlink.snapshot
 vp_capture_resolver_snapshot "$resolver_symlink" "$resolver_symlink_snapshot" \
-    "$resolver_fixture"
+    "$resolver_fixture" "$resolver_runtime_directory" \
+    "$resolver_runtime_uid" "$resolver_runtime_gid"
 vp_capture_file_is_safe "$resolver_symlink_snapshot"
 grep -Fx symlink-target.conf "$resolver_symlink_snapshot" >/dev/null
 grep -Fx "$resolver_symlink_target" "$resolver_symlink_snapshot" >/dev/null
 
-resolver_unsafe_target=$resolver_fixture/unsafe-target.conf
+# Model Debian's managed /etc/resolv.conf -> .../stub-resolv.conf authority split.
+resolver_managed_stub=$resolver_runtime_directory/stub-resolv.conf
+printf '%s\n' 'nameserver 127.0.0.53' >"$resolver_managed_stub"
+chmod 0644 "$resolver_managed_stub"
+resolver_managed_link=$resolver_fixture/managed-resolv.conf
+ln -s "$resolver_managed_stub" "$resolver_managed_link"
+resolver_managed_snapshot=$temporary_directory/resolver-managed.snapshot
+vp_capture_resolver_snapshot "$resolver_managed_link" "$resolver_managed_snapshot" \
+    "$resolver_allowed_roots" "$resolver_runtime_directory" \
+    "$resolver_runtime_uid" "$resolver_runtime_gid"
+vp_capture_file_is_safe "$resolver_managed_snapshot"
+grep -Fx "$resolver_managed_stub" "$resolver_managed_snapshot" >/dev/null
+resolver_managed_runtime_link=$resolver_runtime_directory/managed-resolv.conf
+ln -s stub-resolv.conf "$resolver_managed_runtime_link"
+
+resolver_managed_observation_gate() {
+    (
+        VP_CAPTURE_OWNER_UID=$resolver_other_capture_uid
+        VP_CAPTURE_OWNER_GID=$resolver_other_capture_gid
+        export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID
+        vp_capture_resolver_observation "$resolver_managed_runtime_link" \
+            "$resolver_allowed_roots" "$resolver_runtime_directory" \
+            "$resolver_runtime_uid" "$resolver_runtime_gid" >/dev/null || exit 77
+    )
+}
+expect_status 0 resolver_managed_observation_gate
+
+resolver_managed_uplink=$resolver_runtime_directory/resolv.conf
+printf '%s\n' 'nameserver 192.0.2.60' >"$resolver_managed_uplink"
+chmod 0644 "$resolver_managed_uplink"
+resolver_managed_uplink_snapshot=$temporary_directory/resolver-managed-uplink.snapshot
+vp_capture_resolver_snapshot "$resolver_managed_uplink" \
+    "$resolver_managed_uplink_snapshot" "$resolver_allowed_roots" \
+    "$resolver_runtime_directory" "$resolver_runtime_uid" "$resolver_runtime_gid"
+vp_capture_file_is_safe "$resolver_managed_uplink_snapshot"
+grep -Fx "$resolver_managed_uplink" "$resolver_managed_uplink_snapshot" >/dev/null
+
+resolver_unsafe_object_parent=$resolver_fixture/unsafe-object-parent
+mkdir -m 0777 "$resolver_unsafe_object_parent"
+resolver_unsafe_object=$resolver_unsafe_object_parent/resolv.conf
+ln -s "$resolver_managed_stub" "$resolver_unsafe_object"
+resolver_unsafe_object_snapshot=$temporary_directory/resolver-unsafe-object.snapshot
+if vp_capture_resolver_snapshot "$resolver_unsafe_object" \
+    "$resolver_unsafe_object_snapshot" "$resolver_allowed_roots" \
+    "$resolver_runtime_directory" "$resolver_runtime_uid" "$resolver_runtime_gid"; then
+    printf '%s\n' 'resolver symlink below a writable object parent was accepted' >&2
+    exit 1
+fi
+if [ -e "$resolver_unsafe_object_snapshot" ]; then
+    printf '%s\n' 'unsafe resolver object parent left a partial snapshot' >&2
+    exit 1
+fi
+
+# The service UID/GID grants authority only below the one explicit runtime directory.
+resolver_authority_outside=$(mktemp /tmp/volparossa-resolver-authority-outside.XXXXXX)
+case $resolver_authority_outside in
+    /tmp/volparossa-resolver-authority-outside.??????) ;;
+    *)
+        printf 'unsafe resolver authority fixture path: %s\n' \
+            "$resolver_authority_outside" >&2
+        exit 1
+        ;;
+esac
+printf '%s\n' 'nameserver 192.0.2.56' >"$resolver_authority_outside"
+chmod 0600 "$resolver_authority_outside"
+resolver_outside_authority_gate() {
+    (
+        VP_CAPTURE_OWNER_UID=$resolver_other_capture_uid
+        VP_CAPTURE_OWNER_GID=$resolver_other_capture_gid
+        export VP_CAPTURE_OWNER_UID VP_CAPTURE_OWNER_GID
+        vp_capture_resolver_observation "$resolver_authority_outside" /tmp \
+            "$resolver_runtime_directory" "$resolver_runtime_uid" \
+            "$resolver_runtime_gid" >/dev/null || exit 77
+    )
+}
+expect_status 77 resolver_outside_authority_gate
+rm -f -- "$resolver_authority_outside"
+resolver_authority_outside=
+
+resolver_wrong_uid_snapshot=$temporary_directory/resolver-wrong-uid.snapshot
+if vp_capture_resolver_snapshot "$resolver_managed_link" \
+    "$resolver_wrong_uid_snapshot" "$resolver_allowed_roots" \
+    "$resolver_runtime_directory" "$resolver_wrong_runtime_uid" \
+    "$resolver_runtime_gid"; then
+    printf '%s\n' 'managed resolver target with the wrong authority UID was accepted' >&2
+    exit 1
+fi
+if [ -e "$resolver_wrong_uid_snapshot" ]; then
+    printf '%s\n' 'wrong resolver authority UID left a partial snapshot' >&2
+    exit 1
+fi
+
+resolver_wrong_gid_snapshot=$temporary_directory/resolver-wrong-gid.snapshot
+if vp_capture_resolver_snapshot "$resolver_managed_link" \
+    "$resolver_wrong_gid_snapshot" "$resolver_allowed_roots" \
+    "$resolver_runtime_directory" "$resolver_runtime_uid" \
+    "$resolver_wrong_runtime_gid"; then
+    printf '%s\n' 'managed resolver target with the wrong authority GID was accepted' >&2
+    exit 1
+fi
+if [ -e "$resolver_wrong_gid_snapshot" ]; then
+    printf '%s\n' 'wrong resolver authority GID left a partial snapshot' >&2
+    exit 1
+fi
+
+resolver_writable_target_runtime=$resolver_fixture/writable-target-runtime
+mkdir -m 0755 "$resolver_writable_target_runtime"
+resolver_unsafe_target=$resolver_writable_target_runtime/stub-resolv.conf
 printf '%s\n' 'nameserver 198.51.100.53' >"$resolver_unsafe_target"
 chmod 0666 "$resolver_unsafe_target"
 resolver_unsafe_snapshot=$temporary_directory/resolver-unsafe.snapshot
 if vp_capture_resolver_snapshot "$resolver_unsafe_target" "$resolver_unsafe_snapshot" \
-    "$resolver_fixture"; then
+    "$temporary_directory" "$resolver_writable_target_runtime" \
+    "$resolver_runtime_uid" "$resolver_runtime_gid"; then
     printf '%s\n' 'writable resolver target was accepted' >&2
     exit 1
 fi
 if [ -e "$resolver_unsafe_snapshot" ]; then
     printf '%s\n' 'rejected resolver target left a partial snapshot' >&2
+    exit 1
+fi
+
+resolver_writable_runtime=$resolver_fixture/writable-runtime
+mkdir -m 0777 "$resolver_writable_runtime"
+resolver_writable_runtime_target=$resolver_writable_runtime/stub-resolv.conf
+printf '%s\n' 'nameserver 192.0.2.57' >"$resolver_writable_runtime_target"
+chmod 0644 "$resolver_writable_runtime_target"
+resolver_writable_runtime_snapshot=$temporary_directory/resolver-writable-runtime.snapshot
+if vp_capture_resolver_snapshot "$resolver_writable_runtime_target" \
+    "$resolver_writable_runtime_snapshot" "$temporary_directory" \
+    "$resolver_writable_runtime" "$resolver_runtime_uid" "$resolver_runtime_gid"; then
+    printf '%s\n' 'writable resolver runtime directory was accepted' >&2
+    exit 1
+fi
+if [ -e "$resolver_writable_runtime_snapshot" ]; then
+    printf '%s\n' 'writable resolver runtime directory left a partial snapshot' >&2
+    exit 1
+fi
+
+resolver_hardlinked_runtime=$resolver_fixture/hardlinked-runtime
+mkdir -m 0755 "$resolver_hardlinked_runtime"
+resolver_hardlinked_target=$resolver_hardlinked_runtime/stub-resolv.conf
+printf '%s\n' 'nameserver 192.0.2.58' >"$resolver_hardlinked_target"
+chmod 0644 "$resolver_hardlinked_target"
+ln "$resolver_hardlinked_target" "$resolver_fixture/hardlinked-resolv.peer"
+resolver_hardlinked_snapshot=$temporary_directory/resolver-hardlinked.snapshot
+if vp_capture_resolver_snapshot "$resolver_hardlinked_target" \
+    "$resolver_hardlinked_snapshot" "$temporary_directory" \
+    "$resolver_hardlinked_runtime" "$resolver_runtime_uid" "$resolver_runtime_gid"; then
+    printf '%s\n' 'hard-linked resolver target was accepted' >&2
+    exit 1
+fi
+if [ -e "$resolver_hardlinked_snapshot" ]; then
+    printf '%s\n' 'hard-linked resolver target left a partial snapshot' >&2
+    exit 1
+fi
+
+resolver_oversize_runtime=$resolver_fixture/oversize-runtime
+mkdir -m 0755 "$resolver_oversize_runtime"
+resolver_oversize_target=$resolver_oversize_runtime/stub-resolv.conf
+dd if=/dev/zero of="$resolver_oversize_target" bs=65537 count=1 2>/dev/null
+chmod 0644 "$resolver_oversize_target"
+resolver_oversize_snapshot=$temporary_directory/resolver-oversize.snapshot
+if vp_capture_resolver_snapshot "$resolver_oversize_target" \
+    "$resolver_oversize_snapshot" "$temporary_directory" \
+    "$resolver_oversize_runtime" "$resolver_runtime_uid" "$resolver_runtime_gid"; then
+    printf '%s\n' 'resolver target larger than 64 KiB was accepted' >&2
+    exit 1
+fi
+if [ -e "$resolver_oversize_snapshot" ]; then
+    printf '%s\n' 'oversized resolver target left a partial snapshot' >&2
+    exit 1
+fi
+
+resolver_runtime_symlink_target=$resolver_fixture/runtime-symlink-target
+mkdir -m 0755 "$resolver_runtime_symlink_target"
+printf '%s\n' 'nameserver 192.0.2.59' \
+    >"$resolver_runtime_symlink_target/stub-resolv.conf"
+chmod 0644 "$resolver_runtime_symlink_target/stub-resolv.conf"
+resolver_runtime_symlink=$resolver_fixture/runtime-symlink
+ln -s runtime-symlink-target "$resolver_runtime_symlink"
+resolver_runtime_symlink_snapshot=$temporary_directory/resolver-runtime-symlink.snapshot
+if vp_capture_resolver_snapshot "$resolver_runtime_symlink/stub-resolv.conf" \
+    "$resolver_runtime_symlink_snapshot" "$temporary_directory" \
+    "$resolver_runtime_symlink" "$resolver_runtime_uid" "$resolver_runtime_gid"; then
+    printf '%s\n' 'symlinked resolver runtime directory was accepted' >&2
+    exit 1
+fi
+if [ -e "$resolver_runtime_symlink_snapshot" ]; then
+    printf '%s\n' 'symlinked resolver runtime directory left a partial snapshot' >&2
     exit 1
 fi
 
@@ -321,7 +556,8 @@ resolver_outside_link=$resolver_fixture/outside.conf
 ln -s "$resolver_outside" "$resolver_outside_link"
 resolver_outside_snapshot=$temporary_directory/resolver-outside.snapshot
 if vp_capture_resolver_snapshot "$resolver_outside_link" "$resolver_outside_snapshot" \
-    "$resolver_fixture"; then
+    "$resolver_fixture" "$resolver_runtime_directory" \
+    "$resolver_runtime_uid" "$resolver_runtime_gid"; then
     printf '%s\n' 'resolver target outside the allowed root was accepted' >&2
     exit 1
 fi
@@ -337,7 +573,8 @@ printf '%s\n' 'nameserver 192.0.2.54' >"$resolver_unsafe_parent_target"
 chmod 0600 "$resolver_unsafe_parent_target"
 resolver_unsafe_parent_snapshot=$temporary_directory/resolver-unsafe-parent.snapshot
 if vp_capture_resolver_snapshot "$resolver_unsafe_parent_target" \
-    "$resolver_unsafe_parent_snapshot" "$resolver_fixture"; then
+    "$resolver_unsafe_parent_snapshot" "$resolver_fixture" \
+    "$resolver_runtime_directory" "$resolver_runtime_uid" "$resolver_runtime_gid"; then
     printf '%s\n' 'resolver target below an unsafe parent was accepted' >&2
     exit 1
 fi
@@ -361,7 +598,8 @@ resolver_drift_gate() {
             printf '%s\n' "$drift_checksum"
         }
         vp_capture_resolver_snapshot "$resolver_drift_target" "$resolver_drift_snapshot" \
-            "$resolver_fixture" || exit 77
+            "$resolver_fixture" "$resolver_runtime_directory" \
+            "$resolver_runtime_uid" "$resolver_runtime_gid" || exit 77
     )
 }
 
@@ -679,6 +917,38 @@ do
         exit 1
     }
 done
+if ! awk '
+    /^[[:space:]]*resolver_runtime_uid=\$\(/ { runtime_uid_derived = NR }
+    /^[[:space:]]*resolver_runtime_gid=\$\(/ { runtime_gid_derived = NR }
+    {
+        logical_line = $0
+        logical_continues = logical_line ~ /\\[[:space:]]*$/
+        sub(/[[:space:]]*\\[[:space:]]*$/, " ", logical_line)
+        logical_statement = logical_statement " " logical_line
+        if (logical_continues) next
+        if (logical_statement ~ /vp_capture_resolver_snapshot \/etc\/resolv[.]conf/) {
+            resolver_calls++
+            if (index(logical_statement, "\"$resolver_object_capture\"") > 0 \
+                && index(logical_statement, "/etc /run") > 0 \
+                && index(logical_statement, \
+                    "/run/systemd/resolve \"$resolver_runtime_uid\" \"$resolver_runtime_gid\"") \
+                    > 0) {
+                explicit_authority_call = NR
+            }
+        }
+        logical_statement = ""
+    }
+    END {
+        valid = resolver_calls == 1 && runtime_uid_derived > 0 && runtime_gid_derived > 0
+        valid = valid && explicit_authority_call > runtime_uid_derived
+        valid = valid && explicit_authority_call > runtime_gid_derived
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' \
+        'live resolver capture lacks one literal runtime authority and derived UID/GID pair' >&2
+    exit 1
+fi
 if ! awk '
     /if \[ "\$proof_ok" != yes \]; then/ { proof_gate = NR }
     /final_source_commit=\$\(git / { source_revalidation = NR }

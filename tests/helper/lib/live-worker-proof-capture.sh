@@ -206,24 +206,94 @@ vp_capture_mode_is_not_group_or_world_writable() {
     esac
 }
 
-vp_capture_resolver_parent_chain_is_safe() {
+vp_capture_resolver_reject() {
     [ "$#" -eq 1 ] || return 1
+    case $1 in
+        authority-config|object-metadata|resolved-path|target-owner-class|target-metadata|\
+            parent-owner-class|parent-metadata|object-drift|target-drift|runtime-drift|\
+            snapshot-drift)
+            vp_resolver_rejection=$1
+            ;;
+        *) vp_resolver_rejection=internal ;;
+    esac
+    if [ "${VP_CAPTURE_RESOLVER_DIAGNOSTICS:-no}" = yes ]; then
+        printf 'resolver capture rejected: %s\n' "$vp_resolver_rejection" >&2
+    fi
+    return 1
+}
+
+vp_capture_resolver_authority_is_valid() {
+    [ "$#" -eq 3 ] || return 1
+    vp_resolver_runtime_directory=$1
+    vp_resolver_runtime_uid=$2
+    vp_resolver_runtime_gid=$3
+    case $vp_resolver_runtime_directory in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case $vp_resolver_runtime_directory in
+        /|*/|*//*|*/./*|*/../*|*/.|*/..|*[!A-Za-z0-9_./@+-]*) return 1 ;;
+    esac
+    case $vp_resolver_runtime_uid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    case $vp_resolver_runtime_gid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    if [ ! -d "$vp_resolver_runtime_directory" ] \
+        || [ -L "$vp_resolver_runtime_directory" ]; then
+        return 1
+    fi
+    [ "$(stat -Lc '%F:%u:%g:%a' "$vp_resolver_runtime_directory" 2>/dev/null)" = \
+        "directory:$vp_resolver_runtime_uid:$vp_resolver_runtime_gid:755" ] || return 1
+}
+
+vp_capture_resolver_target_is_managed() {
+    [ "$#" -eq 2 ] || return 1
+    case $1 in
+        "$2/stub-resolv.conf"|"$2/resolv.conf") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+vp_capture_resolver_parent_chain_is_safe() {
+    [ "$#" -eq 4 ] || return 1
+    vp_capture_resolver_authority_is_valid "$2" "$3" "$4" \
+        || { vp_capture_resolver_reject authority-config; return 1; }
+    vp_resolver_runtime_directory=$2
+    vp_resolver_runtime_uid=$3
+    vp_resolver_runtime_gid=$4
     vp_resolver_parent=${1%/*}
     [ -n "$vp_resolver_parent" ] || vp_resolver_parent=/
     while :; do
-        vp_resolver_parent_type=$(stat -Lc '%F' "$vp_resolver_parent") || return 1
-        [ "$vp_resolver_parent_type" = directory ] || return 1
-        vp_resolver_parent_uid=$(stat -Lc '%u' "$vp_resolver_parent") || return 1
-        vp_resolver_parent_mode=$(stat -Lc '%a' "$vp_resolver_parent") || return 1
-        if [ "$vp_resolver_parent_uid:$vp_resolver_parent_mode" = 0:1777 ]; then
+        if [ ! -d "$vp_resolver_parent" ] || [ -L "$vp_resolver_parent" ]; then
+            vp_capture_resolver_reject parent-metadata
+            return 1
+        fi
+        vp_resolver_parent_metadata=$(stat -Lc '%F:%u:%g:%a' \
+            "$vp_resolver_parent") \
+            || { vp_capture_resolver_reject parent-metadata; return 1; }
+        if [ "$vp_resolver_parent" = "$vp_resolver_runtime_directory" ]; then
+            [ "$vp_resolver_parent_metadata" = \
+                "directory:$vp_resolver_runtime_uid:$vp_resolver_runtime_gid:755" ] \
+                || { vp_capture_resolver_reject parent-owner-class; return 1; }
+        elif [ "$vp_resolver_parent_metadata" = 'directory:0:0:1777' ]; then
             :
         else
-            case $vp_resolver_parent_uid in
-                0|"$VP_CAPTURE_OWNER_UID") ;;
-                *) return 1 ;;
+            vp_resolver_parent_type=${vp_resolver_parent_metadata%%:*}
+            vp_resolver_parent_fields=${vp_resolver_parent_metadata#*:}
+            vp_resolver_parent_uid=${vp_resolver_parent_fields%%:*}
+            vp_resolver_parent_fields=${vp_resolver_parent_fields#*:}
+            vp_resolver_parent_gid=${vp_resolver_parent_fields%%:*}
+            vp_resolver_parent_mode=${vp_resolver_parent_fields##*:}
+            [ "$vp_resolver_parent_type" = directory ] \
+                || { vp_capture_resolver_reject parent-metadata; return 1; }
+            case "$vp_resolver_parent_uid:$vp_resolver_parent_gid" in
+                0:0|"$VP_CAPTURE_OWNER_UID:$VP_CAPTURE_OWNER_GID") ;;
+                *) vp_capture_resolver_reject parent-owner-class; return 1 ;;
             esac
             vp_capture_mode_is_not_group_or_world_writable "$vp_resolver_parent_mode" \
-                || return 1
+                || { vp_capture_resolver_reject parent-metadata; return 1; }
         fi
         [ "$vp_resolver_parent" != / ] || break
         vp_resolver_parent=${vp_resolver_parent%/*}
@@ -232,30 +302,69 @@ vp_capture_resolver_parent_chain_is_safe() {
 }
 
 vp_capture_resolver_target_is_safe() {
-    [ "$#" -eq 1 ] || return 1
+    [ "$#" -eq 4 ] || return 1
+    vp_capture_resolver_authority_is_valid "$2" "$3" "$4" \
+        || { vp_capture_resolver_reject authority-config; return 1; }
     vp_resolver_target=$1
+    vp_resolver_runtime_directory=$2
+    vp_resolver_runtime_uid=$3
+    vp_resolver_runtime_gid=$4
     case $vp_resolver_target in
         /*) ;;
-        *) return 1 ;;
+        *) vp_capture_resolver_reject resolved-path; return 1 ;;
     esac
     case $vp_resolver_target in
-        *[!A-Za-z0-9_./@+-]*) return 1 ;;
+        *[!A-Za-z0-9_./@+-]*) vp_capture_resolver_reject resolved-path; return 1 ;;
     esac
-    [ -f "$vp_resolver_target" ] && [ ! -L "$vp_resolver_target" ] || return 1
-    vp_resolver_target_type=$(stat -Lc '%F' "$vp_resolver_target") || return 1
-    [ "$vp_resolver_target_type" = 'regular file' ] || return 1
-    vp_resolver_target_uid=$(stat -Lc '%u' "$vp_resolver_target") || return 1
-    [ "$vp_resolver_target_uid" -eq "$VP_CAPTURE_OWNER_UID" ] || return 1
-    vp_resolver_target_mode=$(stat -Lc '%a' "$vp_resolver_target") || return 1
-    vp_capture_mode_is_not_group_or_world_writable "$vp_resolver_target_mode" || return 1
+    if [ ! -f "$vp_resolver_target" ] || [ -L "$vp_resolver_target" ]; then
+        vp_capture_resolver_reject target-metadata
+        return 1
+    fi
+    vp_resolver_target_metadata=$(stat -Lc '%F:%u:%g:%a:%h:%s' \
+        "$vp_resolver_target") \
+        || { vp_capture_resolver_reject target-metadata; return 1; }
+    vp_resolver_saved_ifs=$IFS
+    IFS=:
+    # The fixed stat serialization contains no glob metacharacters.
+    # shellcheck disable=SC2086
+    set -- $vp_resolver_target_metadata
+    IFS=$vp_resolver_saved_ifs
+    if [ "$#" -ne 6 ] || [ "$1" != 'regular file' ]; then
+        vp_capture_resolver_reject target-metadata
+        return 1
+    fi
+    vp_resolver_target_uid=$2
+    vp_resolver_target_gid=$3
+    vp_resolver_target_mode=$4
+    vp_resolver_target_links=$5
+    vp_resolver_target_size=$6
+    if vp_capture_resolver_target_is_managed \
+        "$vp_resolver_target" "$vp_resolver_runtime_directory"; then
+        [ "$vp_resolver_target_uid:$vp_resolver_target_gid:$vp_resolver_target_mode" = \
+            "$vp_resolver_runtime_uid:$vp_resolver_runtime_gid:644" ] \
+            || { vp_capture_resolver_reject target-owner-class; return 1; }
+    else
+        [ "$vp_resolver_target_uid:$vp_resolver_target_gid" = \
+            "$VP_CAPTURE_OWNER_UID:$VP_CAPTURE_OWNER_GID" ] \
+            || { vp_capture_resolver_reject target-owner-class; return 1; }
+        vp_capture_mode_is_not_group_or_world_writable "$vp_resolver_target_mode" \
+            || { vp_capture_resolver_reject target-metadata; return 1; }
+    fi
     vp_resolver_owner_digit=${vp_resolver_target_mode%??}
-    case $vp_resolver_owner_digit in 4|5|6|7) ;; *) return 1 ;; esac
-    vp_resolver_target_links=$(stat -Lc '%h' "$vp_resolver_target") || return 1
-    [ "$vp_resolver_target_links" -eq 1 ] || return 1
-    vp_resolver_target_size=$(stat -Lc '%s' "$vp_resolver_target") || return 1
-    case $vp_resolver_target_size in ''|*[!0-9]*) return 1 ;; esac
-    [ "$vp_resolver_target_size" -le 65536 ] || return 1
-    vp_capture_resolver_parent_chain_is_safe "$vp_resolver_target"
+    case $vp_resolver_owner_digit in
+        4|5|6|7) ;;
+        *) vp_capture_resolver_reject target-metadata; return 1 ;;
+    esac
+    [ "$vp_resolver_target_links" = 1 ] \
+        || { vp_capture_resolver_reject target-metadata; return 1; }
+    case $vp_resolver_target_size in
+        ''|*[!0-9]*) vp_capture_resolver_reject target-metadata; return 1 ;;
+    esac
+    [ "$vp_resolver_target_size" -le 65536 ] \
+        || { vp_capture_resolver_reject target-metadata; return 1; }
+    vp_capture_resolver_parent_chain_is_safe "$vp_resolver_target" \
+        "$vp_resolver_runtime_directory" "$vp_resolver_runtime_uid" \
+        "$vp_resolver_runtime_gid"
 }
 
 vp_capture_resolver_target_is_allowed() {
@@ -275,24 +384,50 @@ vp_capture_resolver_target_is_allowed() {
 }
 
 vp_capture_resolver_observation() {
-    [ "$#" -eq 2 ] || return 1
+    [ "$#" -eq 5 ] || return 1
     vp_resolver_path=$1
     vp_resolver_roots=$2
+    vp_resolver_runtime_directory=$3
+    vp_resolver_runtime_uid=$4
+    vp_resolver_runtime_gid=$5
+    vp_capture_resolver_authority_is_valid "$vp_resolver_runtime_directory" \
+        "$vp_resolver_runtime_uid" "$vp_resolver_runtime_gid" \
+        || { vp_capture_resolver_reject authority-config; return 1; }
+    case $vp_resolver_path in
+        /*) ;;
+        *) vp_capture_resolver_reject object-metadata; return 1 ;;
+    esac
+    case $vp_resolver_path in
+        *[!A-Za-z0-9_./@+-]*) vp_capture_resolver_reject object-metadata; return 1 ;;
+    esac
+    vp_capture_resolver_parent_chain_is_safe "$vp_resolver_path" \
+        "$vp_resolver_runtime_directory" "$vp_resolver_runtime_uid" \
+        "$vp_resolver_runtime_gid" || return 1
+    vp_resolver_runtime_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+        "$vp_resolver_runtime_directory") \
+        || { vp_capture_resolver_reject parent-metadata; return 1; }
     vp_resolver_object_before=$(stat -c '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
-        "$vp_resolver_path") || return 1
-    vp_resolver_object_type=$(stat -c '%F' "$vp_resolver_path") || return 1
+        "$vp_resolver_path") \
+        || { vp_capture_resolver_reject object-metadata; return 1; }
+    vp_resolver_object_type=$(stat -c '%F' "$vp_resolver_path") \
+        || { vp_capture_resolver_reject object-metadata; return 1; }
     case $vp_resolver_object_type in
         'regular file') vp_resolver_link_before=REGULAR ;;
         'symbolic link')
-            vp_resolver_link_before=$(readlink -- "$vp_resolver_path") || return 1
-            [ -n "$vp_resolver_link_before" ] || return 1
+            vp_resolver_link_before=$(readlink -- "$vp_resolver_path") \
+                || { vp_capture_resolver_reject object-metadata; return 1; }
+            [ -n "$vp_resolver_link_before" ] \
+                || { vp_capture_resolver_reject object-metadata; return 1; }
             ;;
-        *) return 1 ;;
+        *) vp_capture_resolver_reject object-metadata; return 1 ;;
     esac
-    vp_resolver_resolved_before=$(readlink -f -- "$vp_resolver_path") || return 1
+    vp_resolver_resolved_before=$(readlink -f -- "$vp_resolver_path") \
+        || { vp_capture_resolver_reject resolved-path; return 1; }
     vp_capture_resolver_target_is_allowed "$vp_resolver_resolved_before" "$vp_resolver_roots" \
-        || return 1
-    vp_capture_resolver_target_is_safe "$vp_resolver_resolved_before" || return 1
+        || { vp_capture_resolver_reject resolved-path; return 1; }
+    vp_capture_resolver_target_is_safe "$vp_resolver_resolved_before" \
+        "$vp_resolver_runtime_directory" "$vp_resolver_runtime_uid" \
+        "$vp_resolver_runtime_gid" || return 1
     vp_resolver_target_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
         "$vp_resolver_resolved_before") || return 1
     vp_resolver_digest_before=$(vp_capture_sha256_file "$vp_resolver_resolved_before") \
@@ -311,31 +446,48 @@ vp_capture_resolver_observation() {
     else
         vp_resolver_link_after=REGULAR
     fi
-    [ "$vp_resolver_object_before" = "$vp_resolver_object_after" ] \
-        && [ "$vp_resolver_link_before" = "$vp_resolver_link_after" ] \
-        && [ "$vp_resolver_resolved_before" = "$vp_resolver_resolved_after" ] \
-        && [ "$vp_resolver_target_before" = "$vp_resolver_target_middle" ] \
-        && [ "$vp_resolver_target_before" = "$vp_resolver_target_after" ] \
-        && [ "$vp_resolver_digest_before" = "$vp_resolver_digest_after" ] \
-        || return 1
-    vp_capture_resolver_target_is_safe "$vp_resolver_resolved_after" || return 1
-    printf '%s\n%s\n%s\n%s\n%s\n' \
+    if [ "$vp_resolver_object_before" != "$vp_resolver_object_after" ] \
+        || [ "$vp_resolver_link_before" != "$vp_resolver_link_after" ] \
+        || [ "$vp_resolver_resolved_before" != "$vp_resolver_resolved_after" ]; then
+        vp_capture_resolver_reject object-drift
+        return 1
+    fi
+    if [ "$vp_resolver_target_before" != "$vp_resolver_target_middle" ] \
+        || [ "$vp_resolver_target_before" != "$vp_resolver_target_after" ] \
+        || [ "$vp_resolver_digest_before" != "$vp_resolver_digest_after" ]; then
+        vp_capture_resolver_reject target-drift
+        return 1
+    fi
+    vp_capture_resolver_target_is_safe "$vp_resolver_resolved_after" \
+        "$vp_resolver_runtime_directory" "$vp_resolver_runtime_uid" \
+        "$vp_resolver_runtime_gid" || return 1
+    vp_resolver_runtime_after=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+        "$vp_resolver_runtime_directory") \
+        || { vp_capture_resolver_reject parent-metadata; return 1; }
+    [ "$vp_resolver_runtime_before" = "$vp_resolver_runtime_after" ] \
+        || { vp_capture_resolver_reject runtime-drift; return 1; }
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$vp_resolver_object_before" \
         "$vp_resolver_link_before" \
         "$vp_resolver_resolved_before" \
         "$vp_resolver_target_before" \
-        "$vp_resolver_digest_before"
+        "$vp_resolver_digest_before" \
+        "$vp_resolver_runtime_before"
 }
 
 vp_capture_resolver_snapshot_producer() {
-    [ "$#" -eq 2 ] || return 1
-    vp_resolver_first=$(vp_capture_resolver_observation "$1" "$2") || return 1
-    vp_resolver_second=$(vp_capture_resolver_observation "$1" "$2") || return 1
-    [ "$vp_resolver_first" = "$vp_resolver_second" ] || return 1
+    [ "$#" -eq 5 ] || return 1
+    vp_resolver_first=$(vp_capture_resolver_observation "$1" "$2" "$3" "$4" "$5") \
+        || return 1
+    vp_resolver_second=$(vp_capture_resolver_observation "$1" "$2" "$3" "$4" "$5") \
+        || return 1
+    [ "$vp_resolver_first" = "$vp_resolver_second" ] \
+        || { vp_capture_resolver_reject snapshot-drift; return 1; }
     printf '%s\n' "$vp_resolver_first"
 }
 
 vp_capture_resolver_snapshot() {
-    [ "$#" -eq 3 ] || return 1
-    vp_capture_run "$2" vp_capture_resolver_snapshot_producer "$1" "$3"
+    [ "$#" -eq 6 ] || return 1
+    vp_capture_run "$2" vp_capture_resolver_snapshot_producer \
+        "$1" "$3" "$4" "$5" "$6"
 }
