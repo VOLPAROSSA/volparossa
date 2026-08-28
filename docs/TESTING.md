@@ -93,6 +93,16 @@ creating account/capture files, or starting either unit. The fixed path never ra
 Both transient units independently retain `LimitFSIZE=1048576`; this bounds their writes even if
 the producer exits.
 
+The resolver state fence does not treat every non-root owner below `/run` as trusted. It accepts the
+service owner pair only for the two fixed `systemd-resolved` files below the exact
+`/run/systemd/resolve` runtime directory, after binding that pair to one active, running service
+invocation and to the real/effective/saved/filesystem credentials of its current process. The
+pinned genericcloud proof further requires the exact root-owned Debian `/etc/resolv.conf` symlink.
+The authority record, runtime-directory identity, resolver object, canonical target metadata and
+content digest are all bookended; only their private joined digest enters the before/after host
+state comparison. Fixed rejection labels may identify the failed predicate but never print
+resolver bytes, DNS/search values, raw metadata, process IDs, invocation IDs or digests.
+
 The report carries those non-claims in its exact `scope` object: it is evidence only for the helper
 boundary and does not claim package behavior, restart recovery, `CleanupOwned`, a VPN datapath, or
 any A01--A15 result. AV1-09 remains Open until
