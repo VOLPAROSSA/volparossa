@@ -181,6 +181,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   required disposable Debian 13 VM proof,
   validates no installed package or shipped-unit restart behavior, and closes no checkbox or
   scorecard row until durable live evidence exists.
+  The private capture and production-lock metadata predicates now use the numeric regular-file
+  type plus exact owner, mode and single-link fields, so intentionally empty successful stderr,
+  validator and lock files are not misclassified by GNU `stat` as a different type. Content
+  emptiness, non-emptiness and shape remain separate fail-closed checks. The post-merge
+  [helper-boundary run 33136739229](https://github.com/VOLPAROSSA/volparossa/actions/runs/33136739229)
+  at `d54057111dde8ea47970e8708aff7ea8e2af5eb6` retained only diagnostic artifact
+  `9672404397` (API archive SHA-256
+  `e58e138016160e96174bcf174cbaa397083d1d3b0043c37ee7bf20c34025f531`) and exposed that
+  proof-control defect before report publication. It is not PASS evidence, so AV1-09 remains Open.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

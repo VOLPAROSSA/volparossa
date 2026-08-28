@@ -2516,18 +2516,18 @@ if [ "$proof_ok" = yes ]; then
         || [ "$(stat -c '%F:%u:%g:%a:%h:%s' \
             "$temporary_stage/production-runtime/helper.cleanup-token" 2>/dev/null || true)" \
             != "regular file:0:$agent_gid:640:1:32" ] \
-        || [ "$(stat -c '%F:%u:%g:%a:%h' \
+        || [ "$(stat -c '%f:%u:%g:%a:%h' \
             "$temporary_stage/production-runtime/helper.ownership-v3.lock" \
-            2>/dev/null || true)" != "regular file:0:$agent_gid:600:1" ] \
+            2>/dev/null || true)" != "8180:0:$agent_gid:600:1" ] \
         || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
         || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
         production_ok=no
     fi
     if [ -e "$temporary_stage/production-runtime/helper.ownership-v3" ] \
         || [ -L "$temporary_stage/production-runtime/helper.ownership-v3" ]; then
-        if [ "$(stat -c '%F:%u:%g:%a:%h' \
+        if [ "$(stat -c '%f:%u:%g:%a:%h' \
             "$temporary_stage/production-runtime/helper.ownership-v3" \
-            2>/dev/null || true)" != "regular file:0:$agent_gid:600:1" ]; then
+            2>/dev/null || true)" != "8180:0:$agent_gid:600:1" ]; then
             production_ok=no
         fi
     fi
@@ -2568,23 +2568,23 @@ if [ "$proof_ok" = yes ]; then
         expected_production_lock_identity=
         production_ok=no
     fi
-    production_lock_path_before=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
+    production_lock_path_before=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
         "$production_lock_path" 2>/dev/null) || production_lock_path_before=
     case $production_lock_path_before in
-        *":regular file:0:$agent_gid:600:1") ;;
+        *":8180:0:$agent_gid:600:1") ;;
         *) production_ok=no ;;
     esac
     if [ "$production_lock_path_before" != "$expected_production_lock_identity" ]; then
         production_ok=no
     fi
     if exec 9<>"$production_lock_path"; then
-        production_lock_fd_identity=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
+        production_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
             /proc/self/fd/9 2>/dev/null) || production_lock_fd_identity=
         if [ "$production_lock_fd_identity" != "$expected_production_lock_identity" ] \
             || ! /usr/bin/flock -n 9; then
             production_ok=no
         fi
-        production_lock_path_after=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
+        production_lock_path_after=$(stat -c '%d:%i:%f:%u:%g:%a:%h' \
             "$production_lock_path" 2>/dev/null) || production_lock_path_after=
         if [ "$production_lock_path_after" != "$expected_production_lock_identity" ]; then
             production_ok=no

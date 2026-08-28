@@ -113,6 +113,116 @@ expect_status() {
     fi
 }
 
+# Capture safety is a metadata contract, not a non-empty-content contract.
+# Successful commands and validators legitimately produce zero-byte streams.
+empty_capture=$temporary_directory/empty.capture
+vp_capture_run "$empty_capture" :
+if ! vp_capture_file_is_safe "$empty_capture" \
+    || [ -s "$empty_capture" ] \
+    || [ "$(stat -Lc '%f:%u:%g:%a:%h' "$empty_capture")" != \
+        "8180:$VP_CAPTURE_OWNER_UID:$VP_CAPTURE_OWNER_GID:600:1" ]; then
+    printf '%s\n' 'a successful empty private capture was rejected' >&2
+    exit 1
+fi
+empty_normalized=$temporary_directory/empty.normalized
+vp_capture_normalize "$empty_capture" "$empty_normalized" cat
+if ! vp_capture_file_is_safe "$empty_normalized" || [ -s "$empty_normalized" ]; then
+    printf '%s\n' 'a successful empty normalized capture was rejected' >&2
+    exit 1
+fi
+
+chmod 0640 "$empty_capture"
+if vp_capture_file_is_safe "$empty_capture"; then
+    printf '%s\n' 'an empty capture with the wrong mode was accepted' >&2
+    exit 1
+fi
+chmod 0600 "$empty_capture"
+capture_owner_uid=$VP_CAPTURE_OWNER_UID
+VP_CAPTURE_OWNER_UID=0
+if vp_capture_file_is_safe "$empty_capture"; then
+    VP_CAPTURE_OWNER_UID=$capture_owner_uid
+    printf '%s\n' 'an empty capture with the wrong expected owner was accepted' >&2
+    exit 1
+fi
+VP_CAPTURE_OWNER_UID=$capture_owner_uid
+empty_capture_symlink=$temporary_directory/empty.capture.link
+ln -s "$empty_capture" "$empty_capture_symlink"
+if vp_capture_file_is_safe "$empty_capture_symlink"; then
+    printf '%s\n' 'an empty capture symlink was accepted' >&2
+    exit 1
+fi
+empty_capture_hardlink=$temporary_directory/empty.capture.hardlink
+ln "$empty_capture" "$empty_capture_hardlink"
+if vp_capture_file_is_safe "$empty_capture" \
+    || vp_capture_file_is_safe "$empty_capture_hardlink"; then
+    printf '%s\n' 'a multiply linked empty capture was accepted' >&2
+    exit 1
+fi
+rm -f -- "$empty_capture_hardlink"
+vp_capture_file_is_safe "$empty_capture"
+
+# The production ownership lock is intentionally empty. Model its exact
+# numeric path/FD identity, active contention, and release without root.
+empty_lock=$temporary_directory/empty-ownership.lock
+: >"$empty_lock"
+chmod 0600 "$empty_lock"
+empty_lock_identity=$(stat -c '%d:%i:%f:%u:%g:%a:%h' "$empty_lock")
+case $empty_lock_identity in
+    *":8180:$VP_CAPTURE_OWNER_UID:$VP_CAPTURE_OWNER_GID:600:1") ;;
+    *)
+        printf '%s\n' 'the empty ownership-lock metadata is not canonical' >&2
+        exit 1
+        ;;
+esac
+exec 9<>"$empty_lock"
+empty_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' /proc/self/fd/9)
+if [ "$empty_lock_fd_identity" != "$empty_lock_identity" ] \
+    || ! /usr/bin/flock -n -x 9; then
+    printf '%s\n' 'the empty ownership-lock path/FD identity was not retained' >&2
+    exit 1
+fi
+if (
+    exec 8<>"$empty_lock"
+    /usr/bin/flock -n -x 8
+); then
+    printf '%s\n' 'the empty ownership lock did not prove active contention' >&2
+    exit 1
+fi
+exec 9>&-
+exec 9<>"$empty_lock"
+/usr/bin/flock -n -x 9
+exec 9>&-
+
+# Pin the root-only production hook and outer gate to the same size-independent
+# lock identity. The dynamic model above exercises the tuple without root.
+private_file_contract=$(sed -n '/^private_file_is_safe() {$/,/^}$/p' "$ipc_hook")
+capture_lock_contract=$(sed -n '/^capture_lock_identity() {$/,/^}$/p' "$ipc_hook")
+if [ "$(printf '%s\n' "$private_file_contract" \
+        | grep -Fc "stat -Lc '%f:%u:%g:%a:%h'")" -ne 1 ] \
+    || [ "$(printf '%s\n' "$private_file_contract" \
+        | grep -Fc "'8180:0:0:600:1'")" -ne 1 ] \
+    || [ "$(printf '%s\n' "$capture_lock_contract" \
+        | grep -Fc "stat -c '%d:%i:%f:%u:%g:%a:%h'")" -ne 1 ] \
+    || [ "$(printf '%s\n' "$capture_lock_contract" \
+        | grep -Fc "\":8180:0:\$hook_lock_gid:600:1\"")" -ne 1 ]; then
+    printf '%s\n' 'the production hook has a size-dependent private-file contract' >&2
+    exit 1
+fi
+# These are literal gate-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+for numeric_lock_contract in \
+    "stat -c '%f:%u:%g:%a:%h'" \
+    '"8180:0:$agent_gid:600:1"' \
+    "stat -c '%d:%i:%f:%u:%g:%a:%h'" \
+    "stat -Lc '%d:%i:%f:%u:%g:%a:%h'"
+do
+    grep -F -- "$numeric_lock_contract" "$gate" >/dev/null || {
+        printf 'missing size-independent outer lock contract: %s\n' \
+            "$numeric_lock_contract" >&2
+        exit 1
+    }
+done
+
 injected_successful_producer() {
     printf '%s\n' 'identical partial capture'
 }
@@ -2400,7 +2510,7 @@ for required_hook_contract in \
     '[ "$#" -eq 2 ] || fail '"'"'stop hook argument count is invalid'"'"'' \
     'hook_expected_agent_gid=$2' \
     'capture_journal_state' \
-    "stat -c '%d:%i:%F:%u:%g:%a:%h:%s:%y:%z'" \
+    "stat -c '%d:%i:%f:%u:%g:%a:%h:%s:%y:%z'" \
     'hook_expected_lock_identity=$(cat "$proof_directory/lock.identity")' \
     'exec 9<>"$journal_lock"' \
     'hook_lock_fd_identity=$(stat -Lc' \
