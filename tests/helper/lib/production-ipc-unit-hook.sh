@@ -6,6 +6,12 @@ set -eu
 export LC_ALL=C
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+# systemctl otherwise bypasses DBUS_SYSTEM_BUS_ADDRESS for a local root caller
+# and selects systemd's privileged private manager socket. That socket is
+# deliberately absent from this private /run; force the already
+# bound, policy-mediated system bus for read-only unit-property observations.
+SYSTEMCTL_FORCE_BUS=1
+export SYSTEMCTL_FORCE_BUS
 umask 077
 
 runtime_directory=/run/volparossa

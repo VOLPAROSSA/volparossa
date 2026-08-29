@@ -4240,6 +4240,18 @@ do
     fi
 done
 
+# The production hook is root inside a private /run. Pin systemctl to the
+# policy-mediated system bus already bound into that namespace; never widen the
+# sandbox with systemd's privileged private manager socket.
+if [ "$(grep -xc 'SYSTEMCTL_FORCE_BUS=1' "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -xc 'export SYSTEMCTL_FORCE_BUS' "$ipc_hook")" -ne 1 ] \
+    || grep -F -- '/run/systemd/private' "$gate" >/dev/null \
+    || grep -F -- '/run/systemd/private' "$ipc_hook" >/dev/null; then
+    printf '%s\n' \
+        'production hook does not use the exact policy-mediated systemd bus' >&2
+    exit 1
+fi
+
 # Failed production start hooks publish only one private fixed stage. Exercise
 # the exact allowlist and transition graph, then pin the failure trap and all
 # fallible descriptor redirections to ordinary `command exec` semantics.
