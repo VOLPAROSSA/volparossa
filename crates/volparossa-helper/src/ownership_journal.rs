@@ -407,6 +407,11 @@ impl DurableWireguardResource {
         self.specification.local_address()
     }
 
+    /// Exact peer overlay address derived from the topology committed by the durable record.
+    pub(crate) const fn peer_address(&self) -> std::net::Ipv6Addr {
+        self.specification.peer_address()
+    }
+
     /// Project the exact durable resource into the private worker-v3 lease descriptor.
     ///
     /// This is deliberately private to the ownership module: production callers receive a
@@ -3480,6 +3485,43 @@ mod tests {
     }
 
     #[test]
+    fn durable_resource_exposes_exact_peer_for_every_endpoint_role() {
+        let cases = [
+            (
+                volparossa_routing::ContextRole::Client,
+                volparossa_routing::WireguardRole::Client,
+                [0, 1],
+                [0, 2],
+            ),
+            (
+                volparossa_routing::ContextRole::Relay,
+                volparossa_routing::WireguardRole::RelayClient,
+                [0, 2],
+                [0, 1],
+            ),
+            (
+                volparossa_routing::ContextRole::Relay,
+                volparossa_routing::WireguardRole::RelayExit,
+                [0, 3],
+                [0, 4],
+            ),
+            (
+                volparossa_routing::ContextRole::Exit,
+                volparossa_routing::WireguardRole::Exit,
+                [0, 4],
+                [0, 3],
+            ),
+        ];
+
+        for (context_role, role, local_host, peer_host) in cases {
+            let resource = durable_wireguard_resource_for_test([7; 16], context_role, 1, role, 11)
+                .expect("durable endpoint resource");
+            assert_eq!(resource.local_address().octets()[14..], local_host);
+            assert_eq!(resource.peer_address().octets()[14..], peer_host);
+        }
+    }
+
+    #[test]
     fn durable_wireguard_marker_has_fixed_golden_grammar_and_redacts_coordinates() {
         let exact = record(epoch(1), 2, 3, 4, 1, OwnershipPhase::Intent);
         let resources = exact
@@ -3490,6 +3532,7 @@ mod tests {
         assert_eq!(first.key(), (1, WireguardRole::Client as i32));
         assert_eq!(first.interface().len(), DERIVED_WIREGUARD_INTERFACE_BYTES);
         assert_eq!(first.local_address().octets()[14..], [0, 1]);
+        assert_eq!(first.peer_address().octets()[14..], [0, 2]);
         assert_eq!(
             first.ownership_alias(),
             "volparossa:wireguard:ownership-v1:vpc123799507:\
