@@ -838,9 +838,13 @@ if command -v mawk >/dev/null 2>&1; then
 fi
 
 for confinement_reason in bounding ambient private-network control-group; do
+    confinement_application_count=3
+    if [ "$confinement_reason" = control-group ]; then
+        confinement_application_count=6
+    fi
     if ! worker_confinement_failure_is_safe "$confinement_reason" \
         || [ "$(grep -Fc "record_worker_confinement_failure '$confinement_reason'" \
-            "$gate")" -ne 3 ]; then
+            "$gate")" -ne "$confinement_application_count" ]; then
         printf 'worker confinement reason is not closed and fully applied: %s\n' \
             "$confinement_reason" >&2
         exit 1
@@ -3319,6 +3323,8 @@ for required_contract in \
     '[ "$observed_description" != "$unit_ownership_marker" ]' \
     'capture_unit_property NFileDescriptorStore "$temporary_stage/unit-fdstore-count"' \
     'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
+    'capture_unit_property Slice "$temporary_stage/unit-slice"' \
+    'capture_unit_property Slice "$temporary_stage/production-slice"' \
     'capture_unit_property ControlGroup "$temporary_stage/production-control-group"' \
     'capture_unit_property RuntimeMaxUSec' \
     'capture_unit_property LimitFSIZE "$temporary_stage/production-limit-fsize"' \
@@ -3477,6 +3483,7 @@ if ! awk '
             if (gsub(/--/, "", option_copy) != 1) invalid++
             if (argument_line !~ /^--json=/ \
                 && argument_line !~ /^--unit=/ \
+                && argument_line !~ /^--slice=/ \
                 && argument_line !~ /^--description=/ \
                 && argument_line !~ /^--service-type=/ \
                 && argument_line !~ /^--remain-after-exit([[:space:]]|\\|$)/ \
@@ -3501,6 +3508,11 @@ if ! awk '
         if (index($0, "CollectMode=") > 0) collect_assignments[run_count]++
         if ($0 ~ /^[[:space:]]*--property=CollectMode=inactive \\$/) {
             exact_collect_modes[run_count]++
+        }
+
+        if (index($0, "--slice=") > 0) slice_assignments[run_count]++
+        if ($0 ~ /^[[:space:]]*--slice=system\.slice \\$/) {
+            exact_worker_slice[run_count]++
         }
 
         if (index($0, "--remain-after-exit") > 0 \
@@ -3530,6 +3542,8 @@ if ! awk '
         }
         valid = valid && remain_assignments[1] == 1 && exact_remain[1] == 1
         valid = valid && remain_assignments[2] == 0 && exact_remain[2] == 0
+        valid = valid && slice_assignments[1] == 1 && exact_worker_slice[1] == 1
+        valid = valid && slice_assignments[2] == 1 && exact_worker_slice[2] == 1
         valid = valid && exact_worker_runtime[1] == 1
         valid = valid && exact_worker_runtime[2] == 0
         valid = valid && exact_production_runtime[1] == 0
@@ -3610,6 +3624,134 @@ do
     if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 2 ]; then
         printf 'both transient helper invocations lack exact cgroup isolation: %s\n' \
             "$exact_cgroup_property" >&2
+        exit 1
+    fi
+done
+transient_slice_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    worker_slice_source=$1
+    [ -f "$worker_slice_source" ] && [ ! -L "$worker_slice_source" ] || return 1
+    awk '
+        /^[[:space:]]+--slice=system\.slice \\$/ {
+            slice_assignment++
+            if (slice_assignment == 1) worker_slice_assignment_line = NR
+            if (slice_assignment == 2) production_slice_assignment_line = NR
+        }
+        /^if capture_unit_property ActiveState "\$temporary_stage\/unit-active-state"; then$/ {
+            terminal_read++
+            terminal_read_line = NR
+        }
+        /^if capture_unit_property ControlGroup "\$temporary_stage\/unit-control-group"; then$/ {
+            terminal_control_group_read++
+            terminal_control_group_read_line = NR
+        }
+        /^if capture_unit_property Slice "\$temporary_stage\/unit-slice"; then$/ {
+            worker_slice_read++
+            worker_slice_read_line = NR
+        }
+        /^if \[ -n "\$observed_terminal_control_group" \]; then$/ {
+            terminal_control_group_empty++
+            terminal_control_group_empty_line = NR
+        }
+        /^if \[ "\$observed_slice" != system\.slice \]; then$/ {
+            worker_slice_requirement++
+            worker_slice_requirement_line = NR
+        }
+        /^worker_control_group=\/system\.slice\/\$unit_name$/ {
+            cgroup_derivation++
+            cgroup_derivation_line = NR
+        }
+        /^    if capture_unit_property Slice "\$temporary_stage\/production-slice"; then$/ {
+            production_slice_read++
+            production_slice_read_line = NR
+        }
+        /\|\| \[ "\$production_slice" != system\.slice \] \\$/ {
+            production_slice_requirement++
+            production_slice_requirement_line = NR
+        }
+        /capture_unit_property ControlGroup "\$temporary_stage\/production-control-group"/ {
+            production_control_group_read++
+            production_control_group_read_line = NR
+        }
+        /^if ! retire_unit; then$/ {
+            retirement++
+            retirement_line = NR
+        }
+        END {
+            valid = slice_assignment == 2 && terminal_read == 1
+            valid = valid && worker_slice_read == 1 && worker_slice_requirement == 1
+            valid = valid && terminal_control_group_read == 1
+            valid = valid && terminal_control_group_empty == 1 && cgroup_derivation == 1
+            valid = valid && production_slice_read == 1
+            valid = valid && production_slice_requirement == 1
+            valid = valid && production_control_group_read == 1 && retirement == 1
+            valid = valid && worker_slice_assignment_line < terminal_read_line
+            valid = valid && terminal_read_line < terminal_control_group_read_line
+            valid = valid && terminal_control_group_read_line < worker_slice_read_line
+            valid = valid && worker_slice_read_line < terminal_control_group_empty_line
+            valid = valid && terminal_control_group_empty_line < worker_slice_requirement_line
+            valid = valid && worker_slice_requirement_line < cgroup_derivation_line
+            valid = valid && cgroup_derivation_line < retirement_line
+            valid = valid && retirement_line < production_slice_assignment_line
+            valid = valid && production_slice_assignment_line < production_slice_read_line
+            valid = valid && production_slice_read_line < production_slice_requirement_line
+            valid = valid && production_slice_requirement_line < production_control_group_read_line
+            if (!valid) exit 1
+        }
+    ' "$worker_slice_source"
+}
+if ! transient_slice_contract_is_exact "$gate"; then
+    printf '%s\n' \
+        'the transient slice, terminal cgroup and derived retirement contracts are not exact' >&2
+    exit 1
+fi
+# These mutations must retain literal gate variables; the contract, not this
+# test shell, expands them.
+# shellcheck disable=SC2016
+for worker_slice_mutation in \
+    assignment terminal-control-read terminal-empty readback requirement derivation \
+    production-readback production-requirement
+do
+    worker_slice_mutant=$temporary_directory/worker-slice-$worker_slice_mutation.sh
+    case $worker_slice_mutation in
+        assignment)
+            sed '0,/--slice=system\.slice/s//--slice=user.slice/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        terminal-control-read)
+            sed '0,/capture_unit_property ControlGroup "\$temporary_stage\/unit-control-group"/s//capture_unit_property Slice "$temporary_stage\/unit-control-group"/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        terminal-empty)
+            sed '0,/\[ -n "\$observed_terminal_control_group" \]/s//[ -z "$observed_terminal_control_group" ]/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        readback)
+            sed '0,/capture_unit_property Slice "\$temporary_stage\/unit-slice"/s//capture_unit_property ControlGroup "$temporary_stage\/unit-slice"/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        requirement)
+            sed '0,/"\$observed_slice" != system\.slice/s//"$observed_slice" != user.slice/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        derivation)
+            sed '0,/worker_control_group=\/system\.slice\/\$unit_name/s//worker_control_group=\/user.slice\/$unit_name/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        production-readback)
+            sed '0,/capture_unit_property Slice "\$temporary_stage\/production-slice"/s//capture_unit_property ControlGroup "$temporary_stage\/production-slice"/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        production-requirement)
+            sed '0,/"\$production_slice" != system\.slice/s//"$production_slice" != user.slice/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        *) exit 1 ;;
+    esac
+    chmod 0600 "$worker_slice_mutant"
+    if transient_slice_contract_is_exact "$worker_slice_mutant"; then
+        printf 'worker slice contract accepted mutation: %s\n' \
+            "$worker_slice_mutation" >&2
         exit 1
     fi
 done

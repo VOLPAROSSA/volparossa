@@ -2137,6 +2137,7 @@ set +e
 systemd-run \
     --json=short \
     --unit="$unit_name" \
+    --slice=system.slice \
     --description="$unit_ownership_marker" \
     --service-type=exec \
     --remain-after-exit \
@@ -2482,11 +2483,25 @@ else
     observed_private_network=
     record_worker_confinement_failure 'private-network'
 fi
+# The helper's internal live proof has already pinned the parent and worker to
+# the same cgroup path and inode while both processes exist. Once this retained
+# Type=exec unit reaches active (exited), systemd releases its empty service
+# cgroup and must report an empty ControlGroup. Require that exact terminal
+# state, then require the persistent manager-owned system.slice placement and
+# derive the one safe former cgroup path only for the retirement-absence check.
+# The running production unit below continues to require a live ControlGroup.
 if capture_unit_property ControlGroup "$temporary_stage/unit-control-group"; then
-    worker_control_group=$(cat "$temporary_stage/unit-control-group") \
+    observed_terminal_control_group=$(cat "$temporary_stage/unit-control-group") \
         || record_worker_confinement_failure 'control-group'
 else
-    worker_control_group=
+    observed_terminal_control_group=invalid
+    record_worker_confinement_failure 'control-group'
+fi
+if capture_unit_property Slice "$temporary_stage/unit-slice"; then
+    observed_slice=$(cat "$temporary_stage/unit-slice") \
+        || record_worker_confinement_failure 'control-group'
+else
+    observed_slice=
     record_worker_confinement_failure 'control-group'
 fi
 if [ "$observed_bounding" != "$capabilities" ]; then
@@ -2498,9 +2513,13 @@ fi
 if [ "$observed_private_network" != yes ]; then
     record_worker_confinement_failure 'private-network'
 fi
-if [ "$worker_control_group" != "/system.slice/$unit_name" ]; then
+if [ -n "$observed_terminal_control_group" ]; then
     record_worker_confinement_failure 'control-group'
 fi
+if [ "$observed_slice" != system.slice ]; then
+    record_worker_confinement_failure 'control-group'
+fi
+worker_control_group=/system.slice/$unit_name
 
 worker_unit_name=$unit_name
 worker_invocation_id=$unit_invocation_id
@@ -2549,6 +2568,7 @@ if [ "$proof_ok" = yes ]; then
     systemd-run \
         --json=short \
         --unit="$unit_name" \
+        --slice=system.slice \
         --description="$unit_ownership_marker" \
         --service-type=exec \
         --property=CollectMode=inactive \
@@ -2778,6 +2798,13 @@ if [ "$proof_ok" = yes ]; then
         production_remain_after_exit=
         record_proof_failure 'production-unit-contract'
     fi
+    if capture_unit_property Slice "$temporary_stage/production-slice"; then
+        production_slice=$(cat "$temporary_stage/production-slice") \
+            || record_proof_failure 'production-unit-contract'
+    else
+        production_slice=
+        record_proof_failure 'production-unit-contract'
+    fi
     if capture_unit_property RestrictSUIDSGID \
         "$temporary_stage/production-restrict-suid-sgid"; then
         production_restrict_suid_sgid=$(cat \
@@ -2859,6 +2886,7 @@ if [ "$proof_ok" = yes ]; then
         || [ "$production_collect_mode" != inactive ] \
         || [ "$production_unit_type" != exec ] \
         || [ "$production_remain_after_exit" != no ] \
+        || [ "$production_slice" != system.slice ] \
         || [ "$production_restrict_suid_sgid" != no ] \
         || [ "$production_fdstore_max" != 128 ] \
         || [ "$production_fdstore_preserve" != yes ] \

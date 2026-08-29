@@ -886,10 +886,24 @@ launch-binding/terminal/stage classification. After branch
 `worker-confinement`, that category may additionally expose only its first fixed `bounding`,
 `ambient`, `private-network` or `control-group` subcategory. It never reports the property value,
 unit name, cgroup path or capability payload, and a missing, duplicate, malformed or late
-confinement record is suppressed. The second phase exercises
-the production server entry point, but not an installed package, the shipped unit file, restart
-policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run is durably tied
-to the same clean commit and retained, the gate is not earned package, datapath, A14 or A15 evidence.
+confinement record is suppressed. Follow-up branch
+[run 33274272679](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679) at
+`80e0dd077ceab4c8c8a33590a83299e179dde10f` ran the disposable VM in
+[job 99158142816](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679/job/99158142816)
+and retained `control-group`. The already completed internal live proof had pinned the helper parent
+and worker to the same cgroup path and inode while both existed. The external manager readback
+occurred after the retained diagnostic service reached `active (exited)`, when systemd had
+released its empty service cgroup and consequently returned an empty `ControlGroup`. The diagnostic
+unit now explicitly selects `system.slice`, requires an exactly empty terminal `ControlGroup` plus
+exact persistent `Slice=system.slice`, and derives the fixed former service-cgroup path only for its
+post-retirement absence check. The production transient also selects and reads back exact
+`Slice=system.slice`; its process remains running during observation and its exact nonempty live
+`ControlGroup` readback is still mandatory. This failed run is
+not PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open. The second
+phase exercises the production server entry point, but not an installed package, the shipped unit
+file, restart policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run
+is durably tied to the same clean commit and retained, the gate is not earned package, datapath, A14
+or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode

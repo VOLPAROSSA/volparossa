@@ -71,6 +71,31 @@ if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 2 ] \
         'the VM payload does not preserve the helper-specific openat2 compatibility contract' >&2
     exit 1
 fi
+if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property Slice "$temporary_stage/unit-slice"' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- '[ -n "$observed_terminal_control_group" ]' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- '[ "$observed_slice" != system.slice ]' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'worker_control_group=/system.slice/$unit_name' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property Slice "$temporary_stage/production-slice"' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- '[ "$production_slice" != system.slice ]' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property ControlGroup "$temporary_stage/production-control-group"' \
+        "$live_gate")" -ne 1 ]; then
+    printf '%s\n' \
+        'the VM payload does not preserve exact terminal worker placement and live production cgroup proof' >&2
+    exit 1
+fi
 
 expected_manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 actual_manifest_sha256=$(sha256sum "$manifest" | awk '{print $1}')

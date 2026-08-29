@@ -316,8 +316,24 @@ single clean-build A01--A15 run; the score is not a release claim.
   `ambient`, `private-network` or `control-group`) and the non-retained driver exposes that label
   only when the generic first failure is exactly `worker-confinement`; missing, duplicated,
   malformed and non-allowlisted diagnostic records expose nothing. None of the failed runs is PASS
-  evidence; the score remains **11/100** and AV1-09 remains Open until a new exact-main retained run
-  succeeds.
+  evidence. The follow-up non-retained branch smoke
+  [run 33274272679](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679) at
+  `80e0dd077ceab4c8c8a33590a83299e179dde10f` ran the disposable VM in
+  [job 99158142816](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679/job/99158142816)
+  and retained the exact `control-group` subcategory. The worker's preceding internal live proof had
+  already pinned the helper parent and worker to the same cgroup path and inode while both existed.
+  The external manager observation happened only after the deliberately retained
+  `Type=exec` unit reached `active (exited)`: systemd had then released the empty service cgroup and
+  returned an empty `ControlGroup`, even though the unit metadata remained loaded. This was a
+  terminal evidence-contract defect, not evidence of incorrect live placement. The diagnostic
+  transient unit now explicitly selects `system.slice`; after terminal state the gate requires the
+  manager's `ControlGroup` to be exactly empty and `Slice` to be exactly `system.slice`, then derives
+  the fixed
+  `/system.slice/<exact-random-unit-name>` only for bounded post-retirement cgroup-absence checks.
+  The production transient unit also selects and reads back exact `Slice=system.slice`, remains
+  running during observation, and still requires exact live
+  `ControlGroup=/system.slice/<exact-random-unit-name>` readback. The score remains **11/100** and
+  AV1-09 remains Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
