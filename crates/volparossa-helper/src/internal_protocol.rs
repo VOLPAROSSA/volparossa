@@ -13,7 +13,7 @@ use prost::Message;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 2;
+pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 3;
 pub(crate) const INTERNAL_WORKER_MAGIC: &[u8; 8] = b"VPWKR3\0\0";
 pub(crate) const MAX_INTERNAL_WORKER_FRAME: usize = 128 * 1024;
 const MAX_PATHS: u32 = 8;
@@ -149,6 +149,9 @@ pub(crate) struct LeasePlan {
     pub(crate) setup_expires_at_unix: u64,
     #[prost(uint64, tag = "5")]
     pub(crate) hard_expires_at_unix: u64,
+    /// Fixed public ownership marker produced from the durable record by the trusted parent.
+    #[prost(string, tag = "6")]
+    pub(crate) ownership_alias: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -638,6 +641,7 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
                 )?;
                 if lease.setup_expires_at_unix == 0
                     || lease.hard_expires_at_unix < lease.setup_expires_at_unix
+                    || !crate::lease_spec::ownership_alias_has_valid_shape(&lease.ownership_alias)
                 {
                     return Err(InternalProtocolError::Invalid);
                 }
@@ -929,6 +933,11 @@ mod tests {
             local_overlay_address: Some(prefix()),
             setup_expires_at_unix: 100,
             hard_expires_at_unix: 200,
+            ownership_alias: format!(
+                "{}vpc{path_id:09}:{}",
+                crate::lease_spec::DURABLE_WIREGUARD_ALIAS_PREFIX,
+                "ab".repeat(32)
+            ),
         }
     }
 
@@ -970,7 +979,7 @@ mod tests {
 
     #[test]
     fn protocol_identity_and_operation_tags_are_fixed() {
-        assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 2);
+        assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 3);
         assert_eq!(INTERNAL_WORKER_MAGIC, b"VPWKR3\0\0");
 
         let operations = [
@@ -1091,6 +1100,14 @@ mod tests {
         let mut duplicate = relay_leases;
         duplicate[1] = duplicate[0].clone();
         assert!(encode_request(&make(duplicate)).is_err());
+
+        let mut free_form_alias = plan(1);
+        free_form_alias.ownership_alias = "caller-selected-interface".to_owned();
+        assert!(encode_request(&make(vec![free_form_alias])).is_err());
+
+        let mut uppercase_digest = plan(1);
+        uppercase_digest.ownership_alias = uppercase_digest.ownership_alias.to_ascii_uppercase();
+        assert!(encode_request(&make(vec![uppercase_digest])).is_err());
     }
 
     fn correlated_response(

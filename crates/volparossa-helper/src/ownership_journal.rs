@@ -22,7 +22,10 @@ pub(crate) use actor::{
     DurableRegistrationOutcome, StartupCustodyPhase, StartupCustodyTarget,
 };
 
-use crate::{deadline::HardDeadline, lease_spec::WireguardLeaseSpec};
+use crate::{
+    deadline::HardDeadline,
+    lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
+};
 
 /// Constructs one journal anchor without exposing actor-internal failure types outside this module.
 pub(crate) fn durable_prepare_anchor_from_parts(
@@ -261,7 +264,6 @@ const MAX_LEASE_IDENTITIES: usize = 16;
 const JOURNAL_MAGIC: [u8; 8] = *b"VOLJRN3\0";
 const JOURNAL_VERSION: u16 = 3;
 const DIGEST_BYTES: usize = 32;
-const DURABLE_WIREGUARD_ALIAS_PREFIX: &str = "volparossa:wireguard:ownership-v1:";
 const DURABLE_WIREGUARD_MARKER_DOMAIN: &str =
     "VOLPAROSSA helper durable WireGuard resource marker v1";
 const DERIVED_WIREGUARD_INTERFACE_BYTES: usize = 12;
@@ -342,8 +344,9 @@ impl fmt::Debug for RuntimeId {
 ///
 /// The alias is public evidence used to reject stale same-name links. It is neither proof of the
 /// journal's current phase nor authority to create, adopt, mutate or delete a kernel resource.
-/// Construction stays private to this module so callers cannot supply raw ownership coordinates or
-/// a free-form alias. The value is deliberately non-`Clone` and its debug form reveals no marker.
+/// Construction accepts either one exact journal record or the fixed authenticated worker
+/// binding; neither path accepts raw ownership coordinates or a free-form alias. The value is
+/// deliberately non-`Clone` and its debug form reveals no marker.
 #[derive(Eq, PartialEq)]
 pub(crate) struct DurableWireguardResource {
     specification: WireguardLeaseSpec,
@@ -351,6 +354,29 @@ pub(crate) struct DurableWireguardResource {
 }
 
 impl DurableWireguardResource {
+    /// Reconstruct public resource evidence received over the authenticated parent-to-worker
+    /// channel.
+    ///
+    /// This constructor grants no durable ownership or cleanup authority. It accepts only the
+    /// topology-derived interface/address and the fixed ownership-marker grammar; the privileged
+    /// parent must retain the corresponding affine journal owner outside the worker.
+    pub(crate) fn from_authenticated_worker_binding(
+        route_context_id: [u8; 16],
+        context_role: volparossa_routing::ContextRole,
+        path_id: u32,
+        role: i32,
+        ownership_alias: String,
+    ) -> Option<Self> {
+        let specification =
+            WireguardLeaseSpec::derive(route_context_id, context_role, path_id, role).ok()?;
+        specification
+            .matches_ownership_alias(&ownership_alias)
+            .then_some(Self {
+                specification,
+                ownership_alias,
+            })
+    }
+
     /// Context-local path and endpoint role committed by the durable record.
     pub(crate) const fn key(&self) -> (u8, i32) {
         self.specification.key()

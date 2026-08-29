@@ -741,6 +741,7 @@ dependencies = [
  "digest",
  "fiat-crypto",
  "rustc_version",
+ "serde",
  "subtle",
  "zeroize",
 ]
@@ -4441,6 +4442,7 @@ dependencies = [
  "volparossa-mptcp",
  "volparossa-routing",
  "volparossa-wireguard",
+ "x25519-dalek",
  "zbus",
  "zeroize",
 ]

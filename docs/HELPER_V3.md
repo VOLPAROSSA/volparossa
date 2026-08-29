@@ -69,23 +69,30 @@ A successful `PrepareLeaseBatch` response is required to contain:
   correlated WireGuard `GET` that also matches the expected public key.
 
 The internal v3 worker protocol, underlay evidence policy, secret-free link derivation, exact
-WireGuard `SET` encoders, and bounded `GET` proof parser have pure tests. Successful internal
-Prepare, Activate, Probe and MPTCP endpoint responses are now bound to the request's exact identity
-order; the external engine also rejects duplicate public keys and public endpoints before pairing
-affine handles. `NamespaceKernel` contains inactive v3 prepare, peer-activation, and probe
-primitives plus a complete-batch preflight that requires exact name, current ownership alias,
+WireGuard `SET` encoders, and bounded `GET` proof parser have pure tests. The authenticated child
+now executes `Prepare` and `Destroy` for exactly one lease: it reconstructs the canonical interface
+and `/128` from the bound context/path/role and one bounded ownership alias, generates and retains
+the ephemeral X25519 private key in worker-owned secret containers that zeroize on drop, and
+returns only the public key and port from the correlated kernel proof. Failed Prepare deletes the
+exact resource and returns a normal kernel failure only after proving absence; otherwise it retains
+the resource/key state and returns `CleanupIncomplete` for a later exact Destroy. Destroy without
+an adopted lease returns `NotFound`, never false kernel-absence evidence. Successful internal
+Prepare, Activate, Probe and MPTCP endpoint responses are bound to the request's exact identity
+order; the external engine
+also rejects duplicate public keys and public endpoints before pairing affine handles.
+`NamespaceKernel` contains v3 prepare, peer-activation, and probe primitives plus a complete-batch
+preflight that requires exact name, current ownership alias,
 WireGuard kind and fresh DOWN/key-zero/port-zero/fwmark-zero/peerless state before mutation. Its
 exact-owned delete re-proves absence. A validated journal record now deterministically projects a
 non-`Clone` resource for each exact link. Its public `ownership-v1` alias commits the immutable
 ownership-record fields, closed plan, and per-link identity without exposing raw ownership
-coordinates; lifecycle phase and reconciliation evidence do not change it. Every inactive
-owner-sensitive kernel entry point consumes that typed resource and rejects any non-exact marker.
+coordinates; lifecycle phase and reconciliation evidence do not change it. Every owner-sensitive
+kernel entry point consumes that typed resource and rejects any non-exact marker.
 The underlay parser independently accepts only the exact helper grammar and interface binding,
 rejecting malformed, legacy, or mismatched helper aliases. The marker is evidence, not current
-journal-phase or cleanup authority, and has no production call site. These operations are not
-connected to a production child lifecycle or transaction-wide rollback. The production
-`HelperEngine::new` backend therefore
-returns the explicit `Unavailable`
+journal-phase or cleanup authority. The child transaction is not connected to the production
+parent birth-link/dispatch path or `HelperEngine`; transaction-wide production rollback is still
+absent. The production `HelperEngine::new` backend therefore returns the explicit `Unavailable`
 / `PREPARE_FAILED` result and creates no context. It never returns an agent-supplied address,
 placeholder address, guessed port, public key, or endpoint.
 
@@ -466,7 +473,7 @@ blocking `AF_UNIX SOCK_SEQPACKET` socketpair has bounded read/write deadlines an
 request/response records. `SO_PASSCRED` is enabled on both receivers before either endpoint is
 exposed. Every received record must contain exactly one kernel-selected `SCM_CREDENTIALS` value
 matching the expected PID, UID and GID; missing, duplicate, wrong or truncated credentials and all
-unexpected ancillary data fail closed. Internal protocol v2 follows an Acquire response with a
+unexpected ancillary data fail closed. Internal protocol v3 follows an Acquire response with a
 domain-separated 32-byte completion record. Success requires exactly one `MSG_CMSG_CLOEXEC`
 descriptor in that record, transfers ownership into the consuming send API, drops the worker's
 source owner, and then emits a distinct credentialed, descriptor-free source-release binding as a
@@ -806,10 +813,10 @@ no unit mutation, fails the proof, and requires the disposable VM to be discarde
 after exact adoption still blocks stage mapping and permits only exact-ID retirement of that already
 owned unit. It never guesses that a same-named unit belongs to this run.
 
-The child still performs no link, WireGuard, route, nftables, sysctl, or socket-factory operation.
-It keeps only an in-memory context marker, accepts `Initialise` and `DestroyContext`, and returns
-`Invalid` for every network-affecting internal operation. Production `Prepare` and all network
-operations remain unreachable and fail closed through the unavailable engine.
+The child now opens its worker-local netlink sockets, activates loopback, and implements exact
+single-lease WireGuard `Prepare` and `Destroy`. It does not create or move the parent-side birth
+link, and Activate, Commit, routing, nftables, sysctl and socket-factory operations remain rejected.
+Production cannot dispatch this path and still fails closed through the unavailable engine.
 
 A separate bounded registry now reserves a non-copyable monotonic generation token before spawn or
 handshake. Pending tokens count against the same 64-context cap, are bound to one context and expiry,
@@ -1294,14 +1301,14 @@ remain:
 - connect the authenticated worker-v3 launcher and generation registry to creation of the anonymous
   namespace only as part of an atomic underlay-snapshot, capability-reduction,
   independently observed sandbox-proof, birth-link, WireGuard-prepare and rollback transaction; the
-  current child deliberately performs no link, WireGuard or network-policy operation;
+  current child can prepare and destroy only an already-present exact single-lease WireGuard birth
+  link, while parent birth-link creation/movement and production dispatch remain absent;
 - replace the synchronous `HelperEngine` backend interface across every caller with the tested
   plan/call/commit shape: validation and snapshot under the state lock, one bounded worker call
   outside it, and exact context/generation/phase/handle revalidation before publishing. Reap,
   cleanup, destroy, shutdown, and cached-descriptor paths require the same atomic refactor;
 - wire descriptor retries to the live generation registry. The disconnected facade already purges
   caches on death and never retries ambiguous IPC, but the production engine is not yet using it;
-- generate and zeroize ephemeral private keys exclusively in the worker;
 - collect a bounded `DirectAssigned` snapshot from parent-side read-only rtnetlink link/address/route
   dumps before birth-link mutation, rejecting multipath, duplicate, truncated, or ambiguous state;
 - connect parent birth-link creation/movement to the inactive v3 kernel primitives, preserving the

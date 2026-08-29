@@ -480,7 +480,7 @@ cross-category unique. The agent locally permits only one acquisition attempt pe
 activation failure returns the prepared cleanup authority and all eight descriptors, and destroy
 borrows authority so ambiguous failure remains retryable.
 
-The independent internal worker protocol v2 reserves exact tag 17 for the corresponding
+The independent internal worker protocol v3 reserves exact tag 17 for the corresponding
 route-context/path/role/kind/tuple request. Its tested private `SOCK_SEQPACKET` building block uses
 canonical records, a separately bound zero-or-one-FD completion record, fixed deadlines and
 close-on-reject semantics. On success the consuming worker send API drops its source descriptor and
