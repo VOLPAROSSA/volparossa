@@ -658,6 +658,59 @@ cmp -s "$console_log" "$published_console_log"
 test "$(find "$publication_output" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" \
     = vm-console.log
 
+# A failed non-retained proof may publish only one enumerated privacy-safe
+# category. Exercise the reviewed parser rather than a test-only copy.
+branch_failure_functions=$temporary_directory/branch-failure-functions.sh
+{
+    sed -n '/^non_retained_proof_failure_reason_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
+} >"$branch_failure_functions"
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 3
+sh -n "$branch_failure_functions"
+# shellcheck disable=SC1090
+. "$branch_failure_functions"
+
+branch_failure_diagnostic=$temporary_directory/branch-proof.stderr.log
+printf '%s\n%s\n' \
+    'fixed proof plan' \
+    'live worker-identity proof failed: predicate rejected: production-start-records' \
+    >"$branch_failure_diagnostic"
+chmod 0600 "$branch_failure_diagnostic"
+expect_status 0 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke failure category: production-start-records' \
+    "$last_stderr" >/dev/null
+
+printf '%s\n' 'attacker-controlled diagnostic payload' >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'live worker-identity proof failed: predicate rejected: production-secret-leak' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+branch_failure_link=$temporary_directory/branch-proof.stderr.link
+ln -s "$branch_failure_diagnostic" "$branch_failure_link"
+expect_status 1 report_non_retained_proof_failure_reason "$branch_failure_link"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+grep -F \
+    'report_non_retained_proof_failure_reason "$proof_stderr_log"' \
+    "$runner" >/dev/null
+grep -F \
+    'non-retained helper-boundary PR smoke failure category: unclassified' \
+    "$runner" >/dev/null
+
 # Early QEMU exits retain only canonical status fields plus the supervisor's
 # bounded QMP event record and stream-scanned stderr tail in the allowlisted diagnostic file.
 qemu_diagnostic_functions=$temporary_directory/qemu-diagnostic-functions.sh

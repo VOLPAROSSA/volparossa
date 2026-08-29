@@ -845,7 +845,8 @@ for collection; any ambiguous observation fails the gate. The driver has not yet
 exact-main PASS. A non-main branch run may exercise and validate the same disposable proof, but
 on PASS `non-retained-pr-smoke` deliberately discards its report, hash, environment, console and
 proof diagnostics and requires an empty output directory. Its workflow never uploads branch PASS
-artifacts or failure diagnostics. The second phase exercises
+artifacts or failure diagnostics; a failed smoke exposes only one fixed allowlisted category (or
+`unclassified`) on job stderr. The second phase exercises
 the production server entry point, but not an installed package, the shipped unit file, restart
 policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run is durably tied
 to the same clean commit and retained, the gate is not earned package, datapath, A14 or A15 evidence.

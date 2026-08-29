@@ -167,6 +167,9 @@ workflow uploads neither branch PASS artifacts nor branch failure diagnostics. T
 automatic `pull_request` trigger and not support for `refs/pull/*`. Only a retained exact-main PASS
 can count as AV1-09 evidence or change the alpha score.
 
+If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
+category (or `unclassified`) to job stderr. It does not print or upload the proof diagnostic file.
+
 The job first verifies the exact canonical bytes and complete object in
 `tests/helper/debian13-amd64-image-v1.json`, and only then reads its HTTPS URL, filename, and
 SHA-512. The recorded SHA-512 was manually reviewed against the upstream Debian cloud-image

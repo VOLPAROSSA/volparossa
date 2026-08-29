@@ -213,6 +213,68 @@ failed() {
     exit 1
 }
 
+non_retained_proof_failure_reason_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        worker-launch-status|\
+        worker-launch-envelope|\
+        worker-manager-binding|\
+        worker-helper-parent-contract|\
+        worker-helper-runtime-preparation|\
+        worker-helper-worker-spawn|\
+        worker-helper-publication|\
+        worker-helper-retirement-cleanup|\
+        worker-terminal-state|\
+        worker-unit-contract|\
+        worker-proof-records|\
+        worker-confinement|\
+        worker-retirement|\
+        production-launch-status|\
+        production-launch-envelope|\
+        production-manager-binding|\
+        production-running-state|\
+        production-unit-contract|\
+        production-confinement|\
+        production-process-identity|\
+        production-socket-identity|\
+        production-start-records|\
+        production-runtime-layout|\
+        production-process-stability|\
+        production-retirement|\
+        production-lock-release|\
+        production-stop-records)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_non_retained_proof_failure_reason() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_failure_line=$(tail -n 1 -- "$non_retained_diagnostic") \
+        || return 1
+    non_retained_failure_prefix='live worker-identity proof failed: predicate rejected: '
+    case $non_retained_failure_line in
+        "$non_retained_failure_prefix"*)
+            non_retained_failure_reason=${non_retained_failure_line#"$non_retained_failure_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    non_retained_proof_failure_reason_is_safe "$non_retained_failure_reason" \
+        || return 1
+    printf 'non-retained helper-boundary PR smoke failure category: %s\n' \
+        "$non_retained_failure_reason" >&2
+}
+
 case ${#expected_commit} in
     40|64) ;;
     *) blocked 'the expected commit is not a canonical Git object ID' ;;
@@ -1490,6 +1552,11 @@ fi
     || failed 'the retrieved proof diagnostics exceed 1 MiB'
 install -m 0600 -- "$retrieved_stderr" "$proof_stderr_log"
 if [ "$guest_status" -ne 0 ]; then
+    if [ "$proof_mode" = non-retained-pr-smoke ]; then
+        report_non_retained_proof_failure_reason "$proof_stderr_log" \
+            || printf '%s\n' \
+                'non-retained helper-boundary PR smoke failure category: unclassified' >&2
+    fi
     failed "the guest helper-boundary proof exited with status $guest_status"
 fi
 bounded_run retrieve-report 2 guest_scp_from_raw \
