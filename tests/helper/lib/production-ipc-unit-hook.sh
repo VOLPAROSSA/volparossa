@@ -206,13 +206,14 @@ unit_object_path() {
         GetUnit s "$1" 2>/dev/null) \
         || return 1
     [ "${#hook_object_json}" -le 512 ] || return 1
-    hook_object_path=$(printf '%s' "$hook_object_json" | /usr/bin/jq -er '
-        if (. | keys) == ["data", "type"]
-            and .type == "o"
-            and (.data | type) == "array"
-            and (.data | length) == 1
-            and (.data[0] | type) == "string"
-        then .data[0]
+    hook_object_path=$(printf '%s' "$hook_object_json" | /usr/bin/jq -ers '
+        if length == 1
+            and (.[0] | keys) == ["data", "type"]
+            and .[0].type == "o"
+            and (.[0].data | type) == "array"
+            and (.[0].data | length) == 1
+            and (.[0].data[0] | type) == "string"
+        then .[0].data[0]
         else empty
         end
     ') || return 1
@@ -235,14 +236,15 @@ unit_invocation_id() {
         org.freedesktop.systemd1.Unit \
         InvocationID 2>/dev/null) || return 1
     [ "${#hook_invocation_json}" -le 512 ] || return 1
-    hook_invocation_octets=$(printf '%s' "$hook_invocation_json" | /usr/bin/jq -er '
-        if (. | keys) == ["data", "type"]
-            and .type == "ay"
-            and (.data | type) == "array"
-            and (.data | length) == 16
-            and all(.data[];
+    hook_invocation_octets=$(printf '%s' "$hook_invocation_json" | /usr/bin/jq -ers '
+        if length == 1
+            and (.[0] | keys) == ["data", "type"]
+            and .[0].type == "ay"
+            and (.[0].data | type) == "array"
+            and (.[0].data | length) == 16
+            and all(.[0].data[];
                 (type == "number") and . >= 0 and . <= 255 and floor == .)
-        then .data | @tsv
+        then .[0].data | @tsv
         else empty
         end
     ') || return 1
@@ -277,14 +279,15 @@ unit_u32_property() {
         "$hook_property_object" \
         "$2" "$3" 2>/dev/null) || return 1
     [ "${#hook_property_json}" -le 128 ] || return 1
-    hook_property_value=$(printf '%s' "$hook_property_json" | /usr/bin/jq -er '
-        if (. | keys) == ["data", "type"]
-            and .type == "u"
-            and (.data | type) == "number"
-            and .data >= 0
-            and .data <= 4294967295
-            and (.data | floor) == .data
-        then .data
+    hook_property_value=$(printf '%s' "$hook_property_json" | /usr/bin/jq -ers '
+        if length == 1
+            and (.[0] | keys) == ["data", "type"]
+            and .[0].type == "u"
+            and (.[0].data | type) == "number"
+            and .[0].data >= 0
+            and .[0].data <= 4294967295
+            and (.[0].data | floor) == .[0].data
+        then .[0].data
         else empty
         end
     ') || return 1
