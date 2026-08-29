@@ -433,7 +433,14 @@ done <"$expected_proof_failure_reasons"
 expected_production_start_stages=$temporary_directory/expected-production-start-stages
 printf '%s\n' \
     preflight-runtime \
-    identity \
+    identity-socket \
+    identity-lock \
+    identity-manager \
+    identity-command \
+    identity-executable \
+    identity-process \
+    identity-stability \
+    identity-publication \
     active-lock \
     protocol-bind-before \
     protocol-frame-bounds \
@@ -514,25 +521,25 @@ reject_production_launch_capture() (
     case $production_rejection_shape in
         duplicate)
             printf '%s\n%s\n' \
-                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
                 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=publication' \
                 >"$temporary_stage/production-output/start.failure"
             ;;
         truncated)
             printf '%s' \
-                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
                 >"$temporary_stage/production-output/start.failure"
             ;;
         with-pass)
             printf '%s\n' \
-                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
                 >"$temporary_stage/production-output/start.failure"
             : >"$temporary_stage/production-output/start.pass"
             chmod 0600 "$temporary_stage/production-output/start.pass"
             ;;
         exact)
             printf '%s\n' \
-                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
                 >"$temporary_stage/production-output/start.failure"
             ;;
         *) exit 97 ;;
@@ -4294,11 +4301,58 @@ done <"$expected_production_start_stages"
     printf '%s\n' 'production hook start stage did not reach publication' >&2
     exit 1
 }
-if advance_start_failure_stage identity \
+if advance_start_failure_stage identity-socket \
     || { start_failure_stage=preflight-runtime; advance_start_failure_stage active-lock; }; then
     printf '%s\n' 'production hook start stage accepted a skipped or regressed transition' >&2
     exit 1
 fi
+
+# The initial capture must run in the hook shell so its fixed stages survive;
+# ordinary reobservations retain their stdout surface and never move the stage.
+hook_identity_capture_function=$temporary_directory/hook-identity-capture-function.sh
+sed -n '/^capture_running_identity() {$/,/^}$/p' "$ipc_hook" \
+    >"$hook_identity_capture_function"
+test "$(grep -c '^capture_running_identity() {$' \
+    "$hook_identity_capture_function")" -eq 1
+sh -n "$hook_identity_capture_function"
+# These functions and assignments satisfy symbols in the dynamically sourced
+# capture function, which static ShellCheck analysis cannot follow.
+# shellcheck disable=SC2034,SC2154,SC2317
+exercise_hook_identity_capture_modes() (
+    # shellcheck disable=SC1090
+    . "$hook_start_stage_functions"
+    # shellcheck disable=SC1090
+    . "$hook_identity_capture_function"
+    number_is_safe() { return 0; }
+    unit_invocation_id() { printf '%s\n' 11111111111111111111111111111111; }
+    unit_main_pid() { printf '%s\n' 4242; }
+    command_line_is_argumentless() { return 0; }
+    stat() { printf '%s\n' 1:2:regular-file:0:0:755:1; }
+    capture_helper_process_contract() { printf '%s\n' process-contract-v1; }
+    production_helper=/run/exact-helper
+    expected_identity=$(printf '%s\n%s\n%s\n%s' \
+        11111111111111111111111111111111 \
+        4242 \
+        1:2:regular-file:0:0:755:1 \
+        process-contract-v1)
+
+    start_failure_stage=identity-lock
+    capture_running_identity exact.service 7 initial \
+        >"$temporary_directory/initial-identity.stdout"
+    [ ! -s "$temporary_directory/initial-identity.stdout" ]
+    [ "$start_failure_stage" = identity-stability ]
+    [ "$hook_captured_running_identity" = "$expected_identity" ]
+
+    start_failure_stage=active-lock
+    observed_identity=$(capture_running_identity exact.service 7)
+    [ "$start_failure_stage" = active-lock ]
+    [ "$observed_identity" = "$expected_identity" ]
+    ! capture_running_identity exact.service 7 substituted
+)
+exercise_hook_identity_capture_modes || {
+    printf '%s\n' 'production hook identity capture modes are not affine to start stages' >&2
+    exit 1
+}
 # These are literal hook-source contracts; expansion would defeat the checks.
 # shellcheck disable=SC2016
 for fixed_start_failure_contract in \
@@ -4306,6 +4360,8 @@ for fixed_start_failure_contract in \
     "write_private_file \"\$start_failure_record\" \\" \
     'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=$start_failure_stage' \
     'trap start_failure_exit EXIT' \
+    'capture_running_identity "$hook_unit" "$agent_gid" initial' \
+    'hook_identity=$hook_captured_running_identity' \
     'start_failure_armed=no' \
     'trap - EXIT'
 do

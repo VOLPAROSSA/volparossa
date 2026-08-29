@@ -107,7 +107,14 @@ start_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         preflight-runtime|\
-        identity|\
+        identity-socket|\
+        identity-lock|\
+        identity-manager|\
+        identity-command|\
+        identity-executable|\
+        identity-process|\
+        identity-stability|\
+        identity-publication|\
         active-lock|\
         protocol-bind-before|\
         protocol-frame-bounds|\
@@ -131,8 +138,15 @@ start_failure_stage_is_safe() {
 advance_start_failure_stage() {
     [ "$#" -eq 1 ] || return 1
     case "$start_failure_stage:$1" in
-        preflight-runtime:identity|\
-        identity:active-lock|\
+        preflight-runtime:identity-socket|\
+        identity-socket:identity-lock|\
+        identity-lock:identity-manager|\
+        identity-manager:identity-command|\
+        identity-command:identity-executable|\
+        identity-executable:identity-process|\
+        identity-process:identity-stability|\
+        identity-stability:identity-publication|\
+        identity-publication:active-lock|\
         active-lock:protocol-bind-before|\
         protocol-bind-before:protocol-frame-bounds|\
         protocol-frame-bounds:protocol-wire-shapes|\
@@ -342,20 +356,42 @@ capture_helper_process_contract() {
 }
 
 capture_running_identity() {
-    [ "$#" -eq 2 ] || return 1
+    case $# in
+        2) hook_initial_identity=no ;;
+        3)
+            [ "$3" = initial ] || return 1
+            hook_initial_identity=yes
+            ;;
+        *) return 1 ;;
+    esac
     hook_identity_unit=$1
     hook_identity_gid=$2
     number_is_safe "$hook_identity_gid" || return 1
+    if [ "$hook_initial_identity" = yes ]; then
+        advance_start_failure_stage identity-manager || return 1
+    fi
     hook_identity_invocation=$(unit_invocation_id "$hook_identity_unit") || return 1
     hook_identity_pid=$(unit_main_pid "$hook_identity_unit") || return 1
+    if [ "$hook_initial_identity" = yes ]; then
+        advance_start_failure_stage identity-command || return 1
+    fi
     command_line_is_argumentless "$hook_identity_pid" || return 1
+    if [ "$hook_initial_identity" = yes ]; then
+        advance_start_failure_stage identity-executable || return 1
+    fi
     hook_executable_metadata=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
         "/proc/$hook_identity_pid/exe" 2>/dev/null) || return 1
     hook_expected_executable_metadata=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
         "$production_helper" 2>/dev/null) || return 1
     [ "$hook_executable_metadata" = "$hook_expected_executable_metadata" ] || return 1
+    if [ "$hook_initial_identity" = yes ]; then
+        advance_start_failure_stage identity-process || return 1
+    fi
     hook_process_contract=$(capture_helper_process_contract \
         "$hook_identity_pid" "$hook_identity_gid") || return 1
+    if [ "$hook_initial_identity" = yes ]; then
+        advance_start_failure_stage identity-stability || return 1
+    fi
     [ "$(unit_invocation_id "$hook_identity_unit")" = "$hook_identity_invocation" ] \
         || return 1
     [ "$(unit_main_pid "$hook_identity_unit")" = "$hook_identity_pid" ] || return 1
@@ -363,11 +399,15 @@ capture_running_identity() {
     hook_reobserved_executable_metadata=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
         "/proc/$hook_identity_pid/exe" 2>/dev/null) || return 1
     [ "$hook_reobserved_executable_metadata" = "$hook_executable_metadata" ] || return 1
-    printf '%s\n%s\n%s\n%s\n' \
+    hook_captured_running_identity=$(printf '%s\n%s\n%s\n%s\n' \
         "$hook_identity_invocation" \
         "$hook_identity_pid" \
         "$hook_executable_metadata" \
-        "$hook_process_contract"
+        "$hook_process_contract") || return 1
+    if [ "$hook_initial_identity" = yes ]; then
+        return 0
+    fi
+    printf '%s\n' "$hook_captured_running_identity"
 }
 
 running_identity_is_unchanged() {
@@ -1001,17 +1041,22 @@ start_hook() {
     done
     validate_runtime_metadata "$agent_gid" || fail 'production runtime metadata is invalid'
 
-    advance_start_failure_stage identity \
+    advance_start_failure_stage identity-socket \
         || fail 'start failure stage transition is invalid'
     hook_socket_identity=$(capture_socket_identity "$agent_gid") \
         || fail 'production helper socket identity is unavailable'
     write_private_file "$proof_directory/socket.identity" "$hook_socket_identity" \
         || fail 'production helper socket identity could not be published'
+    advance_start_failure_stage identity-lock \
+        || fail 'start failure stage transition is invalid'
     hook_lock_identity=$(capture_lock_identity "$agent_gid") \
         || fail 'ownership journal lock identity is unavailable'
 
-    hook_identity=$(capture_running_identity "$hook_unit" "$agent_gid") \
+    capture_running_identity "$hook_unit" "$agent_gid" initial \
         || fail 'production helper identity is unavailable'
+    hook_identity=$hook_captured_running_identity
+    advance_start_failure_stage identity-publication \
+        || fail 'start failure stage transition is invalid'
     write_private_file "$proof_directory/unit.identity" "$hook_identity" \
         || fail 'production helper identity proof could not be published'
 

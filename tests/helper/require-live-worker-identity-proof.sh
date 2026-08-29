@@ -378,7 +378,14 @@ production_start_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         preflight-runtime|\
-        identity|\
+        identity-socket|\
+        identity-lock|\
+        identity-manager|\
+        identity-command|\
+        identity-executable|\
+        identity-process|\
+        identity-stability|\
+        identity-publication|\
         active-lock|\
         protocol-bind-before|\
         protocol-frame-bounds|\

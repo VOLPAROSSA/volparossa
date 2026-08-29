@@ -786,7 +786,7 @@ expect_status 1 report_non_retained_production_launch_diagnostic \
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
 printf '%s\n%s\n%s\n' \
-    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=identity' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=identity-process' \
     'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=publication' \
     'live worker-identity proof failed: predicate rejected: production-launch-status' \
     >"$branch_failure_diagnostic"
