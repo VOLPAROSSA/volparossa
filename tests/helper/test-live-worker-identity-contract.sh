@@ -2869,13 +2869,15 @@ printf '%s\n' \
     '  copy the already-built real helper into one validated root-only temporary stage;' \
     '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
     '  bind account files plus the system bus socket read-only in two sequential invocations;' \
+    '  let PID 1 resolve only host-present root/root unit credentials before those binds;' \
+    '  use exact /usr/bin/setpriv to install the staged primary and singleton agent GID;' \
     '  bind the canonical systemd notify socket read-only inside both private /run trees;' \
     '  pin its D-Bus system address to that verified socket inside the private /run;' \
     '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
     '  require the host /run/volparossa path absent before and after both private unit runs;' \
     '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
     '    FileDescriptorStorePreserve=yes on that transient service;' \
-    '  start the diagnostic helper as blocking Type=exec, then poll its exact ID to terminal;' \
+    '  start its fixed credential trampoline as blocking Type=exec, then require helper exec;' \
     '  retain diagnostic success with RemainAfterExit=yes and failures with CollectMode=inactive;' \
     '  forbid ignore-failure, aggressive collection, and asynchronous or waiting client modes;' \
     '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
@@ -3143,6 +3145,10 @@ fi
 # shellcheck disable=SC2016
 for required_contract in \
     'nsenter paste prlimit readlink rm sed setpriv' \
+    'setpriv_path=/usr/bin/setpriv' \
+    '[ "$(command -v setpriv)" != "$setpriv_path" ]' \
+    "!= 'regular file:0:0:755:1' ]; then" \
+    "blocked 'the fixed root-owned setpriv credential trampoline is unavailable'" \
     'staged_executable_max_bytes=134217728' \
     'proof_file_max_bytes=1048576' \
     'source_snapshot_is_exact() {' \
@@ -3167,6 +3173,9 @@ for required_contract in \
     '--property=NotifyAccess=main' \
     '--property=FileDescriptorStoreMax=128' \
     '--property=FileDescriptorStorePreserve=yes' \
+    '--property=User=0' \
+    '--property=Group=0' \
+    '--property=SupplementaryGroups=' \
     '--property=CollectMode=inactive' \
     '--property=RuntimeMaxSec=45s' \
     '--property=TimeoutStartSec=45s' \
@@ -3184,6 +3193,8 @@ for required_contract in \
     '--property="AmbientCapabilities=$capabilities"' \
     'helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"' \
     'production_helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-production:norbind"' \
+    '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-live-proof --internal-worker-v3-live-proof' \
+    '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production' \
     '--property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind $notify_socket_bind"' \
     '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind $notify_socket_bind"' \
     '--property="BindPaths=$production_runtime_bind $production_output_bind"' \
@@ -3257,6 +3268,12 @@ for required_contract in \
     '[ "$production_limit_fsize_soft" != 1048576 ]' \
     '[ "$production_standard_output" != null ]' \
     '[ "$production_standard_error" != null ]' \
+    'identity_process_contract=$(sed -n '"'"'4p'"'"' "$production_identity")' \
+    'identity_extra=$(sed -n '"'"'5p'"'"' "$production_identity")' \
+    'expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"' \
+    'identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}' \
+    '[ "${#identity_seccomp_filters}" -gt 10 ]' \
+    '[ "$identity_seccomp_filters" -gt 1024 ]' \
     'production_socket_identity_file=$temporary_stage/production-output/socket.identity' \
     'production_lock_identity_file=$temporary_stage/production-output/lock.identity' \
     'production_lock_fd_identity=$(stat -Lc' \
@@ -3400,8 +3417,7 @@ if ! awk '
                 && argument_line !~ /^--service-type=/ \
                 && argument_line !~ /^--remain-after-exit([[:space:]]|\\|$)/ \
                 && argument_line !~ /^--property=/) invalid++
-        } else if (argument_line !~ /^\/run\/volparossa-helper-live-proof([[:space:]]|$)/ \
-            && argument_line !~ /^\/run\/volparossa-helper-production([[:space:]]|$)/ \
+        } else if (argument_line !~ /^\/usr\/bin\/setpriv([[:space:]]|$)/ \
             && argument_line !~ /^>/ \
             && argument_line !~ /^2>/) invalid++
         if (index($0, "--ignore-failure") > 0 \
@@ -3566,9 +3582,91 @@ do
         exit 1
     fi
 done
-if [ "$(grep -Ec '^[[:space:]]*/run/volparossa-helper-live-proof --internal-worker-v3-live-proof \\{1}$' "$gate")" -ne 1 ] \
-    || [ "$(grep -Ec '^[[:space:]]*/run/volparossa-helper-production \\{1}$' "$gate")" -ne 1 ]; then
-    printf '%s\n' 'transient helper main commands are not exact absolute private paths' >&2
+# These are literal gate-source contracts; expansion here would defeat the checks.
+# shellcheck disable=SC1003,SC2016
+if [ "$(grep -Fc \
+    '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-live-proof --internal-worker-v3-live-proof \' \
+    "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production \' \
+        "$gate")" -ne 1 ]; then
+    printf '%s\n' 'transient helper credential trampolines are not exact' >&2
+    exit 1
+fi
+# PID 1 must never resolve the deliberately host-absent staged GID. The exact
+# trampoline is the sole authority that may install it after the private account
+# binds exist, while the helper parent contract proves the resulting identity.
+unit_credential_source_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    credential_contract_source=$1
+    [ -f "$credential_contract_source" ] \
+        && [ ! -L "$credential_contract_source" ] || return 1
+    awk '
+        /^[[:space:]]+--property=User=/ {
+            user++
+            if ($0 ~ /^[[:space:]]+--property=User=0 \\$/) exact_user++
+        }
+        /^[[:space:]]+--property=Group=/ {
+            group++
+            if ($0 ~ /^[[:space:]]+--property=Group=0 \\$/) exact_group++
+        }
+        /^[[:space:]]+--property=SupplementaryGroups=/ {
+            supplementary++
+            if ($0 ~ /^[[:space:]]+--property=SupplementaryGroups= \\$/) {
+                exact_supplementary++
+            }
+        }
+        END {
+            valid = user == 2 && exact_user == 2
+            valid = valid && group == 2 && exact_group == 2
+            valid = valid && supplementary == 2 && exact_supplementary == 2
+            if (!valid) exit 1
+        }
+    ' "$credential_contract_source"
+}
+# This is a literal gate-source contract; expansion would defeat the check.
+# shellcheck disable=SC2016
+if ! unit_credential_source_contract_is_exact "$gate" \
+    || grep -F -- '--property=Group="$agent_gid"' "$gate" >/dev/null; then
+    printf '%s\n' 'transient units do not use exact host-resolvable root/root credentials' >&2
+    exit 1
+fi
+for credential_mutation in user-suffix group-suffix supplementary-value
+do
+    credential_mutant=$temporary_directory/credential-$credential_mutation.sh
+    case $credential_mutation in
+        user-suffix)
+            sed '0,/--property=User=0/s//--property=User=00/' \
+                "$gate" >"$credential_mutant"
+            ;;
+        group-suffix)
+            sed '0,/--property=Group=0/s//--property=Group=00/' \
+                "$gate" >"$credential_mutant"
+            ;;
+        supplementary-value)
+            sed '0,/--property=SupplementaryGroups=/s//--property=SupplementaryGroups=0/' \
+                "$gate" >"$credential_mutant"
+            ;;
+        *) exit 1 ;;
+    esac
+    chmod 0600 "$credential_mutant"
+    if unit_credential_source_contract_is_exact "$credential_mutant"; then
+        printf 'transient credential contract accepted mutation: %s\n' \
+            "$credential_mutation" >&2
+        exit 1
+    fi
+done
+# These are literal gate-source contracts; expansion here would defeat the checks.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'setpriv_path=/usr/bin/setpriv' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc '[ "$(command -v setpriv)" != "$setpriv_path" ]' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "stat -Lc '%F:%u:%g:%a:%h' \"\$setpriv_path\" 2>/dev/null || true" \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "!= 'regular file:0:0:755:1' ]; then" "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        "blocked 'the fixed root-owned setpriv credential trampoline is unavailable'" \
+        "$gate")" -ne 1 ]; then
+    printf '%s\n' 'the fixed root-owned setpriv credential trampoline is not pinned' >&2
     exit 1
 fi
 for cgroup_assignment_contract in \
@@ -3625,9 +3723,26 @@ for required_hook_contract in \
     'cleanup_token=$runtime_directory/helper.cleanup-token' \
     'probe=/run/volparossa-helper-production-ipc-probe' \
     'production_helper=/run/volparossa-helper-production' \
+    'helper_bootstrap_capability_mask=00000000002031e0' \
     "'directory:0:0:2700'" \
     'command_line_is_argumentless "$hook_identity_pid"' \
-    'running_identity_is_unchanged "$hook_probe_unit" "$hook_probe_identity"' \
+    'capture_helper_process_contract() {' \
+    'hook_contract_status=/proc/$hook_contract_pid/status' \
+    '$1 == "Uid:" {' \
+    '$1 == "Gid:" {' \
+    '$1 == "Groups:" {' \
+    '$1 == "NoNewPrivs:" {' \
+    '$1 == "Seccomp:" {' \
+    '$1 == "Seccomp_filters:" {' \
+    '$1 == "CapInh:" {' \
+    '$1 == "CapPrm:" {' \
+    '$1 == "CapEff:" {' \
+    '$1 == "CapBnd:" {' \
+    '$1 == "CapAmb:" {' \
+    'process-status-v1=uid:0:0:0:0;gid:%s:%s:%s:%s;groups:%s;nnp:1;seccomp:2;caps:%s;filters:%s' \
+    'hook_process_contract=$(capture_helper_process_contract' \
+    '"$hook_identity_pid" "$hook_identity_gid")' \
+    '"$hook_probe_unit" "$hook_probe_identity" "$hook_expected_agent_gid"' \
     'capture_socket_identity' \
     'socket_identity_is_unchanged' \
     'capture_lock_identity' \
@@ -3637,7 +3752,8 @@ for required_hook_contract in \
     'hook_active_lock_fd_identity=$(stat -Lc' \
     '/usr/bin/flock -n -x -E 42 8' \
     '[ "$hook_active_flock_status" -eq 42 ]' \
-    'running_identity_is_unchanged "$hook_unit" "$proof_directory/unit.identity"' \
+    'running_identity_is_unchanged "$hook_unit"' \
+    '"$proof_directory/unit.identity" "$agent_gid"' \
     'exec 8>&-' \
     '/usr/bin/setpriv' \
     '--clear-groups' \
@@ -3727,6 +3843,127 @@ do
         printf 'missing production IPC hook contract: %s\n' "$required_hook_contract" >&2
         exit 1
     }
+done
+hook_process_contract_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_contract_source=$1
+    [ -f "$hook_contract_source" ] && [ ! -L "$hook_contract_source" ] || return 1
+    awk '
+        $0 == "helper_bootstrap_capability_mask=00000000002031e0" { mask++ }
+        /^capture_helper_process_contract\(\) \{$/ { in_contract = 1; next }
+        /^capture_running_identity\(\) \{$/ {
+            in_contract = 0
+            in_identity = 1
+            next
+        }
+        /^running_identity_is_unchanged\(\) \{$/ {
+            in_identity = 0
+            in_recheck = 1
+            next
+        }
+        /^probe_output_is_exact\(\) \{$/ { in_recheck = 0 }
+        in_contract && /\$1 == "Pid:"/ { pid_field++ }
+        in_contract && /\$1 == "Uid:"/ { uid_field++ }
+        in_contract && /\$1 == "Gid:"/ { gid_field++ }
+        in_contract && /\$1 == "Groups:"/ { groups_field++ }
+        in_contract && /\$1 == "NoNewPrivs:"/ { nnp_field++ }
+        in_contract && /\$1 == "Seccomp:"/ { seccomp_field++ }
+        in_contract && /\$1 == "Seccomp_filters:"/ { filters_field++ }
+        in_contract && /\$1 == "CapInh:"/ { inherited_field++ }
+        in_contract && /\$1 == "CapPrm:"/ { permitted_field++ }
+        in_contract && /\$1 == "CapEff:"/ { effective_field++ }
+        in_contract && /\$1 == "CapBnd:"/ { bounding_field++ }
+        in_contract && /\$1 == "CapAmb:"/ { ambient_field++ }
+        in_contract && /NF != 5 \|\| \$2 != 0 \|\| \$3 != 0/ { uid_exact++ }
+        in_contract && /NF != 5 \|\| \$2 != expected_gid/ { gid_exact++ }
+        in_contract && /NF != 2 \|\| \$2 != expected_gid/ { groups_exact++ }
+        in_contract && /NF != 2 \|\| \$2 != 1/ { nnp_exact++ }
+        in_contract && /NF != 2 \|\| \$2 != 2/ { seccomp_exact++ }
+        in_contract && /filters !~ \/\^\[1-9\]\[0-9\]\*\$\// { filters_canonical++ }
+        in_contract && /length\(filters\) > 10 \|\| filters > 1024/ { filters_bounded++ }
+        in_contract && /NF != 2 \|\| \$2 != expected_caps/ { exact_capsets++ }
+        in_contract && /process-status-v1=uid:0:0:0:0;gid:%s:%s:%s:%s;/ {
+            canonical_record++
+        }
+        in_contract && /valid = valid && groups_count == 1 && nnp_count == 1/ {
+            group_counts++
+        }
+        in_contract && /valid = valid && ambient_count == 1/ { exact_counts++ }
+        in_identity && /hook_process_contract=\$\(capture_helper_process_contract/ {
+            process_capture = NR
+        }
+        in_identity && /unit_invocation_id "\$hook_identity_unit"/ {
+            invocation_observations++
+            if (invocation_observations == 2) invocation_after = NR
+        }
+        in_identity && /unit_main_pid "\$hook_identity_unit"/ {
+            pid_observations++
+            if (pid_observations == 2) pid_after = NR
+        }
+        in_identity && /command_line_is_argumentless "\$hook_identity_pid"/ {
+            command_observations++
+            if (command_observations == 2) command_after = NR
+        }
+        in_identity && /hook_reobserved_executable_metadata=\$\(stat -Lc/ {
+            executable_after = NR
+        }
+        in_recheck && /hook_observed_identity=\$\(capture_running_identity/ {
+            recheck_capture = NR
+        }
+        in_recheck && /"\$hook_identity_unit" "\$hook_identity_gid"/ {
+            recheck_gid = NR
+        }
+        END {
+            valid = mask == 1 && pid_field == 1 && uid_field == 1 && gid_field == 1
+            valid = valid && groups_field == 1 && nnp_field == 1
+            valid = valid && seccomp_field == 1 && filters_field == 1
+            valid = valid && inherited_field == 1 && permitted_field == 1
+            valid = valid && effective_field == 1 && bounding_field == 1
+            valid = valid && ambient_field == 1 && exact_capsets == 5
+            valid = valid && uid_exact == 1 && gid_exact == 1 && groups_exact == 1
+            valid = valid && nnp_exact == 1 && seccomp_exact == 1
+            valid = valid && filters_canonical == 1 && filters_bounded == 1
+            valid = valid && canonical_record == 1 && group_counts == 1
+            valid = valid && exact_counts == 1
+            valid = valid && process_capture < invocation_after
+            valid = valid && invocation_after < pid_after && pid_after < command_after
+            valid = valid && command_after < executable_after
+            valid = valid && recheck_capture < recheck_gid
+            if (!valid) exit 1
+        }
+    ' "$hook_contract_source"
+}
+if ! hook_process_contract_source_is_exact "$ipc_hook"; then
+    printf '%s\n' 'production helper process-status contract is incomplete or unordered' >&2
+    exit 1
+fi
+for hook_contract_mutation in capability-mask group-count ambient-field executable-recheck
+do
+    hook_contract_mutant=$temporary_directory/hook-$hook_contract_mutation.sh
+    case $hook_contract_mutation in
+        capability-mask)
+            sed '0,/00000000002031e0/s//0000000000000000/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        group-count)
+            sed '0,/groups_count == 1/s//groups_count == 0/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        ambient-field)
+            sed '0,/CapAmb:/s//CapXYZ:/' "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        executable-recheck)
+            sed '0,/hook_reobserved_executable_metadata=/s//hook_unchecked_executable_metadata=/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        *) exit 1 ;;
+    esac
+    chmod 0600 "$hook_contract_mutant"
+    if hook_process_contract_source_is_exact "$hook_contract_mutant"; then
+        printf 'production helper process-status contract accepted mutation: %s\n' \
+            "$hook_contract_mutation" >&2
+        exit 1
+    fi
 done
 if ! awk '
     /^start_hook\(\) \{$/ { in_start = 1; next }

@@ -25,6 +25,7 @@ functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready
 functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass
 functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass
 functional_release_byte=G
+helper_bootstrap_capability_mask=00000000002031e0
 
 fail() {
     printf 'production IPC unit hook failed: %s\n' "$1" >&2
@@ -170,9 +171,101 @@ command_line_is_argumentless() {
     rm -f -- "$hook_expected_command"
 }
 
+capture_helper_process_contract() {
+    [ "$#" -eq 2 ] || return 1
+    hook_contract_pid=$1
+    hook_contract_gid=$2
+    number_is_safe "$hook_contract_pid" || return 1
+    number_is_safe "$hook_contract_gid" || return 1
+    hook_contract_status=/proc/$hook_contract_pid/status
+    [ -f "$hook_contract_status" ] && [ ! -L "$hook_contract_status" ] || return 1
+    awk \
+        -v expected_pid="$hook_contract_pid" \
+        -v expected_gid="$hook_contract_gid" \
+        -v expected_caps="$helper_bootstrap_capability_mask" '
+        $1 == "Pid:" {
+            pid_count++
+            if (NF != 2 || $2 != expected_pid) invalid = 1
+            next
+        }
+        $1 == "Uid:" {
+            uid_count++
+            if (NF != 5 || $2 != 0 || $3 != 0 || $4 != 0 || $5 != 0) invalid = 1
+            next
+        }
+        $1 == "Gid:" {
+            gid_count++
+            if (NF != 5 || $2 != expected_gid || $3 != expected_gid \
+                || $4 != expected_gid || $5 != expected_gid) invalid = 1
+            next
+        }
+        $1 == "Groups:" {
+            groups_count++
+            if (NF != 2 || $2 != expected_gid) invalid = 1
+            next
+        }
+        $1 == "NoNewPrivs:" {
+            nnp_count++
+            if (NF != 2 || $2 != 1) invalid = 1
+            next
+        }
+        $1 == "Seccomp:" {
+            seccomp_count++
+            if (NF != 2 || $2 != 2) invalid = 1
+            next
+        }
+        $1 == "Seccomp_filters:" {
+            filter_count++
+            filters = $2
+            if (NF != 2 || filters !~ /^[1-9][0-9]*$/ \
+                || length(filters) > 10 || filters > 1024) invalid = 1
+            next
+        }
+        $1 == "CapInh:" {
+            inherited_count++
+            if (NF != 2 || $2 != expected_caps) invalid = 1
+            next
+        }
+        $1 == "CapPrm:" {
+            permitted_count++
+            if (NF != 2 || $2 != expected_caps) invalid = 1
+            next
+        }
+        $1 == "CapEff:" {
+            effective_count++
+            if (NF != 2 || $2 != expected_caps) invalid = 1
+            next
+        }
+        $1 == "CapBnd:" {
+            bounding_count++
+            if (NF != 2 || $2 != expected_caps) invalid = 1
+            next
+        }
+        $1 == "CapAmb:" {
+            ambient_count++
+            if (NF != 2 || $2 != expected_caps) invalid = 1
+            next
+        }
+        END {
+            valid = !invalid && pid_count == 1 && uid_count == 1 && gid_count == 1
+            valid = valid && groups_count == 1 && nnp_count == 1
+            valid = valid && seccomp_count == 1 && filter_count == 1
+            valid = valid && inherited_count == 1 && permitted_count == 1
+            valid = valid && effective_count == 1 && bounding_count == 1
+            valid = valid && ambient_count == 1
+            if (!valid) exit 1
+            printf "process-status-v1=uid:0:0:0:0;gid:%s:%s:%s:%s;groups:%s;nnp:1;seccomp:2;caps:%s;filters:%s\n", \
+                expected_gid, expected_gid, expected_gid, expected_gid, \
+                expected_gid, expected_caps, filters
+        }
+    ' "$hook_contract_status" 2>/dev/null
+}
+
 capture_running_identity() {
-    [ "$#" -eq 1 ] || return 1
+    [ "$#" -eq 2 ] || return 1
     hook_identity_unit=$1
+    hook_identity_gid=$2
+    number_is_safe "$hook_identity_gid" || return 1
     hook_identity_invocation=$(unit_invocation_id "$hook_identity_unit") || return 1
     hook_identity_pid=$(unit_main_pid "$hook_identity_unit") || return 1
     command_line_is_argumentless "$hook_identity_pid" || return 1
@@ -181,17 +274,32 @@ capture_running_identity() {
     hook_expected_executable_metadata=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
         "$production_helper" 2>/dev/null) || return 1
     [ "$hook_executable_metadata" = "$hook_expected_executable_metadata" ] || return 1
-    printf '%s\n%s\n%s\n' \
-        "$hook_identity_invocation" "$hook_identity_pid" "$hook_executable_metadata"
+    hook_process_contract=$(capture_helper_process_contract \
+        "$hook_identity_pid" "$hook_identity_gid") || return 1
+    [ "$(unit_invocation_id "$hook_identity_unit")" = "$hook_identity_invocation" ] \
+        || return 1
+    [ "$(unit_main_pid "$hook_identity_unit")" = "$hook_identity_pid" ] || return 1
+    command_line_is_argumentless "$hook_identity_pid" || return 1
+    hook_reobserved_executable_metadata=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
+        "/proc/$hook_identity_pid/exe" 2>/dev/null) || return 1
+    [ "$hook_reobserved_executable_metadata" = "$hook_executable_metadata" ] || return 1
+    printf '%s\n%s\n%s\n%s\n' \
+        "$hook_identity_invocation" \
+        "$hook_identity_pid" \
+        "$hook_executable_metadata" \
+        "$hook_process_contract"
 }
 
 running_identity_is_unchanged() {
-    [ "$#" -eq 2 ] || return 1
+    [ "$#" -eq 3 ] || return 1
     hook_identity_unit=$1
     hook_identity_file=$2
+    hook_identity_gid=$3
+    number_is_safe "$hook_identity_gid" || return 1
     private_file_is_safe "$hook_identity_file" || return 1
     hook_expected_identity=$(cat "$hook_identity_file") || return 1
-    hook_observed_identity=$(capture_running_identity "$hook_identity_unit") || return 1
+    hook_observed_identity=$(capture_running_identity \
+        "$hook_identity_unit" "$hook_identity_gid") || return 1
     [ "$hook_observed_identity" = "$hook_expected_identity" ]
 }
 
@@ -231,7 +339,8 @@ run_probe() {
     hook_probe_stderr=$proof_directory/$hook_probe_name.stderr
     [ ! -e "$hook_probe_stdout" ] && [ ! -L "$hook_probe_stdout" ] || return 1
     [ ! -e "$hook_probe_stderr" ] && [ ! -L "$hook_probe_stderr" ] || return 1
-    running_identity_is_unchanged "$hook_probe_unit" "$hook_probe_identity" || return 1
+    running_identity_is_unchanged \
+        "$hook_probe_unit" "$hook_probe_identity" "$hook_expected_agent_gid" || return 1
     socket_identity_is_unchanged \
         "$hook_probe_socket_identity" "$hook_expected_agent_gid" || return 1
 
@@ -269,7 +378,8 @@ run_probe() {
             hook_probe_status=$?
         fi
     fi
-    running_identity_is_unchanged "$hook_probe_unit" "$hook_probe_identity" || return 1
+    running_identity_is_unchanged \
+        "$hook_probe_unit" "$hook_probe_identity" "$hook_expected_agent_gid" || return 1
     socket_identity_is_unchanged \
         "$hook_probe_socket_identity" "$hook_expected_agent_gid" || return 1
     [ "$hook_probe_status" -eq 0 ] || return 1
@@ -657,7 +767,9 @@ run_functional_client_lease_probe() {
     private_file_is_safe "$hook_functional_stderr" || return 1
     [ ! -s "$hook_functional_stderr" ] || return 1
     running_identity_is_unchanged \
-        "$hook_functional_unit" "$proof_directory/unit.identity" || return 1
+        "$hook_functional_unit" \
+        "$proof_directory/unit.identity" \
+        "$hook_functional_agent_gid" || return 1
     socket_identity_is_unchanged \
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
     unit_fdstore_is_empty "$hook_functional_unit" || return 1
@@ -702,7 +814,9 @@ run_functional_client_lease_probe() {
     rm -f -- "$hook_functional_stdout" "$hook_functional_stderr" || return 1
 
     running_identity_is_unchanged \
-        "$hook_functional_unit" "$proof_directory/unit.identity" || return 1
+        "$hook_functional_unit" \
+        "$proof_directory/unit.identity" \
+        "$hook_functional_agent_gid" || return 1
     socket_identity_is_unchanged \
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
     unit_fdstore_is_empty "$hook_functional_unit" || return 1
@@ -801,7 +915,7 @@ start_hook() {
     hook_lock_identity=$(capture_lock_identity "$agent_gid") \
         || fail 'ownership journal lock identity is unavailable'
 
-    hook_identity=$(capture_running_identity "$hook_unit") \
+    hook_identity=$(capture_running_identity "$hook_unit" "$agent_gid") \
         || fail 'production helper identity is unavailable'
     write_private_file "$proof_directory/unit.identity" "$hook_identity" \
         || fail 'production helper identity proof could not be published'
@@ -824,7 +938,8 @@ start_hook() {
     fi
     [ "$hook_active_flock_status" -eq 42 ] \
         || fail 'active helper does not exclusively hold its ownership journal lock'
-    running_identity_is_unchanged "$hook_unit" "$proof_directory/unit.identity" \
+    running_identity_is_unchanged "$hook_unit" \
+        "$proof_directory/unit.identity" "$agent_gid" \
         || fail 'production helper identity changed during active lock proof'
     hook_active_lock_path_after=$(capture_lock_identity "$agent_gid") \
         || fail 'active ownership journal lock path changed during contention proof'
@@ -835,7 +950,8 @@ start_hook() {
         || fail 'active ownership journal lock path changed after contention proof'
     [ "$hook_active_lock_path_after_close" = "$hook_lock_identity" ] \
         || fail 'active ownership journal lock path was replaced after contention proof'
-    running_identity_is_unchanged "$hook_unit" "$proof_directory/unit.identity" \
+    running_identity_is_unchanged "$hook_unit" \
+        "$proof_directory/unit.identity" "$agent_gid" \
         || fail 'production helper identity changed after active lock proof'
     write_private_file "$proof_directory/lock.identity" "$hook_lock_identity" \
         || fail 'ownership journal lock identity could not be published'

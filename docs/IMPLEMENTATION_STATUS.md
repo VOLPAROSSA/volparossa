@@ -269,8 +269,22 @@ single clean-build A01--A15 run; the score is not a release claim.
   after adoption and again before mapping the byte-exact stage. Nonempty or malformed stdout,
   `not-found`, marker/ID drift and failed observations remain generic. This exception cannot pass
   the proof: success still requires status zero, exact JSON, empty client stderr and the exact
-  successful terminal tuple. None of the failed runs is PASS evidence; the score remains **11/100**
-  and AV1-09 remains Open until a new exact-main retained run succeeds.
+  successful terminal tuple. A non-retained helper-boundary branch smoke
+  [run 33270993243](https://github.com/VOLPAROSSA/volparossa/actions/runs/33270993243) at
+  `b4eb5eed8ee601e7f63ff71f45d7a9b2244feb61` then reached the exact bounded diagnostic
+  `terminal-failed-exit-status-216,stage-empty`, still classified as `worker-launch-status`.
+  systemd's status 216 is `EXIT_GROUP`: v257 resolves static `Group=` credentials before creating
+  the unit mount namespace, while the gate deliberately selected a staged GID absent from the host
+  account database. Its private `/etc/group` bind was therefore necessarily too late. Both
+  transient services now give PID 1 only host-resolvable root/root credentials and use the exact
+  validated root-owned `/usr/bin/setpriv` trampoline, after namespace construction, to install the
+  raw staged primary and singleton supplementary GID before executing the helper in the same
+  MainPID. The diagnostic helper parent contract continues to attest the final identity,
+  capabilities, no-new-privileges state and seccomp state. The production hook independently
+  requires and repeatedly revalidates all four UID/GID fields, its singleton group, NNP, seccomp
+  mode and bounded filter count, and all five capability masks against the exact seven-capability
+  set. None of the failed runs is PASS evidence; the score remains **11/100** and AV1-09 remains
+  Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

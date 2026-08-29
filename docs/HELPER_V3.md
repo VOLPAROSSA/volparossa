@@ -667,9 +667,21 @@ regular files with one hard link and at most 128 MiB. Each copy runs under its o
 file-size ceiling and is fenced by stable source identity, metadata, and matching source/staged
 digests. After those two large copies, the root producer sets and verifies its own 1 MiB soft/hard
 file-size limit before copying the bounded hook or writing account, capture, and report files; its
-fixed path never raises that limit. It then creates collision-free synthetic service identities,
-binds the staged passwd, group, shadow and nsswitch files read-only, and grants the helper parent
-exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes`,
+fixed path never raises that limit. It then creates collision-free synthetic service identities and
+binds the staged passwd, group, shadow and nsswitch files read-only. systemd v257 resolves static
+`User=` and `Group=` credentials before constructing those private bind mounts, so both transient
+services declare only the host-resolvable `User=0`, `Group=0`, and an empty
+`SupplementaryGroups=` assignment. After the namespace exists, the exact root-owned
+`/usr/bin/setpriv` image changes only the primary and singleton supplementary group to the raw
+staged agent GID and then executes the staged helper in the same MainPID. The unchanged helper
+parent contract rejects any other UID/GID quartet, supplementary-group vector, capability set,
+no-new-privileges state, or seccomp state in the diagnostic phase. The production hook
+independently reads the no-argument helper's live `/proc/<MainPID>/status`, requires the same exact
+credential and five-capability-set envelope plus seccomp mode 2 and a bounded positive filter
+count, and includes that canonical observation in every existing running-identity revalidation.
+This avoids all host account changes while granting the helper parent exactly the reviewed seven
+bootstrap capabilities. The transient unit has
+`PrivateNetwork=yes`,
 `NotifyAccess=main`, `FileDescriptorStoreMax=128`, `FileDescriptorStorePreserve=yes`, and a private
 temporary `/run`. The canonical root-owned system bus socket is bound read-only into that
 private `/run`, and the unit pins `DBUS_SYSTEM_BUS_ADDRESS` to that verified path, so the
@@ -681,16 +693,18 @@ inventory barrier; systemd v257 does not restore that socket automatically for a
 `TemporaryFileSystem=/run`. Strict cgroup protection is submitted through the string-valued
 `ProtectControlGroupsEx=strict` D-Bus property. The legacy `ProtectControlGroups` property is
 boolean-only in systemd-run v257 and is deliberately forbidden by the static contract. The staged
-helper aliases remain absolute, read-only `/run` paths; an exact
-`ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient property suppresses systemd v257's
-host-namespace executable preflight while preserving the driver's fixed child `PATH`. The driver
-reads that property back from PID 1 for both transient units before accepting their contracts.
+helper aliases remain absolute, read-only `/run` paths passed as arguments to the exact host-visible
+`/usr/bin/setpriv` executable. An exact `ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient
+property preserves the driver's fixed child `PATH`; the driver reads that property back from PID 1
+for both transient units before accepting their contracts.
 Both units also pin and read back `CollectMode=inactive`: a real failure therefore remains loaded
 long enough for exact terminal inspection, while successful or reset units can still be collected
 during bounded retirement. Neither transient launch uses `--ignore-failure` or the aggressive
 `--collect` shortcut. The diagnostic phase uses blocking `Type=exec` startup: PID 1 completes the
-start job only after successful `execve`; its separate `RuntimeMaxSec=45s` is also read back
-exactly. A fast diagnostic `exit(1)` can nevertheless make systemd v257's blocking client return
+start job after successful execution of the fixed credential trampoline. The exact terminal
+records, MainPID executable and process predicates then independently require its replacement by
+the staged helper; the separate `RuntimeMaxSec=45s` is also read back exactly. A fast diagnostic
+`exit(1)` can nevertheless make systemd v257's blocking client return
 from the failed start-job wait before its later JSON `InvocationID` acquisition and print path. In
 that one case the driver may recover diagnostic authority only when the launch captures are safe,
 stdout is exactly empty, no JSON binding was accepted, and the nonzero launch status accompanies
@@ -813,12 +827,14 @@ following respect:
 - it is a non-aggressively collected `Type=exec` with `RemainAfterExit=yes`, a 45-second activation
   and runtime bound, no restart, and the private proof selector instead of the production
   no-argument server;
-- it uses a collision-free numeric staged primary group and requests no additional
-  `SupplementaryGroups=` entries, rather than resolving the installed `volparossa` group from the
-  host account database. An empty `SupplementaryGroups=` assignment does not override groups from
-  the account database: systemd initializes them before installing the unit's synthetic account-file
-  bind mounts. The helper therefore accepts exactly one kernel supplementary group, the staged agent
-  GID; any additional group membership configured for host root blocks the proof;
+- PID 1 installs only host-resolvable root/root unit credentials with an empty
+  `SupplementaryGroups=` assignment because systemd resolves static credentials before installing
+  the synthetic account-file bind mounts. Once inside that completed sandbox, the fixed
+  `/usr/bin/setpriv` trampoline installs the raw collision-free staged GID as both primary group and
+  the singleton supplementary group, then executes the helper without changing its UID or
+  capabilities. The diagnostic helper parent contract and the production hook's repeated live
+  process-status contract reject leaked host-root groups and every other final identity; no host
+  account is created or modified;
 - it overlays four synthetic account files read-only, adds `PrivateNetwork=yes`, and replaces host
   `/run` with a 16 MiB private tmpfs; the root-owned staged helper image is also bound read-only into
   that private `/run`, together with a read-only bind of the host system bus socket and an exact

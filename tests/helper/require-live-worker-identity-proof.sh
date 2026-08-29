@@ -29,13 +29,15 @@ print_plan() {
         '  copy the already-built real helper into one validated root-only temporary stage;' \
         '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
         '  bind account files plus the system bus socket read-only in two sequential invocations;' \
+        '  let PID 1 resolve only host-present root/root unit credentials before those binds;' \
+        '  use exact /usr/bin/setpriv to install the staged primary and singleton agent GID;' \
         '  bind the canonical systemd notify socket read-only inside both private /run trees;' \
         '  pin its D-Bus system address to that verified socket inside the private /run;' \
         '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
         '  require the host /run/volparossa path absent before and after both private unit runs;' \
         '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
         '    FileDescriptorStorePreserve=yes on that transient service;' \
-        '  start the diagnostic helper as blocking Type=exec, then poll its exact ID to terminal;' \
+        '  start its fixed credential trampoline as blocking Type=exec, then require helper exec;' \
         '  retain diagnostic success with RemainAfterExit=yes and failures with CollectMode=inactive;' \
         '  forbid ignore-failure, aggressive collection, and asynchronous or waiting client modes;' \
         '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
@@ -384,6 +386,14 @@ do
         blocked "required Debian tool is unavailable: $command_name"
     fi
 done
+setpriv_path=/usr/bin/setpriv
+if [ "$(command -v setpriv)" != "$setpriv_path" ] \
+    || [ ! -f "$setpriv_path" ] || [ ! -x "$setpriv_path" ] \
+    || [ -L "$setpriv_path" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$setpriv_path" 2>/dev/null || true)" \
+        != 'regular file:0:0:755:1' ]; then
+    blocked 'the fixed root-owned setpriv credential trampoline is unavailable'
+fi
 systemd_version_output=$(systemctl show --property=Version --value 2>/dev/null) \
     || blocked 'the systemd manager version is unavailable'
 systemd_version=$(printf '%s\n' "$systemd_version_output" \
@@ -2083,12 +2093,18 @@ notify_socket_bind="$notify_socket:$notify_socket:norbind"
 # The helper owns a 30-second spawn budget followed by a separate five-second
 # FD-store publication budget and bounded local retirement. Keep PID1's outer
 # limits strictly wider so they cannot pre-empt that fail-closed cleanup path.
-# Both staged helper entry paths exist only in the transient mount namespace. Merely
-# supplying the fixed distro-only search path prevents systemd-run v257 from
-# preflighting their absolute paths in the host namespace; those absolute
-# ExecStart paths remain unchanged and the child receives the gate's fixed PATH.
-# Type=exec lets PID 1 finish the start job after the staged image has executed,
-# so systemd-run can return its exact InvocationID before the live proof completes.
+# systemd v257 resolves User=/Group= before constructing the unit's mount
+# namespace, so account files bound only inside that namespace cannot authorize
+# the collision-free staged GID. PID 1 therefore installs only host-present
+# root/root credentials. The fixed root-owned setpriv image then sets the raw
+# staged primary GID plus exactly that one supplementary GID and execs the bound
+# helper in the same MainPID. The diagnostic helper parent contract and the
+# production hook independently attest that final identity together with the
+# unchanged capability, seccomp and NNP envelope.
+# Both staged helper entry paths exist only in the transient mount namespace.
+# The fixed distro-only search path is also the child PATH. Type=exec binds the
+# start job to successful execution of setpriv; terminal output and process/exe
+# predicates separately require its exact helper replacement.
 # Failed units remain loaded for terminal classification; bounded retirement
 # resets and collects them later.
 unit_may_own=yes
@@ -2105,7 +2121,7 @@ systemd-run \
     --property=FileDescriptorStoreMax=128 \
     --property=FileDescriptorStorePreserve=yes \
     --property=User=0 \
-    --property=Group="$agent_gid" \
+    --property=Group=0 \
     --property=SupplementaryGroups= \
     --property=UMask=0077 \
     --property=LimitCORE=0 \
@@ -2150,7 +2166,7 @@ systemd-run \
     --property=SetLoginEnvironment=no \
     --property="StandardOutput=file:$temporary_stage/proof.stdout" \
     --property="StandardError=file:$temporary_stage/proof.stderr" \
-    /run/volparossa-helper-live-proof --internal-worker-v3-live-proof \
+    /usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-live-proof --internal-worker-v3-live-proof \
     >"$temporary_stage/systemd-run.stdout" 2>"$temporary_stage/systemd-run.stderr"
 run_status=$?
 set -e
@@ -2500,7 +2516,7 @@ if [ "$proof_ok" = yes ]; then
         --property=FileDescriptorStoreMax=128 \
         --property=FileDescriptorStorePreserve=yes \
         --property=User=0 \
-        --property=Group="$agent_gid" \
+        --property=Group=0 \
         --property=SupplementaryGroups= \
         --property=UMask=0077 \
         --property=LimitCORE=0 \
@@ -2549,7 +2565,7 @@ if [ "$proof_ok" = yes ]; then
         --property=SetLoginEnvironment=no \
         --property=StandardOutput=null \
         --property=StandardError=null \
-        /run/volparossa-helper-production \
+        /usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production \
         >"$temporary_stage/systemd-run-production.stdout" \
         2>"$temporary_stage/systemd-run-production.stderr"
     production_run_status=$?
@@ -2852,11 +2868,35 @@ if [ "$proof_ok" = yes ]; then
             || record_proof_failure 'production-process-identity'
         identity_executable=$(sed -n '3p' "$production_identity") \
             || record_proof_failure 'production-process-identity'
-        identity_extra=$(sed -n '4p' "$production_identity") \
+        identity_process_contract=$(sed -n '4p' "$production_identity") \
             || record_proof_failure 'production-process-identity'
+        identity_extra=$(sed -n '5p' "$production_identity") \
+            || record_proof_failure 'production-process-identity'
+        expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"
+        case $identity_process_contract in
+            "$expected_process_contract_prefix"*)
+                identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}
+                ;;
+            *)
+                identity_seccomp_filters=
+                record_proof_failure 'production-process-identity'
+                ;;
+        esac
+        case $identity_seccomp_filters in
+            ''|0|0*|*[!0-9]*)
+                record_proof_failure 'production-process-identity'
+                ;;
+            *)
+                if [ "${#identity_seccomp_filters}" -gt 10 ] \
+                    || [ "$identity_seccomp_filters" -gt 1024 ]; then
+                    record_proof_failure 'production-process-identity'
+                fi
+                ;;
+        esac
         if [ "$identity_invocation" != "$unit_invocation_id" ] \
             || [ "$identity_main_pid" != "$production_main_pid" ] \
-            || [ -z "$identity_executable" ] || [ -n "$identity_extra" ]; then
+            || [ -z "$identity_executable" ] \
+            || [ -n "$identity_extra" ]; then
             record_proof_failure 'production-process-identity'
         fi
     else
