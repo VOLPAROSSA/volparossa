@@ -2147,7 +2147,7 @@ systemd-run \
     --property=LockPersonality=yes \
     --property=MemoryDenyWriteExecute=yes \
     --property=RestrictRealtime=yes \
-    --property=RestrictSUIDSGID=yes \
+    --property=RestrictSUIDSGID=no \
     --property=RestrictNamespaces=net \
     --property=SystemCallArchitectures=native \
     --property='SystemCallFilter=@system-service @network-io seccomp' \
@@ -2345,6 +2345,15 @@ else
     observed_remain_after_exit=
     record_proof_failure 'worker-unit-contract'
 fi
+if capture_unit_property RestrictSUIDSGID \
+    "$temporary_stage/unit-restrict-suid-sgid"; then
+    observed_restrict_suid_sgid=$(cat \
+        "$temporary_stage/unit-restrict-suid-sgid") \
+        || record_proof_failure 'worker-unit-contract'
+else
+    observed_restrict_suid_sgid=
+    record_proof_failure 'worker-unit-contract'
+fi
 if capture_unit_property RuntimeMaxUSec "$temporary_stage/unit-runtime-max"; then
     observed_runtime_max=$(cat "$temporary_stage/unit-runtime-max") \
         || record_proof_failure 'worker-unit-contract'
@@ -2382,6 +2391,7 @@ if [ "$observed_notify_access" != main ] \
     || [ "$observed_collect_mode" != inactive ] \
     || [ "$observed_unit_type" != exec ] \
     || [ "$observed_remain_after_exit" != yes ] \
+    || [ "$observed_restrict_suid_sgid" != no ] \
     || [ "$observed_runtime_max" != 45s ] \
     || [ "$observed_fdstore_max" != 128 ] \
     || [ "$observed_fdstore_preserve" != yes ] || [ "$observed_fdstore_count" != 2 ]; then
@@ -2542,7 +2552,7 @@ if [ "$proof_ok" = yes ]; then
         --property=LockPersonality=yes \
         --property=MemoryDenyWriteExecute=yes \
         --property=RestrictRealtime=yes \
-        --property=RestrictSUIDSGID=yes \
+        --property=RestrictSUIDSGID=no \
         --property=RestrictNamespaces=net \
         --property=SystemCallArchitectures=native \
         --property='SystemCallFilter=@system-service @network-io seccomp' \
@@ -2736,6 +2746,15 @@ if [ "$proof_ok" = yes ]; then
         production_remain_after_exit=
         record_proof_failure 'production-unit-contract'
     fi
+    if capture_unit_property RestrictSUIDSGID \
+        "$temporary_stage/production-restrict-suid-sgid"; then
+        production_restrict_suid_sgid=$(cat \
+            "$temporary_stage/production-restrict-suid-sgid") \
+            || record_proof_failure 'production-unit-contract'
+    else
+        production_restrict_suid_sgid=
+        record_proof_failure 'production-unit-contract'
+    fi
     if capture_unit_property FileDescriptorStoreMax \
         "$temporary_stage/production-fdstore-max"; then
         production_fdstore_max=$(cat "$temporary_stage/production-fdstore-max") \
@@ -2808,6 +2827,7 @@ if [ "$proof_ok" = yes ]; then
         || [ "$production_collect_mode" != inactive ] \
         || [ "$production_unit_type" != exec ] \
         || [ "$production_remain_after_exit" != no ] \
+        || [ "$production_restrict_suid_sgid" != no ] \
         || [ "$production_fdstore_max" != 128 ] \
         || [ "$production_fdstore_preserve" != yes ] \
         || [ "$production_fdstore_count" != 0 ] \

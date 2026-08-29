@@ -656,6 +656,21 @@ observes the functional worker created by the no-argument production server. Thi
 implemented gate rather than earned acceptance evidence until the exact merged `main` revision
 produces a retained, host-revalidated PASS; it is not installed-package or restart evidence.
 
+The helper unit deliberately sets `RestrictSUIDSGID=no`, unlike the agent and native MPQUIC units,
+which retain `yes`. In systemd v257.13 that setting installs a separate seccomp filter which returns
+`ENOSYS` for every `openat2(2)` call because seccomp cannot inspect the mode in the indirect
+`open_how` argument. The helper cannot use systemd's suggested `openat(2)` fallback. It uses
+non-fallback `openat2` both to constrain ordinary process records and cgroup paths with
+`RESOLVE_BENEATH`, `NO_MAGICLINKS` and `NO_SYMLINKS`, and to deliberately follow only the fixed
+`exe` and `ns/cgroup` procfs magic links relative to an already pinned exact process directory.
+The helper-specific compatibility exception therefore preserves those distinct `openat2`
+operations and their fail-closed resolution. Its compensating boundaries
+are the fixed typed protocol with no caller-selected filesystem paths, `NoNewPrivileges=yes`,
+`ProtectSystem=strict`, fixed host-visible writable runtime paths, private temporary directories,
+`UMask=0077`, and a capability set without `CAP_CHOWN`, `CAP_FSETID` or `CAP_SETFCAP`. The dedicated
+worker then drops to its distinct UID/GID and final `CAP_NET_ADMIN`-only state before accepting any
+operation.
+
 ### Sequential live worker and production IPC proof driver
 
 `tests/helper/require-live-worker-identity-proof.sh` now provides a preview-first, execute-gated
@@ -696,7 +711,10 @@ boolean-only in systemd-run v257 and is deliberately forbidden by the static con
 helper aliases remain absolute, read-only `/run` paths passed as arguments to the exact host-visible
 `/usr/bin/setpriv` executable. An exact `ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient
 property preserves the driver's fixed child `PATH`; the driver reads that property back from PID 1
-for both transient units before accepting their contracts.
+for both transient units before accepting their contracts. Both calls also set and read back
+`RestrictSUIDSGID=no`: v257's `yes` filter would reject the mandatory `openat2` recovery-anchor
+resolution before the internal worker handshake. The private transient `/run` remains explicitly
+`nosuid,noexec`, and all other applicable helper sandbox boundaries remain pinned.
 Both units also pin and read back `CollectMode=inactive`: a real failure therefore remains loaded
 long enough for exact terminal inspection, while successful or reset units can still be collected
 during bounded retirement. Neither transient launch uses `--ignore-failure` or the aggressive

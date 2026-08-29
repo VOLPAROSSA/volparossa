@@ -15,6 +15,7 @@ umask 077
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
 runner=$script_directory/run-helper-boundary-evidence-vm.sh
+live_gate=$script_directory/require-live-worker-identity-proof.sh
 manifest=$script_directory/debian13-amd64-image-v1.json
 workflow=$repository_directory/.github/workflows/helper-boundary-evidence.yml
 supervisor=$script_directory/qemu-pidfd-supervisor.py
@@ -41,7 +42,7 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 77
 fi
 for required_file in \
-    "$runner" "$manifest" "$workflow" "$supervisor" \
+    "$runner" "$live_gate" "$manifest" "$workflow" "$supervisor" \
     "$environment_validator" "$environment_test"
 do
     if [ ! -f "$required_file" ] || [ -L "$required_file" ]; then
@@ -59,7 +60,17 @@ do
     fi
 done
 sh -n "$runner"
+sh -n "$live_gate"
 jq -e . "$manifest" >/dev/null
+
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 2 ] \
+    || grep -F -- '--property=RestrictSUIDSGID=yes' "$live_gate" >/dev/null \
+    || [ "$(grep -Fc -- \
+        "capture_unit_property RestrictSUIDSGID \\" "$live_gate")" -ne 2 ]; then
+    printf '%s\n' \
+        'the VM payload does not preserve the helper-specific openat2 compatibility contract' >&2
+    exit 1
+fi
 
 expected_manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 actual_manifest_sha256=$(sha256sum "$manifest" | awk '{print $1}')

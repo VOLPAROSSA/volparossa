@@ -283,8 +283,28 @@ single clean-build A01--A15 run; the score is not a release claim.
   capabilities, no-new-privileges state and seccomp state. The production hook independently
   requires and repeatedly revalidates all four UID/GID fields, its singleton group, NNP, seccomp
   mode and bounded filter count, and all five capability masks against the exact seven-capability
-  set. None of the failed runs is PASS evidence; the score remains **11/100** and AV1-09 remains
-  Open until a new exact-main retained run succeeds.
+  set. The next non-retained branch smoke
+  [run 33272380911](https://github.com/VOLPAROSSA/volparossa/actions/runs/33272380911) at
+  `4dad3621fe9ec43ac23de432f57f6b0b7a3582ca` ran the disposable VM in
+  [job 99153099364](https://github.com/VOLPAROSSA/volparossa/actions/runs/33272380911/job/99153099364)
+  and reached the helper-emitted fixed category `worker-helper-worker-spawn`. This proves that PID 1
+  executed the staged helper after the `setpriv` transition and that the helper passed its exact
+  parent contract plus production-runtime preparation before its internal worker failed. Exact
+  systemd v257.13 source identifies the deterministic incompatibility: `RestrictSUIDSGID=yes`
+  installs a separate seccomp filter that returns `ENOSYS` for every `openat2(2)` call because its
+  mode is inside the indirect `open_how` argument. The worker parent intentionally uses rustix's
+  non-fallback `openat2` immediately: ordinary process records and cgroup paths use
+  `RESOLVE_BENEATH`, `NO_MAGICLINKS` and `NO_SYMLINKS`, while only the fixed `exe` and `ns/cgroup`
+  procfs magic links are deliberately followed relative to the already pinned exact process
+  directory. The rejection therefore fails closed instead of silently weakening either resolution
+  contract. The shipped helper and both transient helper
+  profiles now explicitly set and read back `RestrictSUIDSGID=no`; the doctor makes this exception
+  helper-specific, while the agent and native MPQUIC services retain `yes`. Compensating boundaries
+  remain the typed path-free helper protocol, `NoNewPrivileges=yes`, strict filesystem protection,
+  fixed host-visible writable runtime paths, private transient temporary filesystems (including a
+  `nosuid,noexec` `/run`), `UMask=0077`, and the absence of `CAP_CHOWN`, `CAP_FSETID` and
+  `CAP_SETFCAP` from the helper capability set. None of the failed runs is PASS evidence; the score
+  remains **11/100** and AV1-09 remains Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

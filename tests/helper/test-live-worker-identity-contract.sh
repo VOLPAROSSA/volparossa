@@ -3168,6 +3168,7 @@ for required_contract in \
     '--property=PrivateNetwork=yes' \
     '--property=PrivateMounts=yes' \
     '--property=NoNewPrivileges=yes' \
+    '--property=RestrictSUIDSGID=no' \
     '--property=LimitCORE=0' \
     '--property=LimitFSIZE=1048576' \
     '--property=NotifyAccess=main' \
@@ -3549,6 +3550,15 @@ do
         exit 1
     fi
 done
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 2 ] \
+    || grep -F -- '--property=RestrictSUIDSGID=yes' "$gate" >/dev/null \
+    || [ "$(grep -Fc -- \
+        "capture_unit_property RestrictSUIDSGID \\" "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- 'restrict_suid_sgid" != no ]' "$gate")" -ne 2 ]; then
+    printf '%s\n' \
+        'both transient helpers must disable and read back the v257 openat2-incompatible restriction' >&2
+    exit 1
+fi
 if grep -F -- 'ProtectControlGroups=' "$gate" >/dev/null; then
     printf '%s\n' 'a transient helper still assigns the boolean-only legacy cgroup property' >&2
     exit 1
