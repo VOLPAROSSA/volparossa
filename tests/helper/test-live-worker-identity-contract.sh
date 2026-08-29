@@ -277,9 +277,10 @@ while IFS= read -r proof_failure_reason_under_test; do
 done <"$expected_proof_failure_reasons"
 
 exercise_worker_launch_diagnostic() (
-    [ "$#" -eq 2 ] || exit 98
+    [ "$#" -eq 3 ] || exit 98
     diagnostic_name=$1
     diagnostic_stage_payload=$2
+    diagnostic_exec_status=$3
     temporary_stage=$temporary_directory/worker-launch-diagnostic-$diagnostic_name
     mkdir -m 0700 "$temporary_stage"
     printf '%s\n' 'fixed systemd client failure' >"$temporary_stage/systemd-run.stderr"
@@ -294,22 +295,22 @@ exercise_worker_launch_diagnostic() (
     sub_state=failed
     result=exit-code
     exec_code=1
-    exec_status=1
+    exec_status=$diagnostic_exec_status
     report_worker_launch_diagnostic
 )
 expect_status 0 exercise_worker_launch_diagnostic valid \
-    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication'
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' 203
 test ! -s "$last_stdout"
 grep -Fx \
-    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-publication' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-status-203,stage-publication' \
     "$last_stderr" >/dev/null
 
 worker_launch_privacy_sentinel='private-worker-launch-value'
 expect_status 0 exercise_worker_launch_diagnostic other \
-    "$worker_launch_privacy_sentinel"
+    "$worker_launch_privacy_sentinel" 999
 test ! -s "$last_stdout"
 grep -Fx \
-    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-other' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-other,stage-other' \
     "$last_stderr" >/dev/null
 if grep -F "$worker_launch_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
     printf '%s\n' 'worker launch diagnostic exposed a non-allowlisted payload' >&2

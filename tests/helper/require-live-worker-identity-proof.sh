@@ -292,6 +292,18 @@ report_worker_launch_diagnostic() {
     case ${active_state:-}:${sub_state:-}:${result:-}:${exec_code:-}:${exec_status:-} in
         active:exited:success:1:0) worker_diagnostic_terminal=success ;;
         failed:failed:exit-code:1:1) worker_diagnostic_terminal=failed-exit-one ;;
+        failed:failed:exit-code:1:*)
+            case ${exec_status:-} in
+                0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9])
+                    if [ "$exec_status" -le 255 ]; then
+                        worker_diagnostic_terminal=failed-exit-status-$exec_status
+                    else
+                        worker_diagnostic_terminal=other
+                    fi
+                    ;;
+                *) worker_diagnostic_terminal=other ;;
+            esac
+            ;;
         *) worker_diagnostic_terminal=other ;;
     esac
 

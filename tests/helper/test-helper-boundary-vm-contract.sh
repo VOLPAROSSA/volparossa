@@ -673,9 +673,10 @@ sh -n "$branch_failure_functions"
 . "$branch_failure_functions"
 
 branch_failure_diagnostic=$temporary_directory/branch-proof.stderr.log
+branch_failure_privacy_sentinel='private-runtime-payload-must-not-escape'
 printf '%s\n%s\n%s\n' \
-    'fixed proof plan' \
-    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-publication' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-status-203,stage-publication' \
     'live worker-identity proof failed: predicate rejected: worker-launch-status' \
     >"$branch_failure_diagnostic"
 chmod 0600 "$branch_failure_diagnostic"
@@ -689,8 +690,12 @@ expect_status 0 report_non_retained_worker_launch_diagnostic \
     "$branch_failure_diagnostic"
 test ! -s "$last_stdout"
 grep -Fx \
-    'non-retained helper-boundary PR smoke worker launch diagnostic: run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-publication' \
+    'non-retained helper-boundary PR smoke worker launch diagnostic: run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-status-203,stage-publication' \
     "$last_stderr" >/dev/null
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'branch failure diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
 
 printf '%s\n' 'attacker-controlled diagnostic payload' >"$branch_failure_diagnostic"
 expect_status 1 report_non_retained_proof_failure_reason \

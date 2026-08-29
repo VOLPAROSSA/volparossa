@@ -286,7 +286,7 @@ report_non_retained_worker_launch_diagnostic() {
         || return 1
     [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
     require_no_private_key_marker "$non_retained_diagnostic" || return 1
-    non_retained_worker_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-(zero|nonzero|invalid),captures-(yes|no|invalid),json-(yes|no|invalid),manager-(yes|no|invalid),client-stderr-(empty|nonempty|unsafe),terminal-(success|failed-exit-one|other),stage-(empty|parent-contract|runtime-preparation|worker-spawn|publication|retirement-cleanup|other|unsafe)$'
+    non_retained_worker_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-(zero|nonzero|invalid),captures-(yes|no|invalid),json-(yes|no|invalid),manager-(yes|no|invalid),client-stderr-(empty|nonempty|unsafe),terminal-(success|failed-exit-one|failed-exit-status-(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|other),stage-(empty|parent-contract|runtime-preparation|worker-spawn|publication|retirement-cleanup|other|unsafe)$'
     [ "$(grep -Ec "$non_retained_worker_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_worker_diagnostic=$(grep -E \
