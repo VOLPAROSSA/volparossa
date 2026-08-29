@@ -33,6 +33,7 @@ set -- \
     tests/helper/test-helper-boundary-vm-contract.sh \
     tests/helper/test-helper-boundary-vm-environment-v1.sh \
     tests/helper/test-live-worker-identity-contract.sh \
+    tests/helper/test-production-ipc-busctl-parser.sh \
     tests/helper/test-qemu-pidfd-supervisor.sh \
     tests/helper/validate-helper-boundary-evidence-v1.sh \
     tests/helper/validate-helper-boundary-vm-environment-v1.sh \
