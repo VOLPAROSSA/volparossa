@@ -72,7 +72,7 @@ use crate::{
         receive_credential_record_with_deadline, receive_credential_worker_request,
         receive_credential_worker_response_with_deadline, send_credential_record,
         send_credential_record_with_deadline, send_credential_worker_request_with_deadline,
-        send_credential_worker_response, validate_adopted_transport_socket,
+        send_credential_worker_response_with_deadline, validate_adopted_transport_socket,
     },
 };
 use volparossa_linux_uapi::install_close_range_on_exec;
@@ -1309,7 +1309,7 @@ fn fixture_memory_child_loop(
 ) -> Result<(), WorkerV3Error> {
     let mut initialised = false;
     loop {
-        let request = receive_credential_worker_request(channel, expected_parent)?;
+        let (request, deadline) = receive_deadline_bound_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
         let (result, outcome, exit) = match operation {
             internal_worker_request::Operation::Initialise(initialise) => {
@@ -1346,11 +1346,25 @@ fn fixture_memory_child_loop(
             _ => (InternalWorkerResult::Invalid, None, false),
         };
         let response = correlated_response(&request, result, outcome)?;
-        send_credential_worker_response(channel, &request, &response, None)?;
+        send_credential_worker_response_with_deadline(
+            channel, &request, &response, None, deadline,
+        )?;
         if exit {
             return Ok(());
         }
     }
+}
+
+fn receive_deadline_bound_worker_request(
+    channel: &Socket,
+    expected_parent: ExpectedUnixCredentials,
+) -> Result<(InternalWorkerRequest, HardDeadline), WorkerV3Error> {
+    let bound_request = receive_credential_worker_request(channel, expected_parent)?;
+    let deadline = HardDeadline::from_monotonic_expiry_nanos(
+        bound_request.monotonic_deadline_ns,
+        CHANNEL_TIMEOUT,
+    )?;
+    Ok((bound_request.request, deadline))
 }
 
 trait WorkerNamespaceKernel {
@@ -1528,6 +1542,8 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             lease.path_id,
             role,
             lease.ownership_alias.clone(),
+            lease.setup_expires_at_unix,
+            lease.hard_expires_at_unix,
         ) else {
             return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
         };
@@ -1659,7 +1675,7 @@ fn child_loop(
     let mut context: Option<WorkerContext<NamespaceKernel>> = None;
     let mut keys = OsWorkerKeySource;
     loop {
-        let request = receive_credential_worker_request(channel, expected_parent)?;
+        let (request, deadline) = receive_deadline_bound_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
         let (result, outcome, exit) = match operation {
             internal_worker_request::Operation::Initialise(initialise) => {
@@ -1670,7 +1686,6 @@ fn child_loop(
                 if context.is_some() || route_context_id != bound_context {
                     (InternalWorkerResult::Conflict, None, false)
                 } else {
-                    let deadline = HardDeadline::after(CHANNEL_TIMEOUT)?;
                     match NamespaceKernel::connect(deadline).and_then(|mut kernel| {
                         kernel.activate_loopback(deadline)?;
                         Ok(kernel)
@@ -1699,10 +1714,11 @@ fn child_loop(
                 }) else {
                     let response =
                         correlated_response(&request, InternalWorkerResult::NotFound, None)?;
-                    send_credential_worker_response(channel, &request, &response, None)?;
+                    send_credential_worker_response_with_deadline(
+                        channel, &request, &response, None, deadline,
+                    )?;
                     continue;
                 };
-                let deadline = HardDeadline::after(CHANNEL_TIMEOUT)?;
                 match context.prepare(prepare, &mut keys, deadline) {
                     WorkerPrepareOutcome::Prepared(prepared) => (
                         InternalWorkerResult::Ok,
@@ -1722,7 +1738,6 @@ fn child_loop(
                     .as_mut()
                     .filter(|worker_context| worker_context.route_context_id == route_context_id)
                 {
-                    let deadline = HardDeadline::after(CHANNEL_TIMEOUT)?;
                     match worker_context.destroy(deadline) {
                         WorkerDestroyOutcome::Destroyed => {
                             context = None;
@@ -1748,7 +1763,9 @@ fn child_loop(
             _ => (InternalWorkerResult::Invalid, None, false),
         };
         let response = correlated_response(&request, result, outcome)?;
-        send_credential_worker_response(channel, &request, &response, None)?;
+        send_credential_worker_response_with_deadline(
+            channel, &request, &response, None, deadline,
+        )?;
         if exit {
             return Ok(());
         }
@@ -7989,6 +8006,21 @@ mod tests {
             context.prepare(&batch, &mut keys, worker_deadline()),
             WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
         ));
+
+        let mut zero_setup_expiry = worker_prepare(route_context_id, 0x52);
+        zero_setup_expiry.leases[0].setup_expires_at_unix = 0;
+        assert!(matches!(
+            context.prepare(&zero_setup_expiry, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
+        ));
+
+        let mut inverted_expiry = worker_prepare(route_context_id, 0x52);
+        inverted_expiry.leases[0].hard_expires_at_unix =
+            inverted_expiry.leases[0].setup_expires_at_unix - 1;
+        assert!(matches!(
+            context.prepare(&inverted_expiry, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
+        ));
         assert!(context.kernel.calls.is_empty());
         assert!(context.lease.is_none());
     }
@@ -8150,8 +8182,9 @@ mod tests {
         let coordinator = WorkerCoordinator::new(registry);
         let worker_request = request.clone();
         let worker = thread::spawn(move || {
-            let received =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let received = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             assert_eq!(received.request_id, worker_request.request_id);
             let response = initialised_response(&received, SUPERVISOR_CAP_CONTEXT_ID);
             send_credential_worker_response(&peer, &received, &response, None).expect("response");
@@ -15116,8 +15149,9 @@ mod tests {
         let received = Arc::new(AtomicBool::new(false));
         let worker_received = Arc::clone(&received);
         let worker = thread::spawn(move || {
-            let request =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let request = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             worker_received.store(true, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(75));
             let response = initialised_response(&request, context_id);
@@ -15186,8 +15220,9 @@ mod tests {
         let received = Arc::new(AtomicBool::new(false));
         let worker_received = Arc::clone(&received);
         let worker = thread::spawn(move || {
-            let request =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let request = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             worker_received.store(true, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(75));
             let response = initialised_response(&request, context_id);
@@ -15723,8 +15758,9 @@ mod tests {
         let received = Arc::new(AtomicBool::new(false));
         let worker_received = Arc::clone(&received);
         let worker = thread::spawn(move || {
-            let request =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let request = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             worker_received.store(true, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(75));
             let response = initialised_response(&request, context_id);
@@ -15874,8 +15910,9 @@ mod tests {
             )
             .expect("register");
         let worker = thread::spawn(move || {
-            let request =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let request = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             thread::sleep(Duration::from_millis(60));
             let response = initialised_response(&request, context_id);
             send_credential_worker_response(&peer, &request, &response, None).expect("response");
@@ -15914,8 +15951,9 @@ mod tests {
         let sent: OwnedFd = sent.into();
         let worker_alive = Arc::clone(&alive);
         let worker = thread::spawn(move || {
-            let request =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let request = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             let response = acquire_response(&request);
             worker_alive.store(false, Ordering::SeqCst);
             send_credential_worker_response(&peer, &request, &response, Some(sent))
@@ -15957,8 +15995,9 @@ mod tests {
             .expect("observer timeout");
         let sent: OwnedFd = sent.into();
         let worker = thread::spawn(move || {
-            let request =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let request = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             let response = acquire_response(&request);
             send_credential_worker_response(&peer, &request, &response, Some(sent))
                 .expect("invalid FD response");
@@ -16113,8 +16152,9 @@ mod tests {
         let received = Arc::new(AtomicBool::new(false));
         let worker_received = Arc::clone(&received);
         let worker = thread::spawn(move || {
-            let request =
-                receive_credential_worker_request(&peer, current_credentials()).expect("request");
+            let request = receive_credential_worker_request(&peer, current_credentials())
+                .expect("request")
+                .request;
             worker_received.store(true, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(50));
             let response = initialised_response(&request, context_id);

@@ -715,6 +715,39 @@ fn affine_arm_emits_no_token_before_durability_and_exact_retry_projects_identica
     assert_eq!(format!("{may_own:?}"), "DurableMayOwnPrepare(<redacted>)");
     assert_eq!(may_own.resources().len(), 1);
     assert_eq!(may_own.resources()[0].key(), (1, WireRole::Client as i32));
+    let worker_plan = may_own
+        .prepare_leases_v3()
+        .expect("canonical private worker-v3 plan");
+    assert_eq!(worker_plan.route_context_id, vec![28; 16]);
+    assert_eq!(worker_plan.leases.len(), 1);
+    let worker_lease = &worker_plan.leases[0];
+    assert_eq!(worker_lease.path_id, 1);
+    assert_eq!(
+        worker_lease.role,
+        crate::internal_protocol::InternalEndpointRole::Client as i32
+    );
+    assert_eq!(
+        worker_lease
+            .local_overlay_address
+            .as_ref()
+            .expect("canonical local overlay")
+            .address,
+        may_own.resources()[0].local_address().octets()
+    );
+    assert_eq!(
+        worker_lease
+            .local_overlay_address
+            .as_ref()
+            .expect("canonical local overlay")
+            .prefix_length,
+        128
+    );
+    assert_eq!(worker_lease.setup_expires_at_unix, 100);
+    assert_eq!(worker_lease.hard_expires_at_unix, 200);
+    assert_eq!(
+        worker_lease.ownership_alias,
+        may_own.resources()[0].ownership_alias()
+    );
     let first_projection = project_resources(may_own.resources());
     let armed_bytes = fs::read(&config.journal_path).expect("durable MayOwn bytes");
 
@@ -2752,9 +2785,10 @@ fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
         .split("impl fmt::Debug for DurableMayOwnPrepare")
         .next()
         .expect("bounded MayOwn implementation");
-    assert_eq!(may_own_surface.matches("pub(crate)").count(), 2);
+    assert_eq!(may_own_surface.matches("pub(crate)").count(), 3);
     assert!(may_own_surface.contains("context_id(&self)"));
     assert!(may_own_surface.contains("resources(&self) -> &[DurableWireguardResource]"));
+    assert!(may_own_surface.contains("prepare_leases_v3(&self)"));
 
     assert!(!actor_source.contains("impl DurableOwnershipKey {"));
     let custody_surface = actor_source

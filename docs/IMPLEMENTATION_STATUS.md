@@ -502,6 +502,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   otherwise resource/key state is retained as `CleanupIncomplete` for Destroy. Destroy without an
   adopted lease returns `NotFound`, not kernel-absence evidence. Successful internal Prepare,
   Activate, Probe and MPTCP endpoint responses must preserve exact request order and identity;
+  each credentialed request now carries the parent's fixed absolute Linux `CLOCK_MONOTONIC`
+  expiry in a canonical envelope, and the child reuses a no-later projection through mutation and
+  response instead of refreshing a five-second budget. The affine `MayOwnPrepare` token now has one
+  canonical durable-resource projector for path, role, `/128`, expiries and ownership alias; it
+  still has no production dispatch caller.
   engine Prepare proof also rejects
   duplicate public keys or public endpoints before affine handles can be paired. A worker
   `CleanupIncomplete` result now

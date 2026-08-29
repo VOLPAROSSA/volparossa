@@ -80,6 +80,11 @@ an adopted lease returns `NotFound`, never false kernel-absence evidence. Succes
 Prepare, Activate, Probe and MPTCP endpoint responses are bound to the request's exact identity
 order; the external engine
 also rejects duplicate public keys and public endpoints before pairing affine handles.
+Each credentialed worker request carries one canonical envelope with the parent's fixed absolute
+Linux `CLOCK_MONOTONIC` expiry. The child projects a no-later local deadline and reuses it for the
+operation and response, so transport delay cannot create a fresh five-second mutation budget. The
+affine `MayOwnPrepare` owner can canonically project its ordered durable resources into internal-v3
+lease descriptors; call sites supply none of the path, role, `/128`, expiry or ownership alias.
 `NamespaceKernel` contains v3 prepare, peer-activation, and probe primitives plus a complete-batch
 preflight that requires exact name, current ownership alias,
 WireGuard kind and fresh DOWN/key-zero/port-zero/fwmark-zero/peerless state before mutation. Its

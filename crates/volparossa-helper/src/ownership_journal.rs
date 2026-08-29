@@ -24,6 +24,7 @@ pub(crate) use actor::{
 
 use crate::{
     deadline::HardDeadline,
+    internal_protocol::{InternalEndpointRole, InternalIpPrefix, LeasePlan as InternalLeasePlan},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
 };
 
@@ -351,6 +352,8 @@ impl fmt::Debug for RuntimeId {
 pub(crate) struct DurableWireguardResource {
     specification: WireguardLeaseSpec,
     ownership_alias: String,
+    setup_expires_at_unix: NonZeroU64,
+    hard_expires_at_unix: NonZeroU64,
 }
 
 impl DurableWireguardResource {
@@ -366,7 +369,12 @@ impl DurableWireguardResource {
         path_id: u32,
         role: i32,
         ownership_alias: String,
+        setup_expires_at_unix: u64,
+        hard_expires_at_unix: u64,
     ) -> Option<Self> {
+        let setup_expires_at_unix = NonZeroU64::new(setup_expires_at_unix)?;
+        let hard_expires_at_unix =
+            NonZeroU64::new(hard_expires_at_unix).filter(|hard| *hard >= setup_expires_at_unix)?;
         let specification =
             WireguardLeaseSpec::derive(route_context_id, context_role, path_id, role).ok()?;
         specification
@@ -374,6 +382,8 @@ impl DurableWireguardResource {
             .then_some(Self {
                 specification,
                 ownership_alias,
+                setup_expires_at_unix,
+                hard_expires_at_unix,
             })
     }
 
@@ -395,6 +405,37 @@ impl DurableWireguardResource {
     /// Exact topology-derived local overlay address committed by the marker.
     pub(crate) const fn local_address(&self) -> std::net::Ipv6Addr {
         self.specification.local_address()
+    }
+
+    /// Project the exact durable resource into the private worker-v3 lease descriptor.
+    ///
+    /// This is deliberately private to the ownership module: production callers receive a
+    /// complete descriptor only through the affine `DurableMayOwnPrepare` owner and cannot
+    /// substitute a path, role, address, expiry or public ownership marker.
+    fn internal_lease_plan_v3(&self) -> Result<InternalLeasePlan, JournalError> {
+        let (path_id, role) = self.key();
+        let role = match volparossa_routing::WireguardRole::try_from(role)
+            .map_err(|_| JournalError::InvalidRecord)?
+        {
+            volparossa_routing::WireguardRole::Client => InternalEndpointRole::Client,
+            volparossa_routing::WireguardRole::RelayClient => InternalEndpointRole::RelayClient,
+            volparossa_routing::WireguardRole::RelayExit => InternalEndpointRole::RelayExit,
+            volparossa_routing::WireguardRole::Exit => InternalEndpointRole::Exit,
+            volparossa_routing::WireguardRole::Unspecified => {
+                return Err(JournalError::InvalidRecord);
+            }
+        };
+        Ok(InternalLeasePlan {
+            path_id: u32::from(path_id),
+            role: role as i32,
+            local_overlay_address: Some(InternalIpPrefix {
+                address: self.local_address().octets().to_vec(),
+                prefix_length: 128,
+            }),
+            setup_expires_at_unix: self.setup_expires_at_unix.get(),
+            hard_expires_at_unix: self.hard_expires_at_unix.get(),
+            ownership_alias: self.ownership_alias().to_owned(),
+        })
     }
 }
 
@@ -956,6 +997,8 @@ impl OwnershipRecord {
             resources.push(DurableWireguardResource {
                 specification,
                 ownership_alias,
+                setup_expires_at_unix: self.setup_expires_at_unix,
+                hard_expires_at_unix: self.hard_expires_at_unix,
             });
         }
         Ok(resources)

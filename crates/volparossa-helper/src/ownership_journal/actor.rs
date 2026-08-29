@@ -36,7 +36,7 @@ use std::{collections::BTreeSet, sync::OnceLock};
 
 use volparossa_routing::PrepareIntent;
 
-use crate::deadline::HardDeadline;
+use crate::{deadline::HardDeadline, internal_protocol::PrepareLeases};
 
 use super::{
     CleanupExecutor, ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16,
@@ -472,6 +472,23 @@ impl DurableMayOwnPrepare {
 
     pub(crate) fn resources(&self) -> &[DurableWireguardResource] {
         &self.resources
+    }
+
+    /// Canonically project the complete ordered durable plan for the private worker-v3 channel.
+    ///
+    /// No path, role, address, expiry or marker is supplied by an agent or call site. Production
+    /// dispatch remains disconnected; this only closes the descriptor-construction boundary.
+    pub(crate) fn prepare_leases_v3(&self) -> Result<PrepareLeases, DurableOwnershipError> {
+        let leases = self
+            .resources
+            .iter()
+            .map(DurableWireguardResource::internal_lease_plan_v3)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| DurableOwnershipError::Rejected)?;
+        Ok(PrepareLeases {
+            route_context_id: self.context_id().to_vec(),
+            leases,
+        })
     }
 }
 

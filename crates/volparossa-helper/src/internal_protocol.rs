@@ -16,6 +16,8 @@ use zeroize::Zeroizing;
 pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 3;
 pub(crate) const INTERNAL_WORKER_MAGIC: &[u8; 8] = b"VPWKR3\0\0";
 pub(crate) const MAX_INTERNAL_WORKER_FRAME: usize = 128 * 1024;
+const INTERNAL_WORKER_DEADLINE_ENVELOPE_VERSION: u32 = 1;
+const INTERNAL_WORKER_DEADLINE_ENVELOPE_MAGIC: &[u8; 8] = b"VPDLN1\0\0";
 const MAX_PATHS: u32 = 8;
 const MAX_LEASES: usize = 16;
 const MAX_PREFIXES: usize = 8;
@@ -33,6 +35,27 @@ pub(crate) struct InternalWorkerRequest {
         tags = "10, 11, 12, 13, 15, 16, 17, 19"
     )]
     pub(crate) operation: Option<internal_worker_request::Operation>,
+}
+
+/// One logical request bound to the parent's absolute Linux `CLOCK_MONOTONIC` deadline.
+///
+/// The deadline is transport authority rather than operation identity, so it deliberately wraps
+/// the canonical request instead of changing its request digest or idempotent cache key.
+#[derive(Clone, PartialEq, Message)]
+struct DeadlineBoundInternalWorkerRequest {
+    #[prost(uint32, tag = "1")]
+    envelope_version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    magic: Vec<u8>,
+    #[prost(fixed64, tag = "3")]
+    monotonic_deadline_ns: u64,
+    #[prost(message, optional, tag = "4")]
+    request: Option<InternalWorkerRequest>,
+}
+
+pub(crate) struct DeadlineBoundWorkerRequest {
+    pub(crate) monotonic_deadline_ns: u64,
+    pub(crate) request: InternalWorkerRequest,
 }
 
 pub(crate) mod internal_worker_request {
@@ -470,8 +493,32 @@ pub(crate) fn encode_request(
     encode(value)
 }
 
+pub(crate) fn encode_deadline_bound_request(
+    request: &InternalWorkerRequest,
+    monotonic_deadline_ns: u64,
+) -> Result<Zeroizing<Vec<u8>>, InternalProtocolError> {
+    let value = DeadlineBoundInternalWorkerRequest {
+        envelope_version: INTERNAL_WORKER_DEADLINE_ENVELOPE_VERSION,
+        magic: INTERNAL_WORKER_DEADLINE_ENVELOPE_MAGIC.to_vec(),
+        monotonic_deadline_ns,
+        request: Some(request.clone()),
+    };
+    validate_deadline_bound_request(&value)?;
+    encode(&value)
+}
+
 pub(crate) fn decode_request(bytes: &[u8]) -> Result<InternalWorkerRequest, InternalProtocolError> {
     decode(bytes, validate_request)
+}
+
+pub(crate) fn decode_deadline_bound_request(
+    bytes: &[u8],
+) -> Result<DeadlineBoundWorkerRequest, InternalProtocolError> {
+    let value: DeadlineBoundInternalWorkerRequest = decode(bytes, validate_deadline_bound_request)?;
+    Ok(DeadlineBoundWorkerRequest {
+        monotonic_deadline_ns: value.monotonic_deadline_ns,
+        request: value.request.ok_or(InternalProtocolError::Invalid)?,
+    })
 }
 
 pub(crate) fn encode_response(
@@ -608,6 +655,23 @@ fn validate_envelope(
         return Err(InternalProtocolError::Invalid);
     }
     Ok(())
+}
+
+fn validate_deadline_bound_request(
+    value: &DeadlineBoundInternalWorkerRequest,
+) -> Result<(), InternalProtocolError> {
+    if value.envelope_version != INTERNAL_WORKER_DEADLINE_ENVELOPE_VERSION
+        || value.magic != INTERNAL_WORKER_DEADLINE_ENVELOPE_MAGIC
+        || value.monotonic_deadline_ns == 0
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    validate_request(
+        value
+            .request
+            .as_ref()
+            .ok_or(InternalProtocolError::Invalid)?,
+    )
 }
 
 #[allow(clippy::too_many_lines)] // One exhaustive match keeps the operation allowlist auditable.
@@ -981,6 +1045,8 @@ mod tests {
     fn protocol_identity_and_operation_tags_are_fixed() {
         assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 3);
         assert_eq!(INTERNAL_WORKER_MAGIC, b"VPWKR3\0\0");
+        assert_eq!(INTERNAL_WORKER_DEADLINE_ENVELOPE_VERSION, 1);
+        assert_eq!(INTERNAL_WORKER_DEADLINE_ENVELOPE_MAGIC, b"VPDLN1\0\0");
 
         let operations = [
             internal_worker_request::Operation::Initialise(InitialiseContext {
@@ -1044,6 +1110,31 @@ mod tests {
         let mut retired_interception = encoded;
         retired_interception.extend_from_slice(&[0x72, 0]);
         assert!(decode_request(&retired_interception).is_err());
+    }
+
+    #[test]
+    fn deadline_envelope_is_canonical_bounded_and_separate_from_operation_identity() {
+        let request = acquire();
+        let first = encode_deadline_bound_request(&request, 1_000).expect("first envelope");
+        let second = encode_deadline_bound_request(&request, 2_000).expect("second envelope");
+        assert_ne!(first, second, "wire deadline must be transmitted");
+
+        let decoded = decode_deadline_bound_request(&first).expect("deadline envelope");
+        assert_eq!(decoded.monotonic_deadline_ns, 1_000);
+        assert_eq!(decoded.request, request);
+        assert_eq!(
+            encode_request(&decoded.request).expect("logical request"),
+            encode_request(&request).expect("same logical request"),
+            "deadline transport metadata must not change operation identity"
+        );
+
+        assert!(encode_deadline_bound_request(&request, 0).is_err());
+        let raw_request = encode_request(&request).expect("legacy raw request");
+        assert!(decode_deadline_bound_request(&raw_request).is_err());
+
+        let mut noncanonical = first.to_vec();
+        noncanonical.extend_from_slice(&[0xa0, 0x06, 0x01]);
+        assert!(decode_deadline_bound_request(&noncanonical).is_err());
     }
 
     #[test]
