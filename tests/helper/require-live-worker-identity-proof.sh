@@ -206,6 +206,7 @@ classify_worker_live_proof_terminal() {
     [ "$#" -eq 1 ] || return 1
     if [ "$worker_manager_binding_ok" = yes ] \
         && unit_invocation_is_current \
+        && unit_description_matches_marker \
         && [ "$active_state:$sub_state:$result:$exec_code:$exec_status" \
             = failed:failed:exit-code:1:1 ]; then
         record_helper_live_proof_failure_stage "$1" || true
@@ -1348,6 +1349,23 @@ adopt_tentative_unit() {
     done
 }
 
+recover_failed_worker_manager_binding() {
+    [ "$run_status" -ne 0 ] || return 1
+    [ "$worker_launch_captures_ok" = yes ] || return 1
+    vp_capture_file_is_safe "$temporary_stage/systemd-run.stdout" || return 1
+    [ ! -s "$temporary_stage/systemd-run.stdout" ] || return 1
+    [ "$worker_launch_json_ok" = no ] || return 1
+    [ "$worker_manager_binding_ok" = no ] || return 1
+    [ "$unit_owned" = no ] || return 1
+    [ "$unit_may_own" = yes ] || return 1
+    adopt_tentative_unit || return 1
+    [ "$unit_owned" = yes ] || return 1
+    [ "$unit_may_own" = no ] || return 1
+    unit_invocation_is_current || return 1
+    unit_description_matches_marker || return 1
+    worker_manager_binding_ok=yes
+}
+
 retire_unit() {
     if [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ]; then
         adopt_tentative_unit || return 1
@@ -2077,6 +2095,13 @@ if vp_capture_file_is_safe "$temporary_stage/systemd-run.stdout" \
             worker_manager_binding_ok=yes
         fi
     fi
+fi
+# systemd v257 returns from a failed blocking Type=exec start job before its
+# JSON InvocationID print path. Recover only that exact empty-stdout case from
+# PID 1's independently pinned name, ownership marker and current nonzero ID.
+# The missing JSON, nonzero status and systemd-run stderr still forbid PASS.
+if [ "$worker_manager_binding_ok" != yes ]; then
+    recover_failed_worker_manager_binding || true
 fi
 # Preserve the original generic first-failure precedence when no exact PID1
 # binding exists. Only a bound current invocation may defer these predicates
