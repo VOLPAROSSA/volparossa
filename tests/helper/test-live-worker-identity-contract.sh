@@ -122,6 +122,7 @@ proof_failure_functions=$temporary_directory/proof-failure-functions.sh
     sed -n '/^record_helper_live_proof_failure_stage() {$/,/^}$/p' "$gate"
     sed -n '/^classify_worker_live_proof_terminal() {$/,/^}$/p' "$gate"
     sed -n '/^record_worker_launch_failure() {$/,/^}$/p' "$gate"
+    sed -n '/^report_worker_launch_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^report_proof_failure() {$/,/^}$/p' "$gate"
 } >"$proof_failure_functions"
 if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")" -ne 1 ] \
@@ -131,6 +132,8 @@ if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")
     || [ "$(grep -c '^classify_worker_live_proof_terminal() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^record_worker_launch_failure() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_worker_launch_diagnostic() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_proof_failure() {$' "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the privacy-safe proof failure helpers are not uniquely extractable' >&2
@@ -251,6 +254,8 @@ fi
 # These are literal gate-source contracts; expansion here would defeat them.
 # shellcheck disable=SC2016
 if [ "$(grep -Fc 'report_proof_failure "$proof_failure_reason"' "$gate")" -ne 1 ] \
+    || [ "$(grep -Ec '^[[:space:]]+report_worker_launch_diagnostic([[:space:]]|$)' \
+        "$gate")" -ne 1 ] \
     || [ "$(grep -Fc 'failed "predicate rejected: $1"' \
         "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the final proof failure does not use the revalidating reporter once' >&2
@@ -270,6 +275,47 @@ while IFS= read -r proof_failure_reason_under_test; do
         exit 1
     }
 done <"$expected_proof_failure_reasons"
+
+exercise_worker_launch_diagnostic() (
+    [ "$#" -eq 2 ] || exit 98
+    diagnostic_name=$1
+    diagnostic_stage_payload=$2
+    temporary_stage=$temporary_directory/worker-launch-diagnostic-$diagnostic_name
+    mkdir -m 0700 "$temporary_stage"
+    printf '%s\n' 'fixed systemd client failure' >"$temporary_stage/systemd-run.stderr"
+    printf '%s\n' "$diagnostic_stage_payload" >"$temporary_stage/proof.stderr"
+    chmod 0600 "$temporary_stage/systemd-run.stderr" "$temporary_stage/proof.stderr"
+    proof_failure_reason=worker-launch-status
+    run_status=1
+    worker_launch_captures_ok=yes
+    worker_launch_json_ok=no
+    worker_manager_binding_ok=no
+    active_state=failed
+    sub_state=failed
+    result=exit-code
+    exec_code=1
+    exec_status=1
+    report_worker_launch_diagnostic
+)
+expect_status 0 exercise_worker_launch_diagnostic valid \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication'
+test ! -s "$last_stdout"
+grep -Fx \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-publication' \
+    "$last_stderr" >/dev/null
+
+worker_launch_privacy_sentinel='private-worker-launch-value'
+expect_status 0 exercise_worker_launch_diagnostic other \
+    "$worker_launch_privacy_sentinel"
+test ! -s "$last_stdout"
+grep -Fx \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-other' \
+    "$last_stderr" >/dev/null
+if grep -F "$worker_launch_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'worker launch diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
 if proof_failure_reason_is_safe 'worker-launch-status/private-record'; then
     printf '%s\n' 'an unbounded proof failure reason was accepted' >&2
     exit 1

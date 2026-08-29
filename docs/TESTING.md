@@ -168,7 +168,9 @@ automatic `pull_request` trigger and not support for `refs/pull/*`. Only a retai
 can count as AV1-09 evidence or change the alpha score.
 
 If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
-category (or `unclassified`) to job stderr. It does not print or upload the proof diagnostic file.
+category (or `unclassified`) to job stderr. For `worker-launch-status` only, it may additionally emit
+one fixed structural classification of launch binding, terminal state and payload-free helper stage.
+It does not print or upload the proof diagnostic file.
 
 The job first verifies the exact canonical bytes and complete object in
 `tests/helper/debian13-amd64-image-v1.json`, and only then reads its HTTPS URL, filename, and

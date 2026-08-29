@@ -258,6 +258,83 @@ report_proof_failure() {
     failed "predicate rejected: $1"
 }
 
+report_worker_launch_diagnostic() {
+    [ "${proof_failure_reason:-}" = worker-launch-status ] || return 1
+
+    case ${run_status:-} in
+        0) worker_diagnostic_run=zero ;;
+        ''|*[!0-9]*) worker_diagnostic_run=invalid ;;
+        *) worker_diagnostic_run=nonzero ;;
+    esac
+    case ${worker_launch_captures_ok:-} in
+        yes|no) worker_diagnostic_captures=$worker_launch_captures_ok ;;
+        *) worker_diagnostic_captures=invalid ;;
+    esac
+    case ${worker_launch_json_ok:-} in
+        yes|no) worker_diagnostic_json=$worker_launch_json_ok ;;
+        *) worker_diagnostic_json=invalid ;;
+    esac
+    case ${worker_manager_binding_ok:-} in
+        yes|no) worker_diagnostic_manager=$worker_manager_binding_ok ;;
+        *) worker_diagnostic_manager=invalid ;;
+    esac
+
+    if vp_capture_file_is_safe "$temporary_stage/systemd-run.stderr"; then
+        if [ -s "$temporary_stage/systemd-run.stderr" ]; then
+            worker_diagnostic_client_stderr=nonempty
+        else
+            worker_diagnostic_client_stderr=empty
+        fi
+    else
+        worker_diagnostic_client_stderr=unsafe
+    fi
+
+    case ${active_state:-}:${sub_state:-}:${result:-}:${exec_code:-}:${exec_status:-} in
+        active:exited:success:1:0) worker_diagnostic_terminal=success ;;
+        failed:failed:exit-code:1:1) worker_diagnostic_terminal=failed-exit-one ;;
+        *) worker_diagnostic_terminal=other ;;
+    esac
+
+    worker_diagnostic_stage_file=$temporary_stage/proof.stderr
+    if ! vp_capture_file_is_safe "$worker_diagnostic_stage_file"; then
+        worker_diagnostic_stage=unsafe
+    elif [ ! -s "$worker_diagnostic_stage_file" ]; then
+        worker_diagnostic_stage=empty
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=parent-contract' \
+        | cmp -s - "$worker_diagnostic_stage_file"; then
+        worker_diagnostic_stage=parent-contract
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=runtime-preparation' \
+        | cmp -s - "$worker_diagnostic_stage_file"; then
+        worker_diagnostic_stage=runtime-preparation
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=worker-spawn' \
+        | cmp -s - "$worker_diagnostic_stage_file"; then
+        worker_diagnostic_stage=worker-spawn
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+        | cmp -s - "$worker_diagnostic_stage_file"; then
+        worker_diagnostic_stage=publication
+    elif printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=retirement-cleanup' \
+        | cmp -s - "$worker_diagnostic_stage_file"; then
+        worker_diagnostic_stage=retirement-cleanup
+    else
+        worker_diagnostic_stage=other
+    fi
+
+    printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-' \
+        "$worker_diagnostic_run" \
+        ',captures-' "$worker_diagnostic_captures" \
+        ',json-' "$worker_diagnostic_json" \
+        ',manager-' "$worker_diagnostic_manager" \
+        ',client-stderr-' "$worker_diagnostic_client_stderr" \
+        ',terminal-' "$worker_diagnostic_terminal" \
+        ',stage-' "$worker_diagnostic_stage" >&2
+}
+
 if [ "$(id -u)" -ne 0 ]; then
     blocked 'execution requires root inside the disposable VM'
 fi
@@ -2924,6 +3001,10 @@ if [ -n "$changed_records" ] || [ "$before_digest" != "$after_digest" ]; then
     failed 'privacy-safe before/after host-state digests differ'
 fi
 if [ "$proof_ok" != yes ]; then
+    if [ "$proof_failure_reason" = worker-launch-status ]; then
+        report_worker_launch_diagnostic \
+            || failed 'the fixed worker launch diagnostic could not be reported'
+    fi
     report_proof_failure "$proof_failure_reason"
 fi
 if [ "$cleanup_error" != no ]; then

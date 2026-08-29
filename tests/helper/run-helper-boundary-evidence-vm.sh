@@ -275,6 +275,32 @@ report_non_retained_proof_failure_reason() {
         "$non_retained_failure_reason" >&2
 }
 
+report_non_retained_worker_launch_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_worker_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-(zero|nonzero|invalid),captures-(yes|no|invalid),json-(yes|no|invalid),manager-(yes|no|invalid),client-stderr-(empty|nonempty|unsafe),terminal-(success|failed-exit-one|other),stage-(empty|parent-contract|runtime-preparation|worker-spawn|publication|retirement-cleanup|other|unsafe)$'
+    [ "$(grep -Ec "$non_retained_worker_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_worker_diagnostic=$(grep -E \
+        "$non_retained_worker_diagnostic_pattern" "$non_retained_diagnostic") \
+        || return 1
+    non_retained_worker_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=
+    case $non_retained_worker_diagnostic in
+        "$non_retained_worker_diagnostic_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    printf 'non-retained helper-boundary PR smoke worker launch diagnostic: %s\n' \
+        "${non_retained_worker_diagnostic#"$non_retained_worker_diagnostic_prefix"}" >&2
+}
+
 case ${#expected_commit} in
     40|64) ;;
     *) blocked 'the expected commit is not a canonical Git object ID' ;;
@@ -1553,9 +1579,15 @@ fi
 install -m 0600 -- "$retrieved_stderr" "$proof_stderr_log"
 if [ "$guest_status" -ne 0 ]; then
     if [ "$proof_mode" = non-retained-pr-smoke ]; then
-        report_non_retained_proof_failure_reason "$proof_stderr_log" \
-            || printf '%s\n' \
+        if report_non_retained_proof_failure_reason "$proof_stderr_log"; then
+            if [ "$non_retained_failure_reason" = worker-launch-status ]; then
+                report_non_retained_worker_launch_diagnostic \
+                    "$proof_stderr_log" || true
+            fi
+        else
+            printf '%s\n' \
                 'non-retained helper-boundary PR smoke failure category: unclassified' >&2
+        fi
     fi
     failed "the guest helper-boundary proof exited with status $guest_status"
 fi

@@ -665,23 +665,31 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_proof_failure_reason_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 3
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 4
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
 
 branch_failure_diagnostic=$temporary_directory/branch-proof.stderr.log
-printf '%s\n%s\n' \
+printf '%s\n%s\n%s\n' \
     'fixed proof plan' \
-    'live worker-identity proof failed: predicate rejected: production-start-records' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-publication' \
+    'live worker-identity proof failed: predicate rejected: worker-launch-status' \
     >"$branch_failure_diagnostic"
 chmod 0600 "$branch_failure_diagnostic"
 expect_status 0 report_non_retained_proof_failure_reason \
     "$branch_failure_diagnostic"
 test ! -s "$last_stdout"
 grep -Fx \
-    'non-retained helper-boundary PR smoke failure category: production-start-records' \
+    'non-retained helper-boundary PR smoke failure category: worker-launch-status' \
+    "$last_stderr" >/dev/null
+expect_status 0 report_non_retained_worker_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke worker launch diagnostic: run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-one,stage-publication' \
     "$last_stderr" >/dev/null
 
 printf '%s\n' 'attacker-controlled diagnostic payload' >"$branch_failure_diagnostic"
@@ -709,6 +717,9 @@ grep -F \
     "$runner" >/dev/null
 grep -F \
     'non-retained helper-boundary PR smoke failure category: unclassified' \
+    "$runner" >/dev/null
+grep -E \
+    '^[[:space:]]+report_non_retained_worker_launch_diagnostic([[:space:]]|$)' \
     "$runner" >/dev/null
 
 # Early QEMU exits retain only canonical status fields plus the supervisor's
