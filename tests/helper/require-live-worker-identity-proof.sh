@@ -482,7 +482,7 @@ if ! systemd-detect-virt --vm --quiet; then
 fi
 
 for command_name in \
-    awk cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
+    awk busctl cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
     nsenter paste prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl \
     systemd-detect-virt systemd-run tc tr uname wc wg
 do
@@ -490,6 +490,14 @@ do
         blocked "required Debian tool is unavailable: $command_name"
     fi
 done
+busctl_path=/usr/bin/busctl
+if [ "$(command -v busctl)" != "$busctl_path" ] \
+    || [ ! -f "$busctl_path" ] || [ ! -x "$busctl_path" ] \
+    || [ -L "$busctl_path" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$busctl_path" 2>/dev/null || true)" \
+        != 'regular file:0:0:755:1' ]; then
+    blocked 'the fixed root-owned systemd bus client is unavailable'
+fi
 setpriv_path=/usr/bin/setpriv
 if [ "$(command -v setpriv)" != "$setpriv_path" ] \
     || [ ! -f "$setpriv_path" ] || [ ! -x "$setpriv_path" ] \

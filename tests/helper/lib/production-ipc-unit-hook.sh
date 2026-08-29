@@ -6,14 +6,9 @@ set -eu
 export LC_ALL=C
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-# systemctl otherwise bypasses DBUS_SYSTEM_BUS_ADDRESS for a local root caller
-# and selects systemd's privileged private manager socket. That socket is
-# deliberately absent from this private /run; force the already
-# bound, policy-mediated system bus for read-only unit-property observations.
-SYSTEMCTL_FORCE_BUS=1
-export SYSTEMCTL_FORCE_BUS
 umask 077
 
+system_bus_address=unix:path=/run/dbus/system_bus_socket
 runtime_directory=/run/volparossa
 helper_socket=$runtime_directory/helper.sock
 cleanup_token=$runtime_directory/helper.cleanup-token
@@ -198,19 +193,113 @@ checksum_file() {
     esac
 }
 
-unit_invocation_id() {
+unit_object_path() {
     [ "$#" -eq 1 ] || return 1
     unit_name_is_safe "$1" || return 1
-    hook_invocation=$(systemctl show --property=InvocationID --value "$1" 2>/dev/null) \
+    hook_object_json=$(/usr/bin/busctl \
+        --address="$system_bus_address" \
+        --json=short \
+        call \
+        org.freedesktop.systemd1 \
+        /org/freedesktop/systemd1 \
+        org.freedesktop.systemd1.Manager \
+        GetUnit s "$1" 2>/dev/null) \
         || return 1
+    [ "${#hook_object_json}" -le 512 ] || return 1
+    hook_object_path=$(printf '%s' "$hook_object_json" | /usr/bin/jq -er '
+        if (. | keys) == ["data", "type"]
+            and .type == "o"
+            and (.data | type) == "array"
+            and (.data | length) == 1
+            and (.data[0] | type) == "string"
+        then .data[0]
+        else empty
+        end
+    ') || return 1
+    hook_expected_object=$(printf '%s' "$1" \
+        | /usr/bin/sed -e 's/-/_2d/g' -e 's/\./_2e/g') || return 1
+    [ "$hook_object_path" = \
+        "/org/freedesktop/systemd1/unit/$hook_expected_object" ] || return 1
+    printf '%s\n' "$hook_object_path"
+}
+
+unit_invocation_id() {
+    [ "$#" -eq 1 ] || return 1
+    hook_invocation_object=$(unit_object_path "$1") || return 1
+    hook_invocation_json=$(/usr/bin/busctl \
+        --address="$system_bus_address" \
+        --json=short \
+        get-property \
+        org.freedesktop.systemd1 \
+        "$hook_invocation_object" \
+        org.freedesktop.systemd1.Unit \
+        InvocationID 2>/dev/null) || return 1
+    [ "${#hook_invocation_json}" -le 512 ] || return 1
+    hook_invocation_octets=$(printf '%s' "$hook_invocation_json" | /usr/bin/jq -er '
+        if (. | keys) == ["data", "type"]
+            and .type == "ay"
+            and (.data | type) == "array"
+            and (.data | length) == 16
+            and all(.data[];
+                (type == "number") and . >= 0 and . <= 255 and floor == .)
+        then .data | @tsv
+        else empty
+        end
+    ') || return 1
+    hook_invocation=$(printf '%s\n' "$hook_invocation_octets" | /usr/bin/awk -F '\t' '
+        NF == 16 {
+            for (field = 1; field <= NF; field++) {
+                if ($field !~ /^(0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9])$/ \
+                    || $field < 0 || $field > 255) exit 1
+                printf "%02x", $field
+            }
+            accepted = 1
+        }
+        END { if (!accepted) exit 1 }
+    ') || return 1
     invocation_id_is_safe "$hook_invocation" || return 1
     printf '%s\n' "$hook_invocation"
 }
 
+unit_u32_property() {
+    [ "$#" -eq 3 ] || return 1
+    hook_property_object=$(unit_object_path "$1") || return 1
+    [ "$2" = org.freedesktop.systemd1.Service ] || return 1
+    case $3 in
+        MainPID|NFileDescriptorStore) ;;
+        *) return 1 ;;
+    esac
+    hook_property_json=$(/usr/bin/busctl \
+        --address="$system_bus_address" \
+        --json=short \
+        get-property \
+        org.freedesktop.systemd1 \
+        "$hook_property_object" \
+        "$2" "$3" 2>/dev/null) || return 1
+    [ "${#hook_property_json}" -le 128 ] || return 1
+    hook_property_value=$(printf '%s' "$hook_property_json" | /usr/bin/jq -er '
+        if (. | keys) == ["data", "type"]
+            and .type == "u"
+            and (.data | type) == "number"
+            and .data >= 0
+            and .data <= 4294967295
+            and (.data | floor) == .data
+        then .data
+        else empty
+        end
+    ') || return 1
+    case $hook_property_value in
+        0|[1-9]|[1-9][0-9]*) ;;
+        *) return 1 ;;
+    esac
+    [ "${#hook_property_value}" -le 10 ] || return 1
+    printf '%s\n' "$hook_property_value"
+}
+
 unit_main_pid() {
     [ "$#" -eq 1 ] || return 1
-    unit_name_is_safe "$1" || return 1
-    hook_main_pid=$(systemctl show --property=MainPID --value "$1" 2>/dev/null) || return 1
+    hook_main_pid=$(unit_u32_property \
+        "$1" org.freedesktop.systemd1.Service MainPID) || return 1
     number_is_safe "$hook_main_pid" || return 1
     printf '%s\n' "$hook_main_pid"
 }
@@ -737,8 +826,10 @@ unit_fdstore_is_empty() {
     [ "$#" -eq 1 ] || return 1
     hook_fdstore_unit=$1
     unit_name_is_safe "$hook_fdstore_unit" || return 1
-    hook_fdstore_count=$(systemctl show --property=NFileDescriptorStore --value \
-        "$hook_fdstore_unit" 2>/dev/null) || return 1
+    hook_fdstore_count=$(unit_u32_property \
+        "$hook_fdstore_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore) || return 1
     [ "$hook_fdstore_count" = 0 ]
 }
 
@@ -1247,8 +1338,10 @@ stop_hook() {
     [ "$hook_lock_path_after_flock" = "$hook_expected_lock_identity" ] \
         || fail 'ownership journal lock path was replaced while acquired'
     command exec 9>&- || fail 'ownership journal lock FD could not be closed'
-    hook_fdstore_count=$(systemctl show --property=NFileDescriptorStore --value \
-        "$hook_unit" 2>/dev/null) || fail 'descriptor-store count is unavailable'
+    hook_fdstore_count=$(unit_u32_property \
+        "$hook_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore) || fail 'descriptor-store count is unavailable'
     [ "$hook_fdstore_count" = 0 ] || fail 'descriptor store is not empty at stop'
     write_private_file "$proof_directory/stop.pass" \
         'VOLPAROSSA_HELPER_V3_IPC_CLEAN_SHUTDOWN_V1=pass' \

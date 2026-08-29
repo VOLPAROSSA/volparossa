@@ -3558,7 +3558,11 @@ fi
 # These are literal source contracts; expansion here would defeat the check.
 # shellcheck disable=SC2016
 for required_contract in \
+    'awk busctl cat chmod chown' \
     'nsenter paste prlimit readlink rm sed setpriv' \
+    'busctl_path=/usr/bin/busctl' \
+    '[ "$(command -v busctl)" != "$busctl_path" ]' \
+    "blocked 'the fixed root-owned systemd bus client is unavailable'" \
     'setpriv_path=/usr/bin/setpriv' \
     '[ "$(command -v setpriv)" != "$setpriv_path" ]' \
     "!= 'regular file:0:0:755:1' ]; then" \
@@ -4224,11 +4228,23 @@ if [ "$(grep -Fc 'setpriv_path=/usr/bin/setpriv' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc '[ "$(command -v setpriv)" != "$setpriv_path" ]' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc "stat -Lc '%F:%u:%g:%a:%h' \"\$setpriv_path\" 2>/dev/null || true" \
         "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc "!= 'regular file:0:0:755:1' ]; then" "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "!= 'regular file:0:0:755:1' ]; then" "$gate")" -ne 2 ] \
     || [ "$(grep -Fc \
         "blocked 'the fixed root-owned setpriv credential trampoline is unavailable'" \
         "$gate")" -ne 1 ]; then
     printf '%s\n' 'the fixed root-owned setpriv credential trampoline is not pinned' >&2
+    exit 1
+fi
+# This is a literal gate-source contract; expansion would defeat the check.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'busctl_path=/usr/bin/busctl' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc '[ "$(command -v busctl)" != "$busctl_path" ]' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "stat -Lc '%F:%u:%g:%a:%h' \"\$busctl_path\" 2>/dev/null || true" \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        "blocked 'the fixed root-owned systemd bus client is unavailable'" \
+        "$gate")" -ne 1 ]; then
+    printf '%s\n' 'the fixed root-owned systemd bus client is not pinned' >&2
     exit 1
 fi
 for cgroup_assignment_contract in \
@@ -4247,11 +4263,18 @@ do
     fi
 done
 
-# The production hook is root inside a private /run. Pin systemctl to the
-# policy-mediated system bus already bound into that namespace; never widen the
-# sandbox with systemd's privileged private manager socket.
-if [ "$(grep -xc 'SYSTEMCTL_FORCE_BUS=1' "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -xc 'export SYSTEMCTL_FORCE_BUS' "$ipc_hook")" -ne 1 ] \
+# The production hook is root inside a private /run. Query typed properties
+# through the explicit policy-mediated system bus and never widen the sandbox
+# with systemd's privileged private manager socket.
+# These are literal hook-source contracts; expansion would defeat the checks.
+# shellcheck disable=SC2016
+if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 3 ] \
+    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 3 ] \
+    || [ "$(grep -Fc 'GetUnit s "$1" 2>/dev/null)' "$ipc_hook")" -ne 1 ] \
+    || grep -F -- 'SYSTEMCTL_FORCE_BUS' "$ipc_hook" >/dev/null \
+    || grep -F -- 'systemctl ' "$ipc_hook" >/dev/null \
     || grep -F -- '/run/systemd/private' "$gate" >/dev/null \
     || grep -F -- '/run/systemd/private' "$ipc_hook" >/dev/null; then
     printf '%s\n' \
@@ -4586,7 +4609,8 @@ for required_hook_contract in \
     'command exec 9<>"$journal_lock"' \
     'hook_lock_fd_identity=$(stat -Lc' \
     '/usr/bin/flock -n 9' \
-    'systemctl show --property=NFileDescriptorStore --value' \
+    'unit_u32_property' \
+    'NFileDescriptorStore' \
     '[ "$hook_fdstore_count" = 0 ]' \
     'VOLPAROSSA_HELPER_V3_IPC_CLEAN_SHUTDOWN_V1=pass'
 do
