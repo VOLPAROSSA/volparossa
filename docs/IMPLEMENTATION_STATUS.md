@@ -352,7 +352,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   [job 99162565524](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986/job/99162565524)
   and reached the fixed first failure `production-launch-status`. Production service stdout and
   stderr intentionally remained null, so this result does not identify which fixed `ExecStartPost`
-  assertion failed. The start hook now maintains one monotonic 16-value allowlist spanning combined
+  assertion failed. The start hook now maintains one fixed monotonic allowlist spanning combined
   preflight/runtime validation, helper identity, active-lock proof, each protocol-probe group,
   functional underlay, probe-ready, worker observation, probe finish, cleanup and final publication.
   Any failed start atomically writes at most one root-owned, mode-0600, single-link
@@ -363,6 +363,31 @@ single clean-build A01--A15 run; the score is not a release claim.
   exact category. Missing, duplicate, malformed, mixed and privacy-unsafe records expose no stage;
   raw hook messages and service streams remain unavailable. Run 33275945986 is not PASS evidence,
   so the score remains **11/100** and AV1-09 remains Open.
+  Exact branch [run 33278664815](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815)
+  at `b050fe576ebd2e77cc4d3c871dad22f9d91e267b` then ran the disposable VM in
+  [job 99169908991](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815/job/99169908991)
+  and retained `production-launch-status` with diagnostic `identity-command`. That failed run is
+  not PASS evidence. Static reproduction identified an evidence defect: the separately confined
+  root hook cannot honestly read the non-dumpable staged-agent process's `/proc/<pid>/cmdline` or
+  `exe` magic link without ptrace-equivalent authority. The proof does not add `CAP_SYS_PTRACE` or
+  a private-manager bind. Instead, `identity-launch` reads both systemd v257 `ExecStart` and
+  `ExecStartEx` over the policy-mediated system bus and requires their exact ten-field signatures,
+  empty/false flags, running timestamps, `MainPID`, and the exact
+  `/usr/bin/setpriv --regid=<agent-gid> --groups=<agent-gid> --
+  /run/volparossa-helper-production` tuple. `identity-birth` binds that command to the root-owned,
+  mode-0500, single-link helper image: it records metadata plus one SHA-256 that must equal the
+  driver's fenced staged digest, while later checks re-read metadata instead of repeatedly hashing
+  the roughly 78 MiB image. The manager `InvocationID` and `MainPID`, canonical
+  `/proc/<pid>/stat` starttime, exact process-status record, second starttime, image metadata,
+  `MainPID`, and `InvocationID` form one forward/reverse replacement and PID-reuse bracket. Every
+  authenticated probe still requires server `SO_PEERCRED` to equal that exact `MainPID` and is
+  bracketed by the complete identity artifact. Retirement distinguishes the old process from PID
+  reuse by starttime and fails closed when an extant proc record becomes unreadable. The worker
+  observation likewise makes no cross-credential executable claim: it joins one direct child by
+  stable starttime, PPid, complete dedicated credentials and a pinned distinct network namespace
+  to the launched helper's existing pidfd/process/netns custody, credential-authenticated child
+  handshake, and held functional Prepare/Destroy exchange. A fresh exact-main KVM PASS remains
+  required; this correction does not raise the **11/100** score or close AV1-09.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

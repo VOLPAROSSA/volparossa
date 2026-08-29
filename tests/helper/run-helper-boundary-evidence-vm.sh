@@ -381,8 +381,8 @@ non_retained_production_launch_stage_is_safe() {
         identity-socket|\
         identity-lock|\
         identity-manager|\
-        identity-command|\
-        identity-executable|\
+        identity-launch|\
+        identity-birth|\
         identity-process|\
         identity-stability|\
         identity-publication|\
@@ -428,7 +428,7 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
     [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-command|identity-executable|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-probe-ready|functional-worker-observation|functional-probe-finish|functional-cleanup|publication)$'
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-probe-ready|functional-worker-observation|functional-probe-finish|functional-cleanup|publication)$'
     [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_production_mixed_pattern='^(VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=|VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=)'

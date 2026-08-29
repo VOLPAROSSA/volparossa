@@ -81,7 +81,7 @@ if [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$live_gate")" -ne 1 
         'the VM payload does not preserve one fixed unexpected driver-phase record' >&2
     exit 1
 fi
-if [ "$(grep -Fxc '    identity_executable=' "$live_gate")" -ne 1 ] \
+if [ "$(grep -Fxc '    identity_launch=' "$live_gate")" -ne 1 ] \
     || [ "$(grep -Fc 'if command exec 9<>"$production_lock_path"; then' \
         "$live_gate")" -ne 1 ] \
     || grep -F 'if exec 9<>"$production_lock_path"; then' "$live_gate" >/dev/null; then

@@ -381,8 +381,8 @@ production_start_failure_stage_is_safe() {
         identity-socket|\
         identity-lock|\
         identity-manager|\
-        identity-command|\
-        identity-executable|\
+        identity-launch|\
+        identity-birth|\
         identity-process|\
         identity-stability|\
         identity-publication|\
@@ -1489,22 +1489,170 @@ unit_fdstore_count() {
     esac
 }
 
+systemd_launch_record_is_safe() {
+    [ "$#" -eq 3 ] || return 1
+    retired_launch_record=$1
+    retired_launch_pid=$2
+    retired_launch_gid=$3
+    case $retired_launch_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    case $retired_launch_gid in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "$retired_launch_record" | /usr/bin/awk \
+        -v expected_pid="$retired_launch_pid" \
+        -v expected_gid="$retired_launch_gid" '
+        function positive_u53(value) {
+            return value ~ /^[1-9][0-9]*$/ \
+                && length(value) <= 16 \
+                && value + 0 <= 9007199254740991
+        }
+        NR != 1 { invalid = 1; next }
+        {
+            prefix = "systemd-launch-v1=pid:" expected_pid \
+                ";gid:" expected_gid ";start-realtime:"
+            if (index($0, prefix) != 1) {
+                invalid = 1
+                next
+            }
+            remainder = substr($0, length(prefix) + 1)
+            if (split(remainder, value, ";start-monotonic:") != 2 \
+                || !positive_u53(value[1]) \
+                || !positive_u53(value[2])) {
+                invalid = 1
+                next
+            }
+            accepted++
+        }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+        }
+    '
+}
+
+launch_image_record_is_safe() {
+    [ "$#" -eq 2 ] || return 1
+    retired_image_record=$1
+    retired_image_digest=$2
+    [ "${#retired_image_digest}" -eq 64 ] || return 1
+    case $retired_image_digest in
+        *[!0-9a-f]*) return 1 ;;
+    esac
+    printf '%s\n' "$retired_image_record" | /usr/bin/awk -F '[:;]' \
+        -v expected_digest="$retired_image_digest" '
+        function canonical_positive(value) {
+            return value ~ /^[1-9][0-9]*$/ && length(value) <= 20
+        }
+        NR != 1 { invalid = 1; next }
+        {
+            if (NF != 8 || $1 != "launch-image-v1=device" \
+                || !canonical_positive($2) || $3 != "inode" \
+                || !canonical_positive($4) || $5 != "size" \
+                || !canonical_positive($6) || length($6) > 9 \
+                || $6 > 134217728 || $7 != "sha256" \
+                || $8 != expected_digest) {
+                invalid = 1
+                next
+            }
+            accepted++
+        }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+        }
+    '
+}
+
+process_starttime_from_stat() {
+    [ "$#" -eq 2 ] || return 1
+    retired_starttime_line=$1
+    retired_starttime_pid=$2
+    case $retired_starttime_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#retired_starttime_pid}" -le 10 ] \
+        && [ "$retired_starttime_pid" -le 4194304 ] || return 1
+    [ "${#retired_starttime_line}" -le 4096 ] || return 1
+    printf '%s\n' "$retired_starttime_line" | /usr/bin/awk \
+        -v expected_pid="$retired_starttime_pid" '
+        NR != 1 { invalid = 1; next }
+        {
+            prefix = expected_pid " ("
+            if (index($0, prefix) != 1) {
+                invalid = 1
+                next
+            }
+            close_offset = 0
+            for (offset = length($0) - 1; offset >= length(prefix); offset--) {
+                if (substr($0, offset, 2) == ") ") {
+                    close_offset = offset
+                    break
+                }
+            }
+            if (close_offset == 0) {
+                invalid = 1
+                next
+            }
+            remainder = substr($0, close_offset + 2)
+            if (remainder == "" || substr(remainder, 1, 1) == " " \
+                || substr(remainder, length(remainder), 1) == " " \
+                || index(remainder, "  ") != 0 \
+                || remainder ~ /[\t\r\n]/) {
+                invalid = 1
+                next
+            }
+            fields = split(remainder, value, " ")
+            starttime = value[20]
+            if (fields < 20 || value[1] !~ /^(R|S|D)$/ \
+                || starttime !~ /^[1-9][0-9]*$/ \
+                || length(starttime) > 20) {
+                invalid = 1
+                next
+            }
+            accepted++
+        }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+            print starttime
+        }
+    '
+}
+
+capture_process_starttime() {
+    [ "$#" -eq 1 ] || return 1
+    retired_starttime_pid=$1
+    case $retired_starttime_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#retired_starttime_pid}" -le 10 ] \
+        && [ "$retired_starttime_pid" -le 4194304 ] || return 1
+    retired_starttime_path=/proc/$retired_starttime_pid/stat
+    [ -f "$retired_starttime_path" ] && [ ! -L "$retired_starttime_path" ] \
+        || return 1
+    retired_starttime_line=$(cat "$retired_starttime_path") || return 1
+    process_starttime_from_stat "$retired_starttime_line" "$retired_starttime_pid"
+}
+
 retired_runtime_is_absent() {
     [ "$#" -eq 4 ] || return 1
     retired_unit_name=$1
     retired_control_group=$2
     retired_main_pid=$3
-    retired_executable_metadata=$4
+    retired_process_starttime=$4
     case $retired_unit_name in
         volparossa-helper-live-proof-[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9].service) ;;
         *) return 1 ;;
     esac
     [ "$retired_control_group" = "/system.slice/$retired_unit_name" ] || return 1
     case $retired_main_pid in
-        0) [ -z "$retired_executable_metadata" ] || return 1 ;;
-        ''|*[!0-9]*) return 1 ;;
-        *) [ "$retired_main_pid" -le 4194304 ] || return 1
-            [ -n "$retired_executable_metadata" ] || return 1
+        0) [ -z "$retired_process_starttime" ] || return 1 ;;
+        ''|0*|*[!0-9]*) return 1 ;;
+        *) [ "${#retired_main_pid}" -le 7 ] \
+                && [ "$retired_main_pid" -le 4194304 ] || return 1
+            case $retired_process_starttime in
+                ''|0|0*|*[!0-9]*) return 1 ;;
+            esac
+            [ "${#retired_process_starttime}" -le 20 ] || return 1
             ;;
     esac
     retired_cgroup_path=/sys/fs/cgroup$retired_control_group
@@ -1515,13 +1663,17 @@ retired_runtime_is_absent() {
             retired_cgroup_present=yes
         fi
         retired_process_present=no
-        if [ "$retired_main_pid" -ne 0 ] \
-            && { [ -e "/proc/$retired_main_pid/exe" ] \
-                || [ -L "/proc/$retired_main_pid/exe" ]; }; then
-            retired_observed_executable=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
-                "/proc/$retired_main_pid/exe" 2>/dev/null) \
-                || retired_observed_executable=
-            if [ "$retired_observed_executable" = "$retired_executable_metadata" ]; then
+        if [ "$retired_main_pid" -ne 0 ] && [ -d "/proc/$retired_main_pid" ]; then
+            if retired_observed_starttime=$(capture_process_starttime \
+                "$retired_main_pid"); then
+                if [ "$retired_observed_starttime" = \
+                    "$retired_process_starttime" ]; then
+                    retired_process_present=yes
+                fi
+            elif [ -d "/proc/$retired_main_pid" ]; then
+                # An existing process whose birth token cannot be observed is
+                # never treated as safely retired. A disappearing proc entry
+                # is handled as absent on this or the next bounded attempt.
                 retired_process_present=yes
             fi
         fi
@@ -3043,7 +3195,10 @@ if [ "$proof_ok" = yes ]; then
     # reach normal final reporting instead of an errexit/set-u status 2.
     identity_invocation=
     identity_main_pid=
-    identity_executable=
+    identity_launch=
+    identity_launch_image=
+    identity_starttime=
+    identity_starttime_value=
     identity_process_contract=
     identity_extra=
     identity_seccomp_filters=
@@ -3053,12 +3208,44 @@ if [ "$proof_ok" = yes ]; then
             || record_proof_failure 'production-process-identity'
         identity_main_pid=$(sed -n '2p' "$production_identity") \
             || record_proof_failure 'production-process-identity'
-        identity_executable=$(sed -n '3p' "$production_identity") \
+        identity_launch=$(sed -n '3p' "$production_identity") \
             || record_proof_failure 'production-process-identity'
-        identity_process_contract=$(sed -n '4p' "$production_identity") \
+        identity_launch_image=$(sed -n '4p' "$production_identity") \
             || record_proof_failure 'production-process-identity'
-        identity_extra=$(sed -n '5p' "$production_identity") \
+        identity_starttime=$(sed -n '5p' "$production_identity") \
             || record_proof_failure 'production-process-identity'
+        identity_process_contract=$(sed -n '6p' "$production_identity") \
+            || record_proof_failure 'production-process-identity'
+        identity_extra=$(sed -n '7p' "$production_identity") \
+            || record_proof_failure 'production-process-identity'
+        if ! systemd_launch_record_is_safe "$identity_launch" \
+            "$production_main_pid" "$agent_gid"; then
+            record_proof_failure 'production-process-identity'
+        fi
+        if ! launch_image_record_is_safe \
+            "$identity_launch_image" "$staged_digest"; then
+            record_proof_failure 'production-process-identity'
+        fi
+        identity_starttime_prefix=process-starttime-v1=
+        case $identity_starttime in
+            "$identity_starttime_prefix"*)
+                identity_starttime_value=${identity_starttime#"$identity_starttime_prefix"}
+                ;;
+            *)
+                identity_starttime_value=
+                record_proof_failure 'production-process-identity'
+                ;;
+        esac
+        case $identity_starttime_value in
+            ''|0|0*|*[!0-9]*)
+                record_proof_failure 'production-process-identity'
+                ;;
+            *)
+                if [ "${#identity_starttime_value}" -gt 20 ]; then
+                    record_proof_failure 'production-process-identity'
+                fi
+                ;;
+        esac
         expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"
         case $identity_process_contract in
             "$expected_process_contract_prefix"*)
@@ -3082,7 +3269,6 @@ if [ "$proof_ok" = yes ]; then
         esac
         if [ "$identity_invocation" != "$unit_invocation_id" ] \
             || [ "$identity_main_pid" != "$production_main_pid" ] \
-            || [ -z "$identity_executable" ] \
             || [ -n "$identity_extra" ]; then
             record_proof_failure 'production-process-identity'
         fi
@@ -3174,7 +3360,7 @@ if [ "$proof_ok" = yes ]; then
         if [ "$production_retired_load_state" != not-found ] \
             || ! retired_runtime_is_absent "$production_unit_name" \
                 "$production_control_group" "$production_main_pid" \
-                "$identity_executable"; then
+                "$identity_starttime_value"; then
             record_proof_failure 'production-retirement'
         fi
         forget_unit_ownership

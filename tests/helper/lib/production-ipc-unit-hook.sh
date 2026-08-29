@@ -105,8 +105,8 @@ start_failure_stage_is_safe() {
         identity-socket|\
         identity-lock|\
         identity-manager|\
-        identity-command|\
-        identity-executable|\
+        identity-launch|\
+        identity-birth|\
         identity-process|\
         identity-stability|\
         identity-publication|\
@@ -136,9 +136,9 @@ advance_start_failure_stage() {
         preflight-runtime:identity-socket|\
         identity-socket:identity-lock|\
         identity-lock:identity-manager|\
-        identity-manager:identity-command|\
-        identity-command:identity-executable|\
-        identity-executable:identity-process|\
+        identity-manager:identity-launch|\
+        identity-launch:identity-birth|\
+        identity-birth:identity-process|\
         identity-process:identity-stability|\
         identity-stability:identity-publication|\
         identity-publication:active-lock|\
@@ -191,6 +191,62 @@ checksum_file() {
         ''|*[!0-9a-f]*) return 1 ;;
         *) printf '%s\n' "$hook_checksum" ;;
     esac
+}
+
+capture_launch_image_metadata() {
+    [ "$#" -eq 1 ] || return 1
+    hook_image_path=$1
+    [ "$hook_image_path" = "$production_helper" ] || return 1
+    [ -f "$hook_image_path" ] && [ ! -L "$hook_image_path" ] || return 1
+    hook_image_stat=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h:%s' \
+        "$hook_image_path" 2>/dev/null) || return 1
+    [ "${#hook_image_stat}" -le 256 ] || return 1
+    printf '%s\n' "$hook_image_stat" | /usr/bin/awk -F: '
+        function canonical_positive(value) {
+            return value ~ /^[1-9][0-9]*$/ && length(value) <= 20
+        }
+        NR != 1 { invalid = 1; next }
+        {
+            if (NF != 8 || !canonical_positive($1) \
+                || !canonical_positive($2) || $3 != "regular file" \
+                || $4 != 0 || $5 != 0 || $6 != 500 || $7 != 1 \
+                || !canonical_positive($8) || length($8) > 9 \
+                || $8 > 134217728) {
+                invalid = 1
+                next
+            }
+            record = "launch-image-v1=device:" $1 ";inode:" $2 \
+                ";size:" $8
+            accepted++
+        }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+            print record
+        }
+    '
+}
+
+capture_launch_image_identity() {
+    [ "$#" -eq 1 ] || return 1
+    hook_image_metadata=$(capture_launch_image_metadata "$1") || return 1
+    hook_image_digest=$(checksum_file "$1") || return 1
+    printf '%s;sha256:%s\n' "$hook_image_metadata" "$hook_image_digest"
+}
+
+launch_image_matches_identity() {
+    [ "$#" -eq 2 ] || return 1
+    hook_image_path=$1
+    hook_expected_image=$2
+    hook_expected_image_metadata=${hook_expected_image%;sha256:*}
+    hook_expected_image_digest=${hook_expected_image#"$hook_expected_image_metadata;sha256:"}
+    [ "$hook_expected_image" = \
+        "$hook_expected_image_metadata;sha256:$hook_expected_image_digest" ] || return 1
+    [ "${#hook_expected_image_digest}" -eq 64 ] || return 1
+    case $hook_expected_image_digest in
+        *[!0-9a-f]*) return 1 ;;
+    esac
+    [ "$(capture_launch_image_metadata "$hook_image_path")" = \
+        "$hook_expected_image_metadata" ]
 }
 
 unit_object_path() {
@@ -307,6 +363,103 @@ unit_main_pid() {
     printf '%s\n' "$hook_main_pid"
 }
 
+systemd_exec_record_from_json() {
+    [ "$#" -eq 5 ] || return 1
+    hook_exec_json=$1
+    hook_exec_kind=$2
+    hook_exec_pid=$3
+    hook_exec_gid=$4
+    hook_exec_expected_type=$5
+    number_is_safe "$hook_exec_pid" || return 1
+    number_is_safe "$hook_exec_gid" || return 1
+    case $hook_exec_kind:$hook_exec_expected_type in
+        basic:'a(sasbttttuii)'|extended:'a(sasasttttuii)') ;;
+        *) return 1 ;;
+    esac
+    printf '%s' "$hook_exec_json" | /usr/bin/jq -ers \
+        --arg expected_kind "$hook_exec_kind" \
+        --arg expected_type "$hook_exec_expected_type" \
+        --arg expected_path /usr/bin/setpriv \
+        --arg expected_regid "--regid=$hook_exec_gid" \
+        --arg expected_groups "--groups=$hook_exec_gid" \
+        --arg expected_helper "$production_helper" \
+        --arg expected_gid "$hook_exec_gid" \
+        --argjson expected_pid "$hook_exec_pid" '
+        def exact_u53:
+            type == "number"
+            and . >= 0
+            and . <= 9007199254740991
+            and floor == .;
+        if length == 1
+            and (.[0] | keys) == ["data", "type"]
+            and .[0].type == $expected_type
+            and (.[0].data | type) == "array"
+            and (.[0].data | length) == 1
+            and (.[0].data[0] | type) == "array"
+            and (.[0].data[0] | length) == 10
+            and .[0].data[0][0] == $expected_path
+            and .[0].data[0][1] == [
+                $expected_path,
+                $expected_regid,
+                $expected_groups,
+                "--",
+                $expected_helper
+            ]
+            and (if $expected_kind == "basic"
+                then .[0].data[0][2] == false
+                else .[0].data[0][2] == []
+                end)
+            and (.[0].data[0][3] | exact_u53 and . > 0)
+            and (.[0].data[0][4] | exact_u53 and . > 0)
+            and .[0].data[0][5] == 0
+            and .[0].data[0][6] == 0
+            and .[0].data[0][7] == $expected_pid
+            and .[0].data[0][8] == 0
+            and .[0].data[0][9] == 0
+        then .[0].data[0] as $entry
+            | "systemd-launch-v1=pid:\($entry[7]);gid:\($expected_gid);start-realtime:\($entry[3]);start-monotonic:\($entry[4])"
+        else empty
+        end
+    '
+}
+
+capture_systemd_launch_contract() {
+    [ "$#" -eq 3 ] || return 1
+    hook_launch_unit=$1
+    hook_launch_pid=$2
+    hook_launch_gid=$3
+    unit_name_is_safe "$hook_launch_unit" || return 1
+    number_is_safe "$hook_launch_pid" || return 1
+    number_is_safe "$hook_launch_gid" || return 1
+    hook_launch_object=$(unit_object_path "$hook_launch_unit") || return 1
+    hook_exec_start_json=$(/usr/bin/busctl \
+        --address="$system_bus_address" \
+        --json=short \
+        get-property \
+        org.freedesktop.systemd1 \
+        "$hook_launch_object" \
+        org.freedesktop.systemd1.Service \
+        ExecStart 2>/dev/null) || return 1
+    hook_exec_start_ex_json=$(/usr/bin/busctl \
+        --address="$system_bus_address" \
+        --json=short \
+        get-property \
+        org.freedesktop.systemd1 \
+        "$hook_launch_object" \
+        org.freedesktop.systemd1.Service \
+        ExecStartEx 2>/dev/null) || return 1
+    [ "${#hook_exec_start_json}" -le 2048 ] || return 1
+    [ "${#hook_exec_start_ex_json}" -le 2048 ] || return 1
+    hook_exec_start_record=$(systemd_exec_record_from_json \
+        "$hook_exec_start_json" basic "$hook_launch_pid" "$hook_launch_gid" \
+        'a(sasbttttuii)') || return 1
+    hook_exec_start_ex_record=$(systemd_exec_record_from_json \
+        "$hook_exec_start_ex_json" extended "$hook_launch_pid" "$hook_launch_gid" \
+        'a(sasasttttuii)') || return 1
+    [ "$hook_exec_start_record" = "$hook_exec_start_ex_record" ] || return 1
+    printf '%s\n' "$hook_exec_start_record"
+}
+
 capture_socket_identity() {
     [ "$#" -eq 1 ] || return 1
     hook_socket_gid=$1
@@ -341,20 +494,65 @@ capture_lock_identity() {
     esac
 }
 
-command_line_is_argumentless() {
+process_starttime_from_stat() {
+    [ "$#" -eq 2 ] || return 1
+    hook_starttime_line=$1
+    hook_starttime_pid=$2
+    number_is_safe "$hook_starttime_pid" || return 1
+    [ "${#hook_starttime_line}" -le 4096 ] || return 1
+    printf '%s\n' "$hook_starttime_line" | /usr/bin/awk \
+        -v expected_pid="$hook_starttime_pid" '
+        NR != 1 { invalid = 1; next }
+        {
+            prefix = expected_pid " ("
+            if (index($0, prefix) != 1) {
+                invalid = 1
+                next
+            }
+            close_offset = 0
+            for (offset = length($0) - 1; offset >= length(prefix); offset--) {
+                if (substr($0, offset, 2) == ") ") {
+                    close_offset = offset
+                    break
+                }
+            }
+            if (close_offset == 0) {
+                invalid = 1
+                next
+            }
+            remainder = substr($0, close_offset + 2)
+            if (remainder == "" || substr(remainder, 1, 1) == " " \
+                || substr(remainder, length(remainder), 1) == " " \
+                || index(remainder, "  ") != 0 \
+                || remainder ~ /[\t\r\n]/) {
+                invalid = 1
+                next
+            }
+            fields = split(remainder, value, " ")
+            starttime = value[20]
+            if (fields < 20 || value[1] !~ /^(R|S|D)$/ \
+                || starttime !~ /^[1-9][0-9]*$/ \
+                || length(starttime) > 20) {
+                invalid = 1
+                next
+            }
+            accepted++
+        }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+            print starttime
+        }
+    '
+}
+
+capture_process_starttime() {
     [ "$#" -eq 1 ] || return 1
-    hook_command_pid=$1
-    number_is_safe "$hook_command_pid" || return 1
-    hook_expected_command=$proof_directory/expected-command-line
-    [ ! -e "$hook_expected_command" ] && [ ! -L "$hook_expected_command" ] || return 1
-    printf '%s\000' "$production_helper" >"$hook_expected_command" || return 1
-    chmod 0600 "$hook_expected_command" || return 1
-    if ! private_file_is_safe "$hook_expected_command" \
-        || ! cmp -s "$hook_expected_command" "/proc/$hook_command_pid/cmdline"; then
-        rm -f -- "$hook_expected_command"
-        return 1
-    fi
-    rm -f -- "$hook_expected_command"
+    hook_starttime_pid=$1
+    number_is_safe "$hook_starttime_pid" || return 1
+    hook_starttime_path=/proc/$hook_starttime_pid/stat
+    [ -f "$hook_starttime_path" ] && [ ! -L "$hook_starttime_path" ] || return 1
+    hook_starttime_line=$(cat "$hook_starttime_path") || return 1
+    process_starttime_from_stat "$hook_starttime_line" "$hook_starttime_pid"
 }
 
 capture_helper_process_contract() {
@@ -448,11 +646,15 @@ capture_helper_process_contract() {
 }
 
 capture_running_identity() {
-    case $# in
-        2) hook_initial_identity=no ;;
-        3)
-            [ "$3" = initial ] || return 1
+    [ "$#" -eq 3 ] || return 1
+    case $3 in
+        initial)
             hook_initial_identity=yes
+            hook_expected_launch_image=
+            ;;
+        launch-image-v1=*)
+            hook_initial_identity=no
+            hook_expected_launch_image=$3
             ;;
         *) return 1 ;;
     esac
@@ -465,17 +667,23 @@ capture_running_identity() {
     hook_identity_invocation=$(unit_invocation_id "$hook_identity_unit") || return 1
     hook_identity_pid=$(unit_main_pid "$hook_identity_unit") || return 1
     if [ "$hook_initial_identity" = yes ]; then
-        advance_start_failure_stage identity-command || return 1
+        advance_start_failure_stage identity-launch || return 1
     fi
-    command_line_is_argumentless "$hook_identity_pid" || return 1
+    hook_launch_contract=$(capture_systemd_launch_contract \
+        "$hook_identity_unit" "$hook_identity_pid" "$hook_identity_gid") || return 1
     if [ "$hook_initial_identity" = yes ]; then
-        advance_start_failure_stage identity-executable || return 1
+        advance_start_failure_stage identity-birth || return 1
     fi
-    hook_executable_metadata=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
-        "/proc/$hook_identity_pid/exe" 2>/dev/null) || return 1
-    hook_expected_executable_metadata=$(stat -c '%d:%i:%F:%u:%g:%a:%h' \
-        "$production_helper" 2>/dev/null) || return 1
-    [ "$hook_executable_metadata" = "$hook_expected_executable_metadata" ] || return 1
+    if [ "$hook_initial_identity" = yes ]; then
+        hook_launch_image=$(capture_launch_image_identity "$production_helper") \
+            || return 1
+    else
+        launch_image_matches_identity \
+            "$production_helper" "$hook_expected_launch_image" || return 1
+        hook_launch_image=$hook_expected_launch_image
+    fi
+    hook_process_starttime=$(capture_process_starttime "$hook_identity_pid") || return 1
+    hook_process_birth=process-starttime-v1=$hook_process_starttime
     if [ "$hook_initial_identity" = yes ]; then
         advance_start_failure_stage identity-process || return 1
     fi
@@ -484,17 +692,18 @@ capture_running_identity() {
     if [ "$hook_initial_identity" = yes ]; then
         advance_start_failure_stage identity-stability || return 1
     fi
+    [ "$(capture_process_starttime "$hook_identity_pid")" = \
+        "$hook_process_starttime" ] || return 1
+    launch_image_matches_identity "$production_helper" "$hook_launch_image" || return 1
+    [ "$(unit_main_pid "$hook_identity_unit")" = "$hook_identity_pid" ] || return 1
     [ "$(unit_invocation_id "$hook_identity_unit")" = "$hook_identity_invocation" ] \
         || return 1
-    [ "$(unit_main_pid "$hook_identity_unit")" = "$hook_identity_pid" ] || return 1
-    command_line_is_argumentless "$hook_identity_pid" || return 1
-    hook_reobserved_executable_metadata=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
-        "/proc/$hook_identity_pid/exe" 2>/dev/null) || return 1
-    [ "$hook_reobserved_executable_metadata" = "$hook_executable_metadata" ] || return 1
-    hook_captured_running_identity=$(printf '%s\n%s\n%s\n%s\n' \
+    hook_captured_running_identity=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$hook_identity_invocation" \
         "$hook_identity_pid" \
-        "$hook_executable_metadata" \
+        "$hook_launch_contract" \
+        "$hook_launch_image" \
+        "$hook_process_birth" \
         "$hook_process_contract") || return 1
     if [ "$hook_initial_identity" = yes ]; then
         return 0
@@ -510,8 +719,10 @@ running_identity_is_unchanged() {
     number_is_safe "$hook_identity_gid" || return 1
     private_file_is_safe "$hook_identity_file" || return 1
     hook_expected_identity=$(cat "$hook_identity_file") || return 1
+    hook_expected_launch_image=$(sed -n '4p' "$hook_identity_file") || return 1
     hook_observed_identity=$(capture_running_identity \
-        "$hook_identity_unit" "$hook_identity_gid") || return 1
+        "$hook_identity_unit" "$hook_identity_gid" \
+        "$hook_expected_launch_image") || return 1
     [ "$hook_observed_identity" = "$hook_expected_identity" ]
 }
 
@@ -683,43 +894,85 @@ helper_has_no_children() {
     done
 }
 
-worker_identity_is_exact() {
-    [ "$#" -eq 5 ] || return 1
+worker_status_is_exact() {
+    [ "$#" -eq 4 ] || return 1
     hook_worker_pid=$1
     hook_parent_pid=$2
     hook_worker_uid=$3
     hook_worker_gid=$4
-    hook_expected_executable=$5
     for hook_number in \
         "$hook_worker_pid" "$hook_parent_pid" "$hook_worker_uid" "$hook_worker_gid"; do
         number_is_safe "$hook_number" || return 1
     done
     hook_worker_status=/proc/$hook_worker_pid/status
-    [ -f "$hook_worker_status" ] || return 1
-    [ "$(awk '$1 == "PPid:" { print $2 }' "$hook_worker_status")" = \
-        "$hook_parent_pid" ] || return 1
-    [ "$(awk '$1 == "Uid:" { print $2 ":" $3 ":" $4 ":" $5 }' \
-        "$hook_worker_status")" = \
-        "$hook_worker_uid:$hook_worker_uid:$hook_worker_uid:$hook_worker_uid" ] || return 1
-    [ "$(awk '$1 == "Gid:" { print $2 ":" $3 ":" $4 ":" $5 }' \
-        "$hook_worker_status")" = \
-        "$hook_worker_gid:$hook_worker_gid:$hook_worker_gid:$hook_worker_gid" ] || return 1
-    [ "$(awk '$1 == "Groups:" { print NF }' "$hook_worker_status")" = 1 ] \
-        || return 1
-    hook_worker_executable=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
-        "/proc/$hook_worker_pid/exe" 2>/dev/null) || return 1
-    [ "$hook_worker_executable" = "$hook_expected_executable" ] || return 1
-    hook_expected_cmdline=$proof_directory/worker.expected-cmdline
-    [ ! -e "$hook_expected_cmdline" ] && [ ! -L "$hook_expected_cmdline" ] || return 1
-    printf '/proc/self/exe\000--internal-worker-v3\000' >"$hook_expected_cmdline" \
-        || return 1
-    chmod 0600 "$hook_expected_cmdline" || return 1
-    if ! private_file_is_safe "$hook_expected_cmdline" \
-        || ! cmp -s "$hook_expected_cmdline" "/proc/$hook_worker_pid/cmdline"; then
-        rm -f -- "$hook_expected_cmdline"
-        return 1
-    fi
-    rm -f -- "$hook_expected_cmdline"
+    [ -f "$hook_worker_status" ] && [ ! -L "$hook_worker_status" ] || return 1
+    /usr/bin/awk \
+        -v expected_pid="$hook_worker_pid" \
+        -v expected_parent="$hook_parent_pid" \
+        -v expected_uid="$hook_worker_uid" \
+        -v expected_gid="$hook_worker_gid" '
+        $1 == "State:" {
+            state_count++
+            if (NF < 2 || $2 !~ /^(R|S|D)$/) invalid = 1
+            next
+        }
+        $1 == "Pid:" {
+            pid_count++
+            if (NF != 2 || $2 != expected_pid) invalid = 1
+            next
+        }
+        $1 == "PPid:" {
+            parent_count++
+            if (NF != 2 || $2 != expected_parent) invalid = 1
+            next
+        }
+        $1 == "Uid:" {
+            uid_count++
+            if (NF != 5 || $2 != expected_uid || $3 != expected_uid \
+                || $4 != expected_uid || $5 != expected_uid) invalid = 1
+            next
+        }
+        $1 == "Gid:" {
+            gid_count++
+            if (NF != 5 || $2 != expected_gid || $3 != expected_gid \
+                || $4 != expected_gid || $5 != expected_gid) invalid = 1
+            next
+        }
+        $1 == "Groups:" {
+            groups_count++
+            if (NF != 1) invalid = 1
+            next
+        }
+        END {
+            if (invalid || state_count != 1 || pid_count != 1 \
+                || parent_count != 1 || uid_count != 1 || gid_count != 1 \
+                || groups_count != 1) exit 1
+        }
+    ' "$hook_worker_status"
+}
+
+worker_identity_is_exact() {
+    # The exact parent executable and argv are anchored independently through
+    # PID 1. Inside that launched helper, worker construction owns a pidfd and
+    # pinned process/netns descriptors across its credential-authenticated
+    # parent/child handshake. This external observation joins the one direct
+    # child to that held functional exchange by PID starttime, PPid, complete
+    # credentials and the separately pinned live network namespace. It does
+    # not claim ptrace-gated cross-credential exe or cmdline attestation.
+    [ "$#" -eq 4 ] || return 1
+    hook_worker_pid=$1
+    hook_parent_pid=$2
+    hook_worker_uid=$3
+    hook_worker_gid=$4
+    hook_worker_starttime=$(capture_process_starttime "$hook_worker_pid") || return 1
+    worker_status_is_exact \
+        "$hook_worker_pid" "$hook_parent_pid" \
+        "$hook_worker_uid" "$hook_worker_gid" || return 1
+    [ "$(capture_process_starttime "$hook_worker_pid")" = \
+        "$hook_worker_starttime" ] || return 1
+    worker_status_is_exact \
+        "$hook_worker_pid" "$hook_parent_pid" \
+        "$hook_worker_uid" "$hook_worker_gid"
 }
 
 worker_wireguard_interface() {
@@ -898,7 +1151,7 @@ functional_probe_output_is_exact() {
 }
 
 run_functional_client_lease_probe() {
-    [ "$#" -eq 8 ] || return 1
+    [ "$#" -eq 7 ] || return 1
     hook_functional_unit=$1
     hook_functional_main_pid=$2
     hook_functional_agent_uid=$3
@@ -906,7 +1159,6 @@ run_functional_client_lease_probe() {
     hook_functional_operator_gid=$5
     hook_functional_worker_uid=$6
     hook_functional_worker_gid=$7
-    hook_functional_expected_executable=$8
     unit_name_is_safe "$hook_functional_unit" || return 1
     for hook_functional_number in \
         "$hook_functional_main_pid" \
@@ -917,9 +1169,6 @@ run_functional_client_lease_probe() {
         "$hook_functional_worker_gid"; do
         number_is_safe "$hook_functional_number" || return 1
     done
-    case $hook_functional_expected_executable in
-        ''|*[!0-9:A-Za-z\ _-]*) return 1 ;;
-    esac
     private_network_is_pristine || return 1
     [ ! -e "/sys/class/net/$functional_underlay" ] \
         && [ ! -L "/sys/class/net/$functional_underlay" ] || return 1
@@ -998,8 +1247,7 @@ run_functional_client_lease_probe() {
         "$hook_functional_worker_pid" \
         "$hook_functional_main_pid" \
         "$hook_functional_worker_uid" \
-        "$hook_functional_worker_gid" \
-        "$hook_functional_expected_executable" || return 1
+        "$hook_functional_worker_gid" || return 1
     hook_functional_parent_namespace=$(stat -Lc '%d:%i' \
         "/proc/$hook_functional_main_pid/ns/net" 2>/dev/null) || return 1
     hook_functional_worker_namespace=$(stat -Lc '%d:%i' \
@@ -1251,8 +1499,6 @@ start_hook() {
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'final authenticated runtime bind failed'
 
-    hook_expected_executable=$(sed -n '3p' "$identity_file") \
-        || fail 'production helper executable identity could not be read'
     advance_start_failure_stage functional-underlay \
         || fail 'start failure stage transition is invalid'
     run_functional_client_lease_probe \
@@ -1263,7 +1509,6 @@ start_hook() {
         "$operator_gid" \
         "$worker_uid" \
         "$worker_gid" \
-        "$hook_expected_executable" \
         || fail 'functional client lease live proof failed'
 
     advance_start_failure_stage publication \

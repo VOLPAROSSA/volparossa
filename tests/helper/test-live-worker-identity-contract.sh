@@ -15,6 +15,8 @@ capture_library=$repository_directory/tests/helper/lib/live-worker-proof-capture
 ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
+worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
+worker_sandbox_source=$repository_directory/crates/volparossa-helper/src/worker_sandbox.rs
 temporary_directory=$(mktemp -d /tmp/volparossa-helper-proof-contract.XXXXXX)
 resolver_authority_outside=
 resolver_runtime_directory=
@@ -81,6 +83,12 @@ if [ ! -f "$evidence_schema" ] || [ ! -r "$evidence_schema" ] \
     printf '%s\n' 'helper-boundary evidence schema is not one readable regular file' >&2
     exit 1
 fi
+for worker_contract_source in "$worker_source" "$worker_sandbox_source"; do
+    if [ ! -f "$worker_contract_source" ] || [ -L "$worker_contract_source" ]; then
+        printf 'worker contract source is unsafe: %s\n' "$worker_contract_source" >&2
+        exit 1
+    fi
+done
 sh -n "$gate"
 sh -n "$capture_library"
 sh -n "$ipc_hook"
@@ -436,8 +444,8 @@ printf '%s\n' \
     identity-socket \
     identity-lock \
     identity-manager \
-    identity-command \
-    identity-executable \
+    identity-launch \
+    identity-birth \
     identity-process \
     identity-stability \
     identity-publication \
@@ -576,7 +584,7 @@ awk '
         print line
     }
 ' "$gate" >"$production_identity_fragment"
-if [ "$(grep -c '^identity_executable=$' "$production_identity_fragment")" -ne 1 ] \
+if [ "$(grep -c '^identity_launch=$' "$production_identity_fragment")" -ne 1 ] \
     || [ "$(grep -c '^production_identity=' "$production_identity_fragment")" -ne 1 ]; then
     printf '%s\n' 'the production identity fallback is not uniquely executable' >&2
     exit 1
@@ -600,7 +608,10 @@ exercise_missing_production_identity() (
     [ "$proof_failure_reason" = production-process-identity ] \
         && [ -z "$identity_invocation" ] \
         && [ -z "$identity_main_pid" ] \
-        && [ -z "$identity_executable" ] \
+        && [ -z "$identity_launch" ] \
+        && [ -z "$identity_launch_image" ] \
+        && [ -z "$identity_starttime" ] \
+        && [ -z "$identity_starttime_value" ] \
         && [ -z "$identity_process_contract" ] \
         && [ -z "$identity_extra" ] \
         && [ -z "$identity_seccomp_filters" ]
@@ -3689,8 +3700,14 @@ for required_contract in \
     '[ "$production_limit_fsize_soft" != 1048576 ]' \
     '[ "$production_standard_output" != null ]' \
     '[ "$production_standard_error" != null ]' \
-    'identity_process_contract=$(sed -n '"'"'4p'"'"' "$production_identity")' \
-    'identity_extra=$(sed -n '"'"'5p'"'"' "$production_identity")' \
+    'identity_launch=$(sed -n '"'"'3p'"'"' "$production_identity")' \
+    'identity_launch_image=$(sed -n '"'"'4p'"'"' "$production_identity")' \
+    'identity_starttime=$(sed -n '"'"'5p'"'"' "$production_identity")' \
+    'identity_process_contract=$(sed -n '"'"'6p'"'"' "$production_identity")' \
+    'identity_extra=$(sed -n '"'"'7p'"'"' "$production_identity")' \
+    'systemd_launch_record_is_safe "$identity_launch"' \
+    'launch_image_record_is_safe' \
+    'identity_starttime_prefix=process-starttime-v1=' \
     'expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"' \
     'identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}' \
     '[ "${#identity_seccomp_filters}" -gt 10 ]' \
@@ -3709,7 +3726,8 @@ for required_contract in \
     'retired_runtime_is_absent' \
     'retired_cgroup_path=/sys/fs/cgroup$retired_control_group' \
     '[ "$retired_attempt" -lt 1200 ]' \
-    '"/proc/$retired_main_pid/exe"' \
+    'retired_starttime_path=/proc/$retired_starttime_pid/stat' \
+    '"$retired_process_starttime"' \
     '[ "$poll_attempt" -ge 1000 ]' \
     'systemctl reset-failed "$unit_name"' \
     '--internal-worker-v3-live-proof' \
@@ -4270,8 +4288,8 @@ done
 # shellcheck disable=SC2016
 if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
         "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 3 ] \
-    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 3 ] \
+    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 5 ] \
+    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 5 ] \
     || [ "$(grep -Fc 'GetUnit s "$1" 2>/dev/null)' "$ipc_hook")" -ne 1 ] \
     || grep -F -- 'SYSTEMCTL_FORCE_BUS' "$ipc_hook" >/dev/null \
     || grep -F -- 'systemctl ' "$ipc_hook" >/dev/null \
@@ -4279,6 +4297,190 @@ if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
     || grep -F -- '/run/systemd/private' "$ipc_hook" >/dev/null; then
     printf '%s\n' \
         'production hook does not use the exact policy-mediated systemd bus' >&2
+    exit 1
+fi
+
+# Debian 13 systemd v257 exposes the service launch command through two
+# differently typed ten-field tuples. Exercise the exact parser against both
+# shapes and representative substitutions before trusting the source contract.
+hook_launch_parser_functions=$temporary_directory/hook-launch-parser-functions.sh
+{
+    sed -n '/^systemd_exec_record_from_json() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^process_starttime_from_stat() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^capture_process_starttime() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_launch_parser_functions"
+if [ "$(grep -c '^systemd_exec_record_from_json() {$' \
+        "$hook_launch_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^process_starttime_from_stat() {$' \
+        "$hook_launch_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^capture_process_starttime() {$' \
+        "$hook_launch_parser_functions")" -ne 1 ]; then
+    printf '%s\n' 'production launch parsers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$hook_launch_parser_functions"
+# shellcheck disable=SC2034,SC2317
+exercise_hook_launch_parsers() (
+    number_is_safe() {
+        [ "$#" -eq 1 ] || return 1
+        case $1 in
+            ''|0|0*|*[!0-9]*) return 1 ;;
+            *) [ "${#1}" -le 10 ] && [ "$1" -le 4294967294 ] ;;
+        esac
+    }
+    production_helper=/run/volparossa-helper-production
+    # shellcheck disable=SC1090
+    . "$hook_launch_parser_functions"
+    basic='{"type":"a(sasbttttuii)","data":[["/usr/bin/setpriv",["/usr/bin/setpriv","--regid=61000","--groups=61000","--","/run/volparossa-helper-production"],false,123456789,234567890,0,0,4242,0,0]]}'
+    extended='{"type":"a(sasasttttuii)","data":[["/usr/bin/setpriv",["/usr/bin/setpriv","--regid=61000","--groups=61000","--","/run/volparossa-helper-production"],[],123456789,234567890,0,0,4242,0,0]]}'
+    expected='systemd-launch-v1=pid:4242;gid:61000;start-realtime:123456789;start-monotonic:234567890'
+    [ "$(systemd_exec_record_from_json \
+        "$basic" basic 4242 61000 'a(sasbttttuii)')" = "$expected" ]
+    [ "$(systemd_exec_record_from_json \
+        "$extended" extended 4242 61000 'a(sasasttttuii)')" = "$expected" ]
+    for mutation in wrong-path wrong-argument wrong-gid wrong-pid wrong-type \
+        wrong-flag nonzero-stop nonzero-status duplicate-document
+    do
+        case $mutation in
+            wrong-path) candidate=$(printf '%s' "$basic" | sed 's#/usr/bin/setpriv#/usr/bin/env#') ;;
+            wrong-argument) candidate=$(printf '%s' "$basic" | sed 's/"--",/"--bad",/') ;;
+            wrong-gid) candidate=$(printf '%s' "$basic" | sed 's/--groups=61000/--groups=61001/') ;;
+            wrong-pid) candidate=$(printf '%s' "$basic" | sed 's/,4242,0,0/,4243,0,0/') ;;
+            wrong-type) candidate=$(printf '%s' "$basic" | sed 's/a(sasbttttuii)/a(sasasttttuii)/') ;;
+            wrong-flag) candidate=$(printf '%s' "$basic" | sed 's/],false,/],true,/' ) ;;
+            nonzero-stop) candidate=$(printf '%s' "$basic" | sed 's/,234567890,0,0,/,234567890,1,0,/') ;;
+            nonzero-status) candidate=$(printf '%s' "$basic" | sed 's/,4242,0,0]]/,4242,0,1]]/') ;;
+            duplicate-document) candidate=$(printf '%s\n%s' "$basic" "$basic") ;;
+            *) exit 99 ;;
+        esac
+        if systemd_exec_record_from_json \
+            "$candidate" basic 4242 61000 'a(sasbttttuii)' >/dev/null 2>&1; then
+            printf 'production launch parser accepted mutation: %s\n' "$mutation" >&2
+            exit 1
+        fi
+    done
+
+    valid_stat=$(awk 'BEGIN {
+        printf "4242 (worker ) name) S"
+        for (field = 4; field <= 21; field++) printf " %d", field
+        printf " 98765"
+        for (field = 23; field <= 52; field++) printf " 0"
+    }')
+    [ "$(process_starttime_from_stat "$valid_stat" 4242)" = 98765 ]
+    embedded_close_stat=$(printf '%s' "$valid_stat" | sed 's/worker ) name/worker ) name ) tail/')
+    [ "$(process_starttime_from_stat "$embedded_close_stat" 4242)" = 98765 ]
+    for invalid_stat in \
+        "$(printf '%s' "$valid_stat" | sed 's/^4242 /4243 /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/) S /) Z /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/) S /) S  /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/ 98765 / 0 /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/ 98765 / 123456789012345678901 /')" \
+        "$(printf '%s\n%s' "$valid_stat" "$valid_stat")"
+    do
+        if process_starttime_from_stat "$invalid_stat" 4242 >/dev/null 2>&1; then
+            printf '%s\n' 'process starttime parser accepted a malformed stat record' >&2
+            exit 1
+        fi
+    done
+    current_starttime=$(capture_process_starttime "$$")
+    case $current_starttime in
+        ''|0|0*|*[!0-9]*) exit 1 ;;
+    esac
+)
+exercise_hook_launch_parsers || {
+    printf '%s\n' 'production launch parser behavior is not exact' >&2
+    exit 1
+}
+
+gate_launch_identity_functions=$temporary_directory/gate-launch-identity-functions.sh
+{
+    sed -n '/^systemd_launch_record_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^launch_image_record_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^process_starttime_from_stat() {$/,/^}$/p' "$gate"
+    sed -n '/^capture_process_starttime() {$/,/^}$/p' "$gate"
+    sed -n '/^retired_runtime_is_absent() {$/,/^}$/p' "$gate"
+} >"$gate_launch_identity_functions"
+if [ "$(grep -c '^systemd_launch_record_is_safe() {$' \
+        "$gate_launch_identity_functions")" -ne 1 ] \
+    || [ "$(grep -c '^launch_image_record_is_safe() {$' \
+        "$gate_launch_identity_functions")" -ne 1 ] \
+    || [ "$(grep -c '^retired_runtime_is_absent() {$' \
+        "$gate_launch_identity_functions")" -ne 1 ]; then
+    printf '%s\n' 'gate launch identity helpers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$gate_launch_identity_functions"
+# shellcheck disable=SC1090,SC2317
+exercise_gate_launch_identity() (
+    . "$gate_launch_identity_functions"
+    launch='systemd-launch-v1=pid:4242;gid:61000;start-realtime:123456789;start-monotonic:234567890'
+    digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    image="launch-image-v1=device:17;inode:23;size:81726341;sha256:$digest"
+    systemd_launch_record_is_safe "$launch" 4242 61000
+    launch_image_record_is_safe "$image" "$digest"
+    if systemd_launch_record_is_safe "$launch" 4243 61000 \
+        || systemd_launch_record_is_safe \
+            "${launch};start-monotonic:1" 4242 61000 \
+        || launch_image_record_is_safe \
+            "launch-image-v1=device:17;inode:23;size:134217729;sha256:$digest" \
+            "$digest" \
+        || launch_image_record_is_safe "$image" \
+            bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+        exit 1
+    fi
+
+    current_starttime=$(capture_process_starttime "$$")
+    synthetic_unit=volparossa-helper-live-proof-TST123.service
+    synthetic_group=/system.slice/$synthetic_unit
+    [ ! -e "/sys/fs/cgroup$synthetic_group" ]
+    retired_runtime_is_absent "$synthetic_unit" "$synthetic_group" \
+        "$$" "${current_starttime}9"
+    # An existing PID with the same birth token must remain present and fail
+    # the bounded retirement predicate. Remove wall-clock delay in this
+    # contract process while preserving all 1,200 exact observations.
+    sleep() { :; }
+    ! retired_runtime_is_absent "$synthetic_unit" "$synthetic_group" \
+        "$$" "$current_starttime"
+)
+exercise_gate_launch_identity || {
+    printf '%s\n' 'gate launch identity or PID-reuse behavior is not fail closed' >&2
+    exit 1
+}
+
+# Cross-credential procfs magic-link and argument reads require ptrace-like
+# authority. The evidence path must neither depend on those reads nor widen
+# the transient sandbox to make them possible.
+# shellcheck disable=SC2016
+if grep -F '/proc/$hook_identity_pid/exe' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_identity_pid/cmdline' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_worker_pid/exe' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_worker_pid/cmdline' "$ipc_hook" >/dev/null \
+    || grep -F 'CAP_SYS_PTRACE' "$gate" "$ipc_hook" >/dev/null \
+    || grep -F '/run/systemd/private' "$gate" "$ipc_hook" >/dev/null; then
+    printf '%s\n' 'production launch evidence widened or retained ptrace-gated reads' >&2
+    exit 1
+fi
+if ! awk '
+    /^worker_identity_is_exact\(\) \{$/ { in_identity = 1; next }
+    /^worker_wireguard_interface\(\) \{$/ { in_identity = 0 }
+    in_identity && /capture_process_starttime/ {
+        starttime_count++
+        if (starttime_count == 1) start_before = NR
+        if (starttime_count == 2) start_after = NR
+    }
+    in_identity && /worker_status_is_exact/ {
+        status_count++
+        if (status_count == 1) status_before = NR
+        if (status_count == 2) status_after = NR
+    }
+    END {
+        valid = starttime_count == 2 && status_count == 2
+        valid = valid && start_before < status_before
+        valid = valid && status_before < start_after && start_after < status_after
+        if (!valid) exit 1
+    }
+' "$ipc_hook"; then
+    printf '%s\n' 'worker external identity is not stably bracketed' >&2
     exit 1
 fi
 
@@ -4349,14 +4551,28 @@ exercise_hook_identity_capture_modes() (
     number_is_safe() { return 0; }
     unit_invocation_id() { printf '%s\n' 11111111111111111111111111111111; }
     unit_main_pid() { printf '%s\n' 4242; }
-    command_line_is_argumentless() { return 0; }
-    stat() { printf '%s\n' 1:2:regular-file:0:0:755:1; }
+    capture_systemd_launch_contract() {
+        printf '%s\n' \
+            'systemd-launch-v1=pid:4242;gid:7;start-realtime:123;start-monotonic:456'
+    }
+    capture_launch_image_identity() {
+        printf '%s\n' \
+            'launch-image-v1=device:1;inode:2;size:3;sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    }
+    launch_image_matches_identity() {
+        [ "$2" = \
+            'launch-image-v1=device:1;inode:2;size:3;sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]
+    }
+    capture_process_starttime() { printf '%s\n' 789; }
     capture_helper_process_contract() { printf '%s\n' process-contract-v1; }
     production_helper=/run/exact-helper
-    expected_identity=$(printf '%s\n%s\n%s\n%s' \
+    expected_launch_image='launch-image-v1=device:1;inode:2;size:3;sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    expected_identity=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
         11111111111111111111111111111111 \
         4242 \
-        1:2:regular-file:0:0:755:1 \
+        'systemd-launch-v1=pid:4242;gid:7;start-realtime:123;start-monotonic:456' \
+        "$expected_launch_image" \
+        process-starttime-v1=789 \
         process-contract-v1)
 
     start_failure_stage=identity-lock
@@ -4367,7 +4583,8 @@ exercise_hook_identity_capture_modes() (
     [ "$hook_captured_running_identity" = "$expected_identity" ]
 
     start_failure_stage=active-lock
-    observed_identity=$(capture_running_identity exact.service 7)
+    observed_identity=$(capture_running_identity \
+        exact.service 7 "$expected_launch_image")
     [ "$start_failure_stage" = active-lock ]
     [ "$observed_identity" = "$expected_identity" ]
     ! capture_running_identity exact.service 7 substituted
@@ -4499,7 +4716,23 @@ for required_hook_contract in \
     'production_helper=/run/volparossa-helper-production' \
     'helper_bootstrap_capability_mask=00000000002031e0' \
     "'directory:0:0:2700'" \
-    'command_line_is_argumentless "$hook_identity_pid"' \
+    'systemd_exec_record_from_json() {' \
+    "basic:'a(sasbttttuii)'|extended:'a(sasasttttuii)'" \
+    '--arg expected_path /usr/bin/setpriv' \
+    '--arg expected_regid "--regid=$hook_exec_gid"' \
+    '--arg expected_groups "--groups=$hook_exec_gid"' \
+    'capture_systemd_launch_contract() {' \
+    'org.freedesktop.systemd1.Service' \
+    'ExecStart 2>/dev/null)' \
+    'ExecStartEx 2>/dev/null)' \
+    'capture_launch_image_metadata() {' \
+    "stat -Lc '%d:%i:%F:%u:%g:%a:%h:%s'" \
+    'capture_launch_image_identity() {' \
+    'hook_image_digest=$(checksum_file "$1")' \
+    'launch_image_matches_identity() {' \
+    'process_starttime_from_stat() {' \
+    'hook_starttime_path=/proc/$hook_starttime_pid/stat' \
+    'process-starttime-v1=$hook_process_starttime' \
     'capture_helper_process_contract() {' \
     'hook_contract_status=/proc/$hook_contract_pid/status' \
     '$1 == "Uid:" {' \
@@ -4564,8 +4797,10 @@ for required_hook_contract in \
     '"$hook_functional_stdout" "$functional_ready_record"' \
     '[ "$hook_functional_wait_attempt" -lt 300 ] || return 1' \
     'hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid")' \
+    'worker_status_is_exact() {' \
     'worker_identity_is_exact' \
-    'Groups:" { print NF }' \
+    'hook_worker_starttime=$(capture_process_starttime "$hook_worker_pid")' \
+    'groups_count != 1' \
     '"$hook_functional_parent_namespace" != "$hook_functional_worker_namespace"' \
     'command exec 7<"/proc/$hook_functional_worker_pid/ns/net"' \
     '/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" --' \
@@ -4616,6 +4851,28 @@ for required_hook_contract in \
 do
     grep -F -- "$required_hook_contract" "$ipc_hook" >/dev/null || {
         printf 'missing production IPC hook contract: %s\n' "$required_hook_contract" >&2
+        exit 1
+    }
+done
+for worker_launch_anchor in \
+    'crate::worker_sandbox::WorkerKernelPins::pin_process(child)' \
+    'ExpectedUnixCredentials::new(child_pid, worker_identity.uid(), worker_identity.gid())' \
+    'parent_handshake(&process, observation, challenge, binding)' \
+    'prctl::set_dumpable(false)' \
+    'send_credential_record(&channel, &accepted.sandbox_ready().encode())'
+do
+    grep -F -- "$worker_launch_anchor" "$worker_source" >/dev/null || {
+        printf 'worker launch anchor is missing: %s\n' "$worker_launch_anchor" >&2
+        exit 1
+    }
+done
+for worker_kernel_anchor in \
+    'let pidfd = pidfd_open(pid, PidfdFlags::empty())' \
+    'process_directory = open(' \
+    'pin_network_namespace_before_identity_drop('
+do
+    grep -F -- "$worker_kernel_anchor" "$worker_sandbox_source" >/dev/null || {
+        printf 'worker kernel anchor is missing: %s\n' "$worker_kernel_anchor" >&2
         exit 1
     }
 done
@@ -4675,12 +4932,20 @@ hook_process_contract_source_is_exact() {
             pid_observations++
             if (pid_observations == 2) pid_after = NR
         }
-        in_identity && /command_line_is_argumentless "\$hook_identity_pid"/ {
-            command_observations++
-            if (command_observations == 2) command_after = NR
+        in_identity && /capture_systemd_launch_contract/ {
+            launch_observations++
+            launch_before = NR
         }
-        in_identity && /hook_reobserved_executable_metadata=\$\(stat -Lc/ {
-            executable_after = NR
+        in_identity && /capture_process_starttime/ {
+            starttime_observations++
+            if (starttime_observations == 1) starttime_before = NR
+            if (starttime_observations == 2) starttime_after = NR
+        }
+        in_identity && /capture_launch_image_identity/ { image_capture = NR }
+        in_identity && /launch_image_matches_identity/ {
+            image_observations++
+            if (image_observations == 1) image_before = NR
+            if (image_observations == 2) image_after = NR
         }
         in_recheck && /hook_observed_identity=\$\(capture_running_identity/ {
             recheck_capture = NR
@@ -4700,9 +4965,16 @@ hook_process_contract_source_is_exact() {
             valid = valid && filters_canonical == 1 && filters_bounded == 1
             valid = valid && canonical_record == 1 && group_counts == 1
             valid = valid && exact_counts == 1
-            valid = valid && process_capture < invocation_after
-            valid = valid && invocation_after < pid_after && pid_after < command_after
-            valid = valid && command_after < executable_after
+            valid = valid && launch_observations == 1 && starttime_observations == 2
+            valid = valid && image_observations == 2
+            valid = valid && launch_before < image_capture
+            valid = valid && image_capture < image_before
+            valid = valid && image_before < starttime_before
+            valid = valid && starttime_before < process_capture
+            valid = valid && process_capture < starttime_after
+            valid = valid && starttime_after < image_after
+            valid = valid && image_after < pid_after
+            valid = valid && pid_after < invocation_after
             valid = valid && recheck_capture < recheck_gid
             if (!valid) exit 1
         }
@@ -4712,7 +4984,8 @@ if ! hook_process_contract_source_is_exact "$ipc_hook"; then
     printf '%s\n' 'production helper process-status contract is incomplete or unordered' >&2
     exit 1
 fi
-for hook_contract_mutation in capability-mask group-count ambient-field executable-recheck
+for hook_contract_mutation in capability-mask group-count ambient-field \
+    starttime-recheck launch-image-recheck
 do
     hook_contract_mutant=$temporary_directory/hook-$hook_contract_mutation.sh
     case $hook_contract_mutation in
@@ -4727,8 +5000,14 @@ do
         ambient-field)
             sed '0,/CapAmb:/s//CapXYZ:/' "$ipc_hook" >"$hook_contract_mutant"
             ;;
-        executable-recheck)
-            sed '0,/hook_reobserved_executable_metadata=/s//hook_unchecked_executable_metadata=/' \
+        starttime-recheck)
+            # shellcheck disable=SC2016
+            sed '0,/\[ "$(capture_process_starttime/s/capture_process_starttime/unchecked_process_starttime/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        launch-image-recheck)
+            # shellcheck disable=SC2016
+            sed '0,/launch_image_matches_identity "\$production_helper" "\$hook_launch_image"/s/launch_image_matches_identity/unchecked_launch_image/' \
                 "$ipc_hook" >"$hook_contract_mutant"
             ;;
         *) exit 1 ;;

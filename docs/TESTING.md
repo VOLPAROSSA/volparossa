@@ -91,7 +91,12 @@ The production phase now runs one closed functional-client-lease probe as the st
 root hook creates one fixed dummy underlay only inside the transient unit's `PrivateNetwork`
 namespace, then the probe registers an exact tag-35 intent and prepares one Client-role lease. At a
 fixed root-owned FIFO READY barrier, the hook independently observes one direct helper child with
-the expected executable, dedicated UID/GID and separate network namespace. That namespace must
+stable starttime, dedicated UID/GID and a separate network namespace. The exact parent launch is
+anchored independently by PID 1's typed `ExecStart`/`ExecStartEx` tuple, the root-owned mode-0500
+bind image metadata and staged-image SHA-256, `InvocationID`, `MainPID`, process starttime and exact
+status. Every probe also requires server `SO_PEERCRED` to equal that `MainPID`. The worker join
+relies on the launched helper's retained pidfd/process/netns pins and authenticated child handshake;
+it does not claim ptrace-gated cross-credential `cmdline` or `exe` inspection. The worker namespace must
 contain only loopback and one UP WireGuard interface with the exact ownership-marker prefix, one
 global `/128`, a non-zero public key and listen port, no peer, and no firewall mark. The probe
 validates exact response correlation, opaque non-zero handles, the fixed `DirectAssigned` underlay

@@ -812,8 +812,8 @@ socket inode.
 The hook then creates one fixed dummy underlay only inside that production unit's
 `PrivateNetwork` namespace. The staged-agent probe registers an exact tag-35 intent, prepares one
 Client-role lease, closes its first stream and publishes a fixed READY record. While it waits on a
-root-owned FIFO, the hook requires one direct child of the unchanged helper `MainPID`, the expected
-executable and dedicated UID/GID, a network namespace distinct from the helper, and exactly one
+root-owned FIFO, the hook requires one direct child of the unchanged helper `MainPID`, stable
+process starttime and dedicated UID/GID, a network namespace distinct from the helper, and exactly one
 live WireGuard interface beside loopback. That interface must be UP, carry the exact ownership-marker
 prefix and one global `/128`, expose a non-zero public key/listen port, and have neither peers nor a
 firewall mark. The probe validates the exact correlated response and `DirectAssigned` fixture
@@ -826,8 +826,8 @@ lease handles plus a distinct public key prove capacity reuse. After both cycles
 zero helper children, no WireGuard object in its retained first-worker namespace pin, no helper FD
 retaining that namespace or any foreign worker network namespace, an empty descriptor store and the
 fixed exact-one-loopback/no-default-route cleanup predicate after the dummy underlay is removed.
-Only after all probe output and the unchanged `MainPID`,
-executable inode and `InvocationID` have been checked does the hook publish ten distinct fixed proof
+Only after all probe output and the unchanged manager launch tuple, bound helper image metadata,
+process starttime, `MainPID` and `InvocationID` have been checked does the hook publish ten distinct fixed proof
 records: the seven read-only/negative IPC records followed by READY, functional PASS and
 external-cleanup PASS. PID 1 bounds the
 second unit to three minutes even if the runner disappears, and each transient unit independently
@@ -919,7 +919,7 @@ PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open.
 [job 99162565524](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986/job/99162565524)
 and reached the fixed first failure `production-launch-status`. The production service still sends
 both output streams to systemd null targets, so that failed run provides no raw `ExecStartPost`
-message. The fixed start hook now advances through one monotonic 16-stage allowlist covering
+message. The fixed start hook now advances through one fixed monotonic stage allowlist covering
 preflight/runtime, identity, active-lock, each protocol probe group, functional underlay,
 probe-ready, worker observation, probe finish, cleanup and publication. On failure it atomically
 publishes at most one root-owned mode-0600 single-link `start.failure` containing only that stage.
@@ -929,7 +929,34 @@ path. The gate accepts one exact canonical record only when the first recorded p
 `production-launch-status`; the non-retained runner exposes that fixed stage only paired with the
 same exact category and rejects missing, duplicate, invalid, mixed and privacy-unsafe input. This
 failed run remains non-PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains
-Open. The second phase exercises the production server entry point, but not an installed package,
+Open. Exact branch
+[run 33278664815](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815) at
+`b050fe576ebd2e77cc4d3c871dad22f9d91e267b` ran the disposable VM in
+[job 99169908991](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815/job/99169908991)
+and retained `production-launch-status` with diagnostic `identity-command`. The preceding typed
+manager fix therefore worked, but the separately confined hook could not read the non-dumpable
+agent-GID helper's `/proc/<pid>/cmdline` and `exe` magic link. Granting `CAP_SYS_PTRACE` or binding
+systemd's private manager socket would weaken the proof boundary, so neither is done.
+
+The replacement launch lineage is externally anchored at PID 1. Over the read-only policy-mediated
+system bus, the hook requires exact systemd v257 `ExecStart` and `ExecStartEx` ten-field tuple
+shapes, matching running timestamps and PID, false/empty flags, and exactly
+`/usr/bin/setpriv --regid=<agent-gid> --groups=<agent-gid> --
+/run/volparossa-helper-production`. The bind-mounted launch image must independently remain one
+root-owned, mode-0500, single-link regular file. Its initial metadata and SHA-256 are recorded; the
+gate requires that digest to equal the already fenced staged helper digest, and ordinary identity
+rechecks compare metadata without repeatedly hashing the roughly 78 MiB image. One stable bracket
+observes `InvocationID`, `MainPID`, launch tuple, image, canonical process starttime, exact status,
+then starttime, image, `MainPID` and `InvocationID` in reverse. Each socket probe inside the wider
+hook is still bound by `SO_PEERCRED == MainPID`, and the same full identity artifact brackets it.
+Post-retirement observation uses the captured starttime rather than a procfs magic link, treats a
+different token as PID reuse, and never treats an extant unreadable proc record as absent. The
+worker-side external check deliberately makes no byte-for-byte executable claim: the trusted
+parent's existing pidfd/process/netns pins and credential-authenticated child handshake are joined
+to one stable direct child, exact dedicated credentials, a pinned distinct namespace, and the held
+functional Prepare/Destroy exchange. This failed run and the correction are not PASS evidence; a
+fresh exact-main KVM remains required and the alpha score remains **11/100**. The second phase
+exercises the production server entry point, but not an installed package,
 the shipped unit
 file, restart policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run
 is durably tied to the same clean commit and retained, the gate is not earned package, datapath, A14
