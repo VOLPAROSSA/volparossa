@@ -3091,12 +3091,11 @@ fn activation_request<P: ClientReservationProtocol>(
                 address: ip_bytes(endpoint.underlay_ip()),
                 port: u32::from(endpoint.listen_port()),
             }),
-            maximum_up_mbps: u32::try_from(request.parameters.reserved_up_mbps).map_err(|_| {
-                RouteSetupError::Invalid("reserved uplink rate exceeds helper range")
-            })?,
-            maximum_down_mbps: u32::try_from(request.parameters.reserved_down_mbps).map_err(
-                |_| RouteSetupError::Invalid("reserved downlink rate exceeds helper range"),
-            )?,
+            // Reservation rates constrain selection and signed capacity, but
+            // helper-v3 rate fields configure relay forwarding only. A Client
+            // lease must therefore carry the protocol-canonical zero values.
+            maximum_up_mbps: 0,
+            maximum_down_mbps: 0,
         });
     }
     Ok(ActivateLeaseBatch {
@@ -3218,7 +3217,8 @@ mod tests {
     };
     use volparossa_relay::{RelayService, RelayServiceConfig};
     use volparossa_routing::{
-        CommittedLease, HELPER_HANDLE_BYTES, PreparedLease, UnderlayEvidence,
+        CommittedLease, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION, HelperRequest, PreparedLease,
+        UnderlayEvidence, encode_request, helper_request,
     };
     use volparossa_selection::{CandidateEvidence, SelectionMix};
     use volparossa_test_support::{ephemeral_signing_key, verified_development_manifest};
@@ -3430,6 +3430,14 @@ mod tests {
             &mut self,
             request: &ActivateLeaseBatch,
         ) -> Result<ActivatedLeaseBatch, Self::Error> {
+            encode_request(&HelperRequest {
+                protocol_version: HELPER_PROTOCOL_VERSION,
+                request_id: vec![0xa7; ID_BYTES],
+                operation: Some(helper_request::Operation::ActivateLeaseBatch(
+                    request.clone(),
+                )),
+            })
+            .map_err(|_| FakeLocalError::Definitive)?;
             self.shared.record("local.activate");
             let block = self.shared.state.lock().expect("fake state").block_activate;
             self.shared.activate_started.notify_one();
