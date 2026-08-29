@@ -366,6 +366,18 @@ pub(crate) struct ActivatedLease {
     pub(crate) public_key: Vec<u8>,
     #[prost(uint32, tag = "4")]
     pub(crate) listen_port: u32,
+    /// Exact initial handshake seconds read from the configured kernel peer.
+    #[prost(uint64, tag = "5")]
+    pub(crate) latest_handshake_unix: u64,
+    /// Exact initial handshake nanoseconds read from the configured kernel peer.
+    #[prost(uint32, tag = "6")]
+    pub(crate) latest_handshake_nanoseconds: u32,
+    /// Exact initial received-byte counter read from the configured kernel peer.
+    #[prost(uint64, tag = "7")]
+    pub(crate) received_bytes: u64,
+    /// Exact initial transmitted-byte counter read from the configured kernel peer.
+    #[prost(uint64, tag = "8")]
+    pub(crate) transmitted_bytes: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -798,7 +810,10 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
             Outcome::Activated(outcome) => validate_lease_batch(&outcome.leases, |lease| {
                 path_role(lease.path_id, lease.role)?;
                 public_key(&lease.public_key)?;
-                if !(1..=u32::from(u16::MAX)).contains(&lease.listen_port) {
+                if !(1..=u32::from(u16::MAX)).contains(&lease.listen_port)
+                    || lease.latest_handshake_nanoseconds >= 1_000_000_000
+                    || (lease.latest_handshake_unix == 0 && lease.latest_handshake_nanoseconds != 0)
+                {
                     return Err(InternalProtocolError::Invalid);
                 }
                 Ok((lease.path_id, lease.role))
@@ -1288,6 +1303,10 @@ mod tests {
                         role: lease.role,
                         public_key: vec![9; 32],
                         listen_port: 51_820,
+                        latest_handshake_unix: 0,
+                        latest_handshake_nanoseconds: 0,
+                        received_bytes: 0,
+                        transmitted_bytes: 0,
                     })
                     .collect(),
             }),
@@ -1699,6 +1718,10 @@ mod tests {
                         role: InternalEndpointRole::Exit as i32,
                         public_key: vec![9; 32],
                         listen_port: 51_820,
+                        latest_handshake_unix: 0,
+                        latest_handshake_nanoseconds: 0,
+                        received_bytes: 0,
+                        transmitted_bytes: 0,
                     }],
                 },
             )),
@@ -1706,8 +1729,20 @@ mod tests {
         let encoded = encode_response(&value).expect("encode response");
         assert_eq!(decode_response(&encoded).expect("decode response"), value);
 
-        let mut wrong = value;
+        let mut wrong = value.clone();
         wrong.request_digest.clear();
         assert!(encode_response(&wrong).is_err());
+
+        for (seconds, nanoseconds) in [(0, 1), (1, 1_000_000_000)] {
+            let mut wrong = value.clone();
+            let Some(internal_worker_response::Outcome::Activated(activated)) =
+                wrong.outcome.as_mut()
+            else {
+                panic!("activated response")
+            };
+            activated.leases[0].latest_handshake_unix = seconds;
+            activated.leases[0].latest_handshake_nanoseconds = nanoseconds;
+            assert!(encode_response(&wrong).is_err());
+        }
     }
 }

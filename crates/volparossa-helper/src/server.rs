@@ -233,12 +233,12 @@ fn bind_production_socket(
 /// Serves until SIGINT/SIGTERM while an owned expiry driver retires stale in-memory contexts, then
 /// closes the durable actor.
 ///
-/// The crate-internal production engine can prepare and destroy one process-owned functional-alpha
-/// Client lease. Activate, Probe, transport acquisition and every datapath remain unavailable. A
-/// successful return proves the engine was cleaned before the durable journal actor became
-/// quiescent. Startup still refuses `MayOwnPrepare` because no production restart reaper can yet
-/// prove absence of stale kernel state. Unexpected expiry-driver exit stops serving and fails the
-/// runtime closed.
+/// The crate-internal production engine can prepare, activate and destroy one process-owned
+/// functional-alpha Client lease. Probe, transport acquisition and every datapath remain
+/// unavailable. A successful return proves the engine was cleaned before the durable journal actor
+/// became quiescent. Startup still refuses `MayOwnPrepare` because no production restart reaper can
+/// yet prove absence of stale kernel state. Unexpected expiry-driver exit stops serving and fails
+/// the runtime closed.
 ///
 /// # Errors
 ///

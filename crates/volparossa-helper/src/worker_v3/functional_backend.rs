@@ -1,21 +1,22 @@
 //! Process-owned functional-alpha lease backend.
 //!
 //! This adapter deliberately proves only one live helper-runtime Client lease. It uses the real
-//! authenticated worker, a real anonymous network namespace and kernel `WireGuard` UAPI, but it does
-//! not claim crash/restart recovery. Durable journal and systemd descriptor-store composition stay
-//! closed until their affine recovery path is complete.
+//! authenticated worker, a real anonymous network namespace and kernel `WireGuard` UAPI. Activate
+//! installs and reads back one exact public peer plus its main-table IPv6 `/128` link route. It does
+//! not claim a usable datapath or crash/restart recovery. Durable journal and systemd
+//! descriptor-store composition stay closed until their affine recovery path is complete.
 
 use std::{
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::fd::AsRawFd as _,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, ContextRole, LeasePlan as RoutingLeasePlan,
-    PrepareLeaseBatch, PublicUdpEndpoint, UnderlayEvidence as RoutingUnderlayEvidence,
-    WireguardRole,
+    AcquireTransportSocket, ActivateLeaseBatch, ContextRole, HELPER_HANDLE_BYTES,
+    LeasePlan as RoutingLeasePlan, PrepareLeaseBatch, PublicUdpEndpoint,
+    UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
 };
 
 use crate::{
@@ -27,9 +28,10 @@ use crate::{
         KernelCounters, OperationKind, PreparedKernelLease,
     },
     internal_protocol::{
-        DestroyContext, INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext,
-        InternalContextRole, InternalEndpointRole, InternalIpPrefix, InternalWorkerRequest,
-        InternalWorkerResult, LeasePlan as InternalLeasePlan, PrepareLeases,
+        ActivateLeases, DestroyContext, INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION,
+        InitialiseContext, InternalContextRole, InternalEndpointRole, InternalIpPrefix,
+        InternalUdpEndpoint, InternalWorkerRequest, InternalWorkerResult,
+        LeaseActivation as InternalLeaseActivation, LeasePlan as InternalLeasePlan, PrepareLeases,
         internal_worker_request, internal_worker_response,
     },
     kernel::{BirthLinkError, BirthNamespaceKernel, LiveWireguardLeaseOwner},
@@ -49,7 +51,9 @@ const MARKER_DOMAIN: &[u8] = b"VOLPAROSSA functional alpha WireGuard owner v1";
 const REQUEST_ID_DOMAIN: &[u8] = b"VOLPAROSSA functional alpha worker request v1";
 const STAGE_INITIALISE: u8 = 1;
 const STAGE_PREPARE: u8 = 2;
-const STAGE_DESTROY: u8 = 3;
+const STAGE_ACTIVATE: u8 = 3;
+const STAGE_DESTROY: u8 = 4;
+const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
 
 /// Install the deliberately narrow process-owned backend used only by the production server.
 pub(crate) fn functional_alpha_lease_backend() -> Arc<dyn AsyncLeaseBackend> {
@@ -100,6 +104,15 @@ enum OpenLeasePhase {
     Initialised,
     BirthMayExist,
     Prepared,
+    Activated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreparedWorkerLease {
+    path_id: u32,
+    role: i32,
+    public_key: [u8; 32],
+    listen_port: u16,
 }
 
 struct OpenLeaseEntry {
@@ -109,6 +122,7 @@ struct OpenLeaseEntry {
     wireguard: LiveWireguardLeaseOwner,
     prepare: PrepareLeases,
     underlay: UnderlayCandidate,
+    prepared: Option<PreparedWorkerLease>,
     phase: OpenLeasePhase,
     birth_may_exist: bool,
 }
@@ -145,6 +159,12 @@ impl FunctionalAlphaLeaseBackend {
         let underlay = {
             let mut state = lock_state(&self.state);
             let entry = exact_entry_mut(&mut state, key)?;
+            entry.prepared = Some(PreparedWorkerLease {
+                path_id: lease.path_id,
+                role: lease.role,
+                public_key,
+                listen_port,
+            });
             entry.phase = OpenLeasePhase::Prepared;
             entry.underlay
         };
@@ -181,6 +201,7 @@ impl FunctionalAlphaLeaseBackend {
             wireguard,
             prepare,
             underlay,
+            prepared: None,
             phase: OpenLeasePhase::Reserved,
             birth_may_exist: false,
         });
@@ -343,6 +364,90 @@ impl FunctionalAlphaLeaseBackend {
         .ok_or_else(|| response_error(execution))
     }
 
+    async fn activate_one(
+        &self,
+        binding: BackendBinding,
+        value: ActivateLeaseBatch,
+    ) -> Result<Vec<KernelCounters>, BackendError> {
+        let (key, activation) = validate_activate_binding(binding, &value)?;
+        let deadline = prepare_deadline(binding)?;
+        let (prepared, plan) = {
+            let state = lock_state(&self.state);
+            let entry = exact_entry(state.as_ref(), key)?;
+            if entry.phase != OpenLeasePhase::Prepared {
+                return Err(BackendError::Invalid);
+            }
+            let prepared = entry.prepared.ok_or(BackendError::CleanupIncomplete)?;
+            if (prepared.path_id, prepared.role) != (activation.path_id, activation.role) {
+                return Err(BackendError::Invalid);
+            }
+            let peer_key: [u8; 32] = activation
+                .peer_public_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| BackendError::Invalid)?;
+            let peer_endpoint = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
+                .ok_or(BackendError::Invalid)?;
+            if peer_key == prepared.public_key
+                || peer_endpoint == (entry.underlay.address, prepared.listen_port)
+            {
+                return Err(BackendError::Invalid);
+            }
+            (
+                prepared,
+                internal_activate_plan(entry.wireguard.resource(), key, &activation)?,
+            )
+        };
+        let counters = match self.activate_child(key, prepared, plan, deadline).await {
+            Ok(counters) => counters,
+            Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
+        };
+
+        let phase_committed = {
+            let mut state = lock_state(&self.state);
+            exact_entry_mut(&mut state, key).is_ok_and(|entry| {
+                if entry.phase == OpenLeasePhase::Prepared && entry.prepared == Some(prepared) {
+                    entry.phase = OpenLeasePhase::Activated;
+                    true
+                } else {
+                    false
+                }
+            })
+        };
+        if !phase_committed {
+            return Err(self
+                .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                .await);
+        }
+        match deadline.complete(counters) {
+            Ok(counters) => Ok(counters),
+            Err(_) => Err(self
+                .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                .await),
+        }
+    }
+
+    async fn activate_child(
+        &self,
+        key: OpenLineageKey,
+        prepared: PreparedWorkerLease,
+        activate: ActivateLeases,
+        deadline: HardDeadline,
+    ) -> Result<Vec<KernelCounters>, BackendError> {
+        let generation = entry_generation(&self.state, key)?;
+        let request = worker_request(
+            worker_request_id(key, STAGE_ACTIVATE),
+            internal_worker_request::Operation::ActivateLeases(activate),
+        );
+        let execution = self
+            .coordinator
+            .execute_until(key.context_id, generation, request, deadline)
+            .await;
+        matches_activated(execution.as_ref().ok(), prepared)
+            .map(|baseline| vec![baseline])
+            .ok_or_else(|| response_error(execution))
+    }
+
     async fn cleanup_after_failure(
         &self,
         key: OpenLineageKey,
@@ -371,6 +476,7 @@ impl FunctionalAlphaLeaseBackend {
                         OpenLeasePhase::Initialised
                             | OpenLeasePhase::BirthMayExist
                             | OpenLeasePhase::Prepared
+                            | OpenLeasePhase::Activated
                     )
             });
         if let (true, Some(generation)) = (should_destroy, generation) {
@@ -474,8 +580,9 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
         self: Arc<Self>,
         request: BackendRequest<ActivateLeaseBatch>,
     ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
-        let (completion, _) = request.into_parts();
-        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move { completion.complete(self.activate_one(binding, value).await) })
     }
 
     fn probe(
@@ -591,6 +698,62 @@ fn validate_prepare_binding(
         lease.clone(),
         Duration::from_secs(ttl_seconds),
     ))
+}
+
+fn validate_activate_binding(
+    binding: BackendBinding,
+    value: &ActivateLeaseBatch,
+) -> Result<(OpenLineageKey, volparossa_routing::LeaseActivation), BackendError> {
+    let lineage = binding.lineage;
+    let context_id: [u8; 16] = value
+        .route_context_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    let [activation] = value.leases.as_slice() else {
+        return Err(BackendError::Unavailable);
+    };
+    if binding.action != BackendAction::Activate
+        || binding.phase != BackendPhase::Prepared
+        || binding.operation_kind != OperationKind::Activate
+        || binding.prior_phase != Some(ContextPhase::Prepared)
+        || binding.operation_sequence == 0
+        || binding.operation_generation != lineage.backend_generation
+        || binding.request_id.iter().all(|byte| *byte == 0)
+        || binding.request_digest.iter().all(|byte| *byte == 0)
+        || lineage.helper_runtime_id.iter().all(|byte| *byte == 0)
+        || lineage.context_id.iter().all(|byte| *byte == 0)
+        || lineage.backend_generation == 0
+        || lineage.prepare_request_id.iter().all(|byte| *byte == 0)
+        || lineage
+            .prepare_operation_digest
+            .iter()
+            .all(|byte| *byte == 0)
+        || lineage.setup_expires_at_unix == 0
+        || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || context_id != lineage.context_id
+        || value.context_handle.len() != HELPER_HANDLE_BYTES
+        || value.context_handle.iter().all(|byte| *byte == 0)
+        || activation.lease_handle.len() != HELPER_HANDLE_BYTES
+        || activation.lease_handle.iter().all(|byte| *byte == 0)
+        || !(1..=8).contains(&activation.path_id)
+        || activation.role != WireguardRole::Client as i32
+        || activation.peer_public_key.len() != 32
+        || activation.peer_public_key.iter().all(|byte| *byte == 0)
+        || activation.maximum_up_mbps != 0
+        || activation.maximum_down_mbps != 0
+        || parse_public_udp_endpoint(activation.peer_endpoint.as_ref()).is_none()
+    {
+        return Err(BackendError::Invalid);
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| BackendError::Unavailable)?
+        .as_secs();
+    if now >= lineage.setup_expires_at_unix || now >= lineage.hard_expires_at_unix {
+        return Err(BackendError::Invalid);
+    }
+    Ok((OpenLineageKey::from(lineage), activation.clone()))
 }
 
 fn validate_destroy_binding(
@@ -735,6 +898,48 @@ fn internal_prepare_plan(
     }
 }
 
+fn internal_activate_plan(
+    resource: &DurableWireguardResource,
+    key: OpenLineageKey,
+    activation: &volparossa_routing::LeaseActivation,
+) -> Result<ActivateLeases, BackendError> {
+    if resource.key()
+        != (
+            u8::try_from(activation.path_id).map_err(|_| BackendError::Invalid)?,
+            activation.role,
+        )
+    {
+        return Err(BackendError::Invalid);
+    }
+    let peer_public_key: [u8; 32] = activation
+        .peer_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    if peer_public_key.iter().all(|byte| *byte == 0) {
+        return Err(BackendError::Invalid);
+    }
+    let (peer_address, peer_port) = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
+        .ok_or(BackendError::Invalid)?;
+    Ok(ActivateLeases {
+        route_context_id: key.context_id.to_vec(),
+        leases: vec![InternalLeaseActivation {
+            path_id: activation.path_id,
+            role: InternalEndpointRole::Client as i32,
+            peer_public_key: peer_public_key.to_vec(),
+            peer_endpoint: Some(InternalUdpEndpoint {
+                address: ip_bytes(peer_address),
+                port: u32::from(peer_port),
+            }),
+            allowed_prefixes: vec![InternalIpPrefix {
+                address: resource.peer_address().octets().to_vec(),
+                prefix_length: 128,
+            }],
+            persistent_keepalive_seconds: FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS,
+        }],
+    })
+}
+
 fn worker_request(
     request_id: [u8; 16],
     operation: internal_worker_request::Operation,
@@ -787,6 +992,49 @@ fn matches_prepared(
         .filter(|port| *port != 0)?;
     (lease.path_id == path_id && lease.role == role && public_key.iter().any(|byte| *byte != 0))
         .then_some((public_key, listen_port))
+}
+
+fn matches_activated(
+    execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
+    prepared: PreparedWorkerLease,
+) -> Option<KernelCounters> {
+    let execution = execution?;
+    if execution.descriptor.is_some()
+        || execution.response.result != InternalWorkerResult::Ok as i32
+    {
+        return None;
+    }
+    let Some(internal_worker_response::Outcome::Activated(activated)) =
+        execution.response.outcome.as_ref()
+    else {
+        return None;
+    };
+    let [lease] = activated.leases.as_slice() else {
+        return None;
+    };
+    let public_key: [u8; 32] = lease.public_key.as_slice().try_into().ok()?;
+    let listen_port = u16::try_from(lease.listen_port)
+        .ok()
+        .filter(|port| *port != 0)?;
+    if (lease.path_id, lease.role, public_key, listen_port)
+        != (
+            prepared.path_id,
+            prepared.role,
+            prepared.public_key,
+            prepared.listen_port,
+        )
+        || lease.latest_handshake_nanoseconds >= 1_000_000_000
+        || (lease.latest_handshake_unix == 0 && lease.latest_handshake_nanoseconds != 0)
+    {
+        return None;
+    }
+    Some(KernelCounters {
+        path_id: lease.path_id,
+        role: lease.role,
+        latest_handshake_unix: lease.latest_handshake_unix,
+        received_bytes: lease.received_bytes,
+        transmitted_bytes: lease.transmitted_bytes,
+    })
 }
 
 fn response_error(
@@ -873,6 +1121,17 @@ fn ip_bytes(address: IpAddr) -> Vec<u8> {
         IpAddr::V4(address) => address.octets().to_vec(),
         IpAddr::V6(address) => address.octets().to_vec(),
     }
+}
+
+fn parse_public_udp_endpoint(value: Option<&PublicUdpEndpoint>) -> Option<(IpAddr, u16)> {
+    let value = value?;
+    let port = u16::try_from(value.port).ok().filter(|port| *port != 0)?;
+    let address = match value.address.as_slice() {
+        bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(bytes).ok()?)),
+        bytes if bytes.len() == 16 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).ok()?)),
+        _ => return None,
+    };
+    (!address.is_unspecified() && !address.is_multicast()).then_some((address, port))
 }
 
 #[cfg(test)]
@@ -973,6 +1232,7 @@ mod tests {
                 address: "198.51.100.7".parse().expect("fixture address"),
                 evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
             },
+            prepared: None,
             phase: OpenLeasePhase::Reserved,
             birth_may_exist: false,
         }
@@ -1012,6 +1272,54 @@ mod tests {
         (binding, value)
     }
 
+    fn live_activate_fixture() -> (
+        OpenLineageKey,
+        BackendBinding,
+        ActivateLeaseBatch,
+        PreparedWorkerLease,
+    ) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = OpenLineageKey {
+            setup_expires_at_unix: now + 20,
+            hard_expires_at_unix: now + 120,
+            ..key()
+        };
+        let mut binding = binding(
+            key,
+            OperationKind::Activate,
+            BackendPhase::Prepared,
+            BackendAction::Activate,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        binding.prior_phase = Some(ContextPhase::Prepared);
+        let value = ActivateLeaseBatch {
+            route_context_id: key.context_id.to_vec(),
+            context_handle: vec![0x31; HELPER_HANDLE_BYTES],
+            leases: vec![volparossa_routing::LeaseActivation {
+                lease_handle: vec![0x32; HELPER_HANDLE_BYTES],
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                peer_public_key: vec![0x61; 32],
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: vec![198, 51, 100, 9],
+                    port: 51_821,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+            }],
+        };
+        let prepared = PreparedWorkerLease {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            public_key: [0x62; 32],
+            listen_port: 51_820,
+        };
+        (key, binding, value, prepared)
+    }
+
     #[test]
     fn markers_and_stage_request_ids_bind_complete_lineage() {
         let lease = RoutingLeasePlan {
@@ -1028,6 +1336,14 @@ mod tests {
         assert_ne!(
             worker_request_id(key(), STAGE_INITIALISE),
             worker_request_id(key(), STAGE_PREPARE)
+        );
+        assert_ne!(
+            worker_request_id(key(), STAGE_PREPARE),
+            worker_request_id(key(), STAGE_ACTIVATE)
+        );
+        assert_ne!(
+            worker_request_id(key(), STAGE_ACTIVATE),
+            worker_request_id(key(), STAGE_DESTROY)
         );
         let mut changed = key();
         changed.backend_generation += 1;
@@ -1105,6 +1421,137 @@ mod tests {
             validate_prepare_binding(binding, &wrong).unwrap_err(),
             BackendError::Invalid
         );
+    }
+
+    #[test]
+    fn activate_validation_and_internal_plan_bind_the_exact_client_peer() {
+        let (key, binding, value, _) = live_activate_fixture();
+        let (validated_key, activation) =
+            validate_activate_binding(binding, &value).expect("valid Activate binding");
+        assert_eq!(validated_key, key);
+        let resource = process_owned_resource(
+            key,
+            &RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+            },
+        )
+        .expect("resource");
+        let plan = internal_activate_plan(resource.resource(), key, &activation)
+            .expect("internal activation plan");
+        assert_eq!(plan.route_context_id, key.context_id);
+        let [lease] = plan.leases.as_slice() else {
+            panic!("one internal activation")
+        };
+        assert_eq!(lease.path_id, 1);
+        assert_eq!(lease.role, InternalEndpointRole::Client as i32);
+        assert_eq!(lease.peer_public_key, [0x61; 32]);
+        assert_eq!(
+            lease.peer_endpoint,
+            Some(InternalUdpEndpoint {
+                address: vec![198, 51, 100, 9],
+                port: 51_821,
+            })
+        );
+        assert_eq!(lease.allowed_prefixes.len(), 1);
+        assert_eq!(
+            lease.allowed_prefixes[0].address,
+            resource.resource().peer_address().octets()
+        );
+        assert_eq!(lease.allowed_prefixes[0].prefix_length, 128);
+        assert_eq!(
+            lease.persistent_keepalive_seconds,
+            FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS
+        );
+
+        let mut wrong = binding;
+        wrong.prior_phase = None;
+        assert_eq!(
+            validate_activate_binding(wrong, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = binding;
+        wrong.operation_generation += 1;
+        assert_eq!(
+            validate_activate_binding(wrong, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = value.clone();
+        wrong.leases[0].maximum_up_mbps = 1;
+        assert_eq!(
+            validate_activate_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = value.clone();
+        wrong.leases[0].role = WireguardRole::Exit as i32;
+        assert_eq!(
+            validate_activate_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = value;
+        wrong.leases[0]
+            .peer_endpoint
+            .as_mut()
+            .expect("peer endpoint")
+            .address = vec![0; 4];
+        assert_eq!(
+            validate_activate_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+    }
+
+    #[test]
+    fn activated_response_preserves_zero_or_nonzero_kernel_baselines_exactly() {
+        let (_, _, _, prepared) = live_activate_fixture();
+        let execution = |handshake, nanoseconds, received, transmitted| {
+            crate::worker_transport::CredentialedWorkerExecution {
+                response: crate::internal_protocol::InternalWorkerResponse {
+                    protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                    magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                    request_id: vec![7; 16],
+                    result: InternalWorkerResult::Ok as i32,
+                    request_digest: vec![8; 32],
+                    outcome: Some(internal_worker_response::Outcome::Activated(
+                        crate::internal_protocol::ActivatedLeases {
+                            leases: vec![crate::internal_protocol::ActivatedLease {
+                                path_id: prepared.path_id,
+                                role: prepared.role,
+                                public_key: prepared.public_key.to_vec(),
+                                listen_port: u32::from(prepared.listen_port),
+                                latest_handshake_unix: handshake,
+                                latest_handshake_nanoseconds: nanoseconds,
+                                received_bytes: received,
+                                transmitted_bytes: transmitted,
+                            }],
+                        },
+                    )),
+                },
+                descriptor: None,
+            }
+        };
+
+        assert_eq!(
+            matches_activated(Some(&execution(0, 0, 0, 0)), prepared),
+            Some(KernelCounters {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                latest_handshake_unix: 0,
+                received_bytes: 0,
+                transmitted_bytes: 0,
+            })
+        );
+        assert_eq!(
+            matches_activated(Some(&execution(123, 456, 11, 12)), prepared),
+            Some(KernelCounters {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                latest_handshake_unix: 123,
+                received_bytes: 11,
+                transmitted_bytes: 12,
+            })
+        );
+        assert!(matches_activated(Some(&execution(0, 1, 0, 0)), prepared).is_none());
+        assert!(matches_activated(Some(&execution(0, 1_000_000_000, 0, 0)), prepared).is_none());
     }
 
     #[tokio::test]
