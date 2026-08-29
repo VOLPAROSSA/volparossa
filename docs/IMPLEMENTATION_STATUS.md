@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-08-28
+Last updated: 2026-08-29
 
 ## Fixed alpha v1 scorecard
 
@@ -223,9 +223,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   production body is exercised dynamically by the shell contract test. A failed helper main now
   emits exactly one payload-free, versioned stage record for parent contract, runtime preparation,
   worker spawn, FD-store publication, or retirement cleanup. The driver accepts that record only
-  from a safe byte-exact private capture bound to the current manager invocation and the exact
-  `failed:failed:exit-code:1:1` terminal tuple; malformed, additional, truncated, unknown, signalled,
-  launch or manager failures retain a generic fixed label. Exact-main
+  from a safe byte-exact private capture bound to the current manager marker and invocation and the
+  exact `failed:failed:exit-code:1:1` terminal tuple; malformed, additional, truncated, unknown,
+  signalled, launch or manager failures retain a generic fixed label. Exact-main
   [run 33151307859](https://github.com/VOLPAROSSA/volparossa/actions/runs/33151307859) at
   `175defc28c8a1297a8ad23b919abe5c427630ed9` retained diagnostic artifact `9677903781`
   (API archive SHA-256
@@ -235,12 +235,28 @@ single clean-build A01--A15 run; the score is not a release claim.
   mismatch: `--ignore-failure` converted the helper's diagnostic exit 1 into unit success, while
   the classifier correctly required a failed terminal tuple; `--collect` could additionally
   discard other failed terminal state before inspection. The diagnostic unit now uses blocking
-  `Type=exec` startup, so PID 1 completes the start job after successful exec, `systemd-run`
-  returns the already assigned invocation ID, and a later helper exit 1 remains a real unit
+  `Type=exec` startup, so PID 1 owns the exec boundary and a helper exit 1 remains a real unit
   failure. Both transient units forbid those two shortcuts, pin and read back `Type=exec` and
   `CollectMode=inactive`, and attest exact diagnostic/production `RemainAfterExit` values. The
-  diagnostic unit separately pins and reads back a 45-second runtime maximum. None of the failed
-  runs is PASS evidence, so AV1-09 remains Open until a new exact-main retained run succeeds.
+  diagnostic unit separately pins and reads back a 45-second runtime maximum. Attempt 3 of exact-main
+  [run 33154240154](https://github.com/VOLPAROSSA/volparossa/actions/runs/33154240154/attempts/3)
+  at `9277f34b6d4bdf6c673808f916e8530e0772529c` ran the real disposable VM in
+  [job 99120406794](https://github.com/VOLPAROSSA/volparossa/actions/runs/33154240154/job/99120406794)
+  and retained diagnostic artifact
+  [9717037736](https://github.com/VOLPAROSSA/volparossa/actions/runs/33154240154/artifacts/9717037736)
+  (API archive SHA-256
+  `ea62e06f75049d986465f49dba8b3cfb17aaa9815f6b6d6fd276bb6d2bb533fa`) with first fixed label
+  `worker-launch-status`. Exact systemd v257 `start_transient_service` control flow explains this
+  result: the blocking client returns from a failed `bus_wait_for_jobs_one` before its subsequent
+  `acquire_invocation_id` and JSON-print path, so the short failed helper had an exact PID 1 unit but
+  no client JSON binding. The gate now recovers diagnostic binding only for nonzero status, safe
+  captures, exactly empty client stdout, absent JSON binding and successful tentative adoption of
+  the exact random name, SHA-256 marker and nonzero current manager ID. It rechecks marker and ID
+  after adoption and again before mapping the byte-exact stage. Nonempty or malformed stdout,
+  `not-found`, marker/ID drift and failed observations remain generic. This exception cannot pass
+  the proof: success still requires status zero, exact JSON, empty client stderr and the exact
+  successful terminal tuple. None of the failed runs is PASS evidence; the score remains **11/100**
+  and AV1-09 remains Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

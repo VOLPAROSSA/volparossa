@@ -656,10 +656,19 @@ Both units also pin and read back `CollectMode=inactive`: a real failure therefo
 long enough for exact terminal inspection, while successful or reset units can still be collected
 during bounded retirement. Neither transient launch uses `--ignore-failure` or the aggressive
 `--collect` shortcut. The diagnostic phase uses blocking `Type=exec` startup: PID 1 completes the
-start job only after successful `execve`, after which `systemd-run` returns the already assigned
-`InvocationID` before the live proof finishes; its separate `RuntimeMaxSec=45s` is also read back
-exactly. The driver additionally reads back `Type=exec` for both units, `RemainAfterExit=yes` only
-for the diagnostic unit, and the production default `RemainAfterExit=no`.
+start job only after successful `execve`; its separate `RuntimeMaxSec=45s` is also read back
+exactly. A fast diagnostic `exit(1)` can nevertheless make systemd v257's blocking client return
+from the failed start-job wait before its later JSON `InvocationID` acquisition and print path. In
+that one case the driver may recover diagnostic authority only when the launch captures are safe,
+stdout is exactly empty, no JSON binding was accepted, and the nonzero launch status accompanies
+successful tentative adoption of the exact random unit name, SHA-256 ownership marker and current
+nonzero PID 1 `InvocationID`. The marker and current ID are rechecked after adoption and again
+before a byte-exact helper stage is mapped. A nonempty or malformed stdout capture, a missing or
+changed marker or ID, `not-found`, or any failed observation leaves the launch generic. This
+recovery cannot authorize PASS: success still requires launch status zero, one exact JSON object,
+empty client stderr, the original manager binding and `active:exited:success:1:0`. The driver
+additionally reads back `Type=exec` for both units, `RemainAfterExit=yes` only for the diagnostic
+unit, and the production default `RemainAfterExit=no`.
 The first phase succeeds only with the two exact ordered helper records, an externally observed
 post-exit `NFileDescriptorStore=2`, confirmed worker reap and pin release. Before the first phase
 and after the fully retired second phase, the driver compares privacy-safe digests of account files,
@@ -673,13 +682,16 @@ separate legacy captures.
 A failed live-proof helper main writes exactly one payload-free versioned phase record covering only
 parent-contract validation, production-runtime preparation, worker spawn, FD-store publication, or
 retirement cleanup. The driver maps it to a fixed retained label only when the private capture is
-byte-exact and safe, PID 1 still reports the same bound invocation, and the terminal tuple proves a
-normal `exit(1)` by main. Unknown, extra, truncated and otherwise malformed records, signals,
-manager drift and launch failures remain generic and never reflect raw stderr. A publication error
-remains the primary phase after all mandatory local cleanup attempts; an ambiguous child retirement
-or failed reservation settlement is classified as retirement cleanup. The two capability-set
-observations are normalized by the exact dynamically tested Debian-compatible awk body; its loop
-variables deliberately avoid names reserved by Debian's default `mawk`.
+byte-exact and safe, PID 1 still reports the same ownership marker and bound invocation, and the
+terminal tuple proves a normal `exit(1)` by main. This includes the exact failed-`Type=exec`
+empty-stdout adoption described above; the nonzero client status is then evidence of the same
+already-bound helper failure, not a separate success claim. Unknown, extra, truncated and otherwise
+malformed records, signals, manager drift and ambiguous launch envelopes remain generic and never
+reflect raw stderr. A publication error remains the primary phase after all mandatory local cleanup
+attempts; an ambiguous child retirement or failed reservation settlement is classified as
+retirement cleanup. The two capability-set observations are normalized by the exact dynamically
+tested Debian-compatible awk body; its loop variables deliberately avoid names reserved by Debian's
+default `mawk`.
 
 Legacy `x_tables` custody is derived only from the current network namespace's
 `/proc/self/net/ip_tables_names` and `/proc/self/net/ip6_tables_names` inventories. Each family is
@@ -785,10 +797,14 @@ Before the blocking start call, the driver atomically supplies a `Description` c
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
 identity. Normal bounded retirement begins after `systemd-run` has returned one exact JSON object
 containing that unit name and a nonzero lowercase 128-bit `InvocationID`, and the manager reports
-the same marker and ID. During an interrupt or an invalid start reply, tentative ownership may be
-promoted only after bounded read-only observations prove the exact name, marker and nonzero current
-ID. If they cannot, the driver performs no unit mutation, fails the proof, and requires the
-disposable VM to be discarded. It never guesses that a same-named unit belongs to this run.
+the same marker and ID. The exact failed-start diagnostic path and interrupt or invalid-reply
+cleanup may instead promote tentative ownership only after bounded read-only observations prove
+the exact name, marker and nonzero current ID. The failed-start diagnostic binding additionally
+requires safe captures and byte-empty stdout, then rechecks both marker and current ID before
+exposing the fixed helper stage. If tentative ownership cannot be established, the driver performs
+no unit mutation, fails the proof, and requires the disposable VM to be discarded. Drift observed
+after exact adoption still blocks stage mapping and permits only exact-ID retirement of that already
+owned unit. It never guesses that a same-named unit belongs to this run.
 
 The child still performs no link, WireGuard, route, nftables, sysctl, or socket-factory operation.
 It keeps only an in-memory context marker, accepts `Initialise` and `DestroyContext`, and returns

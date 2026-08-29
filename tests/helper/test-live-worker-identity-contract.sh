@@ -486,6 +486,12 @@ exercise_worker_terminal_decision() (
     unit_invocation_is_current() {
         [ "$decision_current" = yes ]
     }
+    # Invoked indirectly by the extracted terminal classifier. Manager-marker
+    # drift is exercised separately by the failed-launch recovery matrix.
+    # shellcheck disable=SC2317
+    unit_description_matches_marker() {
+        return 0
+    }
     proof_failure_reason=
     proof_ok=yes
     unset production_ok
@@ -534,6 +540,195 @@ stage-before-envelope yes yes exact failure 0 yes yes no worker-helper-publicati
 capture-envelope no yes empty failure 0 no no no worker-launch-envelope
 json-envelope no yes empty failure 0 yes no yes worker-launch-envelope
 clean-success yes yes empty success 0 yes yes yes none
+nonzero-success yes yes empty success 1 yes yes yes worker-launch-status
+EOF
+
+# Exercise the failed-Type=exec binding recovery through the production helper
+# bodies while replacing only read-only systemctl observations. No host unit is
+# created or mutated by this contract test.
+worker_binding_recovery_functions=$temporary_directory/worker-binding-recovery-functions.sh
+for recovery_function in \
+    unit_name_is_safe \
+    unit_invocation_id_is_safe \
+    unit_ownership_marker_is_safe \
+    unit_description_matches_marker \
+    unit_current_invocation_id \
+    unit_invocation_is_current \
+    forget_unit_ownership \
+    unit_load_state \
+    unit_active_state \
+    adopt_tentative_unit \
+    recover_failed_worker_manager_binding
+do
+    sed -n "/^$recovery_function() {$/,/^}$/p" "$gate" \
+        >>"$worker_binding_recovery_functions"
+done
+for recovery_function in \
+    unit_name_is_safe \
+    unit_invocation_id_is_safe \
+    unit_ownership_marker_is_safe \
+    unit_description_matches_marker \
+    unit_current_invocation_id \
+    unit_invocation_is_current \
+    forget_unit_ownership \
+    unit_load_state \
+    unit_active_state \
+    adopt_tentative_unit \
+    recover_failed_worker_manager_binding
+do
+    if [ "$(grep -c "^$recovery_function() {$" \
+        "$worker_binding_recovery_functions")" -ne 1 ]; then
+        printf 'worker binding recovery helper is not uniquely extractable: %s\n' \
+            "$recovery_function" >&2
+        exit 1
+    fi
+done
+sh -n "$worker_binding_recovery_functions"
+# shellcheck source=/dev/null
+. "$worker_binding_recovery_functions"
+
+# ShellCheck cannot resolve the extracted recovery and classifier reads of
+# these fixture globals or the indirect calls to the systemctl fixture.
+# shellcheck disable=SC2034
+exercise_failed_worker_binding_recovery() (
+    [ "$#" -eq 6 ] || exit 98
+    recovery_name=$1
+    recovery_stdout=$2
+    recovery_manager=$3
+    recovery_tuple=$4
+    expected_recovery_decision=$5
+    expected_manager_binding=$6
+    temporary_stage=$temporary_directory/worker-binding-$recovery_name
+    mkdir -m 0700 "$temporary_stage"
+    case $recovery_stdout in
+        empty)
+            : >"$temporary_stage/systemd-run.stdout"
+            ;;
+        nonempty)
+            printf '\n' >"$temporary_stage/systemd-run.stdout"
+            ;;
+        malformed)
+            printf '%s\n' '{"unit":' >"$temporary_stage/systemd-run.stdout"
+            ;;
+        *) exit 97 ;;
+    esac
+    chmod 0600 "$temporary_stage/systemd-run.stdout"
+    decision_stage=$temporary_stage/proof.stderr
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' \
+        >"$decision_stage"
+    chmod 0600 "$decision_stage"
+
+    unit_name=volparossa-helper-live-proof-A1b2C3.service
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    exact_invocation_id=0123456789abcdef0123456789abcdef
+    systemctl_call_log=$temporary_stage/systemctl.calls
+    # Invoked indirectly by the extracted tentative-adoption helpers.
+    # shellcheck disable=SC2317
+    systemctl() {
+        printf '%s\n' "$2" >>"$systemctl_call_log"
+        [ "$1" = show ] || return 1
+        case $2 in
+            --property=LoadState)
+                case $recovery_manager in
+                    adoption-failure) return 1 ;;
+                    not-found) printf '%s\n' not-found ;;
+                    *) printf '%s\n' loaded ;;
+                esac
+                ;;
+            --property=Description)
+                observed_id_reads=$(grep -Fc -- '--property=InvocationID' \
+                    "$systemctl_call_log" 2>/dev/null || true)
+                if [ "$recovery_manager" = bad-marker ] \
+                    || { [ "$recovery_manager" = marker-drift-after-id ] \
+                        && [ "$observed_id_reads" -ge 2 ]; }; then
+                    printf '%s\n' \
+                        volparossa-helper-live-proof-owner-v1-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+                else
+                    printf '%s\n' "$unit_ownership_marker"
+                fi
+                ;;
+            --property=InvocationID)
+                if [ "$recovery_manager" = bad-id ]; then
+                    printf '%s\n' 00000000000000000000000000000000
+                else
+                    printf '%s\n' "$exact_invocation_id"
+                fi
+                ;;
+            --property=ActiveState)
+                if [ "$recovery_manager" = bad-id ]; then
+                    printf '%s\n' unknown
+                else
+                    printf '%s\n' failed
+                fi
+                ;;
+            *) return 1 ;;
+        esac
+    }
+
+    run_status=1
+    worker_launch_captures_ok=yes
+    worker_launch_json_ok=no
+    worker_manager_binding_ok=no
+    worker_launch_stderr_empty=no
+    unit_owned=no
+    unit_may_own=yes
+    unit_invocation_id=
+    case $recovery_tuple in
+        failure)
+            active_state=failed
+            sub_state=failed
+            result=exit-code
+            exec_code=1
+            exec_status=1
+            ;;
+        success)
+            active_state=active
+            sub_state=exited
+            result=success
+            exec_code=1
+            exec_status=0
+            ;;
+        *) exit 96 ;;
+    esac
+
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    recover_failed_worker_manager_binding || true
+    if [ "$worker_manager_binding_ok" != yes ]; then
+        record_worker_launch_failure
+    fi
+    classify_worker_live_proof_terminal "$decision_stage" || exit 95
+    [ "$worker_manager_binding_ok" = "$expected_manager_binding" ] \
+        && [ "$proof_failure_reason" = "$expected_recovery_decision" ] \
+        && [ "$proof_ok" = no ] \
+        && [ "${production_ok+x}" != x ] || exit 94
+    if [ "$recovery_stdout" != empty ]; then
+        [ ! -s "$systemctl_call_log" ] || exit 93
+    fi
+)
+while read -r recovery_name recovery_stdout recovery_manager recovery_tuple \
+    recovery_expected recovery_binding
+do
+    expect_status 0 exercise_failed_worker_binding_recovery \
+        "$recovery_name" "$recovery_stdout" "$recovery_manager" \
+        "$recovery_tuple" "$recovery_expected" "$recovery_binding"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'worker binding recovery emitted diagnostics: %s\n' \
+            "$recovery_name" >&2
+        exit 1
+    fi
+done <<'EOF'
+adopted-stage empty exact failure worker-helper-publication yes
+nonempty-stdout nonempty exact failure worker-launch-status no
+malformed-stdout malformed exact failure worker-launch-status no
+bad-marker empty bad-marker failure worker-launch-status no
+bad-id empty bad-id failure worker-launch-status no
+marker-drift-after-id empty marker-drift-after-id failure worker-launch-status no
+adoption-failure empty adoption-failure failure worker-launch-status no
+not-found-success-return empty not-found failure worker-launch-status no
+nonzero-success empty exact success worker-launch-status yes
 EOF
 
 # Exercise the exact capability normalizer with Debian's awk implementation.
@@ -2756,6 +2951,9 @@ if ! awk '
     in_classifier && /^    if \[ "\$worker_manager_binding_ok" = yes \] \\$/ {
         helper_guard = NR
     }
+    in_classifier && /&& unit_description_matches_marker \\$/ {
+        current_marker = NR
+    }
     in_classifier && /&& unit_invocation_is_current \\$/ { current_invocation = NR }
     in_classifier && /= failed:failed:exit-code:1:1 \]; then/ {
         exact_failure_tuple = NR
@@ -2775,6 +2973,9 @@ if ! awk '
     !in_classifier && /^    record_worker_launch_failure$/ {
         early_launch_fallback = NR
     }
+    !in_classifier && /^    recover_failed_worker_manager_binding \|\| true$/ {
+        failed_binding_recovery = NR
+    }
     /capture_unit_property ExecMainCode "\$temporary_stage\/unit-exec-code"/ {
         exec_code_capture = NR
     }
@@ -2785,19 +2986,23 @@ if ! awk '
         generic_proof_records = NR
     }
     END {
-        valid = classifier_definition > 0 && helper_guard > 0 && current_invocation > 0
+        valid = classifier_definition > 0 && helper_guard > 0 && current_marker > 0
+        valid = valid && current_invocation > 0
         valid = valid && exact_failure_tuple > 0 && helper_stage_mapping > 0
         valid = valid && generic_launch_fallback > 0 && success_terminal_gate > 0
         valid = valid && generic_terminal > 0 && early_launch_fallback > 0
+        valid = valid && failed_binding_recovery > 0
         valid = valid && exec_code_capture > 0 && classifier_call > 0
         valid = valid && generic_proof_records > 0
         valid = valid && classifier_definition < helper_guard
         valid = valid && helper_guard < current_invocation
-        valid = valid && current_invocation < exact_failure_tuple
+        valid = valid && current_invocation < current_marker
+        valid = valid && current_marker < exact_failure_tuple
         valid = valid && exact_failure_tuple < helper_stage_mapping
         valid = valid && helper_stage_mapping < generic_launch_fallback
         valid = valid && generic_launch_fallback < success_terminal_gate
         valid = valid && success_terminal_gate < generic_terminal
+        valid = valid && failed_binding_recovery < early_launch_fallback
         valid = valid && early_launch_fallback < exec_code_capture
         valid = valid && exec_code_capture < classifier_call
         valid = valid && classifier_call < generic_proof_records
@@ -2806,6 +3011,60 @@ if ! awk '
 ' "$gate"; then
     printf '%s\n' \
         'helper failure stages are not bound before generic terminal diagnostics' >&2
+    exit 1
+fi
+
+if ! awk '
+    /^recover_failed_worker_manager_binding\(\) \{$/ {
+        in_recovery = 1
+        definition = NR
+        next
+    }
+    in_recovery && /^}$/ { in_recovery = 0; next }
+    in_recovery && /\[ "\$run_status" -ne 0 \] \|\| return 1/ { failed_status = NR }
+    in_recovery && /\[ "\$worker_launch_captures_ok" = yes \] \|\| return 1/ {
+        safe_captures = NR
+    }
+    in_recovery && /vp_capture_file_is_safe "\$temporary_stage\/systemd-run.stdout"/ {
+        stdout_metadata = NR
+    }
+    in_recovery && /\[ ! -s "\$temporary_stage\/systemd-run.stdout" \] \|\| return 1/ {
+        empty_stdout = NR
+    }
+    in_recovery && /\[ "\$worker_launch_json_ok" = no \] \|\| return 1/ {
+        missing_json = NR
+    }
+    in_recovery && /\[ "\$worker_manager_binding_ok" = no \] \|\| return 1/ {
+        missing_binding = NR
+    }
+    in_recovery && /\[ "\$unit_owned" = no \] \|\| return 1/ { pre_owned = NR }
+    in_recovery && /\[ "\$unit_may_own" = yes \] \|\| return 1/ { pre_may = NR }
+    in_recovery && /adopt_tentative_unit \|\| return 1/ { adoption = NR }
+    in_recovery && /\[ "\$unit_owned" = yes \] \|\| return 1/ { post_owned = NR }
+    in_recovery && /\[ "\$unit_may_own" = no \] \|\| return 1/ { post_may = NR }
+    in_recovery && /^    unit_description_matches_marker \|\| return 1$/ {
+        post_marker = NR
+    }
+    in_recovery && /^    unit_invocation_is_current \|\| return 1$/ {
+        post_current = NR
+    }
+    in_recovery && /^    worker_manager_binding_ok=yes$/ { binding_commit = NR }
+    END {
+        valid = definition > 0 && definition < failed_status
+        valid = valid && failed_status < safe_captures
+        valid = valid && safe_captures < stdout_metadata
+        valid = valid && stdout_metadata < empty_stdout
+        valid = valid && empty_stdout < missing_json
+        valid = valid && missing_json < missing_binding
+        valid = valid && missing_binding < pre_owned && pre_owned < pre_may
+        valid = valid && pre_may < adoption && adoption < post_owned
+        valid = valid && post_owned < post_may && post_may < post_current
+        valid = valid && post_current < post_marker && post_marker < binding_commit
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' \
+        'failed worker binding recovery is not exact and fail closed' >&2
     exit 1
 fi
 
