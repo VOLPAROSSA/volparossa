@@ -6,6 +6,9 @@ use thiserror::Error;
 use volparossa_routing::{ContextRole, WireguardRole};
 use volparossa_wireguard::{EndpointRole, interface_name, overlay_prefix};
 
+pub(crate) const DURABLE_WIREGUARD_ALIAS_PREFIX: &str = "volparossa:wireguard:ownership-v1:";
+const DURABLE_WIREGUARD_MARKER_HEX_BYTES: usize = 64;
+
 /// A route, path or role did not describe one endpoint in the two-link topology.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("invalid WireGuard lease topology")]
@@ -66,6 +69,41 @@ impl WireguardLeaseSpec {
     pub(crate) const fn local_address(&self) -> Ipv6Addr {
         self.local_address
     }
+
+    /// Verify one public ownership marker against this exact derived interface.
+    ///
+    /// The marker is correlation evidence received only over the authenticated private worker
+    /// channel. It is not durable journal authority.
+    pub(crate) fn matches_ownership_alias(&self, alias: &str) -> bool {
+        let Some(suffix) = alias.strip_prefix(DURABLE_WIREGUARD_ALIAS_PREFIX) else {
+            return false;
+        };
+        let Some(digest) = suffix.strip_prefix(self.interface()) else {
+            return false;
+        };
+        let Some(digest) = digest.strip_prefix(':') else {
+            return false;
+        };
+        digest.len() == DURABLE_WIREGUARD_MARKER_HEX_BYTES
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    }
+}
+
+/// Validate the fixed bounded grammar before a worker has enough context to derive the interface.
+pub(crate) fn ownership_alias_has_valid_shape(alias: &str) -> bool {
+    let Some(suffix) = alias.strip_prefix(DURABLE_WIREGUARD_ALIAS_PREFIX) else {
+        return false;
+    };
+    let Some((interface, digest)) = suffix.split_once(':') else {
+        return false;
+    };
+    safe_interface_name(interface)
+        && digest.len() == DURABLE_WIREGUARD_MARKER_HEX_BYTES
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn allowed_endpoint_role(context: ContextRole, role: i32) -> Option<EndpointRole> {
@@ -113,5 +151,37 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn ownership_alias_is_bounded_and_bound_to_the_exact_derived_interface() {
+        let specification = WireguardLeaseSpec::derive(
+            [7; 16],
+            ContextRole::Client,
+            1,
+            WireguardRole::Client as i32,
+        )
+        .expect("client lease");
+        let alias = format!(
+            "{DURABLE_WIREGUARD_ALIAS_PREFIX}{}:{}",
+            specification.interface(),
+            "ab".repeat(32)
+        );
+        assert!(ownership_alias_has_valid_shape(&alias));
+        assert!(specification.matches_ownership_alias(&alias));
+
+        let substituted = alias.replacen(specification.interface(), "vpc999999999", 1);
+        assert!(ownership_alias_has_valid_shape(&substituted));
+        assert!(!specification.matches_ownership_alias(&substituted));
+        assert!(!ownership_alias_has_valid_shape(&format!(
+            "{DURABLE_WIREGUARD_ALIAS_PREFIX}{}:{}",
+            specification.interface(),
+            "AB".repeat(32)
+        )));
+        assert!(!ownership_alias_has_valid_shape(&format!(
+            "{DURABLE_WIREGUARD_ALIAS_PREFIX}{}:{}0",
+            specification.interface(),
+            "ab".repeat(32)
+        )));
     }
 }

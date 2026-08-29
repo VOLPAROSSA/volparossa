@@ -6,7 +6,8 @@
 //! capability, descriptor, credential, dedicated non-root identity and post-install clone/fork
 //! confinement before the parent could register it. Retirement owns only the exact leader, and this
 //! bootstrap does not independently attest descendant absence before filter installation. The child
-//! still implements only in-memory initialise/destroy.
+//! implements exact single-lease `WireGuard` Prepare/Destroy inside its anonymous namespace, while
+//! the production engine handoff remains deliberately disconnected.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -52,15 +53,17 @@ use crate::{
     deadline::HardDeadline,
     internal_protocol::{
         ContextDestroyed, ContextInitialised, INTERNAL_WORKER_MAGIC,
-        INTERNAL_WORKER_PROTOCOL_VERSION, InternalWorkerRequest, InternalWorkerResponse,
-        InternalWorkerResult, encode_request, internal_worker_request, internal_worker_response,
-        validate_response_for_request,
+        INTERNAL_WORKER_PROTOCOL_VERSION, InternalContextRole, InternalEndpointRole,
+        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult, PrepareLeases,
+        PreparedLease, PreparedLeases, encode_request, internal_worker_request,
+        internal_worker_response, validate_response_for_request,
     },
+    kernel::{KernelError, NamespaceKernel, PreparedWireguardKernelProof},
     ownership_journal::{
         DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyOutcome,
         DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare,
         DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey,
-        DurableRegistrationOutcome,
+        DurableRegistrationOutcome, DurableWireguardResource,
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
@@ -73,6 +76,9 @@ use crate::{
     },
 };
 use volparossa_linux_uapi::install_close_range_on_exec;
+use volparossa_routing::ContextRole as RoutingContextRole;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
+use zeroize::Zeroizing;
 
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
 pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-worker-v3-live-proof";
@@ -1136,6 +1142,7 @@ fn run_child(required_user: u32, required_group: u32) -> Result<(), WorkerV3Erro
             )?)
         },
         |prepared, identity| Ok(prepared.finish(identity)?),
+        child_loop,
     )
 }
 
@@ -1150,6 +1157,7 @@ fn run_child_with_fixture_sandbox(
         required_group,
         |_| Ok(()),
         move |(), _| Ok(snapshot),
+        fixture_memory_child_loop,
     )
 }
 
@@ -1204,6 +1212,7 @@ fn run_child_with_sandbox<P, B, F>(
     required_group: u32,
     begin_sandbox: B,
     finish_sandbox: F,
+    operation_loop: fn(&Socket, ExpectedUnixCredentials, ContextId) -> Result<(), WorkerV3Error>,
 ) -> Result<(), WorkerV3Error>
 where
     B: FnOnce(crate::worker_sandbox::NetworkNamespaceIdentity) -> Result<P, WorkerV3Error>,
@@ -1289,23 +1298,26 @@ where
         return Err(WorkerV3Error::Authentication);
     }
     send_credential_record(&channel, &accepted.sandbox_ready().encode())?;
-    child_loop(&channel, expected_parent, hello.context_id)
+    operation_loop(&channel, expected_parent, hello.context_id)
 }
 
-fn child_loop(
+#[cfg(test)]
+fn fixture_memory_child_loop(
     channel: &Socket,
     expected_parent: ExpectedUnixCredentials,
     bound_context: ContextId,
 ) -> Result<(), WorkerV3Error> {
-    let mut context: Option<ContextId> = None;
+    let mut initialised = false;
     loop {
         let request = receive_credential_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
         let (result, outcome, exit) = match operation {
             internal_worker_request::Operation::Initialise(initialise) => {
                 let route_context_id = context_id(&initialise.route_context_id)?;
-                if context.is_none() && route_context_id == bound_context {
-                    context = Some(route_context_id);
+                if initialised || route_context_id != bound_context {
+                    (InternalWorkerResult::Conflict, None, false)
+                } else {
+                    initialised = true;
                     (
                         InternalWorkerResult::Ok,
                         Some(internal_worker_response::Outcome::Initialised(
@@ -1315,14 +1327,11 @@ fn child_loop(
                         )),
                         false,
                     )
-                } else {
-                    (InternalWorkerResult::Conflict, None, false)
                 }
             }
             internal_worker_request::Operation::DestroyContext(destroy) => {
                 let route_context_id = context_id(&destroy.route_context_id)?;
-                if context == Some(route_context_id) {
-                    context = None;
+                if initialised && route_context_id == bound_context {
                     (
                         InternalWorkerResult::Ok,
                         Some(internal_worker_response::Outcome::Destroyed(
@@ -1330,6 +1339,408 @@ fn child_loop(
                         )),
                         true,
                     )
+                } else {
+                    (InternalWorkerResult::NotFound, None, false)
+                }
+            }
+            _ => (InternalWorkerResult::Invalid, None, false),
+        };
+        let response = correlated_response(&request, result, outcome)?;
+        send_credential_worker_response(channel, &request, &response, None)?;
+        if exit {
+            return Ok(());
+        }
+    }
+}
+
+trait WorkerNamespaceKernel {
+    fn preflight_exact_owned_wireguard(
+        &mut self,
+        resource: &DurableWireguardResource,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError>;
+
+    fn prepare_wireguard(
+        &mut self,
+        resource: &DurableWireguardResource,
+        private_key: &Zeroizing<[u8; 32]>,
+        expected_public_key: [u8; 32],
+        deadline: HardDeadline,
+    ) -> Result<PreparedWireguardKernelProof, KernelError>;
+
+    fn delete_exact_owned_wireguard(
+        &mut self,
+        resource: &DurableWireguardResource,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError>;
+
+    fn prove_wireguard_absent(
+        &mut self,
+        resource: &DurableWireguardResource,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError>;
+}
+
+impl WorkerNamespaceKernel for NamespaceKernel {
+    fn preflight_exact_owned_wireguard(
+        &mut self,
+        resource: &DurableWireguardResource,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        self.preflight_exact_owned_wireguard_v3(std::slice::from_ref(resource), deadline)
+    }
+
+    fn prepare_wireguard(
+        &mut self,
+        resource: &DurableWireguardResource,
+        private_key: &Zeroizing<[u8; 32]>,
+        expected_public_key: [u8; 32],
+        deadline: HardDeadline,
+    ) -> Result<PreparedWireguardKernelProof, KernelError> {
+        self.prepare_wireguard_v3(resource, private_key, expected_public_key, deadline)
+    }
+
+    fn delete_exact_owned_wireguard(
+        &mut self,
+        resource: &DurableWireguardResource,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        self.delete_exact_owned_wireguard_v3(resource, deadline)
+    }
+
+    fn prove_wireguard_absent(
+        &mut self,
+        resource: &DurableWireguardResource,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        self.prove_wireguard_absent_v3(resource, deadline)
+    }
+}
+
+struct WorkerEphemeralKey {
+    private_key: Zeroizing<[u8; 32]>,
+    public_key: [u8; 32],
+}
+
+impl std::fmt::Debug for WorkerEphemeralKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WorkerEphemeralKey(<redacted>)")
+    }
+}
+
+trait WorkerKeySource {
+    fn generate(&mut self) -> Result<WorkerEphemeralKey, ()>;
+}
+
+struct OsWorkerKeySource;
+
+impl WorkerKeySource for OsWorkerKeySource {
+    fn generate(&mut self) -> Result<WorkerEphemeralKey, ()> {
+        let mut private_key = Zeroizing::new([0_u8; 32]);
+        OsRng.try_fill_bytes(private_key.as_mut()).map_err(|_| ())?;
+        worker_ephemeral_key(private_key).ok_or(())
+    }
+}
+
+fn worker_ephemeral_key(private_key: Zeroizing<[u8; 32]>) -> Option<WorkerEphemeralKey> {
+    if private_key.iter().all(|byte| *byte == 0) {
+        return None;
+    }
+    let secret = X25519StaticSecret::from(*private_key);
+    let public_key = X25519PublicKey::from(&secret).to_bytes();
+    drop(secret);
+    if public_key.iter().all(|byte| *byte == 0) {
+        return None;
+    }
+    Some(WorkerEphemeralKey {
+        private_key,
+        public_key,
+    })
+}
+
+struct WorkerLeaseOwnership {
+    resource: DurableWireguardResource,
+    private_key: Option<Zeroizing<[u8; 32]>>,
+    proof: Option<PreparedWireguardKernelProof>,
+}
+
+impl std::fmt::Debug for WorkerLeaseOwnership {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WorkerLeaseOwnership(<redacted>)")
+    }
+}
+
+enum WorkerLeaseLifecycle {
+    Prepared(WorkerLeaseOwnership),
+    CleanupRequired(WorkerLeaseOwnership),
+}
+
+struct WorkerContext<Kernel> {
+    route_context_id: ContextId,
+    role: RoutingContextRole,
+    kernel: Kernel,
+    lease: Option<WorkerLeaseLifecycle>,
+}
+
+enum WorkerPrepareOutcome {
+    Prepared(PreparedLease),
+    Failed(InternalWorkerResult),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerDestroyOutcome {
+    Destroyed,
+    NoAdoptedLease,
+    CleanupIncomplete,
+}
+
+impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
+    const fn new(route_context_id: ContextId, role: RoutingContextRole, kernel: Kernel) -> Self {
+        Self {
+            route_context_id,
+            role,
+            kernel,
+            lease: None,
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        operation: &PrepareLeases,
+        keys: &mut impl WorkerKeySource,
+        deadline: HardDeadline,
+    ) -> WorkerPrepareOutcome {
+        if self.lease.is_some() {
+            return WorkerPrepareOutcome::Failed(InternalWorkerResult::Conflict);
+        }
+        if operation.route_context_id.as_slice() != self.route_context_id
+            || operation.leases.len() != 1
+        {
+            return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
+        }
+        let lease = &operation.leases[0];
+        let Some(role) = routing_endpoint_role(lease.role) else {
+            return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
+        };
+        let Some(resource) = DurableWireguardResource::from_authenticated_worker_binding(
+            self.route_context_id,
+            self.role,
+            lease.path_id,
+            role,
+            lease.ownership_alias.clone(),
+        ) else {
+            return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
+        };
+        let Some(local_overlay_address) = lease
+            .local_overlay_address
+            .as_ref()
+            .filter(|prefix| prefix.prefix_length == 128)
+            .and_then(|prefix| <[u8; 16]>::try_from(prefix.address.as_slice()).ok())
+            .map(std::net::Ipv6Addr::from)
+        else {
+            return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
+        };
+        if local_overlay_address != resource.local_address() {
+            return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
+        }
+
+        let mut ownership = WorkerLeaseOwnership {
+            resource,
+            private_key: None,
+            proof: None,
+        };
+        if self
+            .kernel
+            .preflight_exact_owned_wireguard(&ownership.resource, deadline)
+            .is_err()
+        {
+            return self.fail_prepare_after_ownership(ownership, deadline);
+        }
+        let Ok(key) = keys.generate() else {
+            return self.fail_prepare_after_ownership(ownership, deadline);
+        };
+        let Ok(proof) = self.kernel.prepare_wireguard(
+            &ownership.resource,
+            &key.private_key,
+            key.public_key,
+            deadline,
+        ) else {
+            ownership.private_key = Some(key.private_key);
+            return self.fail_prepare_after_ownership(ownership, deadline);
+        };
+        ownership.private_key = Some(key.private_key);
+        ownership.proof = Some(proof);
+        if proof.ifindex == 0
+            || proof.public_key != key.public_key
+            || proof.listen_port == 0
+            || proof.local_overlay_address
+                != std::net::IpAddr::V6(ownership.resource.local_address())
+        {
+            return self.fail_prepare_after_ownership(ownership, deadline);
+        }
+        let prepared = PreparedLease {
+            path_id: lease.path_id,
+            role: lease.role,
+            public_key: proof.public_key.to_vec(),
+            listen_port: u32::from(proof.listen_port),
+        };
+        self.lease = Some(WorkerLeaseLifecycle::Prepared(ownership));
+        WorkerPrepareOutcome::Prepared(prepared)
+    }
+
+    fn fail_prepare_after_ownership(
+        &mut self,
+        ownership: WorkerLeaseOwnership,
+        deadline: HardDeadline,
+    ) -> WorkerPrepareOutcome {
+        if cleanup_worker_resource(&mut self.kernel, &ownership.resource, deadline) {
+            drop(ownership);
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Kernel)
+        } else {
+            self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownership));
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::CleanupIncomplete)
+        }
+    }
+
+    fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
+        let Some(lifecycle) = self.lease.take() else {
+            // This says only that the child adopted no resource. A parent may already have moved
+            // a birth link into this namespace, so it is not kernel-absence evidence.
+            return WorkerDestroyOutcome::NoAdoptedLease;
+        };
+        let ownership = match lifecycle {
+            WorkerLeaseLifecycle::Prepared(ownership)
+            | WorkerLeaseLifecycle::CleanupRequired(ownership) => ownership,
+        };
+        if cleanup_worker_resource(&mut self.kernel, &ownership.resource, deadline) {
+            drop(ownership);
+            WorkerDestroyOutcome::Destroyed
+        } else {
+            self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownership));
+            WorkerDestroyOutcome::CleanupIncomplete
+        }
+    }
+}
+
+fn cleanup_worker_resource(
+    kernel: &mut impl WorkerNamespaceKernel,
+    resource: &DurableWireguardResource,
+    deadline: HardDeadline,
+) -> bool {
+    let _ = kernel.delete_exact_owned_wireguard(resource, deadline);
+    kernel.prove_wireguard_absent(resource, deadline).is_ok()
+}
+
+fn routing_context_role(role: i32) -> Option<RoutingContextRole> {
+    match InternalContextRole::try_from(role).ok()? {
+        InternalContextRole::Client => Some(RoutingContextRole::Client),
+        InternalContextRole::Relay => Some(RoutingContextRole::Relay),
+        InternalContextRole::Exit => Some(RoutingContextRole::Exit),
+        InternalContextRole::Unspecified => None,
+    }
+}
+
+fn routing_endpoint_role(role: i32) -> Option<i32> {
+    let role = match InternalEndpointRole::try_from(role).ok()? {
+        InternalEndpointRole::Client => volparossa_routing::WireguardRole::Client,
+        InternalEndpointRole::RelayClient => volparossa_routing::WireguardRole::RelayClient,
+        InternalEndpointRole::RelayExit => volparossa_routing::WireguardRole::RelayExit,
+        InternalEndpointRole::Exit => volparossa_routing::WireguardRole::Exit,
+        InternalEndpointRole::Unspecified => return None,
+    };
+    Some(role as i32)
+}
+
+fn child_loop(
+    channel: &Socket,
+    expected_parent: ExpectedUnixCredentials,
+    bound_context: ContextId,
+) -> Result<(), WorkerV3Error> {
+    let mut context: Option<WorkerContext<NamespaceKernel>> = None;
+    let mut keys = OsWorkerKeySource;
+    loop {
+        let request = receive_credential_worker_request(channel, expected_parent)?;
+        let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
+        let (result, outcome, exit) = match operation {
+            internal_worker_request::Operation::Initialise(initialise) => {
+                let route_context_id = context_id(&initialise.route_context_id)?;
+                let Some(role) = routing_context_role(initialise.role) else {
+                    return Err(WorkerV3Error::Invalid);
+                };
+                if context.is_some() || route_context_id != bound_context {
+                    (InternalWorkerResult::Conflict, None, false)
+                } else {
+                    let deadline = HardDeadline::after(CHANNEL_TIMEOUT)?;
+                    match NamespaceKernel::connect(deadline).and_then(|mut kernel| {
+                        kernel.activate_loopback(deadline)?;
+                        Ok(kernel)
+                    }) {
+                        Ok(kernel) => {
+                            context = Some(WorkerContext::new(route_context_id, role, kernel));
+                            (
+                                InternalWorkerResult::Ok,
+                                Some(internal_worker_response::Outcome::Initialised(
+                                    ContextInitialised {
+                                        route_context_id: route_context_id.to_vec(),
+                                    },
+                                )),
+                                false,
+                            )
+                        }
+                        Err(_) => (InternalWorkerResult::Kernel, None, false),
+                    }
+                }
+            }
+            internal_worker_request::Operation::PrepareLeases(prepare) => {
+                let route_context_id = context_id(&prepare.route_context_id)?;
+                let Some(context) = context.as_mut().filter(|context| {
+                    context.route_context_id == route_context_id
+                        && route_context_id == bound_context
+                }) else {
+                    let response =
+                        correlated_response(&request, InternalWorkerResult::NotFound, None)?;
+                    send_credential_worker_response(channel, &request, &response, None)?;
+                    continue;
+                };
+                let deadline = HardDeadline::after(CHANNEL_TIMEOUT)?;
+                match context.prepare(prepare, &mut keys, deadline) {
+                    WorkerPrepareOutcome::Prepared(prepared) => (
+                        InternalWorkerResult::Ok,
+                        Some(internal_worker_response::Outcome::Prepared(
+                            PreparedLeases {
+                                leases: vec![prepared],
+                            },
+                        )),
+                        false,
+                    ),
+                    WorkerPrepareOutcome::Failed(result) => (result, None, false),
+                }
+            }
+            internal_worker_request::Operation::DestroyContext(destroy) => {
+                let route_context_id = context_id(&destroy.route_context_id)?;
+                if let Some(worker_context) = context
+                    .as_mut()
+                    .filter(|worker_context| worker_context.route_context_id == route_context_id)
+                {
+                    let deadline = HardDeadline::after(CHANNEL_TIMEOUT)?;
+                    match worker_context.destroy(deadline) {
+                        WorkerDestroyOutcome::Destroyed => {
+                            context = None;
+                            (
+                                InternalWorkerResult::Ok,
+                                Some(internal_worker_response::Outcome::Destroyed(
+                                    ContextDestroyed {},
+                                )),
+                                true,
+                            )
+                        }
+                        WorkerDestroyOutcome::NoAdoptedLease => {
+                            (InternalWorkerResult::NotFound, None, false)
+                        }
+                        WorkerDestroyOutcome::CleanupIncomplete => {
+                            (InternalWorkerResult::CleanupIncomplete, None, false)
+                        }
+                    }
                 } else {
                     (InternalWorkerResult::NotFound, None, false)
                 }
@@ -7375,6 +7786,330 @@ mod tests {
         )
     }
 
+    #[derive(Default)]
+    struct FakeWorkerKernel {
+        calls: Vec<&'static str>,
+        prepare_fails: bool,
+        absence_fails: bool,
+        substitute_proof: bool,
+    }
+
+    impl WorkerNamespaceKernel for FakeWorkerKernel {
+        fn preflight_exact_owned_wireguard(
+            &mut self,
+            _resource: &DurableWireguardResource,
+            _deadline: HardDeadline,
+        ) -> Result<(), KernelError> {
+            self.calls.push("preflight");
+            Ok(())
+        }
+
+        fn prepare_wireguard(
+            &mut self,
+            resource: &DurableWireguardResource,
+            _private_key: &Zeroizing<[u8; 32]>,
+            expected_public_key: [u8; 32],
+            _deadline: HardDeadline,
+        ) -> Result<PreparedWireguardKernelProof, KernelError> {
+            self.calls.push("prepare");
+            if self.prepare_fails {
+                return Err(KernelError::Invalid);
+            }
+            Ok(PreparedWireguardKernelProof {
+                ifindex: 7,
+                public_key: if self.substitute_proof {
+                    [0x55; 32]
+                } else {
+                    expected_public_key
+                },
+                listen_port: 51_820,
+                local_overlay_address: std::net::IpAddr::V6(resource.local_address()),
+            })
+        }
+
+        fn delete_exact_owned_wireguard(
+            &mut self,
+            _resource: &DurableWireguardResource,
+            _deadline: HardDeadline,
+        ) -> Result<(), KernelError> {
+            self.calls.push("delete");
+            Ok(())
+        }
+
+        fn prove_wireguard_absent(
+            &mut self,
+            _resource: &DurableWireguardResource,
+            _deadline: HardDeadline,
+        ) -> Result<(), KernelError> {
+            self.calls.push("absent");
+            if self.absence_fails {
+                Err(KernelError::Invalid)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct FixedWorkerKeySource {
+        private_key: Option<[u8; 32]>,
+    }
+
+    impl WorkerKeySource for FixedWorkerKeySource {
+        fn generate(&mut self) -> Result<WorkerEphemeralKey, ()> {
+            let bytes = self.private_key.take().ok_or(())?;
+            worker_ephemeral_key(Zeroizing::new(bytes)).ok_or(())
+        }
+    }
+
+    fn worker_prepare(route_context_id: ContextId, marker_seed: u8) -> PrepareLeases {
+        let specification = crate::lease_spec::WireguardLeaseSpec::derive(
+            route_context_id,
+            RoutingContextRole::Client,
+            1,
+            volparossa_routing::WireguardRole::Client as i32,
+        )
+        .expect("client worker specification");
+        PrepareLeases {
+            route_context_id: route_context_id.to_vec(),
+            leases: vec![crate::internal_protocol::LeasePlan {
+                path_id: 1,
+                role: InternalEndpointRole::Client as i32,
+                local_overlay_address: Some(crate::internal_protocol::InternalIpPrefix {
+                    address: specification.local_address().octets().to_vec(),
+                    prefix_length: 128,
+                }),
+                setup_expires_at_unix: 100,
+                hard_expires_at_unix: 200,
+                ownership_alias: format!(
+                    "{}{}:{}",
+                    crate::lease_spec::DURABLE_WIREGUARD_ALIAS_PREFIX,
+                    specification.interface(),
+                    format!("{marker_seed:02x}").repeat(32)
+                ),
+            }],
+        }
+    }
+
+    fn worker_deadline() -> HardDeadline {
+        HardDeadline::after(Duration::from_secs(1)).expect("worker test deadline")
+    }
+
+    #[test]
+    fn worker_prepare_uses_only_exact_kernel_proof_and_destroy_proves_absence() {
+        let route_context_id = [0x31; 16];
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Client,
+            FakeWorkerKernel::default(),
+        );
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([0x42; 32]),
+        };
+        let expected_public_key = worker_ephemeral_key(Zeroizing::new([0x42; 32]))
+            .expect("fixed key")
+            .public_key;
+
+        let WorkerPrepareOutcome::Prepared(prepared) = context.prepare(
+            &worker_prepare(route_context_id, 0x51),
+            &mut keys,
+            worker_deadline(),
+        ) else {
+            panic!("exact worker Prepare failed")
+        };
+        assert_eq!(prepared.path_id, 1);
+        assert_eq!(prepared.role, InternalEndpointRole::Client as i32);
+        assert_eq!(prepared.public_key, expected_public_key);
+        assert_eq!(prepared.listen_port, 51_820);
+        assert!(matches!(
+            context.lease,
+            Some(WorkerLeaseLifecycle::Prepared(_))
+        ));
+        assert_eq!(context.kernel.calls, ["preflight", "prepare"]);
+
+        assert_eq!(
+            context.destroy(worker_deadline()),
+            WorkerDestroyOutcome::Destroyed
+        );
+        assert!(context.lease.is_none());
+        assert_eq!(
+            context.kernel.calls,
+            ["preflight", "prepare", "delete", "absent"]
+        );
+    }
+
+    #[test]
+    fn worker_destroy_without_an_adopted_lease_is_not_absence_proof() {
+        let mut context = WorkerContext::new(
+            [0x37; 16],
+            RoutingContextRole::Client,
+            FakeWorkerKernel::default(),
+        );
+
+        assert_eq!(
+            context.destroy(worker_deadline()),
+            WorkerDestroyOutcome::NoAdoptedLease
+        );
+        assert!(context.kernel.calls.is_empty());
+    }
+
+    #[test]
+    fn worker_rejects_alias_address_and_batch_substitution_before_kernel_access() {
+        let route_context_id = [0x32; 16];
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Client,
+            FakeWorkerKernel::default(),
+        );
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([0x43; 32]),
+        };
+
+        let mut wrong_alias = worker_prepare(route_context_id, 0x52);
+        let different_alias = worker_prepare([0x33; 16], 0x52);
+        wrong_alias.leases[0].ownership_alias = different_alias.leases[0].ownership_alias.clone();
+        assert!(matches!(
+            context.prepare(&wrong_alias, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
+        ));
+
+        let mut wrong_address = worker_prepare(route_context_id, 0x52);
+        wrong_address.leases[0]
+            .local_overlay_address
+            .as_mut()
+            .expect("address")
+            .address[15] ^= 1;
+        assert!(matches!(
+            context.prepare(&wrong_address, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
+        ));
+
+        let mut batch = worker_prepare(route_context_id, 0x52);
+        batch.leases.push(batch.leases[0].clone());
+        assert!(matches!(
+            context.prepare(&batch, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
+        ));
+        assert!(context.kernel.calls.is_empty());
+        assert!(context.lease.is_none());
+    }
+
+    #[test]
+    fn failed_prepare_returns_kernel_only_after_exact_absence() {
+        let route_context_id = [0x34; 16];
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Client,
+            FakeWorkerKernel {
+                prepare_fails: true,
+                ..FakeWorkerKernel::default()
+            },
+        );
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([0x44; 32]),
+        };
+
+        assert!(matches!(
+            context.prepare(
+                &worker_prepare(route_context_id, 0x53),
+                &mut keys,
+                worker_deadline(),
+            ),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Kernel)
+        ));
+        assert!(context.lease.is_none());
+        assert_eq!(
+            context.kernel.calls,
+            ["preflight", "prepare", "delete", "absent"]
+        );
+    }
+
+    #[test]
+    fn incomplete_prepare_rollback_retains_ownership_until_destroy_succeeds() {
+        let route_context_id = [0x35; 16];
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Client,
+            FakeWorkerKernel {
+                prepare_fails: true,
+                absence_fails: true,
+                ..FakeWorkerKernel::default()
+            },
+        );
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([0x45; 32]),
+        };
+
+        assert!(matches!(
+            context.prepare(
+                &worker_prepare(route_context_id, 0x54),
+                &mut keys,
+                worker_deadline(),
+            ),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::CleanupIncomplete)
+        ));
+        assert!(matches!(
+            context.lease,
+            Some(WorkerLeaseLifecycle::CleanupRequired(_))
+        ));
+        assert_eq!(
+            context.destroy(worker_deadline()),
+            WorkerDestroyOutcome::CleanupIncomplete
+        );
+        assert!(matches!(
+            context.lease,
+            Some(WorkerLeaseLifecycle::CleanupRequired(_))
+        ));
+
+        context.kernel.absence_fails = false;
+        assert_eq!(
+            context.destroy(worker_deadline()),
+            WorkerDestroyOutcome::Destroyed
+        );
+        assert!(context.lease.is_none());
+        assert_eq!(
+            context.kernel.calls,
+            [
+                "preflight",
+                "prepare",
+                "delete",
+                "absent",
+                "delete",
+                "absent",
+                "delete",
+                "absent"
+            ]
+        );
+    }
+
+    #[test]
+    fn substituted_kernel_proof_is_rolled_back_and_never_returned() {
+        let route_context_id = [0x36; 16];
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Client,
+            FakeWorkerKernel {
+                substitute_proof: true,
+                ..FakeWorkerKernel::default()
+            },
+        );
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([0x46; 32]),
+        };
+        assert!(matches!(
+            context.prepare(
+                &worker_prepare(route_context_id, 0x55),
+                &mut keys,
+                worker_deadline(),
+            ),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Kernel)
+        ));
+        assert!(context.lease.is_none());
+        assert_eq!(
+            context.kernel.calls,
+            ["preflight", "prepare", "delete", "absent"]
+        );
+    }
+
     fn initialised_response(
         request: &InternalWorkerRequest,
         context_id: ContextId,
@@ -12802,8 +13537,8 @@ mod tests {
             .find("prctl::set_dumpable(false)")
             .expect("post-observation core-dump disablement");
         let loop_entry = bootstrap
-            .rfind("child_loop(&channel")
-            .expect("child-loop entry");
+            .rfind("operation_loop(&channel")
+            .expect("selected child-loop entry");
         assert!(proof < accepted && accepted < dumpable && dumpable < ready && ready < loop_entry);
     }
 
