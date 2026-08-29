@@ -383,10 +383,22 @@ single clean-build A01--A15 run; the score is not a release claim.
   authenticated probe still requires server `SO_PEERCRED` to equal that exact `MainPID` and is
   bracketed by the complete identity artifact. Retirement distinguishes the old process from PID
   reuse by starttime and fails closed when an extant proc record becomes unreadable. The worker
-  observation likewise makes no cross-credential executable claim: it joins one direct child by
-  stable starttime, PPid, complete dedicated credentials and a pinned distinct network namespace
-  to the launched helper's existing pidfd/process/netns custody, credential-authenticated child
-  handshake, and held functional Prepare/Destroy exchange. A fresh exact-main KVM PASS remains
+  observation likewise makes no cross-credential executable claim. Source-pinned
+  `ExecStartPost`/`ExecStopPost` commands now enter through `setpriv` with UID 0 and all GID/group
+  fields equal to the agent GID; each hook validates that identity, the helper capability mask,
+  no-new-privileges and seccomp state. This makes parent FD observation use matching procfs
+  credentials without `CAP_SYS_PTRACE`. The hook then requires every parent pidfd fdinfo `Pid` and
+  `NSpid` to equal the one direct child, all pidfds to identify one kernel object, every retained
+  numeric proc directory to identify that child, and every foreign netns FD to identify one
+  distinct namespace. Parent-owned process-directory and namespace pins are duplicated to hook FDs
+  8 and 7. Descriptor-relative starttime/status brackets require exact PID, PPid, NSpid,
+  single-thread state, dedicated credentials, empty groups, NNP, seccomp/filter count and worker
+  capability masks around the WireGuard readback. After Destroy, the pinned proc directory must
+  expose no `stat` or `status`, the parent must retain no pidfd/proc-dir/foreign-netns custody, and
+  the pinned namespace must contain no WireGuard object before observer closure. The root-owned
+  setgid proof directory keeps every mode-0600 artifact root:root. The post-hook command remains a
+  source contract plus exact self-status check rather than a separately typed PID-1 readback. A
+  fresh exact-main KVM PASS remains
   required; this correction does not raise the **11/100** score or close AV1-09.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser

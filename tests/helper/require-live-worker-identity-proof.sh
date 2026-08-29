@@ -2865,8 +2865,8 @@ if [ "$proof_ok" = yes ]; then
         --property="BindPaths=$production_runtime_bind $production_output_bind" \
         --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
         --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
-        --property="ExecStartPost=/run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid" \
-        --property="ExecStopPost=/run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid" \
+        --property="ExecStartPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid" \
+        --property="ExecStopPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid" \
         --property=KillSignal=SIGTERM \
         --property=KillMode=control-group \
         --property=SendSIGKILL=yes \

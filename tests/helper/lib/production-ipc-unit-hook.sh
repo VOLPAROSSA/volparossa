@@ -45,6 +45,32 @@ number_is_safe() {
     esac
 }
 
+fd_number_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        0) return 0 ;;
+        ''|0*|*[!0-9]*) return 1 ;;
+        *) [ "${#1}" -le 10 ] && [ "$1" -le 4294967294 ] ;;
+    esac
+}
+
+kernel_object_number_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+        *) [ "${#1}" -le 20 ] ;;
+    esac
+}
+
+kernel_object_identity_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    hook_kernel_device=${1%%:*}
+    hook_kernel_inode=${1#*:}
+    [ "$1" = "$hook_kernel_device:$hook_kernel_inode" ] || return 1
+    kernel_object_number_is_safe "$hook_kernel_device" \
+        && kernel_object_number_is_safe "$hook_kernel_inode"
+}
+
 unit_name_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -645,6 +671,35 @@ capture_helper_process_contract() {
     ' "$hook_contract_status" 2>/dev/null
 }
 
+hook_entry_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_entry_gid=$1
+    number_is_safe "$hook_entry_gid" || return 1
+    hook_entry_status=$(capture_helper_process_contract "$$" "$hook_entry_gid") \
+        || return 1
+    [ -n "$hook_entry_status" ]
+}
+
+process_contract_filter_count() {
+    [ "$#" -eq 2 ] || return 1
+    hook_filter_contract=$1
+    hook_filter_gid=$2
+    number_is_safe "$hook_filter_gid" || return 1
+    hook_filter_prefix="process-status-v1=uid:0:0:0:0;gid:$hook_filter_gid:$hook_filter_gid:$hook_filter_gid:$hook_filter_gid;groups:$hook_filter_gid;nnp:1;seccomp:2;caps:$helper_bootstrap_capability_mask;filters:"
+    case $hook_filter_contract in
+        "$hook_filter_prefix"*)
+            hook_filter_count=${hook_filter_contract#"$hook_filter_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    case $hook_filter_count in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#hook_filter_count}" -le 4 ] \
+        && [ "$hook_filter_count" -le 1024 ] || return 1
+    printf '%s\n' "$hook_filter_count"
+}
+
 capture_running_identity() {
     [ "$#" -eq 3 ] || return 1
     case $3 in
@@ -866,15 +921,24 @@ direct_helper_child() {
     [ "$#" -eq 1 ] || return 1
     hook_parent_pid=$1
     number_is_safe "$hook_parent_pid" || return 1
-    hook_children=$(
+    hook_children_raw=$(
         for hook_children_file in /proc/"$hook_parent_pid"/task/*/children; do
             [ -f "$hook_children_file" ] || exit 1
             cat "$hook_children_file" || exit 1
             printf '\n'
-        done \
-            | tr ' ' '\n' \
-            | sed '/^$/d' \
-            | sort -u
+        done
+    ) || return 1
+    hook_children_lines=$(tr ' ' '\n' <<EOF
+$hook_children_raw
+EOF
+    ) || return 1
+    hook_children_nonempty=$(sed '/^$/d' <<EOF
+$hook_children_lines
+EOF
+    ) || return 1
+    hook_children=$(sort -u <<EOF
+$hook_children_nonempty
+EOF
     ) || return 1
     case $hook_children in
         ''|*[!0-9]*) return 1 ;;
@@ -894,23 +958,30 @@ helper_has_no_children() {
     done
 }
 
-worker_status_is_exact() {
-    [ "$#" -eq 4 ] || return 1
-    hook_worker_pid=$1
-    hook_parent_pid=$2
-    hook_worker_uid=$3
-    hook_worker_gid=$4
+worker_status_from_process_fd_is_exact() {
+    [ "$#" -eq 6 ] || return 1
+    hook_worker_process_fd=$1
+    hook_worker_pid=$2
+    hook_parent_pid=$3
+    hook_worker_uid=$4
+    hook_worker_gid=$5
+    hook_worker_parent_filters=$6
+    fd_number_is_safe "$hook_worker_process_fd" || return 1
     for hook_number in \
-        "$hook_worker_pid" "$hook_parent_pid" "$hook_worker_uid" "$hook_worker_gid"; do
+        "$hook_worker_pid" "$hook_parent_pid" "$hook_worker_uid" \
+        "$hook_worker_gid" "$hook_worker_parent_filters"; do
         number_is_safe "$hook_number" || return 1
     done
-    hook_worker_status=/proc/$hook_worker_pid/status
+    [ "$hook_worker_parent_filters" -le 1024 ] || return 1
+    hook_worker_expected_filters=$((hook_worker_parent_filters + 1))
+    hook_worker_status=/proc/self/fd/$hook_worker_process_fd/status
     [ -f "$hook_worker_status" ] && [ ! -L "$hook_worker_status" ] || return 1
     /usr/bin/awk \
         -v expected_pid="$hook_worker_pid" \
         -v expected_parent="$hook_parent_pid" \
         -v expected_uid="$hook_worker_uid" \
-        -v expected_gid="$hook_worker_gid" '
+        -v expected_gid="$hook_worker_gid" \
+        -v expected_filters="$hook_worker_expected_filters" '
         $1 == "State:" {
             state_count++
             if (NF < 2 || $2 !~ /^(R|S|D)$/) invalid = 1
@@ -924,6 +995,11 @@ worker_status_is_exact() {
         $1 == "PPid:" {
             parent_count++
             if (NF != 2 || $2 != expected_parent) invalid = 1
+            next
+        }
+        $1 == "NSpid:" {
+            namespace_pid_count++
+            if (NF != 2 || $2 != expected_pid) invalid = 1
             next
         }
         $1 == "Uid:" {
@@ -943,42 +1019,296 @@ worker_status_is_exact() {
             if (NF != 1) invalid = 1
             next
         }
+        $1 == "Threads:" {
+            thread_count++
+            if (NF != 2 || $2 != 1) invalid = 1
+            next
+        }
+        $1 == "NoNewPrivs:" {
+            nnp_count++
+            if (NF != 2 || $2 != 1) invalid = 1
+            next
+        }
+        $1 == "Seccomp:" {
+            seccomp_count++
+            if (NF != 2 || $2 != 2) invalid = 1
+            next
+        }
+        $1 == "Seccomp_filters:" {
+            filter_count++
+            if (NF != 2 || $2 != expected_filters) invalid = 1
+            next
+        }
+        $1 == "CapInh:" {
+            inherited_count++
+            if (NF != 2 || $2 != "0000000000000000") invalid = 1
+            next
+        }
+        $1 == "CapPrm:" {
+            permitted_count++
+            if (NF != 2 || $2 != "0000000000001000") invalid = 1
+            next
+        }
+        $1 == "CapEff:" {
+            effective_count++
+            if (NF != 2 || $2 != "0000000000001000") invalid = 1
+            next
+        }
+        $1 == "CapBnd:" {
+            bounding_count++
+            if (NF != 2 || $2 != "0000000000001000") invalid = 1
+            next
+        }
+        $1 == "CapAmb:" {
+            ambient_count++
+            if (NF != 2 || $2 != "0000000000000000") invalid = 1
+            next
+        }
         END {
             if (invalid || state_count != 1 || pid_count != 1 \
-                || parent_count != 1 || uid_count != 1 || gid_count != 1 \
-                || groups_count != 1) exit 1
+                || parent_count != 1 || namespace_pid_count != 1 \
+                || uid_count != 1 || gid_count != 1 || groups_count != 1 \
+                || thread_count != 1 || nnp_count != 1 || seccomp_count != 1 \
+                || filter_count != 1 || inherited_count != 1 \
+                || permitted_count != 1 || effective_count != 1 \
+                || bounding_count != 1 || ambient_count != 1) exit 1
         }
     ' "$hook_worker_status"
 }
 
-worker_identity_is_exact() {
+capture_process_starttime_from_fd() {
+    [ "$#" -eq 2 ] || return 1
+    hook_worker_process_fd=$1
+    hook_worker_pid=$2
+    fd_number_is_safe "$hook_worker_process_fd" || return 1
+    number_is_safe "$hook_worker_pid" || return 1
+    hook_worker_stat=/proc/self/fd/$hook_worker_process_fd/stat
+    [ -f "$hook_worker_stat" ] && [ ! -L "$hook_worker_stat" ] || return 1
+    hook_worker_stat_line=$(cat "$hook_worker_stat") || return 1
+    process_starttime_from_stat "$hook_worker_stat_line" "$hook_worker_pid"
+}
+
+worker_identity_from_process_fd() {
     # The exact parent executable and argv are anchored independently through
     # PID 1. Inside that launched helper, worker construction owns a pidfd and
     # pinned process/netns descriptors across its credential-authenticated
     # parent/child handshake. This external observation joins the one direct
-    # child to that held functional exchange by PID starttime, PPid, complete
-    # credentials and the separately pinned live network namespace. It does
-    # not claim ptrace-gated cross-credential exe or cmdline attestation.
-    [ "$#" -eq 4 ] || return 1
-    hook_worker_pid=$1
-    hook_parent_pid=$2
-    hook_worker_uid=$3
-    hook_worker_gid=$4
-    hook_worker_starttime=$(capture_process_starttime "$hook_worker_pid") || return 1
-    worker_status_is_exact \
-        "$hook_worker_pid" "$hook_parent_pid" \
-        "$hook_worker_uid" "$hook_worker_gid" || return 1
-    [ "$(capture_process_starttime "$hook_worker_pid")" = \
+    # child to that held functional exchange through a duplicated parent-owned
+    # process-directory FD. It does not inspect the non-dumpable worker through
+    # ptrace-gated /proc/<pid> magic links.
+    [ "$#" -eq 6 ] || return 1
+    hook_worker_process_fd=$1
+    hook_worker_pid=$2
+    hook_parent_pid=$3
+    hook_worker_uid=$4
+    hook_worker_gid=$5
+    hook_worker_parent_filters=$6
+    hook_worker_starttime=$(capture_process_starttime_from_fd \
+        "$hook_worker_process_fd" "$hook_worker_pid") || return 1
+    worker_status_from_process_fd_is_exact \
+        "$hook_worker_process_fd" "$hook_worker_pid" "$hook_parent_pid" \
+        "$hook_worker_uid" "$hook_worker_gid" \
+        "$hook_worker_parent_filters" || return 1
+    [ "$(capture_process_starttime_from_fd \
+        "$hook_worker_process_fd" "$hook_worker_pid")" = \
         "$hook_worker_starttime" ] || return 1
-    worker_status_is_exact \
-        "$hook_worker_pid" "$hook_parent_pid" \
-        "$hook_worker_uid" "$hook_worker_gid"
+    worker_status_from_process_fd_is_exact \
+        "$hook_worker_process_fd" "$hook_worker_pid" "$hook_parent_pid" \
+        "$hook_worker_uid" "$hook_worker_gid" \
+        "$hook_worker_parent_filters" || return 1
+    printf '%s\n' "$hook_worker_starttime"
+}
+
+pidfd_record_from_fdinfo() {
+    [ "$#" -eq 3 ] || return 1
+    hook_pidfd_info=$1
+    hook_pidfd_number=$2
+    hook_pidfd_worker=$3
+    fd_number_is_safe "$hook_pidfd_number" || return 1
+    number_is_safe "$hook_pidfd_worker" || return 1
+    [ "${#hook_pidfd_info}" -le 4096 ] || return 1
+    printf '%s\n' "$hook_pidfd_info" | /usr/bin/awk \
+        -v expected_pid="$hook_pidfd_worker" \
+        -v expected_fd="$hook_pidfd_number" '
+        $1 == "Pid:" {
+            pid_count++
+            if (NF != 2 || $2 != expected_pid) invalid = 1
+            next
+        }
+        $1 == "NSpid:" {
+            namespace_pid_count++
+            if (NF != 2 || $2 != expected_pid) invalid = 1
+            next
+        }
+        END {
+            if (invalid || pid_count != 1 || namespace_pid_count != 1) exit 1
+            printf "pidfd-v1=fd:%s;pid:%s\n", expected_fd, expected_pid
+        }
+    '
+}
+
+capture_parent_pidfd_record() {
+    [ "$#" -eq 3 ] || return 1
+    hook_custody_parent_pid=$1
+    hook_custody_fd=$2
+    hook_custody_worker_pid=$3
+    number_is_safe "$hook_custody_parent_pid" || return 1
+    fd_number_is_safe "$hook_custody_fd" || return 1
+    number_is_safe "$hook_custody_worker_pid" || return 1
+    hook_custody_fd_path=/proc/$hook_custody_parent_pid/fd/$hook_custody_fd
+    [ "$(readlink "$hook_custody_fd_path" 2>/dev/null)" = \
+        'anon_inode:[pidfd]' ] || return 1
+    hook_custody_fdinfo=/proc/$hook_custody_parent_pid/fdinfo/$hook_custody_fd
+    [ -f "$hook_custody_fdinfo" ] && [ ! -L "$hook_custody_fdinfo" ] || return 1
+    hook_custody_fdinfo_value=$(cat "$hook_custody_fdinfo") || return 1
+    pidfd_record_from_fdinfo \
+        "$hook_custody_fdinfo_value" "$hook_custody_fd" \
+        "$hook_custody_worker_pid" >/dev/null || return 1
+    hook_custody_identity=$(stat -Lc '%d:%i' \
+        "$hook_custody_fd_path" 2>/dev/null) || return 1
+    kernel_object_identity_is_safe "$hook_custody_identity" || return 1
+    printf '%s\n' "$hook_custody_identity"
+}
+
+namespace_number_from_target() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        net:\[[1-9][0-9]*\]) ;;
+        *) return 1 ;;
+    esac
+    hook_namespace_number=${1#net:[}
+    hook_namespace_number=${hook_namespace_number%]}
+    kernel_object_number_is_safe "$hook_namespace_number" || return 1
+    printf '%s\n' "$hook_namespace_number"
+}
+
+capture_parent_namespace_fd_identity() {
+    [ "$#" -eq 2 ] || return 1
+    hook_custody_parent_pid=$1
+    hook_custody_fd=$2
+    number_is_safe "$hook_custody_parent_pid" || return 1
+    fd_number_is_safe "$hook_custody_fd" || return 1
+    hook_custody_fd_path=/proc/$hook_custody_parent_pid/fd/$hook_custody_fd
+    hook_custody_target=$(readlink "$hook_custody_fd_path" 2>/dev/null) || return 1
+    hook_custody_namespace_number=$(namespace_number_from_target \
+        "$hook_custody_target") || return 1
+    hook_custody_identity=$(stat -Lc '%d:%i' \
+        "$hook_custody_fd_path" 2>/dev/null) || return 1
+    kernel_object_identity_is_safe "$hook_custody_identity" || return 1
+    [ "${hook_custody_identity#*:}" = "$hook_custody_namespace_number" ] || return 1
+    printf '%s\n' "$hook_custody_identity"
+}
+
+capture_parent_process_fd_identity() {
+    [ "$#" -eq 3 ] || return 1
+    hook_custody_parent_pid=$1
+    hook_custody_fd=$2
+    hook_custody_worker_pid=$3
+    number_is_safe "$hook_custody_parent_pid" || return 1
+    fd_number_is_safe "$hook_custody_fd" || return 1
+    number_is_safe "$hook_custody_worker_pid" || return 1
+    hook_custody_fd_path=/proc/$hook_custody_parent_pid/fd/$hook_custody_fd
+    [ "$(readlink "$hook_custody_fd_path" 2>/dev/null)" = \
+        "/proc/$hook_custody_worker_pid" ] || return 1
+    hook_custody_identity=$(stat -Lc '%d:%i' \
+        "$hook_custody_fd_path" 2>/dev/null) || return 1
+    kernel_object_identity_is_safe "$hook_custody_identity" || return 1
+    printf '%s\n' "$hook_custody_identity"
+}
+
+capture_parent_worker_custody() {
+    [ "$#" -eq 2 ] || return 1
+    hook_custody_parent_pid=$1
+    hook_custody_worker_pid=$2
+    number_is_safe "$hook_custody_parent_pid" || return 1
+    number_is_safe "$hook_custody_worker_pid" || return 1
+    hook_custody_parent_namespace=$(stat -Lc '%d:%i' \
+        /proc/self/ns/net 2>/dev/null) || return 1
+    kernel_object_identity_is_safe "$hook_custody_parent_namespace" || return 1
+    hook_custody_fd_unsorted=$(
+        hook_custody_count=0
+        for hook_custody_path in /proc/"$hook_custody_parent_pid"/fd/*; do
+            [ -L "$hook_custody_path" ] || exit 1
+            hook_custody_fd=${hook_custody_path##*/}
+            fd_number_is_safe "$hook_custody_fd" || exit 1
+            hook_custody_count=$((hook_custody_count + 1))
+            [ "$hook_custody_count" -le 512 ] || exit 1
+            printf '%s\n' "$hook_custody_fd"
+        done
+    ) || return 1
+    hook_custody_fd_numbers=$(sort -n <<EOF
+$hook_custody_fd_unsorted
+EOF
+    ) || return 1
+    [ -n "$hook_custody_fd_numbers" ] || return 1
+    hook_custody_pidfd_count=0
+    hook_custody_process_count=0
+    hook_custody_namespace_count=0
+    hook_custody_pidfd_identity=
+    hook_custody_process_fd=
+    hook_custody_process_identity=
+    hook_custody_namespace_fd=
+    hook_custody_namespace_identity=
+    while IFS= read -r hook_custody_fd; do
+        hook_custody_fd_path=/proc/$hook_custody_parent_pid/fd/$hook_custody_fd
+        hook_custody_target=$(readlink "$hook_custody_fd_path" 2>/dev/null) \
+            || return 1
+        case $hook_custody_target in
+            'anon_inode:[pidfd]')
+                hook_custody_observed_identity=$(capture_parent_pidfd_record \
+                    "$hook_custody_parent_pid" "$hook_custody_fd" \
+                    "$hook_custody_worker_pid") || return 1
+                if [ -z "$hook_custody_pidfd_identity" ]; then
+                    hook_custody_pidfd_identity=$hook_custody_observed_identity
+                else
+                    [ "$hook_custody_observed_identity" = \
+                        "$hook_custody_pidfd_identity" ] || return 1
+                fi
+                hook_custody_pidfd_count=$((hook_custody_pidfd_count + 1))
+                ;;
+            /proc/[1-9][0-9]*)
+                [ "$hook_custody_target" = "/proc/$hook_custody_worker_pid" ] \
+                    || return 1
+                hook_custody_observed_identity=$(capture_parent_process_fd_identity \
+                    "$hook_custody_parent_pid" "$hook_custody_fd" \
+                    "$hook_custody_worker_pid") || return 1
+                if [ -z "$hook_custody_process_identity" ]; then
+                    hook_custody_process_fd=$hook_custody_fd
+                    hook_custody_process_identity=$hook_custody_observed_identity
+                else
+                    [ "$hook_custody_observed_identity" = \
+                        "$hook_custody_process_identity" ] || return 1
+                fi
+                hook_custody_process_count=$((hook_custody_process_count + 1))
+                ;;
+            net:\[[1-9][0-9]*\])
+                hook_custody_observed_identity=$(capture_parent_namespace_fd_identity \
+                    "$hook_custody_parent_pid" "$hook_custody_fd") || return 1
+                if [ "$hook_custody_observed_identity" != \
+                    "$hook_custody_parent_namespace" ]; then
+                    if [ -z "$hook_custody_namespace_identity" ]; then
+                        hook_custody_namespace_fd=$hook_custody_fd
+                        hook_custody_namespace_identity=$hook_custody_observed_identity
+                    else
+                        [ "$hook_custody_observed_identity" = \
+                            "$hook_custody_namespace_identity" ] || return 1
+                    fi
+                    hook_custody_namespace_count=$((hook_custody_namespace_count + 1))
+                fi
+                ;;
+        esac
+    done <<EOF
+$hook_custody_fd_numbers
+EOF
+    [ "$hook_custody_pidfd_count" -ge 1 ] \
+        && [ "$hook_custody_process_count" -ge 1 ] \
+        && [ "$hook_custody_namespace_count" -ge 1 ]
 }
 
 worker_wireguard_interface() {
     [ "$#" -eq 1 ] || return 1
     hook_namespace_fd=$1
-    number_is_safe "$hook_namespace_fd" || return 1
+    fd_number_is_safe "$hook_namespace_fd" || return 1
     hook_interfaces=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show interfaces 2>/dev/null) || return 1
     case $hook_interfaces in
@@ -1039,7 +1369,7 @@ worker_wireguard_interface() {
 worker_wireguard_is_absent() {
     [ "$#" -eq 1 ] || return 1
     hook_namespace_fd=$1
-    number_is_safe "$hook_namespace_fd" || return 1
+    fd_number_is_safe "$hook_namespace_fd" || return 1
     hook_interfaces=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show interfaces 2>/dev/null) || return 1
     [ -z "$hook_interfaces" ] || return 1
@@ -1089,47 +1419,46 @@ unit_fdstore_is_empty() {
     [ "$hook_fdstore_count" = 0 ]
 }
 
-helper_does_not_hold_namespace() {
-    [ "$#" -eq 2 ] || return 1
-    hook_namespace_helper_pid=$1
-    hook_namespace_identity=$2
-    number_is_safe "$hook_namespace_helper_pid" || return 1
-    case $hook_namespace_identity in
-        ''|*[!0-9:]*) return 1 ;;
-    esac
-    for hook_helper_fd in /proc/"$hook_namespace_helper_pid"/fd/*; do
-        [ -e "$hook_helper_fd" ] || [ -L "$hook_helper_fd" ] || continue
-        hook_helper_fd_identity=$(stat -Lc '%d:%i' "$hook_helper_fd" 2>/dev/null || true)
-        [ "$hook_helper_fd_identity" != "$hook_namespace_identity" ] || return 1
+helper_holds_no_worker_custody() {
+    [ "$#" -eq 1 ] || return 1
+    hook_custody_parent_pid=$1
+    number_is_safe "$hook_custody_parent_pid" || return 1
+    hook_custody_parent_namespace=$(stat -Lc '%d:%i' \
+        /proc/self/ns/net 2>/dev/null) || return 1
+    kernel_object_identity_is_safe "$hook_custody_parent_namespace" || return 1
+    hook_custody_count=0
+    for hook_custody_path in /proc/"$hook_custody_parent_pid"/fd/*; do
+        [ -L "$hook_custody_path" ] || return 1
+        hook_custody_fd=${hook_custody_path##*/}
+        fd_number_is_safe "$hook_custody_fd" || return 1
+        hook_custody_count=$((hook_custody_count + 1))
+        [ "$hook_custody_count" -le 512 ] || return 1
+        hook_custody_target=$(readlink "$hook_custody_path" 2>/dev/null) || return 1
+        case $hook_custody_target in
+            'anon_inode:[pidfd]'|/proc/[1-9][0-9]*) return 1 ;;
+            net:\[[1-9][0-9]*\])
+                hook_custody_observed_identity=$(capture_parent_namespace_fd_identity \
+                    "$hook_custody_parent_pid" "$hook_custody_fd") || return 1
+                [ "$hook_custody_observed_identity" = \
+                    "$hook_custody_parent_namespace" ] || return 1
+                ;;
+        esac
     done
+    [ "$hook_custody_count" -ge 1 ]
 }
 
-helper_holds_no_foreign_network_namespace() {
+worker_process_fd_is_retired() {
     [ "$#" -eq 1 ] || return 1
-    hook_namespace_helper_pid=$1
-    number_is_safe "$hook_namespace_helper_pid" || return 1
-    hook_parent_network_namespace=$(readlink \
-        "/proc/$hook_namespace_helper_pid/ns/net" 2>/dev/null) || return 1
-    case $hook_parent_network_namespace in
-        net:\[*\]) ;;
-        *) return 1 ;;
-    esac
-    hook_parent_network_namespace_number=${hook_parent_network_namespace#net:[}
-    hook_parent_network_namespace_number=${hook_parent_network_namespace_number%]}
-    number_is_safe "$hook_parent_network_namespace_number" || return 1
-    for hook_helper_fd in /proc/"$hook_namespace_helper_pid"/fd/*; do
-        [ -e "$hook_helper_fd" ] || [ -L "$hook_helper_fd" ] || continue
-        if hook_helper_fd_target=$(readlink "$hook_helper_fd" 2>/dev/null); then
-            case $hook_helper_fd_target in
-                net:\[*\])
-                    [ "$hook_helper_fd_target" = "$hook_parent_network_namespace" ] \
-                        || return 1
-                    ;;
-            esac
-        elif [ -e "$hook_helper_fd" ] || [ -L "$hook_helper_fd" ]; then
-            return 1
-        fi
-    done
+    hook_worker_process_fd=$1
+    fd_number_is_safe "$hook_worker_process_fd" || return 1
+    if cat "/proc/self/fd/$hook_worker_process_fd/stat" \
+        >/dev/null 2>&1; then
+        return 1
+    fi
+    if cat "/proc/self/fd/$hook_worker_process_fd/status" \
+        >/dev/null 2>&1; then
+        return 1
+    fi
 }
 
 functional_probe_output_is_exact() {
@@ -1169,6 +1498,10 @@ run_functional_client_lease_probe() {
         "$hook_functional_worker_gid"; do
         number_is_safe "$hook_functional_number" || return 1
     done
+    hook_functional_parent_contract=$(sed -n '6p' \
+        "$proof_directory/unit.identity") || return 1
+    hook_functional_parent_filters=$(process_contract_filter_count \
+        "$hook_functional_parent_contract" "$hook_functional_agent_gid") || return 1
     private_network_is_pristine || return 1
     [ ! -e "/sys/class/net/$functional_underlay" ] \
         && [ ! -L "/sys/class/net/$functional_underlay" ] || return 1
@@ -1197,8 +1530,11 @@ run_functional_client_lease_probe() {
     mkfifo -m 0600 "$hook_functional_fifo" || return 1
     [ "$(stat -Lc '%F:%u:%g:%a:%h' "$hook_functional_fifo" 2>/dev/null || true)" = \
         'fifo:0:0:600:1' ] || return 1
-    install -o root -g root -m 0600 /dev/null \
-        "$hook_functional_stdout" "$hook_functional_stderr" || return 1
+    # The hook intentionally has the agent GID and no CAP_CHOWN. The setgid,
+    # root-owned proof directory supplies group root at creation time; umask
+    # 077 supplies mode 0600 without a privileged ownership rewrite.
+    printf '%s' '' >"$hook_functional_stdout" || return 1
+    printf '%s' '' >"$hook_functional_stderr" || return 1
     private_file_is_safe "$hook_functional_stdout" || return 1
     private_file_is_safe "$hook_functional_stderr" || return 1
     command exec 6<>"$hook_functional_fifo" || return 1
@@ -1243,26 +1579,83 @@ run_functional_client_lease_probe() {
 
     hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid") \
         || return 1
-    worker_identity_is_exact \
-        "$hook_functional_worker_pid" \
-        "$hook_functional_main_pid" \
-        "$hook_functional_worker_uid" \
-        "$hook_functional_worker_gid" || return 1
-    hook_functional_parent_namespace=$(stat -Lc '%d:%i' \
-        "/proc/$hook_functional_main_pid/ns/net" 2>/dev/null) || return 1
-    hook_functional_worker_namespace=$(stat -Lc '%d:%i' \
-        "/proc/$hook_functional_worker_pid/ns/net" 2>/dev/null) || return 1
+    capture_parent_worker_custody \
+        "$hook_functional_main_pid" "$hook_functional_worker_pid" || return 1
+    hook_functional_pidfd_count=$hook_custody_pidfd_count
+    hook_functional_pidfd_identity=$hook_custody_pidfd_identity
+    hook_functional_process_count=$hook_custody_process_count
+    hook_functional_namespace_count=$hook_custody_namespace_count
+    hook_functional_parent_namespace=$hook_custody_parent_namespace
+    hook_functional_process_parent_fd=$hook_custody_process_fd
+    hook_functional_process_identity=$hook_custody_process_identity
+    hook_functional_namespace_parent_fd=$hook_custody_namespace_fd
+    hook_functional_worker_namespace=$hook_custody_namespace_identity
     [ "$hook_functional_parent_namespace" != "$hook_functional_worker_namespace" ] \
         || return 1
-    command exec 7<"/proc/$hook_functional_worker_pid/ns/net" || return 1
+    hook_functional_parent_process_path=/proc/$hook_functional_main_pid/fd/$hook_functional_process_parent_fd
+    hook_functional_parent_namespace_path=/proc/$hook_functional_main_pid/fd/$hook_functional_namespace_parent_fd
+    [ "$(capture_parent_process_fd_identity \
+        "$hook_functional_main_pid" "$hook_functional_process_parent_fd" \
+        "$hook_functional_worker_pid")" = "$hook_functional_process_identity" ] \
+        || return 1
+    [ "$(capture_parent_namespace_fd_identity \
+        "$hook_functional_main_pid" "$hook_functional_namespace_parent_fd")" = \
+        "$hook_functional_worker_namespace" ] || return 1
+    command exec 7<"$hook_functional_parent_namespace_path" || return 1
+    command exec 8<"$hook_functional_parent_process_path" || return 1
     hook_functional_pinned_namespace=$(stat -Lc '%d:%i' \
         /proc/self/fd/7 2>/dev/null) || return 1
     [ "$hook_functional_pinned_namespace" = "$hook_functional_worker_namespace" ] \
         || return 1
+    hook_functional_pinned_process=$(stat -Lc '%d:%i' \
+        /proc/self/fd/8 2>/dev/null) || return 1
+    [ "$hook_functional_pinned_process" = "$hook_functional_process_identity" ] \
+        || return 1
+    capture_parent_worker_custody \
+        "$hook_functional_main_pid" "$hook_functional_worker_pid" || return 1
+    [ "$hook_custody_pidfd_count" = "$hook_functional_pidfd_count" ] \
+        && [ "$hook_custody_pidfd_identity" = \
+            "$hook_functional_pidfd_identity" ] \
+        && [ "$hook_custody_process_count" = "$hook_functional_process_count" ] \
+        && [ "$hook_custody_namespace_count" = "$hook_functional_namespace_count" ] \
+        && [ "$hook_custody_process_fd" = "$hook_functional_process_parent_fd" ] \
+        && [ "$hook_custody_process_identity" = "$hook_functional_process_identity" ] \
+        && [ "$hook_custody_namespace_fd" = "$hook_functional_namespace_parent_fd" ] \
+        && [ "$hook_custody_namespace_identity" = \
+            "$hook_functional_worker_namespace" ] || return 1
+    hook_functional_worker_starttime=$(worker_identity_from_process_fd \
+        8 "$hook_functional_worker_pid" "$hook_functional_main_pid" \
+        "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
+        "$hook_functional_parent_filters") || return 1
+    running_identity_is_unchanged \
+        "$hook_functional_unit" \
+        "$proof_directory/unit.identity" \
+        "$hook_functional_agent_gid" || return 1
     hook_functional_wireguard=$(worker_wireguard_interface 7) || return 1
     case $hook_functional_wireguard in
         ''|*[!A-Za-z0-9_.-]*) return 1 ;;
     esac
+    [ "$(worker_identity_from_process_fd \
+        8 "$hook_functional_worker_pid" "$hook_functional_main_pid" \
+        "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
+        "$hook_functional_parent_filters")" = \
+        "$hook_functional_worker_starttime" ] || return 1
+    capture_parent_worker_custody \
+        "$hook_functional_main_pid" "$hook_functional_worker_pid" || return 1
+    [ "$hook_custody_pidfd_count" = "$hook_functional_pidfd_count" ] \
+        && [ "$hook_custody_pidfd_identity" = \
+            "$hook_functional_pidfd_identity" ] \
+        && [ "$hook_custody_process_count" = "$hook_functional_process_count" ] \
+        && [ "$hook_custody_namespace_count" = "$hook_functional_namespace_count" ] \
+        && [ "$hook_custody_process_fd" = "$hook_functional_process_parent_fd" ] \
+        && [ "$hook_custody_process_identity" = "$hook_functional_process_identity" ] \
+        && [ "$hook_custody_namespace_fd" = "$hook_functional_namespace_parent_fd" ] \
+        && [ "$hook_custody_namespace_identity" = \
+            "$hook_functional_worker_namespace" ] || return 1
+    running_identity_is_unchanged \
+        "$hook_functional_unit" \
+        "$proof_directory/unit.identity" \
+        "$hook_functional_agent_gid" || return 1
 
     advance_start_failure_stage functional-probe-finish || return 1
 
@@ -1296,11 +1689,15 @@ run_functional_client_lease_probe() {
         [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
         sleep 0.05
     done
+    worker_process_fd_is_retired 8 || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+        "$hook_functional_process_identity" ] || return 1
+    helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
     worker_wireguard_is_absent 7 || return 1
-    helper_does_not_hold_namespace \
-        "$hook_functional_main_pid" "$hook_functional_worker_namespace" || return 1
-    helper_holds_no_foreign_network_namespace \
-        "$hook_functional_main_pid" || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+        "$hook_functional_worker_namespace" ] || return 1
+    command exec 8>&- || return 1
+    [ ! -e /proc/self/fd/8 ] && [ ! -L /proc/self/fd/8 ] || return 1
     command exec 7>&- || return 1
     [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
 
@@ -1365,6 +1762,8 @@ start_hook() {
         || [ "$operator_gid" -eq "$worker_gid" ]; then
         fail 'staged identities overlap'
     fi
+    hook_entry_contract_is_exact "$agent_gid" \
+        || fail 'start hook process contract is invalid'
     [ "$(stat -c '%F:%u:%g:%a' "$proof_directory" 2>/dev/null || true)" = \
         'directory:0:0:2700' ] || fail 'proof directory is unsafe'
     [ "$(stat -c '%F:%u:%g:%a:%h' "$probe" 2>/dev/null || true)" = \
@@ -1534,6 +1933,8 @@ stop_hook() {
     hook_expected_agent_gid=$2
     unit_name_is_safe "$hook_unit" || fail 'unit name is unsafe'
     number_is_safe "$hook_expected_agent_gid" || fail 'expected agent GID is invalid'
+    hook_entry_contract_is_exact "$hook_expected_agent_gid" \
+        || fail 'stop hook process contract is invalid'
     [ "${SERVICE_RESULT:-}" = success ] || fail 'service result is not successful'
     [ "${EXIT_CODE:-}" = exited ] || fail 'main process did not exit normally'
     [ "${EXIT_STATUS:-}" = 0 ] || fail 'main process exit status is nonzero'

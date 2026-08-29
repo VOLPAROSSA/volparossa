@@ -951,10 +951,25 @@ then starttime, image, `MainPID` and `InvocationID` in reverse. Each socket prob
 hook is still bound by `SO_PEERCRED == MainPID`, and the same full identity artifact brackets it.
 Post-retirement observation uses the captured starttime rather than a procfs magic link, treats a
 different token as PID reuse, and never treats an extant unreadable proc record as absent. The
-worker-side external check deliberately makes no byte-for-byte executable claim: the trusted
-parent's existing pidfd/process/netns pins and credential-authenticated child handshake are joined
-to one stable direct child, exact dedicated credentials, a pinned distinct namespace, and the held
-functional Prepare/Destroy exchange. This failed run and the correction are not PASS evidence; a
+worker-side external check deliberately makes no byte-for-byte executable claim. The production
+start/stop hook is source-pinned through `setpriv` to UID 0 with all GID fields and its sole group
+equal to the agent GID; its own status must retain the helper capability mask, no-new-privileges and
+seccomp contract. This matches the staged helper's procfs credentials without adding
+`CAP_SYS_PTRACE`, making the manager's retained descriptors observable. `ExecStartPost` and
+`ExecStopPost` are not yet independently re-read as typed manager tuples, so this is a
+source-pinned command plus exact hook-self-status seam rather than an atomic PID-1 command proof.
+At READY, every parent-held pidfd must name the one direct child in both `Pid` and `NSpid` fdinfo
+fields and every pidfd duplicate must identify the same kernel object. Every retained numeric proc
+directory must be `/proc/<child>`, and all parent-held foreign network-namespace descriptors must
+identify the same distinct namespace. The hook duplicates one parent process-directory pin to FD 8
+and one namespace pin to FD 7. Descriptor-relative `stat` and `status` observations bind the child
+PID, PPID, namespace PID, single thread, starttime, dedicated credentials, empty groups,
+no-new-privileges, one additional seccomp filter and the exact worker-only `CAP_NET_ADMIN` masks
+before and after the namespace readback. After Destroy, FD 8 must expose no process records, the
+helper must retain no pidfd, proc-directory or foreign-netns worker custody, and FD 7 must show no
+WireGuard object before both observer pins close. The root-owned setgid mode-2700 proof directory
+keeps hook-created artifacts root:root mode 0600 despite the agent GID. This failed run and the
+correction are not PASS evidence; a
 fresh exact-main KVM remains required and the alpha score remains **11/100**. The second phase
 exercises the production server entry point, but not an installed package,
 the shipped unit

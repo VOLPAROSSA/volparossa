@@ -90,13 +90,20 @@ an unprivileged user from that clean checkout and then runs the fixed producer w
 The production phase now runs one closed functional-client-lease probe as the staged agent. The
 root hook creates one fixed dummy underlay only inside the transient unit's `PrivateNetwork`
 namespace, then the probe registers an exact tag-35 intent and prepares one Client-role lease. At a
-fixed root-owned FIFO READY barrier, the hook independently observes one direct helper child with
-stable starttime, dedicated UID/GID and a separate network namespace. The exact parent launch is
+fixed root-owned FIFO READY barrier, the source-pinned post hook first proves its own UID 0,
+agent-GID-only credentials, capabilities, no-new-privileges and seccomp state, then independently
+observes one direct helper child through descriptors retained by the parent. The exact parent launch is
 anchored independently by PID 1's typed `ExecStart`/`ExecStartEx` tuple, the root-owned mode-0500
 bind image metadata and staged-image SHA-256, `InvocationID`, `MainPID`, process starttime and exact
 status. Every probe also requires server `SO_PEERCRED` to equal that `MainPID`. The worker join
-relies on the launched helper's retained pidfd/process/netns pins and authenticated child handshake;
-it does not claim ptrace-gated cross-credential `cmdline` or `exe` inspection. The worker namespace must
+requires every retained pidfd to name that child in both fdinfo PID fields and identify the same
+kernel object, every numeric proc-directory pin to identify that child, and every foreign netns pin
+to identify the same distinct namespace. One parent process-directory pin and namespace pin are
+duplicated to hook FDs 8 and 7. Descriptor-relative starttime and status brackets require exact
+PID/PPID/NSpid, one thread, dedicated credentials, empty groups, NNP/seccomp state and worker
+`CAP_NET_ADMIN` masks around the network readback. This relies on the launched helper's retained
+custody and authenticated child handshake; it does not claim ptrace-gated cross-credential
+`cmdline` or `exe` inspection. The worker namespace must
 contain only loopback and one UP WireGuard interface with the exact ownership-marker prefix, one
 global `/128`, a non-zero public key and listen port, no peer, and no firewall mark. The probe
 validates exact response correlation, opaque non-zero handles, the fixed `DirectAssigned` underlay
@@ -106,8 +113,9 @@ or independently byte-compare endpoint or key material.
 After one fixed release byte, the probe requires exact Destroy followed by an idempotent
 `existed=false` Destroy, then performs a second Prepare/Destroy cycle under the same helper runtime
 with a distinct context, handles and public key. The hook finally requires zero helper children,
-no WireGuard object in the retained first-worker namespace, no helper descriptor retaining that
-namespace or any foreign worker network namespace, an empty systemd descriptor store, and a
+no descriptor-relative `stat` or `status` through the retained process-directory observer, no
+helper pidfd/process-directory/foreign-netns custody, no WireGuard object through the retained
+first-worker namespace observer, an empty systemd descriptor store, and a
 private network satisfying the fixed exact-one-loopback/no-default-route cleanup predicate after
 removing the dummy fixture. These checks prove a live, reusable, peerless Client lease and normal process-owned
 cleanup only. They do not prove activation, a peer handshake, routing, transport, a tunnel,

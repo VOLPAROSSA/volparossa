@@ -3629,8 +3629,8 @@ for required_contract in \
     '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind $notify_socket_bind"' \
     '--property="BindPaths=$production_runtime_bind $production_output_bind"' \
     "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" \
-    '--property="ExecStartPost=/run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid"' \
-    '--property="ExecStopPost=/run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid"' \
+    '--property="ExecStartPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid"' \
+    '--property="ExecStopPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid"' \
     'install -d -o root -g root -m 2700 "$temporary_stage/production-output"' \
     '--property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket' \
     'system_bus_socket=/run/dbus/system_bus_socket' \
@@ -3849,6 +3849,7 @@ if ! awk '
         if (short_option_line ~ /(^|[[:space:]])-[^-[:space:]]/) invalid++
         if (argument_line ~ /^--/) {
             option_copy = argument_line
+            sub(/=.*/, "", option_copy)
             if (gsub(/--/, "", option_copy) != 1) invalid++
             if (argument_line !~ /^--json=/ \
                 && argument_line !~ /^--unit=/ \
@@ -4392,6 +4393,162 @@ exercise_hook_launch_parsers || {
     exit 1
 }
 
+# Parent descriptors are kernel indexes, so canonical FD zero is valid even
+# though the PID/UID/GID validator deliberately rejects zero. Exercise that
+# boundary and the pidfd record parser independently of a live privileged run.
+hook_custody_parser_functions=$temporary_directory/hook-custody-parser-functions.sh
+{
+    sed -n '/^number_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^fd_number_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^pidfd_record_from_fdinfo() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_custody_parser_functions"
+if [ "$(grep -c '^number_is_safe() {$' "$hook_custody_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^fd_number_is_safe() {$' \
+        "$hook_custody_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^pidfd_record_from_fdinfo() {$' \
+        "$hook_custody_parser_functions")" -ne 1 ]; then
+    printf '%s\n' 'worker custody parsers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$hook_custody_parser_functions"
+# shellcheck disable=SC1090,SC2317
+exercise_hook_custody_parsers() (
+    . "$hook_custody_parser_functions"
+    for valid_fd in 0 1 4294967294; do
+        fd_number_is_safe "$valid_fd"
+    done
+    for invalid_fd in '' 00 01 -1 1x 4294967295 99999999999; do
+        if fd_number_is_safe "$invalid_fd"; then
+            exit 1
+        fi
+    done
+    if number_is_safe 0; then
+        exit 1
+    fi
+
+    valid_pidfd_info=$(printf '%s\n' \
+        'pos: 0' \
+        'flags: 02000002' \
+        'mnt_id: 5' \
+        'ino: 123' \
+        'Pid: 4242' \
+        'NSpid: 4242')
+    [ "$(pidfd_record_from_fdinfo "$valid_pidfd_info" 0 4242)" = \
+        'pidfd-v1=fd:0;pid:4242' ]
+    for invalid_pidfd_info in \
+        "$(printf '%s\n' "$valid_pidfd_info" 'Pid: 4242')" \
+        "$(printf '%s\n' "$valid_pidfd_info" 'NSpid: 4242')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed 's/Pid: 4242/Pid: 4243/')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed 's/NSpid: 4242/NSpid: 1 4242/')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed '/^Pid:/d')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed '/^NSpid:/d')"
+    do
+        if pidfd_record_from_fdinfo \
+            "$invalid_pidfd_info" 0 4242 >/dev/null 2>&1; then
+            printf '%s\n' 'pidfd parser accepted a malformed identity record' >&2
+            exit 1
+        fi
+    done
+    if pidfd_record_from_fdinfo "$valid_pidfd_info" 00 4242 \
+        >/dev/null 2>&1 \
+        || pidfd_record_from_fdinfo "$valid_pidfd_info" 4294967295 4242 \
+            >/dev/null 2>&1; then
+        exit 1
+    fi
+)
+exercise_hook_custody_parsers || {
+    printf '%s\n' 'worker custody parser behavior is not exact' >&2
+    exit 1
+}
+# These are literal hook variable names. PID and identity numbers remain on the
+# positive-number validator, while every descriptor index uses the FD domain.
+# shellcheck disable=SC2016
+for exact_fd_variable in \
+    hook_worker_process_fd hook_pidfd_number hook_custody_fd hook_namespace_fd
+do
+    if grep -E "^[[:space:]]*number_is_safe \"\\\$$exact_fd_variable\"" \
+        "$ipc_hook" >/dev/null \
+        || ! grep -E "^[[:space:]]*fd_number_is_safe \"\\\$$exact_fd_variable\"" \
+            "$ipc_hook" >/dev/null; then
+        printf 'descriptor does not use the canonical FD validator: %s\n' \
+            "$exact_fd_variable" >&2
+        exit 1
+    fi
+done
+
+# A producer-side `exit` inside a POSIX pipeline is masked by the final sort.
+# Both procfs inventories must finish in a checked command substitution before
+# any separately checked normalization or ordering command consumes them.
+producer_pipeline_is_absent() {
+    [ "$#" -eq 1 ] || return 1
+    if grep -E '^[[:space:]]*done([[:space:]]|\\)*\|' "$1" >/dev/null; then
+        return 1
+    fi
+}
+for inventory_function in direct_helper_child capture_parent_worker_custody; do
+    inventory_body=$temporary_directory/$inventory_function.body
+    inventory_mutant=$temporary_directory/$inventory_function.pipeline-mutant
+    sed -n "/^$inventory_function() {\$/,/^}\$/p" "$ipc_hook" >"$inventory_body"
+    [ "$(grep -c "^$inventory_function() {\$" "$inventory_body")" -eq 1 ] || {
+        printf 'procfs inventory is not uniquely extractable: %s\n' \
+            "$inventory_function" >&2
+        exit 1
+    }
+    producer_pipeline_is_absent "$inventory_body" || {
+        printf 'procfs inventory masks producer failure: %s\n' \
+            "$inventory_function" >&2
+        exit 1
+    }
+    sed '0,/^        done$/s//        done | sort -n/' \
+        "$inventory_body" >"$inventory_mutant"
+    if producer_pipeline_is_absent "$inventory_mutant"; then
+        printf 'procfs inventory pipeline mutant was accepted: %s\n' \
+            "$inventory_function" >&2
+        exit 1
+    fi
+done
+if ! awk '
+    /^direct_helper_child\(\) \{$/ { direct = 1; next }
+    /^helper_has_no_children\(\) \{$/ { direct = 0 }
+    direct && /hook_children_raw=\$\(/ { raw = NR }
+    direct && /^        done$/ { direct_done = NR }
+    direct && /^    \) \|\| return 1$/ {
+        direct_close_count++
+        if (direct_close_count == 1) raw_close = NR
+        if (direct_close_count == 2) lines_close = NR
+        if (direct_close_count == 3) nonempty_close = NR
+        if (direct_close_count == 4) sorted_close = NR
+    }
+    direct && /hook_children_lines=\$\(tr / { lines = NR }
+    direct && /hook_children_nonempty=\$\(sed / { nonempty = NR }
+    direct && /hook_children=\$\(sort -u / { sorted = NR }
+    /^capture_parent_worker_custody\(\) \{$/ { custody = 1; next }
+    /^worker_wireguard_interface\(\) \{$/ { custody = 0 }
+    custody && /hook_custody_fd_unsorted=\$\(/ { fd_raw = NR }
+    custody && /^        done$/ { fd_done = NR }
+    custody && /^    \) \|\| return 1$/ {
+        fd_close_count++
+        if (fd_close_count == 1) fd_raw_close = NR
+        if (fd_close_count == 2) fd_sorted_close = NR
+    }
+    custody && /hook_custody_fd_numbers=\$\(sort -n / { fd_sorted = NR }
+    END {
+        direct_ok = direct_close_count == 4 && raw < direct_done
+        direct_ok = direct_ok && direct_done < raw_close && raw_close < lines
+        direct_ok = direct_ok && lines < lines_close && lines_close < nonempty
+        direct_ok = direct_ok && nonempty < nonempty_close
+        direct_ok = direct_ok && nonempty_close < sorted && sorted < sorted_close
+        custody_ok = fd_close_count == 2 && fd_raw < fd_done
+        custody_ok = custody_ok && fd_done < fd_raw_close
+        custody_ok = custody_ok && fd_raw_close < fd_sorted
+        custody_ok = custody_ok && fd_sorted < fd_sorted_close
+        if (!(direct_ok && custody_ok)) exit 1
+    }
+' "$ipc_hook"; then
+    printf '%s\n' 'procfs inventories are not fail-closed before normalization' >&2
+    exit 1
+fi
+
 gate_launch_identity_functions=$temporary_directory/gate-launch-identity-functions.sh
 {
     sed -n '/^systemd_launch_record_is_safe() {$/,/^}$/p' "$gate"
@@ -4455,20 +4612,21 @@ if grep -F '/proc/$hook_identity_pid/exe' "$ipc_hook" >/dev/null \
     || grep -F '/proc/$hook_identity_pid/cmdline' "$ipc_hook" >/dev/null \
     || grep -F '/proc/$hook_worker_pid/exe' "$ipc_hook" >/dev/null \
     || grep -F '/proc/$hook_worker_pid/cmdline' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_functional_worker_pid/ns/net' "$ipc_hook" >/dev/null \
     || grep -F 'CAP_SYS_PTRACE' "$gate" "$ipc_hook" >/dev/null \
     || grep -F '/run/systemd/private' "$gate" "$ipc_hook" >/dev/null; then
     printf '%s\n' 'production launch evidence widened or retained ptrace-gated reads' >&2
     exit 1
 fi
 if ! awk '
-    /^worker_identity_is_exact\(\) \{$/ { in_identity = 1; next }
+    /^worker_identity_from_process_fd\(\) \{$/ { in_identity = 1; next }
     /^worker_wireguard_interface\(\) \{$/ { in_identity = 0 }
-    in_identity && /capture_process_starttime/ {
+    in_identity && /capture_process_starttime_from_fd/ {
         starttime_count++
         if (starttime_count == 1) start_before = NR
         if (starttime_count == 2) start_after = NR
     }
-    in_identity && /worker_status_is_exact/ {
+    in_identity && /worker_status_from_process_fd_is_exact/ {
         status_count++
         if (status_count == 1) status_before = NR
         if (status_count == 2) status_after = NR
@@ -4614,7 +4772,7 @@ done
 if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
-        "$ipc_hook")" -ne 9 ] \
+        "$ipc_hook")" -ne 11 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
@@ -4797,12 +4955,30 @@ for required_hook_contract in \
     '"$hook_functional_stdout" "$functional_ready_record"' \
     '[ "$hook_functional_wait_attempt" -lt 300 ] || return 1' \
     'hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid")' \
-    'worker_status_is_exact() {' \
-    'worker_identity_is_exact' \
-    'hook_worker_starttime=$(capture_process_starttime "$hook_worker_pid")' \
-    'groups_count != 1' \
+    'hook_entry_contract_is_exact() {' \
+    'capture_helper_process_contract "$$" "$hook_entry_gid"' \
+    'hook_entry_contract_is_exact "$agent_gid"' \
+    'hook_entry_contract_is_exact "$hook_expected_agent_gid"' \
+    'process_contract_filter_count() {' \
+    'fd_number_is_safe() {' \
+    'worker_status_from_process_fd_is_exact() {' \
+    'worker_identity_from_process_fd() {' \
+    'capture_process_starttime_from_fd() {' \
+    'hook_worker_expected_filters=$((hook_worker_parent_filters + 1))' \
+    'if (NF != 2 || $2 != expected_pid) invalid = 1' \
+    'if (NF != 2 || $2 != expected_filters) invalid = 1' \
+    'if (NF != 2 || $2 != "0000000000001000") invalid = 1' \
+    'pidfd_record_from_fdinfo() {' \
+    'capture_parent_pidfd_record() {' \
+    'hook_custody_pidfd_identity=$hook_custody_observed_identity' \
+    'capture_parent_worker_custody() {' \
+    "'anon_inode:[pidfd]'" \
+    'capture_parent_process_fd_identity' \
+    'capture_parent_namespace_fd_identity' \
     '"$hook_functional_parent_namespace" != "$hook_functional_worker_namespace"' \
-    'command exec 7<"/proc/$hook_functional_worker_pid/ns/net"' \
+    'command exec 7<"$hook_functional_parent_namespace_path"' \
+    'command exec 8<"$hook_functional_parent_process_path"' \
+    'worker_identity_from_process_fd' \
     '/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" --' \
     '/usr/bin/wg show interfaces' \
     'worker_wireguard_interface 7' \
@@ -4810,9 +4986,10 @@ for required_hook_contract in \
     'wait "$hook_functional_probe_pid"' \
     'functional_probe_output_is_exact "$hook_functional_stdout"' \
     'helper_has_no_children "$hook_functional_main_pid"' \
+    'worker_process_fd_is_retired 8' \
+    'helper_holds_no_worker_custody "$hook_functional_main_pid"' \
     'worker_wireguard_is_absent 7' \
-    'helper_does_not_hold_namespace' \
-    'helper_holds_no_foreign_network_namespace' \
+    'command exec 8>&-' \
     'command exec 7>&-' \
     'private_network_is_pristine' \
     '"$hook_private_namespace" != "$hook_pid1_namespace"' \
@@ -5171,9 +5348,22 @@ if ! awk '
     in_functional && /"\$probe" functional-client-lease/ { probe = NR }
     in_functional && /while ! probe_output_is_exact/ { ready = NR }
     in_functional && /direct_helper_child/ { child = NR }
-    in_functional && /worker_identity_is_exact/ { identity = NR }
-    in_functional && /exec 7<"\/proc\/\$hook_functional_worker_pid\/ns\/net"/ {
+    in_functional && /capture_parent_worker_custody/ {
+        custody_count++
+        if (custody_count == 1) custody_before = NR
+        if (custody_count == 2) custody_after_pin = NR
+        if (custody_count == 3) custody_after_readback = NR
+    }
+    in_functional && /command exec 7<"\$hook_functional_parent_namespace_path"/ {
         namespace_pin = NR
+    }
+    in_functional && /command exec 8<"\$hook_functional_parent_process_path"/ {
+        process_pin = NR
+    }
+    in_functional && /worker_identity_from_process_fd/ {
+        identity_count++
+        if (identity_count == 1) identity_before = NR
+        if (identity_count == 2) identity_after = NR
     }
     in_functional && /worker_wireguard_interface 7/ { wireguard = NR }
     in_functional && /rm -f -- "\$hook_functional_fifo"/ { fifo_unlink = NR }
@@ -5182,25 +5372,30 @@ if ! awk '
     in_functional && /wait "\$hook_functional_probe_pid"/ { waited = NR }
     in_functional && /functional_probe_output_is_exact/ { final_output = NR }
     in_functional && /helper_has_no_children/ { no_children = NR }
+    in_functional && /worker_process_fd_is_retired 8/ { process_retired = NR }
+    in_functional && /helper_holds_no_worker_custody/ { custody_absent = NR }
     in_functional && /worker_wireguard_is_absent 7/ { wireguard_absent = NR }
-    in_functional && /helper_does_not_hold_namespace/ { namespace_absent = NR }
-    in_functional && /helper_holds_no_foreign_network_namespace/ {
-        foreign_namespace_absent = NR
-    }
-    in_functional && /exec 7>&-/ { namespace_release = NR }
+    in_functional && /command exec 8>&-/ { process_release = NR }
+    in_functional && /command exec 7>&-/ { namespace_release = NR }
     in_functional && /remove_functional_underlay/ { fixture_remove = NR }
     END {
         valid = pristine_count == 2 && pristine_before < fixture
         valid = valid && fixture < fifo && fifo < fifo_open && fifo_open < probe
-        valid = valid && probe < ready && ready < child && child < identity
-        valid = valid && identity < namespace_pin && namespace_pin < wireguard
-        valid = valid && wireguard < fifo_unlink && fifo_unlink < release
+        valid = valid && probe < ready && ready < child
+        valid = valid && custody_count == 3 && identity_count == 2
+        valid = valid && child < custody_before && custody_before < namespace_pin
+        valid = valid && namespace_pin < process_pin && process_pin < custody_after_pin
+        valid = valid && custody_after_pin < identity_before
+        valid = valid && identity_before < wireguard && wireguard < identity_after
+        valid = valid && identity_after < custody_after_readback
+        valid = valid && custody_after_readback < fifo_unlink && fifo_unlink < release
         valid = valid && release < release_close && release_close < waited
         valid = valid && waited < final_output && final_output < no_children
-        valid = valid && no_children < wireguard_absent
-        valid = valid && wireguard_absent < namespace_absent
-        valid = valid && namespace_absent < foreign_namespace_absent
-        valid = valid && foreign_namespace_absent < namespace_release
+        valid = valid && no_children < process_retired
+        valid = valid && process_retired < custody_absent
+        valid = valid && custody_absent < wireguard_absent
+        valid = valid && wireguard_absent < process_release
+        valid = valid && process_release < namespace_release
         valid = valid && namespace_release < fixture_remove
         valid = valid && fixture_remove < pristine_after
         if (!valid) exit 1
