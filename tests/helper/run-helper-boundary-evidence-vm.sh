@@ -301,6 +301,34 @@ report_non_retained_worker_launch_diagnostic() {
         "${non_retained_worker_diagnostic#"$non_retained_worker_diagnostic_prefix"}" >&2
 }
 
+report_non_retained_worker_confinement_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_confinement_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=
+    [ "$(grep -Ec "^$non_retained_confinement_diagnostic_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_confinement_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=(bounding|ambient|private-network|control-group)$'
+    [ "$(grep -Ec "$non_retained_confinement_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_confinement_diagnostic=$(grep -E \
+        "$non_retained_confinement_diagnostic_pattern" "$non_retained_diagnostic") \
+        || return 1
+    case $non_retained_confinement_diagnostic in
+        "$non_retained_confinement_diagnostic_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    printf 'non-retained helper-boundary PR smoke worker confinement diagnostic: %s\n' \
+        "${non_retained_confinement_diagnostic#"$non_retained_confinement_diagnostic_prefix"}" >&2
+}
+
 case ${#expected_commit} in
     40|64) ;;
     *) blocked 'the expected commit is not a canonical Git object ID' ;;
@@ -1582,6 +1610,9 @@ if [ "$guest_status" -ne 0 ]; then
         if report_non_retained_proof_failure_reason "$proof_stderr_log"; then
             if [ "$non_retained_failure_reason" = worker-launch-status ]; then
                 report_non_retained_worker_launch_diagnostic \
+                    "$proof_stderr_log" || true
+            elif [ "$non_retained_failure_reason" = worker-confinement ]; then
+                report_non_retained_worker_confinement_diagnostic \
                     "$proof_stderr_log" || true
             fi
         else

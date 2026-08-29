@@ -182,6 +182,24 @@ record_proof_failure() {
     esac
 }
 
+worker_confinement_failure_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        bounding|ambient|private-network|control-group) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+record_worker_confinement_failure() {
+    [ "$#" -eq 1 ] || failed 'internal worker confinement recorder invocation is invalid'
+    worker_confinement_failure_is_safe "$1" \
+        || failed 'internal worker confinement reason is invalid'
+    if [ -z "${worker_confinement_failure:-}" ]; then
+        worker_confinement_failure=$1
+    fi
+    record_proof_failure 'worker-confinement'
+}
+
 record_helper_live_proof_failure_stage() {
     [ "$#" -eq 1 ] || return 1
     vp_capture_file_is_safe "$1" || return 1
@@ -347,6 +365,13 @@ report_worker_launch_diagnostic() {
         ',client-stderr-' "$worker_diagnostic_client_stderr" \
         ',terminal-' "$worker_diagnostic_terminal" \
         ',stage-' "$worker_diagnostic_stage" >&2
+}
+
+report_worker_confinement_diagnostic() {
+    [ "${proof_failure_reason:-}" = worker-confinement ] || return 1
+    worker_confinement_failure_is_safe "${worker_confinement_failure:-}" || return 1
+    printf 'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=%s\n' \
+        "$worker_confinement_failure" >&2
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -2174,6 +2199,7 @@ set -e
 unset production_ok
 proof_failure_reason=
 proof_ok=yes
+worker_confinement_failure=
 worker_launch_captures_ok=no
 worker_launch_json_ok=no
 worker_manager_binding_ok=no
@@ -2435,39 +2461,45 @@ if capture_unit_property CapabilityBoundingSet "$temporary_stage/unit-bounding.r
     && normalize_capabilities "$temporary_stage/unit-bounding.raw" \
         "$temporary_stage/unit-bounding.normalized"; then
     observed_bounding=$(cat "$temporary_stage/unit-bounding.normalized") \
-        || record_proof_failure 'worker-confinement'
+        || record_worker_confinement_failure 'bounding'
 else
     observed_bounding=
-    record_proof_failure 'worker-confinement'
+    record_worker_confinement_failure 'bounding'
 fi
 if capture_unit_property AmbientCapabilities "$temporary_stage/unit-ambient.raw" \
     && normalize_capabilities "$temporary_stage/unit-ambient.raw" \
         "$temporary_stage/unit-ambient.normalized"; then
     observed_ambient=$(cat "$temporary_stage/unit-ambient.normalized") \
-        || record_proof_failure 'worker-confinement'
+        || record_worker_confinement_failure 'ambient'
 else
     observed_ambient=
-    record_proof_failure 'worker-confinement'
+    record_worker_confinement_failure 'ambient'
 fi
 if capture_unit_property PrivateNetwork "$temporary_stage/unit-private-network"; then
     observed_private_network=$(cat "$temporary_stage/unit-private-network") \
-        || record_proof_failure 'worker-confinement'
+        || record_worker_confinement_failure 'private-network'
 else
     observed_private_network=
-    record_proof_failure 'worker-confinement'
+    record_worker_confinement_failure 'private-network'
 fi
 if capture_unit_property ControlGroup "$temporary_stage/unit-control-group"; then
     worker_control_group=$(cat "$temporary_stage/unit-control-group") \
-        || record_proof_failure 'worker-confinement'
+        || record_worker_confinement_failure 'control-group'
 else
     worker_control_group=
-    record_proof_failure 'worker-confinement'
+    record_worker_confinement_failure 'control-group'
 fi
-if [ "$observed_bounding" != "$capabilities" ] \
-    || [ "$observed_ambient" != "$capabilities" ] \
-    || [ "$observed_private_network" != yes ] \
-    || [ "$worker_control_group" != "/system.slice/$unit_name" ]; then
-    record_proof_failure 'worker-confinement'
+if [ "$observed_bounding" != "$capabilities" ]; then
+    record_worker_confinement_failure 'bounding'
+fi
+if [ "$observed_ambient" != "$capabilities" ]; then
+    record_worker_confinement_failure 'ambient'
+fi
+if [ "$observed_private_network" != yes ]; then
+    record_worker_confinement_failure 'private-network'
+fi
+if [ "$worker_control_group" != "/system.slice/$unit_name" ]; then
+    record_worker_confinement_failure 'control-group'
 fi
 
 worker_unit_name=$unit_name
@@ -3076,6 +3108,9 @@ if [ "$proof_ok" != yes ]; then
     if [ "$proof_failure_reason" = worker-launch-status ]; then
         report_worker_launch_diagnostic \
             || failed 'the fixed worker launch diagnostic could not be reported'
+    elif [ "$proof_failure_reason" = worker-confinement ]; then
+        report_worker_confinement_diagnostic \
+            || failed 'the fixed worker confinement diagnostic could not be reported'
     fi
     report_proof_failure "$proof_failure_reason"
 fi

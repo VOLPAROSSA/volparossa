@@ -881,7 +881,12 @@ on PASS `non-retained-pr-smoke` deliberately discards its report, hash, environm
 proof diagnostics and requires an empty output directory. Its workflow never uploads branch PASS
 artifacts or failure diagnostics; a failed smoke exposes only one fixed allowlisted category (or
 `unclassified`) on job stderr. `worker-launch-status` may additionally expose only a fixed structural
-launch-binding/terminal/stage classification. The second phase exercises
+launch-binding/terminal/stage classification. After branch
+[run 33273482691](https://github.com/VOLPAROSSA/volparossa/actions/runs/33273482691) reached
+`worker-confinement`, that category may additionally expose only its first fixed `bounding`,
+`ambient`, `private-network` or `control-group` subcategory. It never reports the property value,
+unit name, cgroup path or capability payload, and a missing, duplicate, malformed or late
+confinement record is suppressed. The second phase exercises
 the production server entry point, but not an installed package, the shipped unit file, restart
 policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run is durably tied
 to the same clean commit and retained, the gate is not earned package, datapath, A14 or A15 evidence.

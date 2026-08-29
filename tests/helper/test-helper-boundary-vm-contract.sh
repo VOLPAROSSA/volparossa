@@ -677,8 +677,9 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_worker_confinement_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 4
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 5
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -708,6 +709,57 @@ if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/de
     exit 1
 fi
 
+printf '%s\n%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke failure category: worker-confinement' \
+    "$last_stderr" >/dev/null
+expect_status 0 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke worker confinement diagnostic: ambient' \
+    "$last_stderr" >/dev/null
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'worker confinement diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=bounding' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=control-group' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=private-record' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=private-record' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
 printf '%s\n' 'attacker-controlled diagnostic payload' >"$branch_failure_diagnostic"
 expect_status 1 report_non_retained_proof_failure_reason \
     "$branch_failure_diagnostic"
@@ -736,6 +788,12 @@ grep -F \
     "$runner" >/dev/null
 grep -E \
     '^[[:space:]]+report_non_retained_worker_launch_diagnostic([[:space:]]|$)' \
+    "$runner" >/dev/null
+grep -E \
+    '^[[:space:]]+report_non_retained_worker_confinement_diagnostic([[:space:]]|$)' \
+    "$runner" >/dev/null
+grep -F \
+    'elif [ "$non_retained_failure_reason" = worker-confinement ]; then' \
     "$runner" >/dev/null
 
 # Early QEMU exits retain only canonical status fields plus the supervisor's

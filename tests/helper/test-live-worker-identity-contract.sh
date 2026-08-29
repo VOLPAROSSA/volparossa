@@ -119,14 +119,21 @@ proof_failure_functions=$temporary_directory/proof-failure-functions.sh
 {
     sed -n '/^proof_failure_reason_is_safe() {$/,/^}$/p' "$gate"
     sed -n '/^record_proof_failure() {$/,/^}$/p' "$gate"
+    sed -n '/^worker_confinement_failure_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^record_worker_confinement_failure() {$/,/^}$/p' "$gate"
     sed -n '/^record_helper_live_proof_failure_stage() {$/,/^}$/p' "$gate"
     sed -n '/^classify_worker_live_proof_terminal() {$/,/^}$/p' "$gate"
     sed -n '/^record_worker_launch_failure() {$/,/^}$/p' "$gate"
     sed -n '/^report_worker_launch_diagnostic() {$/,/^}$/p' "$gate"
+    sed -n '/^report_worker_confinement_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^report_proof_failure() {$/,/^}$/p' "$gate"
 } >"$proof_failure_functions"
 if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^record_proof_failure() {$' "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^worker_confinement_failure_is_safe() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^record_worker_confinement_failure() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^record_helper_live_proof_failure_stage() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^classify_worker_live_proof_terminal() {$' \
@@ -134,6 +141,8 @@ if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")
     || [ "$(grep -c '^record_worker_launch_failure() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_worker_launch_diagnostic() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_worker_confinement_diagnostic() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_proof_failure() {$' "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the privacy-safe proof failure helpers are not uniquely extractable' >&2
@@ -826,6 +835,60 @@ if command -v mawk >/dev/null 2>&1; then
         printf '%s\n' 'explicit mawk capability normalization is not exact' >&2
         exit 1
     fi
+fi
+
+for confinement_reason in bounding ambient private-network control-group; do
+    if ! worker_confinement_failure_is_safe "$confinement_reason" \
+        || [ "$(grep -Fc "record_worker_confinement_failure '$confinement_reason'" \
+            "$gate")" -ne 3 ]; then
+        printf 'worker confinement reason is not closed and fully applied: %s\n' \
+            "$confinement_reason" >&2
+        exit 1
+    fi
+done
+if worker_confinement_failure_is_safe '' \
+    || worker_confinement_failure_is_safe 'control-group/private-record'; then
+    printf '%s\n' 'the worker confinement subcategory allowlist is not closed' >&2
+    exit 1
+fi
+
+report_worker_confinement_first_failure() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    worker_confinement_failure=
+    record_worker_confinement_failure 'ambient'
+    record_worker_confinement_failure 'control-group'
+    if [ "$proof_ok" != no ] || [ "${production_ok+x}" = x ] \
+        || [ "$proof_failure_reason" != worker-confinement ] \
+        || [ "$worker_confinement_failure" != ambient ]; then
+        exit 99
+    fi
+    report_worker_confinement_diagnostic
+)
+expect_status 0 report_worker_confinement_first_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx \
+        'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+        "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the worker confinement diagnostic did not retain its first fixed reason' >&2
+    exit 1
+fi
+
+reject_late_worker_confinement_diagnostic() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    worker_confinement_failure=
+    record_proof_failure 'worker-unit-contract'
+    record_worker_confinement_failure 'bounding'
+    report_worker_confinement_diagnostic
+)
+expect_status 1 reject_late_worker_confinement_diagnostic
+if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+    printf '%s\n' 'a later worker confinement predicate escaped first-failure precedence' >&2
+    exit 1
 fi
 
 report_worker_first_failure() (

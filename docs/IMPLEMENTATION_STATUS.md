@@ -303,8 +303,21 @@ single clean-build A01--A15 run; the score is not a release claim.
   remain the typed path-free helper protocol, `NoNewPrivileges=yes`, strict filesystem protection,
   fixed host-visible writable runtime paths, private transient temporary filesystems (including a
   `nosuid,noexec` `/run`), `UMask=0077`, and the absence of `CAP_CHOWN`, `CAP_FSETID` and
-  `CAP_SETFCAP` from the helper capability set. None of the failed runs is PASS evidence; the score
-  remains **11/100** and AV1-09 remains Open until a new exact-main retained run succeeds.
+  `CAP_SETFCAP` from the helper capability set. The resulting non-retained branch smoke
+  [run 33273482691](https://github.com/VOLPAROSSA/volparossa/actions/runs/33273482691) at
+  `7f23bc855b7f9922f9b055cb95098394d913313c` ran the disposable VM in
+  [job 99156047492](https://github.com/VOLPAROSSA/volparossa/actions/runs/33273482691/job/99156047492)
+  and advanced to the fixed first-failure category `worker-confinement`. The earlier ordered
+  predicates therefore prove that the diagnostic helper completed its internal live-worker proof,
+  published both exact records and left two descriptors in PID 1's store. The retained category
+  intentionally did not reveal which of the capability bounding set, ambient capability set,
+  private-network flag or exact control-group readback failed, so no production correction is
+  inferred from it. The gate now retains only the first matching fixed subcategory (`bounding`,
+  `ambient`, `private-network` or `control-group`) and the non-retained driver exposes that label
+  only when the generic first failure is exactly `worker-confinement`; missing, duplicated,
+  malformed and non-allowlisted diagnostic records expose nothing. None of the failed runs is PASS
+  evidence; the score remains **11/100** and AV1-09 remains Open until a new exact-main retained run
+  succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
