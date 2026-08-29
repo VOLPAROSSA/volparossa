@@ -131,6 +131,33 @@ pub(crate) enum BirthLinkError {
     CleanupIncomplete,
 }
 
+/// Affine same-runtime authority for one process-owned `WireGuard` birth link.
+///
+/// This deliberately non-`Clone` wrapper distinguishes live helper ownership from the public
+/// marker metadata it contains. It grants no crash/restart recovery: durable cleanup still needs
+/// the journal's separate affine authority.
+pub(crate) struct LiveWireguardLeaseOwner {
+    resource: DurableWireguardResource,
+}
+
+impl LiveWireguardLeaseOwner {
+    /// Mint one live owner before any same-runtime birth-link mutation.
+    pub(crate) const fn claim(resource: DurableWireguardResource) -> Self {
+        Self { resource }
+    }
+
+    /// Borrow the secret-free evidence needed by the authenticated child request.
+    pub(crate) const fn resource(&self) -> &DurableWireguardResource {
+        &self.resource
+    }
+}
+
+impl std::fmt::Debug for LiveWireguardLeaseOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LiveWireguardLeaseOwner(<redacted>)")
+    }
+}
+
 /// Physical-namespace rtnetlink client used only by the root helper parent.
 pub(crate) struct BirthNamespaceKernel {
     route: NetlinkClient,
@@ -147,10 +174,11 @@ impl BirthNamespaceKernel {
     /// Create a `WireGuard` device here and then move it by target namespace fd.
     pub(crate) fn create_and_move_wireguard(
         &mut self,
-        resource: &DurableWireguardResource,
+        ownership: &LiveWireguardLeaseOwner,
         target_namespace: RawFd,
         deadline: HardDeadline,
     ) -> Result<(), BirthLinkError> {
+        let resource = ownership.resource();
         let interface = resource.interface();
         if validate_durable_wireguard_resource(resource).is_err() || target_namespace < 0 {
             return Err(BirthLinkError::Kernel(KernelError::Invalid));
@@ -204,13 +232,16 @@ impl BirthNamespaceKernel {
         }
     }
 
-    /// Delete a crash-stranded `WireGuard` link only when its exact durable marker and kind match.
-    /// Production callers must separately hold durable journal authority.
+    /// Delete a same-runtime process-owned link only when exact name, marker and kind match.
+    ///
+    /// The live owner is not crash-recovery authority; durable restart cleanup remains a separate
+    /// journal-authorized path.
     pub(crate) fn delete_owned_wireguard(
         &mut self,
-        resource: &DurableWireguardResource,
+        ownership: &LiveWireguardLeaseOwner,
         deadline: HardDeadline,
     ) -> Result<(), KernelError> {
+        let resource = ownership.resource();
         self.route
             .delete_named_exact_owned_wireguard_link(resource, deadline)
     }

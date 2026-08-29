@@ -225,9 +225,11 @@ generate or expose private keys. The helper-v3 worker contract requires each eph
 private key to be generated and retained only inside the route namespace worker; the unprivileged
 agent receives an opaque lease handle plus the kernel-proven public key and public UDP endpoint.
 Interface names are derived, bounded to Linux's 15-character limit, and never accepted from the
-agent. The production worker/kernel backend is still unavailable, so these contracts are not yet
-evidence that a live tunnel exists. Keys must never be persisted and are destroyed with the worker
-context.
+agent. The production functional-alpha backend now creates and prepares exactly one process-owned
+Client-role lease and returns only the child's kernel-proven public key/listen port, but Activate,
+peer configuration, routing and every datapath remain unavailable. This narrow same-runtime path,
+which still lacks disposable live-root evidence and crash recovery, is not evidence that a live
+tunnel exists. Keys must never be persisted and are destroyed with the worker context.
 
 ## Privileged helper boundary
 

@@ -32,8 +32,10 @@ contains a required closed recovery plan: the exact context role and strictly or
 role-complete `(path_id, WireGuard role)` identities projected from that same Prepare. Prepare itself
 requires the same canonical identity order. The helper stores the complete binding in runtime-global
 state and requires an exact plan match before that target can enter `Pending` or invoke its Prepare
-backend call; unrelated global expiry housekeeping may run before target admission. The server does
-not bind the intent to that connection. Same-stream use is therefore a client-side socket-swap
+backend call; unrelated global expiry housekeeping may run before target admission. A server-owned
+driver also invokes that cleanup every second, with missed ticks skipped, so cleanup does not depend
+on another agent request. The server does not bind the intent to that connection. Same-stream use is
+therefore a client-side socket-swap
 defence, not a server-side session authorization rule.
 
 Role cardinality is exact for every path: client has one client endpoint, relay has one client-facing
@@ -58,7 +60,7 @@ reused. A raw occurrence of any retired tag is rejected as unknown/non-canonical
 version 1, version 2, future versions, unknown operations, and non-canonical encodings likewise fail
 closed. Regression tests cover every retired tag, including the former secret-bearing tag 11.
 
-## Prepare evidence and current fail-closed result
+## Prepare evidence and current functional-alpha boundary
 
 A successful `PrepareLeaseBatch` response is required to contain:
 
@@ -96,10 +98,26 @@ kernel entry point consumes that typed resource and rejects any non-exact marker
 The underlay parser independently accepts only the exact helper grammar and interface binding,
 rejecting malformed, legacy, or mismatched helper aliases. The marker is evidence, not current
 journal-phase or cleanup authority. The child transaction is not connected to the production
-parent birth-link/dispatch path or `HelperEngine`; transaction-wide production rollback is still
-absent. The production `HelperEngine::new` backend therefore returns the explicit `Unavailable`
-/ `PREPARE_FAILED` result and creates no context. It never returns an agent-supplied address,
-placeholder address, guessed port, public key, or endpoint.
+durable-journal path; transaction-wide crash/restart rollback is still absent. The production
+server now selects a crate-private functional-alpha backend for exactly one Client context with
+exactly one `WireguardRole::Client` lease. It obtains a consistent read-only direct-underlay
+snapshot before mutation, opens a process-owned worker coordinator, initializes the authenticated
+child, creates the helper-derived WireGuard birth link in the parent and moves it into the pinned
+child `NEWNET`, then dispatches Prepare. Only the child's correlated kernel proof supplies the
+public key and UDP port; the response combines that proof with the selected direct-underlay IP.
+Destroy sends the exact child operation and succeeds only after worker termination, reap and
+registry purge. The backend permits no second live context. Activate, Probe, transport acquisition,
+routing, peer configuration and every datapath remain explicitly `Unavailable`; shutdown succeeds
+only with empty backend state and confirmed coordinator cleanup. The periodic driver uses an owned,
+cancellation-safe engine supervisor with nonzero domain-separated exact-lineage correlation; it
+retries cleanup-pending Quarantined contexts and orphan Pending preparations, and unexpected driver
+exit stops the server. Shutdown first stops and joins this driver, then cleans the engine, then joins
+the durable actor. The driver schedules a sweep once per second with missed ticks skipped; a sweep
+begins only after every earlier request in the serialized operation gate has settled. Once begun,
+its kernel-absence attempt remains bounded by the backend hard deadline. The public
+`HelperEngine::new` constructor remains fully fail-closed and does not select this backend. No
+crash/restart recovery or durable journal/systemd custody is claimed, and no placeholder or
+agent-supplied endpoint is used.
 
 ## Ownership journal startup boundary
 
@@ -491,9 +509,10 @@ PID.
 
 ### Authenticated worker-v3 lifecycle foundation
 
-The separate fixed `--internal-worker-v3` child entry now has a disconnected, tested parent
-launcher. It has no production caller and `HelperEngine` still returns `Unavailable` before spawn or
-network work. The launcher reopens the exact running Linux image through `/proc/self/exe`, creates a
+The separate fixed `--internal-worker-v3` child entry has a tested parent launcher. The production
+server's narrow functional-alpha backend now uses that launcher for one Client lease; the public
+`HelperEngine::new` constructor still returns `Unavailable` before spawn or network work. The
+launcher reopens the exact running Linux image through `/proc/self/exe`, creates a
 private credential-enabled Unix seqpacket socketpair and generates a 256-bit OS-CSPRNG challenge. It
 maps only the child endpoint to stdin, clears the environment, selects `/` as the working directory
 and maps stdout and stderr to `/dev/null`. The launcher deliberately does not scan the process-wide
@@ -508,7 +527,7 @@ flags unchanged. While the spawn lock is held and after retirement-permit acquis
 reads `Seccomp` and `Seccomp_filters` from `/proc/thread-self/status` immediately before
 `Command::spawn`; the child therefore inherits that exact per-thread filter baseline.
 
-One 30-second absolute monotonic deadline now follows the disconnected launcher through setup,
+One 30-second absolute monotonic deadline follows launcher setup,
 the post-lock pre-spawn check, credentialed handshake records, sandbox observation and liveness
 proofs. Spawn-lock acquisition repeatedly uses `try_lock` with deadline-bounded sleeps and rechecks
 the same deadline after acquiring the mutex, so an expired queued caller creates no child. The
@@ -517,8 +536,8 @@ constructs an armed retirement owner with its permit and empty child slot. The s
 that slot and moves a successfully returned `Child` into it before returning, so no allocation,
 deadline check or other fallible post-spawn step can observe an unowned child. Late setup or
 handshake failure therefore retires that exact child boundedly or transfers the same owner to the
-escalation reaper. This is a disconnected launcher bound, not production route-setup or acceptance
-evidence.
+escalation reaper. Production reuses this bound only for its single functional-alpha Client lease;
+it is not route setup, a datapath, crash recovery, or acceptance evidence.
 
 After exec, the child closes raw descriptor 3 if present, atomically duplicates stdin with
 `fcntl_dupfd_cloexec` using minimum 3, requires the returned descriptor to be exactly 3 and closes
@@ -630,10 +649,10 @@ the child drops it before the namespace-pin barrier and proves a final `CAP_NET_
 The contract rejects `CAP_SYS_PTRACE` and adds only the individual `seccomp` syscall to the existing systemd syscall
 groups so the fixed child filter can be installed without allowing all of `@sandbox`. After the drop, the worker's
 distinct UID/GID plus exact `CAP_NET_ADMIN` set excludes same-UID signalling of the root parent and
-access through the root:`volparossa` runtime-directory mode. This is not yet a production claim:
-the launcher remains disconnected from the engine, and the complete account transition,
-pre-filter task state, path access denials and parent-signal denial still require a disposable
-Debian 13 live-root acceptance run.
+access through the root:`volparossa` runtime-directory mode. The functional-alpha backend now calls
+the launcher, but this is not acceptance evidence: the complete account transition, pre-filter task
+state, path access denials and parent-signal denial still require a disposable Debian 13 live-root
+run.
 
 ### Sequential live worker and production IPC proof driver
 
@@ -874,9 +893,10 @@ restart reaper is connected.
 Exact cache hits use a registry-lock-free point-in-time process probe followed by registry-locked
 checks of the atomic hint, expiry, generation and shutdown state. There is deliberately no watcher
 or pidfd, so a child can still die after a positive probe. The in-memory fallback queue is not a
-replacement for durable secret-free ownership and crash recovery; production remains disconnected.
+replacement for durable secret-free ownership and crash recovery; the functional-alpha production
+adapter deliberately remains process-lifetime-only.
 
-The disconnected async coordinator demonstrates the required transaction shape: PLAN records the
+The async coordinator enforces the required transaction shape: PLAN records the
 exact context, generation, phase, token, request digest and one caller-owned monotonic deadline
 under its short mutex, then starts an owned supervisor before the caller can wait on the oneshot
 result. `execute_until` rejects expiry again immediately before PLAN, leaving no tombstone,
@@ -979,13 +999,13 @@ registry mutation, no-runtime polling before admission or PLAN, mutex-poison own
 around PLAN, generation ABA, late/dead commit rejection, descriptor closure, tombstone bounds and
 registry-lock availability.
 
-Neither the launcher, registry, coordinator, nor production route manager calls this worker path.
-The production engine already supervises cancellation-safe PLAN -> CALL -> COMMIT/rollback
-transactions: it
+The production server's functional-alpha backend now calls this worker path for one Client lease;
+no production route manager calls it. The production engine supervises cancellation-safe
+PLAN -> CALL -> COMMIT/rollback transactions: it
 reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
-held. This orchestration does not make the disconnected worker implementation production-ready.
-The production backend still returns `Unavailable` for Prepare and transport acquisition, and the
-engine rejects client ingress as `Unavailable` before backend dispatch.
+held. The narrow backend implements real Prepare/Destroy only. It returns `Unavailable` for
+Activate, Probe and transport acquisition, and the engine rejects client ingress as `Unavailable`
+before backend dispatch. This process-lifetime composition is not full production readiness.
 
 ### Affine asynchronous engine/backend boundary
 
@@ -1017,8 +1037,8 @@ Fake/adversarial tests cover factory and poll panic, caller cancellation, missin
 recovery, stale-owner rejection, generation overflow, deadline and completion substitution, runtime
 shutdown correlation, wrong-binding and timed-out Acquire descriptor closure before Destroy, and
 retryable shutdown after incomplete cleanup. This establishes only the adapter boundary. The public
-production constructor still installs the unavailable backend and performs no worker or network
-mutation.
+standalone constructor still installs the unavailable backend and performs no worker or network
+mutation; only the production server selects the functional-alpha adapter.
 
 A private dormant worker-lifecycle seam now reserves a coordinator-local generation, changes its
 reservation to a non-expiring `LifecycleOwned` shutdown fence, authenticates one passive sandboxed
@@ -1106,19 +1126,20 @@ adapter and shared manager-mutation serialization now exist, but a production re
 old-worker death proof, exact namespace/kernel cleanup, and authority-preserving composition of the
 two settlement proofs remain required before those phases can progress.
 
-Production wiring remains a separate audited change with these explicit blockers:
+Full durable production wiring remains a separate audited change with these explicit blockers:
 
-- No production adapter maps `BackendLineage`/`OperationBinding` and a durable ownership key to the
-  dormant lifecycle owner, or carries that owner from journal Intent through authenticated anchor,
-  durable MayOwn, child dispatch and exact settlement. No adapter obtains a phase-authorized
-  per-link resource after durable `MayOwnPrepare` or carries it through birth-link creation,
-  namespace movement, mutation, cleanup, and exact settlement; the typed resource deliberately
-  proves neither current journal phase nor cleanup authority. The adapter also does not carry the
-  engine's exact deadline through the complete lifecycle and into `execute_until`. Before returning
-  success it must also revalidate every adopted kernel object
+- The functional-alpha adapter maps `BackendLineage`/`OperationBinding` to one process-owned Client
+  worker generation and carries the engine deadline into the worker call. A separate non-cloneable
+  live owner distinguishes same-runtime create/delete authority from its public WireGuard marker
+  metadata. It does not bind that
+  lineage to a durable ownership key or carry an owner from journal Intent through authenticated
+  anchor, durable MayOwn, child dispatch and exact settlement. It does not obtain a phase-authorized
+  per-link resource after durable `MayOwnPrepare`; its typed resource deliberately proves neither
+  current journal phase nor crash-cleanup authority. Before a complete adapter returns success it
+  must also revalidate every adopted kernel object
   against the requested socket kind, protocol, local/remote tuple, nonblocking/listening state and
-  genuine MPTCP evidence. The implemented deadline, adoption and retryable-shutdown machinery
-  therefore remains disconnected from `HelperEngine`.
+  genuine MPTCP evidence. Descriptor adoption and complete-operation retryable shutdown therefore
+  remain disconnected from the functional-alpha path.
 - Retryable shutdown ownership and the escalation reaper are still process-memory-only. The
   journal has a production startup owner but no request-path issuance/arming writer or restart
   reaper, so helper-crash reconciliation is not yet durable.
@@ -1171,9 +1192,9 @@ quarantines rather than releasing. A production-started secret-free journal subs
 the request-path issuance/arming writer, restart reaper, trusted worker/kernel-cleanup executor,
 exact manager-absence composition, and cross-runtime proof needed to settle that case do not.
 
-This entire path is dormant containment, not a live route implementation. Production Prepare still
-returns `Unavailable`, and no production route-manager caller drives the helper-backed setup
-transaction.
+This same-runtime reconciliation path remains containment rather than crash recovery. The
+functional-alpha production adapter can Prepare and Destroy one Client lease, but no production
+route-manager caller drives it and there is no activation, peer route, transport or live datapath.
 
 ## Namespace-local transport descriptor
 
@@ -1303,22 +1324,21 @@ remain:
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
   the final worker must retain only `CAP_NET_ADMIN`;
-- connect the authenticated worker-v3 launcher and generation registry to creation of the anonymous
-  namespace only as part of an atomic underlay-snapshot, capability-reduction,
-  independently observed sandbox-proof, birth-link, WireGuard-prepare and rollback transaction; the
-  current child can prepare and destroy only an already-present exact single-lease WireGuard birth
-  link, while parent birth-link creation/movement and production dispatch remain absent;
-- replace the synchronous `HelperEngine` backend interface across every caller with the tested
-  plan/call/commit shape: validation and snapshot under the state lock, one bounded worker call
-  outside it, and exact context/generation/phase/handle revalidation before publishing. Reap,
-  cleanup, destroy, shutdown, and cached-descriptor paths require the same atomic refactor;
-- wire descriptor retries to the live generation registry. The disconnected facade already purges
-  caches on death and never retries ambiguous IPC, but the production engine is not yet using it;
-- collect a bounded `DirectAssigned` snapshot from parent-side read-only rtnetlink link/address/route
-  dumps before birth-link mutation, rejecting multipath, duplicate, truncated, or ambiguous state;
-- connect parent birth-link creation/movement to the inactive v3 kernel primitives, preserving the
-  exact no-peer/key, link-UP, port-zero `SET`, and correlated public-key/port `GET` ordering with
-  full rollback or quarantine;
+- prove the functional-alpha transaction in a disposable live-root environment: read-only direct
+  underlay selection, independently observed sandbox proof, parent birth-link creation and move,
+  child WireGuard Prepare, response proof, exact Destroy, worker reap/purge and unchanged host state;
+  then extend its one-Client/one-lease capacity without weakening atomic rollback;
+- extend the asynchronous `HelperEngine` backend beyond Prepare/Destroy: Activate, Probe, descriptor
+  acquisition, cached-descriptor cleanup and shutdown need the same plan/call/commit discipline and
+  exact context/generation/phase/handle revalidation;
+- wire descriptor retries to the live production generation registry. The coordinator purges caches
+  on death and never retries ambiguous IPC, but the functional-alpha backend advertises descriptor
+  acquisition as unsupported;
+- extend the bounded `DirectAssigned` parent snapshot from the current one direct underlay to the
+  exact multi-path evidence required by complete route setup, retaining rejection of multipath,
+  duplicate, truncated or ambiguous dumps;
+- carry every parent birth link through activation and complete cleanup/quarantine, preserving the
+  exact no-peer/key, link-UP, port-zero `SET`, and correlated public-key/port `GET` ordering;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - capture activation baselines and perform correlated handshake/RX/TX commit probes;
 - connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact

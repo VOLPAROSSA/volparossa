@@ -492,7 +492,7 @@ adoption then uses the audited Linux-UAPI
 `FD_CLOEXEC`, and closes the original when the duplication call returns. The parent returns the
 adopted owner only after the exact release record arrives within the same absolute deadline. Any
 adoption or release-barrier failure closes every local owner. A consuming parent validator also
-re-queries the closed socket shape. The disconnected coordinator additionally duplicates the
+re-queries the closed socket shape. The coordinator additionally duplicates the
 already attested worker namespace pin affinely before recording this request's tombstone or
 in-flight transition, retains it across concurrent retirement without probing the worker process
 under the registry lock, and before registry COMMIT compares the typed namespace FD returned by
@@ -500,24 +500,28 @@ fixed `SIOCGSKNS` against that pin by exact nsfs device/inode identity. Expired 
 housekeeping may precede pinning but carries no socket or namespace authority. Post-PLAN mismatch,
 validation failure or expiry closes the descriptor and quarantines the generation. Closed worker-side
 factories create and revalidate connected MPTCP, listening MPTCP and unconnected UDP sockets,
-including genuine `MPTCP_INFO` negotiation evidence for a connected stream. These components are
-not wired into a production worker process, so their socketpair/fake-kernel tests do not prove a
-namespace socket or datapath.
+including genuine `MPTCP_INFO` negotiation evidence for a connected stream. The production
+functional-alpha path uses the coordinator only for one Client lease's Initialise, Prepare and
+Destroy operations; the socket factories remain disconnected, so their socketpair/fake-kernel
+tests do not prove a production namespace socket or datapath.
 
-The production lease backend currently fails closed: `PrepareLeaseBatch` returns
-`Unavailable/PREPARE_FAILED` and creates no context because the read-only rtnetlink
-`DirectAssigned` collector and the v3 parent/worker kernel transaction are not connected yet. It
-does not return a placeholder endpoint or claim a tunnel. `AcquireTransportSocket` likewise returns
-`Unavailable/TRANSPORT_SOCKET_UNAVAILABLE` before context lookup or any network action until the
-worker lifecycle owns committed lease state and invokes the factory. The exact proof contract,
-namespace transport blocker and remaining live-kernel work are recorded in
-[Privileged helper protocol v3](HELPER_V3.md).
+The production functional-alpha backend connects the bounded rtnetlink `DirectAssigned` collector
+and the v3 parent/worker kernel transaction for exactly one Client context with one Client-role
+WireGuard lease. A successful `PrepareLeaseBatch` reports only the child's correlated kernel-proven
+public key/listen port plus the selected direct-underlay address; it is not evidence of an activated
+tunnel. A server-owned expiry driver schedules cancellation-safe exact cleanup once per second
+without waiting for another agent request, serializes it behind earlier operations, retries
+quarantined lineages, and is joined before backend shutdown. `ActivateLeaseBatch`,
+`CommitLeaseBatch` and `AcquireTransportSocket` remain
+`Unavailable`, and no datapath is connected. The exact proof contract and remaining live-kernel
+work are recorded in [Privileged helper protocol v3](HELPER_V3.md).
 
-Tags 35 and 28 therefore provide only same-process ambiguity containment. Tag 35's closed plan is
-directly convertible to the journal's canonical `ClosedPlan`, but no production request-path writer
-consumes it and no production route-manager caller reaches this transaction. Production now starts
-one boot-scoped, secret-free canonical/CAS ownership actor before publishing its cleanup token or
-socket, and joins it after engine cleanup. Startup may durably settle only never-dispatched
+Tags 35 and 28 provide only same-process ambiguity containment. The functional-alpha request path
+consumes tag 35's closed plan, which is directly convertible to the journal's canonical
+`ClosedPlan`, but no production request-path writer carries it into durable `MayOwnPrepare` custody
+and no production route-manager caller reaches this transaction. Production starts one boot-scoped,
+secret-free canonical/CAS ownership actor before publishing its cleanup token or socket, and joins
+it after expiry-driver and engine cleanup. Startup may durably settle only never-dispatched
 `Intent`; its deliberately refusing executor leaves every `MayOwnPrepare` byte-identical and blocks
 the internal socket-publication boundary. No production issuance/arming writer, restart-stable
 namespace/pidfd vault, absence-proving `MayOwnPrepare` recovery backend, restart reaper, or

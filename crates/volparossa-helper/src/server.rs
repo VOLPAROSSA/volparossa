@@ -13,7 +13,7 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     sync::Semaphore,
     task::JoinSet,
-    time::timeout,
+    time::{MissedTickBehavior, interval, timeout},
 };
 use volparossa_linux_uapi::{SystemdListenFdSet, send_fd_with_binding};
 use volparossa_routing::{
@@ -40,6 +40,7 @@ use crate::{
 const MAX_CONNECTIONS: usize = 32;
 const MAX_REQUESTS_PER_CONNECTION: usize = 16;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const EXPIRY_REAP_INTERVAL: Duration = Duration::from_secs(1);
 const OWNERSHIP_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const OWNERSHIP_SHUTDOWN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -72,6 +73,15 @@ struct ProductionServer {
 struct ProductionServerStartup {
     ownership_runtime: ProductionOwnershipRuntime,
     socket_guard: SocketPathGuard,
+}
+
+enum ExpiryDriverState {
+    NotStarted,
+    Running {
+        stop: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
+    },
+    Failed,
 }
 
 /// Helper server failures which reveal no kernel/user-controlled diagnostic strings.
@@ -206,7 +216,11 @@ fn bind_production_socket(
     } = startup;
     Ok(ProductionServer {
         listener,
-        engine: HelperEngine::new_with_protected_cleanup_token(runtime.cleanup_token, trusted_uid),
+        engine: HelperEngine::new_with_backend(
+            runtime.cleanup_token,
+            trusted_uid,
+            crate::worker_v3::functional_alpha_lease_backend(),
+        ),
         allowed_peer: AllowedPeer {
             uid: trusted_uid,
             gid: socket_group,
@@ -216,11 +230,15 @@ fn bind_production_socket(
     })
 }
 
-/// Serves until SIGINT/SIGTERM, retires in-memory contexts, and then closes the durable actor.
+/// Serves until SIGINT/SIGTERM while an owned expiry driver retires stale in-memory contexts, then
+/// closes the durable actor.
 ///
-/// Production currently creates no contexts because its lease backend is unavailable. A successful
-/// return proves the durable journal is quiescent. Startup still refuses `MayOwnPrepare` because no
-/// production restart reaper can yet prove absence of stale kernel state.
+/// The crate-internal production engine can prepare and destroy one process-owned functional-alpha
+/// Client lease. Activate, Probe, transport acquisition and every datapath remain unavailable. A
+/// successful return proves the engine was cleaned before the durable journal actor became
+/// quiescent. Startup still refuses `MayOwnPrepare` because no production restart reaper can yet
+/// prove absence of stale kernel state. Unexpected expiry-driver exit stops serving and fails the
+/// runtime closed.
 ///
 /// # Errors
 ///
@@ -235,22 +253,68 @@ async fn run_server(server: ProductionServer) -> Result<(), ServerError> {
         _socket_guard: socket_guard,
     } = server;
     let mut tasks = JoinSet::new();
-    let service_result = match UnixListener::from_std(listener) {
+    let (service_result, expiry_driver) = match UnixListener::from_std(listener) {
         Ok(listener) => {
-            let result = serve_connections(&listener, &engine, allowed_peer, &mut tasks)
-                .await
-                .map_err(ServerError::Io);
+            let (expiry_stop, expiry_stopped) = tokio::sync::oneshot::channel();
+            let expiry_engine = engine.clone();
+            let mut expiry_task = tokio::spawn(async move {
+                run_expiry_reaper(expiry_engine, expiry_stopped).await;
+            });
+            let (result, expiry_driver_failed) = tokio::select! {
+                result = serve_connections(&listener, &engine, allowed_peer, &mut tasks) => {
+                    (result.map_err(ServerError::Io), false)
+                }
+                _ = &mut expiry_task => {
+                    (Err(ServerError::CleanupIncomplete), true)
+                }
+            };
             drop(listener);
-            result
+            let expiry_driver = if expiry_driver_failed {
+                ExpiryDriverState::Failed
+            } else {
+                ExpiryDriverState::Running {
+                    stop: expiry_stop,
+                    task: expiry_task,
+                }
+            };
+            (result, expiry_driver)
         }
-        Err(error) => Err(ServerError::Io(error)),
+        Err(error) => (Err(ServerError::Io(error)), ExpiryDriverState::NotStarted),
     };
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    let complete = engine.shutdown_cleanup().await;
+    let expiry_complete = match expiry_driver {
+        ExpiryDriverState::NotStarted => true,
+        ExpiryDriverState::Running { stop, task } => {
+            let _ = stop.send(());
+            task.await.is_ok()
+        }
+        ExpiryDriverState::Failed => false,
+    };
+    let engine_complete = engine.shutdown_cleanup().await;
+    let complete = expiry_complete && engine_complete;
     let ownership_complete = shutdown_production_ownership(ownership_runtime);
     drop(socket_guard);
     combine_server_completion(service_result, complete, ownership_complete)
+}
+
+async fn run_expiry_reaper(engine: HelperEngine, mut stopped: tokio::sync::oneshot::Receiver<()>) {
+    let mut ticks = interval(EXPIRY_REAP_INTERVAL);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    ticks.tick().await;
+    loop {
+        tokio::select! {
+            _ = &mut stopped => return,
+            _ = ticks.tick() => {
+                if !engine.reap_expired_cleanup().await {
+                    tracing::warn!(
+                        diagnostic_code = "EXPIRY_REAP_INCOMPLETE",
+                        "helper expiry cleanup remains quarantined"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn startup_io_failure(
@@ -877,6 +941,67 @@ mod tests {
         assert!(library.contains("run_production_server"));
         assert!(!library.contains("bind_production_socket"));
         assert!(!library.contains("run_server"));
+    }
+
+    #[test]
+    fn production_composition_is_narrow_and_shutdown_is_ordered() {
+        let source = include_str!("server.rs");
+        let bind_start = source
+            .find("fn bind_production_socket")
+            .expect("private production bind");
+        let bind_end = source[bind_start..]
+            .find("async fn run_server")
+            .map(|offset| bind_start + offset)
+            .expect("private server loop");
+        let bind = &source[bind_start..bind_end];
+        assert!(bind.contains("HelperEngine::new_with_backend("));
+        assert!(bind.contains("crate::worker_v3::functional_alpha_lease_backend()"));
+        assert!(!bind.contains("HelperEngine::new_with_protected_cleanup_token("));
+
+        let run_end = source[bind_end..]
+            .find("fn startup_io_failure")
+            .map(|offset| bind_end + offset)
+            .expect("startup failure helper");
+        let run = &source[bind_end..run_end];
+        let abort_connections = run.find("tasks.abort_all()").expect("connection stop");
+        let expiry_join = run
+            .find("let expiry_complete = match expiry_driver")
+            .expect("expiry driver join");
+        let engine_shutdown = run
+            .find("engine.shutdown_cleanup().await")
+            .expect("engine cleanup");
+        let ownership_shutdown = run
+            .find("shutdown_production_ownership(ownership_runtime)")
+            .expect("ownership shutdown");
+        assert!(run.contains("tokio::select!"));
+        assert!(run.contains("ExpiryDriverState::Failed"));
+        assert!(run.contains("MissedTickBehavior::Skip"));
+        assert!(abort_connections < expiry_join);
+        assert!(expiry_join < engine_shutdown);
+        assert!(engine_shutdown < ownership_shutdown);
+
+        let engine = include_str!("engine_v3.rs");
+        let public_start = engine
+            .find("pub fn new(cleanup_token")
+            .expect("public standalone constructor");
+        let public_end = engine[public_start..]
+            .find("pub(crate) fn new_with_backend")
+            .map(|offset| public_start + offset)
+            .expect("crate-internal backend constructor");
+        assert!(engine[public_start..public_end].contains("Arc::new(UnavailableLeaseBackend)"));
+    }
+
+    #[tokio::test]
+    async fn empty_expiry_driver_stops_and_joins_on_signal() {
+        let engine = HelperEngine::new([9; 32], 1_000);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let driver = tokio::spawn(run_expiry_reaper(engine, stopped));
+        tokio::task::yield_now().await;
+        stop.send(()).expect("expiry stop receiver");
+        timeout(Duration::from_secs(1), driver)
+            .await
+            .expect("expiry driver stop deadline")
+            .expect("expiry driver join");
     }
 
     #[test]

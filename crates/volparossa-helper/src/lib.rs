@@ -1,26 +1,26 @@
 //! Minimal privileged service boundary for VOLPAROSSA network operations.
 //!
 //! Production requests arrive over a fixed root-owned Unix socket and are authenticated with
-//! Linux peer credentials. The v3 production lease backend currently fails closed with
-//! `Unavailable` and spawns no worker. The private worker entry can now bootstrap and prove narrow
-//! network-namespace, capability, descriptor, credential and dedicated non-root identity
-//! confinement, but that lifecycle, kernel preparation, transaction-wide cleanup and disposable
-//! live-root proof are not yet connected to the engine. Production does own the canonical durable
-//! journal actor as a startup/shutdown barrier, but deliberately refuses `MayOwnPrepare` recovery;
-//! it has no request-path issuance/arming writer or restart-stable pidfd/network-namespace custody.
-//! Leader retirement still does not own descendants.
+//! Linux peer credentials. The crate-internal production engine can execute real Prepare and
+//! Destroy for exactly one process-owned functional-alpha Client lease. It does not implement
+//! Activate, Probe, transport acquisition, a usable datapath, or crash/restart recovery. The public
+//! [`HelperEngine::new`] constructor remains fail-closed with `Unavailable`, so only the production
+//! server selects that deliberately narrow backend. Production owns the canonical durable journal
+//! actor as a startup/shutdown barrier but still refuses `MayOwnPrepare` recovery; it has no
+//! restart-stable pidfd/network-namespace custody or restart reaper. Leader retirement still does
+//! not own descendants, and disposable live-root proof remains outstanding.
 
 #![cfg(target_os = "linux")]
 
-#[allow(dead_code)] // Shared hard-deadline substrate; production backend remains disconnected.
+#[allow(dead_code)] // Shared hard-deadline substrate; later operation kinds remain disconnected.
 mod deadline;
 #[path = "engine_v3.rs"]
 mod engine;
-#[allow(dead_code)] // Secret-free v3 worker API foundation; no production spawn path exists yet.
+#[allow(dead_code)] // Functional-alpha uses one request shape; later worker operations remain.
 mod internal_protocol;
-#[allow(dead_code)] // V3 link primitives remain isolated until the production backend is wired.
+#[allow(dead_code)] // Functional-alpha uses a subset; activation and datapath primitives remain.
 mod kernel;
-#[allow(dead_code)] // Secret-free topology derivation used by the future v3 worker.
+#[allow(dead_code)] // Secret-free topology derivation; broader roles remain disconnected.
 mod lease_spec;
 #[allow(dead_code)] // V3 endpoint ownership remains isolated until worker-v3 wiring lands.
 mod mptcp_endpoint;
@@ -32,13 +32,13 @@ mod server;
 mod systemd_custody;
 #[allow(dead_code)] // Production observes inventory; publication and removal remain disconnected.
 mod systemd_fdstore;
-#[allow(dead_code)] // Pure phase-1 policy; rtnetlink collection is wired in helper v3 phase 2.
+#[allow(dead_code)] // Functional-alpha selects one direct underlay; broader policy remains.
 mod underlay;
-#[allow(dead_code)] // Narrow sandbox bootstrap; production engine still never spawns it.
+#[allow(dead_code)] // Narrow sandbox bootstrap; broader lifecycle operations remain unavailable.
 mod worker_sandbox;
-#[allow(dead_code)] // V3 transport foundation; production worker lifecycle remains unavailable.
+#[allow(dead_code)] // V3 transport foundation; descriptor/datapath operations remain unavailable.
 mod worker_transport;
-#[allow(dead_code)] // Authenticated lifecycle foundation; production engine remains unavailable.
+#[allow(dead_code)] // Functional-alpha uses one lease; broader authenticated lifecycle remains.
 mod worker_v3;
 
 pub use engine::HelperEngine;

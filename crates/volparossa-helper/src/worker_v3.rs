@@ -1,13 +1,12 @@
 //! Authenticated helper-v3 worker process and generation-safe transaction foundation.
 //!
-//! This module is deliberately disconnected from the production helper engine. It proves a
-//! fail-closed child lifecycle and cancellation-safe plan/call/commit discipline without making
-//! route network changes. The disconnected production entry applies and proves narrow NEWNET,
-//! capability, descriptor, credential, dedicated non-root identity and post-install clone/fork
-//! confinement before the parent could register it. Retirement owns only the exact leader, and this
-//! bootstrap does not independently attest descendant absence before filter installation. The child
-//! implements exact single-lease `WireGuard` Prepare/Destroy inside its anonymous namespace, while
-//! the production engine handoff remains deliberately disconnected.
+//! The production server uses this module's narrow process-owned seam for one functional-alpha
+//! Client lease. It applies and proves NEWNET, capability, descriptor, credential, dedicated
+//! non-root identity and post-install clone/fork confinement before the parent can register the
+//! worker. The child then implements exact single-lease `WireGuard` Prepare/Destroy inside its
+//! anonymous namespace. Retirement owns only the exact leader, and bootstrap does not independently
+//! attest descendant absence before filter installation. Durable journal/systemd custody,
+//! crash/restart recovery, activation, transports and datapaths remain disconnected.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -79,6 +78,9 @@ use volparossa_linux_uapi::install_close_range_on_exec;
 use volparossa_routing::ContextRole as RoutingContextRole;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 use zeroize::Zeroizing;
+
+mod functional_backend;
+pub(crate) use functional_backend::functional_alpha_lease_backend;
 
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
 pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-worker-v3-live-proof";
@@ -6026,9 +6028,8 @@ impl WorkerCoordinator {
         }
     }
 
-    /// Dormant production seam: reserves a coordinator-local worker generation, authenticates one
-    /// worker, then commits that exact reservation without issuing any child operation.
-    #[allow(dead_code)] // Connected only after durable recovery identity is complete.
+    /// Open process-owned seam: reserves a coordinator-local worker generation, authenticates one
+    /// worker, then commits that exact reservation before the caller issues a child operation.
     fn reserve_spawn_register_until(
         &self,
         context_id: ContextId,
@@ -6361,6 +6362,39 @@ impl WorkerCoordinator {
         WorkerLifecycleSettlement::ConfirmedAbsent(ConfirmedWorkerGenerationAbsent {
             coordinates: ownership.coordinates,
         })
+    }
+
+    /// Settle any pre-registration placement, then retire the exact generation when it exists.
+    ///
+    /// A spawn-ambiguous owner remains retained because it carries no process identity from which
+    /// absence can be proven. Registered, detached and reaped-pending-purge owners proceed directly
+    /// through the ordinary exact-generation retirement path.
+    fn settle_and_terminate_lifecycle_until(
+        &self,
+        ownership: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> WorkerGenerationReap {
+        let needs_settlement = matches!(
+            ownership.placement.as_ref(),
+            Some(
+                WorkerGenerationPlacement::LifecycleReservation(_)
+                    | WorkerGenerationPlacement::Spawned(_)
+            )
+        );
+        if !needs_settlement {
+            return self.terminate_generation_until(ownership, deadline);
+        }
+        match self.settle_lifecycle_ownership_until(ownership, deadline) {
+            WorkerLifecycleSettlement::Registered(ownership) => {
+                self.terminate_generation_until(ownership, deadline)
+            }
+            WorkerLifecycleSettlement::ConfirmedAbsent(proof) => {
+                WorkerGenerationReap::Confirmed(proof)
+            }
+            WorkerLifecycleSettlement::Retained { error, ownership } => {
+                retained_worker_generation(error, ownership)
+            }
+        }
     }
 
     /// Returns only identity material re-derived from the exact registered worker's retained,
@@ -11378,7 +11412,7 @@ mod tests {
         assert!(!prepare.contains("publish_current_process_custody("));
 
         let arm_end = source[arm_start..]
-            .find("\n    /// Dormant production seam: reserves")
+            .find("\n    /// Open process-owned seam: reserves")
             .map(|offset| arm_start + offset)
             .expect("post-attestation arm implementation boundary");
         let arm = &source[arm_start..arm_end];
@@ -11493,7 +11527,7 @@ mod tests {
     }
 
     #[test]
-    fn dormant_lifecycle_registers_without_dispatch_and_exposes_only_pinned_identity() {
+    fn open_lifecycle_registers_without_dispatch_and_exposes_only_pinned_identity() {
         let context_id = [70; 16];
         let coordinator =
             WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
@@ -12209,18 +12243,14 @@ mod tests {
             registry.expire_reservations(Instant::now() + Duration::from_secs(30));
             assert!(registry.reservations.contains_key(&context_id));
         }
-        let proof = match coordinator.settle_lifecycle_ownership_until(
+        let proof = match coordinator.settle_and_terminate_lifecycle_until(
             ownership,
             HardDeadline::after(Duration::from_secs(1)).expect("abandon retry deadline"),
         ) {
-            WorkerLifecycleSettlement::ConfirmedAbsent(proof) => proof,
-            WorkerLifecycleSettlement::Retained { error, ownership } => {
+            WorkerGenerationReap::Confirmed(proof) => proof,
+            WorkerGenerationReap::Retained { error, ownership } => {
                 drop(ownership);
                 panic!("reservation abandon retry remained unresolved: {error}")
-            }
-            WorkerLifecycleSettlement::Registered(ownership) => {
-                drop(ownership);
-                panic!("unspawned reservation registered")
             }
         };
         assert_eq!(proof.coordinates.context_id, context_id);
@@ -12559,20 +12589,7 @@ mod tests {
         }
         assert!(alive.load(Ordering::SeqCst));
         coordinator.set_lifecycle_mutation_hook(None);
-        let ownership = match coordinator.settle_lifecycle_ownership_until(
-            ownership,
-            HardDeadline::after(Duration::from_secs(1)).expect("commit retry deadline"),
-        ) {
-            WorkerLifecycleSettlement::Registered(ownership) => ownership,
-            WorkerLifecycleSettlement::Retained { error, ownership } => {
-                drop(ownership);
-                panic!("commit retry remained unresolved: {error}")
-            }
-            WorkerLifecycleSettlement::ConfirmedAbsent(_) => {
-                panic!("spawned worker was falsely absent")
-            }
-        };
-        match coordinator.terminate_generation_until(
+        match coordinator.settle_and_terminate_lifecycle_until(
             ownership,
             HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
         ) {

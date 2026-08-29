@@ -1,7 +1,8 @@
 //! Bounded, read-only `NETLINK_ROUTE` snapshot collection.
 //!
-//! This collector is deliberately isolated from `HelperEngine`. It is a foundation for a future
-//! helper-v3 transaction and cannot activate routes, links, addresses, DNS or firewall state.
+//! The production functional-alpha backend uses this collector before its single Client-lease
+//! Prepare transaction. The collector cannot activate routes, links, addresses, DNS or firewall
+//! state.
 
 use std::{
     io,
@@ -98,7 +99,7 @@ const MAX_IFALIAS_BYTES: usize = 255;
 
 /// A fixed, non-sensitive failure produced by the read-only collector.
 #[derive(Debug, Error)]
-pub(super) enum UnderlayNetlinkError {
+pub(crate) enum UnderlayNetlinkError {
     /// The netlink socket or bounded wait failed.
     #[error("underlay netlink I/O failed")]
     Io(#[from] io::Error),
@@ -401,11 +402,11 @@ impl NetlinkCollector {
 
 /// Collect two identical bounded snapshots, then make the pure fail-closed selection.
 ///
-/// This function is intentionally not called by production while helper-v3 lifecycle rollback is
-/// incomplete. It is read-only, opens only `NETLINK_ROUTE`, and uses one deadline for all six dumps.
-/// Its result proves only local assignment plus an unambiguous main-table default route; it never
-/// infers NAT behaviour or global reachability.
-pub(super) fn collect_consistent_direct_underlay(
+/// The production functional-alpha backend calls this before any mutation. It is read-only, opens
+/// only `NETLINK_ROUTE`, and uses one deadline for all six dumps. Its result proves only local
+/// assignment plus an unambiguous main-table default route; it never infers NAT behaviour or global
+/// reachability.
+pub(crate) fn collect_consistent_direct_underlay(
     deadline: HardDeadline,
 ) -> Result<UnderlayCandidate, UnderlayNetlinkError> {
     deadline.ensure_remaining()?;
