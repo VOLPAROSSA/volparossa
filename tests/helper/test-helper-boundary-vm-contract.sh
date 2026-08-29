@@ -723,8 +723,10 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^report_non_retained_driver_phase() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_confinement_diagnostic() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_production_launch_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 7
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 9
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -753,6 +755,83 @@ if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/de
     printf '%s\n' 'branch failure diagnostic exposed a non-allowlisted payload' >&2
     exit 1
 fi
+
+printf '%s\n%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-ready' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke failure category: production-launch-status'
+expect_status 0 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke production launch diagnostic: functional-probe-ready'
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'production launch diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+# Missing, duplicate, malformed, mixed and private-key-bearing production
+# launch records fail closed without printing any captured payload.
+printf '%s\n' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=identity' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=publication' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=private-stage' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-cleanup' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    '-----BEGIN PRIVATE KEY-----' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-underlay' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+if grep -F -- '-----BEGIN PRIVATE KEY-----' "$last_stderr" >/dev/null \
+    || grep -F 'production launch diagnostic:' "$last_stderr" >/dev/null; then
+    printf '%s\n' 'production launch parser exposed private or invalid diagnostics' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=active-lock' \
+    'live worker-identity proof failed: predicate rejected: production-running-state' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
 # An unclassified unexpected exit may expose exactly one fixed phase and no
 # captured payload. Missing, duplicate, invalid and mixed records fail closed.
@@ -900,8 +979,14 @@ grep -E \
 grep -E \
     '^[[:space:]]+report_non_retained_worker_confinement_diagnostic([[:space:]]|$)' \
     "$runner" >/dev/null
+grep -E \
+    '^[[:space:]]+report_non_retained_production_launch_diagnostic([[:space:]]|$)' \
+    "$runner" >/dev/null
 grep -F \
     'elif [ "$non_retained_failure_reason" = worker-confinement ]; then' \
+    "$runner" >/dev/null
+grep -F \
+    'elif [ "$non_retained_failure_reason" = production-launch-status ]; then' \
     "$runner" >/dev/null
 
 # Early QEMU exits retain only canonical status fields plus the supervisor's

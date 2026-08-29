@@ -265,6 +265,8 @@ proof_failure_functions=$temporary_directory/proof-failure-functions.sh
     sed -n '/^record_worker_launch_failure() {$/,/^}$/p' "$gate"
     sed -n '/^report_worker_launch_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^report_worker_confinement_diagnostic() {$/,/^}$/p' "$gate"
+    sed -n '/^production_start_failure_stage_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^report_production_launch_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^report_proof_failure() {$/,/^}$/p' "$gate"
 } >"$proof_failure_functions"
 if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")" -ne 1 ] \
@@ -282,6 +284,10 @@ if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")
     || [ "$(grep -c '^report_worker_launch_diagnostic() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_worker_confinement_diagnostic() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^production_start_failure_stage_is_safe() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_production_launch_diagnostic() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_proof_failure() {$' "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the privacy-safe proof failure helpers are not uniquely extractable' >&2
@@ -423,6 +429,133 @@ while IFS= read -r proof_failure_reason_under_test; do
         exit 1
     }
 done <"$expected_proof_failure_reasons"
+
+expected_production_start_stages=$temporary_directory/expected-production-start-stages
+printf '%s\n' \
+    preflight-runtime \
+    identity \
+    active-lock \
+    protocol-bind-before \
+    protocol-frame-bounds \
+    protocol-wire-shapes \
+    protocol-wrong-uid \
+    protocol-wrong-gid \
+    protocol-root-peer \
+    protocol-bind-after \
+    functional-underlay \
+    functional-probe-ready \
+    functional-worker-observation \
+    functional-probe-finish \
+    functional-cleanup \
+    publication >"$expected_production_start_stages"
+while IFS= read -r expected_production_start_stage; do
+    production_start_failure_stage_is_safe "$expected_production_start_stage" || {
+        printf 'production start stage is not allowlisted: %s\n' \
+            "$expected_production_start_stage" >&2
+        exit 1
+    }
+done <"$expected_production_start_stages"
+if production_start_failure_stage_is_safe 'functional-private-value'; then
+    printf '%s\n' 'an unbounded production start stage was accepted' >&2
+    exit 1
+fi
+
+exercise_production_launch_diagnostic() (
+    [ "$#" -eq 2 ] || exit 98
+    production_diagnostic_name=$1
+    production_diagnostic_stage=$2
+    temporary_stage=$temporary_directory/production-launch-$production_diagnostic_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=%s\n' \
+        "$production_diagnostic_stage" \
+        >"$temporary_stage/production-output/start.failure"
+    chmod 0600 "$temporary_stage/production-output/start.failure"
+    proof_failure_reason=production-launch-status
+    report_production_launch_diagnostic
+)
+expect_status 0 exercise_production_launch_diagnostic exact functional-worker-observation
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-worker-observation'
+production_launch_privacy_sentinel='private-production-launch-value'
+expect_status 1 exercise_production_launch_diagnostic invalid \
+    "$production_launch_privacy_sentinel"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+exercise_production_launch_diagnostic_missing() (
+    temporary_stage=$temporary_directory/production-launch-missing
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    proof_failure_reason=production-launch-status
+    report_production_launch_diagnostic
+)
+expect_status 1 exercise_production_launch_diagnostic_missing
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+exercise_production_launch_diagnostic_wrong_reason() (
+    temporary_stage=$temporary_directory/production-launch-wrong-reason
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=publication' \
+        >"$temporary_stage/production-output/start.failure"
+    chmod 0600 "$temporary_stage/production-output/start.failure"
+    proof_failure_reason=production-running-state
+    report_production_launch_diagnostic
+)
+expect_status 1 exercise_production_launch_diagnostic_wrong_reason
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+reject_production_launch_capture() (
+    [ "$#" -eq 3 ] || exit 98
+    production_rejection_name=$1
+    production_rejection_shape=$2
+    production_rejection_mode=$3
+    temporary_stage=$temporary_directory/production-launch-reject-$production_rejection_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    case $production_rejection_shape in
+        duplicate)
+            printf '%s\n%s\n' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=publication' \
+                >"$temporary_stage/production-output/start.failure"
+            ;;
+        truncated)
+            printf '%s' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                >"$temporary_stage/production-output/start.failure"
+            ;;
+        with-pass)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                >"$temporary_stage/production-output/start.failure"
+            : >"$temporary_stage/production-output/start.pass"
+            chmod 0600 "$temporary_stage/production-output/start.pass"
+            ;;
+        exact)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity' \
+                >"$temporary_stage/production-output/start.failure"
+            ;;
+        *) exit 97 ;;
+    esac
+    chmod "$production_rejection_mode" \
+        "$temporary_stage/production-output/start.failure"
+    proof_failure_reason=production-launch-status
+    if report_production_launch_diagnostic; then
+        exit 96
+    fi
+)
+while read -r production_rejection_name production_rejection_shape \
+    production_rejection_mode; do
+    expect_status 0 reject_production_launch_capture \
+        "$production_rejection_name" "$production_rejection_shape" \
+        "$production_rejection_mode"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done <<'EOF'
+duplicate duplicate 0600
+truncated truncated 0600
+unsafe-mode exact 0644
+mixed-pass with-pass 0600
+EOF
 
 # Run the exact production identity fragment with its artifact missing. Every
 # downstream operand must stay defined and the fixed predicate must survive.
@@ -4106,6 +4239,134 @@ do
         exit 1
     fi
 done
+
+# Failed production start hooks publish only one private fixed stage. Exercise
+# the exact allowlist and transition graph, then pin the failure trap and all
+# fallible descriptor redirections to ordinary `command exec` semantics.
+hook_start_stage_functions=$temporary_directory/hook-start-stage-functions.sh
+{
+    sed -n '/^start_failure_stage_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^advance_start_failure_stage() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_start_stage_functions"
+test "$(grep -c '^start_failure_stage_is_safe() {$' \
+    "$hook_start_stage_functions")" -eq 1
+test "$(grep -c '^advance_start_failure_stage() {$' \
+    "$hook_start_stage_functions")" -eq 1
+sh -n "$hook_start_stage_functions"
+# shellcheck disable=SC1090
+. "$hook_start_stage_functions"
+observed_hook_start_stages=$temporary_directory/observed-hook-start-stages
+sed -n '/^start_failure_stage_is_safe() {$/,/^}$/p' "$ipc_hook" \
+    | sed -nE 's/^[[:space:]]*([a-z][a-z-]*)(\|\\|\))[[:space:]]*$/\1/p' \
+    >"$observed_hook_start_stages"
+cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
+    printf '%s\n' 'production hook start failure stages differ from the fixed allowlist' >&2
+    exit 1
+}
+start_failure_stage=
+hook_stage_index=0
+while IFS= read -r hook_start_stage; do
+    hook_stage_index=$((hook_stage_index + 1))
+    if [ "$hook_stage_index" -eq 1 ]; then
+        [ "$hook_start_stage" = preflight-runtime ] || exit 1
+        start_failure_stage=$hook_start_stage
+    else
+        advance_start_failure_stage "$hook_start_stage" || {
+            printf 'production hook rejected monotone start stage: %s\n' \
+                "$hook_start_stage" >&2
+            exit 1
+        }
+    fi
+done <"$expected_production_start_stages"
+[ "$start_failure_stage" = publication ] || {
+    printf '%s\n' 'production hook start stage did not reach publication' >&2
+    exit 1
+}
+if advance_start_failure_stage identity \
+    || { start_failure_stage=preflight-runtime; advance_start_failure_stage active-lock; }; then
+    printf '%s\n' 'production hook start stage accepted a skipped or regressed transition' >&2
+    exit 1
+fi
+# These are literal hook-source contracts; expansion would defeat the checks.
+# shellcheck disable=SC2016
+for fixed_start_failure_contract in \
+    'start_failure_record=$proof_directory/start.failure' \
+    "write_private_file \"\$start_failure_record\" \\" \
+    'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=$start_failure_stage' \
+    'trap start_failure_exit EXIT' \
+    'start_failure_armed=no' \
+    'trap - EXIT'
+do
+    grep -F -- "$fixed_start_failure_contract" "$ipc_hook" >/dev/null || {
+        printf 'production hook start failure contract is missing: %s\n' \
+            "$fixed_start_failure_contract" >&2
+        exit 1
+    }
+done
+if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
+    "$ipc_hook" >/dev/null \
+    || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
+        "$ipc_hook")" -ne 9 ] \
+    || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
+        "$ipc_hook")" -ne 1 ]; then
+    printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
+    exit 1
+fi
+hook_start_exit_functions=$temporary_directory/hook-start-exit-functions.sh
+{
+    sed -n '/^start_failure_stage_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^publish_start_failure() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^start_failure_exit() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_start_exit_functions"
+test "$(grep -c '^[_a-z].*() {$' "$hook_start_exit_functions")" -eq 3
+sh -n "$hook_start_exit_functions"
+forced_fd_script=$temporary_directory/forced-hook-fd-failure.sh
+{
+    printf '%s\n' '#!/bin/sh' 'set -eu'
+    printf '. %s\n' "$hook_start_exit_functions"
+    cat <<'EOF'
+write_private_file() {
+    [ "$#" -eq 2 ] || return 1
+    forced_destination=$1
+    forced_payload=$2
+    (
+        umask 077
+        set -C
+        printf '%s\n' "$forced_payload" >"$forced_destination"
+    ) 2>/dev/null || return 1
+    [ "$(stat -Lc '%F:%h:%u:%a' "$forced_destination")" = \
+        "regular file:1:$(id -u):600" ]
+}
+start_failure_record=$1
+start_failure_stage=functional-probe-ready
+start_failure_armed=yes
+start_failure_published=no
+trap start_failure_exit EXIT
+force_fd_failure() {
+    command exec 8<>"$1" || return 1
+}
+force_fd_failure "$2"
+EOF
+} >"$forced_fd_script"
+chmod 0700 "$forced_fd_script"
+forced_fd_record=$temporary_directory/forced-hook-fd.start.failure
+set +e
+dash "$forced_fd_script" "$forced_fd_record" \
+    "$temporary_directory/absent-directory/fd" \
+    >"$temporary_directory/forced-hook-fd.stdout" \
+    2>"$temporary_directory/forced-hook-fd.stderr"
+forced_fd_status=$?
+set -e
+if [ "$forced_fd_status" -ne 1 ] \
+    || [ -s "$temporary_directory/forced-hook-fd.stdout" ] \
+    || [ "$(stat -Lc '%F:%h:%u:%a' "$forced_fd_record" 2>/dev/null || true)" \
+        != "regular file:1:$(id -u):600" ] \
+    || ! printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=functional-probe-ready' \
+        | cmp -s - "$forced_fd_record"; then
+    printf '%s\n' 'forced hook FD failure did not return status 1 with one fixed stage' >&2
+    exit 1
+fi
 if [ "$(grep -Fc -- 'capture_unit_property CollectMode' "$gate")" -ne 2 ] \
     || [ "$(grep -Fc -- 'collect_mode" != inactive' "$gate")" -ne 2 ]; then
     printf '%s\n' \
@@ -4205,7 +4466,7 @@ for required_hook_contract in \
     '/usr/sbin/ip route add default via "$functional_underlay_gateway"' \
     'mkfifo -m 0600 "$hook_functional_fifo"' \
     "'fifo:0:0:600:1'" \
-    'exec 6<>"$hook_functional_fifo"' \
+    'command exec 6<>"$hook_functional_fifo"' \
     '"$probe" functional-client-lease' \
     '<"$hook_functional_fifo"' \
     'probe_output_is_exact' \
@@ -4215,7 +4476,7 @@ for required_hook_contract in \
     'worker_identity_is_exact' \
     'Groups:" { print NF }' \
     '"$hook_functional_parent_namespace" != "$hook_functional_worker_namespace"' \
-    'exec 7<"/proc/$hook_functional_worker_pid/ns/net"' \
+    'command exec 7<"/proc/$hook_functional_worker_pid/ns/net"' \
     '/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" --' \
     '/usr/bin/wg show interfaces' \
     'worker_wireguard_interface 7' \
@@ -4226,7 +4487,7 @@ for required_hook_contract in \
     'worker_wireguard_is_absent 7' \
     'helper_does_not_hold_namespace' \
     'helper_holds_no_foreign_network_namespace' \
-    'exec 7>&-' \
+    'command exec 7>&-' \
     'private_network_is_pristine' \
     '"$hook_private_namespace" != "$hook_pid1_namespace"' \
     '/usr/sbin/ip -json route show default' \
@@ -4254,7 +4515,7 @@ for required_hook_contract in \
     'capture_journal_state' \
     "stat -c '%d:%i:%f:%u:%g:%a:%h:%s:%y:%z'" \
     'hook_expected_lock_identity=$(cat "$proof_directory/lock.identity")' \
-    'exec 9<>"$journal_lock"' \
+    'command exec 9<>"$journal_lock"' \
     'hook_lock_fd_identity=$(stat -Lc' \
     '/usr/bin/flock -n 9' \
     'systemctl show --property=NFileDescriptorStore --value' \

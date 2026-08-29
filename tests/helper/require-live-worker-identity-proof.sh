@@ -374,6 +374,55 @@ report_worker_confinement_diagnostic() {
         "$worker_confinement_failure" >&2
 }
 
+production_start_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight-runtime|\
+        identity|\
+        active-lock|\
+        protocol-bind-before|\
+        protocol-frame-bounds|\
+        protocol-wire-shapes|\
+        protocol-wrong-uid|\
+        protocol-wrong-gid|\
+        protocol-root-peer|\
+        protocol-bind-after|\
+        functional-underlay|\
+        functional-probe-ready|\
+        functional-worker-observation|\
+        functional-probe-finish|\
+        functional-cleanup|\
+        publication)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_production_launch_diagnostic() {
+    [ "${proof_failure_reason:-}" = production-launch-status ] || return 1
+    production_start_failure_file=$temporary_stage/production-output/start.failure
+    vp_capture_file_is_safe "$production_start_failure_file" || return 1
+    [ ! -e "$temporary_stage/production-output/start.pass" ] \
+        && [ ! -L "$temporary_stage/production-output/start.pass" ] || return 1
+    production_start_failure_record=$(cat "$production_start_failure_file") \
+        || return 1
+    production_start_failure_prefix=VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=
+    case $production_start_failure_record in
+        "$production_start_failure_prefix"*)
+            production_start_failure_stage=${production_start_failure_record#"$production_start_failure_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    production_start_failure_stage_is_safe "$production_start_failure_stage" \
+        || return 1
+    printf '%s%s\n' "$production_start_failure_prefix" \
+        "$production_start_failure_stage" \
+        | cmp -s - "$production_start_failure_file" || return 1
+    printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=%s\n' \
+        "$production_start_failure_stage" >&2
+}
+
 driver_phase_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -3148,7 +3197,7 @@ if [ "$proof_ok" = yes ]; then
         if [ "$production_lock_path_after" != "$expected_production_lock_identity" ]; then
             record_proof_failure 'production-lock-release'
         fi
-        exec 9>&-
+        command exec 9>&- || record_proof_failure 'production-lock-release'
     else
         record_proof_failure 'production-lock-release'
     fi
@@ -3188,6 +3237,8 @@ if [ "$proof_ok" != yes ]; then
     elif [ "$proof_failure_reason" = worker-confinement ]; then
         report_worker_confinement_diagnostic \
             || failed 'the fixed worker confinement diagnostic could not be reported'
+    elif [ "$proof_failure_reason" = production-launch-status ]; then
+        report_production_launch_diagnostic || :
     fi
     report_proof_failure "$proof_failure_reason"
 fi

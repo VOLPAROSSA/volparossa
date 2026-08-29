@@ -374,6 +374,69 @@ report_non_retained_worker_confinement_diagnostic() {
         "${non_retained_confinement_diagnostic#"$non_retained_confinement_diagnostic_prefix"}" >&2
 }
 
+non_retained_production_launch_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight-runtime|\
+        identity|\
+        active-lock|\
+        protocol-bind-before|\
+        protocol-frame-bounds|\
+        protocol-wire-shapes|\
+        protocol-wrong-uid|\
+        protocol-wrong-gid|\
+        protocol-root-peer|\
+        protocol-bind-after|\
+        functional-underlay|\
+        functional-probe-ready|\
+        functional-worker-observation|\
+        functional-probe-finish|\
+        functional-cleanup|\
+        publication)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_non_retained_production_launch_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_production_failure='live worker-identity proof failed: predicate rejected: production-launch-status'
+    [ "$(grep -Fxc "$non_retained_production_failure" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    [ "$(tail -n 1 -- "$non_retained_diagnostic")" = \
+        "$non_retained_production_failure" ] || return 1
+    non_retained_failure_pattern='^live worker-identity proof failed: predicate rejected: '
+    [ "$(grep -Ec "$non_retained_failure_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
+    [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-probe-ready|functional-worker-observation|functional-probe-finish|functional-cleanup|publication)$'
+    [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_production_mixed_pattern='^(VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=|VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=)'
+    [ "$(grep -Ec "$non_retained_production_mixed_pattern" \
+        "$non_retained_diagnostic")" -eq 0 ] || return 1
+    non_retained_production_diagnostic=$(grep -E \
+        "$non_retained_production_diagnostic_pattern" "$non_retained_diagnostic") \
+        || return 1
+    non_retained_production_stage=${non_retained_production_diagnostic#"$non_retained_production_diagnostic_prefix"}
+    non_retained_production_launch_stage_is_safe "$non_retained_production_stage" \
+        || return 1
+    printf 'non-retained helper-boundary PR smoke production launch diagnostic: %s\n' \
+        "$non_retained_production_stage" >&2
+}
+
 case ${#expected_commit} in
     40|64) ;;
     *) blocked 'the expected commit is not a canonical Git object ID' ;;
@@ -1658,6 +1721,9 @@ if [ "$guest_status" -ne 0 ]; then
                     "$proof_stderr_log" || true
             elif [ "$non_retained_failure_reason" = worker-confinement ]; then
                 report_non_retained_worker_confinement_diagnostic \
+                    "$proof_stderr_log" || true
+            elif [ "$non_retained_failure_reason" = production-launch-status ]; then
+                report_non_retained_production_launch_diagnostic \
                     "$proof_stderr_log" || true
             fi
         else

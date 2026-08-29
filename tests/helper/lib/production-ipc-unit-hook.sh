@@ -26,6 +26,10 @@ functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass
 functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass
 functional_release_byte=G
 helper_bootstrap_capability_mask=00000000002031e0
+start_failure_record=$proof_directory/start.failure
+start_failure_stage=
+start_failure_armed=no
+start_failure_published=no
 
 fail() {
     printf 'production IPC unit hook failed: %s\n' "$1" >&2
@@ -91,6 +95,76 @@ write_private_file() {
         return 1
     }
     private_file_is_safe "$hook_destination"
+}
+
+start_failure_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight-runtime|\
+        identity|\
+        active-lock|\
+        protocol-bind-before|\
+        protocol-frame-bounds|\
+        protocol-wire-shapes|\
+        protocol-wrong-uid|\
+        protocol-wrong-gid|\
+        protocol-root-peer|\
+        protocol-bind-after|\
+        functional-underlay|\
+        functional-probe-ready|\
+        functional-worker-observation|\
+        functional-probe-finish|\
+        functional-cleanup|\
+        publication)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+advance_start_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    case "$start_failure_stage:$1" in
+        preflight-runtime:identity|\
+        identity:active-lock|\
+        active-lock:protocol-bind-before|\
+        protocol-bind-before:protocol-frame-bounds|\
+        protocol-frame-bounds:protocol-wire-shapes|\
+        protocol-wire-shapes:protocol-wrong-uid|\
+        protocol-wrong-uid:protocol-wrong-gid|\
+        protocol-wrong-gid:protocol-root-peer|\
+        protocol-root-peer:protocol-bind-after|\
+        protocol-bind-after:functional-underlay|\
+        functional-underlay:functional-probe-ready|\
+        functional-probe-ready:functional-worker-observation|\
+        functional-worker-observation:functional-probe-finish|\
+        functional-probe-finish:functional-cleanup|\
+        functional-cleanup:publication)
+            start_failure_stage=$1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+publish_start_failure() {
+    [ "$start_failure_armed" = yes ] || return 1
+    [ "$start_failure_published" = no ] || return 1
+    start_failure_stage_is_safe "$start_failure_stage" || return 1
+    write_private_file "$start_failure_record" \
+        "VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=$start_failure_stage" \
+        || return 1
+    start_failure_published=yes
+}
+
+start_failure_exit() {
+    start_failure_status=$?
+    trap - EXIT
+    if [ "$start_failure_status" -ne 0 ] \
+        && [ "$start_failure_armed" = yes ] \
+        && [ "$start_failure_published" = no ]; then
+        publish_start_failure || :
+    fi
+    exit "$start_failure_status"
 }
 
 checksum_file() {
@@ -722,6 +796,8 @@ run_functional_client_lease_probe() {
         || return 1
     functional_underlay_is_exact "$hook_functional_ifindex" || return 1
 
+    advance_start_failure_stage functional-probe-ready || return 1
+
     hook_functional_fifo=$proof_directory/functional-client-lease.release
     hook_functional_stdout=$proof_directory/functional-client-lease.stdout
     hook_functional_stderr=$proof_directory/functional-client-lease.stderr
@@ -736,10 +812,10 @@ run_functional_client_lease_probe() {
         "$hook_functional_stdout" "$hook_functional_stderr" || return 1
     private_file_is_safe "$hook_functional_stdout" || return 1
     private_file_is_safe "$hook_functional_stderr" || return 1
-    exec 6<>"$hook_functional_fifo" || return 1
+    command exec 6<>"$hook_functional_fifo" || return 1
     (
-        exec 6>&-
-        exec /usr/bin/setpriv \
+        command exec 6>&- || exit 1
+        command exec /usr/bin/setpriv \
             --reuid="$hook_functional_agent_uid" \
             --regid="$hook_functional_agent_gid" \
             --groups="$hook_functional_operator_gid" \
@@ -749,7 +825,7 @@ run_functional_client_lease_probe() {
             --no-new-privs \
             "$probe" functional-client-lease \
                 "$hook_functional_main_pid" "$hook_functional_agent_gid" \
-            <"$hook_functional_fifo"
+            <"$hook_functional_fifo" || exit 1
     ) >"$hook_functional_stdout" 2>"$hook_functional_stderr" &
     hook_functional_probe_pid=$!
     number_is_safe "$hook_functional_probe_pid" || return 1
@@ -774,6 +850,8 @@ run_functional_client_lease_probe() {
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
     unit_fdstore_is_empty "$hook_functional_unit" || return 1
 
+    advance_start_failure_stage functional-worker-observation || return 1
+
     hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid") \
         || return 1
     worker_identity_is_exact \
@@ -788,7 +866,7 @@ run_functional_client_lease_probe() {
         "/proc/$hook_functional_worker_pid/ns/net" 2>/dev/null) || return 1
     [ "$hook_functional_parent_namespace" != "$hook_functional_worker_namespace" ] \
         || return 1
-    exec 7<"/proc/$hook_functional_worker_pid/ns/net" || return 1
+    command exec 7<"/proc/$hook_functional_worker_pid/ns/net" || return 1
     hook_functional_pinned_namespace=$(stat -Lc '%d:%i' \
         /proc/self/fd/7 2>/dev/null) || return 1
     [ "$hook_functional_pinned_namespace" = "$hook_functional_worker_namespace" ] \
@@ -798,10 +876,12 @@ run_functional_client_lease_probe() {
         ''|*[!A-Za-z0-9_.-]*) return 1 ;;
     esac
 
+    advance_start_failure_stage functional-probe-finish || return 1
+
     rm -f -- "$hook_functional_fifo" || return 1
     [ ! -e "$hook_functional_fifo" ] && [ ! -L "$hook_functional_fifo" ] || return 1
     printf '%s' "$functional_release_byte" >&6 || return 1
-    exec 6>&-
+    command exec 6>&- || return 1
     if wait "$hook_functional_probe_pid"; then
         hook_functional_probe_status=0
     else
@@ -812,6 +892,8 @@ run_functional_client_lease_probe() {
     private_file_is_safe "$hook_functional_stderr" || return 1
     [ ! -s "$hook_functional_stderr" ] || return 1
     rm -f -- "$hook_functional_stdout" "$hook_functional_stderr" || return 1
+
+    advance_start_failure_stage functional-cleanup || return 1
 
     running_identity_is_unchanged \
         "$hook_functional_unit" \
@@ -831,7 +913,7 @@ run_functional_client_lease_probe() {
         "$hook_functional_main_pid" "$hook_functional_worker_namespace" || return 1
     helper_holds_no_foreign_network_namespace \
         "$hook_functional_main_pid" || return 1
-    exec 7>&-
+    command exec 7>&- || return 1
     [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
 
     remove_functional_underlay "$hook_functional_ifindex" || return 1
@@ -899,6 +981,11 @@ start_hook() {
         'directory:0:0:2700' ] || fail 'proof directory is unsafe'
     [ "$(stat -c '%F:%u:%g:%a:%h' "$probe" 2>/dev/null || true)" = \
         "regular file:0:$agent_gid:550:1" ] || fail 'probe executable is unsafe'
+    if [ -e "$start_failure_record" ] || [ -L "$start_failure_record" ] \
+        || [ -e "$start_failure_record.next" ] \
+        || [ -L "$start_failure_record.next" ]; then
+        fail 'start failure record path is unsafe'
+    fi
 
     hook_wait_attempt=0
     while [ ! -S "$helper_socket" ]; do
@@ -908,6 +995,8 @@ start_hook() {
     done
     validate_runtime_metadata "$agent_gid" || fail 'production runtime metadata is invalid'
 
+    advance_start_failure_stage identity \
+        || fail 'start failure stage transition is invalid'
     hook_socket_identity=$(capture_socket_identity "$agent_gid") \
         || fail 'production helper socket identity is unavailable'
     write_private_file "$proof_directory/socket.identity" "$hook_socket_identity" \
@@ -920,7 +1009,9 @@ start_hook() {
     write_private_file "$proof_directory/unit.identity" "$hook_identity" \
         || fail 'production helper identity proof could not be published'
 
-    if ! exec 8<>"$journal_lock"; then
+    advance_start_failure_stage active-lock \
+        || fail 'start failure stage transition is invalid'
+    if ! command exec 8<>"$journal_lock"; then
         fail 'active ownership journal lock could not be opened'
     fi
     hook_active_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
@@ -945,7 +1036,7 @@ start_hook() {
         || fail 'active ownership journal lock path changed during contention proof'
     [ "$hook_active_lock_path_after" = "$hook_lock_identity" ] \
         || fail 'active ownership journal lock path was replaced during contention proof'
-    exec 8>&-
+    command exec 8>&- || fail 'active ownership journal lock FD could not be closed'
     hook_active_lock_path_after_close=$(capture_lock_identity "$agent_gid") \
         || fail 'active ownership journal lock path changed after contention proof'
     [ "$hook_active_lock_path_after_close" = "$hook_lock_identity" ] \
@@ -972,30 +1063,44 @@ start_hook() {
     number_is_safe "$hook_expected_main_pid" \
         || fail 'production helper MainPID is invalid'
 
+    advance_start_failure_stage protocol-bind-before \
+        || fail 'start failure stage transition is invalid'
     run_probe bind-before bind-runtime "$agent_uid" "$agent_gid" "$operator_gid" \
         "$bind_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'initial authenticated runtime bind failed'
+    advance_start_failure_stage protocol-frame-bounds \
+        || fail 'start failure stage transition is invalid'
     run_probe frame-bounds reject-frame-bounds "$agent_uid" "$agent_gid" "$operator_gid" \
         "$frame_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'frame-bound rejection failed'
+    advance_start_failure_stage protocol-wire-shapes \
+        || fail 'start failure stage transition is invalid'
     run_probe wire-shapes reject-wire-shapes "$agent_uid" "$agent_gid" "$operator_gid" \
         "$wire_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'wire-shape rejection failed'
+    advance_start_failure_stage protocol-wrong-uid \
+        || fail 'start failure stage transition is invalid'
     run_probe wrong-uid expect-unauthorised-peer "$worker_uid" "$agent_gid" clear \
         "$unauthorised_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'wrong-UID rejection failed'
+    advance_start_failure_stage protocol-wrong-gid \
+        || fail 'start failure stage transition is invalid'
     run_probe wrong-gid expect-unauthorised-peer "$agent_uid" "$operator_gid" "$agent_gid" \
         "$unauthorised_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'wrong-GID rejection failed'
+    advance_start_failure_stage protocol-root-peer \
+        || fail 'start failure stage transition is invalid'
     run_probe root-peer expect-unauthorised-peer 0 "$agent_gid" clear \
         "$unauthorised_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'root-peer rejection failed'
+    advance_start_failure_stage protocol-bind-after \
+        || fail 'start failure stage transition is invalid'
     run_probe bind-after bind-runtime "$agent_uid" "$agent_gid" "$operator_gid" \
         "$bind_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
@@ -1003,6 +1108,8 @@ start_hook() {
 
     hook_expected_executable=$(sed -n '3p' "$identity_file") \
         || fail 'production helper executable identity could not be read'
+    advance_start_failure_stage functional-underlay \
+        || fail 'start failure stage transition is invalid'
     run_functional_client_lease_probe \
         "$hook_unit" \
         "$hook_expected_main_pid" \
@@ -1014,6 +1121,8 @@ start_hook() {
         "$hook_expected_executable" \
         || fail 'functional client lease live proof failed'
 
+    advance_start_failure_stage publication \
+        || fail 'start failure stage transition is invalid'
     hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
@@ -1070,7 +1179,7 @@ stop_hook() {
         || fail 'settled lock path identity is unavailable'
     [ "$hook_lock_path_before" = "$hook_expected_lock_identity" ] \
         || fail 'ownership journal lock path identity changed'
-    if ! exec 9<>"$journal_lock"; then
+    if ! command exec 9<>"$journal_lock"; then
         fail 'ownership journal lock could not be opened'
     fi
     hook_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
@@ -1086,7 +1195,7 @@ stop_hook() {
         || fail 'ownership journal lock path changed while acquired'
     [ "$hook_lock_path_after_flock" = "$hook_expected_lock_identity" ] \
         || fail 'ownership journal lock path was replaced while acquired'
-    exec 9>&-
+    command exec 9>&- || fail 'ownership journal lock FD could not be closed'
     hook_fdstore_count=$(systemctl show --property=NFileDescriptorStore --value \
         "$hook_unit" 2>/dev/null) || fail 'descriptor-store count is unavailable'
     [ "$hook_fdstore_count" = 0 ] || fail 'descriptor store is not empty at stop'
@@ -1098,7 +1207,12 @@ stop_hook() {
 case ${1:-} in
     start)
         shift
+        start_failure_stage=preflight-runtime
+        start_failure_armed=yes
+        trap start_failure_exit EXIT
         start_hook "$@"
+        start_failure_armed=no
+        trap - EXIT
         ;;
     stop)
         shift

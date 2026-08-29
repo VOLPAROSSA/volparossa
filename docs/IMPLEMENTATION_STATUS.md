@@ -345,7 +345,24 @@ single clean-build A01--A15 run; the score is not a release claim.
   phase only when a nonzero exit occurs before normal final reporting, without changing original or
   cleanup status; branch smoke may expose that phase only with `unclassified` and rejects missing,
   duplicate, malformed, mixed or privacy-unsafe records. This run is not PASS evidence. The score
-  remains **11/100** and AV1-09 remains Open until a new exact-main retained run succeeds.
+  remains **11/100** and AV1-09 remains Open until a new exact-main retained run succeeds. The next
+  non-retained branch smoke
+  [run 33275945986](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986) at
+  `38ee44a81991f660168a76342584416d04a6ef5d` ran the disposable VM in
+  [job 99162565524](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986/job/99162565524)
+  and reached the fixed first failure `production-launch-status`. Production service stdout and
+  stderr intentionally remained null, so this result does not identify which fixed `ExecStartPost`
+  assertion failed. The start hook now maintains one monotonic 16-value allowlist spanning combined
+  preflight/runtime validation, helper identity, active-lock proof, each protocol-probe group,
+  functional underlay, probe-ready, worker observation, probe finish, cleanup and final publication.
+  Any failed start atomically writes at most one root-owned, mode-0600, single-link
+  `start.failure`; every hook descriptor open and close uses ordinary-failure `command exec`, so a
+  redirection failure reaches that record instead of terminating the shell as a special builtin.
+  The live gate parses an exact canonical record only when its first failure remains
+  `production-launch-status`, and the branch runner exposes only the fixed stage paired with that
+  exact category. Missing, duplicate, malformed, mixed and privacy-unsafe records expose no stage;
+  raw hook messages and service streams remain unavailable. Run 33275945986 is not PASS evidence,
+  so the score remains **11/100** and AV1-09 remains Open.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

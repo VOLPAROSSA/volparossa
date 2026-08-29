@@ -913,8 +913,24 @@ EXIT cleanup emits exactly one of eight value-free monotonic driver phases only 
 before normal final reporting; it never changes the original or cleanup-derived exit status. A
 non-retained runner exposes that single phase only beside `unclassified`, rejecting missing,
 duplicate, malformed, mixed, private-key-bearing or non-allowlisted records. This failed run is not
-PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open. The second
-phase exercises the production server entry point, but not an installed package, the shipped unit
+PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open. Follow-up branch
+[run 33275945986](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986) at
+`38ee44a81991f660168a76342584416d04a6ef5d` ran the disposable VM in
+[job 99162565524](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986/job/99162565524)
+and reached the fixed first failure `production-launch-status`. The production service still sends
+both output streams to systemd null targets, so that failed run provides no raw `ExecStartPost`
+message. The fixed start hook now advances through one monotonic 16-stage allowlist covering
+preflight/runtime, identity, active-lock, each protocol probe group, functional underlay,
+probe-ready, worker observation, probe finish, cleanup and publication. On failure it atomically
+publishes at most one root-owned mode-0600 single-link `start.failure` containing only that stage.
+All potentially failing hook descriptor opens and closes use ordinary-failure `command exec`,
+including the background probe handoff, so redirection errors return through the same fixed failure
+path. The gate accepts one exact canonical record only when the first recorded predicate is
+`production-launch-status`; the non-retained runner exposes that fixed stage only paired with the
+same exact category and rejects missing, duplicate, invalid, mixed and privacy-unsafe input. This
+failed run remains non-PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains
+Open. The second phase exercises the production server entry point, but not an installed package,
+the shipped unit
 file, restart policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run
 is durably tied to the same clean commit and retained, the gate is not earned package, datapath, A14
 or A15 evidence.
