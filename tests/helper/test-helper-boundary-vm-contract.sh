@@ -127,14 +127,17 @@ if [ -s "$last_stderr" ]; then
     exit 1
 fi
 expect_status 64 "$runner" --preview --yes
+expect_status 64 "$runner" --preview --retained-main
 expect_status 64 "$runner" --preview --image /tmp/image
 expect_status 64 "$runner" --execute
 expect_status 64 "$runner" --execute --yes --yes
+expect_status 64 "$runner" --execute --yes --retained-main --non-retained-pr-smoke
 expect_status 64 "$runner" --execute --yes --image
 expect_status 64 "$runner" --execute --yes --image /tmp/image --output /tmp/output
 expect_status 64 "$runner" --unknown
-expect_status 77 "$runner" --execute --yes \
+expect_status 77 "$runner" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output --expected-commit invalid \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity '1:2:a:b:character special file'
@@ -153,9 +156,18 @@ chmod 0700 "$argument_parser_fixture"
 canonical_commit=1111111111111111111111111111111111111111
 canonical_kvm_identity='1:2:a:b:character special file'
 
-expect_status 0 "$argument_parser_fixture" --execute --yes \
+expect_status 0 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+
+expect_status 0 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/feature/helper-smoke \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
@@ -163,58 +175,121 @@ expect_status 0 "$argument_parser_fixture" --execute --yes \
 expect_status 64 "$argument_parser_fixture" --execute --yes \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
     --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/feature/helper-smoke \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'retained evidence requires refs/heads/main' "$last_stderr" >/dev/null
+expect_status 77 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'main can never select non-retained PR smoke' "$last_stderr" >/dev/null
+expect_status 77 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/tags/not-a-branch \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'the expected source ref is not one branch ref' "$last_stderr" >/dev/null
+expect_status 64 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/feature/helper-smoke \
+    --expected-source-ref refs/heads/feature/substitution \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 77 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/-unsafe \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'the expected source ref is not canonical' "$last_stderr" >/dev/null
+
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108
 
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity" \
     --expected-kvm-identity "$canonical_kvm_identity"
 
-expect_status 77 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid invalid \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
 grep -F 'the expected host UID is not canonical nonzero decimal' \
     "$last_stderr" >/dev/null
-expect_status 77 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 0 \
     --expected-kvm-identity "$canonical_kvm_identity"
 grep -F 'the expected KVM GID is not canonical nonzero decimal' \
     "$last_stderr" >/dev/null
-expect_status 77 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity invalid
@@ -235,6 +310,13 @@ if command -v shellcheck >/dev/null 2>&1; then
 fi
 
 for exact_runner_text in \
+    '--retained-main' \
+    '--non-retained-pr-smoke' \
+    '--expected-source-ref refs/heads/BRANCH' \
+    '[ "$expected_source_ref" = refs/heads/main ]' \
+    '[ "$expected_source_ref" != refs/heads/main ]' \
+    '[ "$source_branch" = "$expected_source_branch" ]' \
+    'main can never run non-retained PR smoke' \
     '-machine q35,accel=kvm' \
     '-no-user-config -nodefaults' \
     '-device VGA,id=video0,bus=pcie.0,addr=0x1' \
@@ -245,6 +327,7 @@ for exact_runner_text in \
     "qemu_netdev='user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:22222-:22'" \
     '-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny' \
     '--no-hardlinks --depth 1 --no-tags --single-branch --branch main' \
+    '--branch "$expected_source_branch"' \
     'qemu-pidfd-supervisor.py' \
     'validate-helper-boundary-vm-environment-v1.sh' \
     'StrictHostKeyChecking=yes' \
@@ -264,10 +347,42 @@ for exact_runner_text in \
     'cargo fetch --locked' \
     'cargo build --locked --offline' \
     'proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"}' \
-    'post_image_sha512=$(sha512sum "$image_path"'
+    'post_image_sha512=$(sha512sum "$image_path"' \
+    '[ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]' \
+    'if [ "$proof_mode" = retained-main ]; then' \
+    'the non-retained PR smoke output directory is not empty' \
+    'PASS: non-retained helper-boundary PR smoke completed in the disposable Debian 13 KVM.'
 do
     grep -F -- "$exact_runner_text" "$runner" >/dev/null
 done
+
+success_console_start=$(grep -n -m 1 -F \
+    "settle_console || failed 'the bounded console log did not settle'" \
+    "$runner" | cut -d: -f1)
+success_console_end=$(grep -n -m 1 -F \
+    'post_image_sha512=$(sha512sum "$image_path"' "$runner" | cut -d: -f1)
+if [ -z "$success_console_start" ] || [ -z "$success_console_end" ] \
+    || [ "$success_console_start" -ge "$success_console_end" ]; then
+    printf '%s\n' 'the successful console-publication fence is missing or reordered' >&2
+    exit 1
+fi
+success_console_block=$temporary_directory/success-console-publication.sh
+sed -n "${success_console_start},$((success_console_end - 1))p" "$runner" \
+    >"$success_console_block"
+if [ "$(grep -Fc 'if [ "$proof_mode" = retained-main ]; then' \
+        "$success_console_block")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        "publish_console || failed 'the bounded console log could not be published atomically'" \
+        "$success_console_block")" -ne 1 ] \
+    || ! awk '
+        /if \[ "\$proof_mode" = retained-main \]; then/ { opened = NR }
+        /publish_console \|\| failed/ { published = NR }
+        /^fi$/ { closed = NR }
+        END { if (!(opened < published && published < closed)) exit 1 }
+      ' "$success_console_block"; then
+    printf '%s\n' 'successful console publication is not retained-main-only' >&2
+    exit 1
+fi
 if grep -F -- 'sudo -n prlimit --fsize=' "$guest_proof_fixture" >/dev/null \
     || grep -F -- 'prlimit --fsize=1048576:1048576 --' \
         "$guest_proof_fixture" >/dev/null; then
@@ -724,7 +839,16 @@ grep -Fx 'linked file must not be touched' "$scrub_link_target" >/dev/null
 for exact_workflow_text in \
     '  workflow_dispatch:' \
     '  contents: read' \
+    'id: source_selection' \
     'test "$SELECTED_REF" = refs/heads/main' \
+    'proof_mode=retained-main' \
+    'proof_mode=non-retained-pr-smoke' \
+    'test "$selected_branch" != main' \
+    'PROOF_MODE: ${{ steps.source_selection.outputs.proof_mode }}' \
+    'proof_mode_flag=--retained-main' \
+    'proof_mode_flag=--non-retained-pr-smoke' \
+    '"$proof_mode_flag"' \
+    '--expected-source-ref "$SELECTED_REF"' \
     'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
     'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
     'persist-credentials: false' \
@@ -755,7 +879,12 @@ for exact_workflow_text in \
     'tests/helper/validate-helper-boundary-evidence-v1.sh' \
     'tests/helper/validate-helper-boundary-vm-environment-v1.sh' \
     "grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'" \
-    'VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}'
+    'VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}' \
+    "steps.source_selection.outputs.proof_mode == 'retained-main'" \
+    "steps.source_selection.outputs.proof_mode == 'non-retained-pr-smoke'" \
+    'name: Require a non-retained PR smoke PASS' \
+    'test "$GITHUB_REF" != refs/heads/main' \
+    'PASS: exact branch/SHA completed the non-retained disposable KVM smoke.'
 do
     grep -F -- "$exact_workflow_text" "$workflow" >/dev/null
 done
@@ -891,9 +1020,43 @@ fi
 verify_kvm_state_line=$(grep -n -m 1 -F \
     'name: Verify the KVM device and ACL remained unchanged' "$workflow" | cut -d: -f1)
 pass_upload_line=$(grep -n -m 1 -F 'name: Upload bounded helper-boundary evidence' "$workflow" | cut -d: -f1)
+failure_upload_line=$(grep -n -m 1 -F 'name: Upload bounded failure diagnostics' \
+    "$workflow" | cut -d: -f1)
+retained_gate_line=$(grep -n -m 1 -F 'name: Require a retained PASS' \
+    "$workflow" | cut -d: -f1)
+smoke_gate_line=$(grep -n -m 1 -F 'name: Require a non-retained PR smoke PASS' \
+    "$workflow" | cut -d: -f1)
 if [ -z "$verify_kvm_state_line" ] || [ -z "$pass_upload_line" ] \
-    || [ "$verify_kvm_state_line" -ge "$pass_upload_line" ]; then
+    || [ -z "$failure_upload_line" ] || [ -z "$retained_gate_line" ] \
+    || [ -z "$smoke_gate_line" ] \
+    || [ "$verify_kvm_state_line" -ge "$pass_upload_line" ] \
+    || [ "$pass_upload_line" -ge "$failure_upload_line" ] \
+    || [ "$failure_upload_line" -ge "$retained_gate_line" ] \
+    || [ "$retained_gate_line" -ge "$smoke_gate_line" ]; then
     printf '%s\n' 'the PASS artifact can be uploaded before exact KVM state comparison' >&2
+    exit 1
+fi
+pass_upload_fixture=$temporary_directory/pass-upload-step.yml
+failure_upload_fixture=$temporary_directory/failure-upload-step.yml
+smoke_gate_fixture=$temporary_directory/non-retained-smoke-step.yml
+sed -n "${pass_upload_line},$((failure_upload_line - 1))p" "$workflow" \
+    >"$pass_upload_fixture"
+sed -n "${failure_upload_line},$((retained_gate_line - 1))p" "$workflow" \
+    >"$failure_upload_fixture"
+sed -n "${smoke_gate_line},\$p" "$workflow" >"$smoke_gate_fixture"
+for retained_upload_fixture in "$pass_upload_fixture" "$failure_upload_fixture"; do
+    grep -F "steps.source_selection.outputs.proof_mode == 'retained-main'" \
+        "$retained_upload_fixture" >/dev/null
+    if grep -F 'non-retained-pr-smoke' "$retained_upload_fixture" >/dev/null; then
+        printf '%s\n' 'a retained upload step is reachable from PR smoke' >&2
+        exit 1
+    fi
+done
+grep -F "steps.source_selection.outputs.proof_mode == 'non-retained-pr-smoke'" \
+    "$smoke_gate_fixture" >/dev/null
+grep -F 'test "$GITHUB_REF" != refs/heads/main' "$smoke_gate_fixture" >/dev/null
+if grep -F 'uses: actions/upload-artifact@' "$smoke_gate_fixture" >/dev/null; then
+    printf '%s\n' 'the non-retained smoke gate uploads an artifact' >&2
     exit 1
 fi
 
@@ -920,4 +1083,4 @@ if [ "$uses_count" -ne 3 ]; then
 fi
 
 printf '%s\n' \
-    'PASS: helper-boundary VM preview, image provenance, KVM-only runner, and main-only workflow contracts are exact.'
+    'PASS: helper-boundary VM preview, retained-main, non-retained branch smoke, and KVM contracts are exact.'

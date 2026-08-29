@@ -2848,14 +2848,20 @@ printf '%s\n' \
     '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
     '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
     '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
+    '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
+    '  hold the first functional Client Prepare at a fixed root-owned FIFO READY barrier;' \
+    '  externally prove its child PID, executable, identity, distinct netns, and live WireGuard;' \
+    '  release exactly one byte, require Destroy plus a second capacity-reuse Prepare/Destroy;' \
+    '  prove the old worker and WireGuard absent, release its netns pin, and remove the fixture;' \
     '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
     '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
     '  collect that exact second invocation and remove the validated temporary stage;' \
     '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
     '    and network digests;' \
     '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
-    'This stages the helper identity and production IPC boundary. It creates no host account, link,' \
-    'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+    'This stages the helper identity and production IPC boundary. It creates no host account,' \
+    'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+    'One dummy underlay and ephemeral WireGuard lease exist only inside private namespaces.' \
     'It is not package-install, restart-recovery, CleanupOwned, datapath, or A01-A15 evidence.' \
     'PREVIEW ONLY: no file, account, service, or network state was changed.' \
     >"$expected_preview"
@@ -3089,7 +3095,7 @@ fi
 # These are literal source contracts; expansion here would defeat the check.
 # shellcheck disable=SC2016
 for required_contract in \
-    'paste prlimit readlink rm sed setpriv' \
+    'nsenter paste prlimit readlink rm sed setpriv' \
     'staged_executable_max_bytes=134217728' \
     'proof_file_max_bytes=1048576' \
     'source_snapshot_is_exact() {' \
@@ -3602,6 +3608,47 @@ for required_hook_contract in \
     'run_probe wrong-gid expect-unauthorised-peer "$agent_uid" "$operator_gid" "$agent_gid"' \
     'run_probe root-peer expect-unauthorised-peer 0 "$agent_gid" clear' \
     'run_probe bind-after bind-runtime "$agent_uid" "$agent_gid" "$operator_gid"' \
+    'functional_underlay_address=192.31.195.254' \
+    'functional_underlay_gateway=192.31.195.1' \
+    'functional_underlay_alias=volparossa-proof-underlay-v1' \
+    'functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+    'functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
+    'functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+    'functional_release_byte=G' \
+    '/usr/sbin/ip link add name "$functional_underlay" type dummy' \
+    '/usr/sbin/ip address add "$functional_underlay_address/24"' \
+    '/usr/sbin/ip route add default via "$functional_underlay_gateway"' \
+    'mkfifo -m 0600 "$hook_functional_fifo"' \
+    "'fifo:0:0:600:1'" \
+    'exec 6<>"$hook_functional_fifo"' \
+    '"$probe" functional-client-lease' \
+    '<"$hook_functional_fifo"' \
+    'probe_output_is_exact' \
+    '"$hook_functional_stdout" "$functional_ready_record"' \
+    '[ "$hook_functional_wait_attempt" -lt 300 ] || return 1' \
+    'hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid")' \
+    'worker_identity_is_exact' \
+    'Groups:" { print NF }' \
+    '"$hook_functional_parent_namespace" != "$hook_functional_worker_namespace"' \
+    'exec 7<"/proc/$hook_functional_worker_pid/ns/net"' \
+    '/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" --' \
+    '/usr/bin/wg show interfaces' \
+    'worker_wireguard_interface 7' \
+    'printf '"'"'%s'"'"' "$functional_release_byte" >&6' \
+    'wait "$hook_functional_probe_pid"' \
+    'functional_probe_output_is_exact "$hook_functional_stdout"' \
+    'helper_has_no_children "$hook_functional_main_pid"' \
+    'worker_wireguard_is_absent 7' \
+    'helper_does_not_hold_namespace' \
+    'helper_holds_no_foreign_network_namespace' \
+    'exec 7>&-' \
+    'private_network_is_pristine' \
+    '"$hook_private_namespace" != "$hook_pid1_namespace"' \
+    '/usr/sbin/ip -json route show default' \
+    '/usr/sbin/ip -6 -json route show default' \
+    'unit_fdstore_is_empty' \
+    'remove_functional_underlay "$hook_functional_ifindex"' \
+    'run_functional_client_lease_probe' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_RUNTIME_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
@@ -3611,6 +3658,9 @@ for required_hook_contract in \
     'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
     '[ "${SERVICE_RESULT:-}" = success ]' \
     '[ "${EXIT_CODE:-}" = exited ]' \
     '[ "${EXIT_STATUS:-}" = 0 ]' \
@@ -3703,7 +3753,7 @@ if ! awk '
         if (probe_count == 2) second_probe = NR
     }
     in_probe && /"\$hook_probe_status" -eq 0/ { status_gate = NR }
-    /^start_hook\(\) \{$/ { in_probe = 0 }
+    /^functional_underlay_is_exact\(\) \{$/ { in_probe = 0 }
     END {
         valid = socket_count == 2 && identity_count == 2 && probe_count == 2
         valid = valid && identity_before < socket_before && socket_before < first_probe
@@ -3740,6 +3790,7 @@ if ! awk '
     /run_probe wrong-gid expect-unauthorised-peer/ { wrong_gid = NR }
     /run_probe root-peer expect-unauthorised-peer/ { root_peer = NR }
     /run_probe bind-after bind-runtime/ { bind_after = NR }
+    /^    run_functional_client_lease_probe/ { functional = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass'"'"'/ { marker_bind_before = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass'"'"'/ { marker_frame = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass'"'"'/ { marker_wire = NR }
@@ -3747,19 +3798,78 @@ if ! awk '
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass'"'"'/ { marker_wrong_gid = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass'"'"'/ { marker_root_peer = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass'"'"'/ { marker_bind_after = NR }
+    /"\$functional_ready_record"/ { marker_functional_ready = NR }
+    /"\$functional_pass_record"/ { marker_functional_pass = NR }
+    /"\$functional_cleanup_record"/ { marker_functional_cleanup = NR }
     END {
         probes = bind_before < frame && frame < wire && wire < wrong_uid
         probes = probes && wrong_uid < wrong_gid && wrong_gid < root_peer
-        probes = probes && root_peer < bind_after
+        probes = probes && root_peer < bind_after && bind_after < functional
         markers = bind_after < marker_bind_before && marker_bind_before < marker_frame
         markers = markers && marker_frame < marker_wire && marker_wire < marker_wrong_uid
         markers = markers && marker_wrong_uid < marker_wrong_gid
         markers = markers && marker_wrong_gid < marker_root_peer
         markers = markers && marker_root_peer < marker_bind_after
+        markers = markers && marker_bind_after < marker_functional_ready
+        markers = markers && marker_functional_ready < marker_functional_pass
+        markers = markers && marker_functional_pass < marker_functional_cleanup
         if (!(probes && markers)) exit 1
     }
 ' "$ipc_hook"; then
     printf '%s\n' 'production IPC probes or hook-owned records are not in exact order' >&2
+    exit 1
+fi
+if ! awk '
+    /^run_functional_client_lease_probe\(\) \{$/ { in_functional = 1; next }
+    /^validate_runtime_metadata\(\) \{$/ { in_functional = 0 }
+    in_functional && /private_network_is_pristine/ {
+        pristine_count++
+        if (pristine_count == 1) pristine_before = NR
+        if (pristine_count == 2) pristine_after = NR
+    }
+    in_functional && /\/usr\/sbin\/ip link add name/ { fixture = NR }
+    in_functional && /mkfifo -m 0600/ { fifo = NR }
+    in_functional && /exec 6<>"\$hook_functional_fifo"/ { fifo_open = NR }
+    in_functional && /"\$probe" functional-client-lease/ { probe = NR }
+    in_functional && /while ! probe_output_is_exact/ { ready = NR }
+    in_functional && /direct_helper_child/ { child = NR }
+    in_functional && /worker_identity_is_exact/ { identity = NR }
+    in_functional && /exec 7<"\/proc\/\$hook_functional_worker_pid\/ns\/net"/ {
+        namespace_pin = NR
+    }
+    in_functional && /worker_wireguard_interface 7/ { wireguard = NR }
+    in_functional && /rm -f -- "\$hook_functional_fifo"/ { fifo_unlink = NR }
+    in_functional && /functional_release_byte.*>&6/ { release = NR }
+    in_functional && release && /exec 6>&-/ { release_close = NR }
+    in_functional && /wait "\$hook_functional_probe_pid"/ { waited = NR }
+    in_functional && /functional_probe_output_is_exact/ { final_output = NR }
+    in_functional && /helper_has_no_children/ { no_children = NR }
+    in_functional && /worker_wireguard_is_absent 7/ { wireguard_absent = NR }
+    in_functional && /helper_does_not_hold_namespace/ { namespace_absent = NR }
+    in_functional && /helper_holds_no_foreign_network_namespace/ {
+        foreign_namespace_absent = NR
+    }
+    in_functional && /exec 7>&-/ { namespace_release = NR }
+    in_functional && /remove_functional_underlay/ { fixture_remove = NR }
+    END {
+        valid = pristine_count == 2 && pristine_before < fixture
+        valid = valid && fixture < fifo && fifo < fifo_open && fifo_open < probe
+        valid = valid && probe < ready && ready < child && child < identity
+        valid = valid && identity < namespace_pin && namespace_pin < wireguard
+        valid = valid && wireguard < fifo_unlink && fifo_unlink < release
+        valid = valid && release < release_close && release_close < waited
+        valid = valid && waited < final_output && final_output < no_children
+        valid = valid && no_children < wireguard_absent
+        valid = valid && wireguard_absent < namespace_absent
+        valid = valid && namespace_absent < foreign_namespace_absent
+        valid = valid && foreign_namespace_absent < namespace_release
+        valid = valid && namespace_release < fixture_remove
+        valid = valid && fixture_remove < pristine_after
+        if (!valid) exit 1
+    }
+' "$ipc_hook"; then
+    printf '%s\n' \
+        'functional lease READY, live observation, release, and cleanup are not fail-closed' >&2
     exit 1
 fi
 if ! awk '
@@ -3801,12 +3911,38 @@ if grep -E '(^|[;&|[:space:]])sysctl[[:space:]]+-w([;&|[:space:]]|$)' \
     || grep -E '(^|[;&|[:space:]])wg[[:space:]]+([^#]*[[:space:]])?set([[:space:]]|$)' \
         "$gate" "$ipc_hook" >/dev/null \
     || grep -E '(^|[;&|[:space:]])ip[[:space:]]+([^#]*[[:space:]])?(add|delete|replace|set)([[:space:]]|$)' \
-        "$gate" "$ipc_hook" >/dev/null \
+        "$gate" >/dev/null \
     || grep -E '(^|[;&|[:space:]])nft[[:space:]]+([^#]*[[:space:]])?(add|delete|flush)([[:space:]]|$)' \
         "$gate" "$ipc_hook" >/dev/null; then
     printf '%s\n' 'live helper proof gate contains a host network mutator' >&2
     exit 1
 fi
+hook_ip_mutator_count=$(grep -Ec \
+    '^[[:space:]]*/usr/sbin/ip[[:space:]]+(link|address|route)[[:space:]]+(add|delete|set)([[:space:]]|$)' \
+    "$ipc_hook")
+# These are literal hook contracts; expansion here would defeat the check.
+# shellcheck disable=SC2016
+if [ "$hook_ip_mutator_count" -ne 6 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link add name "$functional_underlay" type dummy' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link set dev "$functional_underlay" alias' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link set dev "$functional_underlay" up' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip address add "$functional_underlay_address/24"' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip route add default via "$functional_underlay_gateway"' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link delete dev "$functional_underlay"' \
+        "$ipc_hook")" -ne 1 ]; then
+    printf '%s\n' \
+        'production hook network mutation is not the exact private fixture lifecycle' >&2
+    exit 1
+fi
+if grep -Ei 'capabilit(y|ies)[_-]?state|state[_-]?capabilit(y|ies)' "$ipc_hook" >/dev/null; then
+    printf '%s\n' 'functional lease proof contains a capability state file' >&2
+    exit 1
+fi
 
 printf '%s\n' \
-    'PASS: live helper identity/fdstore and production IPC preview, retirement, root refusal, confinement, and no-mutation contracts are exact.'
+    'PASS: live helper identity/fdstore and production IPC plus reusable live Client lease preview, retirement, root refusal, confinement, and no-host-mutation contracts are exact.'

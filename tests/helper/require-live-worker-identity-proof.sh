@@ -55,14 +55,20 @@ print_plan() {
         '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
         '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
         '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
+        '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
+        '  hold the first functional Client Prepare at a fixed root-owned FIFO READY barrier;' \
+        '  externally prove its child PID, executable, identity, distinct netns, and live WireGuard;' \
+        '  release exactly one byte, require Destroy plus a second capacity-reuse Prepare/Destroy;' \
+        '  prove the old worker and WireGuard absent, release its netns pin, and remove the fixture;' \
         '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
         '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
         '  collect that exact second invocation and remove the validated temporary stage;' \
         '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
         '    and network digests;' \
         '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
-        'This stages the helper identity and production IPC boundary. It creates no host account, link,' \
-        'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+        'This stages the helper identity and production IPC boundary. It creates no host account,' \
+        'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+        'One dummy underlay and ephemeral WireGuard lease exist only inside private namespaces.' \
         'It is not package-install, restart-recovery, CleanupOwned, datapath, or A01-A15 evidence.'
 }
 
@@ -282,8 +288,8 @@ fi
 
 for command_name in \
     awk cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
-    paste prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl systemd-detect-virt \
-    systemd-run tc tr uname wc
+    nsenter paste prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl \
+    systemd-detect-virt systemd-run tc tr uname wc wg
 do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         blocked "required Debian tool is unavailable: $command_name"
@@ -2795,6 +2801,9 @@ if [ "$proof_ok" = yes ]; then
         'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
         >"$temporary_stage/expected-production-start.pass"
     if ! vp_capture_file_is_safe "$temporary_stage/production-output/start.pass" \
         || ! cmp -s "$temporary_stage/expected-production-start.pass" \
@@ -3104,6 +3113,6 @@ if ! remove_temporary_stage; then
 fi
 
 printf '%s\n' \
-    'PASS: staged helper identity, exact two-FD custody, production IPC, clean stop, confinement, and pin release were proved.' \
+    'PASS: staged helper identity, exact two-FD custody, production IPC, a live reusable Client lease, clean stop, confinement, and pin release were proved.' \
     'SCOPE: helper boundary only; no CleanupOwned, datapath, or A01-A15 result is claimed.' >&2
 printf '%s\n' "$validated_report"

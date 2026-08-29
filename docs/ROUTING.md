@@ -227,9 +227,12 @@ agent receives an opaque lease handle plus the kernel-proven public key and publ
 Interface names are derived, bounded to Linux's 15-character limit, and never accepted from the
 agent. The production functional-alpha backend now creates and prepares exactly one process-owned
 Client-role lease and returns only the child's kernel-proven public key/listen port, but Activate,
-peer configuration, routing and every datapath remain unavailable. This narrow same-runtime path,
-which still lacks disposable live-root evidence and crash recovery, is not evidence that a live
-tunnel exists. Keys must never be persisted and are destroyed with the worker context.
+peer configuration, routing and every datapath remain unavailable. The committed disposable
+helper-boundary gate exercises this exact same-runtime one-lease lifecycle in private namespaces.
+Until an exact-main run is retained, that remains an implemented gate or non-retained branch smoke
+rather than earned acceptance evidence. It proves a prepared peerless WireGuard interface and normal
+Destroy cleanup, not an activated tunnel, crash recovery or datapath. Keys must never be persisted
+and are destroyed with the worker context.
 
 ## Privileged helper boundary
 
@@ -295,9 +298,10 @@ active host network.
 The v4 wire types, service state machines, forwarding codecs, helper plan/call/commit supervisor, and
 authorization binding have unprivileged tests. They are not proof of a live route. The production
 two-leg probe producer does not exist. The actor-linearized candidate snapshot and staged preflight
-described above are dormant and report no production-usable candidates. Helper `Prepare`
-deliberately returns `Unavailable`, and the production manager does not call the helper-backed
-transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
+described above are dormant and report no production-usable candidates. The no-argument production
+helper can now execute only the exact one-Client/one-lease Bind/Prepare/Destroy subset, and the
+committed disposable gate exercises it in private namespaces. The production manager does not call
+that helper-backed transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
 cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
 never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
 blocks startup. There is no production request-path issuance/arming writer, absence-proving
@@ -305,6 +309,9 @@ recovery backend, restart reaper, or cross-runtime tag-28 proof. Tag 35 carries 
 closed Prepare plan needed by that store, but production does not yet issue it; journal absence is
 not cleanup proof. Client ingress is also
 blocked. Consequently
-no production path can reach finalize, `Activate`, or `Commit`, and kernel configuration,
-Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. See
+no production path can reach finalize, `Activate`, or `Commit`, and route-level kernel configuration
+and Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. The disposable
+gate proves only one peerless prepared interface, normal process-owned Destroy and capacity reuse;
+it has no peer, handshake, routed packet, crash/restart recovery or datapath, and a non-retained
+branch smoke is not earned evidence. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).

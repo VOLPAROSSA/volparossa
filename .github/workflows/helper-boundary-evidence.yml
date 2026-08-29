@@ -27,17 +27,34 @@ jobs:
           persist-credentials: false
           ref: ${{ github.ref }}
 
-      - name: Require the selected main revision
+      - name: Bind the exact selected source revision and proof mode
+        id: source_selection
         env:
           SELECTED_REF: ${{ github.ref }}
           SELECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$SELECTED_REF" = refs/heads/main
           test "$SELECTED_SHA" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git symbolic-ref --quiet --short HEAD)" = main
           test -z "$(git status --short --untracked-files=all)"
+          case "$SELECTED_REF" in
+            refs/heads/main)
+              test "$SELECTED_REF" = refs/heads/main
+              test "$(git symbolic-ref --quiet --short HEAD)" = main
+              proof_mode=retained-main
+              ;;
+            refs/heads/*)
+              selected_branch=${SELECTED_REF#refs/heads/}
+              test -n "$selected_branch"
+              git check-ref-format "$SELECTED_REF"
+              git check-ref-format --branch "$selected_branch" >/dev/null
+              test "$selected_branch" != main
+              test "$(git symbolic-ref --quiet --short HEAD)" = "$selected_branch"
+              proof_mode=non-retained-pr-smoke
+              ;;
+            *) exit 1 ;;
+          esac
+          printf 'proof_mode=%s\n' "$proof_mode" >>"$GITHUB_OUTPUT"
 
       - name: Install official Ubuntu VM tools
         run: |
@@ -287,9 +304,23 @@ jobs:
 
       - name: Run the disposable Debian 13 proof VM
         id: vm_proof
+        env:
+          PROOF_MODE: ${{ steps.source_selection.outputs.proof_mode }}
+          SELECTED_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
+
+          case "$PROOF_MODE:$SELECTED_REF" in
+            retained-main:refs/heads/main)
+              proof_mode_flag=--retained-main
+              ;;
+            non-retained-pr-smoke:refs/heads/*)
+              test "$SELECTED_REF" != refs/heads/main
+              proof_mode_flag=--non-retained-pr-smoke
+              ;;
+            *) exit 1 ;;
+          esac
 
           acl_snapshot="$RUNNER_TEMP/kvm-acl.before"
           acl_identity="$RUNNER_TEMP/kvm-device.identity"
@@ -330,9 +361,11 @@ jobs:
             "$runner_path" \
             --execute \
             --yes \
+            "$proof_mode_flag" \
             --image "$VOLPAROSSA_VM_IMAGE" \
             --output "$VOLPAROSSA_EVIDENCE_OUTPUT" \
             --expected-commit "$GITHUB_SHA" \
+            --expected-source-ref "$SELECTED_REF" \
             --expected-host-uid "$runner_uid" \
             --expected-kvm-gid "$kvm_gid" \
             --expected-kvm-identity "$(cat "$acl_identity")"
@@ -348,7 +381,9 @@ jobs:
 
       - name: Fence the retained artifacts
         id: retained_artifacts
-        if: always()
+        if: >-
+          always() &&
+          steps.source_selection.outputs.proof_mode == 'retained-main'
         env:
           PROOF_EXIT_CODE: ${{ steps.vm_proof.outputs.exit_code }}
         run: |
@@ -465,7 +500,9 @@ jobs:
 
       - name: Revalidate the exact retained evidence on the host
         id: host_validation
-        if: steps.vm_proof.outputs.exit_code == '0'
+        if: >-
+          steps.source_selection.outputs.proof_mode == 'retained-main' &&
+          steps.vm_proof.outputs.exit_code == '0'
         run: |
           set -euo pipefail
           retained_dir="$RUNNER_TEMP/helper-boundary-retained"
@@ -562,6 +599,7 @@ jobs:
         id: pass_artifact_upload
         if: >-
           always() &&
+          steps.source_selection.outputs.proof_mode == 'retained-main' &&
           steps.vm_proof.outputs.exit_code == '0' &&
           steps.host_validation.outcome == 'success' &&
           steps.verify_kvm_state.outcome == 'success'
@@ -581,6 +619,7 @@ jobs:
         id: failure_artifact_upload
         if: >-
           always() &&
+          steps.source_selection.outputs.proof_mode == 'retained-main' &&
           (steps.vm_proof.outputs.exit_code != '0' ||
           steps.host_validation.outcome != 'success' ||
           steps.verify_kvm_state.outcome != 'success') &&
@@ -596,7 +635,9 @@ jobs:
           retention-days: 90
 
       - name: Require a retained PASS
-        if: always()
+        if: >-
+          always() &&
+          steps.source_selection.outputs.proof_mode == 'retained-main'
         env:
           PROOF_EXIT_CODE: ${{ steps.vm_proof.outputs.exit_code }}
           HOST_VALIDATION_OUTCOME: ${{ steps.host_validation.outcome }}
@@ -610,3 +651,20 @@ jobs:
           test "$RETAINED_ARTIFACTS_OUTCOME" = success
           test "$PASS_ARTIFACT_UPLOAD_OUTCOME" = success
           test "$VERIFY_KVM_STATE_OUTCOME" = success
+
+      - name: Require a non-retained PR smoke PASS
+        if: >-
+          always() &&
+          steps.source_selection.outputs.proof_mode == 'non-retained-pr-smoke'
+        env:
+          PROOF_EXIT_CODE: ${{ steps.vm_proof.outputs.exit_code }}
+          VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" != refs/heads/main
+          test "$PROOF_EXIT_CODE" = 0
+          test "$VERIFY_KVM_STATE_OUTCOME" = success
+          test -z "$(find "$VOLPAROSSA_EVIDENCE_OUTPUT" \
+            -mindepth 1 -maxdepth 1 -print -quit)"
+          printf '%s\n' \
+            'PASS: exact branch/SHA completed the non-retained disposable KVM smoke.'

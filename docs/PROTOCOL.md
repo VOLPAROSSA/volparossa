@@ -516,6 +516,19 @@ quarantined lineages, and is joined before backend shutdown. `ActivateLeaseBatch
 `Unavailable`, and no datapath is connected. The exact proof contract and remaining live-kernel
 work are recorded in [Privileged helper protocol v3](HELPER_V3.md).
 
+The committed disposable production-IPC producer exercises only that implemented subset. As the
+staged agent, it performs two exact same-runtime Bind/Prepare/Destroy cycles with distinct contexts,
+handles and public keys; the first cycle pauses at a fixed READY barrier so the root hook can observe
+the exact child identity, separate network namespace and one live peerless WireGuard interface.
+Repeated Destroy must report the context absent, and the second cycle proves that the single-context
+capacity is reusable. Its fixed dummy underlay exists only inside the transient production unit's
+`PrivateNetwork`; successful cleanup leaves that namespace with exactly loopback and no default
+route before retirement. The
+producer configures no peer, handshake, route or datapath. A non-main branch smoke validates and
+on PASS discards all proof files; its workflow uploads neither branch PASS artifacts nor branch
+failure diagnostics. It is not retained protocol or acceptance evidence. Only a retained,
+host-revalidated exact-main PASS can change that evidence status.
+
 Tags 35 and 28 provide only same-process ambiguity containment. The functional-alpha request path
 consumes tag 35's closed plan, which is directly convertible to the journal's canonical
 `ClosedPlan`, but no production request-path writer carries it into durable `MayOwnPrepare` custody

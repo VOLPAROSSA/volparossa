@@ -17,6 +17,14 @@ journal_next=$runtime_directory/helper.ownership-v3.next
 proof_directory=/run/volparossa-helper-production-proof
 probe=/run/volparossa-helper-production-ipc-probe
 production_helper=/run/volparossa-helper-production
+functional_underlay=vpfu0
+functional_underlay_alias=volparossa-proof-underlay-v1
+functional_underlay_address=192.31.195.254
+functional_underlay_gateway=192.31.195.1
+functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready
+functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass
+functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass
+functional_release_byte=G
 
 fail() {
     printf 'production IPC unit hook failed: %s\n' "$1" >&2
@@ -272,6 +280,450 @@ run_probe() {
     rm -f -- "$hook_probe_stdout" "$hook_probe_stderr"
 }
 
+functional_underlay_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_expected_ifindex=$1
+    number_is_safe "$hook_expected_ifindex" || return 1
+    /usr/sbin/ip -details -json link show dev "$functional_underlay" 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg name "$functional_underlay" \
+            --arg alias "$functional_underlay_alias" \
+            --argjson ifindex "$hook_expected_ifindex" '
+              type == "array" and length == 1
+              and .[0].ifname == $name
+              and .[0].ifindex == $ifindex
+              and .[0].ifalias == $alias
+              and .[0].linkinfo.info_kind == "dummy"
+              and (.[0].flags | index("UP")) != null
+            ' >/dev/null 2>&1 \
+        || return 1
+    /usr/sbin/ip -4 -json address show dev "$functional_underlay" 2>/dev/null \
+        | /usr/bin/jq -e --arg address "$functional_underlay_address" '
+              type == "array" and length == 1
+              and ([.[0].addr_info[]
+                    | select(.family == "inet"
+                        and .local == $address
+                        and .prefixlen == 24
+                        and .scope == "global")] | length) == 1
+            ' >/dev/null 2>&1 \
+        || return 1
+    /usr/sbin/ip -4 -json route show default dev "$functional_underlay" 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg dev "$functional_underlay" \
+            --arg gateway "$functional_underlay_gateway" \
+            --arg source "$functional_underlay_address" '
+              type == "array" and length == 1
+              and .[0].dst == "default"
+              and .[0].dev == $dev
+              and .[0].gateway == $gateway
+              and .[0].prefsrc == $source
+            ' >/dev/null 2>&1
+}
+
+remove_functional_underlay() {
+    [ "$#" -eq 1 ] || return 1
+    hook_remove_ifindex=$1
+    functional_underlay_is_exact "$hook_remove_ifindex" || return 1
+    /usr/sbin/ip link delete dev "$functional_underlay" || return 1
+    [ ! -e "/sys/class/net/$functional_underlay" ] \
+        && [ ! -L "/sys/class/net/$functional_underlay" ]
+}
+
+direct_helper_child() {
+    [ "$#" -eq 1 ] || return 1
+    hook_parent_pid=$1
+    number_is_safe "$hook_parent_pid" || return 1
+    hook_children=$(
+        for hook_children_file in /proc/"$hook_parent_pid"/task/*/children; do
+            [ -f "$hook_children_file" ] || exit 1
+            cat "$hook_children_file" || exit 1
+            printf '\n'
+        done \
+            | tr ' ' '\n' \
+            | sed '/^$/d' \
+            | sort -u
+    ) || return 1
+    case $hook_children in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    number_is_safe "$hook_children" || return 1
+    printf '%s\n' "$hook_children"
+}
+
+helper_has_no_children() {
+    [ "$#" -eq 1 ] || return 1
+    hook_parent_pid=$1
+    number_is_safe "$hook_parent_pid" || return 1
+    for hook_children_file in /proc/"$hook_parent_pid"/task/*/children; do
+        [ -f "$hook_children_file" ] || return 1
+        hook_children_value=$(cat "$hook_children_file") || return 1
+        [ -z "$hook_children_value" ] || return 1
+    done
+}
+
+worker_identity_is_exact() {
+    [ "$#" -eq 5 ] || return 1
+    hook_worker_pid=$1
+    hook_parent_pid=$2
+    hook_worker_uid=$3
+    hook_worker_gid=$4
+    hook_expected_executable=$5
+    for hook_number in \
+        "$hook_worker_pid" "$hook_parent_pid" "$hook_worker_uid" "$hook_worker_gid"; do
+        number_is_safe "$hook_number" || return 1
+    done
+    hook_worker_status=/proc/$hook_worker_pid/status
+    [ -f "$hook_worker_status" ] || return 1
+    [ "$(awk '$1 == "PPid:" { print $2 }' "$hook_worker_status")" = \
+        "$hook_parent_pid" ] || return 1
+    [ "$(awk '$1 == "Uid:" { print $2 ":" $3 ":" $4 ":" $5 }' \
+        "$hook_worker_status")" = \
+        "$hook_worker_uid:$hook_worker_uid:$hook_worker_uid:$hook_worker_uid" ] || return 1
+    [ "$(awk '$1 == "Gid:" { print $2 ":" $3 ":" $4 ":" $5 }' \
+        "$hook_worker_status")" = \
+        "$hook_worker_gid:$hook_worker_gid:$hook_worker_gid:$hook_worker_gid" ] || return 1
+    [ "$(awk '$1 == "Groups:" { print NF }' "$hook_worker_status")" = 1 ] \
+        || return 1
+    hook_worker_executable=$(stat -Lc '%d:%i:%F:%u:%g:%a:%h' \
+        "/proc/$hook_worker_pid/exe" 2>/dev/null) || return 1
+    [ "$hook_worker_executable" = "$hook_expected_executable" ] || return 1
+    hook_expected_cmdline=$proof_directory/worker.expected-cmdline
+    [ ! -e "$hook_expected_cmdline" ] && [ ! -L "$hook_expected_cmdline" ] || return 1
+    printf '/proc/self/exe\000--internal-worker-v3\000' >"$hook_expected_cmdline" \
+        || return 1
+    chmod 0600 "$hook_expected_cmdline" || return 1
+    if ! private_file_is_safe "$hook_expected_cmdline" \
+        || ! cmp -s "$hook_expected_cmdline" "/proc/$hook_worker_pid/cmdline"; then
+        rm -f -- "$hook_expected_cmdline"
+        return 1
+    fi
+    rm -f -- "$hook_expected_cmdline"
+}
+
+worker_wireguard_interface() {
+    [ "$#" -eq 1 ] || return 1
+    hook_namespace_fd=$1
+    number_is_safe "$hook_namespace_fd" || return 1
+    hook_interfaces=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show interfaces 2>/dev/null) || return 1
+    case $hook_interfaces in
+        ''|*[!A-Za-z0-9_.-]*|*' '*) return 1 ;;
+    esac
+    [ "${#hook_interfaces}" -le 15 ] || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/sbin/ip -details -json link show dev "$hook_interfaces" 2>/dev/null \
+        | /usr/bin/jq -e --arg name "$hook_interfaces" '
+              type == "array" and length == 1
+              and .[0].ifname == $name
+              and .[0].linkinfo.info_kind == "wireguard"
+              and (.[0].flags | index("UP")) != null
+              and (.[0].ifalias | type) == "string"
+              and (.[0].ifalias | startswith("volparossa:wireguard:ownership-v1:"))
+            ' >/dev/null 2>&1 \
+        || return 1
+    hook_public_key=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interfaces" public-key 2>/dev/null) || return 1
+    case $hook_public_key in
+        ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
+    esac
+    [ "${#hook_public_key}" -eq 44 ] || return 1
+    hook_listen_port=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interfaces" listen-port 2>/dev/null) || return 1
+    case $hook_listen_port in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "$hook_listen_port" -le 65535 ] || return 1
+    hook_firewall_mark=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interfaces" fwmark 2>/dev/null) || return 1
+    [ "$hook_firewall_mark" = off ] || return 1
+    hook_peers=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interfaces" peers 2>/dev/null) || return 1
+    [ -z "$hook_peers" ] || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/sbin/ip -6 -json address show dev "$hook_interfaces" 2>/dev/null \
+        | /usr/bin/jq -e '
+              type == "array" and length == 1
+              and ([.[0].addr_info[]
+                    | select(.family == "inet6"
+                        and .prefixlen == 128
+                        and .scope == "global")] | length) == 1
+            ' >/dev/null 2>&1 \
+        || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/sbin/ip -details -json link show 2>/dev/null \
+        | /usr/bin/jq -e --arg interface "$hook_interfaces" '
+              type == "array" and length == 2
+              and any(.[]; .ifname == "lo")
+              and any(.[]; .ifname == $interface)
+              and all(.[]; .ifname == "lo" or .ifname == $interface)
+            ' >/dev/null 2>&1 \
+        || return 1
+    printf '%s\n' "$hook_interfaces"
+}
+
+worker_wireguard_is_absent() {
+    [ "$#" -eq 1 ] || return 1
+    hook_namespace_fd=$1
+    number_is_safe "$hook_namespace_fd" || return 1
+    hook_interfaces=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show interfaces 2>/dev/null) || return 1
+    [ -z "$hook_interfaces" ] || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/sbin/ip -details -json link show 2>/dev/null \
+        | /usr/bin/jq -e '
+              type == "array"
+              and all(.[].linkinfo.info_kind?; . != "wireguard")
+              and all(.[].ifalias?;
+                    (type != "string")
+                    or (startswith("volparossa:wireguard:ownership-v1:") | not))
+            ' >/dev/null 2>&1
+}
+
+private_network_is_pristine() {
+    hook_private_namespace=$(stat -Lc '%d:%i' /proc/self/ns/net 2>/dev/null) \
+        || return 1
+    hook_pid1_namespace=$(stat -Lc '%d:%i' /proc/1/ns/net 2>/dev/null) \
+        || return 1
+    [ "$hook_private_namespace" != "$hook_pid1_namespace" ] || return 1
+    /usr/sbin/ip -details -json link show 2>/dev/null \
+        | /usr/bin/jq -e '
+              type == "array" and length == 1
+              and .[0].ifname == "lo"
+              and all(.[].linkinfo.info_kind?; . != "wireguard")
+              and all(.[].ifalias?;
+                    (type != "string")
+                    or (startswith("volparossa:wireguard:ownership-v1:") | not))
+            ' >/dev/null 2>&1 \
+        || return 1
+    hook_private_ipv4_defaults=$(/usr/sbin/ip -json route show default 2>/dev/null) \
+        || return 1
+    [ "$hook_private_ipv4_defaults" = '[]' ] || return 1
+    hook_private_ipv6_defaults=$(/usr/sbin/ip -6 -json route show default 2>/dev/null) \
+        || return 1
+    [ "$hook_private_ipv6_defaults" = '[]' ]
+}
+
+unit_fdstore_is_empty() {
+    [ "$#" -eq 1 ] || return 1
+    hook_fdstore_unit=$1
+    unit_name_is_safe "$hook_fdstore_unit" || return 1
+    hook_fdstore_count=$(systemctl show --property=NFileDescriptorStore --value \
+        "$hook_fdstore_unit" 2>/dev/null) || return 1
+    [ "$hook_fdstore_count" = 0 ]
+}
+
+helper_does_not_hold_namespace() {
+    [ "$#" -eq 2 ] || return 1
+    hook_namespace_helper_pid=$1
+    hook_namespace_identity=$2
+    number_is_safe "$hook_namespace_helper_pid" || return 1
+    case $hook_namespace_identity in
+        ''|*[!0-9:]*) return 1 ;;
+    esac
+    for hook_helper_fd in /proc/"$hook_namespace_helper_pid"/fd/*; do
+        [ -e "$hook_helper_fd" ] || [ -L "$hook_helper_fd" ] || continue
+        hook_helper_fd_identity=$(stat -Lc '%d:%i' "$hook_helper_fd" 2>/dev/null || true)
+        [ "$hook_helper_fd_identity" != "$hook_namespace_identity" ] || return 1
+    done
+}
+
+helper_holds_no_foreign_network_namespace() {
+    [ "$#" -eq 1 ] || return 1
+    hook_namespace_helper_pid=$1
+    number_is_safe "$hook_namespace_helper_pid" || return 1
+    hook_parent_network_namespace=$(readlink \
+        "/proc/$hook_namespace_helper_pid/ns/net" 2>/dev/null) || return 1
+    case $hook_parent_network_namespace in
+        net:\[*\]) ;;
+        *) return 1 ;;
+    esac
+    hook_parent_network_namespace_number=${hook_parent_network_namespace#net:[}
+    hook_parent_network_namespace_number=${hook_parent_network_namespace_number%]}
+    number_is_safe "$hook_parent_network_namespace_number" || return 1
+    for hook_helper_fd in /proc/"$hook_namespace_helper_pid"/fd/*; do
+        [ -e "$hook_helper_fd" ] || [ -L "$hook_helper_fd" ] || continue
+        if hook_helper_fd_target=$(readlink "$hook_helper_fd" 2>/dev/null); then
+            case $hook_helper_fd_target in
+                net:\[*\])
+                    [ "$hook_helper_fd_target" = "$hook_parent_network_namespace" ] \
+                        || return 1
+                    ;;
+            esac
+        elif [ -e "$hook_helper_fd" ] || [ -L "$hook_helper_fd" ]; then
+            return 1
+        fi
+    done
+}
+
+functional_probe_output_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_functional_output=$1
+    private_file_is_safe "$hook_functional_output" || return 1
+    hook_functional_expected=$hook_functional_output.expected
+    [ ! -e "$hook_functional_expected" ] && [ ! -L "$hook_functional_expected" ] \
+        || return 1
+    printf '%s\n%s\n' "$functional_ready_record" "$functional_pass_record" \
+        >"$hook_functional_expected" || return 1
+    chmod 0600 "$hook_functional_expected" || return 1
+    if ! private_file_is_safe "$hook_functional_expected" \
+        || ! cmp -s "$hook_functional_expected" "$hook_functional_output"; then
+        rm -f -- "$hook_functional_expected"
+        return 1
+    fi
+    rm -f -- "$hook_functional_expected"
+}
+
+run_functional_client_lease_probe() {
+    [ "$#" -eq 8 ] || return 1
+    hook_functional_unit=$1
+    hook_functional_main_pid=$2
+    hook_functional_agent_uid=$3
+    hook_functional_agent_gid=$4
+    hook_functional_operator_gid=$5
+    hook_functional_worker_uid=$6
+    hook_functional_worker_gid=$7
+    hook_functional_expected_executable=$8
+    unit_name_is_safe "$hook_functional_unit" || return 1
+    for hook_functional_number in \
+        "$hook_functional_main_pid" \
+        "$hook_functional_agent_uid" \
+        "$hook_functional_agent_gid" \
+        "$hook_functional_operator_gid" \
+        "$hook_functional_worker_uid" \
+        "$hook_functional_worker_gid"; do
+        number_is_safe "$hook_functional_number" || return 1
+    done
+    case $hook_functional_expected_executable in
+        ''|*[!0-9:A-Za-z\ _-]*) return 1 ;;
+    esac
+    private_network_is_pristine || return 1
+    [ ! -e "/sys/class/net/$functional_underlay" ] \
+        && [ ! -L "/sys/class/net/$functional_underlay" ] || return 1
+
+    /usr/sbin/ip link add name "$functional_underlay" type dummy || return 1
+    /usr/sbin/ip link set dev "$functional_underlay" alias \
+        "$functional_underlay_alias" || return 1
+    /usr/sbin/ip link set dev "$functional_underlay" up || return 1
+    /usr/sbin/ip address add "$functional_underlay_address/24" \
+        broadcast 0.0.0.0 dev "$functional_underlay" || return 1
+    /usr/sbin/ip route add default via "$functional_underlay_gateway" \
+        dev "$functional_underlay" src "$functional_underlay_address" || return 1
+    hook_functional_ifindex=$(cat "/sys/class/net/$functional_underlay/ifindex") \
+        || return 1
+    functional_underlay_is_exact "$hook_functional_ifindex" || return 1
+
+    hook_functional_fifo=$proof_directory/functional-client-lease.release
+    hook_functional_stdout=$proof_directory/functional-client-lease.stdout
+    hook_functional_stderr=$proof_directory/functional-client-lease.stderr
+    for hook_functional_path in \
+        "$hook_functional_fifo" "$hook_functional_stdout" "$hook_functional_stderr"; do
+        [ ! -e "$hook_functional_path" ] && [ ! -L "$hook_functional_path" ] || return 1
+    done
+    mkfifo -m 0600 "$hook_functional_fifo" || return 1
+    [ "$(stat -Lc '%F:%u:%g:%a:%h' "$hook_functional_fifo" 2>/dev/null || true)" = \
+        'fifo:0:0:600:1' ] || return 1
+    install -o root -g root -m 0600 /dev/null \
+        "$hook_functional_stdout" "$hook_functional_stderr" || return 1
+    private_file_is_safe "$hook_functional_stdout" || return 1
+    private_file_is_safe "$hook_functional_stderr" || return 1
+    exec 6<>"$hook_functional_fifo" || return 1
+    (
+        exec 6>&-
+        exec /usr/bin/setpriv \
+            --reuid="$hook_functional_agent_uid" \
+            --regid="$hook_functional_agent_gid" \
+            --groups="$hook_functional_operator_gid" \
+            --inh-caps=-all \
+            --ambient-caps=-all \
+            --bounding-set=-all \
+            --no-new-privs \
+            "$probe" functional-client-lease \
+                "$hook_functional_main_pid" "$hook_functional_agent_gid" \
+            <"$hook_functional_fifo"
+    ) >"$hook_functional_stdout" 2>"$hook_functional_stderr" &
+    hook_functional_probe_pid=$!
+    number_is_safe "$hook_functional_probe_pid" || return 1
+
+    hook_functional_wait_attempt=0
+    while ! probe_output_is_exact \
+        "$hook_functional_stdout" "$functional_ready_record"; do
+        private_file_is_safe "$hook_functional_stderr" || return 1
+        [ ! -s "$hook_functional_stderr" ] || return 1
+        kill -0 "$hook_functional_probe_pid" 2>/dev/null || return 1
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 300 ] || return 1
+        sleep 0.05
+    done
+    private_file_is_safe "$hook_functional_stderr" || return 1
+    [ ! -s "$hook_functional_stderr" ] || return 1
+    running_identity_is_unchanged \
+        "$hook_functional_unit" "$proof_directory/unit.identity" || return 1
+    socket_identity_is_unchanged \
+        "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
+    unit_fdstore_is_empty "$hook_functional_unit" || return 1
+
+    hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid") \
+        || return 1
+    worker_identity_is_exact \
+        "$hook_functional_worker_pid" \
+        "$hook_functional_main_pid" \
+        "$hook_functional_worker_uid" \
+        "$hook_functional_worker_gid" \
+        "$hook_functional_expected_executable" || return 1
+    hook_functional_parent_namespace=$(stat -Lc '%d:%i' \
+        "/proc/$hook_functional_main_pid/ns/net" 2>/dev/null) || return 1
+    hook_functional_worker_namespace=$(stat -Lc '%d:%i' \
+        "/proc/$hook_functional_worker_pid/ns/net" 2>/dev/null) || return 1
+    [ "$hook_functional_parent_namespace" != "$hook_functional_worker_namespace" ] \
+        || return 1
+    exec 7<"/proc/$hook_functional_worker_pid/ns/net" || return 1
+    hook_functional_pinned_namespace=$(stat -Lc '%d:%i' \
+        /proc/self/fd/7 2>/dev/null) || return 1
+    [ "$hook_functional_pinned_namespace" = "$hook_functional_worker_namespace" ] \
+        || return 1
+    hook_functional_wireguard=$(worker_wireguard_interface 7) || return 1
+    case $hook_functional_wireguard in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+
+    rm -f -- "$hook_functional_fifo" || return 1
+    [ ! -e "$hook_functional_fifo" ] && [ ! -L "$hook_functional_fifo" ] || return 1
+    printf '%s' "$functional_release_byte" >&6 || return 1
+    exec 6>&-
+    if wait "$hook_functional_probe_pid"; then
+        hook_functional_probe_status=0
+    else
+        hook_functional_probe_status=$?
+    fi
+    [ "$hook_functional_probe_status" -eq 0 ] || return 1
+    functional_probe_output_is_exact "$hook_functional_stdout" || return 1
+    private_file_is_safe "$hook_functional_stderr" || return 1
+    [ ! -s "$hook_functional_stderr" ] || return 1
+    rm -f -- "$hook_functional_stdout" "$hook_functional_stderr" || return 1
+
+    running_identity_is_unchanged \
+        "$hook_functional_unit" "$proof_directory/unit.identity" || return 1
+    socket_identity_is_unchanged \
+        "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
+    unit_fdstore_is_empty "$hook_functional_unit" || return 1
+    hook_functional_wait_attempt=0
+    while ! helper_has_no_children "$hook_functional_main_pid"; do
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
+        sleep 0.05
+    done
+    worker_wireguard_is_absent 7 || return 1
+    helper_does_not_hold_namespace \
+        "$hook_functional_main_pid" "$hook_functional_worker_namespace" || return 1
+    helper_holds_no_foreign_network_namespace \
+        "$hook_functional_main_pid" || return 1
+    exec 7>&-
+    [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
+
+    remove_functional_underlay "$hook_functional_ifindex" || return 1
+    private_network_is_pristine || return 1
+}
+
 validate_runtime_metadata() {
     [ "$#" -eq 1 ] || return 1
     hook_agent_gid=$1
@@ -433,14 +885,30 @@ start_hook() {
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'final authenticated runtime bind failed'
 
-    hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+    hook_expected_executable=$(sed -n '3p' "$identity_file") \
+        || fail 'production helper executable identity could not be read'
+    run_functional_client_lease_probe \
+        "$hook_unit" \
+        "$hook_expected_main_pid" \
+        "$agent_uid" \
+        "$agent_gid" \
+        "$operator_gid" \
+        "$worker_uid" \
+        "$worker_gid" \
+        "$hook_expected_executable" \
+        || fail 'functional client lease live proof failed'
+
+    hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_WRONG_UID_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
-        'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass')
+        'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
+        "$functional_ready_record" \
+        "$functional_pass_record" \
+        "$functional_cleanup_record")
     write_private_file "$proof_directory/start.pass" "$hook_start_pass" \
         || fail 'production IPC start proof could not be published'
 }

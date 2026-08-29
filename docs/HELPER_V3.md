@@ -650,9 +650,11 @@ The contract rejects `CAP_SYS_PTRACE` and adds only the individual `seccomp` sys
 groups so the fixed child filter can be installed without allowing all of `@sandbox`. After the drop, the worker's
 distinct UID/GID plus exact `CAP_NET_ADMIN` set excludes same-UID signalling of the root parent and
 access through the root:`volparossa` runtime-directory mode. The functional-alpha backend now calls
-the launcher, but this is not acceptance evidence: the complete account transition, pre-filter task
-state, path access denials and parent-signal denial still require a disposable Debian 13 live-root
-run.
+the launcher. The committed disposable driver now exercises the account transition, pre-filter task
+state, path access denials and parent-signal denial first through its diagnostic selector and then
+observes the functional worker created by the no-argument production server. This remains an
+implemented gate rather than earned acceptance evidence until the exact merged `main` revision
+produces a retained, host-revalidated PASS; it is not installed-package or restart evidence.
 
 ### Sequential live worker and production IPC proof driver
 
@@ -773,8 +775,29 @@ right socket group, right UID with the wrong primary GID but the right supplemen
 and root UID rejection. Every negative credential case therefore passes filesystem DAC before the
 server applies exact `SO_PEERCRED` policy. The probe additionally requires the server peer PID and
 primary GID to equal the unit's exact `MainPID` and staged agent GID, while the hook brackets one
-socket inode. The hook publishes seven distinct fixed proof records only after all probe output and
-the unchanged `MainPID`, executable inode and `InvocationID` have been checked. PID 1 bounds the
+socket inode.
+
+The hook then creates one fixed dummy underlay only inside that production unit's
+`PrivateNetwork` namespace. The staged-agent probe registers an exact tag-35 intent, prepares one
+Client-role lease, closes its first stream and publishes a fixed READY record. While it waits on a
+root-owned FIFO, the hook requires one direct child of the unchanged helper `MainPID`, the expected
+executable and dedicated UID/GID, a network namespace distinct from the helper, and exactly one
+live WireGuard interface beside loopback. That interface must be UP, carry the exact ownership-marker
+prefix and one global `/128`, expose a non-zero public key/listen port, and have neither peers nor a
+firewall mark. The probe validates the exact correlated response and `DirectAssigned` fixture
+endpoint without printing handles, keys, ports or runtime IDs; the external hook deliberately does
+not claim an independent byte-for-byte join to those response values.
+
+One fixed release byte authorizes exact Destroy and an idempotent `existed=false` retry. A second
+distinct context is then prepared and destroyed under the same helper runtime; distinct context and
+lease handles plus a distinct public key prove capacity reuse. After both cycles, the hook requires
+zero helper children, no WireGuard object in its retained first-worker namespace pin, no helper FD
+retaining that namespace or any foreign worker network namespace, an empty descriptor store and the
+fixed exact-one-loopback/no-default-route cleanup predicate after the dummy underlay is removed.
+Only after all probe output and the unchanged `MainPID`,
+executable inode and `InvocationID` have been checked does the hook publish ten distinct fixed proof
+records: the seven read-only/negative IPC records followed by READY, functional PASS and
+external-cleanup PASS. PID 1 bounds the
 second unit to three minutes even if the runner disappears, and each transient unit independently
 receives a 1 MiB hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are attested as `null`, so structured
 helper rejection logs cannot grow host files. The start hook proves that the same captured lock inode
@@ -818,11 +841,14 @@ recovery requires the exact per-stage marker before adopting the manager's curre
 diagnostic unit is reset to inactive before its descriptor store is cleaned. Retirement cleans only
 that unit's `fdstore`, requires either
 `NFileDescriptorStore=0` or `LoadState=not-found`, resets it when still present and waits boundedly
-for collection; any ambiguous observation fails the gate. The driver has not yet produced a
-successful evidence report from the required disposable VM. Its second phase exercises the
-production server entry point, but not an installed package, the shipped unit file, restart policy,
-or inherited-descriptor adoption/recovery. Until a successful run is durably tied to the same clean
-commit, it is a reviewed driver rather than earned live-root, package, datapath, A14 or A15 evidence.
+for collection; any ambiguous observation fails the gate. The driver has not yet produced a retained
+exact-main PASS. A non-main branch run may exercise and validate the same disposable proof, but
+on PASS `non-retained-pr-smoke` deliberately discards its report, hash, environment, console and
+proof diagnostics and requires an empty output directory. Its workflow never uploads branch PASS
+artifacts or failure diagnostics. The second phase exercises
+the production server entry point, but not an installed package, the shipped unit file, restart
+policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run is durably tied
+to the same clean commit and retained, the gate is not earned package, datapath, A14 or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
@@ -837,10 +863,13 @@ no unit mutation, fails the proof, and requires the disposable VM to be discarde
 after exact adoption still blocks stage mapping and permits only exact-ID retirement of that already
 owned unit. It never guesses that a same-named unit belongs to this run.
 
-The child now opens its worker-local netlink sockets, activates loopback, and implements exact
-single-lease WireGuard `Prepare` and `Destroy`. It does not create or move the parent-side birth
-link, and Activate, Commit, routing, nftables, sysctl and socket-factory operations remain rejected.
-Production cannot dispatch this path and still fails closed through the unavailable engine.
+The child opens its worker-local netlink sockets, activates loopback, and implements exact
+single-lease WireGuard `Prepare` and `Destroy`. The no-argument production server now dispatches it
+through the crate-private functional-alpha backend: for at most one live Client context at a time,
+containing exactly one Client-role lease, the parent creates the helper-derived birth link and moves it into the pinned
+child `NEWNET` before Prepare. Activate, Commit, peer configuration, routing, nftables, sysctl,
+socket-factory operations and every datapath remain rejected. The public `HelperEngine::new`
+constructor remains unavailable and does not select this backend.
 
 A separate bounded registry now reserves a non-copyable monotonic generation token before spawn or
 handshake. Pending tokens count against the same 64-context cap, are bound to one context and expiry,
@@ -1311,23 +1340,28 @@ one-shot guard is defense in depth, not a substitute for that privileged invaria
 
 ## WRITE-STOP: remaining live-kernel gaps
 
-No host networking was executed for this slice. Before `Prepare`, `Activate`, `Commit`, transport
+No development-host network configuration is mutated or authorized for this slice. The committed gate confines
+its fixed dummy underlay and ephemeral WireGuard leases to a transient `PrivateNetwork` and child
+network namespaces inside the disposable VM. Before `Prepare`, `Activate`, `Commit`, transport
 acquisition, client ingress, or datapath operation can be called complete, all of the following
 remain:
 
-- run the complete dedicated `volparossa-worker` UID/GID transition in a disposable Debian 13
-  live-root environment and prove exact post-drop credentials/groups/capabilities, parent-signal
-  denial, runtime token/socket path denial, pre-filter single-task state, namespace pin lifetime and
-  unchanged host state; portable tests and package inspection do not substitute for this gate;
+- obtain one retained exact-main PASS from the committed disposable Debian 13 driver for the complete
+  dedicated `volparossa-worker` UID/GID transition, exact post-drop credentials/groups/capabilities,
+  parent-signal denial, runtime token/socket path denial, pre-filter single-task state, namespace-pin
+  lifetime and equal enumerated host-state fences; a non-retained branch smoke, portable tests and
+  package inspection do not substitute for this gate;
 - validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
   the final worker must retain only `CAP_NET_ADMIN`;
-- prove the functional-alpha transaction in a disposable live-root environment: read-only direct
-  underlay selection, independently observed sandbox proof, parent birth-link creation and move,
-  child WireGuard Prepare, response proof, exact Destroy, worker reap/purge and unchanged host state;
-  then extend its one-Client/one-lease capacity without weakening atomic rollback;
+- obtain one retained exact-main PASS for the already wired functional-alpha proof: read-only direct
+  underlay selection, independently observed sandbox identity, parent birth-link creation and move,
+  child WireGuard Prepare, correlated response validation, exact/idempotent Destroy, worker
+  reap/purge, second-cycle capacity reuse and equal enumerated host-state fences; a non-retained
+  branch smoke does not close this evidence gate, and the one-Client/one-lease capacity must then be
+  extended without weakening atomic rollback;
 - extend the asynchronous `HelperEngine` backend beyond Prepare/Destroy: Activate, Probe, descriptor
   acquisition, cached-descriptor cleanup and shutdown need the same plan/call/commit discipline and
   exact context/generation/phase/handle revalidation;

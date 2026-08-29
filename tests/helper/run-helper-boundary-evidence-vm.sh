@@ -10,17 +10,21 @@ umask 077
 
 mode=preview
 approval=no
+proof_mode=
 image_path=
 output_directory=
 expected_commit=
+expected_source_ref=
 expected_host_uid=
 expected_kvm_gid=
 expected_kvm_identity=
 seen_mode=no
 seen_approval=no
+seen_proof_mode=no
 seen_image=no
 seen_output=no
 seen_commit=no
+seen_source_ref=no
 seen_host_uid=no
 seen_kvm_gid=no
 seen_kvm_identity=no
@@ -29,12 +33,31 @@ usage() {
     printf '%s\n' \
         'usage: tests/helper/run-helper-boundary-evidence-vm.sh [--preview]' \
         '       tests/helper/run-helper-boundary-evidence-vm.sh --execute --yes' \
+        '         (--retained-main|--non-retained-pr-smoke)' \
         '         --image PATH --output DIRECTORY --expected-commit SHA' \
+        '         --expected-source-ref refs/heads/BRANCH' \
         '         --expected-host-uid UID --expected-kvm-gid GID' \
         '         --expected-kvm-identity IDENTITY'
 }
 
 print_plan() {
+    if [ "$proof_mode" = non-retained-pr-smoke ]; then
+        printf '%s\n' \
+            'VOLPAROSSA non-retained helper-boundary PR smoke VM plan:' \
+            '  require an unprivileged host user and usable KVM; never fall back to TCG;' \
+            '  require one exact clean non-main branch commit and clone only its tracked Git state;' \
+            '  require the reviewed Debian 13 amd64 genericcloud image by exact SHA-512;' \
+            '  create one temporary qcow2 overlay, NoCloud seed and ephemeral SSH keys;' \
+            '  pin the injected guest host key before the first SSH connection;' \
+            '  provision and fetch locked dependencies in a first disposable KVM boot;' \
+            '  restart with QEMU user-network egress denied and prove that denial;' \
+            '  build fully offline as the unprivileged guest user in the restricted boot;' \
+            '  run only the fixed helper-boundary proof as guest root;' \
+            '  shut down, rehash the base image, validate, and discard all proof files;' \
+            '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
+            'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
+        return
+    fi
     printf '%s\n' \
         'VOLPAROSSA helper-boundary evidence VM plan:' \
         '  require an unprivileged host user and usable KVM; never fall back to TCG;' \
@@ -68,6 +91,16 @@ while [ "$#" -gt 0 ]; do
             approval=yes
             seen_approval=yes
             ;;
+        --retained-main)
+            [ "$seen_proof_mode" = no ] || { usage >&2; exit 64; }
+            proof_mode=retained-main
+            seen_proof_mode=yes
+            ;;
+        --non-retained-pr-smoke)
+            [ "$seen_proof_mode" = no ] || { usage >&2; exit 64; }
+            proof_mode=non-retained-pr-smoke
+            seen_proof_mode=yes
+            ;;
         --image)
             if [ "$seen_image" != no ] || [ "$#" -lt 2 ]; then
                 usage >&2
@@ -93,6 +126,15 @@ while [ "$#" -gt 0 ]; do
             fi
             expected_commit=$2
             seen_commit=yes
+            shift
+            ;;
+        --expected-source-ref)
+            if [ "$seen_source_ref" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            expected_source_ref=$2
+            seen_source_ref=yes
             shift
             ;;
         --expected-host-uid)
@@ -135,8 +177,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$mode" = preview ]; then
-    if [ "$approval" = yes ] || [ "$seen_image" = yes ] \
+    if [ "$approval" = yes ] || [ "$seen_proof_mode" = yes ] \
+        || [ "$seen_image" = yes ] \
         || [ "$seen_output" = yes ] || [ "$seen_commit" = yes ] \
+        || [ "$seen_source_ref" = yes ] \
         || [ "$seen_host_uid" = yes ] || [ "$seen_kvm_gid" = yes ] \
         || [ "$seen_kvm_identity" = yes ]; then
         usage >&2
@@ -147,8 +191,10 @@ if [ "$mode" = preview ]; then
     exit 0
 fi
 
-if [ "$approval" != yes ] || [ "$seen_image" != yes ] \
+if [ "$approval" != yes ] || [ "$seen_proof_mode" != yes ] \
+    || [ "$seen_image" != yes ] \
     || [ "$seen_output" != yes ] || [ "$seen_commit" != yes ] \
+    || [ "$seen_source_ref" != yes ] \
     || [ "$seen_host_uid" != yes ] || [ "$seen_kvm_gid" != yes ] \
     || [ "$seen_kvm_identity" != yes ]; then
     print_plan >&2
@@ -175,6 +221,26 @@ case $expected_commit in
     *[!0-9a-f]*|0000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000)
         blocked 'the expected commit is not lowercase nonzero hexadecimal'
         ;;
+esac
+case $expected_source_ref in
+    refs/heads/*) expected_source_branch=${expected_source_ref#refs/heads/} ;;
+    *) blocked 'the expected source ref is not one branch ref' ;;
+esac
+if [ -z "$expected_source_branch" ] || [ "${#expected_source_ref}" -gt 255 ] \
+    || ! git check-ref-format "$expected_source_ref" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$expected_source_branch" >/dev/null 2>&1; then
+    blocked 'the expected source ref is not canonical'
+fi
+case $proof_mode in
+    retained-main)
+        [ "$expected_source_ref" = refs/heads/main ] \
+            || blocked 'retained evidence requires refs/heads/main'
+        ;;
+    non-retained-pr-smoke)
+        [ "$expected_source_ref" != refs/heads/main ] \
+            || blocked 'main can never select non-retained PR smoke'
+        ;;
+    *) blocked 'the proof mode is not canonical' ;;
 esac
 case $expected_host_uid in
     ''|0|0*|*[!0-9]*) blocked 'the expected host UID is not canonical nonzero decimal' ;;
@@ -269,8 +335,14 @@ source_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}' 
     || blocked 'the source HEAD cannot be established'
 [ "$source_head" = "$expected_commit" ] || blocked 'HEAD differs from the expected commit'
 source_branch=$(git -C "$repository_directory" symbolic-ref --quiet --short HEAD 2>/dev/null) \
-    || blocked 'the source must be the checked-out main branch'
-[ "$source_branch" = main ] || blocked 'retained VM evidence is restricted to main'
+    || blocked 'the source must be one checked-out branch'
+[ "$source_branch" = "$expected_source_branch" ] \
+    || blocked 'the checked-out branch differs from the expected source ref'
+if [ "$proof_mode" = retained-main ]; then
+    [ "$source_branch" = main ] || blocked 'retained VM evidence is restricted to main'
+else
+    [ "$source_branch" != main ] || blocked 'main can never run non-retained PR smoke'
+fi
 source_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$repository_directory" \
     status --porcelain=v1 --untracked-files=normal --ignore-submodules=none 2>/dev/null) \
     || blocked 'the source worktree state cannot be established'
@@ -874,7 +946,7 @@ cleanup() {
         reap_qemu no || cleanup_status=1
     fi
     if settle_console; then
-        if [ "$safe_to_remove" = yes ]; then
+        if [ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]; then
             publish_console || cleanup_status=1
         fi
     else
@@ -931,12 +1003,23 @@ jq -S -c -n \
 chmod 0600 "$environment_report"
 
 source_clone=$run_directory/source
-git -c protocol.file.allow=always clone \
-    --no-hardlinks --depth 1 --no-tags --single-branch --branch main \
-    "file://$repository_directory" "$source_clone" >/dev/null 2>&1 \
-    || failed 'the bounded tracked-only source clone failed'
+if [ "$proof_mode" = retained-main ]; then
+    git -c protocol.file.allow=always clone \
+        --no-hardlinks --depth 1 --no-tags --single-branch --branch main \
+        "file://$repository_directory" "$source_clone" >/dev/null 2>&1 \
+        || failed 'the bounded tracked-only main source clone failed'
+else
+    git -c protocol.file.allow=always clone \
+        --no-hardlinks --depth 1 --no-tags --single-branch \
+        --branch "$expected_source_branch" \
+        "file://$repository_directory" "$source_clone" >/dev/null 2>&1 \
+        || failed 'the bounded tracked-only PR source clone failed'
+fi
 [ "$(git -C "$source_clone" rev-parse HEAD)" = "$expected_commit" ] \
     || failed 'the bounded source clone selected the wrong commit'
+[ "$(git -C "$source_clone" symbolic-ref --quiet --short HEAD)" \
+    = "$expected_source_branch" ] \
+    || failed 'the bounded source clone selected the wrong branch'
 [ -z "$(git -C "$source_clone" status --porcelain=v1 --untracked-files=all)" ] \
     || failed 'the bounded source clone is not clean'
 [ ! -e "$source_clone/.git/objects/info/alternates" ] \
@@ -1420,7 +1503,9 @@ bounded_run proof-kvm-uevent-settle 1 udevadm settle --timeout=10 \
 verify_kvm_contract \
     || failed 'the KVM authority changed after the restricted proof'
 settle_console || failed 'the bounded console log did not settle'
-publish_console || failed 'the bounded console log could not be published atomically'
+if [ "$proof_mode" = retained-main ]; then
+    publish_console || failed 'the bounded console log could not be published atomically'
+fi
 
 post_image_sha512=$(sha512sum "$image_path" | awk '{print $1}') \
     || failed 'the reviewed base image cannot be rehashed after VM use'
@@ -1447,10 +1532,14 @@ fi
 
 late_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}') \
     || failed 'the late source HEAD fence failed'
+late_branch=$(git -C "$repository_directory" symbolic-ref --quiet --short HEAD) \
+    || failed 'the late source branch fence failed'
 late_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$repository_directory" \
     status --porcelain=v1 --untracked-files=normal --ignore-submodules=none) \
     || failed 'the late source clean fence failed'
-if [ "$late_head" != "$expected_commit" ] || [ -n "$late_status" ]; then
+if [ "$late_head" != "$expected_commit" ] \
+    || [ "$late_branch" != "$expected_source_branch" ] \
+    || [ -n "$late_status" ]; then
     failed 'the source changed while the VM proof ran'
 fi
 
@@ -1490,10 +1579,28 @@ if [ -s "$environment_validator_stdout" ] || [ -s "$environment_validator_stderr
     failed 'the local VM-environment validator was not silent'
 fi
 
-install -m 0600 -- "$retrieved_report" \
-    "$output_directory/helper-boundary-evidence-v1.json"
-install -m 0600 -- "$report_hash_file" \
-    "$output_directory/helper-boundary-evidence-v1.json.sha256"
-install -m 0600 -- "$successful_environment" "$environment_report"
-
-printf '%s\n' 'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
+if [ "$proof_mode" = retained-main ]; then
+    install -m 0600 -- "$retrieved_report" \
+        "$output_directory/helper-boundary-evidence-v1.json"
+    install -m 0600 -- "$report_hash_file" \
+        "$output_directory/helper-boundary-evidence-v1.json.sha256"
+    install -m 0600 -- "$successful_environment" "$environment_report"
+    printf '%s\n' \
+        'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
+else
+    for non_retained_output in "$proof_stderr_log" "$environment_report"; do
+        if [ ! -f "$non_retained_output" ] || [ -L "$non_retained_output" ] \
+            || [ "$(stat -Lc '%h:%u:%a' "$non_retained_output" 2>/dev/null || true)" \
+                != "1:$(id -u):600" ]; then
+            failed 'a non-retained smoke output cannot be discarded safely'
+        fi
+        rm -f -- "$non_retained_output" \
+            || failed 'a non-retained smoke output could not be discarded'
+    done
+    if find "$output_directory" -mindepth 1 -maxdepth 1 -print -quit \
+        | grep -q .; then
+        failed 'the non-retained PR smoke output directory is not empty'
+    fi
+    printf '%s\n' \
+        'PASS: non-retained helper-boundary PR smoke completed in the disposable Debian 13 KVM.' >&2
+fi
