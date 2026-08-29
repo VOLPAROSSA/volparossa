@@ -872,40 +872,56 @@ functional_underlay_is_exact() {
     [ "$#" -eq 1 ] || return 1
     hook_expected_ifindex=$1
     number_is_safe "$hook_expected_ifindex" || return 1
-    /usr/sbin/ip -details -json link show dev "$functional_underlay" 2>/dev/null \
-        | /usr/bin/jq -e \
-            --arg name "$functional_underlay" \
-            --arg alias "$functional_underlay_alias" \
-            --argjson ifindex "$hook_expected_ifindex" '
-              type == "array" and length == 1
-              and .[0].ifname == $name
-              and .[0].ifindex == $ifindex
-              and .[0].ifalias == $alias
-              and .[0].linkinfo.info_kind == "dummy"
-              and (.[0].flags | index("UP")) != null
-            ' >/dev/null 2>&1 \
+    hook_underlay_link_json=$(
+        /usr/sbin/ip -details -json link show dev "$functional_underlay" 2>/dev/null
+    ) || return 1
+    /usr/bin/jq -en \
+        --argjson observed "$hook_underlay_link_json" \
+        --arg name "$functional_underlay" \
+        --arg alias "$functional_underlay_alias" \
+        --argjson ifindex "$hook_expected_ifindex" '
+          $observed
+          | type == "array" and length == 1
+          and .[0].ifname == $name
+          and .[0].ifindex == $ifindex
+          and .[0].ifalias == $alias
+          and .[0].linkinfo.info_kind == "dummy"
+          and (.[0].flags | index("UP")) != null
+        ' >/dev/null 2>&1 \
         || return 1
-    /usr/sbin/ip -4 -json address show dev "$functional_underlay" 2>/dev/null \
-        | /usr/bin/jq -e --arg address "$functional_underlay_address" '
-              type == "array" and length == 1
-              and ([.[0].addr_info[]
-                    | select(.family == "inet"
-                        and .local == $address
-                        and .prefixlen == 24
-                        and .scope == "global")] | length) == 1
-            ' >/dev/null 2>&1 \
+    hook_underlay_address_json=$(
+        /usr/sbin/ip -4 -json address show dev "$functional_underlay" 2>/dev/null
+    ) || return 1
+    /usr/bin/jq -en \
+        --argjson observed "$hook_underlay_address_json" \
+        --arg address "$functional_underlay_address" '
+          $observed
+          | type == "array" and length == 1
+          and ([.[0].addr_info[]
+                | select(.family == "inet"
+                    and .local == $address
+                    and .prefixlen == 24
+                    and .scope == "global")] | length) == 1
+        ' >/dev/null 2>&1 \
         || return 1
-    /usr/sbin/ip -4 -json route show default dev "$functional_underlay" 2>/dev/null \
-        | /usr/bin/jq -e \
-            --arg dev "$functional_underlay" \
-            --arg gateway "$functional_underlay_gateway" \
-            --arg source "$functional_underlay_address" '
-              type == "array" and length == 1
-              and .[0].dst == "default"
-              and .[0].dev == $dev
-              and .[0].gateway == $gateway
-              and .[0].prefsrc == $source
-            ' >/dev/null 2>&1
+    # Filtering by `dev` makes recent iproute2 omit that already-filtered field
+    # from JSON. Query the main-table default set so the device remains part of
+    # the independently checked kernel readback.
+    hook_underlay_route_json=$(
+        /usr/sbin/ip -4 -json route show table main default 2>/dev/null
+    ) || return 1
+    /usr/bin/jq -en \
+        --argjson observed "$hook_underlay_route_json" \
+        --arg dev "$functional_underlay" \
+        --arg gateway "$functional_underlay_gateway" \
+        --arg source "$functional_underlay_address" '
+          $observed
+          | type == "array" and length == 1
+          and .[0].dst == "default"
+          and .[0].dev == $dev
+          and .[0].gateway == $gateway
+          and .[0].prefsrc == $source
+        ' >/dev/null 2>&1
 }
 
 remove_functional_underlay() {

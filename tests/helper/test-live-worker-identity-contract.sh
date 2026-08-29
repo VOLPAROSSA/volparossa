@@ -4507,6 +4507,68 @@ for inventory_function in direct_helper_child capture_parent_worker_custody; do
         exit 1
     fi
 done
+
+# iproute2 may omit a route field that was already constrained on the command
+# line. Keep the underlay readback as three checked producer captures followed
+# by separate jq validation, and query the complete main-table default set so
+# the output still carries the device that the proof compares.
+# These patterns deliberately name literal hook variables.
+# shellcheck disable=SC2016
+functional_underlay_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -c '^[[:space:]]*hook_underlay_.*_json=\$(' "$1")" -eq 3 ] \
+        || return 1
+    [ "$(grep -c '^[[:space:]]*) || return 1$' "$1")" -eq 3 ] \
+        || return 1
+    for hook_underlay_exact_line in \
+        '        /usr/sbin/ip -details -json link show dev "$functional_underlay" 2>/dev/null' \
+        '        /usr/sbin/ip -4 -json address show dev "$functional_underlay" 2>/dev/null' \
+        '        /usr/sbin/ip -4 -json route show table main default 2>/dev/null'
+    do
+        [ "$(grep -Fxc -- "$hook_underlay_exact_line" "$1")" -eq 1 ] \
+            || return 1
+    done
+    for hook_underlay_exact_consumer in \
+        '--argjson observed "$hook_underlay_link_json"' \
+        '--argjson observed "$hook_underlay_address_json"' \
+        '--argjson observed "$hook_underlay_route_json"'
+    do
+        [ "$(grep -Fc -- "$hook_underlay_exact_consumer" "$1")" -eq 1 ] \
+            || return 1
+    done
+    ! grep -F 'route show default dev "$functional_underlay"' "$1" >/dev/null
+}
+functional_underlay_body=$temporary_directory/functional-underlay.body
+functional_underlay_mutant=$temporary_directory/functional-underlay.mutant
+sed -n '/^functional_underlay_is_exact() {$/,/^}$/p' \
+    "$ipc_hook" >"$functional_underlay_body"
+functional_underlay_source_is_exact "$functional_underlay_body" || {
+    printf '%s\n' 'functional underlay readback is not fail-closed and field-complete' >&2
+    exit 1
+}
+# This recreates the Debian 13/iproute2 failure where `dev` disappears from
+# JSON because it was consumed as a route-show filter.
+# shellcheck disable=SC2016
+sed '0,/route show table main default/s//route show default dev "$functional_underlay"/' \
+    "$functional_underlay_body" >"$functional_underlay_mutant"
+if functional_underlay_source_is_exact "$functional_underlay_mutant"; then
+    printf '%s\n' 'functional underlay accepted the iproute2 field-omission mutant' >&2
+    exit 1
+fi
+sed '0,/) || return 1/s//) || :/' \
+    "$functional_underlay_body" >"$functional_underlay_mutant"
+if functional_underlay_source_is_exact "$functional_underlay_mutant"; then
+    printf '%s\n' 'functional underlay accepted an unchecked producer mutant' >&2
+    exit 1
+fi
+# A checked command substitution still masks an `ip` failure when the producer
+# is silently changed back into a POSIX pipeline whose final command succeeds.
+sed '0,/ip -details -json link show dev/s/$/ | \/usr\/bin\/jq -e ./' \
+    "$functional_underlay_body" >"$functional_underlay_mutant"
+if functional_underlay_source_is_exact "$functional_underlay_mutant"; then
+    printf '%s\n' 'functional underlay accepted a producer-pipeline mutant' >&2
+    exit 1
+fi
 if ! awk '
     /^direct_helper_child\(\) \{$/ { direct = 1; next }
     /^helper_has_no_children\(\) \{$/ { direct = 0 }
