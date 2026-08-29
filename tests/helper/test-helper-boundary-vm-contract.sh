@@ -71,6 +71,24 @@ if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 2 ] \
         'the VM payload does not preserve the helper-specific openat2 compatibility contract' >&2
     exit 1
 fi
+if [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|final-verification)$' \
+        "$live_gate")" -ne 8 ] \
+    || [ "$(grep -Fc 'normal_final_reporting_reached=yes' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'report_unexpected_driver_phase "${driver_phase:-}" || :' \
+        "$live_gate")" -ne 1 ]; then
+    printf '%s\n' \
+        'the VM payload does not preserve one fixed unexpected driver-phase record' >&2
+    exit 1
+fi
+if [ "$(grep -Fxc '    identity_executable=' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'if command exec 9<>"$production_lock_path"; then' \
+        "$live_gate")" -ne 1 ] \
+    || grep -F 'if exec 9<>"$production_lock_path"; then' "$live_gate" >/dev/null; then
+    printf '%s\n' \
+        'the VM payload does not preserve status-2-safe production observation and lock probing' >&2
+    exit 1
+fi
 if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 2 ] \
     || [ "$(grep -Fc -- \
         'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
@@ -699,12 +717,14 @@ test "$(find "$publication_output" -mindepth 1 -maxdepth 1 -type f -printf '%f\n
 branch_failure_functions=$temporary_directory/branch-failure-functions.sh
 {
     sed -n '/^non_retained_proof_failure_reason_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_driver_phase_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_driver_phase() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_confinement_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 5
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 7
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -731,6 +751,66 @@ grep -Fx \
     "$last_stderr" >/dev/null
 if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
     printf '%s\n' 'branch failure diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+# An unclassified unexpected exit may expose exactly one fixed phase and no
+# captured payload. Missing, duplicate, invalid and mixed records fail closed.
+printf '%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-observation' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke driver phase: production-observation' \
+    "$last_stderr" >/dev/null
+test "$(wc -l <"$last_stderr")" -eq 1
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'driver phase exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n' "$branch_failure_privacy_sentinel" >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-secret-observation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-secret-observation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=final-verification' \
+    'live worker-identity proof failed: predicate rejected: production-retirement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    '-----BEGIN PRIVATE KEY-----' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-launch' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+if grep -F -- '-----BEGIN PRIVATE KEY-----' "$last_stderr" >/dev/null \
+    || grep -F 'driver phase:' "$last_stderr" >/dev/null; then
+    printf '%s\n' 'driver phase parser exposed private or invalid diagnostics' >&2
     exit 1
 fi
 
@@ -810,6 +890,9 @@ grep -F \
     "$runner" >/dev/null
 grep -F \
     'non-retained helper-boundary PR smoke failure category: unclassified' \
+    "$runner" >/dev/null
+grep -F \
+    'report_non_retained_driver_phase "$proof_stderr_log" || true' \
     "$runner" >/dev/null
 grep -E \
     '^[[:space:]]+report_non_retained_worker_launch_diagnostic([[:space:]]|$)' \

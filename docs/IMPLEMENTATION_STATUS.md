@@ -332,8 +332,20 @@ single clean-build A01--A15 run; the score is not a release claim.
   `/system.slice/<exact-random-unit-name>` only for bounded post-retirement cgroup-absence checks.
   The production transient unit also selects and reads back exact `Slice=system.slice`, remains
   running during observation, and still requires exact live
-  `ControlGroup=/system.slice/<exact-random-unit-name>` readback. The score remains **11/100** and
-  AV1-09 remains Open until a new exact-main retained run succeeds.
+  `ControlGroup=/system.slice/<exact-random-unit-name>` readback. The next non-retained branch smoke
+  [run 33275030601](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601) at
+  `20f8a121f7aa020450587251dad9de66ec7738fc` ran the disposable VM in
+  [job 99160142810](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601/job/99160142810)
+  but exited with shell status 2 before the fixed final failure line, leaving only `unclassified`.
+  Static review found two production-observation paths capable of masking their fixed predicate:
+  missing or unsafe `unit.identity` could leave its later retirement executable operand unset under
+  `set -u`, and redirection failure on special builtin `exec` could terminate the shell rather than
+  enter its recorded lock-release failure branch. The identity fields now start empty and the probe
+  uses ordinary-failure `command exec`. The EXIT cleanup also emits one fixed value-free monotonic
+  phase only when a nonzero exit occurs before normal final reporting, without changing original or
+  cleanup status; branch smoke may expose that phase only with `unclassified` and rejects missing,
+  duplicate, malformed, mixed or privacy-unsafe records. This run is not PASS evidence. The score
+  remains **11/100** and AV1-09 remains Open until a new exact-main retained run succeeds.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while

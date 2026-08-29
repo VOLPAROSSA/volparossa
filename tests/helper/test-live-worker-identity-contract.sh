@@ -113,6 +113,145 @@ expect_status() {
     fi
 }
 
+# Unexpected shell exits may disclose only one fixed, coarse phase from the
+# real EXIT cleanup. Exercise the exact helpers and the status-preserving trap.
+driver_phase_functions=$temporary_directory/driver-phase-functions.sh
+{
+    sed -n '/^driver_phase_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^report_unexpected_driver_phase() {$/,/^}$/p' "$gate"
+} >"$driver_phase_functions"
+if [ "$(grep -c '^driver_phase_is_safe() {$' "$driver_phase_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_unexpected_driver_phase() {$' \
+        "$driver_phase_functions")" -ne 1 ]; then
+    printf '%s\n' 'the unexpected driver-phase helpers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$driver_phase_functions"
+# shellcheck disable=SC1090
+. "$driver_phase_functions"
+
+expected_driver_phases=$temporary_directory/expected-driver-phases
+printf '%s\n' \
+    staging \
+    worker-launch \
+    worker-terminal-observation \
+    worker-retirement \
+    production-launch \
+    production-observation \
+    production-retirement \
+    final-verification >"$expected_driver_phases"
+while IFS= read -r expected_driver_phase; do
+    driver_phase_is_safe "$expected_driver_phase" || {
+        printf 'driver phase is not allowlisted: %s\n' "$expected_driver_phase" >&2
+        exit 1
+    }
+    expect_status 0 report_unexpected_driver_phase "$expected_driver_phase"
+    if [ -s "$last_stdout" ] \
+        || [ "$(cat "$last_stderr")" \
+            != "VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=$expected_driver_phase" ] \
+        || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+        printf 'driver phase did not emit one fixed record: %s\n' \
+            "$expected_driver_phase" >&2
+        exit 1
+    fi
+done <"$expected_driver_phases"
+expect_status 1 report_unexpected_driver_phase
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_unexpected_driver_phase 'production-observation/private-record'
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+gate_cleanup_function=$temporary_directory/gate-cleanup-function.sh
+sed -n '/^cleanup() {$/,/^}$/p' "$gate" >"$gate_cleanup_function"
+# This is a literal gate-source contract; expansion here would defeat it.
+# shellcheck disable=SC2016
+if [ "$(grep -c '^cleanup() {$' "$gate_cleanup_function")" -ne 1 ] \
+    || [ "$(grep -Fc 'report_unexpected_driver_phase "${driver_phase:-}" || :' \
+        "$gate_cleanup_function")" -ne 1 ]; then
+    printf '%s\n' 'the status-preserving driver-phase cleanup is not unique' >&2
+    exit 1
+fi
+sh -n "$gate_cleanup_function"
+exercise_gate_cleanup() (
+    phase=$1
+    final_reporting=$2
+    requested_status=$3
+    retire_status=$4
+    removal_status=$5
+    # Invoked indirectly by the extracted EXIT cleanup.
+    # shellcheck disable=SC2317
+    retire_unit() { return "$retire_status"; }
+    # shellcheck disable=SC2317
+    remove_temporary_stage() { return "$removal_status"; }
+    cleanup_error=no
+    normal_final_reporting_reached=$final_reporting
+    if [ "$phase" = missing ]; then
+        unset driver_phase
+    else
+        driver_phase=$phase
+    fi
+    : "$cleanup_error" "$normal_final_reporting_reached" "${driver_phase:-}"
+    # shellcheck disable=SC1090
+    . "$gate_cleanup_function"
+    trap cleanup EXIT
+    exit "$requested_status"
+)
+expect_status 2 exercise_gate_cleanup worker-terminal-observation no 2 0 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-terminal-observation'
+expect_status 2 exercise_gate_cleanup missing no 2 0 0
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 2 exercise_gate_cleanup invalid-phase no 2 0 0
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 2 exercise_gate_cleanup production-launch yes 2 0 0
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 exercise_gate_cleanup worker-retirement no 0 1 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement'
+expect_status 2 exercise_gate_cleanup production-retirement no 2 1 1
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement'
+
+if ! awk '
+    /^driver_phase=staging$/ { staging++; staging_line = NR }
+    /^driver_phase=worker-launch$/ { worker_launch++; worker_launch_line = NR }
+    /^driver_phase=worker-terminal-observation$/ {
+        worker_terminal++; worker_terminal_line = NR
+    }
+    /^driver_phase=worker-retirement$/ { worker_retirement++; worker_retirement_line = NR }
+    /^    driver_phase=production-launch$/ {
+        production_launch++; production_launch_line = NR
+    }
+    /^    driver_phase=production-observation$/ {
+        production_observation++; production_observation_line = NR
+    }
+    /^    driver_phase=production-retirement$/ {
+        production_retirement++; production_retirement_line = NR
+    }
+    /^driver_phase=final-verification$/ { final_verification++; final_verification_line = NR }
+    /^normal_final_reporting_reached=yes$/ { final_reporting++; final_reporting_line = NR }
+    END {
+        valid = staging == 1 && worker_launch == 1 && worker_terminal == 1
+        valid = valid && worker_retirement == 1 && production_launch == 1
+        valid = valid && production_observation == 1 && production_retirement == 1
+        valid = valid && final_verification == 1 && final_reporting == 1
+        valid = valid && staging_line < worker_launch_line
+        valid = valid && worker_launch_line < worker_terminal_line
+        valid = valid && worker_terminal_line < worker_retirement_line
+        valid = valid && worker_retirement_line < production_launch_line
+        valid = valid && production_launch_line < production_observation_line
+        valid = valid && production_observation_line < production_retirement_line
+        valid = valid && production_retirement_line < final_verification_line
+        valid = valid && final_verification_line < final_reporting_line
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'the coarse driver phases are not unique and monotonic' >&2
+    exit 1
+fi
+
 # Retained VM evidence may expose only one fixed, privacy-safe predicate group.
 # Exercise the exact gate helpers and pin both the allowlist and first-failure rule.
 proof_failure_functions=$temporary_directory/proof-failure-functions.sh
@@ -284,6 +423,74 @@ while IFS= read -r proof_failure_reason_under_test; do
         exit 1
     }
 done <"$expected_proof_failure_reasons"
+
+# Run the exact production identity fragment with its artifact missing. Every
+# downstream operand must stay defined and the fixed predicate must survive.
+production_identity_fragment=$temporary_directory/production-identity-fragment.sh
+awk '
+    /^    identity_invocation=$/ { capture = 1 }
+    /^    production_socket_identity_file=/ { capture = 0 }
+    capture {
+        line = $0
+        sub(/^    /, "", line)
+        print line
+    }
+' "$gate" >"$production_identity_fragment"
+if [ "$(grep -c '^identity_executable=$' "$production_identity_fragment")" -ne 1 ] \
+    || [ "$(grep -c '^production_identity=' "$production_identity_fragment")" -ne 1 ]; then
+    printf '%s\n' 'the production identity fallback is not uniquely executable' >&2
+    exit 1
+fi
+sh -n "$production_identity_fragment"
+exercise_missing_production_identity() (
+    set -u
+    temporary_stage=$temporary_directory/missing-production-identity
+    agent_gid=61000
+    : "$agent_gid"
+    proof_failure_reason=
+    # Invoked by the exact extracted observation fragment.
+    # shellcheck disable=SC2317
+    vp_capture_file_is_safe() { return 1; }
+    # shellcheck disable=SC2317
+    record_proof_failure() {
+        [ -z "$proof_failure_reason" ] && proof_failure_reason=$1
+    }
+    # shellcheck disable=SC1090
+    . "$production_identity_fragment"
+    [ "$proof_failure_reason" = production-process-identity ] \
+        && [ -z "$identity_invocation" ] \
+        && [ -z "$identity_main_pid" ] \
+        && [ -z "$identity_executable" ] \
+        && [ -z "$identity_process_contract" ] \
+        && [ -z "$identity_extra" ] \
+        && [ -z "$identity_seccomp_filters" ]
+)
+expect_status 0 exercise_missing_production_identity
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+# A failed redirection on POSIX special builtin `exec` used to terminate dash
+# with status 2. The exact `command exec` form must remain an ordinary failure.
+# These are literal gate-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+grep -Fx '    if command exec 9<>"$production_lock_path"; then' "$gate" >/dev/null
+# shellcheck disable=SC2016
+if grep -F 'if exec 9<>"$production_lock_path"; then' "$gate" >/dev/null; then
+    printf '%s\n' 'the production lock probe restored fatal special-builtin semantics' >&2
+    exit 1
+fi
+exercise_missing_production_lock() (
+    set -eu
+    production_lock_path=$temporary_directory/absent-directory/lock
+    if command exec 9<>"$production_lock_path"; then
+        exit 91
+    else
+        lock_open_status=$?
+    fi
+    [ "$lock_open_status" -eq 2 ]
+)
+expect_status 0 exercise_missing_production_lock
+test ! -s "$last_stdout"
+grep -F 'cannot create' "$last_stderr" >/dev/null
 
 exercise_worker_launch_diagnostic() (
     [ "$#" -eq 3 ] || exit 98

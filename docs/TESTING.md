@@ -170,6 +170,11 @@ can count as AV1-09 evidence or change the alpha score.
 If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
 category (or `unclassified`) to job stderr. For `worker-launch-status` only, it may additionally emit
 one fixed structural classification of launch binding, terminal state and payload-free helper stage.
+If and only if the gate exits nonzero before its normal final reporting path and the generic category
+is consequently `unclassified`, the EXIT cleanup may additionally emit one fixed value-free driver
+phase: staging, worker launch, worker terminal observation, worker retirement, production launch,
+production observation, production retirement, or final verification. The runner requires exactly
+one allowlisted phase and suppresses missing, duplicate, malformed, mixed or privacy-unsafe records.
 It does not print or upload the proof diagnostic file.
 
 The job first verifies the exact canonical bytes and complete object in

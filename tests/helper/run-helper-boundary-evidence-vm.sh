@@ -249,6 +249,23 @@ non_retained_proof_failure_reason_is_safe() {
     esac
 }
 
+non_retained_driver_phase_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        staging|\
+        worker-launch|\
+        worker-terminal-observation|\
+        worker-retirement|\
+        production-launch|\
+        production-observation|\
+        production-retirement|\
+        final-verification)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 report_non_retained_proof_failure_reason() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -273,6 +290,34 @@ report_non_retained_proof_failure_reason() {
         || return 1
     printf 'non-retained helper-boundary PR smoke failure category: %s\n' \
         "$non_retained_failure_reason" >&2
+}
+
+report_non_retained_driver_phase() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_driver_phase_prefix=VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=
+    [ "$(grep -Ec "^$non_retained_driver_phase_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|final-verification)$'
+    [ "$(grep -Ec "$non_retained_driver_phase_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_mixed_diagnostic_pattern='^(live worker-identity proof failed: predicate rejected: |VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=)'
+    [ "$(grep -Ec "$non_retained_mixed_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 0 ] || return 1
+    non_retained_driver_phase=$(grep -E "$non_retained_driver_phase_pattern" \
+        "$non_retained_diagnostic") || return 1
+    non_retained_driver_phase=${non_retained_driver_phase#"$non_retained_driver_phase_prefix"}
+    non_retained_driver_phase_is_safe "$non_retained_driver_phase" || return 1
+    printf 'non-retained helper-boundary PR smoke driver phase: %s\n' \
+        "$non_retained_driver_phase" >&2
 }
 
 report_non_retained_worker_launch_diagnostic() {
@@ -1618,6 +1663,7 @@ if [ "$guest_status" -ne 0 ]; then
         else
             printf '%s\n' \
                 'non-retained helper-boundary PR smoke failure category: unclassified' >&2
+            report_non_retained_driver_phase "$proof_stderr_log" || true
         fi
     fi
     failed "the guest helper-boundary proof exited with status $guest_status"

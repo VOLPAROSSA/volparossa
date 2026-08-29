@@ -898,8 +898,22 @@ unit now explicitly selects `system.slice`, requires an exactly empty terminal `
 exact persistent `Slice=system.slice`, and derives the fixed former service-cgroup path only for its
 post-retirement absence check. The production transient also selects and reads back exact
 `Slice=system.slice`; its process remains running during observation and its exact nonempty live
-`ControlGroup` readback is still mandatory. This failed run is
-not PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open. The second
+`ControlGroup` readback is still mandatory. The next non-retained branch
+[run 33275030601](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601) at
+`20f8a121f7aa020450587251dad9de66ec7738fc` ran that correction in
+[job 99160142810](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601/job/99160142810),
+but the guest gate exited with status 2 before its normal fixed final report, so the runner could
+retain only `unclassified`. Static review found two fail-closed observations that could mask a
+fixed production predicate with that shell status: an unsafe or missing `unit.identity` left its
+later retirement executable operand unset under `set -u`, and a failed redirection on the POSIX
+special builtin `exec` could terminate the non-interactive shell before its `else` branch. All
+identity operands are now initialized before validation, and the lock probe uses `command exec` so
+redirection failure is an ordinary recorded predicate failure. As a bounded fallback, the existing
+EXIT cleanup emits exactly one of eight value-free monotonic driver phases only for a nonzero exit
+before normal final reporting; it never changes the original or cleanup-derived exit status. A
+non-retained runner exposes that single phase only beside `unclassified`, rejecting missing,
+duplicate, malformed, mixed, private-key-bearing or non-allowlisted records. This failed run is not
+PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open. The second
 phase exercises the production server entry point, but not an installed package, the shipped unit
 file, restart policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run
 is durably tied to the same clean commit and retained, the gate is not earned package, datapath, A14

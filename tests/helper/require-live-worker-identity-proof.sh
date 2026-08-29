@@ -374,6 +374,29 @@ report_worker_confinement_diagnostic() {
         "$worker_confinement_failure" >&2
 }
 
+driver_phase_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        staging|\
+        worker-launch|\
+        worker-terminal-observation|\
+        worker-retirement|\
+        production-launch|\
+        production-observation|\
+        production-retirement|\
+        final-verification)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_unexpected_driver_phase() {
+    [ "$#" -eq 1 ] || return 1
+    driver_phase_is_safe "$1" || return 1
+    printf 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=%s\n' "$1" >&2
+}
+
 if [ "$(id -u)" -ne 0 ]; then
     blocked 'execution requires root inside the disposable VM'
 fi
@@ -1289,6 +1312,8 @@ worker_fdstore_before_retirement=
 worker_retired_load_state=
 production_fdstore_during_run=
 production_retired_load_state=
+driver_phase=staging
+normal_final_reporting_reached=no
 
 unit_name_is_safe() {
     case $unit_name in
@@ -1670,6 +1695,10 @@ cleanup() {
     fi
     if [ "$cleanup_error" = yes ] && [ "$saved_status" -eq 0 ]; then
         saved_status=1
+    fi
+    if [ "$saved_status" -ne 0 ] \
+        && [ "${normal_final_reporting_reached:-no}" = no ]; then
+        report_unexpected_driver_phase "${driver_phase:-}" || :
     fi
     exit "$saved_status"
 }
@@ -2132,6 +2161,7 @@ notify_socket_bind="$notify_socket:$notify_socket:norbind"
 # predicates separately require its exact helper replacement.
 # Failed units remain loaded for terminal classification; bounded retirement
 # resets and collects them later.
+driver_phase=worker-launch
 unit_may_own=yes
 set +e
 systemd-run \
@@ -2196,6 +2226,7 @@ systemd-run \
     >"$temporary_stage/systemd-run.stdout" 2>"$temporary_stage/systemd-run.stderr"
 run_status=$?
 set -e
+driver_phase=worker-terminal-observation
 
 unset production_ok
 proof_failure_reason=
@@ -2524,6 +2555,7 @@ worker_control_group=/system.slice/$unit_name
 worker_unit_name=$unit_name
 worker_invocation_id=$unit_invocation_id
 worker_ownership_marker=$unit_ownership_marker
+driver_phase=worker-retirement
 if ! retire_unit; then
     cleanup_error=yes
     record_proof_failure 'worker-retirement'
@@ -2545,6 +2577,7 @@ if [ "$proof_ok" = yes ]; then
 fi
 
 if [ "$proof_ok" = yes ]; then
+    driver_phase=production-launch
     production_marker_line=$(printf '%s\n%s\n%s\n' \
         'VOLPAROSSA helper production IPC transient ownership marker v1' \
         "$unit_name" "$temporary_stage_identity" | sha256sum) \
@@ -2632,6 +2665,7 @@ if [ "$proof_ok" = yes ]; then
         2>"$temporary_stage/systemd-run-production.stderr"
     production_run_status=$?
     set -e
+    driver_phase=production-observation
 
     production_ok=yes
     if [ "$production_run_status" -ne 0 ]; then
@@ -2940,6 +2974,15 @@ if [ "$proof_ok" = yes ]; then
         record_proof_failure 'production-confinement'
     fi
 
+    # Keep every downstream retirement operand defined even when the bounded
+    # identity artifact is absent or unsafe. The recorded fixed predicate must
+    # reach normal final reporting instead of an errexit/set-u status 2.
+    identity_invocation=
+    identity_main_pid=
+    identity_executable=
+    identity_process_contract=
+    identity_extra=
+    identity_seccomp_filters=
     production_identity=$temporary_stage/production-output/unit.identity
     if vp_capture_file_is_safe "$production_identity"; then
         identity_invocation=$(sed -n '1p' "$production_identity") \
@@ -3054,6 +3097,7 @@ if [ "$proof_ok" = yes ]; then
     fi
 
     production_unit_name=$unit_name
+    driver_phase=production-retirement
     if ! retire_unit; then
         cleanup_error=yes
         record_proof_failure 'production-retirement'
@@ -3089,7 +3133,10 @@ if [ "$proof_ok" = yes ]; then
     if [ "$production_lock_path_before" != "$expected_production_lock_identity" ]; then
         record_proof_failure 'production-lock-release'
     fi
-    if exec 9<>"$production_lock_path"; then
+    # `exec` is a POSIX special builtin; a redirection failure may otherwise
+    # terminate a non-interactive shell with status 2 before the fixed failure
+    # predicate and cleanup path run. `command` removes that special status.
+    if command exec 9<>"$production_lock_path"; then
         production_lock_fd_identity=$(stat -Lc '%d:%i:%f:%u:%g:%a:%h' \
             /proc/self/fd/9 2>/dev/null) || production_lock_fd_identity=
         if [ "$production_lock_fd_identity" != "$expected_production_lock_identity" ] \
@@ -3120,6 +3167,7 @@ if [ "$proof_ok" = yes ]; then
         failed 'internal production proof failure state is inconsistent'
     fi
 fi
+driver_phase=final-verification
 capture_host_state "$temporary_stage/after"
 after_digest=$(state_digest "$temporary_stage/after")
 changed_records=
@@ -3132,6 +3180,7 @@ if [ -n "$changed_records" ] || [ "$before_digest" != "$after_digest" ]; then
     printf 'Host state changed in:%s\n' "$changed_records" >&2
     failed 'privacy-safe before/after host-state digests differ'
 fi
+normal_final_reporting_reached=yes
 if [ "$proof_ok" != yes ]; then
     if [ "$proof_failure_reason" = worker-launch-status ]; then
         report_worker_launch_diagnostic \
