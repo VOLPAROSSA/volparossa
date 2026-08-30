@@ -59,9 +59,10 @@ use crate::{
 
 use super::{
     ConfirmedWorkerGenerationAbsent, DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_TTL,
-    DurableFunctionalWorkerOwnership, ShutdownStatus, WorkerCoordinator, WorkerGenerationOwnership,
-    WorkerGenerationReap, WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry,
-    WorkerV3Error,
+    DurableFunctionalPrepareFailure, DurableFunctionalWorkerOwnership,
+    DurableHandoffPrepareFailure, DurableHandoffTerminalSelector, DurableHandoffTerminalSettlement,
+    ShutdownStatus, WorkerCoordinator, WorkerGenerationOwnership, WorkerGenerationReap,
+    WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
 };
 
 const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 1;
@@ -185,6 +186,7 @@ struct OpenLeaseEntry {
     worker: Option<WorkerGenerationOwnership>,
     recovery: Option<WorkerRecoveryIdentitySource>,
     durable: Option<DurableLeaseCustody>,
+    durable_handoff_terminal: Option<DurableHandoffTerminalSelector>,
     wireguard: Vec<LiveWireguardLeaseOwner>,
     prepare: PrepareLeases,
     underlay: UnderlayCandidate,
@@ -390,7 +392,7 @@ impl FunctionalAlphaLeaseBackend {
             let mut state = lock_state(&self.state);
             exact_entry_mut(&mut state, key)?.phase = OpenLeasePhase::DurableHandoffPending;
         }
-        let Ok(durable) = self
+        let durable = match self
             .coordinator
             .durable_functional_prepare_until(
                 durable_handle,
@@ -401,8 +403,25 @@ impl FunctionalAlphaLeaseBackend {
                 operation_deadline,
             )
             .await
-        else {
-            return Err(BackendError::CleanupIncomplete);
+        {
+            Ok(durable) => durable,
+            Err(DurableFunctionalPrepareFailure::Handoff(DurableHandoffPrepareFailure {
+                error: _,
+                selector,
+            })) => {
+                if selector.context_id() != key.context_id {
+                    std::process::abort();
+                }
+                let mut state = lock_state(&self.state);
+                let entry = exact_entry_mut(&mut state, key)?;
+                if entry.durable_handoff_terminal.replace(selector).is_some() {
+                    std::process::abort();
+                }
+                return Err(BackendError::CleanupIncomplete);
+            }
+            Err(DurableFunctionalPrepareFailure::Later(_error)) => {
+                return Err(BackendError::CleanupIncomplete);
+            }
         };
         let DurableFunctionalWorkerOwnership {
             settlement,
@@ -512,6 +531,7 @@ impl FunctionalAlphaLeaseBackend {
             worker: None,
             recovery: None,
             durable: None,
+            durable_handoff_terminal: None,
             wireguard: Vec::new(),
             prepare: PrepareLeases {
                 route_context_id: key.context_id.to_vec(),
@@ -965,6 +985,39 @@ impl FunctionalAlphaLeaseBackend {
         deadline: HardDeadline,
         request_child_destroy: bool,
     ) -> bool {
+        let handoff_terminal = {
+            let mut state = lock_state(&self.state);
+            state.as_mut().and_then(|entry| {
+                if entry.key == key
+                    && entry.phase == OpenLeasePhase::DurableHandoffPending
+                    && entry.worker.is_none()
+                {
+                    entry.durable_handoff_terminal.take()
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(selector) = handoff_terminal {
+            let Some(handle) = self.durable_ownership.as_ref() else {
+                self.restore_durable_handoff_terminal(key, selector);
+                return false;
+            };
+            match self.coordinator.settle_durable_handoff_terminal_until(
+                handle,
+                selector,
+                key.context_id,
+                deadline,
+            ) {
+                DurableHandoffTerminalSettlement::Absent => {
+                    return remove_exact_entry(&self.state, key);
+                }
+                DurableHandoffTerminalSettlement::Retained { error: _, selector } => {
+                    self.restore_durable_handoff_terminal(key, selector);
+                    return false;
+                }
+            }
+        }
         if lock_state(&self.state).as_ref().is_some_and(|entry| {
             entry.key == key
                 && entry.phase == OpenLeasePhase::DurableHandoffPending
@@ -1119,6 +1172,23 @@ impl FunctionalAlphaLeaseBackend {
             }
         }
         remove_exact_entry(&self.state, key)
+    }
+
+    fn restore_durable_handoff_terminal(
+        &self,
+        key: OpenLineageKey,
+        selector: DurableHandoffTerminalSelector,
+    ) {
+        let mut state = lock_state(&self.state);
+        let Ok(entry) = exact_entry_mut(&mut state, key) else {
+            std::process::abort();
+        };
+        if entry.phase != OpenLeasePhase::DurableHandoffPending
+            || entry.worker.is_some()
+            || entry.durable_handoff_terminal.replace(selector).is_some()
+        {
+            std::process::abort();
+        }
     }
 
     #[allow(
@@ -3180,6 +3250,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
     use nix::unistd::{getegid, geteuid};
+    use tempfile::tempdir;
     use volparossa_protocol::{
         MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
         SignedEnvelope, Transport, decode_canonical, generate_nonce, node_id_from_public_key,
@@ -3195,7 +3266,8 @@ mod tests {
             receive_credential_worker_request, send_credential_worker_response,
         },
         worker_v3::{
-            BootstrapChallenge, SpawnedWorker, StablePhase, WorkerProcess, correlated_response,
+            BootstrapChallenge, DurableWorkerPrepareOutcome, DurableWorkerPrepareTerminal,
+            SpawnedWorker, StablePhase, WorkerProcess, correlated_response,
         },
     };
 
@@ -3313,6 +3385,7 @@ mod tests {
             worker: None,
             recovery: None,
             durable: None,
+            durable_handoff_terminal: None,
             wireguard: vec![wireguard],
             prepare,
             underlay: UnderlayCandidate {
@@ -3353,6 +3426,7 @@ mod tests {
             worker: None,
             recovery: None,
             durable: None,
+            durable_handoff_terminal: None,
             birth_may_exist: vec![false; wireguard.len()],
             wireguard,
             prepare,
@@ -3861,6 +3935,105 @@ mod tests {
             &[false],
             1,
         ));
+    }
+
+    #[test]
+    fn opaque_never_dispatched_settlement_has_one_bounded_production_path() {
+        let functional_source = include_str!("functional_backend.rs");
+        let functional_end = functional_source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("functional production boundary");
+        let functional = &functional_source[..functional_end];
+        let worker_source = include_str!("../worker_v3.rs");
+        let worker_end = worker_source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("worker production boundary");
+        let worker = &worker_source[..worker_end];
+        let actor = include_str!("../ownership_journal/actor.rs");
+        let journal = include_str!("../ownership_journal.rs");
+
+        assert_eq!(
+            worker
+                .matches(
+                    "ExactNeverDispatchedPrepareProof::after_definite_worker_admission_rejection("
+                )
+                .count(),
+            1,
+            "definite no-worker admission has one proof mint"
+        );
+        assert_eq!(
+            worker
+                .matches("ExactNeverDispatchedPrepareProof::after_exact_worker_absence(")
+                .count(),
+            1,
+            "exact worker reap has one proof mint"
+        );
+        assert_eq!(
+            worker
+                .matches("handle.retire_never_dispatched_until(proof, deadline)")
+                .count(),
+            1,
+            "the coordinator has one proof-consuming actor call"
+        );
+        assert_eq!(
+            functional
+                .matches(".settle_durable_handoff_terminal_until(")
+                .count(),
+            1,
+            "only exact later functional cleanup retries a handoff terminal"
+        );
+        assert!(actor.contains(
+            "pub(crate) fn retire_never_dispatched_until(\n        &self,\n        proof: ExactNeverDispatchedPrepareProof,"
+        ));
+        assert!(!actor.contains(
+            "pub(crate) fn retire_never_dispatched_until(\n        &self,\n        key: DurableOwnershipKey,"
+        ));
+
+        let settlement_start = worker
+            .find("    fn settle_durable_handoff_terminal_until(")
+            .expect("bounded handoff settlement");
+        let settlement_end = worker[settlement_start..]
+            .find("\n    /// Complete the cancellation-safe durable Prepare handoff")
+            .map(|offset| settlement_start + offset)
+            .expect("bounded handoff settlement end");
+        let settlement = &worker[settlement_start..settlement_end];
+        assert!(!settlement.contains("async fn"));
+        assert!(!settlement.contains(".await"));
+        assert!(settlement.contains("take_exact_durable_handoff_terminal(&selector)"));
+        assert!(settlement.contains("restore_exact_durable_handoff_terminal(&selector, outcome)"));
+        assert!(!settlement.contains("PublicationStart"));
+        assert!(!settlement.contains("DispatchOpen"));
+        assert!(!settlement.contains("remove_current_process_custody"));
+        assert!(!settlement.contains("reconcile_current_process_removal"));
+
+        let cleanup_start = functional
+            .find("    async fn cleanup_exact(")
+            .expect("functional cleanup");
+        let cleanup_end = functional[cleanup_start..]
+            .find("\n    fn restore_durable_handoff_terminal(")
+            .map(|offset| cleanup_start + offset)
+            .expect("handoff cleanup end");
+        let cleanup = &functional[cleanup_start..cleanup_end];
+        let retry = cleanup
+            .find(".settle_durable_handoff_terminal_until(")
+            .expect("exact handoff retry");
+        let absent = cleanup
+            .find("DurableHandoffTerminalSettlement::Absent")
+            .expect("durable Absent result");
+        let remove = cleanup
+            .find("remove_exact_entry(&self.state, key)")
+            .expect("entry removal");
+        assert!(retry < absent && absent < remove);
+
+        // Any registration reply lost after a possible mutation is promoted to Ambiguous. A
+        // non-Ambiguous persistence error is returned only after the complete journal boundary is
+        // confirmed unchanged, so the registration can be dropped without orphaning its Intent.
+        assert!(actor.contains("operation.complete_unstarted_deadline();"));
+        assert!(actor.contains("fence_terminal(&self.lifecycle, Lifecycle::Ambiguous)"));
+        assert!(actor.contains("self.journal.confirm_retry_safe_after_definite_failure()"));
+        assert!(journal.contains("fn confirm_retry_safe_after_definite_failure(&mut self)"));
+        assert!(journal.contains("Err(failure) if failure.uncertain =>"));
+        assert!(journal.contains("self.poisoned = true;"));
     }
 
     fn live_activate_fixture() -> (
@@ -6330,6 +6503,114 @@ mod tests {
         assert_eq!(
             lock_state(&backend.state).as_ref().map(|entry| entry.key),
             Some(open_key)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn later_destroy_retries_exact_handoff_terminal_and_removes_only_after_durable_absent() {
+        let open_key = key();
+        let directory = tempdir().expect("durable handoff directory");
+        let mut actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(2)).expect("actor startup deadline"),
+        )
+        .expect("durable ownership actor");
+        let handle = actor.prepare_handle().expect("durable Prepare handle");
+        let registration = DurableIntentRegistration::try_from_wire(
+            open_key.helper_runtime_id,
+            &PrepareIntent {
+                route_context_id: open_key.context_id.to_vec(),
+                prepare_request_id: open_key.prepare_request_id.to_vec(),
+                prepare_operation_digest: open_key.prepare_operation_digest.to_vec(),
+                setup_expires_at_unix: 100,
+                hard_expires_at_unix: 200,
+                closed_plan: Some(ClosedPreparePlan {
+                    context_role: ContextRole::Client as i32,
+                    leases: vec![RoutingLeasePlan {
+                        path_id: 1,
+                        role: WireguardRole::Client as i32,
+                    }],
+                }),
+            },
+        )
+        .expect("durable registration");
+        let durable_key = match handle.register_until(
+            registration,
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+        ) {
+            crate::ownership_journal::DurableRegistrationOutcome::Registered(key) => key,
+            crate::ownership_journal::DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            } => {
+                drop(registration);
+                panic!("durable registration remained retained: {error}")
+            }
+        };
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let selector = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(Box::new(
+                DurableWorkerPrepareOutcome::KeyRetained {
+                    error: WorkerV3Error::Invalid,
+                    key: durable_key,
+                },
+            )))
+            .expect("ordinary handoff selector");
+        let mut entry = open_entry(open_key);
+        entry.phase = OpenLeasePhase::DurableHandoffPending;
+        entry.durable_handoff_terminal = Some(selector);
+        let backend = FunctionalAlphaLeaseBackend {
+            coordinator,
+            relay_replay: Mutex::new(functional_alpha_replay_cache()),
+            state: Mutex::new(Some(entry)),
+            durable_ownership: Some(handle),
+        };
+
+        assert_eq!(
+            backend
+                .destroy_one(
+                    destroy_binding(
+                        open_key,
+                        tokio::time::Instant::now() - Duration::from_millis(1),
+                    ),
+                    destroy_value(open_key),
+                )
+                .await,
+            Err(BackendError::CleanupIncomplete)
+        );
+        assert!(
+            lock_state(&backend.state)
+                .as_ref()
+                .is_some_and(|entry| entry.durable_handoff_terminal.is_some())
+        );
+        assert_eq!(
+            backend
+                .destroy_one(
+                    destroy_binding(
+                        open_key,
+                        tokio::time::Instant::now() + Duration::from_secs(1),
+                    ),
+                    destroy_value(open_key),
+                )
+                .await,
+            Ok(ConfirmedAbsent)
+        );
+        assert!(lock_state(&backend.state).is_none());
+        assert!(backend.coordinator.shutdown().await);
+        drop(backend);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
         );
     }
 

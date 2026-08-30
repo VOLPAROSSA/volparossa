@@ -18,8 +18,9 @@ mod actor;
 pub(crate) use actor::{
     DurableArmOutcome, DurableCleanupConfirmed, DurableCleanupOutcome, DurableCustodyArmHandle,
     DurableCustodyNameDigest, DurableCustodyOutcome, DurableIntentRegistration,
-    DurableManagerAbsentOutcome, DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor,
-    DurableOwnershipError, DurableOwnershipKey, DurableOwnershipPrepareHandle,
+    DurableManagerAbsentOutcome, DurableMayOwnCustody, DurableMayOwnPrepare,
+    DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
+    DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
     DurablePrepareAnchor, DurablePrepareAnchorParts, DurablePrepareSettlement,
     DurableRegistrationOutcome, StartupCustodyPhase, StartupCustodyTarget,
 };

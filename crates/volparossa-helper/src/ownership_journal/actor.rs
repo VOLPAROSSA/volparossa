@@ -42,7 +42,10 @@ use volparossa_routing::PrepareIntent;
 use crate::{
     deadline::HardDeadline,
     internal_protocol::PrepareLeases,
-    worker_v3::{ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof},
+    worker_v3::{
+        ExactNeverDispatchedPrepareProof, ExactSameRuntimeCleanupProof,
+        ExactSameRuntimeManagerAbsenceProof,
+    },
 };
 
 use super::{
@@ -292,6 +295,27 @@ fn custody_binding_for_test(
 #[must_use = "a durable ownership key must be armed or explicitly retired"]
 pub(crate) struct DurableOwnershipKey {
     coordinates: OwnershipCoordinates,
+}
+
+/// Copyable correlation identity for selecting one retained terminal without carrying mutation
+/// authority. Only affine keys and proofs can expose this opaque value.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DurableOwnershipSelector(OwnershipCoordinates);
+
+impl DurableOwnershipSelector {
+    pub(crate) const fn from_key(key: &DurableOwnershipKey) -> Self {
+        Self(key.coordinates)
+    }
+
+    pub(crate) const fn context_id(self) -> [u8; 16] {
+        self.0.context_id.0
+    }
+}
+
+impl fmt::Debug for DurableOwnershipSelector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableOwnershipSelector(<redacted>)")
+    }
 }
 
 /// Stable, secret-free descriptor-store identity derived from one exact durable key.
@@ -571,6 +595,15 @@ pub(crate) enum DurableManagerAbsentOutcome {
     Retained {
         error: DurableOwnershipError,
         proof: ExactSameRuntimeManagerAbsenceProof,
+    },
+}
+
+#[must_use = "never-dispatched retirement retains the opaque absence proof on every error"]
+pub(crate) enum DurableNeverDispatchedOutcome {
+    Absent,
+    Retained {
+        error: DurableOwnershipError,
+        proof: ExactNeverDispatchedPrepareProof,
     },
 }
 
@@ -1329,6 +1362,29 @@ impl DurableOwnershipPrepareHandle {
         }
     }
 
+    /// Inject a reply-path panic after a different Intent has durably registered.
+    ///
+    /// This cross-module test seam makes the actor deterministically ambiguous without exposing
+    /// its client, journal coordinates or any production mutation authority.
+    #[cfg(test)]
+    pub(crate) fn panic_after_registration_for_test(
+        &self,
+        registration: DurableIntentRegistration,
+    ) -> DurableRegistrationOutcome {
+        let payload = registration.actor_payload();
+        let result = self
+            .client
+            .panic_after_register_pending(payload)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(key) => DurableRegistrationOutcome::Registered(key),
+            Err(error) => DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            },
+        }
+    }
+
     pub(crate) fn mark_custody_until(
         &self,
         key: DurableOwnershipKey,
@@ -1349,6 +1405,21 @@ impl DurableOwnershipPrepareHandle {
     pub(crate) fn custody_arm_handle(&self) -> DurableCustodyArmHandle {
         DurableCustodyArmHandle {
             client: self.client.clone(),
+        }
+    }
+
+    pub(crate) fn retire_never_dispatched_until(
+        &self,
+        proof: ExactNeverDispatchedPrepareProof,
+        deadline: HardDeadline,
+    ) -> DurableNeverDispatchedOutcome {
+        let result = self
+            .client
+            .retire_pending_until(proof.key().coordinates, deadline)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(()) => DurableNeverDispatchedOutcome::Absent,
+            Err(error) => DurableNeverDispatchedOutcome::Retained { error, proof },
         }
     }
 

@@ -72,9 +72,9 @@ use crate::{
     ownership_journal::{
         DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyOutcome,
         DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare,
-        DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey,
-        DurableOwnershipPrepareHandle, DurablePrepareSettlement, DurableRegistrationOutcome,
-        DurableWireguardResource,
+        DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
+        DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
+        DurablePrepareSettlement, DurableRegistrationOutcome, DurableWireguardResource,
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
@@ -4468,6 +4468,77 @@ enum DurableWorkerPrepareOutcome {
         error: DurableOwnershipError,
         handoff: DurableWorkerPrepareHandoff,
     },
+    NeverDispatchedRetained {
+        error: DurableOwnershipError,
+        proof: ExactNeverDispatchedPrepareProof,
+    },
+}
+
+enum ExactNeverDispatchedEvidence {
+    AdmissionRejected,
+    WorkerAbsent(Box<ExactNeverDispatchedWorkerEvidence>),
+}
+
+struct ExactNeverDispatchedWorkerEvidence {
+    _worker: ConfirmedWorkerGenerationAbsent,
+    _source: Option<WorkerRecoveryIdentitySource>,
+}
+
+/// Opaque affine authority that one durable Intent never crossed worker dispatch or systemd
+/// publication. Only the worker coordinator can mint it after a definite admission rejection or
+/// exact worker-generation reap; the actor can only consume or return it unchanged.
+#[must_use = "never-dispatched evidence must retire its exact Intent or remain retained"]
+pub(crate) struct ExactNeverDispatchedPrepareProof {
+    key: DurableOwnershipKey,
+    _evidence: ExactNeverDispatchedEvidence,
+}
+
+impl ExactNeverDispatchedPrepareProof {
+    fn after_definite_worker_admission_rejection(key: DurableOwnershipKey) -> Self {
+        Self {
+            key,
+            _evidence: ExactNeverDispatchedEvidence::AdmissionRejected,
+        }
+    }
+
+    fn after_exact_worker_absence(
+        key: DurableOwnershipKey,
+        worker: ConfirmedWorkerGenerationAbsent,
+        source: Option<WorkerRecoveryIdentitySource>,
+    ) -> Self {
+        if DurableOwnershipSelector::from_key(&key).context_id() != worker.coordinates.context_id
+            || source.as_ref().is_some_and(|source| {
+                source.pending.coordinates != worker.coordinates
+                    || source.pending.coordinates.context_id
+                        != DurableOwnershipSelector::from_key(&key).context_id()
+            })
+        {
+            std::process::abort();
+        }
+        Self {
+            key,
+            _evidence: ExactNeverDispatchedEvidence::WorkerAbsent(Box::new(
+                ExactNeverDispatchedWorkerEvidence {
+                    _worker: worker,
+                    _source: source,
+                },
+            )),
+        }
+    }
+
+    pub(crate) const fn key(&self) -> &DurableOwnershipKey {
+        &self.key
+    }
+
+    fn selector(&self) -> DurableOwnershipSelector {
+        DurableOwnershipSelector::from_key(&self.key)
+    }
+}
+
+impl std::fmt::Debug for ExactNeverDispatchedPrepareProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ExactNeverDispatchedPrepareProof(<redacted>)")
+    }
 }
 
 /// Affine terminal retained when production durable Prepare cannot reach dispatch-open.
@@ -4482,6 +4553,101 @@ enum DurableWorkerPrepareTerminal {
         error: WorkerV3Error,
         may_own: Box<DurableWorkerMayOwnPrepare>,
     },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct DurableHandoffTerminalIdentity {
+    serial: NonZeroU64,
+    context_id: ContextId,
+    ownership: Option<DurableOwnershipSelector>,
+}
+
+#[must_use = "a retained handoff selector must be settled or kept for an exact retry"]
+struct DurableHandoffTerminalSelector {
+    identity: DurableHandoffTerminalIdentity,
+}
+
+impl DurableHandoffTerminalSelector {
+    const fn context_id(&self) -> ContextId {
+        self.identity.context_id
+    }
+}
+
+impl std::fmt::Debug for DurableHandoffTerminalSelector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableHandoffTerminalSelector(<redacted>)")
+    }
+}
+
+struct StoredDurableWorkerPrepareTerminal {
+    serial: NonZeroU64,
+    terminal: DurableWorkerPrepareTerminal,
+}
+
+struct DurableHandoffPrepareFailure {
+    error: WorkerV3Error,
+    selector: DurableHandoffTerminalSelector,
+}
+
+enum DurableFunctionalPrepareFailure {
+    Handoff(DurableHandoffPrepareFailure),
+    Later(WorkerV3Error),
+}
+
+#[must_use = "handoff settlement either proves durable absence or returns the exact selector"]
+enum DurableHandoffTerminalSettlement {
+    Absent,
+    Retained {
+        error: WorkerV3Error,
+        selector: DurableHandoffTerminalSelector,
+    },
+}
+
+enum NeverDispatchedWorkerSettlement {
+    Proven(ExactNeverDispatchedPrepareProof),
+    Retained {
+        error: WorkerV3Error,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+        source: Box<Option<WorkerRecoveryIdentitySource>>,
+    },
+}
+
+fn durable_handoff_outcome_identity(
+    outcome: &DurableWorkerPrepareOutcome,
+) -> Option<(ContextId, Option<DurableOwnershipSelector>)> {
+    match outcome {
+        DurableWorkerPrepareOutcome::CustodyPublication(_) => None,
+        DurableWorkerPrepareOutcome::RegistrationRetained { registration, .. } => {
+            Some((registration.context_id(), None))
+        }
+        DurableWorkerPrepareOutcome::KeyRetained { key, .. } => {
+            let selector = DurableOwnershipSelector::from_key(key);
+            Some((selector.context_id(), Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { key, worker, .. } => {
+            let selector = DurableOwnershipSelector::from_key(key);
+            (selector.context_id() == worker.coordinates.context_id)
+                .then_some((selector.context_id(), Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::RegisteredWorkerRetained { registered, .. } => {
+            let selector = DurableOwnershipSelector::from_key(&registered.key);
+            (selector.context_id() == registered.worker.coordinates.context_id)
+                .then_some((selector.context_id(), Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. }
+        | DurableWorkerPrepareOutcome::CustodyFenceRetained { handoff, .. } => {
+            let selector = DurableOwnershipSelector::from_key(&handoff.registered.key);
+            let context_id = selector.context_id();
+            (context_id == handoff.registered.worker.coordinates.context_id
+                && context_id == handoff.source.pending.coordinates.context_id
+                && handoff.registered.worker.coordinates == handoff.source.pending.coordinates)
+                .then_some((context_id, Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::NeverDispatchedRetained { proof, .. } => {
+            Some((proof.selector().context_id(), Some(proof.selector())))
+        }
+    }
 }
 
 impl std::fmt::Debug for DurableWorkerPrepareOutcome {
@@ -4512,6 +4678,10 @@ impl std::fmt::Debug for DurableWorkerPrepareOutcome {
                 .debug_struct("CustodyFenceRetained")
                 .field("error", error)
                 .finish_non_exhaustive(),
+            Self::NeverDispatchedRetained { error, .. } => formatter
+                .debug_struct("NeverDispatchedRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -4520,7 +4690,8 @@ fn durable_prepare_outcome_error(outcome: &DurableWorkerPrepareOutcome) -> Worke
     match outcome {
         DurableWorkerPrepareOutcome::CustodyPublication(_) => WorkerV3Error::Ambiguous,
         DurableWorkerPrepareOutcome::RegistrationRetained { error, .. }
-        | DurableWorkerPrepareOutcome::CustodyFenceRetained { error, .. } => {
+        | DurableWorkerPrepareOutcome::CustodyFenceRetained { error, .. }
+        | DurableWorkerPrepareOutcome::NeverDispatchedRetained { error, .. } => {
             durable_ownership_worker_error(*error)
         }
         DurableWorkerPrepareOutcome::KeyRetained { error, .. }
@@ -6040,7 +6211,9 @@ fn ensure_worker_deadline(deadline: HardDeadline) -> Result<(), WorkerV3Error> {
 
 struct SupervisorSettlements {
     shutdown_owners: Vec<DetachedWorker>,
-    durable_prepare_terminals: Vec<DurableWorkerPrepareTerminal>,
+    durable_prepare_terminals: Vec<StoredDurableWorkerPrepareTerminal>,
+    active_durable_handoff_settlements: usize,
+    next_durable_prepare_terminal_serial: u64,
     custody_publication_terminals: Vec<DurableWorkerCustodyPublicationTerminal>,
     reserved_custody_publication_terminals: usize,
     unresolved: bool,
@@ -6057,6 +6230,8 @@ impl SupervisorSettlements {
         Self {
             shutdown_owners: Vec::with_capacity(MAX_PROCESS_OWNERS),
             durable_prepare_terminals: Vec::with_capacity(MAX_PROCESS_OWNERS),
+            active_durable_handoff_settlements: 0,
+            next_durable_prepare_terminal_serial: 0,
             custody_publication_terminals: Vec::with_capacity(MAX_CUSTODY_PUBLICATION_TERMINALS),
             reserved_custody_publication_terminals: 0,
             unresolved: false,
@@ -6126,11 +6301,109 @@ impl SupervisorSettlements {
         self.custody_publication_terminals.push(terminal);
     }
 
-    fn store_durable_prepare_terminal(&mut self, terminal: DurableWorkerPrepareTerminal) {
-        if self.durable_prepare_terminals.len() >= MAX_PROCESS_OWNERS {
+    fn store_durable_prepare_terminal(
+        &mut self,
+        terminal: DurableWorkerPrepareTerminal,
+    ) -> Option<DurableHandoffTerminalSelector> {
+        if self
+            .durable_prepare_terminals
+            .len()
+            .checked_add(self.active_durable_handoff_settlements)
+            .is_none_or(|occupied| occupied >= MAX_PROCESS_OWNERS)
+        {
             std::process::abort();
         }
-        self.durable_prepare_terminals.push(terminal);
+        let Some(next_serial) = self.next_durable_prepare_terminal_serial.checked_add(1) else {
+            std::process::abort();
+        };
+        let Some(serial) = NonZeroU64::new(next_serial) else {
+            std::process::abort();
+        };
+        self.next_durable_prepare_terminal_serial = next_serial;
+        let selector = match &terminal {
+            DurableWorkerPrepareTerminal::Handoff(outcome) => {
+                let Some((context_id, ownership)) = durable_handoff_outcome_identity(outcome)
+                else {
+                    std::process::abort();
+                };
+                Some(DurableHandoffTerminalSelector {
+                    identity: DurableHandoffTerminalIdentity {
+                        serial,
+                        context_id,
+                        ownership,
+                    },
+                })
+            }
+            DurableWorkerPrepareTerminal::PublicationStart { .. }
+            | DurableWorkerPrepareTerminal::DispatchOpen { .. } => None,
+        };
+        self.durable_prepare_terminals
+            .push(StoredDurableWorkerPrepareTerminal { serial, terminal });
+        selector
+    }
+
+    fn take_exact_durable_handoff_terminal(
+        &mut self,
+        selector: &DurableHandoffTerminalSelector,
+    ) -> Option<DurableWorkerPrepareOutcome> {
+        let index = self
+            .durable_prepare_terminals
+            .iter()
+            .position(|stored| stored.serial == selector.identity.serial)?;
+        let DurableWorkerPrepareTerminal::Handoff(outcome) =
+            &self.durable_prepare_terminals[index].terminal
+        else {
+            return None;
+        };
+        let Some((context_id, ownership)) = durable_handoff_outcome_identity(outcome) else {
+            std::process::abort();
+        };
+        if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership) {
+            return None;
+        }
+        let stored = self.durable_prepare_terminals.swap_remove(index);
+        let Some(active) = self.active_durable_handoff_settlements.checked_add(1) else {
+            std::process::abort();
+        };
+        if active > MAX_PROCESS_OWNERS {
+            std::process::abort();
+        }
+        self.active_durable_handoff_settlements = active;
+        let DurableWorkerPrepareTerminal::Handoff(outcome) = stored.terminal else {
+            std::process::abort();
+        };
+        Some(*outcome)
+    }
+
+    fn restore_exact_durable_handoff_terminal(
+        &mut self,
+        selector: &DurableHandoffTerminalSelector,
+        outcome: DurableWorkerPrepareOutcome,
+    ) {
+        let Some((context_id, ownership)) = durable_handoff_outcome_identity(&outcome) else {
+            std::process::abort();
+        };
+        if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership)
+            || self
+                .durable_prepare_terminals
+                .iter()
+                .any(|stored| stored.serial == selector.identity.serial)
+        {
+            std::process::abort();
+        }
+        self.finish_durable_handoff_settlement_reservation();
+        self.durable_prepare_terminals
+            .push(StoredDurableWorkerPrepareTerminal {
+                serial: selector.identity.serial,
+                terminal: DurableWorkerPrepareTerminal::Handoff(Box::new(outcome)),
+            });
+    }
+
+    fn finish_durable_handoff_settlement_reservation(&mut self) {
+        let Some(active) = self.active_durable_handoff_settlements.checked_sub(1) else {
+            std::process::abort();
+        };
+        self.active_durable_handoff_settlements = active;
     }
 
     fn take_exact_custody_publication_terminal(
@@ -6147,7 +6420,8 @@ impl SupervisorSettlements {
     fn take_for_shutdown(&mut self) -> (Vec<DetachedWorker>, bool) {
         let custody_settled = self.custody_publication_terminals.is_empty()
             && self.reserved_custody_publication_terminals == 0
-            && self.durable_prepare_terminals.is_empty();
+            && self.durable_prepare_terminals.is_empty()
+            && self.active_durable_handoff_settlements == 0;
         (
             std::mem::take(&mut self.shutdown_owners),
             !self.unresolved && custody_settled,
@@ -7528,6 +7802,242 @@ impl WorkerCoordinator {
         }
     }
 
+    fn settle_never_dispatched_worker_until(
+        &self,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+        source: Option<WorkerRecoveryIdentitySource>,
+        deadline: HardDeadline,
+    ) -> NeverDispatchedWorkerSettlement {
+        match self.settle_and_terminate_lifecycle_until(worker, deadline) {
+            WorkerGenerationReap::Confirmed(worker) => NeverDispatchedWorkerSettlement::Proven(
+                ExactNeverDispatchedPrepareProof::after_exact_worker_absence(key, worker, source),
+            ),
+            WorkerGenerationReap::Retained { error, ownership } => {
+                NeverDispatchedWorkerSettlement::Retained {
+                    error,
+                    key,
+                    worker: *ownership,
+                    source: Box::new(source),
+                }
+            }
+        }
+    }
+
+    fn retire_exact_never_dispatched_until(
+        handle: &DurableOwnershipPrepareHandle,
+        proof: ExactNeverDispatchedPrepareProof,
+        deadline: HardDeadline,
+    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+        match handle.retire_never_dispatched_until(proof, deadline) {
+            DurableNeverDispatchedOutcome::Absent => Ok(()),
+            DurableNeverDispatchedOutcome::Retained { error, proof } => Err((
+                durable_ownership_worker_error(error),
+                DurableWorkerPrepareOutcome::NeverDispatchedRetained { error, proof },
+            )),
+        }
+    }
+
+    fn settle_retained_handoff_worker_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        handoff: DurableWorkerPrepareHandoff,
+        custody_error: Option<DurableOwnershipError>,
+        deadline: HardDeadline,
+    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+        match self.settle_never_dispatched_worker_until(key, worker, Some(source), deadline) {
+            NeverDispatchedWorkerSettlement::Proven(proof) => {
+                Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+            }
+            NeverDispatchedWorkerSettlement::Retained {
+                error,
+                key,
+                worker,
+                source,
+            } => {
+                let Some(source) = *source else {
+                    std::process::abort();
+                };
+                let handoff = DurableWorkerPrepareHandoff {
+                    registered: DurableRegisteredStartingWorker { key, worker },
+                    source,
+                };
+                let returned_error = worker_error_class(&error);
+                let retained = match custody_error {
+                    Some(error) => {
+                        DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff }
+                    }
+                    None => DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff },
+                };
+                Err((returned_error, retained))
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every unpublished affine handoff variant has one explicit fail-closed settlement"
+    )]
+    fn settle_durable_handoff_outcome_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        outcome: DurableWorkerPrepareOutcome,
+        deadline: HardDeadline,
+    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+        match outcome {
+            DurableWorkerPrepareOutcome::CustodyPublication(publication) => {
+                drop(publication);
+                std::process::abort();
+            }
+            DurableWorkerPrepareOutcome::RegistrationRetained {
+                error,
+                registration,
+            } => {
+                if error == DurableOwnershipError::Ambiguous {
+                    return Err((
+                        WorkerV3Error::Ambiguous,
+                        DurableWorkerPrepareOutcome::RegistrationRetained {
+                            error,
+                            registration,
+                        },
+                    ));
+                }
+                if let Err(error) = ensure_worker_deadline(deadline) {
+                    return Err((
+                        error,
+                        DurableWorkerPrepareOutcome::RegistrationRetained {
+                            error: DurableOwnershipError::DeadlineElapsed,
+                            registration,
+                        },
+                    ));
+                }
+                // Every non-ambiguous retained registration result is pre-mutation or a
+                // retry-safe, health-checked failure. No key exists and no journal retirement is
+                // therefore required.
+                drop(registration);
+                Ok(())
+            }
+            DurableWorkerPrepareOutcome::KeyRetained { key, .. } => {
+                let proof =
+                    ExactNeverDispatchedPrepareProof::after_definite_worker_admission_rejection(
+                        key,
+                    );
+                Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+            }
+            DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker } => {
+                if matches!(error, WorkerV3Error::Ambiguous) {
+                    return Err((
+                        WorkerV3Error::Ambiguous,
+                        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker },
+                    ));
+                }
+                match self.settle_never_dispatched_worker_until(key, worker, None, deadline) {
+                    NeverDispatchedWorkerSettlement::Proven(proof) => {
+                        Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+                    }
+                    NeverDispatchedWorkerSettlement::Retained {
+                        error, key, worker, ..
+                    } => Err((
+                        worker_error_class(&error),
+                        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker },
+                    )),
+                }
+            }
+            DurableWorkerPrepareOutcome::RegisteredWorkerRetained { registered, .. } => {
+                let DurableRegisteredStartingWorker { key, worker } = registered;
+                match self.settle_never_dispatched_worker_until(key, worker, None, deadline) {
+                    NeverDispatchedWorkerSettlement::Proven(proof) => {
+                        Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+                    }
+                    NeverDispatchedWorkerSettlement::Retained {
+                        error,
+                        key,
+                        worker,
+                        source,
+                    } => {
+                        if source.is_some() {
+                            std::process::abort();
+                        }
+                        Err((
+                            worker_error_class(&error),
+                            DurableWorkerPrepareOutcome::RegisteredWorkerRetained {
+                                error,
+                                registered: DurableRegisteredStartingWorker { key, worker },
+                            },
+                        ))
+                    }
+                }
+            }
+            DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. } => {
+                self.settle_retained_handoff_worker_until(handle, handoff, None, deadline)
+            }
+            DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff } => {
+                if error == DurableOwnershipError::Ambiguous {
+                    return Err((
+                        WorkerV3Error::Ambiguous,
+                        DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff },
+                    ));
+                }
+                self.settle_retained_handoff_worker_until(handle, handoff, Some(error), deadline)
+            }
+            DurableWorkerPrepareOutcome::NeverDispatchedRetained { proof, .. } => {
+                Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+            }
+        }
+    }
+
+    fn settle_durable_handoff_terminal_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        selector: DurableHandoffTerminalSelector,
+        expected_context_id: ContextId,
+        deadline: HardDeadline,
+    ) -> DurableHandoffTerminalSettlement {
+        if selector.identity.context_id != expected_context_id
+            || selector
+                .identity
+                .ownership
+                .is_some_and(|ownership| ownership.context_id() != expected_context_id)
+        {
+            return DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Conflict,
+                selector,
+            };
+        }
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            return DurableHandoffTerminalSettlement::Retained { error, selector };
+        }
+        let outcome = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_handoff_terminal(&selector);
+        let Some(outcome) = outcome else {
+            return DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Ambiguous,
+                selector,
+            };
+        };
+        match self.settle_durable_handoff_outcome_until(handle, outcome, deadline) {
+            Ok(()) => {
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .finish_durable_handoff_settlement_reservation();
+                DurableHandoffTerminalSettlement::Absent
+            }
+            Err((error, outcome)) => {
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .restore_exact_durable_handoff_terminal(&selector, outcome);
+                DurableHandoffTerminalSettlement::Retained { error, selector }
+            }
+        }
+    }
+
     /// Complete the cancellation-safe durable Prepare handoff and return only after the exact
     /// worker dispatch fence has opened from attested `MayOwnPrepare` authority.
     ///
@@ -7542,7 +8052,7 @@ impl WorkerCoordinator {
         path_id: u8,
         worker_ttl: Duration,
         deadline: HardDeadline,
-    ) -> Result<DurableFunctionalWorkerOwnership, WorkerV3Error> {
+    ) -> Result<DurableFunctionalWorkerOwnership, DurableFunctionalPrepareFailure> {
         let handoff = self.durable_passive_prepare_handoff_for_context_until(
             handle,
             registration,
@@ -7555,13 +8065,17 @@ impl WorkerCoordinator {
             DurableWorkerPrepareOutcome::CustodyPublication(publication) => publication,
             retained => {
                 let error = durable_prepare_outcome_error(&retained);
-                self.settlements
+                let selector = self
+                    .settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(
                         Box::new(retained),
-                    ));
-                return Err(error);
+                    ))
+                    .unwrap_or_else(|| std::process::abort());
+                return Err(DurableFunctionalPrepareFailure::Handoff(
+                    DurableHandoffPrepareFailure { error, selector },
+                ));
             }
         };
 
@@ -7570,7 +8084,8 @@ impl WorkerCoordinator {
             DurableCustodyPublicationStartOutcome::Started(completion) => completion,
             DurableCustodyPublicationStartOutcome::Retained { error, publication } => {
                 let returned_error = worker_error_class(&error);
-                self.settlements
+                let _ = self
+                    .settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .store_durable_prepare_terminal(
@@ -7579,18 +8094,22 @@ impl WorkerCoordinator {
                             publication: Box::new(publication),
                         },
                     );
-                return Err(returned_error);
+                return Err(DurableFunctionalPrepareFailure::Later(returned_error));
             }
         };
         if !completion.wait().await {
-            return Err(WorkerV3Error::Ambiguous);
+            return Err(DurableFunctionalPrepareFailure::Later(
+                WorkerV3Error::Ambiguous,
+            ));
         }
         let terminal = self
             .settlements
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take_exact_custody_publication_terminal()
-            .ok_or(WorkerV3Error::Ambiguous)?;
+            .ok_or(DurableFunctionalPrepareFailure::Later(
+                WorkerV3Error::Ambiguous,
+            ))?;
         let may_own = match terminal {
             DurableWorkerCustodyPublicationTerminal::MayOwn(may_own) => may_own,
             retained => {
@@ -7599,21 +8118,22 @@ impl WorkerCoordinator {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .store_custody_publication_terminal(retained);
-                return Err(error);
+                return Err(DurableFunctionalPrepareFailure::Later(error));
             }
         };
         match self.open_durable_functional_worker_until(may_own, deadline) {
             Ok(ownership) => Ok(ownership),
             Err((error, may_own)) => {
                 let returned_error = worker_error_class(&error);
-                self.settlements
+                let _ = self
+                    .settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::DispatchOpen {
                         error,
                         may_own: Box::new(may_own),
                     });
-                Err(returned_error)
+                Err(DurableFunctionalPrepareFailure::Later(returned_error))
             }
         }
     }
@@ -9451,6 +9971,73 @@ mod tests {
         };
         DurableIntentRegistration::try_from_wire([seed.wrapping_add(2); 32], &intent)
             .expect("valid durable worker registration")
+    }
+
+    fn registered_durable_key(
+        actor: &DurableOwnershipActor,
+        context_id: ContextId,
+        seed: u8,
+    ) -> DurableOwnershipKey {
+        let handle = actor.prepare_handle().expect("durable Prepare handle");
+        match handle.register_until(
+            durable_worker_registration(context_id, seed),
+            HardDeadline::after(Duration::from_secs(1)).expect("durable registration deadline"),
+        ) {
+            DurableRegistrationOutcome::Registered(key) => key,
+            DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            } => {
+                drop(registration);
+                panic!("durable registration remained retained: {error}")
+            }
+        }
+    }
+
+    fn store_handoff_terminal(
+        coordinator: &WorkerCoordinator,
+        outcome: DurableWorkerPrepareOutcome,
+    ) -> DurableHandoffTerminalSelector {
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(Box::new(
+                outcome,
+            )))
+            .expect("ordinary handoff terminal selector")
+    }
+
+    fn handoff_terminal_count(coordinator: &WorkerCoordinator) -> usize {
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .durable_prepare_terminals
+            .iter()
+            .filter(|stored| matches!(stored.terminal, DurableWorkerPrepareTerminal::Handoff(_)))
+            .count()
+    }
+
+    fn durable_actor_fixture() -> (tempfile::TempDir, DurableOwnershipActor) {
+        let directory = tempdir().expect("durable ownership directory");
+        let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(5)).expect("actor fixture deadline"),
+        )
+        .expect("durable ownership actor fixture");
+        (directory, actor)
+    }
+
+    fn settle_handoff_terminal(
+        coordinator: &WorkerCoordinator,
+        actor: &DurableOwnershipActor,
+        selector: DurableHandoffTerminalSelector,
+        context_id: ContextId,
+        deadline: HardDeadline,
+    ) -> DurableHandoffTerminalSettlement {
+        let handle = actor.prepare_handle().expect("durable Prepare handle");
+        coordinator.settle_durable_handoff_terminal_until(&handle, selector, context_id, deadline)
     }
 
     fn request(
@@ -14580,6 +15167,493 @@ mod tests {
         reap_durable_handoff_worker(&fixture.coordinator, worker);
         drop(fixture.actor);
         drop(fixture.directory);
+    }
+
+    #[tokio::test]
+    async fn definitive_registration_terminal_is_mutation_free_and_shutdown_unblocks() {
+        let context_id = [109; 16];
+        let (_directory, mut actor) = durable_actor_fixture();
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let deadline =
+            HardDeadline::after(Duration::from_millis(10)).expect("expired registration deadline");
+        wait_until_deadline_elapsed(deadline);
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            durable_worker_registration(context_id, 109),
+            Duration::from_secs(5),
+            deadline,
+            |_reservation, _deadline| panic!("definite registration failure cannot spawn"),
+        );
+        assert!(matches!(
+            outcome,
+            DurableWorkerPrepareOutcome::RegistrationRetained {
+                error: DurableOwnershipError::DeadlineElapsed,
+                ..
+            }
+        ));
+        let selector = store_handoff_terminal(&coordinator, outcome);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &actor,
+                selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert_eq!(handoff_terminal_count(&coordinator), 0);
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn key_terminal_retires_the_exact_intent_and_shutdown_unblocks() {
+        let context_id = [110; 16];
+        let (_directory, mut actor) = durable_actor_fixture();
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            durable_worker_registration(context_id, 110),
+            Duration::ZERO,
+            HardDeadline::after(Duration::from_secs(1)).expect("handoff deadline"),
+            |_reservation, _deadline| panic!("invalid TTL cannot spawn"),
+        );
+        assert!(matches!(
+            outcome,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                ..
+            }
+        ));
+        let selector = store_handoff_terminal(&coordinator, outcome);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &actor,
+                selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn definitive_worker_admission_and_registered_terminals_reap_before_intent_retirement() {
+        for (context_id, registered) in [([111; 16], false), ([112; 16], true)] {
+            let (_directory, mut actor) = durable_actor_fixture();
+            let key = registered_durable_key(&actor, context_id, context_id[0]);
+            let fixture = durable_pending_lifecycle_fixture(context_id, VecDeque::new(), true);
+            assert_no_worker_request_bytes(&fixture.peer);
+            let outcome = if registered {
+                DurableWorkerPrepareOutcome::RegisteredWorkerRetained {
+                    error: WorkerV3Error::Conflict,
+                    registered: DurableRegisteredStartingWorker {
+                        key,
+                        worker: fixture.worker,
+                    },
+                }
+            } else {
+                DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                    error: WorkerV3Error::Conflict,
+                    key,
+                    worker: fixture.worker,
+                }
+            };
+            let selector = store_handoff_terminal(&fixture.coordinator, outcome);
+            assert!(matches!(
+                settle_handoff_terminal(
+                    &fixture.coordinator,
+                    &actor,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+                ),
+                DurableHandoffTerminalSettlement::Absent
+            ));
+            assert!(!fixture.alive.load(Ordering::SeqCst));
+            assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+            assert!(fixture.coordinator.shutdown().await);
+            assert_eq!(
+                actor.shutdown_for_test(
+                    HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_and_definite_custody_fence_terminals_reap_before_intent_retirement() {
+        for (context_id, custody) in [([113; 16], false), ([114; 16], true)] {
+            let mut fixture = fenced_durable_handoff_fixture(
+                context_id,
+                HardDeadline::after(Duration::from_secs(2)).expect("handoff deadline"),
+                |coordinator, context_id, _generation, _directory| {
+                    lock_worker_registry(&coordinator.registry)
+                        .records
+                        .get_mut(&context_id)
+                        .expect("registered passive worker")
+                        .stable_phase = StablePhase::Initialised;
+                },
+            );
+            lock_worker_registry(&fixture.coordinator.registry)
+                .records
+                .get_mut(&context_id)
+                .expect("registered passive worker")
+                .stable_phase = StablePhase::Starting;
+            let DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. } =
+                fixture.outcome
+            else {
+                panic!("phase fence did not retain a handoff")
+            };
+            let outcome = if custody {
+                DurableWorkerPrepareOutcome::CustodyFenceRetained {
+                    error: DurableOwnershipError::Rejected,
+                    handoff,
+                }
+            } else {
+                DurableWorkerPrepareOutcome::HandoffWorkerRetained {
+                    error: WorkerV3Error::Conflict,
+                    handoff,
+                }
+            };
+            let selector = store_handoff_terminal(&fixture.coordinator, outcome);
+            assert!(matches!(
+                settle_handoff_terminal(
+                    &fixture.coordinator,
+                    &fixture.actor,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+                ),
+                DurableHandoffTerminalSettlement::Absent
+            ));
+            assert!(fixture.coordinator.shutdown().await);
+            assert_eq!(
+                fixture.actor.shutdown_for_test(
+                    HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_worker_and_custody_terminals_retain_the_exact_affine_owner() {
+        let worker_context = [115; 16];
+        let (_worker_directory, worker_actor) = durable_actor_fixture();
+        let worker_coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let worker_outcome = worker_coordinator.durable_passive_prepare_handoff_with_until(
+            &worker_actor,
+            durable_worker_registration(worker_context, 115),
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("ambiguous admission deadline"),
+            |reservation, _deadline| {
+                Err(WorkerSpawnFailure {
+                    error: WorkerV3Error::Ambiguous,
+                    reservation,
+                })
+            },
+        );
+        let worker_selector = store_handoff_terminal(&worker_coordinator, worker_outcome);
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Ambiguous,
+            selector: _worker_selector,
+        } = settle_handoff_terminal(
+            &worker_coordinator,
+            &worker_actor,
+            worker_selector,
+            worker_context,
+            HardDeadline::after(Duration::from_secs(1)).expect("worker settlement deadline"),
+        )
+        else {
+            panic!("ambiguous worker admission was not retained")
+        };
+        assert_eq!(handoff_terminal_count(&worker_coordinator), 1);
+
+        let custody_context = [116; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            custody_context,
+            HardDeadline::after(Duration::from_secs(2)).expect("custody fixture deadline"),
+            |coordinator, context_id, _generation, _directory| {
+                lock_worker_registry(&coordinator.registry)
+                    .records
+                    .get_mut(&context_id)
+                    .expect("registered passive worker")
+                    .stable_phase = StablePhase::Initialised;
+            },
+        );
+        lock_worker_registry(&fixture.coordinator.registry)
+            .records
+            .get_mut(&custody_context)
+            .expect("registered passive worker")
+            .stable_phase = StablePhase::Starting;
+        let DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. } = fixture.outcome
+        else {
+            panic!("phase fence did not retain a handoff")
+        };
+        let custody_selector = store_handoff_terminal(
+            &fixture.coordinator,
+            DurableWorkerPrepareOutcome::CustodyFenceRetained {
+                error: DurableOwnershipError::Ambiguous,
+                handoff,
+            },
+        );
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Ambiguous,
+            selector: _custody_selector,
+        } = settle_handoff_terminal(
+            &fixture.coordinator,
+            &fixture.actor,
+            custody_selector,
+            custody_context,
+            HardDeadline::after(Duration::from_secs(1)).expect("custody settlement deadline"),
+        )
+        else {
+            panic!("ambiguous custody fence was not retained")
+        };
+        assert_eq!(handoff_terminal_count(&fixture.coordinator), 1);
+        assert_durable_handoff_registry_pristine(&fixture.coordinator, custody_context, 1);
+        assert_no_worker_request_bytes(&fixture.peer);
+    }
+
+    #[tokio::test]
+    async fn reaped_never_dispatched_proof_survives_deadline_and_retries_without_second_reap() {
+        let context_id = [117; 16];
+        let (_directory, mut actor) = durable_actor_fixture();
+        let key = registered_durable_key(&actor, context_id, 117);
+        let fixture = durable_pending_lifecycle_fixture(context_id, VecDeque::new(), true);
+        let proof = match fixture.coordinator.settle_never_dispatched_worker_until(
+            key,
+            fixture.worker,
+            None,
+            HardDeadline::after(Duration::from_secs(1)).expect("worker reap deadline"),
+        ) {
+            NeverDispatchedWorkerSettlement::Proven(proof) => proof,
+            NeverDispatchedWorkerSettlement::Retained {
+                error,
+                key,
+                worker,
+                source,
+            } => {
+                drop((key, worker, source));
+                panic!("exact worker reap remained retained: {error}")
+            }
+        };
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(!fixture.alive.load(Ordering::SeqCst));
+        let selector = store_handoff_terminal(
+            &fixture.coordinator,
+            DurableWorkerPrepareOutcome::NeverDispatchedRetained {
+                error: DurableOwnershipError::DeadlineElapsed,
+                proof,
+            },
+        );
+        let identity = selector.identity;
+        let elapsed =
+            HardDeadline::after(Duration::from_millis(5)).expect("expired settlement deadline");
+        wait_until_deadline_elapsed(elapsed);
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Deadline,
+            selector,
+        } = settle_handoff_terminal(&fixture.coordinator, &actor, selector, context_id, elapsed)
+        else {
+            panic!("elapsed proof retirement was not retained")
+        };
+        assert!(selector.identity == identity);
+        assert_eq!(handoff_terminal_count(&fixture.coordinator), 1);
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &fixture.coordinator,
+                &actor,
+                selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("retry deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(fixture.coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_context_and_ownership_mismatch_do_not_take_the_stored_terminal() {
+        let context_id = [118; 16];
+        let (_first_directory, mut first_actor) = durable_actor_fixture();
+        let (_second_directory, mut second_actor) = durable_actor_fixture();
+        let first_key = registered_durable_key(&first_actor, context_id, 118);
+        let second_key = registered_durable_key(&second_actor, context_id, 119);
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let first_selector = store_handoff_terminal(
+            &coordinator,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                key: first_key,
+            },
+        );
+        let first_identity = first_selector.identity;
+
+        let wrong_context = DurableHandoffTerminalSelector {
+            identity: DurableHandoffTerminalIdentity {
+                context_id: [0xee; 16],
+                ..first_identity
+            },
+        };
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &first_actor,
+                wrong_context,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("context mismatch deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Conflict,
+                ..
+            }
+        ));
+        assert_eq!(handoff_terminal_count(&coordinator), 1);
+
+        let wrong_ownership = DurableHandoffTerminalSelector {
+            identity: DurableHandoffTerminalIdentity {
+                ownership: Some(DurableOwnershipSelector::from_key(&second_key)),
+                ..first_identity
+            },
+        };
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &first_actor,
+                wrong_ownership,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("ownership mismatch deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Ambiguous,
+                ..
+            }
+        ));
+        assert_eq!(handoff_terminal_count(&coordinator), 1);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &first_actor,
+                DurableHandoffTerminalSelector {
+                    identity: first_identity,
+                },
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("exact settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+
+        let second_selector = store_handoff_terminal(
+            &coordinator,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                key: second_key,
+            },
+        );
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &second_actor,
+                second_selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("second settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        for actor in [&mut first_actor, &mut second_actor] {
+            assert_eq!(
+                actor.shutdown_for_test(
+                    HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn actor_ambiguity_retains_the_opaque_never_dispatched_proof() {
+        let context_id = [119; 16];
+        let (_directory, actor) = durable_actor_fixture();
+        let key = registered_durable_key(&actor, context_id, 120);
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let selector = store_handoff_terminal(
+            &coordinator,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                key,
+            },
+        );
+        let panic_registration = durable_worker_registration([120; 16], 121);
+        let panic_handle = actor.prepare_handle().expect("panic test Prepare handle");
+        assert!(matches!(
+            panic_handle.panic_after_registration_for_test(panic_registration),
+            DurableRegistrationOutcome::Retained {
+                error: DurableOwnershipError::Ambiguous,
+                ..
+            }
+        ));
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Ambiguous,
+            selector: _selector,
+        } = settle_handoff_terminal(
+            &coordinator,
+            &actor,
+            selector,
+            context_id,
+            HardDeadline::after(Duration::from_secs(1)).expect("ambiguous actor deadline"),
+        )
+        else {
+            panic!("actor ambiguity did not retain opaque retirement proof")
+        };
+        assert_eq!(handoff_terminal_count(&coordinator), 1);
+        let settlements = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            settlements.durable_prepare_terminals.as_slice(),
+            [StoredDurableWorkerPrepareTerminal {
+                terminal: DurableWorkerPrepareTerminal::Handoff(outcome),
+                ..
+            }] if matches!(
+                outcome.as_ref(),
+                DurableWorkerPrepareOutcome::NeverDispatchedRetained {
+                    error: DurableOwnershipError::Ambiguous,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]
