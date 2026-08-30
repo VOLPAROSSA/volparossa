@@ -461,6 +461,9 @@ non_retained_production_launch_stage_is_safe() {
         functional-probe-socket|\
         functional-probe-fdstore|\
         functional-worker-observation|\
+        functional-relay-fixture|\
+        functional-relay-traffic|\
+        functional-relay-cleanup|\
         functional-probe-finish|\
         functional-cleanup|\
         publication)
@@ -479,7 +482,7 @@ non_retained_functional_probe_failure_value_is_safe() {
         "$non_retained_functional_failure_phase,$non_retained_functional_failure_class" ] \
         || return 1
     case $non_retained_functional_failure_phase in
-        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|\
+        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|\
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|\
         second-cycle-destroy|final-shutdown)
@@ -516,7 +519,7 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
     [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-probe-finish|functional-cleanup|publication)$'
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-probe-finish|functional-cleanup|publication)$'
     [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_functional_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
@@ -533,7 +536,7 @@ report_non_retained_production_launch_diagnostic() {
             non_retained_functional_failure_value=
             ;;
         1)
-            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|second-cycle-activate|reuse|second-cycle-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
+            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|second-cycle-activate|reuse|second-cycle-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
             [ "$(grep -Ec "$non_retained_functional_diagnostic_pattern" \
                 "$non_retained_diagnostic")" -eq 1 ] || return 1
             non_retained_functional_diagnostic=$(grep -E \
@@ -1476,7 +1479,7 @@ case $archive_sha256 in *[!0-9a-f]*|'') exit 64 ;; esac
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
-    build-essential ca-certificates cargo cmake curl dbus git iproute2 jq nftables \
+    build-essential ca-certificates cargo cmake curl dbus git iproute2 iputils-ping jq nftables \
     pkg-config rustc sudo util-linux wireguard-tools
 test "$(rustc --version | awk '{print $2}')" = 1.85.0
 test "$(cargo --version | awk '{print $2}')" = 1.85.0

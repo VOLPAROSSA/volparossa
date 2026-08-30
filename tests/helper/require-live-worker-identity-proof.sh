@@ -418,6 +418,9 @@ production_start_failure_stage_is_safe() {
         functional-probe-socket|\
         functional-probe-fdstore|\
         functional-worker-observation|\
+        functional-relay-fixture|\
+        functional-relay-traffic|\
+        functional-relay-cleanup|\
         functional-probe-finish|\
         functional-cleanup|\
         publication)
@@ -436,7 +439,7 @@ production_functional_probe_failure_value_is_safe() {
         "$production_functional_failure_phase,$production_functional_failure_class" ] \
         || return 1
     case $production_functional_failure_phase in
-        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|\
+        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|\
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|\
         second-cycle-destroy|final-shutdown)
@@ -592,8 +595,8 @@ if ! systemd-detect-virt --vm --quiet; then
 fi
 
 for command_name in \
-    awk busctl cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
-    nsenter paste prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl \
+    awk base64 busctl cat chmod chown cmp cp date dpkg find flock getent git id install ip jq mkfifo mktemp mv nft \
+    nsenter paste ping prlimit readlink rm sed setpriv sha256sum sleep sort stat systemctl \
     systemd-detect-virt systemd-run tc tr uname wc wg
 do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -3512,6 +3515,7 @@ if [ "$proof_ok" = yes ]; then
         'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_COMMITTED_KERNEL_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
         >"$temporary_stage/expected-production-start.pass"

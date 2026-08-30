@@ -23,14 +23,19 @@ functional_underlay=vpfu0
 functional_underlay_alias=volparossa-proof-underlay-v1
 functional_underlay_address=192.31.195.254
 functional_underlay_gateway=192.31.195.1
+functional_relay=vprl0
+functional_relay_alias=volparossa-proof-relay-v1
+functional_relay_listen_port=10000
+functional_relay_public_key=MdSras7slhE3kXA3k25gcW+sVzr+lNnahKgCBEjfwRI=
 functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready
 functional_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass
+functional_committed_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_COMMITTED_KERNEL_V1=pass
 functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass
 functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass
 functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
 functional_failure_record=$proof_directory/functional-client-lease.failure
-functional_peer_public_key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=
-functional_peer_endpoint=1.1.1.1:51820
+functional_peer_public_key=$functional_relay_public_key
+functional_peer_endpoint=$functional_underlay_address:$functional_relay_listen_port
 functional_peer_keepalive=25
 functional_release_byte=G
 helper_bootstrap_capability_mask=00000000002031e0
@@ -38,10 +43,21 @@ start_failure_record=$proof_directory/start.failure
 start_failure_stage=
 start_failure_armed=no
 start_failure_published=no
+functional_relay_state=absent
+functional_relay_ifindex=
+functional_relay_client_address=
 
 fail() {
     printf 'production IPC unit hook failed: %s\n' "$1" >&2
     exit 1
+}
+
+emit_functional_relay_private_key() {
+    # Produce the public, deterministic test fixture [8; 32] only in this private pipe. The
+    # Base64 private key never appears in source, argv, an environment variable, a file or output.
+    /usr/bin/awk 'BEGIN { for (position = 1; position <= 32; position++) printf "%c", 8 }' \
+        | /usr/bin/base64 -w 0 || return 1
+    printf '\n'
 }
 
 number_is_safe() {
@@ -173,6 +189,9 @@ start_failure_stage_is_safe() {
         functional-probe-socket|\
         functional-probe-fdstore|\
         functional-worker-observation|\
+        functional-relay-fixture|\
+        functional-relay-traffic|\
+        functional-relay-cleanup|\
         functional-probe-finish|\
         functional-cleanup|\
         publication)
@@ -223,7 +242,10 @@ advance_start_failure_stage() {
         functional-probe-identity:functional-probe-socket|\
         functional-probe-socket:functional-probe-fdstore|\
         functional-probe-fdstore:functional-worker-observation|\
-        functional-worker-observation:functional-probe-finish|\
+        functional-worker-observation:functional-relay-fixture|\
+        functional-relay-fixture:functional-relay-traffic|\
+        functional-relay-traffic:functional-relay-cleanup|\
+        functional-relay-cleanup:functional-probe-finish|\
         functional-probe-finish:functional-cleanup|\
         functional-cleanup:publication)
             start_failure_stage=$1
@@ -245,6 +267,11 @@ publish_start_failure() {
 start_failure_exit() {
     start_failure_status=$?
     trap - EXIT
+    if [ "$functional_relay_state" != absent ]; then
+        if ! remove_functional_relay_fixture; then
+            start_failure_status=1
+        fi
+    fi
     if [ "$start_failure_status" -ne 0 ] \
         && [ "$start_failure_armed" = yes ] \
         && [ "$start_failure_published" = no ]; then
@@ -1471,6 +1498,35 @@ derive_client_peer_address() {
     '
 }
 
+derive_client_local_address() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 15 ] || return 1
+    /usr/bin/awk -v expected_interface="$1" '
+        $6 == expected_interface \
+            && length($1) == 32 \
+            && $1 ~ /^[0-9a-f]+$/ \
+            && substr($1, 1, 12) == "fd766f6c7061" \
+            && substr($1, 21, 4) == "0001" \
+            && substr($1, 29, 4) == "0001" \
+            && $3 == "80" \
+            && $4 == "00" {
+                candidates++
+                local_address = $1
+            }
+        END {
+            if (candidates != 1) exit 1
+            printf "%s:%s:%s:%s:%s:%s:%s:%s\n", \
+                substr(local_address, 1, 4), substr(local_address, 5, 4), \
+                substr(local_address, 9, 4), substr(local_address, 13, 4), \
+                substr(local_address, 17, 4), substr(local_address, 21, 4), \
+                substr(local_address, 25, 4), substr(local_address, 29, 4)
+        }
+    '
+}
+
 wireguard_counter_line_is_exact() {
     [ "$#" -eq 3 ] || return 1
     case $3 in
@@ -1494,6 +1550,91 @@ wireguard_counter_line_is_exact() {
         }
         END {
             if (records != 1 || invalid) exit 1
+        }
+    '
+}
+
+wireguard_snapshot_from_lines() {
+    [ "$#" -eq 3 ] || return 1
+    printf '%s\n%s\n' "$1" "$2" | /usr/bin/awk \
+        -F '\t' -v expected_key="$3" '
+        function canonical_u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            if (length(value) < 20) return 1
+            return ("x" value) <= "x18446744073709551615"
+        }
+        NR == 1 {
+            valid = NF == 2 && $1 == expected_key && canonical_u64($2)
+            handshake = $2
+        }
+        NR == 2 {
+            valid = valid && NF == 3 && $1 == expected_key \
+                && canonical_u64($2) && canonical_u64($3)
+            received = $2
+            transmitted = $3
+        }
+        NR > 2 { valid = 0 }
+        END {
+            if (NR != 2 || !valid) exit 1
+            printf "%s\t%s\t%s\n", handshake, received, transmitted
+        }
+    '
+}
+
+worker_wireguard_snapshot() {
+    [ "$#" -eq 3 ] || return 1
+    hook_namespace_fd=$1
+    hook_interface=$2
+    hook_expected_key=$3
+    fd_number_is_safe "$hook_namespace_fd" || return 1
+    hook_handshake_line=$(/usr/bin/nsenter \
+        --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" latest-handshakes 2>/dev/null) \
+        || return 1
+    hook_transfer_line=$(/usr/bin/nsenter \
+        --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" transfer 2>/dev/null) || return 1
+    wireguard_snapshot_from_lines \
+        "$hook_handshake_line" "$hook_transfer_line" "$hook_expected_key"
+}
+
+relay_wireguard_snapshot() {
+    [ "$#" -eq 2 ] || return 1
+    hook_interface=$1
+    hook_expected_key=$2
+    hook_handshake_line=$(/usr/bin/wg show \
+        "$hook_interface" latest-handshakes 2>/dev/null) || return 1
+    hook_transfer_line=$(/usr/bin/wg show \
+        "$hook_interface" transfer 2>/dev/null) || return 1
+    wireguard_snapshot_from_lines \
+        "$hook_handshake_line" "$hook_transfer_line" "$hook_expected_key"
+}
+
+wireguard_snapshot_has_growth() {
+    [ "$#" -eq 2 ] || return 1
+    /usr/bin/awk -v baseline="$1" -v current="$2" '
+        function canonical_u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            if (length(value) < 20) return 1
+            return ("x" value) <= "x18446744073709551615"
+        }
+        function greater(left, right) {
+            if (length(left) != length(right)) return length(left) > length(right)
+            return ("x" left) > ("x" right)
+        }
+        BEGIN {
+            baseline_count = split(baseline, before, "\t")
+            current_count = split(current, after, "\t")
+            if (baseline_count != 3 || current_count != 3) exit 1
+            for (position = 1; position <= 3; position++) {
+                if (!canonical_u64(before[position]) \
+                    || !canonical_u64(after[position])) exit 1
+            }
+            if (after[1] == "0" \
+                || !greater(after[2], before[2]) \
+                || !greater(after[3], before[3])) exit 1
         }
     '
 }
@@ -1536,6 +1677,16 @@ worker_client_peer_address() {
     /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/cat /proc/net/if_inet6 2>/dev/null \
         | derive_client_peer_address "$hook_interface"
+}
+
+worker_client_local_address() {
+    [ "$#" -eq 2 ] || return 1
+    hook_namespace_fd=$1
+    hook_interface=$2
+    fd_number_is_safe "$hook_namespace_fd" || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/cat /proc/net/if_inet6 2>/dev/null \
+        | derive_client_local_address "$hook_interface"
 }
 
 worker_activated_wireguard_is_exact() {
@@ -1598,6 +1749,282 @@ worker_activated_wireguard_is_exact() {
         /usr/bin/wg show "$hook_interface" transfer 2>/dev/null) || return 1
     wireguard_counter_line_is_exact \
         "$hook_peer_field" "$functional_peer_public_key" 3
+}
+
+functional_relay_link_is_absent() {
+    [ ! -e "/sys/class/net/$functional_relay" ] \
+        && [ ! -L "/sys/class/net/$functional_relay" ]
+}
+
+functional_relay_route_is_absent() {
+    if [ -z "$functional_relay_client_address" ]; then
+        return 0
+    fi
+    hook_relay_route=$(/usr/sbin/ip -6 -json route show table main \
+        exact "$functional_relay_client_address/128" 2>/dev/null) || return 1
+    [ "$hook_relay_route" = '[]' ]
+}
+
+functional_relay_identity_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_expected_ifindex=$1
+    number_is_safe "$hook_expected_ifindex" || return 1
+    /usr/sbin/ip -details -json link show dev "$functional_relay" 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg name "$functional_relay" \
+            --argjson ifindex "$hook_expected_ifindex" '
+              type == "array" and length == 1
+              and .[0].ifname == $name
+              and .[0].ifindex == $ifindex
+              and .[0].linkinfo.info_kind == "wireguard"
+            ' >/dev/null 2>&1
+}
+
+functional_relay_link_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_expected_ifindex=$1
+    number_is_safe "$hook_expected_ifindex" || return 1
+    /usr/sbin/ip -details -json link show dev "$functional_relay" 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg name "$functional_relay" \
+            --arg alias "$functional_relay_alias" \
+            --argjson ifindex "$hook_expected_ifindex" '
+              type == "array" and length == 1
+              and .[0].ifname == $name
+              and .[0].ifindex == $ifindex
+              and .[0].ifalias == $alias
+              and .[0].linkinfo.info_kind == "wireguard"
+            ' >/dev/null 2>&1
+}
+
+functional_relay_fixture_is_exact() {
+    [ "$#" -eq 5 ] || return 1
+    hook_expected_ifindex=$1
+    hook_client_public_key=$2
+    hook_client_listen_port=$3
+    hook_client_local_address=$4
+    hook_relay_local_address=$5
+    functional_relay_link_is_exact "$hook_expected_ifindex" || return 1
+    /usr/sbin/ip -details -json link show 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg underlay "$functional_underlay" \
+            --arg relay "$functional_relay" '
+              type == "array" and length == 3
+              and any(.[]; .ifname == "lo")
+              and any(.[]; .ifname == $underlay and .linkinfo.info_kind == "dummy")
+              and any(.[];
+                    .ifname == $relay
+                    and .linkinfo.info_kind == "wireguard"
+                    and (.flags | index("UP")) != null)
+              and all(.[];
+                    .ifname == "lo" or .ifname == $underlay or .ifname == $relay)
+            ' >/dev/null 2>&1 || return 1
+    hook_relay_public_key=$(/usr/bin/wg show \
+        "$functional_relay" public-key 2>/dev/null) || return 1
+    [ "$hook_relay_public_key" = "$functional_relay_public_key" ] || return 1
+    hook_relay_port=$(/usr/bin/wg show \
+        "$functional_relay" listen-port 2>/dev/null) || return 1
+    [ "$hook_relay_port" = "$functional_relay_listen_port" ] || return 1
+    hook_relay_mark=$(/usr/bin/wg show \
+        "$functional_relay" fwmark 2>/dev/null) || return 1
+    [ "$hook_relay_mark" = off ] || return 1
+    hook_relay_address_hex=$(printf '%s' "$hook_relay_local_address" \
+        | /usr/bin/tr -d ':') || return 1
+    [ "${#hook_relay_address_hex}" -eq 32 ] || return 1
+    /usr/bin/awk \
+        -v expected_address="$hook_relay_address_hex" \
+        -v expected_interface="$functional_relay" '
+        $6 == expected_interface {
+            records++
+            if ($1 == expected_address && $3 == "80" && $4 == "00") matches++
+        }
+        END { if (records != 1 || matches != 1) exit 1 }
+    ' /proc/net/if_inet6 || return 1
+    hook_relay_route_destination=$(
+        /usr/sbin/ip -6 -json route show table main \
+            exact "$hook_client_local_address/128" 2>/dev/null \
+            | activated_route_destination "$functional_relay" 2>/dev/null
+    ) || return 1
+    hook_relay_default_routes=$(/usr/sbin/ip -6 -json \
+        route show table main default 2>/dev/null) || return 1
+    [ "$hook_relay_default_routes" = '[]' ] || return 1
+    hook_relay_peers=$(/usr/bin/wg show \
+        "$functional_relay" peers 2>/dev/null) || return 1
+    [ "$hook_relay_peers" = "$hook_client_public_key" ] || return 1
+    hook_expected_relay_field=$(printf '%s\t%s:%s' \
+        "$hook_client_public_key" "$functional_underlay_address" \
+        "$hook_client_listen_port") || return 1
+    hook_relay_field=$(/usr/bin/wg show \
+        "$functional_relay" endpoints 2>/dev/null) || return 1
+    [ "$hook_relay_field" = "$hook_expected_relay_field" ] || return 1
+    hook_expected_relay_field=$(printf '%s\t%s/128' \
+        "$hook_client_public_key" "$hook_relay_route_destination") || return 1
+    hook_relay_field=$(/usr/bin/wg show \
+        "$functional_relay" allowed-ips 2>/dev/null) || return 1
+    [ "$hook_relay_field" = "$hook_expected_relay_field" ] || return 1
+    hook_expected_relay_field=$(printf '%s\t%s' \
+        "$hook_client_public_key" "$functional_peer_keepalive") || return 1
+    hook_relay_field=$(/usr/bin/wg show \
+        "$functional_relay" persistent-keepalive 2>/dev/null) || return 1
+    [ "$hook_relay_field" = "$hook_expected_relay_field" ] || return 1
+    hook_relay_field=$(/usr/bin/wg show \
+        "$functional_relay" latest-handshakes 2>/dev/null) || return 1
+    wireguard_counter_line_is_exact \
+        "$hook_relay_field" "$hook_client_public_key" 2 || return 1
+    hook_relay_field=$(/usr/bin/wg show \
+        "$functional_relay" transfer 2>/dev/null) || return 1
+    wireguard_counter_line_is_exact \
+        "$hook_relay_field" "$hook_client_public_key" 3
+}
+
+add_functional_relay_link() {
+    /usr/sbin/ip link add name "$functional_relay" type wireguard
+}
+
+capture_functional_relay_ifindex() {
+    hook_captured_relay_ifindex=$(/usr/bin/cat \
+        "/sys/class/net/$functional_relay/ifindex") || return 1
+    number_is_safe "$hook_captured_relay_ifindex"
+}
+
+mark_functional_relay_link() {
+    /usr/sbin/ip link set dev "$functional_relay" alias \
+        "$functional_relay_alias"
+}
+
+configure_functional_relay_wireguard() {
+    [ "$#" -eq 3 ] || return 1
+    hook_client_public_key=$1
+    hook_client_listen_port=$2
+    hook_client_local_address=$3
+    emit_functional_relay_private_key \
+        | /usr/bin/wg set "$functional_relay" \
+            listen-port "$functional_relay_listen_port" \
+            private-key /dev/stdin \
+            peer "$hook_client_public_key" \
+            allowed-ips "$hook_client_local_address/128" \
+            endpoint "$functional_underlay_address:$hook_client_listen_port" \
+            persistent-keepalive "$functional_peer_keepalive"
+}
+
+add_functional_relay_address() {
+    [ "$#" -eq 1 ] || return 1
+    hook_relay_local_address=$1
+    /usr/sbin/ip -6 address add "$hook_relay_local_address/128" \
+        dev "$functional_relay"
+}
+
+raise_functional_relay_link() {
+    /usr/sbin/ip link set dev "$functional_relay" up
+}
+
+add_functional_relay_route() {
+    [ "$#" -eq 1 ] || return 1
+    hook_client_local_address=$1
+    /usr/sbin/ip -6 route add "$hook_client_local_address/128" \
+        dev "$functional_relay" proto static metric 1024
+}
+
+delete_functional_relay_link() {
+    /usr/sbin/ip link delete dev "$functional_relay"
+}
+
+forget_functional_relay_fixture() {
+    functional_relay_state=absent
+    functional_relay_ifindex=
+    functional_relay_client_address=
+    hook_captured_relay_ifindex=
+}
+
+create_functional_relay_fixture() {
+    [ "$#" -eq 4 ] || return 1
+    hook_client_public_key=$1
+    hook_client_listen_port=$2
+    hook_client_local_address=$3
+    hook_relay_local_address=$4
+    case $hook_client_public_key in
+        ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
+    esac
+    [ "${#hook_client_public_key}" -eq 44 ] \
+        && [ "$hook_client_public_key" != "$functional_relay_public_key" ] || return 1
+    number_is_safe "$hook_client_listen_port" \
+        && [ "$hook_client_listen_port" -le 65535 ] || return 1
+    for hook_relay_address in \
+        "$hook_client_local_address" "$hook_relay_local_address"; do
+        case $hook_relay_address in
+            ''|*[!0-9a-f:]*) return 1 ;;
+        esac
+        [ "${#hook_relay_address}" -eq 39 ] || return 1
+    done
+    functional_relay_link_is_absent || return 1
+    functional_relay_client_address=$hook_client_local_address
+    functional_relay_ifindex=
+    hook_captured_relay_ifindex=
+    functional_relay_state=adding
+    add_functional_relay_link || return 1
+    capture_functional_relay_ifindex || return 1
+    functional_relay_ifindex=$hook_captured_relay_ifindex
+    functional_relay_state=created
+    functional_relay_identity_is_exact "$functional_relay_ifindex" || return 1
+    mark_functional_relay_link || return 1
+    functional_relay_link_is_exact "$functional_relay_ifindex" || return 1
+    functional_relay_state=marked
+    configure_functional_relay_wireguard \
+        "$hook_client_public_key" \
+        "$hook_client_listen_port" \
+        "$hook_client_local_address" || return 1
+    add_functional_relay_address "$hook_relay_local_address" || return 1
+    raise_functional_relay_link || return 1
+    add_functional_relay_route "$hook_client_local_address" || return 1
+    functional_relay_fixture_is_exact \
+        "$functional_relay_ifindex" \
+        "$hook_client_public_key" \
+        "$hook_client_listen_port" \
+        "$hook_client_local_address" \
+        "$hook_relay_local_address"
+}
+
+remove_functional_relay_fixture() {
+    case $functional_relay_state in
+        absent) return 0 ;;
+        adding)
+            functional_relay_link_is_absent || return 1
+            functional_relay_state=deleted
+            ;;
+        created)
+            if functional_relay_link_is_absent; then
+                functional_relay_state=deleted
+            else
+                functional_relay_identity_is_exact \
+                    "$functional_relay_ifindex" || return 1
+                if delete_functional_relay_link \
+                    || functional_relay_link_is_absent; then
+                    functional_relay_state=deleted
+                else
+                    return 1
+                fi
+            fi
+            ;;
+        marked)
+            if functional_relay_link_is_absent; then
+                functional_relay_state=deleted
+            else
+                functional_relay_link_is_exact \
+                    "$functional_relay_ifindex" || return 1
+                if delete_functional_relay_link \
+                    || functional_relay_link_is_absent; then
+                    functional_relay_state=deleted
+                else
+                    return 1
+                fi
+            fi
+            ;;
+        deleted) ;;
+        *) return 1 ;;
+    esac
+    functional_relay_link_is_absent || return 1
+    functional_relay_route_is_absent || return 1
+    forget_functional_relay_fixture
 }
 
 worker_wireguard_is_absent() {
@@ -1764,7 +2191,7 @@ functional_probe_failure_value_is_safe() {
         "$hook_functional_failure_phase,$hook_functional_failure_class" ] \
         || return 1
     case $hook_functional_failure_phase in
-        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|\
+        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|\
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|\
         second-cycle-destroy|final-shutdown)
@@ -2014,8 +2441,76 @@ run_functional_client_lease_probe() {
     esac
     hook_functional_peer_address=$(worker_client_peer_address \
         7 "$hook_functional_wireguard") || return 1
+    hook_functional_client_address=$(worker_client_local_address \
+        7 "$hook_functional_wireguard") || return 1
     worker_activated_wireguard_is_exact \
         7 "$hook_functional_wireguard" "$hook_functional_peer_address" || return 1
+    hook_functional_client_public_key=$(/usr/bin/nsenter \
+        --net=/proc/self/fd/7 -- \
+        /usr/bin/wg show "$hook_functional_wireguard" public-key 2>/dev/null) \
+        || return 1
+    case $hook_functional_client_public_key in
+        ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
+    esac
+    [ "${#hook_functional_client_public_key}" -eq 44 ] \
+        && [ "$hook_functional_client_public_key" != \
+            "$functional_relay_public_key" ] || return 1
+    hook_functional_client_listen_port=$(/usr/bin/nsenter \
+        --net=/proc/self/fd/7 -- \
+        /usr/bin/wg show "$hook_functional_wireguard" listen-port 2>/dev/null) \
+        || return 1
+    number_is_safe "$hook_functional_client_listen_port" \
+        && [ "$hook_functional_client_listen_port" -le 65535 ] || return 1
+    [ "$hook_functional_client_listen_port" -ne \
+        "$functional_relay_listen_port" ] || return 1
+    hook_functional_baseline=$(worker_wireguard_snapshot \
+        7 "$hook_functional_wireguard" "$functional_relay_public_key") \
+        || return 1
+
+    advance_start_failure_stage functional-relay-fixture || return 1
+    create_functional_relay_fixture \
+        "$hook_functional_client_public_key" \
+        "$hook_functional_client_listen_port" \
+        "$hook_functional_client_address" \
+        "$hook_functional_peer_address" || return 1
+
+    advance_start_failure_stage functional-relay-traffic || return 1
+    /usr/bin/ping -6 -n -I "$functional_relay" \
+        -c 1 -W 3 "$hook_functional_client_address" >/dev/null 2>&1 || return 1
+    hook_functional_wait_attempt=0
+    while :; do
+        hook_functional_current=$(worker_wireguard_snapshot \
+            7 "$hook_functional_wireguard" "$functional_relay_public_key") \
+            || return 1
+        if wireguard_snapshot_has_growth \
+            "$hook_functional_baseline" "$hook_functional_current"; then
+            break
+        fi
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
+        sleep 0.05
+    done
+    hook_functional_relay_snapshot=$(relay_wireguard_snapshot \
+        "$functional_relay" "$hook_functional_client_public_key") || return 1
+    hook_functional_zero_snapshot=$(printf '0\t0\t0') || return 1
+    wireguard_snapshot_has_growth \
+        "$hook_functional_zero_snapshot" "$hook_functional_relay_snapshot" || return 1
+    functional_relay_fixture_is_exact \
+        "$functional_relay_ifindex" \
+        "$hook_functional_client_public_key" \
+        "$hook_functional_client_listen_port" \
+        "$hook_functional_client_address" \
+        "$hook_functional_peer_address" || return 1
+
+    advance_start_failure_stage functional-relay-cleanup || return 1
+    remove_functional_relay_fixture || return 1
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_wireguard" "$hook_functional_peer_address" || return 1
+    hook_functional_retained=$(worker_wireguard_snapshot \
+        7 "$hook_functional_wireguard" "$functional_relay_public_key") \
+        || return 1
+    wireguard_snapshot_has_growth \
+        "$hook_functional_baseline" "$hook_functional_retained" || return 1
     [ "$(worker_identity_from_process_fd \
         8 "$hook_functional_worker_pid" "$hook_functional_main_pid" \
         "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
@@ -2297,7 +2792,7 @@ start_hook() {
 
     advance_start_failure_stage publication \
         || fail 'start failure stage transition is invalid'
-    hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+    hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
@@ -2307,6 +2802,7 @@ start_hook() {
         'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
         "$functional_ready_record" \
         "$functional_activated_kernel_record" \
+        "$functional_committed_kernel_record" \
         "$functional_pass_record" \
         "$functional_cleanup_record")
     write_private_file "$proof_directory/start.pass" "$hook_start_pass" \
