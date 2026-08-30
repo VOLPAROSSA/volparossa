@@ -194,7 +194,9 @@ impl RelayService {
         self.purge_expired(now_ms);
         let request_hash: [u8; NODE_ID_BYTES] = Sha256::digest(encoded_request).into();
         if let Some(cached) = self.response_cache.get(&request_hash) {
-            if cached.request != encoded_request {
+            if cached.response.signed_client_relay_request() != encoded_request
+                || cached.response.signed_client_relay_request_sha256() != &request_hash
+            {
                 return Err(RelayError::InvalidGrant(
                     "idempotency request hash collision",
                 ));
@@ -217,7 +219,11 @@ impl RelayService {
         let request_expires_at_ms = request.expires_at_ms;
         let outcome = self.accept_verified_request_with(
             &request,
-            request_public_key,
+            VerifiedClientRequestAuthority {
+                encoded: encoded_request,
+                sha256: request_hash,
+                public_key: request_public_key,
+            },
             now_ms,
             local_public_key,
             endpoint_provider,
@@ -228,7 +234,6 @@ impl RelayService {
                 self.response_cache.insert(
                     request_hash,
                     CachedRelayResponse {
-                        request: encoded_request.to_vec(),
                         response: response.clone(),
                         expires_at_ms: request_expires_at_ms.min(response.expires_at_ms),
                     },
@@ -251,7 +256,7 @@ impl RelayService {
     fn accept_verified_request_with<E, F>(
         &mut self,
         request: &RelayReservationRequest,
-        request_public_key: [u8; NODE_ID_BYTES],
+        client_authority: VerifiedClientRequestAuthority<'_>,
         now_ms: u64,
         local_public_key: [u8; NODE_ID_BYTES],
         endpoint_provider: E,
@@ -307,7 +312,7 @@ impl RelayService {
             }
             validate_relay_scope(&VerifiedRelayScope {
                 request,
-                request_public_key,
+                request_public_key: client_authority.public_key,
                 capability: &capability,
                 capability_public_key,
                 exit: &exit_reservation,
@@ -436,6 +441,7 @@ impl RelayService {
                 control_relay_node_id: authorization.control_relay_node_id.clone(),
                 control_relay_peer_id: authorization.control_relay_peer_id.clone(),
                 exit_peer_id: authorization.exit_peer_id.clone(),
+                signed_client_relay_request_sha256: client_authority.sha256.to_vec(),
             };
             let encoded = match sign_control_message_with(
                 &payload,
@@ -467,6 +473,11 @@ impl RelayService {
 
             Ok(AcceptedRelayReservation {
                 encoded,
+                signed_client_relay_request: client_authority.encoded.to_vec(),
+                signed_client_relay_request_sha256: client_authority.sha256,
+                client_session_public_key: client_authority.public_key,
+                exit_public_key,
+                relay_public_key: local_public_key,
                 reservation_id,
                 route_context_id,
                 path_id: payload.path_id,
@@ -584,6 +595,11 @@ impl RelayService {
 #[derive(Clone)]
 pub struct AcceptedRelayReservation {
     encoded: Vec<u8>,
+    signed_client_relay_request: Vec<u8>,
+    signed_client_relay_request_sha256: [u8; NODE_ID_BYTES],
+    client_session_public_key: [u8; NODE_ID_BYTES],
+    exit_public_key: [u8; NODE_ID_BYTES],
+    relay_public_key: [u8; NODE_ID_BYTES],
     reservation_id: [u8; ID_BYTES],
     route_context_id: [u8; ID_BYTES],
     path_id: u32,
@@ -596,6 +612,36 @@ impl AcceptedRelayReservation {
     #[must_use]
     pub fn encoded(&self) -> &[u8] {
         &self.encoded
+    }
+
+    /// Return the exact canonical client-session-signed request accepted by this relay.
+    #[must_use]
+    pub fn signed_client_relay_request(&self) -> &[u8] {
+        &self.signed_client_relay_request
+    }
+
+    /// Return the commitment carried by the signed relay response.
+    #[must_use]
+    pub const fn signed_client_relay_request_sha256(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.signed_client_relay_request_sha256
+    }
+
+    /// Return the independently verified ephemeral client-session authority.
+    #[must_use]
+    pub const fn client_session_public_key(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.client_session_public_key
+    }
+
+    /// Return the independently verified exit authority.
+    #[must_use]
+    pub const fn exit_public_key(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.exit_public_key
+    }
+
+    /// Return the local relay authority used to sign the acceptance.
+    #[must_use]
+    pub const fn relay_public_key(&self) -> &[u8; NODE_ID_BYTES] {
+        &self.relay_public_key
     }
 
     /// Return the short-lived reservation identifier.
@@ -641,9 +687,15 @@ impl fmt::Debug for AcceptedRelayReservation {
 }
 
 struct CachedRelayResponse {
-    request: Vec<u8>,
     response: AcceptedRelayReservation,
     expires_at_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+struct VerifiedClientRequestAuthority<'a> {
+    encoded: &'a [u8],
+    sha256: [u8; NODE_ID_BYTES],
+    public_key: [u8; NODE_ID_BYTES],
 }
 
 struct VerifiedRelayScope<'a> {
@@ -931,7 +983,8 @@ mod tests {
     use volparossa_protocol::{
         ClientSessionCapability, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, ProtocolError,
         RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
-        decode_canonical, sign_control_message, verify_relay_reservation,
+        decode_canonical, relay_reservation_request_sha256, sign_control_message,
+        verify_relay_reservation,
     };
     use volparossa_test_support::SignedRouteFixture;
     use volparossa_wireguard::{
@@ -973,6 +1026,25 @@ mod tests {
                 |message| Some(relay_key.sign(message).to_bytes()),
             )
             .unwrap();
+        let expected_request = fixture.relay_request(0).unwrap();
+        let expected_request_sha256 = relay_reservation_request_sha256(expected_request).unwrap();
+        assert_eq!(accepted.signed_client_relay_request(), expected_request);
+        assert_eq!(
+            accepted.signed_client_relay_request_sha256(),
+            &expected_request_sha256
+        );
+        assert_eq!(
+            accepted.client_session_public_key(),
+            &fixture.client_key().verifying_key().to_bytes()
+        );
+        assert_eq!(
+            accepted.exit_public_key(),
+            &fixture.exit_key().verifying_key().to_bytes()
+        );
+        assert_eq!(
+            accepted.relay_public_key(),
+            &relay_key.verifying_key().to_bytes()
+        );
 
         let mut replay_cache = ReplayCache::new(8).unwrap();
         let (relay_message, exit_message) = verify_relay_reservation(
@@ -994,6 +1066,10 @@ mod tests {
         assert_eq!(
             relay_message.message().finalize_id,
             exit_message.message().finalize_id
+        );
+        assert_eq!(
+            relay_message.message().signed_client_relay_request_sha256,
+            expected_request_sha256
         );
         assert_eq!(metrics.snapshot().active_reservations, 1);
         assert_eq!(service.available(NOW_MS).unwrap().bandwidth.up_mbps, 100);
@@ -1119,7 +1195,16 @@ mod tests {
             |_path_id| panic!("exact retry must not allocate another helper lease"),
             |_message| panic!("exact retry must return the cached signed response"),
         );
-        assert_eq!(replay.unwrap().encoded(), expected);
+        let replay = replay.unwrap();
+        assert_eq!(replay.encoded(), expected);
+        assert_eq!(
+            replay.signed_client_relay_request(),
+            fixture.relay_request(0).unwrap()
+        );
+        assert_eq!(
+            replay.signed_client_relay_request_sha256(),
+            &relay_reservation_request_sha256(fixture.relay_request(0).unwrap()).unwrap()
+        );
 
         let mut disabled = RelayService::new(
             RelayServiceConfig::disabled(fixture.relay_node_id(0).unwrap()),

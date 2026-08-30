@@ -3117,6 +3117,8 @@ fn activation_request<P: ClientReservationProtocol>(
             // envelope and binds it to the prepared lease before mutation. Never decode,
             // reconstruct, or substitute another path's grant here.
             signed_relay_reservation: signed_relay_reservation.to_vec(),
+            // Client-role activations never carry the Relay-only client-to-relay request proof.
+            signed_client_relay_request: Vec::new(),
         });
     }
     Ok(ActivateLeaseBatch {

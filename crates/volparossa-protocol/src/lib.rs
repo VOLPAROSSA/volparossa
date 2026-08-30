@@ -23,7 +23,8 @@ pub use messages::{
     AdvertisementQuality, AdvertisementRoles, ControlMessageType, ExitConfirmationReceipt,
     ExitReservation, ExitReservationConfirmation, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
     RelayAuthorization, RelayReservation, Transport, UdpFlowAuthorization, WireguardEndpoint,
-    exit_confirmation_envelope_hash, finalized_reservation_bundle_hash, verify_relay_reservation,
+    exit_confirmation_envelope_hash, finalized_reservation_bundle_hash,
+    relay_reservation_request_sha256, verify_relay_reservation,
 };
 pub use native_route::{
     NATIVE_ROUTE_AUTH_BEARER_LENGTH, NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN,

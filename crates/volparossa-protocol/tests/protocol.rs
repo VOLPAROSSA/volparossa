@@ -19,9 +19,10 @@ use volparossa_protocol::{
     decode_canonical, encode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, frame_control_message, generate_nonce,
     native_route_auth_commitment, node_id_from_public_key, preselection_observation_receipt_hash,
-    preselection_observation_request_hash, sign_control_message, sign_control_message_with,
-    unframe_control_message, verify_control_message, verify_direct_preselection_transcript,
-    verify_forwarded_preselection_transcript, verify_relay_reservation,
+    preselection_observation_request_hash, relay_reservation_request_sha256, sign_control_message,
+    sign_control_message_with, unframe_control_message, verify_control_message,
+    verify_direct_preselection_transcript, verify_forwarded_preselection_transcript,
+    verify_relay_reservation,
 };
 
 const NOW: u64 = 1_700_000_000_000;
@@ -2786,6 +2787,29 @@ fn checked_in_v4_schema_has_exact_native_route_tags() {
 }
 
 #[test]
+fn checked_in_v4_schema_binds_relay_acceptance_to_exact_client_request_at_tag_30() {
+    let schema = include_str!("../../../proto/volparossa/control/v4/control.proto");
+    let reservation = schema
+        .split_once("message RelayReservation {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    assert!(reservation.contains("bytes signed_client_relay_request_sha256 = 30;"));
+
+    let retired = include_str!("../../../proto/volparossa/control/v3/control.proto");
+    let retired_reservation = retired
+        .split_once("message RelayReservation {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    assert!(!retired_reservation.contains("signed_client_relay_request_sha256"));
+}
+
+#[test]
 fn v4_schemas_are_active_while_v3_remains_retired_evidence() {
     let control_v3 = include_str!("../../../proto/volparossa/control/v3/control.proto");
     let control_v4 = include_str!("../../../proto/volparossa/control/v4/control.proto");
@@ -3326,21 +3350,18 @@ fn assert_relay_scope_mismatch(changed: &RelayReservation, relay_key: &SigningKe
     assert!(mismatch_cache.is_empty());
 }
 
-#[test]
-fn relay_acceptance_requires_matching_exit_authorization() {
-    let exit_key = key(20);
-    let relay_key = key(21);
-    let grant = relay_authorization(&exit_key, &relay_key);
+fn relay_reservation_fixture(exit_key: &SigningKey, relay_key: &SigningKey) -> RelayReservation {
+    let grant = relay_authorization(exit_key, relay_key);
     let signed_grant = sign_control_message(
         &grant,
-        &exit_key,
+        exit_key,
         NOW,
         EXPIRY,
         [6; 32],
         TimePolicy::default(),
     )
     .unwrap();
-    let reservation = RelayReservation {
+    RelayReservation {
         reservation_id: grant.reservation_id.clone(),
         route_context_id: grant.route_context_id.clone(),
         path_id: grant.path_id,
@@ -3368,7 +3389,15 @@ fn relay_acceptance_requires_matching_exit_authorization() {
         control_relay_node_id: grant.control_relay_node_id.clone(),
         control_relay_peer_id: grant.control_relay_peer_id.clone(),
         exit_peer_id: grant.exit_peer_id.clone(),
-    };
+        signed_client_relay_request_sha256: vec![18; 32],
+    }
+}
+
+#[test]
+fn relay_acceptance_requires_matching_exit_authorization() {
+    let exit_key = key(20);
+    let relay_key = key(21);
+    let reservation = relay_reservation_fixture(&exit_key, &relay_key);
     let signed_reservation = sign_control_message(
         &reservation,
         &relay_key,
@@ -3426,6 +3455,80 @@ fn relay_acceptance_requires_matching_exit_authorization() {
     )
     .unwrap();
     assert_eq!(relay.message().path_id, exit.message().path_id);
+}
+
+#[test]
+fn relay_acceptance_commitment_is_required_nonzero_and_canonical_at_tag_30() {
+    let reservation = relay_reservation_fixture(&key(20), &key(21));
+    let payload = encode_canonical(&reservation, MAX_CONTROL_PAYLOAD_SIZE).unwrap();
+    let commitment_field = [vec![0xf2, 0x01, 0x20], vec![18; 32]].concat();
+    assert!(payload.ends_with(&commitment_field));
+
+    for invalid_commitment in [Vec::new(), vec![0; 32], vec![19; 31], vec![19; 33]] {
+        let mut invalid = reservation.clone();
+        invalid.signed_client_relay_request_sha256 = invalid_commitment;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProtocolError::InvalidField(
+                "relay signed client request SHA-256"
+            ))
+        ));
+    }
+}
+
+#[test]
+fn relay_request_commitment_hashes_the_complete_canonical_signed_envelope() {
+    let client_key = key(70);
+    let request = RelayReservationRequest {
+        client_session_id: node_id(&client_key),
+        exit_authorization: structural_signed_type(ControlMessageType::RelayAuthorization),
+        created_at_ms: NOW,
+        expires_at_ms: NOW + 20_000,
+        nonce: vec![71; 32],
+        client_wireguard_endpoint: Some(endpoint(72, 20_010)),
+        client_session_capability: structural_signed_type(
+            ControlMessageType::ClientSessionCapability,
+        ),
+        exit_reservation: structural_signed_type(ControlMessageType::ExitReservation),
+    };
+    let signed = sign_control_message(
+        &request,
+        &client_key,
+        request.created_at_ms,
+        request.expires_at_ms,
+        [71; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        relay_reservation_request_sha256(&signed)
+            .unwrap()
+            .as_slice(),
+        Sha256::digest(&signed).as_slice()
+    );
+
+    let wrong_type = sign_control_message(
+        &open_tcp(&client_key, [73; 32]),
+        &client_key,
+        NOW,
+        EXPIRY,
+        [73; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        relay_reservation_request_sha256(&wrong_type),
+        Err(ProtocolError::InvalidField(
+            "relay reservation request SHA-256"
+        ))
+    ));
+
+    let mut noncanonical = signed;
+    noncanonical.extend_from_slice(&[0xf8, 0x07, 0x01]);
+    assert!(matches!(
+        relay_reservation_request_sha256(&noncanonical),
+        Err(ProtocolError::NonCanonical)
+    ));
 }
 
 fn endpoint(key: u8, port: u16) -> WireguardEndpoint {

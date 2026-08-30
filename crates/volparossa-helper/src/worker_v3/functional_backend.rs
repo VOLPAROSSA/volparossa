@@ -1,12 +1,14 @@
 //! Process-owned functional-alpha lease backend.
 //!
-//! This adapter deliberately proves only one live helper-runtime Client or Exit lease. It uses the
-//! real authenticated worker, a real anonymous network namespace and kernel `WireGuard` UAPI.
-//! Activate verifies the signed role-specific local and peer authority, then installs and reads
-//! back one exact public peer plus its main-table IPv6 `/128` link route. Probe-Commit requires a
-//! recent handshake and strict bidirectional counter growth from the activation baseline. It does
-//! not claim a usable datapath or crash/restart recovery. Durable journal and systemd
-//! descriptor-store composition stay closed until their affine recovery path is complete.
+//! This adapter proves one live helper-runtime Client/Exit singleton or one atomic
+//! RelayClient+RelayExit pair. It uses the real authenticated worker, a real anonymous network
+//! namespace and kernel `WireGuard` UAPI. Activate verifies the signed role-specific local and peer
+//! authority, then installs and reads back the complete exact peer set plus its main-table IPv6
+//! `/128` link routes. Probe-Commit requires a recent handshake and strict bidirectional counter
+//! growth from every activation baseline. The Relay pair does not enable forwarding between its
+//! two interfaces. This seam does not claim a usable datapath or crash/restart recovery. Durable
+//! journal and systemd descriptor-store composition stay closed until their affine recovery path
+//! is complete.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -16,7 +18,9 @@ use std::{
 };
 
 use volparossa_protocol::{
-    ProtocolError, ReplayCache, TimePolicy, WireguardEndpoint, verify_relay_reservation,
+    ClientSessionCapability, ExitReservation, ProtocolError, RelayAuthorization, RelayReservation,
+    RelayReservationRequest, ReplayCache, TimePolicy, VerifiedControlMessage, WireguardEndpoint,
+    relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
 };
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, ContextRole, HELPER_HANDLE_BYTES,
@@ -158,13 +162,13 @@ struct OpenLeaseEntry {
     context_role: ContextRole,
     worker: Option<WorkerGenerationOwnership>,
     recovery: Option<WorkerRecoveryIdentitySource>,
-    wireguard: LiveWireguardLeaseOwner,
+    wireguard: Vec<LiveWireguardLeaseOwner>,
     prepare: PrepareLeases,
     underlay: UnderlayCandidate,
-    prepared: Option<PreparedWorkerLease>,
-    activated: Option<ActivatedWorkerLease>,
+    prepared: Vec<PreparedWorkerLease>,
+    activated: Vec<ActivatedWorkerLease>,
     phase: OpenLeasePhase,
-    birth_may_exist: bool,
+    birth_may_exist: Vec<bool>,
 }
 
 impl FunctionalAlphaLeaseBackend {
@@ -173,14 +177,29 @@ impl FunctionalAlphaLeaseBackend {
         binding: BackendBinding,
         value: PrepareLeaseBatch,
     ) -> Result<Vec<PreparedKernelLease>, BackendError> {
-        let (key, role, lease, context_ttl) = validate_prepare_binding(binding, &value)?;
+        let (key, context_role, leases, context_ttl) =
+            validate_prepare_batch_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
         let underlay =
             collect_consistent_direct_underlay(deadline).map_err(|_| BackendError::Unavailable)?;
-        let wireguard = process_owned_resource(key, &lease)?;
-        let prepare = internal_prepare_plan(wireguard.resource(), key, &lease);
+        let wireguard = leases
+            .iter()
+            .map(|lease| process_owned_resource(key, lease))
+            .collect::<Result<Vec<_>, _>>()?;
+        if wireguard.len() != leases.len()
+            || wireguard.iter().enumerate().any(|(index, owner)| {
+                wireguard[index + 1..].iter().any(|other| {
+                    owner.resource().key() == other.resource().key()
+                        || owner.resource().interface() == other.resource().interface()
+                        || owner.resource().ownership_alias() == other.resource().ownership_alias()
+                })
+            })
+        {
+            return Err(BackendError::Invalid);
+        }
+        let prepare = internal_prepare_batch_plan(&wireguard, key, &leases)?;
 
-        self.reserve_entry(key, role.context, wireguard, prepare, underlay)?;
+        self.reserve_entry(key, context_role, wireguard, prepare, underlay)?;
         self.admit_worker(key, context_ttl, deadline).await?;
         if let Err(error) = self.retain_recovery_source(key, deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
@@ -188,46 +207,44 @@ impl FunctionalAlphaLeaseBackend {
         if let Err(error) = self.initialise_child(key, &value, deadline).await {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        if let Err(error) = self.create_birth_link(key, deadline) {
+        if let Err(error) = self.create_birth_links(key, deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        let (public_key, listen_port) = match self.prepare_child(key, &lease, deadline).await {
+        let prepared = match self.prepare_child(key, &leases, deadline).await {
             Ok(prepared) => prepared,
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
 
-        let underlay = {
+        let (underlay, prepared) = {
             let mut state = lock_state(&self.state);
             let entry = exact_entry_mut(&mut state, key)?;
-            entry.prepared = Some(PreparedWorkerLease {
-                path_id: lease.path_id,
-                role: lease.role,
-                public_key,
-                listen_port,
-            });
+            entry.prepared = prepared;
             entry.phase = OpenLeasePhase::Prepared;
-            entry.underlay
+            (entry.underlay, entry.prepared.clone())
         };
         deadline
             .complete(())
             .map_err(|_| BackendError::CleanupIncomplete)?;
-        Ok(vec![PreparedKernelLease {
-            path_id: lease.path_id,
-            role: lease.role,
-            public_key,
-            public_endpoint: PublicUdpEndpoint {
-                address: ip_bytes(underlay.address),
-                port: u32::from(listen_port),
-            },
-            evidence: RoutingUnderlayEvidence::DirectAssigned,
-        }])
+        Ok(prepared
+            .into_iter()
+            .map(|lease| PreparedKernelLease {
+                path_id: lease.path_id,
+                role: lease.role,
+                public_key: lease.public_key,
+                public_endpoint: PublicUdpEndpoint {
+                    address: ip_bytes(underlay.address),
+                    port: u32::from(lease.listen_port),
+                },
+                evidence: RoutingUnderlayEvidence::DirectAssigned,
+            })
+            .collect())
     }
 
     fn reserve_entry(
         &self,
         key: OpenLineageKey,
         context_role: ContextRole,
-        wireguard: LiveWireguardLeaseOwner,
+        wireguard: Vec<LiveWireguardLeaseOwner>,
         prepare: PrepareLeases,
         underlay: UnderlayCandidate,
     ) -> Result<(), BackendError> {
@@ -235,6 +252,7 @@ impl FunctionalAlphaLeaseBackend {
         if state.is_some() {
             return Err(BackendError::Capacity);
         }
+        let birth_may_exist = vec![false; wireguard.len()];
         *state = Some(OpenLeaseEntry {
             key,
             context_role,
@@ -243,10 +261,10 @@ impl FunctionalAlphaLeaseBackend {
             wireguard,
             prepare,
             underlay,
-            prepared: None,
-            activated: None,
+            prepared: Vec::new(),
+            activated: Vec::new(),
             phase: OpenLeasePhase::Reserved,
-            birth_may_exist: false,
+            birth_may_exist,
         });
         Ok(())
     }
@@ -325,12 +343,12 @@ impl FunctionalAlphaLeaseBackend {
                 .get();
             (generation, entry.context_role)
         };
-        let role = functional_lease_role_for_context(context_role).ok_or(BackendError::Invalid)?;
+        let internal_context = internal_context_role(context_role).ok_or(BackendError::Invalid)?;
         let request = worker_request(
             worker_request_id(key, STAGE_INITIALISE),
             internal_worker_request::Operation::Initialise(InitialiseContext {
                 route_context_id: key.context_id.to_vec(),
-                role: role.internal_context as i32,
+                role: internal_context as i32,
                 mptcp_accepted_addrs: value.mptcp_accepted_addrs,
                 mptcp_subflows: value.mptcp_subflows,
             }),
@@ -347,50 +365,76 @@ impl FunctionalAlphaLeaseBackend {
         Ok(())
     }
 
-    fn create_birth_link(
+    fn create_birth_links(
         &self,
         key: OpenLineageKey,
         deadline: HardDeadline,
     ) -> Result<(), BackendError> {
         let mut kernel =
             BirthNamespaceKernel::connect(deadline).map_err(|_| BackendError::Kernel)?;
-        let birth = {
-            let mut state = lock_state(&self.state);
-            let entry = exact_entry_mut(&mut state, key)?;
-            let recovery = entry
-                .recovery
-                .as_ref()
-                .ok_or(BackendError::CleanupIncomplete)?;
-            let target_namespace = recovery
-                .restart_custody
-                .borrowed_network_namespace()
-                .as_raw_fd();
-            entry.birth_may_exist = true;
-            entry.phase = OpenLeasePhase::BirthMayExist;
-            kernel.create_and_move_wireguard(&mut entry.wireguard, target_namespace, deadline)
+        let resource_count = {
+            let state = lock_state(&self.state);
+            exact_entry(state.as_ref(), key)?.wireguard.len()
         };
-        if matches!(
-            birth,
-            Err(BirthLinkError::Conflict | BirthLinkError::Kernel(_))
-        ) {
-            let mut state = lock_state(&self.state);
-            exact_entry_mut(&mut state, key)?.birth_may_exist = false;
+        if !(1..=2).contains(&resource_count) {
+            return Err(BackendError::Invalid);
         }
-        match birth {
-            Ok(()) => Ok(()),
-            Err(BirthLinkError::Conflict) => Err(BackendError::Invalid),
-            Err(BirthLinkError::Kernel(_) | BirthLinkError::CleanupIncomplete) => {
-                Err(BackendError::Kernel)
+        for index in 0..resource_count {
+            let birth = {
+                let mut state = lock_state(&self.state);
+                let entry = exact_entry_mut(&mut state, key)?;
+                let recovery = entry
+                    .recovery
+                    .as_ref()
+                    .ok_or(BackendError::CleanupIncomplete)?;
+                let target_namespace = recovery
+                    .restart_custody
+                    .borrowed_network_namespace()
+                    .as_raw_fd();
+                if entry.birth_may_exist.len() != entry.wireguard.len()
+                    || index >= entry.birth_may_exist.len()
+                {
+                    return Err(BackendError::CleanupIncomplete);
+                }
+                entry.birth_may_exist[index] = true;
+                entry.phase = OpenLeasePhase::BirthMayExist;
+                kernel.create_and_move_wireguard(
+                    entry
+                        .wireguard
+                        .get_mut(index)
+                        .ok_or(BackendError::CleanupIncomplete)?,
+                    target_namespace,
+                    deadline,
+                )
+            };
+            if matches!(
+                birth,
+                Err(BirthLinkError::Conflict | BirthLinkError::Kernel(_))
+            ) {
+                let mut state = lock_state(&self.state);
+                let entry = exact_entry_mut(&mut state, key)?;
+                *entry
+                    .birth_may_exist
+                    .get_mut(index)
+                    .ok_or(BackendError::CleanupIncomplete)? = false;
+            }
+            match birth {
+                Ok(()) => {}
+                Err(BirthLinkError::Conflict) => return Err(BackendError::Invalid),
+                Err(BirthLinkError::Kernel(_) | BirthLinkError::CleanupIncomplete) => {
+                    return Err(BackendError::Kernel);
+                }
             }
         }
+        Ok(())
     }
 
     async fn prepare_child(
         &self,
         key: OpenLineageKey,
-        lease: &RoutingLeasePlan,
+        leases: &[RoutingLeasePlan],
         deadline: HardDeadline,
-    ) -> Result<([u8; 32], u16), BackendError> {
+    ) -> Result<Vec<PreparedWorkerLease>, BackendError> {
         let (generation, prepare) = {
             let state = lock_state(&self.state);
             let entry = exact_entry(state.as_ref(), key)?;
@@ -411,14 +455,8 @@ impl FunctionalAlphaLeaseBackend {
             .coordinator
             .execute_until(key.context_id, generation, request, deadline)
             .await;
-        matches_prepared(
-            execution.as_ref().ok(),
-            lease.path_id,
-            functional_lease_role_for_wireguard(lease.role)
-                .ok_or(BackendError::Invalid)?
-                .internal_endpoint as i32,
-        )
-        .ok_or_else(|| response_error(execution))
+        matches_prepared_batch(execution.as_ref().ok(), leases)
+            .ok_or_else(|| response_error(execution))
     }
 
     async fn activate_one(
@@ -426,7 +464,7 @@ impl FunctionalAlphaLeaseBackend {
         binding: BackendBinding,
         value: ActivateLeaseBatch,
     ) -> Result<Vec<KernelCounters>, BackendError> {
-        let (key, activation) = validate_activate_binding(binding, &value)?;
+        let (key, activations) = validate_activate_batch_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
         let now_ms = unix_milliseconds()?;
         let (prepared, plan) = {
@@ -435,47 +473,63 @@ impl FunctionalAlphaLeaseBackend {
             if entry.phase != OpenLeasePhase::Prepared {
                 return Err(BackendError::Invalid);
             }
-            let prepared = entry.prepared.ok_or(BackendError::CleanupIncomplete)?;
-            if (prepared.path_id, prepared.role) != (activation.path_id, activation.role) {
+            let prepared = entry.prepared.clone();
+            if prepared.len() != activations.len()
+                || prepared
+                    .iter()
+                    .zip(&activations)
+                    .any(|(prepared, activation)| {
+                        (prepared.path_id, prepared.role) != (activation.path_id, activation.role)
+                    })
+            {
                 return Err(BackendError::Invalid);
             }
             (
-                prepared,
-                verified_internal_activate_plan(
+                prepared.clone(),
+                verified_internal_activate_batch_plan(
                     &self.relay_replay,
-                    entry.wireguard.resource(),
+                    &entry.wireguard,
                     key,
-                    prepared,
+                    &prepared,
                     entry.underlay,
-                    &activation,
+                    &activations,
                     now_ms,
                 )?,
             )
         };
-        let counters = match self.activate_child(key, prepared, plan, deadline).await {
+        let counters = match self.activate_child(key, &prepared, plan, deadline).await {
             Ok(counters) => counters,
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
-        let [baseline] = counters.as_slice() else {
+        if counters.len() != activations.len() {
             return Err(self
                 .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
                 .await);
-        };
+        }
 
-        let peer_public_key: [u8; 32] = activation
-            .peer_public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| BackendError::Invalid)?;
+        let activated = prepared
+            .iter()
+            .copied()
+            .zip(&activations)
+            .zip(&counters)
+            .map(|((prepared, activation), baseline)| {
+                let peer_public_key: [u8; 32] = activation
+                    .peer_public_key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| BackendError::Invalid)?;
+                Ok(ActivatedWorkerLease {
+                    prepared,
+                    peer_public_key,
+                    baseline: *baseline,
+                })
+            })
+            .collect::<Result<Vec<_>, BackendError>>()?;
         let phase_committed = {
             let mut state = lock_state(&self.state);
             exact_entry_mut(&mut state, key).is_ok_and(|entry| {
-                if entry.phase == OpenLeasePhase::Prepared && entry.prepared == Some(prepared) {
-                    entry.activated = Some(ActivatedWorkerLease {
-                        prepared,
-                        peer_public_key,
-                        baseline: *baseline,
-                    });
+                if entry.phase == OpenLeasePhase::Prepared && entry.prepared == prepared {
+                    entry.activated = activated;
                     entry.phase = OpenLeasePhase::Activated;
                     true
                 } else {
@@ -499,7 +553,7 @@ impl FunctionalAlphaLeaseBackend {
     async fn activate_child(
         &self,
         key: OpenLineageKey,
-        prepared: PreparedWorkerLease,
+        prepared: &[PreparedWorkerLease],
         activate: ActivateLeases,
         deadline: HardDeadline,
     ) -> Result<Vec<KernelCounters>, BackendError> {
@@ -512,8 +566,7 @@ impl FunctionalAlphaLeaseBackend {
             .coordinator
             .execute_until(key.context_id, generation, request, deadline)
             .await;
-        matches_activated(execution.as_ref().ok(), prepared)
-            .map(|baseline| vec![baseline])
+        matches_activated_batch(execution.as_ref().ok(), prepared)
             .ok_or_else(|| response_error(execution))
     }
 
@@ -522,7 +575,7 @@ impl FunctionalAlphaLeaseBackend {
         binding: BackendBinding,
         value: BackendProbe,
     ) -> Result<Vec<KernelCounters>, BackendError> {
-        let (key, commit, activated_at_unix) = validate_probe_binding(binding, &value)?;
+        let (key, commits, activated_at_unix) = validate_probe_batch_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
         let activated = {
             let state = lock_state(&self.state);
@@ -530,9 +583,12 @@ impl FunctionalAlphaLeaseBackend {
             if entry.phase != OpenLeasePhase::Activated {
                 return Err(BackendError::Invalid);
             }
-            let activated = entry.activated.ok_or(BackendError::CleanupIncomplete)?;
-            if (activated.prepared.path_id, activated.prepared.role)
-                != (commit.path_id, commit.role)
+            let activated = entry.activated.clone();
+            if activated.len() != commits.len()
+                || activated.iter().zip(&commits).any(|(activated, commit)| {
+                    (activated.prepared.path_id, activated.prepared.role)
+                        != (commit.path_id, commit.role)
+                })
             {
                 return Err(BackendError::Invalid);
             }
@@ -543,12 +599,18 @@ impl FunctionalAlphaLeaseBackend {
             worker_attempt_request_id(key, STAGE_PROBE_COMMIT, binding),
             internal_worker_request::Operation::ProbeCommitLeases(ProbeCommitLeases {
                 route_context_id: key.context_id.to_vec(),
-                leases: vec![LeaseProbe {
-                    path_id: commit.path_id,
-                    role: commit.role,
-                    expected_peer_public_key: activated.peer_public_key.to_vec(),
-                    not_before_unix: activated_at_unix,
-                }],
+                leases: commits
+                    .iter()
+                    .zip(&activated)
+                    .map(|(commit, activated)| LeaseProbe {
+                        path_id: commit.path_id,
+                        role: functional_lease_role_for_wireguard(commit.role)
+                            .expect("validated functional commit role")
+                            .internal_endpoint as i32,
+                        expected_peer_public_key: activated.peer_public_key.to_vec(),
+                        not_before_unix: activated_at_unix,
+                    })
+                    .collect(),
             }),
         );
         let execution = self
@@ -556,19 +618,21 @@ impl FunctionalAlphaLeaseBackend {
             .execute_until(key.context_id, generation, request, deadline)
             .await;
         let proof = match execution {
-            Ok(execution) => match matches_probed(Some(&execution), activated, activated_at_unix) {
-                Some(proof) => proof,
-                None if InternalWorkerResult::try_from(execution.response.result)
-                    == Ok(InternalWorkerResult::Kernel) =>
-                {
-                    return Err(BackendError::Kernel);
+            Ok(execution) => {
+                match matches_probed_batch(Some(&execution), &activated, activated_at_unix) {
+                    Some(proof) => proof,
+                    None if InternalWorkerResult::try_from(execution.response.result)
+                        == Ok(InternalWorkerResult::Kernel) =>
+                    {
+                        return Err(BackendError::Kernel);
+                    }
+                    None => {
+                        return Err(self
+                            .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                            .await);
+                    }
                 }
-                None => {
-                    return Err(self
-                        .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
-                        .await);
-                }
-            },
+            }
             Err(_) => {
                 return Err(self
                     .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
@@ -579,7 +643,7 @@ impl FunctionalAlphaLeaseBackend {
         let phase_committed = {
             let mut state = lock_state(&self.state);
             exact_entry_mut(&mut state, key).is_ok_and(|entry| {
-                if entry.phase == OpenLeasePhase::Activated && entry.activated == Some(activated) {
+                if entry.phase == OpenLeasePhase::Activated && entry.activated == activated {
                     entry.phase = OpenLeasePhase::Committed;
                     true
                 } else {
@@ -592,7 +656,7 @@ impl FunctionalAlphaLeaseBackend {
                 .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
                 .await);
         }
-        match deadline.complete(vec![proof]) {
+        match deadline.complete(proof) {
             Ok(proofs) => Ok(proofs),
             Err(_) => Err(self
                 .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
@@ -673,14 +737,30 @@ impl FunctionalAlphaLeaseBackend {
             let Ok(entry) = exact_entry_mut(&mut state, key) else {
                 return false;
             };
-            if entry.birth_may_exist {
-                BirthNamespaceKernel::connect(deadline)
-                    .and_then(|mut kernel| {
-                        kernel.delete_owned_wireguard(&mut entry.wireguard, deadline)
-                    })
-                    .is_ok()
-            } else {
+            if entry.birth_may_exist.len() != entry.wireguard.len() {
+                return false;
+            }
+            if entry.birth_may_exist.iter().all(|may_exist| !*may_exist) {
                 true
+            } else {
+                let Ok(mut kernel) = BirthNamespaceKernel::connect(deadline) else {
+                    return false;
+                };
+                let mut absent = true;
+                for index in (0..entry.wireguard.len()).rev() {
+                    if !entry.birth_may_exist[index] {
+                        continue;
+                    }
+                    if kernel
+                        .delete_owned_wireguard(&mut entry.wireguard[index], deadline)
+                        .is_ok()
+                    {
+                        entry.birth_may_exist[index] = false;
+                    } else {
+                        absent = false;
+                    }
+                }
+                absent && entry.birth_may_exist.iter().all(|may_exist| !*may_exist)
             }
         };
         if !parent_absent || deadline.ensure_remaining().is_err() {
@@ -801,28 +881,18 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
     }
 }
 
-fn validate_prepare_binding(
+fn validate_prepare_batch_binding(
     binding: BackendBinding,
     value: &PrepareLeaseBatch,
-) -> Result<
-    (
-        OpenLineageKey,
-        FunctionalLeaseRole,
-        RoutingLeasePlan,
-        Duration,
-    ),
-    BackendError,
-> {
+) -> Result<(OpenLineageKey, ContextRole, Vec<RoutingLeasePlan>, Duration), BackendError> {
     let lineage = binding.lineage;
     let context_id: [u8; 16] = value
         .route_context_id
         .as_slice()
         .try_into()
         .map_err(|_| BackendError::Invalid)?;
-    let [lease] = value.leases.as_slice() else {
-        return Err(BackendError::Unavailable);
-    };
-    let role = functional_lease_role(value.role, lease.role).ok_or(BackendError::Invalid)?;
+    let context_role = ContextRole::try_from(value.role).map_err(|_| BackendError::Invalid)?;
+    validate_functional_lease_batch_shape(context_role, &value.leases)?;
     if binding.action != BackendAction::Prepare
         || binding.phase != BackendPhase::PreparePending
         || binding.operation_kind != OperationKind::Prepare
@@ -835,7 +905,6 @@ fn validate_prepare_binding(
         || context_id.iter().all(|byte| *byte == 0)
         || lineage.helper_runtime_id.iter().all(|byte| *byte == 0)
         || lineage.backend_generation == 0
-        || !(1..=8).contains(&lease.path_id)
         || value.setup_expires_at_unix != lineage.setup_expires_at_unix
         || value.hard_expires_at_unix != lineage.hard_expires_at_unix
         || value.hard_expires_at_unix < value.setup_expires_at_unix
@@ -856,28 +925,37 @@ fn validate_prepare_binding(
     }
     Ok((
         OpenLineageKey::from(lineage),
-        role,
-        lease.clone(),
+        context_role,
+        value.leases.clone(),
         Duration::from_secs(ttl_seconds),
     ))
 }
 
-fn validate_activate_binding(
+fn validate_activate_batch_binding(
     binding: BackendBinding,
     value: &ActivateLeaseBatch,
-) -> Result<(OpenLineageKey, volparossa_routing::LeaseActivation), BackendError> {
+) -> Result<(OpenLineageKey, Vec<volparossa_routing::LeaseActivation>), BackendError> {
     let lineage = binding.lineage;
     let context_id: [u8; 16] = value
         .route_context_id
         .as_slice()
         .try_into()
         .map_err(|_| BackendError::Invalid)?;
-    let [activation] = value.leases.as_slice() else {
-        return Err(BackendError::Unavailable);
-    };
-    if functional_lease_role_for_wireguard(activation.role).is_none() {
-        return Err(BackendError::Invalid);
-    }
+    let context = value
+        .leases
+        .first()
+        .and_then(|lease| functional_lease_role_for_wireguard(lease.role))
+        .map(|role| role.context)
+        .ok_or(BackendError::Invalid)?;
+    let plans = value
+        .leases
+        .iter()
+        .map(|lease| RoutingLeasePlan {
+            path_id: lease.path_id,
+            role: lease.role,
+        })
+        .collect::<Vec<_>>();
+    validate_functional_lease_batch_shape(context, &plans)?;
     if binding.action != BackendAction::Activate
         || binding.phase != BackendPhase::Prepared
         || binding.operation_kind != OperationKind::Activate
@@ -899,17 +977,51 @@ fn validate_activate_binding(
         || context_id != lineage.context_id
         || value.context_handle.len() != HELPER_HANDLE_BYTES
         || value.context_handle.iter().all(|byte| *byte == 0)
-        || activation.lease_handle.len() != HELPER_HANDLE_BYTES
-        || activation.lease_handle.iter().all(|byte| *byte == 0)
-        || !(1..=8).contains(&activation.path_id)
-        || activation.peer_public_key.len() != 32
-        || activation.peer_public_key.iter().all(|byte| *byte == 0)
-        || activation.signed_relay_reservation.is_empty()
-        || activation.maximum_up_mbps != 0
-        || activation.maximum_down_mbps != 0
-        || parse_public_udp_endpoint(activation.peer_endpoint.as_ref()).is_none()
+        || value.leases.iter().any(|activation| {
+            activation.lease_handle.len() != HELPER_HANDLE_BYTES
+                || activation.lease_handle.iter().all(|byte| *byte == 0)
+                || !(1..=8).contains(&activation.path_id)
+                || activation.peer_public_key.len() != 32
+                || activation.peer_public_key.iter().all(|byte| *byte == 0)
+                || activation.signed_relay_reservation.is_empty()
+                || parse_public_udp_endpoint(activation.peer_endpoint.as_ref()).is_none()
+        })
+        || value.leases.iter().enumerate().any(|(index, activation)| {
+            value.leases[index + 1..]
+                .iter()
+                .any(|other| other.lease_handle == activation.lease_handle)
+        })
     {
         return Err(BackendError::Invalid);
+    }
+    match context {
+        ContextRole::Client | ContextRole::Exit => {
+            let [activation] = value.leases.as_slice() else {
+                return Err(BackendError::Invalid);
+            };
+            if activation.maximum_up_mbps != 0
+                || activation.maximum_down_mbps != 0
+                || !activation.signed_client_relay_request.is_empty()
+            {
+                return Err(BackendError::Invalid);
+            }
+        }
+        ContextRole::Relay => {
+            let [client, exit] = value.leases.as_slice() else {
+                return Err(BackendError::Invalid);
+            };
+            if client.maximum_up_mbps == 0
+                || client.maximum_down_mbps == 0
+                || exit.maximum_up_mbps != client.maximum_up_mbps
+                || exit.maximum_down_mbps != client.maximum_down_mbps
+                || client.signed_client_relay_request.is_empty()
+                || !exit.signed_client_relay_request.is_empty()
+                || client.signed_relay_reservation != exit.signed_relay_reservation
+            {
+                return Err(BackendError::Invalid);
+            }
+        }
+        ContextRole::Unspecified => return Err(BackendError::Invalid),
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -918,13 +1030,13 @@ fn validate_activate_binding(
     if now >= lineage.setup_expires_at_unix || now >= lineage.hard_expires_at_unix {
         return Err(BackendError::Invalid);
     }
-    Ok((OpenLineageKey::from(lineage), activation.clone()))
+    Ok((OpenLineageKey::from(lineage), value.leases.clone()))
 }
 
-fn validate_probe_binding(
+fn validate_probe_batch_binding(
     binding: BackendBinding,
     value: &BackendProbe,
-) -> Result<(OpenLineageKey, volparossa_routing::LeaseCommit, u64), BackendError> {
+) -> Result<(OpenLineageKey, Vec<volparossa_routing::LeaseCommit>, u64), BackendError> {
     let lineage = binding.lineage;
     let context_id: [u8; 16] = value
         .commit
@@ -932,12 +1044,23 @@ fn validate_probe_binding(
         .as_slice()
         .try_into()
         .map_err(|_| BackendError::Invalid)?;
-    let [commit] = value.commit.leases.as_slice() else {
-        return Err(BackendError::Unavailable);
-    };
-    if functional_lease_role_for_wireguard(commit.role).is_none() {
-        return Err(BackendError::Invalid);
-    }
+    let context = value
+        .commit
+        .leases
+        .first()
+        .and_then(|lease| functional_lease_role_for_wireguard(lease.role))
+        .map(|role| role.context)
+        .ok_or(BackendError::Invalid)?;
+    let plans = value
+        .commit
+        .leases
+        .iter()
+        .map(|lease| RoutingLeasePlan {
+            path_id: lease.path_id,
+            role: lease.role,
+        })
+        .collect::<Vec<_>>();
+    validate_functional_lease_batch_shape(context, &plans)?;
     if binding.action != BackendAction::Probe
         || binding.phase != BackendPhase::Activated
         || binding.operation_kind != OperationKind::Probe
@@ -959,9 +1082,21 @@ fn validate_probe_binding(
         || context_id != lineage.context_id
         || value.commit.context_handle.len() != HELPER_HANDLE_BYTES
         || value.commit.context_handle.iter().all(|byte| *byte == 0)
-        || commit.lease_handle.len() != HELPER_HANDLE_BYTES
-        || commit.lease_handle.iter().all(|byte| *byte == 0)
-        || !(1..=8).contains(&commit.path_id)
+        || value.commit.leases.iter().any(|commit| {
+            commit.lease_handle.len() != HELPER_HANDLE_BYTES
+                || commit.lease_handle.iter().all(|byte| *byte == 0)
+                || !(1..=8).contains(&commit.path_id)
+        })
+        || value
+            .commit
+            .leases
+            .iter()
+            .enumerate()
+            .any(|(index, commit)| {
+                value.commit.leases[index + 1..]
+                    .iter()
+                    .any(|other| other.lease_handle == commit.lease_handle)
+            })
         || value.activated_at_unix == 0
         || value.activated_at_unix >= lineage.setup_expires_at_unix
     {
@@ -976,9 +1111,54 @@ fn validate_probe_binding(
     }
     Ok((
         OpenLineageKey::from(lineage),
-        commit.clone(),
+        value.commit.leases.clone(),
         value.activated_at_unix,
     ))
+}
+
+#[cfg(test)]
+fn validate_prepare_binding(
+    binding: BackendBinding,
+    value: &PrepareLeaseBatch,
+) -> Result<
+    (
+        OpenLineageKey,
+        FunctionalLeaseRole,
+        RoutingLeasePlan,
+        Duration,
+    ),
+    BackendError,
+> {
+    let (key, context, leases, ttl) = validate_prepare_batch_binding(binding, value)?;
+    let [lease] = leases.as_slice() else {
+        return Err(BackendError::Unavailable);
+    };
+    let role = functional_lease_role(context as i32, lease.role).ok_or(BackendError::Invalid)?;
+    Ok((key, role, lease.clone(), ttl))
+}
+
+#[cfg(test)]
+fn validate_activate_binding(
+    binding: BackendBinding,
+    value: &ActivateLeaseBatch,
+) -> Result<(OpenLineageKey, volparossa_routing::LeaseActivation), BackendError> {
+    let (key, leases) = validate_activate_batch_binding(binding, value)?;
+    let [lease] = leases.as_slice() else {
+        return Err(BackendError::Unavailable);
+    };
+    Ok((key, lease.clone()))
+}
+
+#[cfg(test)]
+fn validate_probe_binding(
+    binding: BackendBinding,
+    value: &BackendProbe,
+) -> Result<(OpenLineageKey, volparossa_routing::LeaseCommit, u64), BackendError> {
+    let (key, leases, activated_at_unix) = validate_probe_batch_binding(binding, value)?;
+    let [lease] = leases.as_slice() else {
+        return Err(BackendError::Unavailable);
+    };
+    Ok((key, lease.clone(), activated_at_unix))
 }
 
 fn validate_destroy_binding(
@@ -1043,33 +1223,85 @@ const fn destroy_operation_shape_is_valid(binding: BackendBinding) -> bool {
 
 fn functional_lease_role(context: i32, wireguard: i32) -> Option<FunctionalLeaseRole> {
     let context = ContextRole::try_from(context).ok()?;
-    let role = functional_lease_role_for_context(context)?;
-    (role.wireguard as i32 == wireguard).then_some(role)
+    let wireguard = WireguardRole::try_from(wireguard).ok()?;
+    let role = functional_lease_role_for_wireguard(wireguard as i32)?;
+    (role.context == context).then_some(role)
 }
 
-const fn functional_lease_role_for_context(context: ContextRole) -> Option<FunctionalLeaseRole> {
+const fn internal_context_role(context: ContextRole) -> Option<InternalContextRole> {
     match context {
-        ContextRole::Client => Some(FunctionalLeaseRole {
-            context,
-            wireguard: WireguardRole::Client,
-            internal_context: InternalContextRole::Client,
-            internal_endpoint: InternalEndpointRole::Client,
-        }),
-        ContextRole::Exit => Some(FunctionalLeaseRole {
-            context,
-            wireguard: WireguardRole::Exit,
-            internal_context: InternalContextRole::Exit,
-            internal_endpoint: InternalEndpointRole::Exit,
-        }),
-        ContextRole::Relay | ContextRole::Unspecified => None,
+        ContextRole::Client => Some(InternalContextRole::Client),
+        ContextRole::Relay => Some(InternalContextRole::Relay),
+        ContextRole::Exit => Some(InternalContextRole::Exit),
+        ContextRole::Unspecified => None,
     }
 }
 
 fn functional_lease_role_for_wireguard(wireguard: i32) -> Option<FunctionalLeaseRole> {
-    match WireguardRole::try_from(wireguard).ok()? {
-        WireguardRole::Client => functional_lease_role_for_context(ContextRole::Client),
-        WireguardRole::Exit => functional_lease_role_for_context(ContextRole::Exit),
-        WireguardRole::RelayClient | WireguardRole::RelayExit | WireguardRole::Unspecified => None,
+    match WireguardRole::try_from(wireguard) {
+        Ok(WireguardRole::Client) => Some(FunctionalLeaseRole {
+            context: ContextRole::Client,
+            wireguard: WireguardRole::Client,
+            internal_context: InternalContextRole::Client,
+            internal_endpoint: InternalEndpointRole::Client,
+        }),
+        Ok(WireguardRole::RelayClient) => Some(FunctionalLeaseRole {
+            context: ContextRole::Relay,
+            wireguard: WireguardRole::RelayClient,
+            internal_context: InternalContextRole::Relay,
+            internal_endpoint: InternalEndpointRole::RelayClient,
+        }),
+        Ok(WireguardRole::RelayExit) => Some(FunctionalLeaseRole {
+            context: ContextRole::Relay,
+            wireguard: WireguardRole::RelayExit,
+            internal_context: InternalContextRole::Relay,
+            internal_endpoint: InternalEndpointRole::RelayExit,
+        }),
+        Ok(WireguardRole::Exit) => Some(FunctionalLeaseRole {
+            context: ContextRole::Exit,
+            wireguard: WireguardRole::Exit,
+            internal_context: InternalContextRole::Exit,
+            internal_endpoint: InternalEndpointRole::Exit,
+        }),
+        Ok(WireguardRole::Unspecified) | Err(_) => None,
+    }
+}
+
+fn validate_functional_lease_batch_shape(
+    context: ContextRole,
+    leases: &[RoutingLeasePlan],
+) -> Result<(), BackendError> {
+    match context {
+        ContextRole::Client | ContextRole::Exit => {
+            if leases.is_empty()
+                || leases.iter().any(|lease| {
+                    functional_lease_role(context as i32, lease.role).is_none()
+                        || !(1..=8).contains(&lease.path_id)
+                })
+            {
+                return Err(BackendError::Invalid);
+            }
+            if leases.len() == 1 {
+                Ok(())
+            } else {
+                Err(BackendError::Unavailable)
+            }
+        }
+        ContextRole::Relay => {
+            let [client, exit] = leases else {
+                return Err(BackendError::Invalid);
+            };
+            if client.path_id == exit.path_id
+                && (1..=8).contains(&client.path_id)
+                && client.role == WireguardRole::RelayClient as i32
+                && exit.role == WireguardRole::RelayExit as i32
+            {
+                Ok(())
+            } else {
+                Err(BackendError::Invalid)
+            }
+        }
+        ContextRole::Unspecified => Err(BackendError::Invalid),
     }
 }
 
@@ -1148,13 +1380,56 @@ fn bind_lineage(hasher: &mut blake3::Hasher, key: OpenLineageKey) {
     hasher.update(&key.hard_expires_at_unix.to_be_bytes());
 }
 
+fn internal_prepare_batch_plan(
+    resources: &[LiveWireguardLeaseOwner],
+    key: OpenLineageKey,
+    leases: &[RoutingLeasePlan],
+) -> Result<PrepareLeases, BackendError> {
+    if resources.len() != leases.len() || !(1..=2).contains(&leases.len()) {
+        return Err(BackendError::Invalid);
+    }
+    let leases = resources
+        .iter()
+        .zip(leases)
+        .map(|(owner, lease)| {
+            let resource = owner.resource();
+            let role =
+                functional_lease_role_for_wireguard(lease.role).ok_or(BackendError::Invalid)?;
+            if resource.key()
+                != (
+                    u8::try_from(lease.path_id).map_err(|_| BackendError::Invalid)?,
+                    lease.role,
+                )
+            {
+                return Err(BackendError::Invalid);
+            }
+            Ok(InternalLeasePlan {
+                path_id: lease.path_id,
+                role: role.internal_endpoint as i32,
+                local_overlay_address: Some(InternalIpPrefix {
+                    address: resource.local_address().octets().to_vec(),
+                    prefix_length: 128,
+                }),
+                setup_expires_at_unix: key.setup_expires_at_unix,
+                hard_expires_at_unix: key.hard_expires_at_unix,
+                ownership_alias: resource.ownership_alias().to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, BackendError>>()?;
+    Ok(PrepareLeases {
+        route_context_id: key.context_id.to_vec(),
+        leases,
+    })
+}
+
+#[cfg(test)]
 fn internal_prepare_plan(
     resource: &DurableWireguardResource,
     key: OpenLineageKey,
     lease: &RoutingLeasePlan,
 ) -> PrepareLeases {
     let role = functional_lease_role_for_wireguard(lease.role)
-        .expect("process-owned resource already validated the functional lease role");
+        .expect("test resource has one validated functional role");
     PrepareLeases {
         route_context_id: key.context_id.to_vec(),
         leases: vec![InternalLeasePlan {
@@ -1171,6 +1446,468 @@ fn internal_prepare_plan(
     }
 }
 
+fn verified_internal_activate_batch_plan(
+    replay_cache: &Mutex<ReplayCache>,
+    resources: &[LiveWireguardLeaseOwner],
+    key: OpenLineageKey,
+    prepared: &[PreparedWorkerLease],
+    underlay: UnderlayCandidate,
+    activations: &[volparossa_routing::LeaseActivation],
+    now_ms: u64,
+) -> Result<ActivateLeases, BackendError> {
+    if resources.len() != prepared.len()
+        || prepared.len() != activations.len()
+        || !(1..=2).contains(&prepared.len())
+    {
+        return Err(BackendError::Invalid);
+    }
+    let context = functional_lease_role_for_wireguard(prepared[0].role)
+        .map(|role| role.context)
+        .ok_or(BackendError::Invalid)?;
+    let plans = prepared
+        .iter()
+        .map(|lease| RoutingLeasePlan {
+            path_id: lease.path_id,
+            role: lease.role,
+        })
+        .collect::<Vec<_>>();
+    if validate_functional_lease_batch_shape(context, &plans).is_err()
+        || prepared
+            .iter()
+            .zip(activations)
+            .any(|(prepared, activation)| {
+                (prepared.path_id, prepared.role) != (activation.path_id, activation.role)
+            })
+    {
+        return Err(BackendError::Invalid);
+    }
+
+    let mut replay_guard = lock_replay_cache(replay_cache);
+    let mut replay_keys = Vec::with_capacity(5);
+    let result = (|| {
+        let authority = verify_activation_authority(
+            context,
+            key,
+            prepared,
+            activations,
+            now_ms,
+            &mut replay_guard,
+            &mut replay_keys,
+        )?;
+        let endpoints = verified_activation_endpoints(&authority, prepared, underlay, activations)?;
+        project_internal_activation_batch(
+            resources,
+            key,
+            prepared,
+            underlay,
+            activations,
+            &endpoints,
+        )
+    })();
+
+    if result.is_err() {
+        rollback_replay_entries(&mut replay_guard, &replay_keys);
+    }
+    result
+}
+
+struct VerifiedActivationAuthority {
+    context: ContextRole,
+    request: Option<VerifiedControlMessage<RelayReservationRequest>>,
+    relay: VerifiedControlMessage<RelayReservation>,
+    exit: VerifiedControlMessage<RelayAuthorization>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the verifier binds the complete immutable route authority and replay transaction"
+)]
+fn verify_activation_authority(
+    context: ContextRole,
+    key: OpenLineageKey,
+    prepared: &[PreparedWorkerLease],
+    activations: &[volparossa_routing::LeaseActivation],
+    now_ms: u64,
+    replay_cache: &mut ReplayCache,
+    replay_keys: &mut Vec<([u8; 32], [u8; 32])>,
+) -> Result<VerifiedActivationAuthority, BackendError> {
+    let (request, capability, exit_reservation) = if context == ContextRole::Relay {
+        let [client, exit] = activations else {
+            return Err(BackendError::Invalid);
+        };
+        if client.signed_client_relay_request.is_empty()
+            || !exit.signed_client_relay_request.is_empty()
+        {
+            return Err(BackendError::Invalid);
+        }
+        let verified = verify_control_message::<RelayReservationRequest>(
+            &client.signed_client_relay_request,
+            now_ms,
+            TimePolicy::default(),
+            replay_cache,
+        )
+        .map_err(|error| protocol_backend_error(&error))?;
+        replay_keys.push((*verified.sender_id(), *verified.nonce()));
+        let verified_capability = verify_control_message::<ClientSessionCapability>(
+            &verified.message().client_session_capability,
+            now_ms,
+            TimePolicy::default(),
+            replay_cache,
+        )
+        .map_err(|error| protocol_backend_error(&error))?;
+        replay_keys.push((
+            *verified_capability.sender_id(),
+            *verified_capability.nonce(),
+        ));
+        let verified_exit_reservation = verify_control_message::<ExitReservation>(
+            &verified.message().exit_reservation,
+            now_ms,
+            TimePolicy::default(),
+            replay_cache,
+        )
+        .map_err(|error| protocol_backend_error(&error))?;
+        replay_keys.push((
+            *verified_exit_reservation.sender_id(),
+            *verified_exit_reservation.nonce(),
+        ));
+        (
+            Some(verified),
+            Some(verified_capability),
+            Some(verified_exit_reservation),
+        )
+    } else {
+        (None, None, None)
+    };
+    let (relay, exit) = verify_relay_reservation(
+        &activations[0].signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        replay_cache,
+    )
+    .map_err(|error| {
+        rollback_replay_entries(replay_cache, replay_keys);
+        protocol_backend_error(&error)
+    })?;
+    replay_keys.push((*relay.sender_id(), *relay.nonce()));
+    replay_keys.push((*exit.sender_id(), *exit.nonce()));
+
+    let relay_message = relay.message();
+    let hard_expires_at_ms = key
+        .hard_expires_at_unix
+        .checked_mul(1_000)
+        .ok_or(BackendError::Invalid)?;
+    if activations.iter().skip(1).any(|activation| {
+        activation.signed_relay_reservation != activations[0].signed_relay_reservation
+    }) || relay_message.route_context_id.as_slice() != key.context_id
+        || relay_message.path_id != prepared[0].path_id
+        || prepared
+            .iter()
+            .any(|lease| lease.path_id != relay_message.path_id)
+        || relay.expires_at_ms() < hard_expires_at_ms
+        || exit.expires_at_ms() < hard_expires_at_ms
+        || !signer_matches_peer_id(relay.sender_public_key(), &relay_message.relay_peer_id)
+        || !signer_matches_peer_id(exit.sender_public_key(), &exit.message().exit_peer_id)
+        || relay.sender_public_key() == exit.sender_public_key()
+    {
+        return Err(BackendError::Invalid);
+    }
+    if context == ContextRole::Relay
+        && !verified_relay_request_scope(
+            request.as_ref().ok_or(BackendError::Invalid)?,
+            capability.as_ref().ok_or(BackendError::Invalid)?,
+            exit_reservation.as_ref().ok_or(BackendError::Invalid)?,
+            &relay,
+            &exit,
+        )
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(VerifiedActivationAuthority {
+        context,
+        request,
+        relay,
+        exit,
+    })
+}
+
+fn verified_relay_request_scope(
+    request: &VerifiedControlMessage<RelayReservationRequest>,
+    capability: &VerifiedControlMessage<ClientSessionCapability>,
+    exit_reservation: &VerifiedControlMessage<ExitReservation>,
+    relay: &VerifiedControlMessage<RelayReservation>,
+    authorization: &VerifiedControlMessage<RelayAuthorization>,
+) -> bool {
+    let request_message = request.message();
+    let capability_message = capability.message();
+    let exit_message = exit_reservation.message();
+    let authorization_message = authorization.message();
+    request.sender_public_key().as_slice() == capability_message.client_session_public_key
+        && capability.sender_public_key() == exit_reservation.sender_public_key()
+        && exit_reservation.sender_public_key() == authorization.sender_public_key()
+        && signer_matches_peer_id(
+            exit_reservation.sender_public_key(),
+            &exit_message.exit_peer_id,
+        )
+        && request_message.client_session_id == capability_message.client_session_id
+        && request_message.exit_authorization == relay.message().exit_authorization
+        && request_message.created_at_ms >= capability_message.created_at_ms
+        && request_message.expires_at_ms <= capability_message.expires_at_ms
+        && request_message.created_at_ms >= authorization_message.created_at_ms
+        && request_message.expires_at_ms <= authorization_message.expires_at_ms
+        && same_capability_exit_scope(capability_message, exit_message)
+        && same_authorization_exit_scope(authorization_message, exit_message, capability_message)
+}
+
+fn same_capability_exit_scope(
+    capability: &ClientSessionCapability,
+    exit: &ExitReservation,
+) -> bool {
+    capability.reservation_id == exit.reservation_id
+        && capability.route_context_id == exit.route_context_id
+        && capability.client_session_id == exit.client_session_id
+        && capability.client_session_public_key == exit.client_session_public_key
+        && capability.exit_node_id == exit.exit_node_id
+        && capability.exit_peer_id == exit.exit_peer_id
+        && capability.exit_boot_id == exit.exit_boot_id
+        && capability.control_relay_node_id == exit.control_relay_node_id
+        && capability.control_relay_peer_id == exit.control_relay_peer_id
+        && capability.policy_hash == exit.policy_hash
+        && capability.allowed_transports == exit.allowed_transports
+        && capability.reserved_up_mbps == exit.reserved_up_mbps
+        && capability.reserved_down_mbps == exit.reserved_down_mbps
+        && capability.maximum_paths >= exit.maximum_paths
+        && capability.created_at_ms == exit.created_at_ms
+        && capability.expires_at_ms == exit.expires_at_ms
+        && capability.capability_id == exit.capability_id
+}
+
+fn same_authorization_exit_scope(
+    authorization: &RelayAuthorization,
+    exit: &ExitReservation,
+    capability: &ClientSessionCapability,
+) -> bool {
+    authorization.reservation_id == exit.reservation_id
+        && authorization.route_context_id == exit.route_context_id
+        && authorization.path_id <= capability.probe_permit_limit
+        && authorization.exit_node_id == exit.exit_node_id
+        && authorization.exit_peer_id == exit.exit_peer_id
+        && authorization.client_session_id == exit.client_session_id
+        && authorization.client_session_public_key == exit.client_session_public_key
+        && authorization.allowed_transports == exit.allowed_transports
+        && authorization.maximum_up_mbps == exit.reserved_up_mbps
+        && authorization.maximum_down_mbps == exit.reserved_down_mbps
+        && authorization.policy_hash == exit.policy_hash
+        && authorization.created_at_ms == exit.created_at_ms
+        && authorization.expires_at_ms == exit.expires_at_ms
+        && authorization.capability_id == exit.capability_id
+        && authorization.exit_boot_id == exit.exit_boot_id
+        && authorization.hold_id == exit.hold_id
+        && authorization.finalize_id == exit.finalize_id
+        && authorization.control_relay_node_id == exit.control_relay_node_id
+        && authorization.control_relay_peer_id == exit.control_relay_peer_id
+}
+
+fn verified_activation_endpoints(
+    authority: &VerifiedActivationAuthority,
+    prepared: &[PreparedWorkerLease],
+    underlay: UnderlayCandidate,
+    activations: &[volparossa_routing::LeaseActivation],
+) -> Result<Vec<VerifiedWireguardEndpoint>, BackendError> {
+    match authority.context {
+        ContextRole::Client => {
+            let [prepared] = prepared else {
+                return Err(BackendError::Invalid);
+            };
+            if authority
+                .relay
+                .message()
+                .client_wireguard_public_key
+                .as_slice()
+                != prepared.public_key
+            {
+                return Err(BackendError::Invalid);
+            }
+            authority
+                .relay
+                .message()
+                .relay_client_wireguard_endpoint
+                .as_ref()
+                .and_then(verified_wireguard_endpoint)
+                .map(|endpoint| vec![endpoint])
+                .ok_or(BackendError::Invalid)
+        }
+        ContextRole::Exit => {
+            let [prepared] = prepared else {
+                return Err(BackendError::Invalid);
+            };
+            let signed_local = authority
+                .exit
+                .message()
+                .exit_wireguard_endpoint
+                .as_ref()
+                .and_then(verified_wireguard_endpoint)
+                .ok_or(BackendError::Invalid)?;
+            if (
+                signed_local.public_key,
+                signed_local.address,
+                signed_local.port,
+            ) != (prepared.public_key, underlay.address, prepared.listen_port)
+            {
+                return Err(BackendError::Invalid);
+            }
+            authority
+                .relay
+                .message()
+                .relay_exit_wireguard_endpoint
+                .as_ref()
+                .and_then(verified_wireguard_endpoint)
+                .map(|endpoint| vec![endpoint])
+                .ok_or(BackendError::Invalid)
+        }
+        ContextRole::Relay => {
+            verified_relay_activation_endpoints(authority, prepared, underlay, activations)
+        }
+        ContextRole::Unspecified => Err(BackendError::Invalid),
+    }
+}
+
+fn verified_relay_activation_endpoints(
+    authority: &VerifiedActivationAuthority,
+    prepared: &[PreparedWorkerLease],
+    underlay: UnderlayCandidate,
+    activations: &[volparossa_routing::LeaseActivation],
+) -> Result<Vec<VerifiedWireguardEndpoint>, BackendError> {
+    let [relay_client, relay_exit] = prepared else {
+        return Err(BackendError::Invalid);
+    };
+    let [client_activation, exit_activation] = activations else {
+        return Err(BackendError::Invalid);
+    };
+    let verified_request = authority.request.as_ref().ok_or(BackendError::Invalid)?;
+    let request = verified_request.message();
+    let relay = authority.relay.message();
+    let request_hash =
+        relay_reservation_request_sha256(&client_activation.signed_client_relay_request)
+            .map_err(|_| BackendError::Invalid)?;
+    let signed_hash: [u8; 32] = relay
+        .signed_client_relay_request_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    if request_hash != signed_hash
+        || verified_request.sender_public_key().as_slice() != relay.client_session_public_key
+        || verified_request.sender_public_key() == authority.relay.sender_public_key()
+        || verified_request.sender_public_key() == authority.exit.sender_public_key()
+        || client_activation.maximum_up_mbps
+            != u32::try_from(relay.maximum_up_mbps).map_err(|_| BackendError::Invalid)?
+        || client_activation.maximum_down_mbps
+            != u32::try_from(relay.maximum_down_mbps).map_err(|_| BackendError::Invalid)?
+        || exit_activation.maximum_up_mbps != client_activation.maximum_up_mbps
+        || exit_activation.maximum_down_mbps != client_activation.maximum_down_mbps
+    {
+        return Err(BackendError::Invalid);
+    }
+    let signed_client_local = relay
+        .relay_client_wireguard_endpoint
+        .as_ref()
+        .and_then(verified_wireguard_endpoint)
+        .ok_or(BackendError::Invalid)?;
+    let signed_exit_local = relay
+        .relay_exit_wireguard_endpoint
+        .as_ref()
+        .and_then(verified_wireguard_endpoint)
+        .ok_or(BackendError::Invalid)?;
+    if (
+        signed_client_local.public_key,
+        signed_client_local.address,
+        signed_client_local.port,
+    ) != (
+        relay_client.public_key,
+        underlay.address,
+        relay_client.listen_port,
+    ) || (
+        signed_exit_local.public_key,
+        signed_exit_local.address,
+        signed_exit_local.port,
+    ) != (
+        relay_exit.public_key,
+        underlay.address,
+        relay_exit.listen_port,
+    ) {
+        return Err(BackendError::Invalid);
+    }
+    let client_peer = request
+        .client_wireguard_endpoint
+        .as_ref()
+        .and_then(verified_wireguard_endpoint)
+        .ok_or(BackendError::Invalid)?;
+    let exit_peer = authority
+        .exit
+        .message()
+        .exit_wireguard_endpoint
+        .as_ref()
+        .and_then(verified_wireguard_endpoint)
+        .ok_or(BackendError::Invalid)?;
+    if client_peer.public_key.as_slice() != relay.client_wireguard_public_key {
+        return Err(BackendError::Invalid);
+    }
+    Ok(vec![client_peer, exit_peer])
+}
+
+fn project_internal_activation_batch(
+    resources: &[LiveWireguardLeaseOwner],
+    key: OpenLineageKey,
+    prepared: &[PreparedWorkerLease],
+    underlay: UnderlayCandidate,
+    activations: &[volparossa_routing::LeaseActivation],
+    endpoints: &[VerifiedWireguardEndpoint],
+) -> Result<ActivateLeases, BackendError> {
+    let mut public_keys = Vec::with_capacity(prepared.len() * 2);
+    let mut socket_tuples = Vec::with_capacity(prepared.len() * 2);
+    let mut leases = Vec::with_capacity(prepared.len());
+    for (((owner, prepared), activation), endpoint) in resources
+        .iter()
+        .zip(prepared)
+        .zip(activations)
+        .zip(endpoints)
+    {
+        let supplied_public_key: [u8; 32] = activation
+            .peer_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| BackendError::Invalid)?;
+        let supplied_endpoint = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
+            .ok_or(BackendError::Invalid)?;
+        if supplied_public_key != endpoint.public_key
+            || supplied_endpoint != (endpoint.address, endpoint.port)
+            || endpoint.public_key == prepared.public_key
+            || (endpoint.address, endpoint.port) == (underlay.address, prepared.listen_port)
+            || public_keys.contains(&prepared.public_key)
+            || public_keys.contains(&endpoint.public_key)
+            || socket_tuples.contains(&(underlay.address, prepared.listen_port))
+            || socket_tuples.contains(&(endpoint.address, endpoint.port))
+        {
+            return Err(BackendError::Invalid);
+        }
+        public_keys.extend([prepared.public_key, endpoint.public_key]);
+        socket_tuples.extend([
+            (underlay.address, prepared.listen_port),
+            (endpoint.address, endpoint.port),
+        ]);
+        leases.push(internal_lease_activation(
+            owner.resource(),
+            activation.path_id,
+            prepared.role,
+            *endpoint,
+        )?);
+    }
+    Ok(ActivateLeases {
+        route_context_id: key.context_id.to_vec(),
+        leases,
+    })
+}
+
+#[cfg(test)]
 fn verified_internal_activate_plan(
     replay_cache: &Mutex<ReplayCache>,
     resource: &DurableWireguardResource,
@@ -1180,6 +1917,9 @@ fn verified_internal_activate_plan(
     activation: &volparossa_routing::LeaseActivation,
     now_ms: u64,
 ) -> Result<ActivateLeases, BackendError> {
+    if !activation.signed_client_relay_request.is_empty() {
+        return Err(BackendError::Invalid);
+    }
     let mut replay_guard = lock_replay_cache(replay_cache);
     let (relay_grant, exit_grant) = verify_relay_reservation(
         &activation.signed_relay_reservation,
@@ -1188,9 +1928,10 @@ fn verified_internal_activate_plan(
         &mut replay_guard,
     )
     .map_err(|error| protocol_backend_error(&error))?;
-    let relay_replay_key = (*relay_grant.sender_id(), *relay_grant.nonce());
-    let exit_replay_key = (*exit_grant.sender_id(), *exit_grant.nonce());
-
+    let replay_keys = [
+        (*relay_grant.sender_id(), *relay_grant.nonce()),
+        (*exit_grant.sender_id(), *exit_grant.nonce()),
+    ];
     let result = (|| {
         let relay_message = relay_grant.message();
         let exit_message = exit_grant.message();
@@ -1203,22 +1944,16 @@ fn verified_internal_activate_plan(
             || relay_message.path_id != prepared.path_id
             || activation.role != prepared.role
             || relay_grant.expires_at_ms() < hard_expires_at_ms
+            || exit_grant.expires_at_ms() < hard_expires_at_ms
             || !signer_matches_peer_id(
                 relay_grant.sender_public_key(),
                 &relay_message.relay_peer_id,
             )
             || !signer_matches_peer_id(exit_grant.sender_public_key(), &exit_message.exit_peer_id)
+            || relay_grant.sender_public_key() == exit_grant.sender_public_key()
         {
             return Err(BackendError::Invalid);
         }
-
-        let supplied_public_key: [u8; 32] = activation
-            .peer_public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| BackendError::Invalid)?;
-        let supplied_endpoint = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
-            .ok_or(BackendError::Invalid)?;
         let endpoint =
             match WireguardRole::try_from(prepared.role).map_err(|_| BackendError::Invalid)? {
                 WireguardRole::Client => {
@@ -1253,6 +1988,13 @@ fn verified_internal_activate_plan(
                 | WireguardRole::RelayExit
                 | WireguardRole::Unspecified => return Err(BackendError::Invalid),
             };
+        let supplied_public_key: [u8; 32] = activation
+            .peer_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| BackendError::Invalid)?;
+        let supplied_endpoint = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
+            .ok_or(BackendError::Invalid)?;
         if supplied_public_key != endpoint.public_key
             || supplied_endpoint != (endpoint.address, endpoint.port)
             || endpoint.public_key == prepared.public_key
@@ -1260,24 +2002,28 @@ fn verified_internal_activate_plan(
         {
             return Err(BackendError::Invalid);
         }
-
-        internal_activate_plan(resource, key, activation.path_id, prepared.role, endpoint)
+        Ok(ActivateLeases {
+            route_context_id: key.context_id.to_vec(),
+            leases: vec![internal_lease_activation(
+                resource,
+                activation.path_id,
+                prepared.role,
+                endpoint,
+            )?],
+        })
     })();
-
     if result.is_err() {
-        let _ = replay_guard.rollback(&relay_replay_key.0, &relay_replay_key.1);
-        let _ = replay_guard.rollback(&exit_replay_key.0, &exit_replay_key.1);
+        rollback_replay_entries(&mut replay_guard, &replay_keys);
     }
     result
 }
 
-fn internal_activate_plan(
+fn internal_lease_activation(
     resource: &DurableWireguardResource,
-    key: OpenLineageKey,
     path_id: u32,
     wireguard_role: i32,
     endpoint: VerifiedWireguardEndpoint,
-) -> Result<ActivateLeases, BackendError> {
+) -> Result<InternalLeaseActivation, BackendError> {
     let role = functional_lease_role_for_wireguard(wireguard_role).ok_or(BackendError::Invalid)?;
     if resource.key()
         != (
@@ -1287,23 +2033,26 @@ fn internal_activate_plan(
     {
         return Err(BackendError::Invalid);
     }
-    Ok(ActivateLeases {
-        route_context_id: key.context_id.to_vec(),
-        leases: vec![InternalLeaseActivation {
-            path_id,
-            role: role.internal_endpoint as i32,
-            peer_public_key: endpoint.public_key.to_vec(),
-            peer_endpoint: Some(InternalUdpEndpoint {
-                address: ip_bytes(endpoint.address),
-                port: u32::from(endpoint.port),
-            }),
-            allowed_prefixes: vec![InternalIpPrefix {
-                address: resource.peer_address().octets().to_vec(),
-                prefix_length: 128,
-            }],
-            persistent_keepalive_seconds: FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS,
+    Ok(InternalLeaseActivation {
+        path_id,
+        role: role.internal_endpoint as i32,
+        peer_public_key: endpoint.public_key.to_vec(),
+        peer_endpoint: Some(InternalUdpEndpoint {
+            address: ip_bytes(endpoint.address),
+            port: u32::from(endpoint.port),
+        }),
+        allowed_prefixes: vec![InternalIpPrefix {
+            address: resource.peer_address().octets().to_vec(),
+            prefix_length: 128,
         }],
+        persistent_keepalive_seconds: FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS,
     })
+}
+
+fn rollback_replay_entries(cache: &mut ReplayCache, entries: &[([u8; 32], [u8; 32])]) {
+    for (sender, nonce) in entries.iter().rev() {
+        let _ = cache.rollback(sender, nonce);
+    }
 }
 
 fn verified_wireguard_endpoint(value: &WireguardEndpoint) -> Option<VerifiedWireguardEndpoint> {
@@ -1374,11 +2123,10 @@ fn matches_initialised(
     })
 }
 
-fn matches_prepared(
+fn matches_prepared_batch(
     execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
-    path_id: u32,
-    role: i32,
-) -> Option<([u8; 32], u16)> {
+    leases: &[RoutingLeasePlan],
+) -> Option<Vec<PreparedWorkerLease>> {
     let execution = execution?;
     if execution.descriptor.is_some()
         || execution.response.result != InternalWorkerResult::Ok as i32
@@ -1390,21 +2138,39 @@ fn matches_prepared(
     else {
         return None;
     };
-    let [lease] = prepared.leases.as_slice() else {
+    if prepared.leases.len() != leases.len() || !(1..=2).contains(&leases.len()) {
         return None;
-    };
-    let public_key: [u8; 32] = lease.public_key.as_slice().try_into().ok()?;
-    let listen_port = u16::try_from(lease.listen_port)
-        .ok()
-        .filter(|port| *port != 0)?;
-    (lease.path_id == path_id && lease.role == role && public_key.iter().any(|byte| *byte != 0))
-        .then_some((public_key, listen_port))
+    }
+    let mut output = Vec::with_capacity(leases.len());
+    for (actual, planned) in prepared.leases.iter().zip(leases) {
+        let role = functional_lease_role_for_wireguard(planned.role)?;
+        let public_key: [u8; 32] = actual.public_key.as_slice().try_into().ok()?;
+        let listen_port = u16::try_from(actual.listen_port)
+            .ok()
+            .filter(|port| *port != 0)?;
+        if actual.path_id != planned.path_id
+            || actual.role != role.internal_endpoint as i32
+            || public_key.iter().all(|byte| *byte == 0)
+            || output.iter().any(|existing: &PreparedWorkerLease| {
+                existing.public_key == public_key || existing.listen_port == listen_port
+            })
+        {
+            return None;
+        }
+        output.push(PreparedWorkerLease {
+            path_id: planned.path_id,
+            role: planned.role,
+            public_key,
+            listen_port,
+        });
+    }
+    Some(output)
 }
 
-fn matches_activated(
+fn matches_activated_batch(
     execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
-    prepared: PreparedWorkerLease,
-) -> Option<KernelCounters> {
+    prepared: &[PreparedWorkerLease],
+) -> Option<Vec<KernelCounters>> {
     let execution = execution?;
     if execution.descriptor.is_some()
         || execution.response.result != InternalWorkerResult::Ok as i32
@@ -1416,39 +2182,47 @@ fn matches_activated(
     else {
         return None;
     };
-    let [lease] = activated.leases.as_slice() else {
-        return None;
-    };
-    let public_key: [u8; 32] = lease.public_key.as_slice().try_into().ok()?;
-    let listen_port = u16::try_from(lease.listen_port)
-        .ok()
-        .filter(|port| *port != 0)?;
-    if (lease.path_id, lease.role, public_key, listen_port)
-        != (
-            prepared.path_id,
-            prepared.role,
-            prepared.public_key,
-            prepared.listen_port,
-        )
-        || lease.latest_handshake_nanoseconds >= 1_000_000_000
-        || (lease.latest_handshake_unix == 0 && lease.latest_handshake_nanoseconds != 0)
-    {
+    if activated.leases.len() != prepared.len() || !(1..=2).contains(&prepared.len()) {
         return None;
     }
-    Some(KernelCounters {
-        path_id: lease.path_id,
-        role: lease.role,
-        latest_handshake_unix: lease.latest_handshake_unix,
-        received_bytes: lease.received_bytes,
-        transmitted_bytes: lease.transmitted_bytes,
-    })
+    activated
+        .leases
+        .iter()
+        .zip(prepared)
+        .map(|(lease, expected)| {
+            let role = functional_lease_role_for_wireguard(expected.role)?;
+            let public_key: [u8; 32] = lease.public_key.as_slice().try_into().ok()?;
+            let listen_port = u16::try_from(lease.listen_port)
+                .ok()
+                .filter(|port| *port != 0)?;
+            if (lease.path_id, lease.role, public_key, listen_port)
+                != (
+                    expected.path_id,
+                    role.internal_endpoint as i32,
+                    expected.public_key,
+                    expected.listen_port,
+                )
+                || lease.latest_handshake_nanoseconds >= 1_000_000_000
+                || (lease.latest_handshake_unix == 0 && lease.latest_handshake_nanoseconds != 0)
+            {
+                return None;
+            }
+            Some(KernelCounters {
+                path_id: expected.path_id,
+                role: expected.role,
+                latest_handshake_unix: lease.latest_handshake_unix,
+                received_bytes: lease.received_bytes,
+                transmitted_bytes: lease.transmitted_bytes,
+            })
+        })
+        .collect()
 }
 
-fn matches_probed(
+fn matches_probed_batch(
     execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
-    activated: ActivatedWorkerLease,
+    activated: &[ActivatedWorkerLease],
     not_before_unix: u64,
-) -> Option<KernelCounters> {
+) -> Option<Vec<KernelCounters>> {
     let execution = execution?;
     if execution.descriptor.is_some()
         || execution.response.result != InternalWorkerResult::Ok as i32
@@ -1460,24 +2234,53 @@ fn matches_probed(
     else {
         return None;
     };
-    let [lease] = probed.leases.as_slice() else {
-        return None;
-    };
-    if (lease.path_id, lease.role) != (activated.prepared.path_id, activated.prepared.role)
-        || lease.latest_handshake_unix < not_before_unix
-        || lease.latest_handshake_unix < activated.baseline.latest_handshake_unix
-        || lease.received_bytes <= activated.baseline.received_bytes
-        || lease.transmitted_bytes <= activated.baseline.transmitted_bytes
-    {
+    if probed.leases.len() != activated.len() || !(1..=2).contains(&activated.len()) {
         return None;
     }
-    Some(KernelCounters {
-        path_id: lease.path_id,
-        role: lease.role,
-        latest_handshake_unix: lease.latest_handshake_unix,
-        received_bytes: lease.received_bytes,
-        transmitted_bytes: lease.transmitted_bytes,
-    })
+    probed
+        .leases
+        .iter()
+        .zip(activated)
+        .map(|(lease, expected)| {
+            let role = functional_lease_role_for_wireguard(expected.prepared.role)?;
+            if (lease.path_id, lease.role)
+                != (expected.prepared.path_id, role.internal_endpoint as i32)
+                || lease.latest_handshake_unix < not_before_unix
+                || lease.latest_handshake_unix < expected.baseline.latest_handshake_unix
+                || lease.received_bytes <= expected.baseline.received_bytes
+                || lease.transmitted_bytes <= expected.baseline.transmitted_bytes
+            {
+                return None;
+            }
+            Some(KernelCounters {
+                path_id: expected.prepared.path_id,
+                role: expected.prepared.role,
+                latest_handshake_unix: lease.latest_handshake_unix,
+                received_bytes: lease.received_bytes,
+                transmitted_bytes: lease.transmitted_bytes,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn matches_activated(
+    execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
+    prepared: PreparedWorkerLease,
+) -> Option<KernelCounters> {
+    let mut proofs = matches_activated_batch(execution, std::slice::from_ref(&prepared))?;
+    (proofs.len() == 1).then(|| proofs.remove(0))
+}
+
+#[cfg(test)]
+fn matches_probed(
+    execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
+    activated: ActivatedWorkerLease,
+    not_before_unix: u64,
+) -> Option<KernelCounters> {
+    let mut proofs =
+        matches_probed_batch(execution, std::slice::from_ref(&activated), not_before_unix)?;
+    (proofs.len() == 1).then(|| proofs.remove(0))
 }
 
 fn response_error(
@@ -1587,10 +2390,12 @@ fn parse_public_udp_endpoint(value: Option<&PublicUdpEndpoint>) -> Option<(IpAdd
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use ed25519_dalek::SigningKey;
     use nix::unistd::{getegid, geteuid};
     use volparossa_protocol::{
         MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
-        SignedEnvelope, Transport, decode_canonical, generate_nonce, sign_control_message,
+        SignedEnvelope, Transport, decode_canonical, generate_nonce, node_id_from_public_key,
+        sign_control_message,
     };
     use volparossa_test_support::SignedRouteFixture;
 
@@ -1701,17 +2506,50 @@ mod tests {
             context_role: role.context,
             worker: None,
             recovery: None,
-            wireguard,
+            wireguard: vec![wireguard],
             prepare,
             underlay: UnderlayCandidate {
                 ifindex: 2,
                 address: "198.51.100.7".parse().expect("fixture address"),
                 evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
             },
-            prepared: None,
-            activated: None,
+            prepared: Vec::new(),
+            activated: Vec::new(),
             phase: OpenLeasePhase::Reserved,
-            birth_may_exist: false,
+            birth_may_exist: vec![false],
+        }
+    }
+
+    fn open_relay_entry(key: OpenLineageKey) -> OpenLeaseEntry {
+        let leases = [
+            RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::RelayClient as i32,
+            },
+            RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::RelayExit as i32,
+            },
+        ];
+        let wireguard = leases
+            .iter()
+            .map(|lease| process_owned_resource(key, lease))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("relay resources");
+        let prepare = internal_prepare_batch_plan(&wireguard, key, &leases)
+            .expect("relay prepare projection");
+        OpenLeaseEntry {
+            key,
+            context_role: ContextRole::Relay,
+            worker: None,
+            recovery: None,
+            birth_may_exist: vec![false; wireguard.len()],
+            wireguard,
+            prepare,
+            underlay: fixture_underlay(),
+            prepared: Vec::new(),
+            activated: Vec::new(),
+            phase: OpenLeasePhase::Reserved,
         }
     }
 
@@ -1753,6 +2591,22 @@ mod tests {
         let (binding, mut value) = live_prepare_fixture();
         value.role = ContextRole::Exit as i32;
         value.leases[0].role = WireguardRole::Exit as i32;
+        (binding, value)
+    }
+
+    fn live_relay_prepare_fixture() -> (BackendBinding, PrepareLeaseBatch) {
+        let (binding, mut value) = live_prepare_fixture();
+        value.role = ContextRole::Relay as i32;
+        value.leases = vec![
+            RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::RelayClient as i32,
+            },
+            RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::RelayExit as i32,
+            },
+        ];
         (binding, value)
     }
 
@@ -1806,6 +2660,7 @@ mod tests {
                 maximum_up_mbps: 0,
                 maximum_down_mbps: 0,
                 signed_relay_reservation: route.relay_reservations()[0].clone(),
+                signed_client_relay_request: Vec::new(),
             }],
         };
         let prepared = PreparedWorkerLease {
@@ -1927,6 +2782,7 @@ mod tests {
                 maximum_up_mbps: 0,
                 maximum_down_mbps: 0,
                 signed_relay_reservation: route.relay_reservations()[0].clone(),
+                signed_client_relay_request: Vec::new(),
             }],
         };
         let prepared = PreparedWorkerLease {
@@ -1993,10 +2849,180 @@ mod tests {
         (key, binding, value, activated)
     }
 
+    fn live_relay_activate_fixture() -> (
+        OpenLineageKey,
+        BackendBinding,
+        ActivateLeaseBatch,
+        [PreparedWorkerLease; 2],
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now = now_ms / 1_000;
+        let route = SignedRouteFixture::new(1, &[Transport::TcpMptcp], now_ms)
+            .expect("signed route fixture");
+        let relay = decode_relay_reservation(&route.relay_reservations()[0]);
+        let request = decode_relay_request(route.relay_request(0).expect("client relay request"));
+        let relay_client = relay
+            .relay_client_wireguard_endpoint
+            .as_ref()
+            .and_then(verified_wireguard_endpoint)
+            .expect("relay-client local endpoint");
+        let relay_exit = relay
+            .relay_exit_wireguard_endpoint
+            .as_ref()
+            .and_then(verified_wireguard_endpoint)
+            .expect("relay-exit local endpoint");
+        let client = request
+            .client_wireguard_endpoint
+            .as_ref()
+            .and_then(verified_wireguard_endpoint)
+            .expect("client peer endpoint");
+        let exit = decode_relay_authorization(&relay.exit_authorization)
+            .exit_wireguard_endpoint
+            .as_ref()
+            .and_then(verified_wireguard_endpoint)
+            .expect("exit peer endpoint");
+        assert_eq!(relay_client.address, relay_exit.address);
+        let key = OpenLineageKey {
+            context_id: *route.route_context_id(),
+            setup_expires_at_unix: now + 20,
+            hard_expires_at_unix: now + 120,
+            ..key()
+        };
+        let mut binding = binding(
+            key,
+            OperationKind::Activate,
+            BackendPhase::Prepared,
+            BackendAction::Activate,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        binding.prior_phase = Some(ContextPhase::Prepared);
+        let rate_up = u32::try_from(relay.maximum_up_mbps).expect("fixture up rate");
+        let rate_down = u32::try_from(relay.maximum_down_mbps).expect("fixture down rate");
+        let value = ActivateLeaseBatch {
+            route_context_id: key.context_id.to_vec(),
+            context_handle: vec![0x51; HELPER_HANDLE_BYTES],
+            leases: vec![
+                volparossa_routing::LeaseActivation {
+                    lease_handle: vec![0x52; HELPER_HANDLE_BYTES],
+                    path_id: 1,
+                    role: WireguardRole::RelayClient as i32,
+                    peer_public_key: client.public_key.to_vec(),
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: ip_bytes(client.address),
+                        port: u32::from(client.port),
+                    }),
+                    maximum_up_mbps: rate_up,
+                    maximum_down_mbps: rate_down,
+                    signed_relay_reservation: route.relay_reservations()[0].clone(),
+                    signed_client_relay_request: route
+                        .relay_request(0)
+                        .expect("client relay request")
+                        .to_vec(),
+                },
+                volparossa_routing::LeaseActivation {
+                    lease_handle: vec![0x53; HELPER_HANDLE_BYTES],
+                    path_id: 1,
+                    role: WireguardRole::RelayExit as i32,
+                    peer_public_key: exit.public_key.to_vec(),
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: ip_bytes(exit.address),
+                        port: u32::from(exit.port),
+                    }),
+                    maximum_up_mbps: rate_up,
+                    maximum_down_mbps: rate_down,
+                    signed_relay_reservation: route.relay_reservations()[0].clone(),
+                    signed_client_relay_request: Vec::new(),
+                },
+            ],
+        };
+        let prepared = [
+            PreparedWorkerLease {
+                path_id: 1,
+                role: WireguardRole::RelayClient as i32,
+                public_key: relay_client.public_key,
+                listen_port: relay_client.port,
+            },
+            PreparedWorkerLease {
+                path_id: 1,
+                role: WireguardRole::RelayExit as i32,
+                public_key: relay_exit.public_key,
+                listen_port: relay_exit.port,
+            },
+        ];
+        let underlay = UnderlayCandidate {
+            ifindex: 4,
+            address: relay_client.address,
+            evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
+        };
+        (key, binding, value, prepared, underlay, route)
+    }
+
+    fn live_relay_probe_fixture() -> (
+        OpenLineageKey,
+        BackendBinding,
+        BackendProbe,
+        [ActivatedWorkerLease; 2],
+    ) {
+        let (key, _, activation, prepared, _, _) = live_relay_activate_fixture();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let mut binding = binding(
+            key,
+            OperationKind::Probe,
+            BackendPhase::Activated,
+            BackendAction::Probe,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        binding.prior_phase = Some(ContextPhase::Activated);
+        binding.operation_generation = key.backend_generation + 1;
+        let value = BackendProbe {
+            commit: volparossa_routing::CommitLeaseBatch {
+                route_context_id: key.context_id.to_vec(),
+                context_handle: activation.context_handle,
+                leases: activation
+                    .leases
+                    .iter()
+                    .map(|lease| volparossa_routing::LeaseCommit {
+                        lease_handle: lease.lease_handle.clone(),
+                        path_id: lease.path_id,
+                        role: lease.role,
+                    })
+                    .collect(),
+            },
+            activated_at_unix: now,
+        };
+        let activated = std::array::from_fn(|index| ActivatedWorkerLease {
+            prepared: prepared[index],
+            peer_public_key: activation.leases[index]
+                .peer_public_key
+                .as_slice()
+                .try_into()
+                .expect("peer key"),
+            baseline: KernelCounters {
+                path_id: prepared[index].path_id,
+                role: prepared[index].role,
+                latest_handshake_unix: 0,
+                received_bytes: 100 + u64::try_from(index).expect("index"),
+                transmitted_bytes: 200 + u64::try_from(index).expect("index"),
+            },
+        });
+        (key, binding, value, activated)
+    }
+
     fn decode_relay_reservation(encoded: &[u8]) -> RelayReservation {
         let envelope: SignedEnvelope =
             decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE).expect("relay envelope");
         decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).expect("relay payload")
+    }
+
+    fn decode_relay_request(encoded: &[u8]) -> RelayReservationRequest {
+        let envelope: SignedEnvelope =
+            decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE).expect("request envelope");
+        decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).expect("request payload")
     }
 
     fn fixture_underlay() -> UnderlayCandidate {
@@ -2041,6 +3067,39 @@ mod tests {
             TimePolicy::default(),
         )
         .expect("re-signed relay reservation")
+    }
+
+    fn resign_client_relay_request(
+        route: &SignedRouteFixture,
+        mutate: impl FnOnce(&mut RelayReservationRequest),
+    ) -> Vec<u8> {
+        resign_client_relay_request_with_key(route, route.client_key(), mutate)
+    }
+
+    fn resign_client_relay_request_with_key(
+        route: &SignedRouteFixture,
+        signing_key: &SigningKey,
+        mutate: impl FnOnce(&mut RelayReservationRequest),
+    ) -> Vec<u8> {
+        let mut request = decode_relay_request(route.relay_request(0).expect("relay request"));
+        mutate(&mut request);
+        let nonce: [u8; 32] = request.nonce.as_slice().try_into().expect("request nonce");
+        sign_control_message(
+            &request,
+            signing_key,
+            request.created_at_ms,
+            request.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+        )
+        .expect("re-signed client relay request")
+    }
+
+    fn bind_grant_to_request(route: &SignedRouteFixture, request: &[u8]) -> Vec<u8> {
+        let request_hash = relay_reservation_request_sha256(request).expect("request hash");
+        resign_consistent_grant(route, |relay, _| {
+            relay.signed_client_relay_request_sha256 = request_hash.to_vec();
+        })
     }
 
     fn resign_with_corrupt_nested_signature(route: &SignedRouteFixture) -> Vec<u8> {
@@ -2121,6 +3180,40 @@ mod tests {
             prepared,
             underlay,
             &value.leases[0],
+            now_ms,
+        )
+    }
+
+    fn verify_relay_fixture_plan(
+        replay: &Mutex<ReplayCache>,
+        key: OpenLineageKey,
+        prepared: &[PreparedWorkerLease; 2],
+        underlay: UnderlayCandidate,
+        value: &ActivateLeaseBatch,
+        now_ms: u64,
+    ) -> Result<ActivateLeases, BackendError> {
+        let plans = [
+            RoutingLeasePlan {
+                path_id: prepared[0].path_id,
+                role: prepared[0].role,
+            },
+            RoutingLeasePlan {
+                path_id: prepared[1].path_id,
+                role: prepared[1].role,
+            },
+        ];
+        let resources = plans
+            .iter()
+            .map(|lease| process_owned_resource(key, lease))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("relay resources");
+        verified_internal_activate_batch_plan(
+            replay,
+            &resources,
+            key,
+            prepared,
+            underlay,
+            &value.leases,
             now_ms,
         )
     }
@@ -2294,6 +3387,293 @@ mod tests {
             Err(BackendError::Unavailable),
             "the functional Exit seam remains an exact singleton"
         );
+    }
+
+    #[test]
+    fn relay_prepare_accepts_only_one_canonical_atomic_endpoint_pair() {
+        let (binding, value) = live_relay_prepare_fixture();
+        let (key, context, leases, _) =
+            validate_prepare_batch_binding(binding, &value).expect("relay pair binding");
+        assert_eq!(context, ContextRole::Relay);
+        assert_eq!(leases, value.leases);
+        let resources = leases
+            .iter()
+            .map(|lease| process_owned_resource(key, lease))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("relay resources");
+        let plan = internal_prepare_batch_plan(&resources, key, &leases).expect("relay plan");
+        assert_eq!(plan.leases.len(), 2);
+        assert_eq!(
+            plan.leases[0].role,
+            InternalEndpointRole::RelayClient as i32
+        );
+        assert_eq!(plan.leases[1].role, InternalEndpointRole::RelayExit as i32);
+        assert_ne!(
+            plan.leases[0].ownership_alias,
+            plan.leases[1].ownership_alias
+        );
+        assert_ne!(
+            plan.leases[0].local_overlay_address,
+            plan.leases[1].local_overlay_address
+        );
+
+        let mut malformed = Vec::new();
+        let mut missing = value.clone();
+        missing.leases.pop();
+        malformed.push(missing);
+        let mut reordered = value.clone();
+        reordered.leases.swap(0, 1);
+        malformed.push(reordered);
+        let mut cross_path = value.clone();
+        cross_path.leases[1].path_id = 2;
+        malformed.push(cross_path);
+        let mut duplicate_role = value.clone();
+        duplicate_role.leases[1].role = WireguardRole::RelayClient as i32;
+        malformed.push(duplicate_role);
+        let mut client_context = value;
+        client_context.role = ContextRole::Client as i32;
+        malformed.push(client_context);
+        for value in malformed {
+            assert_eq!(
+                validate_prepare_batch_binding(binding, &value),
+                Err(BackendError::Invalid)
+            );
+        }
+    }
+
+    #[test]
+    fn relay_activate_projects_the_exact_client_and_exit_authority_in_order() {
+        let (key, binding, value, prepared, underlay, _) = live_relay_activate_fixture();
+        let (validated_key, activations) =
+            validate_activate_batch_binding(binding, &value).expect("relay activation binding");
+        assert_eq!(validated_key, key);
+        assert_eq!(activations, value.leases);
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verify_relay_fixture_plan(
+            &replay,
+            key,
+            &prepared,
+            underlay,
+            &value,
+            unix_milliseconds().expect("fixture time"),
+        )
+        .expect("verified relay pair");
+        assert_eq!(lock_replay_cache(&replay).len(), 5);
+        let [client, exit] = plan.leases.as_slice() else {
+            panic!("two relay endpoint activations")
+        };
+        assert_eq!(client.role, InternalEndpointRole::RelayClient as i32);
+        assert_eq!(exit.role, InternalEndpointRole::RelayExit as i32);
+        assert_eq!(client.peer_public_key, value.leases[0].peer_public_key);
+        assert_eq!(exit.peer_public_key, value.leases[1].peer_public_key);
+        assert_ne!(client.peer_public_key, exit.peer_public_key);
+        assert_ne!(client.peer_endpoint, exit.peer_endpoint);
+        assert_ne!(client.allowed_prefixes, exit.allowed_prefixes);
+
+        let (_, probe_binding, probe, _) = live_relay_probe_fixture();
+        let (_, commits, _) =
+            validate_probe_batch_binding(probe_binding, &probe).expect("relay probe binding");
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].role, WireguardRole::RelayClient as i32);
+        assert_eq!(commits[1].role, WireguardRole::RelayExit as i32);
+    }
+
+    #[test]
+    fn relay_activate_shape_rejects_partial_reordered_or_ambiguous_pairs_before_authority() {
+        let (_, binding, value, _, _, _) = live_relay_activate_fixture();
+        let mut malformed = Vec::new();
+        let mut missing = value.clone();
+        missing.leases.pop();
+        malformed.push(missing);
+        let mut reordered = value.clone();
+        reordered.leases.swap(0, 1);
+        malformed.push(reordered);
+        let mut cross_path = value.clone();
+        cross_path.leases[1].path_id = 2;
+        malformed.push(cross_path);
+        let mut unequal_rate = value.clone();
+        unequal_rate.leases[1].maximum_down_mbps += 1;
+        malformed.push(unequal_rate);
+        let mut unequal_grant = value.clone();
+        *unequal_grant.leases[1]
+            .signed_relay_reservation
+            .last_mut()
+            .expect("grant byte") ^= 1;
+        malformed.push(unequal_grant);
+        let mut request_on_both = value.clone();
+        request_on_both.leases[1].signed_client_relay_request = request_on_both.leases[0]
+            .signed_client_relay_request
+            .clone();
+        malformed.push(request_on_both);
+        let mut duplicate_handle = value;
+        duplicate_handle.leases[1].lease_handle = duplicate_handle.leases[0].lease_handle.clone();
+        malformed.push(duplicate_handle);
+        for value in malformed {
+            assert_eq!(
+                validate_activate_batch_binding(binding, &value),
+                Err(BackendError::Invalid)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one mutation matrix proves all five authority records roll back together"
+    )]
+    fn relay_authority_endpoint_and_request_substitutions_roll_back_all_replay_records() {
+        let (key, _, value, prepared, underlay, route) = live_relay_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let mut substitutions = Vec::new();
+
+        let mut wrong_hash = value.clone();
+        let grant = resign_consistent_grant(&route, |relay, _| {
+            relay.signed_client_relay_request_sha256[0] ^= 1;
+        });
+        for lease in &mut wrong_hash.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(wrong_hash);
+
+        for select_endpoint in [
+            |relay: &mut RelayReservation| {
+                relay
+                    .relay_client_wireguard_endpoint
+                    .as_mut()
+                    .expect("relay-client local")
+                    .listen_port += 10;
+            },
+            |relay: &mut RelayReservation| {
+                relay
+                    .relay_exit_wireguard_endpoint
+                    .as_mut()
+                    .expect("relay-exit local")
+                    .public_key[0] ^= 1;
+            },
+        ] {
+            let mut substituted = value.clone();
+            let grant = resign_consistent_grant(&route, |relay, _| select_endpoint(relay));
+            for lease in &mut substituted.leases {
+                lease.signed_relay_reservation.clone_from(&grant);
+            }
+            substitutions.push(substituted);
+        }
+
+        let mut wrong_client_peer = value.clone();
+        wrong_client_peer.leases[0].peer_public_key[0] ^= 1;
+        substitutions.push(wrong_client_peer);
+        let mut wrong_exit_peer = value.clone();
+        wrong_exit_peer.leases[1]
+            .peer_endpoint
+            .as_mut()
+            .expect("exit peer")
+            .port += 1;
+        substitutions.push(wrong_exit_peer);
+
+        let request = resign_client_relay_request(&route, |request| {
+            request
+                .client_wireguard_endpoint
+                .as_mut()
+                .expect("client endpoint")
+                .listen_port += 1;
+        });
+        let mut wrong_request_peer = value.clone();
+        wrong_request_peer.leases[0].signed_client_relay_request = request.clone();
+        let grant = bind_grant_to_request(&route, &request);
+        for lease in &mut wrong_request_peer.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(wrong_request_peer);
+
+        let substitute_key = SigningKey::from_bytes(&[0x91; 32]);
+        let substitute_session_id =
+            node_id_from_public_key(&substitute_key.verifying_key().to_bytes());
+        let request = resign_client_relay_request_with_key(&route, &substitute_key, |request| {
+            request.client_session_id = substitute_session_id.to_vec();
+        });
+        let mut wrong_session = value.clone();
+        wrong_session.leases[0].signed_client_relay_request = request.clone();
+        let grant = bind_grant_to_request(&route, &request);
+        for lease in &mut wrong_session.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(wrong_session);
+
+        let request = resign_client_relay_request(&route, |request| {
+            *request.exit_authorization.last_mut().expect("nested byte") ^= 1;
+        });
+        let mut wrong_nested = value.clone();
+        wrong_nested.leases[0].signed_client_relay_request = request.clone();
+        let grant = bind_grant_to_request(&route, &request);
+        for lease in &mut wrong_nested.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(wrong_nested);
+
+        let request = resign_client_relay_request(&route, |request| {
+            *request
+                .client_session_capability
+                .last_mut()
+                .expect("capability signature") ^= 1;
+        });
+        let mut corrupt_capability = value.clone();
+        corrupt_capability.leases[0].signed_client_relay_request = request.clone();
+        let grant = bind_grant_to_request(&route, &request);
+        for lease in &mut corrupt_capability.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(corrupt_capability);
+
+        let request = resign_client_relay_request(&route, |request| {
+            *request
+                .exit_reservation
+                .last_mut()
+                .expect("exit reservation signature") ^= 1;
+        });
+        let mut corrupt_exit_reservation = value.clone();
+        corrupt_exit_reservation.leases[0].signed_client_relay_request = request.clone();
+        let grant = bind_grant_to_request(&route, &request);
+        for lease in &mut corrupt_exit_reservation.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(corrupt_exit_reservation);
+
+        let other_route = SignedRouteFixture::new(1, &[Transport::TcpMptcp], now_ms)
+            .expect("independent signed route");
+        let request = resign_client_relay_request(&route, |request| {
+            request.client_session_capability = other_route.client_session_capability().to_vec();
+        });
+        let mut substituted_capability = value.clone();
+        substituted_capability.leases[0].signed_client_relay_request = request.clone();
+        let grant = bind_grant_to_request(&route, &request);
+        for lease in &mut substituted_capability.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(substituted_capability);
+
+        let request = resign_client_relay_request(&route, |request| {
+            request.exit_reservation = other_route.exit_reservation().to_vec();
+        });
+        let mut substituted_exit_reservation = value.clone();
+        substituted_exit_reservation.leases[0].signed_client_relay_request = request.clone();
+        let grant = bind_grant_to_request(&route, &request);
+        for lease in &mut substituted_exit_reservation.leases {
+            lease.signed_relay_reservation.clone_from(&grant);
+        }
+        substitutions.push(substituted_exit_reservation);
+
+        for substituted in substitutions {
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            assert_eq!(
+                verify_relay_fixture_plan(&replay, key, &prepared, underlay, &substituted, now_ms,),
+                Err(BackendError::Invalid)
+            );
+            assert!(lock_replay_cache(&replay).is_empty());
+            assert!(
+                verify_relay_fixture_plan(&replay, key, &prepared, underlay, &value, now_ms)
+                    .is_ok()
+            );
+        }
     }
 
     #[test]
@@ -2750,8 +4130,8 @@ mod tests {
         let mut substituted = value;
         substituted.commit.leases[0].role = WireguardRole::Client as i32;
         let mut entry = open_entry_for_role(key, WireguardRole::Exit);
-        entry.prepared = Some(activated.prepared);
-        entry.activated = Some(activated);
+        entry.prepared = vec![activated.prepared];
+        entry.activated = vec![activated];
         entry.phase = OpenLeasePhase::Activated;
         let backend = backend_with_state(Some(entry));
         assert_eq!(
@@ -2834,7 +4214,7 @@ mod tests {
         let (key, binding, value, prepared, underlay, _) = live_exit_activate_fixture();
         let mut entry = open_entry_for_role(key, WireguardRole::Exit);
         entry.underlay = underlay;
-        entry.prepared = Some(prepared);
+        entry.prepared = vec![prepared];
         entry.phase = OpenLeasePhase::Prepared;
         let backend = backend_with_state(Some(entry));
 
@@ -2847,7 +4227,7 @@ mod tests {
 
         let mut retry = open_entry_for_role(key, WireguardRole::Exit);
         retry.underlay = underlay;
-        retry.prepared = Some(prepared);
+        retry.prepared = vec![prepared];
         retry.phase = OpenLeasePhase::Prepared;
         *lock_state(&backend.state) = Some(retry);
         let mut retry_binding = binding;
@@ -2860,6 +4240,40 @@ mod tests {
             Err(BackendError::Invalid)
         );
         assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
+        drop(lock_state(&backend.state).take());
+    }
+
+    #[tokio::test]
+    async fn relay_post_verification_worker_lookup_failure_retains_all_five_replay_records() {
+        let (key, binding, value, prepared, underlay, _) = live_relay_activate_fixture();
+        let mut entry = open_relay_entry(key);
+        entry.underlay = underlay;
+        entry.prepared = prepared.to_vec();
+        entry.phase = OpenLeasePhase::Prepared;
+        let backend = backend_with_state(Some(entry));
+
+        assert_eq!(
+            backend.activate_one(binding, value.clone()).await,
+            Err(BackendError::CleanupIncomplete)
+        );
+        assert!(lock_state(&backend.state).is_none());
+        assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 5);
+
+        let mut retry = open_relay_entry(key);
+        retry.underlay = underlay;
+        retry.prepared = prepared.to_vec();
+        retry.phase = OpenLeasePhase::Prepared;
+        *lock_state(&backend.state) = Some(retry);
+        let mut retry_binding = binding;
+        retry_binding.operation_sequence += 1;
+        retry_binding.request_id = [0xd3; 16];
+        retry_binding.request_digest = [0xd4; 32];
+        retry_binding.call_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            backend.activate_one(retry_binding, value).await,
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 5);
         drop(lock_state(&backend.state).take());
     }
 
@@ -3109,7 +4523,7 @@ mod tests {
 
         let mut entry = open_entry(key);
         entry.worker = Some(ownership);
-        entry.prepared = Some(prepared);
+        entry.prepared = vec![prepared];
         entry.phase = OpenLeasePhase::Prepared;
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
@@ -3163,7 +4577,7 @@ mod tests {
         assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
 
         let mut retry_entry = open_entry(key);
-        retry_entry.prepared = Some(prepared);
+        retry_entry.prepared = vec![prepared];
         retry_entry.phase = OpenLeasePhase::Prepared;
         *lock_state(&backend.state) = Some(retry_entry);
 
@@ -3332,8 +4746,8 @@ mod tests {
 
         let mut entry = open_entry(key);
         entry.worker = Some(ownership);
-        entry.prepared = Some(activated.prepared);
-        entry.activated = Some(activated);
+        entry.prepared = vec![activated.prepared];
+        entry.activated = vec![activated];
         entry.phase = OpenLeasePhase::Activated;
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
@@ -3464,6 +4878,69 @@ mod tests {
                 value.activated_at_unix,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn relay_probe_requires_complete_ordered_proof_and_growth_on_both_legs() {
+        let (_, _, value, activated) = live_relay_probe_fixture();
+        let execution = |second_leg_grows: bool| {
+            let leases = activated
+                .iter()
+                .enumerate()
+                .map(|(index, lease)| crate::internal_protocol::ProbedLease {
+                    path_id: lease.prepared.path_id,
+                    role: functional_lease_role_for_wireguard(lease.prepared.role)
+                        .expect("relay role")
+                        .internal_endpoint as i32,
+                    latest_handshake_unix: value.activated_at_unix,
+                    received_bytes: lease.baseline.received_bytes
+                        + u64::from(index == 0 || second_leg_grows),
+                    transmitted_bytes: lease.baseline.transmitted_bytes + 1,
+                })
+                .collect();
+            crate::worker_transport::CredentialedWorkerExecution {
+                response: crate::internal_protocol::InternalWorkerResponse {
+                    protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                    magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                    request_id: vec![7; 16],
+                    result: InternalWorkerResult::Ok as i32,
+                    request_digest: vec![8; 32],
+                    outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
+                        crate::internal_protocol::ProbedLeases { leases },
+                    )),
+                },
+                descriptor: None,
+            }
+        };
+
+        let complete = execution(true);
+        let proof = matches_probed_batch(Some(&complete), &activated, value.activated_at_unix)
+            .expect("both relay legs prove ready");
+        assert_eq!(proof.len(), 2);
+        assert!(
+            matches_probed_batch(Some(&execution(false)), &activated, value.activated_at_unix,)
+                .is_none()
+        );
+        let mut partial = execution(true);
+        let Some(internal_worker_response::Outcome::ProbedCommitted(probed)) =
+            partial.response.outcome.as_mut()
+        else {
+            panic!("probe response")
+        };
+        probed.leases.pop();
+        assert!(
+            matches_probed_batch(Some(&partial), &activated, value.activated_at_unix).is_none()
+        );
+        let mut reordered = execution(true);
+        let Some(internal_worker_response::Outcome::ProbedCommitted(probed)) =
+            reordered.response.outcome.as_mut()
+        else {
+            panic!("probe response")
+        };
+        probed.leases.swap(0, 1);
+        assert!(
+            matches_probed_batch(Some(&reordered), &activated, value.activated_at_unix,).is_none()
         );
     }
 

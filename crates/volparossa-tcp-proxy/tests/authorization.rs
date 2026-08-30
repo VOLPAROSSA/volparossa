@@ -9,9 +9,10 @@ use volparossa_policy::{
     TrustedMaintainer, VerificationPolicy, VerifiedManifest, sign_manifest, verify_manifest,
 };
 use volparossa_protocol::{
-    ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, NativeRouteIdentity,
-    OpenTcp, ProtocolError, RelayAuthorization, RelayReservation, ReplayCache, SignedEnvelope,
-    TimePolicy, Transport, WireguardEndpoint, decode_canonical, node_id_from_public_key,
+    ClientSessionCapability, ExitReservation, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
+    NativeRouteIdentity, OpenTcp, ProtocolError, RelayAuthorization, RelayReservation,
+    RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport, WireguardEndpoint,
+    decode_canonical, node_id_from_public_key, relay_reservation_request_sha256,
     sign_control_message,
 };
 use volparossa_tcp_proxy::{
@@ -24,6 +25,7 @@ const EXPIRY: u64 = NOW + 60_000;
 const PERMANENT_CLIENT_PEER_ID: [u8; 32] = [0xa5; 32];
 
 struct V4GrantScope {
+    client_session_signing_key: [u8; 32],
     client_session_id: Vec<u8>,
     client_session_public_key: Vec<u8>,
     capability_id: Vec<u8>,
@@ -55,6 +57,7 @@ fn v4_grant_scope(
     control_relay: &SigningKey,
 ) -> V4GrantScope {
     V4GrantScope {
+        client_session_signing_key: client_session.to_bytes(),
         client_session_id: node_id(client_session),
         client_session_public_key: client_session.verifying_key().to_bytes().to_vec(),
         capability_id: vec![4; 16],
@@ -65,6 +68,71 @@ fn v4_grant_scope(
         control_relay_peer_id: peer_id(control_relay),
         exit_peer_id: peer_id(exit),
     }
+}
+
+fn signed_client_session_capability(exit: &SigningKey, scope: &V4GrantScope) -> Vec<u8> {
+    let nonce = [4; 32];
+    let capability = ClientSessionCapability {
+        capability_id: scope.capability_id.clone(),
+        reservation_id: vec![1; 16],
+        route_context_id: vec![2; 16],
+        client_session_id: scope.client_session_id.clone(),
+        client_session_public_key: scope.client_session_public_key.clone(),
+        exit_node_id: node_id(exit),
+        exit_boot_id: scope.exit_boot_id.clone(),
+        control_relay_node_id: scope.control_relay_node_id.clone(),
+        control_relay_peer_id: scope.control_relay_peer_id.clone(),
+        policy_hash: vec![7; 32],
+        allowed_transports: vec![Transport::TcpMptcp as i32],
+        reserved_up_mbps: 25,
+        reserved_down_mbps: 50,
+        maximum_paths: 8,
+        created_at_ms: NOW,
+        expires_at_ms: EXPIRY,
+        nonce: nonce.to_vec(),
+        exit_peer_id: scope.exit_peer_id.clone(),
+        probe_permit_limit: 8,
+    };
+    sign_control_message(
+        &capability,
+        exit,
+        capability.created_at_ms,
+        capability.expires_at_ms,
+        nonce,
+        TimePolicy::default(),
+    )
+    .unwrap()
+}
+
+fn client_relay_request_sha256(
+    exit: &SigningKey,
+    scope: &V4GrantScope,
+    signed_grant: &[u8],
+    path_byte: u8,
+    nonce_discriminator: u8,
+) -> [u8; 32] {
+    let nonce = [70 + nonce_discriminator; 32];
+    let request = RelayReservationRequest {
+        client_session_id: scope.client_session_id.clone(),
+        exit_authorization: signed_grant.to_vec(),
+        created_at_ms: NOW,
+        expires_at_ms: NOW + 20_000,
+        nonce: nonce.to_vec(),
+        client_wireguard_endpoint: Some(endpoint(30 + path_byte, 23_000 + u16::from(path_byte))),
+        client_session_capability: signed_client_session_capability(exit, scope),
+        exit_reservation: signed_exit(exit, scope),
+    };
+    let client_session_key = SigningKey::from_bytes(&scope.client_session_signing_key);
+    let signed_request = sign_control_message(
+        &request,
+        &client_session_key,
+        request.created_at_ms,
+        request.expires_at_ms,
+        nonce,
+        TimePolicy::default(),
+    )
+    .unwrap();
+    relay_reservation_request_sha256(&signed_request).unwrap()
 }
 
 fn policy() -> VerifiedManifest {
@@ -212,6 +280,8 @@ where
         TimePolicy::default(),
     )
     .unwrap();
+    let signed_client_relay_request_sha256 =
+        client_relay_request_sha256(exit, scope, &signed_grant, path_byte, nonce_discriminator);
     let accepted = RelayReservation {
         reservation_id: grant.reservation_id,
         route_context_id: grant.route_context_id,
@@ -246,6 +316,7 @@ where
         control_relay_node_id: grant.control_relay_node_id,
         control_relay_peer_id: grant.control_relay_peer_id,
         exit_peer_id: grant.exit_peer_id,
+        signed_client_relay_request_sha256: signed_client_relay_request_sha256.to_vec(),
     };
     sign_control_message(
         &accepted,
