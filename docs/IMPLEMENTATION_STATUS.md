@@ -651,13 +651,16 @@ single clean-build A01--A15 run; the score is not a release claim.
   publication now poisons one process-global manager-mutation gate before `sendmsg(2)` with an
   opaque typed attempt identity bound to the exact unit object path, `MainPID`, parsed notify
   endpoint, custody name and role-ordered local identities; publication and removal IDs draw from
-  one monotone counter, and that identity is retained in the normal manager-may-own terminal. A
-  callerless observation-only reconciler holds that same gate and borrows the affine owners while it
-  sends one causal non-mutating manager barrier, requires two identical complete bounded D-Bus
-  inventory identity projections plus exact service properties and remeasures the local binding. It
-  can report exact name/identity-correlated present, exact absent, or unresolved evidence, but uses
-  types which cannot arm/adopt/remove, advance the journal, open dispatch, clear poison or authorize
-  retry. A distinct exact-name removal adapter accepts a stable complete baseline and the
+  one monotone counter, and that identity is retained in the normal manager-may-own terminal.
+  Attempt-bound and target-bound observation-only reconcilers hold that same gate and borrow the
+  affine owners while they send one causal non-mutating manager barrier, require two identical
+  complete bounded D-Bus inventory identity projections plus exact service properties and
+  remeasure the local binding. Exact later functional Destroy invokes them for retained same-runtime
+  `ManagerMayOwn` and `SupervisorDropped` terminals respectively. A distinct no-send observer proves
+  absence only while the publication gate is unpoisoned. These paths can report exact
+  name/identity-correlated present, exact absent, or unresolved evidence, but use types which cannot
+  arm/adopt/remove, advance the journal, open dispatch, clear publication poison or authorize
+  publication retry. A distinct exact-name removal adapter accepts a stable complete baseline and the
   borrowed affine custody pair, requires a fresh uncached preflight equal to that baseline, and
   remeasures the local binding before its send boundary. It poisons the shared gate immediately
   before sending exactly `FDSTOREREMOVE=1\nFDNAME=<fixed-name>` with zero `SCM_RIGHTS`, then orders
@@ -676,11 +679,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   hold one process-global gate from their fresh baseline/preflight read through final attestation;
   cross-kind in-flight work is serialized, either poison blocks both mutations, and wrong-kind or
   wrong-target reconciliation fails before observation. Publication reconciliation never clears
-  poison. Same-runtime clean Destroy uses the original, reconciliation and single correlated-retry
-  removal APIs only between durable
-  `CleanupConfirmed` and `Absent`; this does not provide restart recovery. Ambiguous spawn remains
-  permanently fail-closed. `SupervisorDropped` without a returned normal-failure attempt identity
-  is deliberately not reconcilable in this slice.
+  poison. Same-runtime clean Destroy uses the publication observers before removal and the original,
+  reconciliation and single correlated-retry removal APIs only between durable `CleanupConfirmed`
+  and `Absent`; this does not provide restart recovery. Ambiguous spawn remains permanently
+  fail-closed.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
   transiently retain a `Registered` owner while record or detached process ownership remains; after
   confirmed reap and complete six-index purge, that same owner settles without a second signal or
@@ -703,25 +705,32 @@ single clean-build A01--A15 run; the score is not a release claim.
   Tokio cannot abort it; a queued cancellation instead stores the unpublished owner as
   `SupervisorDropped`. It retains `BeforeSend`, `ManagerMayOwn`,
   explicit post-attestation failure or queued-abort authority as unresolved and stores every success
-  or failure terminal before notifying a waiter. An unwind before the phase-4 owner is extracted
-  stores `SupervisorDropped`; after extraction the guard instead aborts fail-closed rather than
-  claiming an in-memory terminal. Dynamic tests cover success, both adapter failure classes without
-  retry, waiter cancellation, activated outer-runtime shutdown, queued abort without publisher
-  polling, shutdown-start rejection, completion observability and zero child request bytes. The
+  or failure terminal before notifying a waiter. While the guard owns an unpublished phase-4 owner,
+  an unwind stores target-correlated `SupervisorDropped`; exact later Destroy uses the current
+  poisoned target when one exists, or requires exact no-send absence when the gate proves no attempt
+  occurred. Successful publication first transitions that same affine guard to
+  `Published { publication, attestation }`; an unwind at that seam stores exact post-attestation
+  unresolved custody for attested removal. Only after the pair is extracted into arming does an
+  unwind abort fail-closed rather than falsely claiming an in-memory terminal. Dynamic tests cover
+  success, both adapter failure classes without retry, waiter cancellation, activated outer-runtime
+  shutdown, queued abort without publisher polling, the deterministic successful-publication unwind
+  seam and exact later settlement, shutdown-start rejection, completion observability and zero child
+  request bytes. The
   implementation itself orders authoritative terminal storage before the completion send. The
   functional backend consumes only an exact successful terminal, revalidates the worker once more,
   atomically opens that generation's pending fence, and derives all live link owners from the
-  durable token before issuing a child or kernel mutation. Definitive unpublished handoff failures
-  have the separate exact later-Destroy settlement described above. `PublicationStart`, unresolved
-  publication/post-attestation, `SupervisorDropped`, and `DispatchOpen` terminals remain retained
-  and prevent falsely confirmed shutdown.
+  durable token before issuing a child or kernel mutation. Every other terminal, including the
+  definitive unpublished handoff failures described above, remains retained until exact
+  context-and-durable-ownership Destroy selects it; incomplete settlement stays retained and
+  prevents falsely confirmed shutdown.
 
-  Production publication and clean same-runtime removal are connected only through the functional
-  backend. Startup separately performs a record-transition-free, lock-held exact-set
+  Production publication, retained post-custody terminal reconciliation and clean same-runtime
+  removal are connected only through the functional backend. Startup separately performs a
+  record-transition-free, lock-held exact-set
   classification of durable journal targets, affinely inherited custody and a barrier-ordered
-  stable manager inventory before any `Intent` mutation. There remains no production terminal
-  consumer of the publication-poison observer, inherited adoption/absence proof, restart reaper, or
-  inherited namespace/kernel cleanup executor. Every non-empty
+  stable manager inventory before any `Intent` mutation. There remains no restart terminal consumer,
+  inherited adoption/absence proof consumer, restart reaper, or inherited namespace/kernel cleanup
+  executor. Every non-empty
   classification therefore continues to block startup. Its production refusal observer waits
   for exact inherited process-pidfd `POLLIN` under one hard deadline, permits `POLLHUP` only with
   `POLLIN`, remeasures the exact descriptor binding before and after each wait, and remeasures the
@@ -901,10 +910,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
   Every publication failure returned after the first send is manager-may-own and leaves the shared
-  manager-mutation gate permanently poisoned. A separate dormant poisoned-attempt
-  observer can only classify the exact poisoned in-process attempt after a barrier, two identical
-  complete bounded inventory identity projections, exact service properties and retained-binding
-  revalidation; its private evidence grants no mutation, adoption, arming or retry authority. A
+  manager-mutation gate permanently poisoned. Same-runtime exact Destroy production-wires
+  observation after worker reap and durable `CleanupConfirmed`: normal `ManagerMayOwn` uses its
+  exact poisoned attempt, while unpublished `SupervisorDropped` uses the exact currently poisoned
+  target or, only when no publication poison exists, the distinct no-send absence observer. A
+  successful-publication unwind instead retains its exact attestation for removal. Attempt- and
+  target-bound observation require a barrier, two identical complete bounded inventory identity
+  projections, exact service properties and retained-binding revalidation; their private evidence
+  grants no mutation, adoption, arming or publication-retry authority. A
   distinct remover takes a fresh exact preflight from a stable complete baseline, rechecks
   the local pair, then sends exact-name `FDSTOREREMOVE=1` with zero ancillary FDs and orders it with
   a separate one-FD barrier. It accepts only two equal fresh uncached snapshots proving the exact
@@ -919,10 +932,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   inventory I/O, and only exact-removed original- or retry-attempt reconciliation reopens ambiguous
   removal poison.
   Publication is reachable only from the private live-proof selector and production durable-Prepare
-  supervisor; the publication-poison observer remains callerless. Exact removal and same-attempt
-  reconciliation are reached only by same-runtime clean Destroy. The distinct complete startup observer and
-  journal/inherited classifier are production-wired but grant no mutation, adoption, arming or
-  cleanup authority. The live composition has no recorded transient-unit acceptance result. This is
+  supervisor. Publication observation, exact removal and correlated removal reconciliation are
+  reached only by same-runtime exact Destroy of a retained post-custody terminal. The distinct
+  complete startup observer and journal/inherited classifier are production-wired but grant no
+  mutation, adoption, arming or cleanup authority. The live composition has no recorded
+  transient-unit acceptance result. This is
   fail-closed same-runtime custody and clean settlement plus a read-only restart-classification
   boundary, not production adoption, restart settlement, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver

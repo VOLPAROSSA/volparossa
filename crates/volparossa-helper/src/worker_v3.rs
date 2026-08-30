@@ -7142,7 +7142,7 @@ impl DurableCustodyPublisher {
 #[must_use = "a reserved terminal slot must store or return its publication owner"]
 struct DurableCustodyPublicationTerminalGuard {
     settlements: Arc<Mutex<SupervisorSettlements>>,
-    publication: Option<DurableWorkerCustodyPublicationOwner>,
+    authority: DurableCustodyPublicationGuardAuthority,
     completion: Option<oneshot::Sender<()>>,
     destination: DurableCustodyPublicationTerminalDestination,
     terminal_reserved: bool,
@@ -7154,6 +7154,16 @@ enum DurableCustodyPublicationTerminalDestination {
     Prepare(DurablePrepareTerminalSelector),
 }
 
+#[must_use = "publication authority must remain affine across attestation"]
+enum DurableCustodyPublicationGuardAuthority {
+    Publication(DurableWorkerCustodyPublicationOwner),
+    Published {
+        publication: DurableWorkerCustodyPublicationOwner,
+        attestation: crate::systemd_fdstore::InventoryAttestation,
+    },
+    Extracted,
+}
+
 impl DurableCustodyPublicationTerminalGuard {
     fn new(
         settlements: Arc<Mutex<SupervisorSettlements>>,
@@ -7163,7 +7173,7 @@ impl DurableCustodyPublicationTerminalGuard {
     ) -> Self {
         Self {
             settlements,
-            publication: Some(publication),
+            authority: DurableCustodyPublicationGuardAuthority::Publication(publication),
             completion: Some(completion),
             destination,
             terminal_reserved: true,
@@ -7171,19 +7181,56 @@ impl DurableCustodyPublicationTerminalGuard {
     }
 
     fn publication(&self) -> &DurableWorkerCustodyPublicationOwner {
-        self.publication.as_ref().unwrap_or_else(|| {
+        let DurableCustodyPublicationGuardAuthority::Publication(publication) = &self.authority
+        else {
             std::process::abort();
-        })
+        };
+        publication
     }
 
     fn take_publication(&mut self) -> DurableWorkerCustodyPublicationOwner {
-        self.publication.take().unwrap_or_else(|| {
+        let DurableCustodyPublicationGuardAuthority::Publication(publication) = std::mem::replace(
+            &mut self.authority,
+            DurableCustodyPublicationGuardAuthority::Extracted,
+        ) else {
             std::process::abort();
-        })
+        };
+        publication
+    }
+
+    fn retain_published(&mut self, attestation: crate::systemd_fdstore::InventoryAttestation) {
+        let publication = self.take_publication();
+        self.authority = DurableCustodyPublicationGuardAuthority::Published {
+            publication,
+            attestation,
+        };
+    }
+
+    fn take_published(
+        &mut self,
+    ) -> (
+        DurableWorkerCustodyPublicationOwner,
+        crate::systemd_fdstore::InventoryAttestation,
+    ) {
+        let DurableCustodyPublicationGuardAuthority::Published {
+            publication,
+            attestation,
+        } = std::mem::replace(
+            &mut self.authority,
+            DurableCustodyPublicationGuardAuthority::Extracted,
+        )
+        else {
+            std::process::abort();
+        };
+        (publication, attestation)
     }
 
     fn store(mut self, terminal: DurableWorkerCustodyPublicationTerminal) {
-        if self.publication.is_some() || !self.terminal_reserved {
+        if !matches!(
+            self.authority,
+            DurableCustodyPublicationGuardAuthority::Extracted
+        ) || !self.terminal_reserved
+        {
             std::process::abort();
         }
         let mut settlements = self
@@ -7232,10 +7279,26 @@ impl Drop for DurableCustodyPublicationTerminalGuard {
         if !self.terminal_reserved {
             return;
         }
-        let publication = self.publication.take().unwrap_or_else(|| {
-            std::process::abort();
-        });
-        let terminal = DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication);
+        let authority = std::mem::replace(
+            &mut self.authority,
+            DurableCustodyPublicationGuardAuthority::Extracted,
+        );
+        let terminal = match authority {
+            DurableCustodyPublicationGuardAuthority::Publication(publication) => {
+                DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication)
+            }
+            DurableCustodyPublicationGuardAuthority::Published {
+                publication,
+                attestation,
+            } => DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved(
+                DurableWorkerPostAttestationOutcome::PublicationUnresolved {
+                    error: WorkerV3Error::Ambiguous,
+                    publication,
+                    attestation,
+                },
+            ),
+            DurableCustodyPublicationGuardAuthority::Extracted => std::process::abort(),
+        };
         let mut settlements = self
             .settlements
             .lock()
@@ -8000,6 +8063,8 @@ struct WorkerCoordinator {
     lifecycle_recovery_hook: Arc<Mutex<Option<LifecycleRecoveryHook>>>,
     #[cfg(test)]
     durable_handoff_source_hook: Arc<Mutex<Option<DurableHandoffSourceHook>>>,
+    #[cfg(test)]
+    unwind_after_published_terminal: Arc<AtomicBool>,
 }
 
 impl WorkerCoordinator {
@@ -8031,6 +8096,8 @@ impl WorkerCoordinator {
             lifecycle_recovery_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             durable_handoff_source_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            unwind_after_published_terminal: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -10227,10 +10294,10 @@ impl WorkerCoordinator {
                 publisher,
             } = activation;
             let settlement = SupervisorSettlementGuard::new(settlements, permit);
-            // Declared after `settlement` so an unwind while this guard still owns the publication
-            // stores `SupervisorDropped` before the generic settlement guard marks the coordinator
-            // unresolved. After ownership is extracted, the guard aborts rather than falsely
-            // claiming that an in-memory terminal was retained.
+            // Declared after `settlement` so unwind stores either the unpublished owner or the
+            // exact published owner plus attestation before the generic settlement guard marks the
+            // coordinator unresolved. After ownership is extracted into arming, the guard aborts
+            // rather than falsely claiming that an in-memory terminal was retained.
             let mut terminal = terminal;
             // The complete owner-bearing transaction stays on this blocking supervisor. Tokio
             // cannot abort a `spawn_blocking` closure after it starts; the private current-thread
@@ -10255,9 +10322,15 @@ impl WorkerCoordinator {
                     }
                 }
                 Ok(attestation) => {
+                    // Publication success first becomes an affine guard-owned terminal. An unwind
+                    // at this exact seam therefore retains both the owner and its exact inventory
+                    // attestation for correlated later Destroy settlement.
+                    terminal.retain_published(attestation);
+                    #[cfg(test)]
+                    coordinator.maybe_unwind_after_published_terminal_for_test();
                     // The non-abortable blocking closure performs synchronous durable arming and
                     // receives every affine outcome before it can return.
-                    let publication = terminal.take_publication();
+                    let (publication, attestation) = terminal.take_published();
                     match coordinator.arm_attested_durable_worker_with_handle(
                         &arm,
                         publication,
@@ -10738,6 +10811,22 @@ impl WorkerCoordinator {
             .durable_handoff_source_hook
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    fn set_unwind_after_published_terminal_for_test(&self) {
+        self.unwind_after_published_terminal
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn maybe_unwind_after_published_terminal_for_test(&self) {
+        assert!(
+            !self
+                .unwind_after_published_terminal
+                .swap(false, Ordering::SeqCst),
+            "injected unwind after guard retained published custody"
+        );
     }
 
     #[cfg(test)]
@@ -11285,6 +11374,56 @@ mod tests {
             .restore_exact_durable_prepare_terminal(
                 &selector,
                 DurableWorkerPrepareTerminal::UndispatchedSettlement(settlement),
+            );
+    }
+
+    fn verify_and_restore_published_unwind_terminal(
+        coordinator: &WorkerCoordinator,
+        selector: DurablePrepareTerminalSelector,
+    ) {
+        let terminal = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_prepare_terminal(&selector)
+            .expect("published unwind exact terminal");
+        let DurableWorkerPrepareTerminal::CustodyPublication(custody_terminal) = &terminal else {
+            panic!("published unwind stored a non-custody terminal")
+        };
+        let DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved(
+            DurableWorkerPostAttestationOutcome::PublicationUnresolved {
+                error,
+                publication,
+                attestation,
+            },
+        ) = custody_terminal.as_ref()
+        else {
+            panic!("published unwind lost its attested publication")
+        };
+        assert!(matches!(error, WorkerV3Error::Ambiguous));
+        let pair = crate::systemd_fdstore::BorrowedCustodyPair::new(
+            publication.source.restart_custody.borrowed_pidfd(),
+            publication
+                .source
+                .restart_custody
+                .borrowed_network_namespace(),
+        )
+        .expect("published unwind custody pair");
+        attestation
+            .verify_exact_custody(publication.custody_name, pair)
+            .expect("published unwind exact attestation");
+        let settlement = into_undispatched_prepare_settlement(terminal);
+        assert!(matches!(
+            settlement.manager.as_ref(),
+            Some(DurableUndispatchedManagerSettlement::Attested(_))
+        ));
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore_exact_durable_prepare_terminal(
+                &selector,
+                DurableWorkerPrepareTerminal::UndispatchedSettlement(Box::new(settlement)),
             );
     }
 
@@ -16030,6 +16169,82 @@ mod tests {
     async fn caller_cancel_before_or_after_terminal_storage_keeps_exact_destroy_authority() {
         assert_dropped_prepare_waiter_preserves_exact_terminal([118; 16], true).await;
         assert_dropped_prepare_waiter_preserves_exact_terminal([119; 16], false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unwind_after_successful_publication_retains_exact_attested_terminal() {
+        let context_id = [120; 16];
+        let FencedDurableHandoffFixture {
+            mut actor,
+            coordinator,
+            outcome,
+            peer: _peer,
+            directory: _directory,
+        } = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("published unwind deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("published unwind fixture did not reach publication authority")
+        };
+        let (_, ownership) =
+            durable_publication_owner_identity(&publication).expect("published unwind ownership");
+        let selector = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserve_durable_prepare_terminal(context_id, Some(ownership));
+        let arm = actor.custody_arm_handle().expect("published unwind arm");
+        let (publisher, _started, _release, _) = deterministic_custody_publisher(
+            &coordinator,
+            DurableCustodyTestPublicationDisposition::ExactAttestation,
+            true,
+        );
+        coordinator.set_unwind_after_published_terminal_for_test();
+        let start = coordinator.start_durable_custody_publication_with_destination(
+            &tokio::runtime::Handle::current(),
+            arm,
+            publication,
+            publisher,
+            DurableCustodyPublicationTerminalDestination::Prepare(selector),
+        );
+        let DurableCustodyPublicationStartOutcome::Started(completion) = start else {
+            panic!("published unwind supervisor did not start: {start:?}")
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+                .await
+                .expect("published unwind completion deadline")
+        );
+        verify_and_restore_published_unwind_terminal(&coordinator, selector);
+        replace_retained_terminal_with_exact_test_manager_absence(&coordinator, selector);
+        let handle = actor
+            .prepare_handle()
+            .expect("published unwind actor handle");
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(2))
+                        .expect("published unwind settlement deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Absent
+        ));
+        assert!(
+            !coordinator.shutdown().await,
+            "unwind remains globally fail closed"
+        );
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1))
+                    .expect("published unwind actor shutdown")
+            ),
+            Ok(())
+        );
     }
 
     #[test]

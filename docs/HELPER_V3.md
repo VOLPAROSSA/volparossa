@@ -488,22 +488,28 @@ counter. A later caller cannot obtain a new attempt identity merely by encounter
 poison. Callers must retain their original affine descriptor owners; there is deliberately no
 automatic removal on an ambiguous path.
 
-A separate dormant, observation-only reconciler can inspect only that exact poisoned in-process
-attempt. While borrowing both affine owners and holding the shared manager-mutation gate, it
-reopens the stored unit object directly, sends one non-mutating `BARRIER=1`, takes two complete
-bounded uncached D-Bus inventory identity projections, requires those projections and service
-properties to be identical, and remeasures the local role binding before accepting a result. It
-reports `ExactPresent` only for exactly two target name entries whose complete stat/status-flag
+Exact same-runtime Destroy production-wires attempt-bound and target-bound observation-only
+reconcilers for retained post-custody terminals. The former accepts only the opaque poisoned
+attempt returned by normal `ManagerMayOwn`; the latter accepts only the exact target currently held
+by the publication poison. While borrowing both affine owners and holding the shared
+manager-mutation gate, each reopens the stored unit object directly, sends one non-mutating
+`BARRIER=1`, takes two complete bounded uncached D-Bus inventory identity projections, requires
+those projections and service properties to be identical, and remeasures the local role binding
+before accepting a result. They report `ExactPresent` only for exactly two target name entries whose
+complete stat/status-flag
 identity multiset matches the retained pair; any same-kernel-object alias under another name fails
 closed even when flags differ. It reports `ExactAbsent` only when the target name and both kernel
 objects are absent everywhere. Partial, wrong, unstable, expired or otherwise ambiguous
 observations are `Unresolved`. Present and absent
 use private evidence types distinct from publication attestation, so they cannot arm a worker,
-adopt or remove custody, advance the journal, open dispatch, clear the permanent poison, or
+adopt or remove custody, advance the journal, open dispatch, clear publication poison, or
 authorize publication retry. This is correlated inventory evidence, not proof of shared
-open-file-description identity. A `SupervisorDropped` terminal produced before a normal
-manager-may-own failure returns has no exported attempt identity and deliberately remains
-not reconcilable in this slice.
+open-file-description identity. An unpublished `SupervisorDropped` terminal remains target-bound:
+Destroy uses the target reconciler when the exact poison exists, or the distinct no-send observer
+to prove absence only when the gate reports that no publication attempt is poisoned. After
+successful publication, the affine guard retains `Published { publication, attestation }`; unwind
+therefore stores a post-attestation unresolved terminal with exact removal evidence instead of
+`SupervisorDropped`. None of these same-runtime paths supplies restart recovery.
 
 A separate private production adapter can send exactly one name-scoped descriptor-store removal. It
 accepts an already stable complete startup inventory, the exact custody name and binding, and
@@ -1467,17 +1473,22 @@ most one descriptor-store publication attempt and never retries; after exact att
 the deadline, verifies the role-ordered name and descriptor identities, revalidates the worker, and
 uses a separately cloneable arm-only handle to advance `MayOwnCustody -> MayOwnPrepare`.
 `BeforeSend`, `ManagerMayOwn`, explicit post-attestation failure, queued abort and success all retain
-the exact affine terminal available at that boundary. An unwind while the supervisor guard still
-owns the phase-4 publication stores `SupervisorDropped`; after that owner has been extracted, the
-guard instead aborts fail-closed rather than falsely claiming an in-memory terminal. Neither adapter
-failure authorizes retry. The terminal is stored before the non-authoritative completion is sent,
-dropping that waiter has no effect, and an activated blocking publication survives outer-runtime
-shutdown. A queued abort stores the phase-4 owner without polling the publisher. Production
+the exact affine terminal available at that boundary. The supervisor guard first owns
+`Publication`; unwind there stores target-correlated `SupervisorDropped`. Exact attestation changes
+that same guard to affine `Published { publication, attestation }` before either owner is extracted,
+so unwind at the successful-publication seam stores exact post-attestation unresolved custody for
+correlated removal. Only after the pair has been extracted into arming does the guard abort
+fail-closed rather than falsely claiming an in-memory terminal. Neither adapter failure authorizes
+retry. The terminal is stored before the non-authoritative completion is sent, dropping that waiter
+has no effect, and an activated blocking publication survives outer-runtime shutdown. A queued abort
+stores the phase-4 owner without polling the publisher. A deterministic unwind regression verifies
+the published terminal and its exact later settlement. Production
 consumes only the exact successful `MayOwnPrepare` terminal, revalidates the worker and recovery
 identity once more, atomically opens that generation's `DurableHandoffPending` dispatch fence, and
 converts only the journal-derived resources into live kernel owners. No child request or WireGuard
-mutation precedes that open. Publication-start, post-publication and dispatch-open failures remain
-coordinator-owned and prevent a falsely confirmed shutdown.
+mutation precedes that open. Every failed handoff, publication, or open terminal remains
+coordinator-owned until exact correlated same-runtime Destroy settles it; incomplete settlement
+stays retained and prevents a falsely confirmed shutdown.
 
 Definitive failures before publication have a narrower exact settlement path. The coordinator
 stores each terminal under a fresh non-zero serial plus its context and, where one exists, exact
@@ -1509,6 +1520,18 @@ Exact-still-present evidence permits only the single predecessor-bound retry des
 manager absence then advances the record to `Absent` before the local recovery descriptors are
 released. Missing child, kernel, manager, or journal proof retains all available owners and fails
 closed.
+
+For an undispatched post-custody terminal, exact same-runtime Destroy sends no child request and
+performs no kernel network mutation. It confirms exact passive worker-generation reap and parent
+birth-link absence, then consumes a new opaque proof to advance `MayOwnCustody` or `MayOwnPrepare`
+to durable `CleanupConfirmed`. `BeforeSend` and publication-start terminals require no-send manager
+absence; normal `ManagerMayOwn` uses its exact attempt; unpublished `SupervisorDropped` uses exact
+target reconciliation or, only when unpoisoned, no-send absence; post-attestation terminals retain
+their attestation. Exact presence is removed against the retained post-publication inventory. An
+ambiguous removal is correlated; exact still-present evidence alone authorizes the single retry,
+so no blind resend occurs. Exact manager absence then advances the record to `Absent` before local
+recovery descriptors are released. Cancellation, mismatch, deadline or ambiguous evidence
+preserves the complete affine terminal under its exact selector for a fresh-deadline retry.
 
 Production startup still performs the separate read-only complete-set classification described
 above before retiring any `Intent`, and every non-empty classification still blocks. This is

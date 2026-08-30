@@ -4,9 +4,11 @@
 //! pidfd/network-namespace pair to the current service's systemd descriptor store, wait for a
 //! separate barrier acknowledgement, and attest the resulting manager inventory over D-Bus. The
 //! caller retains both local owners throughout. Once the first `sendmsg(2)` is attempted, every
-//! failure is classified as `ManagerMayOwn`. A separate callerless observer can classify that
-//! exact poisoned in-process attempt as present, absent, or unresolved, but never clears the
-//! poison or authorizes a resend. A read-only startup observer uses one manager barrier and two
+//! failure is classified as `ManagerMayOwn`. Exact later functional Destroy settlement can use
+//! attempt-bound or target-bound observation to classify retained same-runtime publication
+//! custody as present, absent, or unresolved; no observer clears publication poison or authorizes
+//! a resend. A distinct no-send observer proves absence only when no publication attempt is
+//! poisoned. A read-only startup observer uses one manager barrier and two
 //! uncached exact-service snapshots, then exposes only an opaque exact-set comparison against
 //! inherited custody bindings. That observer never publishes descriptors. Same-runtime clean
 //! teardown can remove one already-proven exact custody name, orders that notification with a
