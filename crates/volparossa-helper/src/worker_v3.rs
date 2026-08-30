@@ -2085,11 +2085,14 @@ fn cleanup_worker_resources(
     ownerships: &[WorkerLeaseOwnership],
     deadline: HardDeadline,
 ) -> bool {
-    for ownership in ownerships {
+    // Ownership is acquired in canonical endpoint order. Tear it down in the exact
+    // reverse order so a Relay's exit-facing leg is removed before its client-facing
+    // predecessor during either normal destruction or rollback.
+    for ownership in ownerships.iter().rev() {
         let _ = kernel.delete_exact_owned_wireguard(&ownership.resource, deadline);
     }
     let mut all_absent = true;
-    for ownership in ownerships {
+    for ownership in ownerships.iter().rev() {
         if kernel
             .prove_wireguard_absent(&ownership.resource, deadline)
             .is_err()
@@ -8381,6 +8384,7 @@ mod tests {
     #[derive(Default)]
     struct FakeWorkerKernel {
         calls: Vec<&'static str>,
+        cleanup_calls: Vec<(&'static str, (u8, i32))>,
         preflight_sizes: Vec<usize>,
         failures: Vec<FakeWorkerKernelFailure>,
         substitute_proof: bool,
@@ -8497,20 +8501,22 @@ mod tests {
 
         fn delete_exact_owned_wireguard(
             &mut self,
-            _resource: &DurableWireguardResource,
+            resource: &DurableWireguardResource,
             _deadline: HardDeadline,
         ) -> Result<(), KernelError> {
             self.calls.push("delete");
+            self.cleanup_calls.push(("delete", resource.key()));
             Ok(())
         }
 
         fn prove_wireguard_absent(
             &mut self,
-            _resource: &DurableWireguardResource,
+            resource: &DurableWireguardResource,
             _deadline: HardDeadline,
         ) -> Result<(), KernelError> {
             let call_index = self.calls.iter().filter(|call| **call == "absent").count();
             self.calls.push("absent");
+            self.cleanup_calls.push(("absent", resource.key()));
             if self.failures.contains(&FakeWorkerKernelFailure::Absence)
                 || self
                     .failures
@@ -8521,6 +8527,30 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    fn assert_relay_pair_cleanup_order(kernel: &FakeWorkerKernel) {
+        assert_eq!(
+            kernel.cleanup_calls,
+            [
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32),
+                ),
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32),
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32),
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32),
+                ),
+            ]
+        );
     }
 
     struct FixedWorkerKeySource {
@@ -8905,6 +8935,7 @@ mod tests {
                 "absent",
             ]
         );
+        assert_relay_pair_cleanup_order(&context.kernel);
     }
 
     #[test]
