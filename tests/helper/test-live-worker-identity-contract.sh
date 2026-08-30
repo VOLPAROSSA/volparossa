@@ -5058,15 +5058,16 @@ exercise_hook_custody_parsers() (
     pidfd_identity=33261:0:5:100:0:0:2
     namespace_identity=33060:0:4:200:0:0:0
     fdstore_dump=$(printf \
-        '{"type":"a(suuutuusu)","data":[["%s",33261,0,5,100,0,0,"anon_inode:[pidfd]",32770],["%s",33060,0,4,200,0,0,"net:[200]",32768]]}' \
+        '{"type":"a(suuutuusu)","data":[[["%s",33261,0,5,100,0,0,"anon_inode:[pidfd]",32770],["%s",33060,0,4,200,0,0,"net:[200]",32768]]]}' \
         "$custody_name" "$custody_name")
     [ "$(fdstore_dump_exact_custody_name \
         "$fdstore_dump" "$pidfd_identity" "$namespace_identity")" = \
         "$custody_name" ]
     for fdstore_mutation in \
-        '.data[0][8] = 32771' \
-        '.data[1][0] = "volparossa-custody-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
-        '.data |= .[0:1]' \
+        '.data[0][0][8] = 32771' \
+        '.data[0][1][0] = "volparossa-custody-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
+        '.data[0] |= .[0:1]' \
+        '.data[0] += [.data[0][0]]' \
         '.data += [.data[0]]'
     do
         mutated_fdstore_dump=$(printf '%s' "$fdstore_dump" \

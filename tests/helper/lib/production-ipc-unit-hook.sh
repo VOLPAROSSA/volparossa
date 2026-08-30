@@ -3699,7 +3699,8 @@ unit_fdstore_is_empty() {
         type == "object"
         and keys == ["data", "type"]
         and .type == "a(suuutuusu)"
-        and .data == []
+        and (.data | type == "array" and length == 1)
+        and .data[0] == []
     ' >/dev/null 2>&1 || return 1
     hook_fdstore_count_after=$(unit_u32_property \
         "$hook_fdstore_unit" \
@@ -3809,18 +3810,19 @@ fdstore_dump_exact_custody_name() {
         if length == 1
             and (.[0] | keys) == ["data", "type"]
             and .[0].type == "a(suuutuusu)"
-            and (.[0].data | type == "array" and length == 2)
-            and all(.[0].data[]; exact_entry)
-            and .[0].data[0][0] == .[0].data[1][0]
+            and (.[0].data | type == "array" and length == 1)
+            and (.[0].data[0] | type == "array" and length == 2)
+            and all(.[0].data[0][]; exact_entry)
+            and .[0].data[0][0][0] == .[0].data[0][1][0]
             and ($pidfd | split(":") | map(tonumber)) as $pidfd_identity
             | ($namespace | split(":") | map(tonumber)) as $namespace_identity
             | (($pidfd_identity | length) == 7
                 and ($namespace_identity | length) == 7
-                and ((.[0].data[0] | identity) == $pidfd_identity
-                    and (.[0].data[1] | identity) == $namespace_identity
-                    or (.[0].data[1] | identity) == $pidfd_identity
-                    and (.[0].data[0] | identity) == $namespace_identity))
-        then .[0].data[0][0]
+                and ((.[0].data[0][0] | identity) == $pidfd_identity
+                    and (.[0].data[0][1] | identity) == $namespace_identity
+                    or (.[0].data[0][1] | identity) == $pidfd_identity
+                    and (.[0].data[0][0] | identity) == $namespace_identity))
+        then .[0].data[0][0][0]
         else empty
         end
     '
