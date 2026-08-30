@@ -436,8 +436,9 @@ production_functional_probe_failure_value_is_safe() {
         "$production_functional_failure_phase,$production_functional_failure_class" ] \
         || return 1
     case $production_functional_failure_phase in
-        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
-        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
+        second-cycle-activate|reuse|\
         second-cycle-destroy|final-shutdown)
             ;;
         *) return 1 ;;

@@ -751,8 +751,9 @@ for non_retained_final_checkpoint in \
 done
 
 for non_retained_functional_phase in \
-    plan connect bind prepare shutdown ready release reconnect destroy \
-    second-cycle-plan second-cycle-bind second-cycle-prepare reuse \
+    plan connect bind prepare activate shutdown ready release reconnect destroy \
+    second-cycle-plan second-cycle-bind second-cycle-prepare \
+    second-cycle-activate reuse \
     second-cycle-destroy final-shutdown; do
     for non_retained_functional_class in \
         random protocol io timeout untrusted correlation unexpected-response; do

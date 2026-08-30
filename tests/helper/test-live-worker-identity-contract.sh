@@ -561,6 +561,7 @@ printf '%s\n' \
     connect \
     bind \
     prepare \
+    activate \
     shutdown \
     ready \
     release \
@@ -569,6 +570,7 @@ printf '%s\n' \
     second-cycle-plan \
     second-cycle-bind \
     second-cycle-prepare \
+    second-cycle-activate \
     reuse \
     second-cycle-destroy \
     final-shutdown >"$expected_functional_failure_phases"

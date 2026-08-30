@@ -581,7 +581,6 @@ async fn run_functional_client_lease(
             FunctionalPhase::Bind,
             FunctionalPhase::Prepare,
             FunctionalPhase::Activate,
-            FunctionalPhase::Activate,
         )
         .await?;
         phase.set(FunctionalPhase::Shutdown);
@@ -615,7 +614,6 @@ async fn run_functional_client_lease(
             &phase,
             FunctionalPhase::SecondCycleBind,
             FunctionalPhase::SecondCyclePrepare,
-            FunctionalPhase::SecondCycleActivate,
             FunctionalPhase::SecondCycleActivate,
         )
         .await?;
@@ -1448,6 +1446,7 @@ mod tests {
             FunctionalPhase::Connect,
             FunctionalPhase::Bind,
             FunctionalPhase::Prepare,
+            FunctionalPhase::Activate,
             FunctionalPhase::Shutdown,
             FunctionalPhase::Ready,
             FunctionalPhase::Release,
@@ -1456,6 +1455,7 @@ mod tests {
             FunctionalPhase::SecondCyclePlan,
             FunctionalPhase::SecondCycleBind,
             FunctionalPhase::SecondCyclePrepare,
+            FunctionalPhase::SecondCycleActivate,
             FunctionalPhase::Reuse,
             FunctionalPhase::SecondCycleDestroy,
             FunctionalPhase::FinalShutdown,
