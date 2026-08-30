@@ -16,6 +16,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use ed25519_dalek::SigningKey;
 use nix::{
     poll::{PollFd, PollFlags, poll},
     unistd::read,
@@ -27,6 +28,10 @@ use tokio::{
     time::timeout,
 };
 use volparossa_helper::SOCKET_PATH;
+use volparossa_protocol::{
+    RelayAuthorization, RelayReservation, TimePolicy, Transport, WireguardEndpoint, generate_nonce,
+    node_id_from_public_key, sign_control_message,
+};
 use volparossa_routing::{
     ActivateLeaseBatch, ActivatedLeaseBatch, BindHelperRuntime, ClosedPreparePlan, ContextRole,
     DestroyContext, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
@@ -58,6 +63,13 @@ const FUNCTIONAL_PUBLIC_IPV4: [u8; 4] = [192, 31, 195, 254];
 const FUNCTIONAL_PEER_PUBLIC_KEY: [u8; 32] = [8; 32];
 const FUNCTIONAL_PEER_IPV4: [u8; 4] = [1, 1, 1, 1];
 const FUNCTIONAL_PEER_PORT: u16 = 51_820;
+const FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY: [u8; 32] = [9; 32];
+const FUNCTIONAL_RELAY_EXIT_IPV4: [u8; 4] = [8, 8, 8, 8];
+const FUNCTIONAL_RELAY_EXIT_PORT: u16 = 51_821;
+const FUNCTIONAL_EXIT_PUBLIC_KEY: [u8; 32] = [10; 32];
+const FUNCTIONAL_EXIT_IPV4: [u8; 4] = [9, 9, 9, 9];
+const FUNCTIONAL_EXIT_PORT: u16 = 51_822;
+const FUNCTIONAL_SIGNED_RATE_MBPS: u64 = 1;
 const FUNCTIONAL_RELEASE_TIMEOUT_MILLIS: u16 = 10_000;
 const FUNCTIONAL_RELEASE_BYTE: u8 = b'G';
 const FUNCTIONAL_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready";
@@ -304,6 +316,7 @@ struct FunctionalCyclePlan {
     ids: FunctionalCycleIds,
     bind: FunctionalRequestExchange,
     prepare: FunctionalRequestExchange,
+    hard_expires_at_unix: u64,
 }
 
 impl FunctionalCyclePlan {
@@ -394,7 +407,12 @@ impl FunctionalCyclePlan {
             )),
         };
         let bind = FunctionalRequestExchange::from_request(&bind_request)?;
-        Ok(Self { ids, bind, prepare })
+        Ok(Self {
+            ids,
+            bind,
+            prepare,
+            hard_expires_at_unix,
+        })
     }
 }
 
@@ -652,6 +670,11 @@ async fn activate_functional_cycle(
         .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
     validate_activated_outcome(activated_outcome, &prepared)
         .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let retried_outcome = exchange_functional(stream, &activate, LEASES_ACTIVATED_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    validate_activated_outcome(retried_outcome, &prepared)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
     Ok(FunctionalCycleResult {
         helper_runtime_id,
         prepared,
@@ -664,11 +687,14 @@ fn functional_activation_exchange(
 ) -> Result<FunctionalRequestExchange, ProbeError> {
     if prepared.context_id != plan.ids.context
         || prepared.public_key == FUNCTIONAL_PEER_PUBLIC_KEY
+        || prepared.public_key == FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY
+        || prepared.public_key == FUNCTIONAL_EXIT_PUBLIC_KEY
         || (FUNCTIONAL_PUBLIC_IPV4, prepared.listen_port)
             == (FUNCTIONAL_PEER_IPV4, FUNCTIONAL_PEER_PORT)
     {
         return Err(ProbeError::Correlation);
     }
+    let signed_relay_reservation = functional_signed_relay_reservation(plan, prepared)?;
     FunctionalRequestExchange::from_request(&HelperRequest {
         protocol_version: HELPER_PROTOCOL_VERSION,
         request_id: plan.ids.activate_request.to_vec(),
@@ -687,11 +713,168 @@ fn functional_activation_exchange(
                     }),
                     maximum_up_mbps: 0,
                     maximum_down_mbps: 0,
-                    signed_relay_reservation: Vec::new(),
+                    signed_relay_reservation,
                 }],
             },
         )),
     })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one closed probe builder creates a single internally consistent two-signer grant graph"
+)]
+fn functional_signed_relay_reservation(
+    plan: &FunctionalCyclePlan,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<Vec<u8>, ProbeError> {
+    let created_at_ms = plan
+        .hard_expires_at_unix
+        .checked_sub(FUNCTIONAL_HARD_TTL_SECONDS)
+        .and_then(|created| created.checked_mul(1_000))
+        .ok_or(ProbeError::Protocol)?;
+    let expires_at_ms = plan
+        .hard_expires_at_unix
+        .checked_mul(1_000)
+        .ok_or(ProbeError::Protocol)?;
+    let relay_key = ephemeral_signing_key()?;
+    let exit_key = ephemeral_signing_key()?;
+    let client_session_key = ephemeral_signing_key()?;
+    let control_relay_key = ephemeral_signing_key()?;
+    let relay_public_key = relay_key.verifying_key().to_bytes();
+    let exit_public_key = exit_key.verifying_key().to_bytes();
+    let client_session_public_key = client_session_key.verifying_key().to_bytes();
+    let control_relay_public_key = control_relay_key.verifying_key().to_bytes();
+    let relay_node_id = node_id_from_public_key(&relay_public_key);
+    let exit_node_id = node_id_from_public_key(&exit_public_key);
+    let client_session_id = node_id_from_public_key(&client_session_public_key);
+    let control_relay_node_id = node_id_from_public_key(&control_relay_public_key);
+    let relay_peer_id = peer_id_from_ed25519(&relay_public_key)?;
+    let exit_peer_id = peer_id_from_ed25519(&exit_public_key)?;
+    let control_relay_peer_id = peer_id_from_ed25519(&control_relay_public_key)?;
+    let reservation_id = random_unique_id(&[])?;
+    let capability_id = random_unique_id(&[])?;
+    let exit_boot_id = random_unique_id(&[])?;
+    let hold_id = random_unique_id(&[])?;
+    let finalize_id = random_unique_id(&[])?;
+    let policy_hash = random_nonzero_32()?;
+    let exit_nonce = generate_nonce();
+    let relay_nonce = generate_nonce();
+    let exit_endpoint = WireguardEndpoint {
+        public_key: FUNCTIONAL_EXIT_PUBLIC_KEY.to_vec(),
+        underlay_ip: FUNCTIONAL_EXIT_IPV4.to_vec(),
+        listen_port: u32::from(FUNCTIONAL_EXIT_PORT),
+    };
+    let authorization = RelayAuthorization {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        path_id: FUNCTIONAL_PATH_ID,
+        relay_node_id: relay_node_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports: vec![Transport::TcpMptcp as i32],
+        maximum_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        client_wireguard_public_key: prepared.public_key.to_vec(),
+        exit_wireguard_endpoint: Some(exit_endpoint.clone()),
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: exit_nonce.to_vec(),
+        relay_peer_id: relay_peer_id.clone(),
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id: control_relay_peer_id.clone(),
+        exit_peer_id: exit_peer_id.clone(),
+    };
+    let exit_authorization = sign_control_message(
+        &authorization,
+        &exit_key,
+        created_at_ms,
+        expires_at_ms,
+        exit_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+    let relay = RelayReservation {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        path_id: FUNCTIONAL_PATH_ID,
+        relay_node_id: relay_node_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports: vec![Transport::TcpMptcp as i32],
+        maximum_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        client_wireguard_public_key: prepared.public_key.to_vec(),
+        relay_client_wireguard_endpoint: Some(WireguardEndpoint {
+            public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+            underlay_ip: FUNCTIONAL_PEER_IPV4.to_vec(),
+            listen_port: u32::from(FUNCTIONAL_PEER_PORT),
+        }),
+        relay_exit_wireguard_endpoint: Some(WireguardEndpoint {
+            public_key: FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY.to_vec(),
+            underlay_ip: FUNCTIONAL_RELAY_EXIT_IPV4.to_vec(),
+            listen_port: u32::from(FUNCTIONAL_RELAY_EXIT_PORT),
+        }),
+        exit_wireguard_endpoint: Some(exit_endpoint),
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: relay_nonce.to_vec(),
+        exit_authorization,
+        relay_peer_id,
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id,
+        exit_peer_id,
+    };
+    sign_control_message(
+        &relay,
+        &relay_key,
+        created_at_ms,
+        expires_at_ms,
+        relay_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)
+}
+
+fn ephemeral_signing_key() -> Result<SigningKey, ProbeError> {
+    let mut bytes = [0_u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|_| ProbeError::Random)?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+fn random_nonzero_32() -> Result<[u8; 32], ProbeError> {
+    let mut bytes = [0_u8; 32];
+    for _ in 0..64 {
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|_| ProbeError::Random)?;
+        if bytes.iter().any(|byte| *byte != 0) {
+            return Ok(bytes);
+        }
+    }
+    Err(ProbeError::Random)
+}
+
+fn peer_id_from_ed25519(public_key: &[u8; 32]) -> Result<Vec<u8>, ProbeError> {
+    let public_key = libp2p_identity::ed25519::PublicKey::try_from_bytes(public_key)
+        .map_err(|_| ProbeError::Protocol)?;
+    Ok(libp2p_identity::PublicKey::from(public_key)
+        .to_peer_id()
+        .to_bytes())
 }
 
 async fn destroy_functional_cycle(
@@ -1429,22 +1612,46 @@ mod tests {
         assert_eq!(activate.request_id, ids.activate_request);
         assert_eq!(value.route_context_id, ids.context);
         assert_eq!(value.context_handle, prepared.context_handle);
+        let [activation] = value.leases.as_slice() else {
+            panic!("one activation");
+        };
+        assert_eq!(activation.lease_handle, prepared.lease_handle);
+        assert_eq!(activation.path_id, FUNCTIONAL_PATH_ID);
+        assert_eq!(activation.role, WireguardRole::Client as i32);
+        assert_eq!(activation.peer_public_key, FUNCTIONAL_PEER_PUBLIC_KEY);
         assert_eq!(
-            value.leases,
-            [LeaseActivation {
-                lease_handle: prepared.lease_handle.to_vec(),
-                path_id: FUNCTIONAL_PATH_ID,
-                role: WireguardRole::Client as i32,
-                peer_public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
-                peer_endpoint: Some(PublicUdpEndpoint {
-                    address: FUNCTIONAL_PEER_IPV4.to_vec(),
-                    port: u32::from(FUNCTIONAL_PEER_PORT),
-                }),
-                maximum_up_mbps: 0,
-                maximum_down_mbps: 0,
-                signed_relay_reservation: Vec::new(),
-            }]
+            activation.peer_endpoint,
+            Some(PublicUdpEndpoint {
+                address: FUNCTIONAL_PEER_IPV4.to_vec(),
+                port: u32::from(FUNCTIONAL_PEER_PORT),
+            })
         );
+        assert_eq!(activation.maximum_up_mbps, 0);
+        assert_eq!(activation.maximum_down_mbps, 0);
+        assert!(!activation.signed_relay_reservation.is_empty());
+        let mut replay = volparossa_protocol::ReplayCache::new(8).expect("probe replay verifier");
+        let (relay, exit) = volparossa_protocol::verify_relay_reservation(
+            &activation.signed_relay_reservation,
+            1_000_000,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("cryptographically valid relay grant");
+        assert_eq!(relay.message().route_context_id, ids.context);
+        assert_eq!(relay.message().path_id, FUNCTIONAL_PATH_ID);
+        assert_eq!(
+            relay.message().client_wireguard_public_key,
+            prepared.public_key
+        );
+        assert_eq!(
+            relay.message().relay_peer_id,
+            peer_id_from_ed25519(relay.sender_public_key()).expect("relay Peer ID")
+        );
+        assert_eq!(
+            exit.message().exit_peer_id,
+            peer_id_from_ed25519(exit.sender_public_key()).expect("exit Peer ID")
+        );
+        assert_eq!(replay.len(), 2);
         assert_eq!(
             operation_digest(&activate).expect("Activate digest"),
             activate_exchange.operation_digest

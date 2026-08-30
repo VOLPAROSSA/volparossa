@@ -3113,8 +3113,9 @@ fn activation_request<P: ClientReservationProtocol>(
             // lease must therefore carry the protocol-canonical zero values.
             maximum_up_mbps: 0,
             maximum_down_mbps: 0,
-            // This is the exact already-verified relay envelope. It remains opaque here and in
-            // helper-v3 until the separate privileged verification boundary is implemented.
+            // Preserve byte identity: the production helper verifies this exact canonical signed
+            // envelope and binds it to the prepared lease before mutation. Never decode,
+            // reconstruct, or substitute another path's grant here.
             signed_relay_reservation: signed_relay_reservation.to_vec(),
         });
     }

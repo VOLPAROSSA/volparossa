@@ -13,6 +13,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use volparossa_protocol::{
+    ProtocolError, ReplayCache, TimePolicy, WireguardEndpoint, verify_relay_reservation,
+};
 use volparossa_routing::{
     AcquireTransportSocket, ActivateLeaseBatch, ContextRole, HELPER_HANDLE_BYTES,
     LeasePlan as RoutingLeasePlan, PrepareLeaseBatch, PublicUdpEndpoint,
@@ -63,12 +66,21 @@ pub(crate) fn functional_alpha_lease_backend() -> Arc<dyn AsyncLeaseBackend> {
             DEFAULT_MAX_CACHE_ENTRIES,
             DEFAULT_MAX_TTL,
         )),
+        relay_replay: Mutex::new(functional_alpha_replay_cache()),
         state: Mutex::new(None),
     })
 }
 
+fn functional_alpha_replay_cache() -> ReplayCache {
+    match ReplayCache::new(DEFAULT_MAX_CACHE_ENTRIES) {
+        Ok(cache) => cache,
+        Err(_) => std::process::abort(),
+    }
+}
+
 struct FunctionalAlphaLeaseBackend {
     coordinator: WorkerCoordinator,
+    relay_replay: Mutex<ReplayCache>,
     state: Mutex<Option<OpenLeaseEntry>>,
 }
 
@@ -113,6 +125,13 @@ struct PreparedWorkerLease {
     role: i32,
     public_key: [u8; 32],
     listen_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VerifiedRelayClientEndpoint {
+    public_key: [u8; 32],
+    address: IpAddr,
+    port: u16,
 }
 
 struct OpenLeaseEntry {
@@ -371,6 +390,7 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<KernelCounters>, BackendError> {
         let (key, activation) = validate_activate_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
+        let now_ms = unix_milliseconds()?;
         let (prepared, plan) = {
             let state = lock_state(&self.state);
             let entry = exact_entry(state.as_ref(), key)?;
@@ -381,21 +401,17 @@ impl FunctionalAlphaLeaseBackend {
             if (prepared.path_id, prepared.role) != (activation.path_id, activation.role) {
                 return Err(BackendError::Invalid);
             }
-            let peer_key: [u8; 32] = activation
-                .peer_public_key
-                .as_slice()
-                .try_into()
-                .map_err(|_| BackendError::Invalid)?;
-            let peer_endpoint = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
-                .ok_or(BackendError::Invalid)?;
-            if peer_key == prepared.public_key
-                || peer_endpoint == (entry.underlay.address, prepared.listen_port)
-            {
-                return Err(BackendError::Invalid);
-            }
             (
                 prepared,
-                internal_activate_plan(entry.wireguard.resource(), key, &activation)?,
+                verified_internal_activate_plan(
+                    &self.relay_replay,
+                    entry.wireguard.resource(),
+                    key,
+                    prepared,
+                    entry.underlay,
+                    &activation,
+                    now_ms,
+                )?,
             )
         };
         let counters = match self.activate_child(key, prepared, plan, deadline).await {
@@ -740,6 +756,7 @@ fn validate_activate_binding(
         || activation.role != WireguardRole::Client as i32
         || activation.peer_public_key.len() != 32
         || activation.peer_public_key.iter().all(|byte| *byte == 0)
+        || activation.signed_relay_reservation.is_empty()
         || activation.maximum_up_mbps != 0
         || activation.maximum_down_mbps != 0
         || parse_public_udp_endpoint(activation.peer_endpoint.as_ref()).is_none()
@@ -898,38 +915,100 @@ fn internal_prepare_plan(
     }
 }
 
+fn verified_internal_activate_plan(
+    replay_cache: &Mutex<ReplayCache>,
+    resource: &DurableWireguardResource,
+    key: OpenLineageKey,
+    prepared: PreparedWorkerLease,
+    underlay: UnderlayCandidate,
+    activation: &volparossa_routing::LeaseActivation,
+    now_ms: u64,
+) -> Result<ActivateLeases, BackendError> {
+    let mut replay_guard = lock_replay_cache(replay_cache);
+    let (relay_grant, exit_grant) = verify_relay_reservation(
+        &activation.signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        &mut replay_guard,
+    )
+    .map_err(|error| protocol_backend_error(&error))?;
+    let relay_replay_key = (*relay_grant.sender_id(), *relay_grant.nonce());
+    let exit_replay_key = (*exit_grant.sender_id(), *exit_grant.nonce());
+
+    let result = (|| {
+        let relay_message = relay_grant.message();
+        let exit_message = exit_grant.message();
+        let hard_expires_at_ms = key
+            .hard_expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(BackendError::Invalid)?;
+        if relay_message.route_context_id.as_slice() != key.context_id
+            || relay_message.path_id != activation.path_id
+            || relay_message.path_id != prepared.path_id
+            || relay_message.client_wireguard_public_key.as_slice() != prepared.public_key
+            || relay_grant.expires_at_ms() < hard_expires_at_ms
+            || !signer_matches_peer_id(
+                relay_grant.sender_public_key(),
+                &relay_message.relay_peer_id,
+            )
+            || !signer_matches_peer_id(exit_grant.sender_public_key(), &exit_message.exit_peer_id)
+        {
+            return Err(BackendError::Invalid);
+        }
+
+        let endpoint = relay_message
+            .relay_client_wireguard_endpoint
+            .as_ref()
+            .and_then(verified_relay_client_endpoint)
+            .ok_or(BackendError::Invalid)?;
+        let supplied_public_key: [u8; 32] = activation
+            .peer_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| BackendError::Invalid)?;
+        let supplied_endpoint = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
+            .ok_or(BackendError::Invalid)?;
+        if supplied_public_key != endpoint.public_key
+            || supplied_endpoint != (endpoint.address, endpoint.port)
+            || endpoint.public_key == prepared.public_key
+            || (endpoint.address, endpoint.port) == (underlay.address, prepared.listen_port)
+        {
+            return Err(BackendError::Invalid);
+        }
+
+        internal_activate_plan(resource, key, activation.path_id, endpoint)
+    })();
+
+    if result.is_err() {
+        let _ = replay_guard.rollback(&relay_replay_key.0, &relay_replay_key.1);
+        let _ = replay_guard.rollback(&exit_replay_key.0, &exit_replay_key.1);
+    }
+    result
+}
+
 fn internal_activate_plan(
     resource: &DurableWireguardResource,
     key: OpenLineageKey,
-    activation: &volparossa_routing::LeaseActivation,
+    path_id: u32,
+    endpoint: VerifiedRelayClientEndpoint,
 ) -> Result<ActivateLeases, BackendError> {
     if resource.key()
         != (
-            u8::try_from(activation.path_id).map_err(|_| BackendError::Invalid)?,
-            activation.role,
+            u8::try_from(path_id).map_err(|_| BackendError::Invalid)?,
+            WireguardRole::Client as i32,
         )
     {
         return Err(BackendError::Invalid);
     }
-    let peer_public_key: [u8; 32] = activation
-        .peer_public_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| BackendError::Invalid)?;
-    if peer_public_key.iter().all(|byte| *byte == 0) {
-        return Err(BackendError::Invalid);
-    }
-    let (peer_address, peer_port) = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
-        .ok_or(BackendError::Invalid)?;
     Ok(ActivateLeases {
         route_context_id: key.context_id.to_vec(),
         leases: vec![InternalLeaseActivation {
-            path_id: activation.path_id,
+            path_id,
             role: InternalEndpointRole::Client as i32,
-            peer_public_key: peer_public_key.to_vec(),
+            peer_public_key: endpoint.public_key.to_vec(),
             peer_endpoint: Some(InternalUdpEndpoint {
-                address: ip_bytes(peer_address),
-                port: u32::from(peer_port),
+                address: ip_bytes(endpoint.address),
+                port: u32::from(endpoint.port),
             }),
             allowed_prefixes: vec![InternalIpPrefix {
                 address: resource.peer_address().octets().to_vec(),
@@ -938,6 +1017,49 @@ fn internal_activate_plan(
             persistent_keepalive_seconds: FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS,
         }],
     })
+}
+
+fn verified_relay_client_endpoint(
+    value: &WireguardEndpoint,
+) -> Option<VerifiedRelayClientEndpoint> {
+    let public_key: [u8; 32] = value.public_key.as_slice().try_into().ok()?;
+    let port = u16::try_from(value.listen_port)
+        .ok()
+        .filter(|port| *port != 0)?;
+    let address = match value.underlay_ip.as_slice() {
+        bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(bytes).ok()?)),
+        bytes if bytes.len() == 16 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).ok()?)),
+        _ => return None,
+    };
+    Some(VerifiedRelayClientEndpoint {
+        public_key,
+        address,
+        port,
+    })
+}
+
+fn signer_matches_peer_id(public_key: &[u8; 32], expected_peer_id: &[u8]) -> bool {
+    libp2p_identity::ed25519::PublicKey::try_from_bytes(public_key)
+        .map(libp2p_identity::PublicKey::from)
+        .is_ok_and(|key| key.to_peer_id().to_bytes() == expected_peer_id)
+}
+
+fn protocol_backend_error(error: &ProtocolError) -> BackendError {
+    if matches!(error, ProtocolError::ReplayCapacity) {
+        BackendError::Capacity
+    } else {
+        BackendError::Invalid
+    }
+}
+
+fn unix_milliseconds() -> Result<u64, BackendError> {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| BackendError::Unavailable)?
+            .as_millis(),
+    )
+    .map_err(|_| BackendError::Unavailable)
 }
 
 fn worker_request(
@@ -1116,6 +1238,12 @@ fn lock_state(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn lock_replay_cache(replay: &Mutex<ReplayCache>) -> std::sync::MutexGuard<'_, ReplayCache> {
+    replay
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn ip_bytes(address: IpAddr) -> Vec<u8> {
     match address {
         IpAddr::V4(address) => address.octets().to_vec(),
@@ -1136,6 +1264,12 @@ fn parse_public_udp_endpoint(value: Option<&PublicUdpEndpoint>) -> Option<(IpAdd
 
 #[cfg(test)]
 mod tests {
+    use volparossa_protocol::{
+        MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
+        SignedEnvelope, Transport, decode_canonical, sign_control_message,
+    };
+    use volparossa_test_support::SignedRouteFixture;
+
     use super::*;
 
     fn backend_with_state(state: Option<OpenLeaseEntry>) -> FunctionalAlphaLeaseBackend {
@@ -1145,6 +1279,7 @@ mod tests {
                 DEFAULT_MAX_CACHE_ENTRIES,
                 DEFAULT_MAX_TTL,
             )),
+            relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(state),
         }
     }
@@ -1277,12 +1412,24 @@ mod tests {
         BackendBinding,
         ActivateLeaseBatch,
         PreparedWorkerLease,
+        SignedRouteFixture,
     ) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("fixture time")
-            .as_secs();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now = now_ms / 1_000;
+        let route = SignedRouteFixture::new(1, &[Transport::TcpMptcp], now_ms)
+            .expect("signed route fixture");
+        let relay = decode_relay_reservation(
+            route
+                .relay_reservations()
+                .first()
+                .expect("one relay reservation"),
+        );
+        let relay_client = relay
+            .relay_client_wireguard_endpoint
+            .as_ref()
+            .expect("relay-client endpoint");
         let key = OpenLineageKey {
+            context_id: *route.route_context_id(),
             setup_expires_at_unix: now + 20,
             hard_expires_at_unix: now + 120,
             ..key()
@@ -1302,23 +1449,132 @@ mod tests {
                 lease_handle: vec![0x32; HELPER_HANDLE_BYTES],
                 path_id: 1,
                 role: WireguardRole::Client as i32,
-                peer_public_key: vec![0x61; 32],
+                peer_public_key: relay_client.public_key.clone(),
                 peer_endpoint: Some(PublicUdpEndpoint {
-                    address: vec![198, 51, 100, 9],
-                    port: 51_821,
+                    address: relay_client.underlay_ip.clone(),
+                    port: relay_client.listen_port,
                 }),
                 maximum_up_mbps: 0,
                 maximum_down_mbps: 0,
-                signed_relay_reservation: Vec::new(),
+                signed_relay_reservation: route.relay_reservations()[0].clone(),
             }],
         };
         let prepared = PreparedWorkerLease {
             path_id: 1,
             role: WireguardRole::Client as i32,
-            public_key: [0x62; 32],
+            public_key: relay
+                .client_wireguard_public_key
+                .as_slice()
+                .try_into()
+                .expect("client key"),
             listen_port: 51_820,
         };
-        (key, binding, value, prepared)
+        (key, binding, value, prepared, route)
+    }
+
+    fn decode_relay_reservation(encoded: &[u8]) -> RelayReservation {
+        let envelope: SignedEnvelope =
+            decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE).expect("relay envelope");
+        decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).expect("relay payload")
+    }
+
+    fn fixture_underlay() -> UnderlayCandidate {
+        UnderlayCandidate {
+            ifindex: 2,
+            address: "198.51.100.7".parse().expect("fixture address"),
+            evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
+        }
+    }
+
+    fn decode_relay_authorization(encoded: &[u8]) -> RelayAuthorization {
+        let envelope: SignedEnvelope =
+            decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE).expect("authorization envelope");
+        decode_canonical(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE)
+            .expect("authorization payload")
+    }
+
+    fn resign_consistent_grant(
+        route: &SignedRouteFixture,
+        mutate: impl FnOnce(&mut RelayReservation, &mut RelayAuthorization),
+    ) -> Vec<u8> {
+        let mut relay = decode_relay_reservation(&route.relay_reservations()[0]);
+        let mut exit = decode_relay_authorization(&relay.exit_authorization);
+        mutate(&mut relay, &mut exit);
+        let exit_nonce: [u8; 32] = exit.nonce.as_slice().try_into().expect("exit nonce");
+        relay.exit_authorization = sign_control_message(
+            &exit,
+            route.exit_key(),
+            exit.created_at_ms,
+            exit.expires_at_ms,
+            exit_nonce,
+            TimePolicy::default(),
+        )
+        .expect("re-signed exit authorization");
+        let relay_nonce: [u8; 32] = relay.nonce.as_slice().try_into().expect("relay nonce");
+        sign_control_message(
+            &relay,
+            route.relay_key(0).expect("relay key"),
+            relay.created_at_ms,
+            relay.expires_at_ms,
+            relay_nonce,
+            TimePolicy::default(),
+        )
+        .expect("re-signed relay reservation")
+    }
+
+    fn resign_with_corrupt_nested_signature(route: &SignedRouteFixture) -> Vec<u8> {
+        let mut relay = decode_relay_reservation(&route.relay_reservations()[0]);
+        let last = relay
+            .exit_authorization
+            .last_mut()
+            .expect("nested signature byte");
+        *last ^= 1;
+        let relay_nonce: [u8; 32] = relay.nonce.as_slice().try_into().expect("relay nonce");
+        sign_control_message(
+            &relay,
+            route.relay_key(0).expect("relay key"),
+            relay.created_at_ms,
+            relay.expires_at_ms,
+            relay_nonce,
+            TimePolicy::default(),
+        )
+        .expect("relay reservation with corrupt nested signature")
+    }
+
+    fn endpoint_copy(endpoint: &WireguardEndpoint) -> (Vec<u8>, PublicUdpEndpoint) {
+        (
+            endpoint.public_key.clone(),
+            PublicUdpEndpoint {
+                address: endpoint.underlay_ip.clone(),
+                port: endpoint.listen_port,
+            },
+        )
+    }
+
+    fn verify_fixture_plan(
+        replay: &Mutex<ReplayCache>,
+        key: OpenLineageKey,
+        prepared: PreparedWorkerLease,
+        value: &ActivateLeaseBatch,
+        now_ms: u64,
+    ) -> Result<ActivateLeases, BackendError> {
+        let resource = process_owned_resource(
+            key,
+            &RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+            },
+        )
+        .expect("resource");
+        verified_internal_activate_plan(
+            replay,
+            resource.resource(),
+            key,
+            prepared,
+            fixture_underlay(),
+            &value.leases[0],
+            now_ms,
+        )
     }
 
     #[test]
@@ -1425,8 +1681,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test covers the complete external Activate shape plus verified worker projection"
+    )]
     fn activate_validation_and_internal_plan_bind_the_exact_client_peer() {
-        let (key, binding, value, _) = live_activate_fixture();
+        let (key, binding, value, prepared, _) = live_activate_fixture();
         let (validated_key, activation) =
             validate_activate_binding(binding, &value).expect("valid Activate binding");
         assert_eq!(validated_key, key);
@@ -1438,20 +1698,39 @@ mod tests {
             },
         )
         .expect("resource");
-        let plan = internal_activate_plan(resource.resource(), key, &activation)
-            .expect("internal activation plan");
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verified_internal_activate_plan(
+            &replay,
+            resource.resource(),
+            key,
+            prepared,
+            fixture_underlay(),
+            &activation,
+            unix_milliseconds().expect("fixture time"),
+        )
+        .expect("verified internal activation plan");
+        assert_eq!(lock_replay_cache(&replay).len(), 2);
         assert_eq!(plan.route_context_id, key.context_id);
         let [lease] = plan.leases.as_slice() else {
             panic!("one internal activation")
         };
         assert_eq!(lease.path_id, 1);
         assert_eq!(lease.role, InternalEndpointRole::Client as i32);
-        assert_eq!(lease.peer_public_key, [0x61; 32]);
+        assert_eq!(lease.peer_public_key, activation.peer_public_key);
         assert_eq!(
             lease.peer_endpoint,
             Some(InternalUdpEndpoint {
-                address: vec![198, 51, 100, 9],
-                port: 51_821,
+                address: activation
+                    .peer_endpoint
+                    .as_ref()
+                    .expect("peer endpoint")
+                    .address
+                    .clone(),
+                port: activation
+                    .peer_endpoint
+                    .as_ref()
+                    .expect("peer endpoint")
+                    .port,
             })
         );
         assert_eq!(lease.allowed_prefixes.len(), 1);
@@ -1489,6 +1768,18 @@ mod tests {
             validate_activate_binding(binding, &wrong).unwrap_err(),
             BackendError::Invalid
         );
+        let mut wrong = value.clone();
+        wrong.leases[0].signed_relay_reservation.clear();
+        assert_eq!(
+            validate_activate_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut ambiguous = value.clone();
+        ambiguous.leases.push(ambiguous.leases[0].clone());
+        assert_eq!(
+            validate_activate_binding(binding, &ambiguous).unwrap_err(),
+            BackendError::Unavailable
+        );
         let mut wrong = value;
         wrong.leases[0]
             .peer_endpoint
@@ -1502,8 +1793,196 @@ mod tests {
     }
 
     #[test]
+    fn relay_grant_signatures_expiry_replay_and_capacity_fail_closed() {
+        let (key, _, value, prepared, route) = live_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+
+        let mut corrupt_outer = value.clone();
+        *corrupt_outer.leases[0]
+            .signed_relay_reservation
+            .last_mut()
+            .expect("outer signature byte") ^= 1;
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_fixture_plan(&replay, key, prepared, &corrupt_outer, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let mut noncanonical = value.clone();
+        noncanonical.leases[0]
+            .signed_relay_reservation
+            .extend_from_slice(&[0x98, 0x06, 0x01]);
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_fixture_plan(&replay, key, prepared, &noncanonical, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let mut corrupt_nested = value.clone();
+        corrupt_nested.leases[0].signed_relay_reservation =
+            resign_with_corrupt_nested_signature(&route);
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_fixture_plan(&replay, key, prepared, &corrupt_nested, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verify_fixture_plan(&replay, key, prepared, &value, route.expires_at_ms()),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert!(verify_fixture_plan(&replay, key, prepared, &value, now_ms).is_ok());
+        assert_eq!(lock_replay_cache(&replay).len(), 2);
+        assert_eq!(
+            verify_fixture_plan(&replay, key, prepared, &value, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 2);
+
+        let replay = Mutex::new(ReplayCache::new(1).expect("bounded replay cache"));
+        assert_eq!(
+            verify_fixture_plan(&replay, key, prepared, &value, now_ms),
+            Err(BackendError::Capacity)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+    }
+
+    #[test]
+    fn signed_scope_and_helper_owned_prepare_binding_roll_back_before_mutation() {
+        let (key, _, value, prepared, route) = live_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrong_context = key;
+        wrong_context.context_id[0] ^= 1;
+        assert_eq!(
+            verify_fixture_plan(&replay, wrong_context, prepared, &value, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+        assert!(verify_fixture_plan(&replay, key, prepared, &value, now_ms).is_ok());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrong_path = prepared;
+        wrong_path.path_id = 2;
+        assert_eq!(
+            verify_fixture_plan(&replay, key, wrong_path, &value, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut signed_wrong_path = value.clone();
+        signed_wrong_path.leases[0].signed_relay_reservation =
+            resign_consistent_grant(&route, |relay, exit| {
+                relay.path_id = 2;
+                exit.path_id = 2;
+            });
+        assert_eq!(
+            verify_fixture_plan(&replay, key, prepared, &signed_wrong_path, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrong_key = prepared;
+        wrong_key.public_key[0] ^= 1;
+        assert_eq!(
+            verify_fixture_plan(&replay, key, wrong_key, &value, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut outlives_grant = key;
+        outlives_grant.hard_expires_at_unix = route.expires_at_ms() / 1_000 + 1;
+        assert_eq!(
+            verify_fixture_plan(&replay, outlives_grant, prepared, &value, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+    }
+
+    #[test]
+    fn only_exact_signed_relay_client_endpoint_can_reach_worker_plan() {
+        let (key, _, value, prepared, _) = live_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let signed_grant = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
+
+        for forbidden in [
+            signed_grant
+                .relay_exit_wireguard_endpoint
+                .as_ref()
+                .expect("relay-exit endpoint"),
+            signed_grant
+                .exit_wireguard_endpoint
+                .as_ref()
+                .expect("exit endpoint"),
+        ] {
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            let mut substituted = value.clone();
+            let (key_copy, endpoint_copy) = endpoint_copy(forbidden);
+            substituted.leases[0].peer_public_key = key_copy;
+            substituted.leases[0].peer_endpoint = Some(endpoint_copy);
+            assert_eq!(
+                verify_fixture_plan(&replay, key, prepared, &substituted, now_ms),
+                Err(BackendError::Invalid)
+            );
+            assert!(lock_replay_cache(&replay).is_empty());
+            let plan = verify_fixture_plan(&replay, key, prepared, &value, now_ms)
+                .expect("same grant remains usable after local mismatch rollback");
+            let [lease] = plan.leases.as_slice() else {
+                panic!("one activation")
+            };
+            assert_eq!(lease.peer_public_key, value.leases[0].peer_public_key);
+            assert_eq!(
+                lease.peer_endpoint.as_ref().expect("peer endpoint").address,
+                value.leases[0]
+                    .peer_endpoint
+                    .as_ref()
+                    .expect("copied endpoint")
+                    .address
+            );
+        }
+    }
+
+    #[test]
+    fn relay_and_exit_peer_ids_must_derive_from_their_ed25519_signers() {
+        let (key, _, value, prepared, route) = live_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+
+        for signed in [
+            resign_consistent_grant(&route, |relay, exit| {
+                relay.relay_peer_id = vec![0x91];
+                exit.relay_peer_id = vec![0x91];
+            }),
+            resign_consistent_grant(&route, |relay, exit| {
+                relay.exit_peer_id = vec![0x92];
+                exit.exit_peer_id = vec![0x92];
+            }),
+        ] {
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            let mut substituted = value.clone();
+            substituted.leases[0].signed_relay_reservation = signed;
+            assert_eq!(
+                verify_fixture_plan(&replay, key, prepared, &substituted, now_ms),
+                Err(BackendError::Invalid)
+            );
+            assert!(lock_replay_cache(&replay).is_empty());
+            assert!(verify_fixture_plan(&replay, key, prepared, &value, now_ms).is_ok());
+        }
+    }
+
+    #[test]
     fn activated_response_preserves_zero_or_nonzero_kernel_baselines_exactly() {
-        let (_, _, _, prepared) = live_activate_fixture();
+        let (_, _, _, prepared, _) = live_activate_fixture();
         let execution = |handshake, nanoseconds, received, transmitted| {
             crate::worker_transport::CredentialedWorkerExecution {
                 response: crate::internal_protocol::InternalWorkerResponse {
