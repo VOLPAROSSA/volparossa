@@ -500,11 +500,13 @@ complete stat/status-flag
 identity multiset matches the retained pair; any same-kernel-object alias under another name fails
 closed even when flags differ. It reports `ExactAbsent` only when the target name and both kernel
 objects are absent everywhere. Partial, wrong, unstable, expired or otherwise ambiguous
-observations are `Unresolved`. Present and absent
-use private evidence types distinct from publication attestation, so they cannot arm a worker,
-adopt or remove custody, advance the journal, open dispatch, clear publication poison, or
-authorize publication retry. This is correlated inventory evidence, not proof of shared
-open-file-description identity. An unpublished `SupervisorDropped` terminal remains target-bound:
+observations are `Unresolved`. An exact correlated stable `ExactPresent` or `ExactAbsent`
+projection consumes only the selected publication poison as part of reconciliation; unresolved,
+cancelled or mismatched observation leaves it unchanged. Present and absent use private evidence
+types distinct from publication attestation, so they cannot arm a worker, adopt or remove custody,
+advance the journal, open dispatch, or authorize publication retry. This is correlated inventory
+evidence, not proof of shared open-file-description identity. An unpublished `SupervisorDropped`
+terminal remains target-bound:
 Destroy uses the target reconciler when the exact poison exists, or the distinct no-send observer
 to prove absence only when the gate reports that no publication attempt is poisoned. After
 successful publication, the affine guard retains `Published { publication, attestation }`; unwind
@@ -538,9 +540,11 @@ Publication, removal and their reconciler
 observations hold that one gate from the fresh baseline/preflight read through terminal
 attestation. An ambiguous attempt of either kind blocks both mutation kinds, and a reconciler with
 the wrong typed attempt kind or exact target binding fails before barrier or inventory I/O.
-Publication reconciliation never clears poison; only exact-removed evidence for the original or
-correlated retry attempt reopens a gate poisoned by that removal. The production same-runtime
-Destroy path calls the removal adapter, reconciler and at most one correlated retry only after exact
+Publication reconciliation consumes its selected publication poison only after an exact correlated
+stable `ExactPresent` or `ExactAbsent` projection; unresolved, cancellation and mismatch retain it,
+and no result authorizes publication retry. For removal poison, only exact-removed evidence for the
+original or correlated retry attempt reopens the gate. The production same-runtime Destroy path
+calls the removal adapter, reconciler and at most one correlated retry only after exact
 child/worker/kernel cleanup; none of those components proves that cleanup or advances the ownership
 journal by itself.
 

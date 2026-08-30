@@ -658,9 +658,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   remeasure the local binding. Exact later functional Destroy invokes them for retained same-runtime
   `ManagerMayOwn` and `SupervisorDropped` terminals respectively. A distinct no-send observer proves
   absence only while the publication gate is unpoisoned. These paths can report exact
-  name/identity-correlated present, exact absent, or unresolved evidence, but use types which cannot
-  arm/adopt/remove, advance the journal, open dispatch, clear publication poison or authorize
-  publication retry. A distinct exact-name removal adapter accepts a stable complete baseline and the
+  name/identity-correlated present, exact absent, or unresolved evidence. Only an exact correlated
+  stable present or absent projection consumes the selected publication poison; unresolved,
+  cancellation and mismatch retain it. Their evidence types cannot arm/adopt/remove, advance the
+  journal, open dispatch or authorize publication retry. A distinct exact-name removal adapter
+  accepts a stable complete baseline and the
   borrowed affine custody pair, requires a fresh uncached preflight equal to that baseline, and
   remeasures the local binding before its send boundary. It poisons the shared gate immediately
   before sending exactly `FDSTOREREMOVE=1\nFDNAME=<fixed-name>` with zero `SCM_RIGHTS`, then orders
@@ -678,11 +680,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   transaction kinds and both reconcilers
   hold one process-global gate from their fresh baseline/preflight read through final attestation;
   cross-kind in-flight work is serialized, either poison blocks both mutations, and wrong-kind or
-  wrong-target reconciliation fails before observation. Publication reconciliation never clears
-  poison. Same-runtime clean Destroy uses the publication observers before removal and the original,
-  reconciliation and single correlated-retry removal APIs only between durable `CleanupConfirmed`
-  and `Absent`; this does not provide restart recovery. Ambiguous spawn remains permanently
-  fail-closed.
+  wrong-target reconciliation fails before observation. Publication reconciliation consumes only
+  its selected poison after an exact correlated stable present or absent projection; unresolved,
+  cancellation and mismatch retain it, and no result authorizes publication retry. Same-runtime
+  clean Destroy uses the publication observers before removal and the original, reconciliation and
+  single correlated-retry removal APIs only between durable `CleanupConfirmed` and `Absent`; this
+  does not provide restart recovery. Ambiguous spawn remains permanently fail-closed.
   Dropped/unwound lifecycle ownership is not yet recoverable. Concurrent terminal retirement may
   transiently retain a `Registered` owner while record or detached process ownership remains; after
   confirmed reap and complete six-index purge, that same owner settles without a second signal or

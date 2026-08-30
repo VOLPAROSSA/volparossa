@@ -6,9 +6,11 @@
 //! caller retains both local owners throughout. Once the first `sendmsg(2)` is attempted, every
 //! failure is classified as `ManagerMayOwn`. Exact later functional Destroy settlement can use
 //! attempt-bound or target-bound observation to classify retained same-runtime publication
-//! custody as present, absent, or unresolved; no observer clears publication poison or authorizes
-//! a resend. A distinct no-send observer proves absence only when no publication attempt is
-//! poisoned. A read-only startup observer uses one manager barrier and two
+//! custody as present, absent, or unresolved. Only an exact correlated stable `ExactPresent` or
+//! `ExactAbsent` projection consumes that publication's poison; unresolved, cancelled or
+//! mismatched observation leaves it unchanged, and no observation authorizes a publication resend.
+//! A distinct no-send observer proves absence only when no publication attempt is poisoned. A
+//! read-only startup observer uses one manager barrier and two
 //! uncached exact-service snapshots, then exposes only an opaque exact-set comparison against
 //! inherited custody bindings. That observer never publishes descriptors. Same-runtime clean
 //! teardown can remove one already-proven exact custody name, orders that notification with a
