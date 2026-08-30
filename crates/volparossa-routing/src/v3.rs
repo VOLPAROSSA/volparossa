@@ -20,6 +20,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 pub const HELPER_PROTOCOL_VERSION: u32 = 3;
 /// Hard local frame limit.
 pub const MAX_HELPER_FRAME: usize = 128 * 1024;
+/// Per-item and aggregate opaque signed-relay-reservation limit on the helper wire.
+///
+/// This deliberately reuses the existing helper frame ceiling. The complete encoded request,
+/// including protobuf and envelope overhead, must still fit `MAX_HELPER_FRAME`, so the frame codec
+/// remains the stricter final authority.
+pub const MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES: usize = MAX_HELPER_FRAME;
 /// Maximum distinct paths in one route context.
 pub const MAX_HELPER_PATHS: u32 = 8;
 /// Fixed upper bound shared with signed reservation rate fields.
@@ -460,6 +466,12 @@ pub struct LeaseActivation {
     /// Relay downstream rate bound; zero for non-relay roles.
     #[prost(uint32, tag = "7")]
     pub maximum_down_mbps: u32,
+    /// Opaque canonical relay-signed reservation envelope.
+    ///
+    /// Empty remains the protobuf default for compatibility. This wire layer preserves the bytes
+    /// and enforces resource bounds but does not verify or grant authority from them.
+    #[prost(bytes = "vec", tag = "8")]
+    pub signed_relay_reservation: Vec<u8>,
 }
 
 /// Activate exactly a previously prepared batch.
@@ -1135,6 +1147,7 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
         Operation::ActivateLeaseBatch(operation) => {
             context(&operation.route_context_id)?;
             handle(&operation.context_handle)?;
+            let mut signed_relay_reservation_bytes = 0_usize;
             validate_identity_set(&operation.leases, |lease| {
                 handle(&lease.lease_handle)?;
                 path_role(lease.path_id, lease.role)?;
@@ -1158,8 +1171,25 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 } else if lease.maximum_up_mbps != 0 || lease.maximum_down_mbps != 0 {
                     return Err(HelperProtocolError::Invalid("non-relay rate bounds"));
                 }
+                if lease.signed_relay_reservation.len() > MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES
+                {
+                    return Err(HelperProtocolError::Invalid(
+                        "signed relay reservation size",
+                    ));
+                }
+                signed_relay_reservation_bytes = signed_relay_reservation_bytes
+                    .checked_add(lease.signed_relay_reservation.len())
+                    .ok_or(HelperProtocolError::Invalid(
+                        "signed relay reservation aggregate size",
+                    ))?;
                 Ok((lease.path_id, lease.role))
-            })
+            })?;
+            if signed_relay_reservation_bytes > MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES {
+                return Err(HelperProtocolError::Invalid(
+                    "signed relay reservation aggregate size",
+                ));
+            }
+            Ok(())
         }
         Operation::CommitLeaseBatch(operation) => {
             context(&operation.route_context_id)?;
@@ -1836,6 +1866,24 @@ async fn read_frame<R: AsyncRead + Unpin>(
 mod tests {
     use super::*;
 
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyLeaseActivation {
+        #[prost(bytes = "vec", tag = "1")]
+        lease_handle: Vec<u8>,
+        #[prost(uint32, tag = "2")]
+        path_id: u32,
+        #[prost(enumeration = "WireguardRole", tag = "3")]
+        role: i32,
+        #[prost(bytes = "vec", tag = "4")]
+        peer_public_key: Vec<u8>,
+        #[prost(message, optional, tag = "5")]
+        peer_endpoint: Option<PublicUdpEndpoint>,
+        #[prost(uint32, tag = "6")]
+        maximum_up_mbps: u32,
+        #[prost(uint32, tag = "7")]
+        maximum_down_mbps: u32,
+    }
+
     fn prepare(role: ContextRole, leases: Vec<LeasePlan>) -> HelperRequest {
         HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -1882,6 +1930,40 @@ mod tests {
                     expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
                     expected_remote: (kind == TransportSocketKind::MptcpConnected)
                         .then(|| transport_address([10, 77, 0, 3], 443)),
+                },
+            )),
+        }
+    }
+
+    fn activation_lease(path_id: u32, signed_relay_reservation: Vec<u8>) -> LeaseActivation {
+        LeaseActivation {
+            lease_handle: vec![u8::try_from(path_id).expect("test path"); HELPER_HANDLE_BYTES],
+            path_id,
+            role: WireguardRole::Client as i32,
+            peer_public_key: vec![
+                u8::try_from(path_id.checked_add(16).expect("test path"))
+                    .expect("test path");
+                32
+            ],
+            peer_endpoint: Some(PublicUdpEndpoint {
+                address: vec![8, 8, 8, 8],
+                port: 51_820 + path_id,
+            }),
+            maximum_up_mbps: 0,
+            maximum_down_mbps: 0,
+            signed_relay_reservation,
+        }
+    }
+
+    fn activate(leases: Vec<LeaseActivation>) -> HelperRequest {
+        HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: vec![21; 16],
+            operation: Some(helper_request::Operation::ActivateLeaseBatch(
+                ActivateLeaseBatch {
+                    route_context_id: vec![7; 16],
+                    context_handle: vec![8; HELPER_HANDLE_BYTES],
+                    leases,
                 },
             )),
         }
@@ -2478,6 +2560,18 @@ mod tests {
         wire
     }
 
+    fn raw_activate_request_with_lease(lease_payload: &[u8]) -> Vec<u8> {
+        const ACTIVATE_OPERATION_KEY: [u8; 2] = [0xaa, 0x01];
+        let mut operation_payload = ActivateLeaseBatch {
+            route_context_id: vec![7; 16],
+            context_handle: vec![8; HELPER_HANDLE_BYTES],
+            leases: Vec::new(),
+        }
+        .encode_to_vec();
+        operation_payload.extend_from_slice(&length_delimited_field(&[0x1a], lease_payload));
+        raw_request_with_operation(21, &ACTIVATE_OPERATION_KEY, &operation_payload)
+    }
+
     fn raw_response_with_outcome(
         response: &HelperResponse,
         outcome_key: &[u8],
@@ -2534,6 +2628,144 @@ mod tests {
         );
         assert!(encode_response(&response).is_err());
         assert!(decode_response(&response.encode_to_vec()).is_err());
+    }
+
+    #[test]
+    fn signed_relay_reservation_default_preserves_the_legacy_wire() {
+        let lease = activation_lease(1, Vec::new());
+        let legacy = LegacyLeaseActivation {
+            lease_handle: lease.lease_handle.clone(),
+            path_id: lease.path_id,
+            role: lease.role,
+            peer_public_key: lease.peer_public_key.clone(),
+            peer_endpoint: lease.peer_endpoint.clone(),
+            maximum_up_mbps: lease.maximum_up_mbps,
+            maximum_down_mbps: lease.maximum_down_mbps,
+        };
+        let legacy_wire = legacy.encode_to_vec();
+        assert_eq!(lease.encode_to_vec(), legacy_wire);
+
+        let decoded = LeaseActivation::decode(legacy_wire.as_slice()).expect("legacy lease wire");
+        assert_eq!(decoded, lease);
+        assert!(decoded.signed_relay_reservation.is_empty());
+        assert!(
+            LeaseActivation::default()
+                .signed_relay_reservation
+                .is_empty()
+        );
+
+        let request = activate(vec![lease]);
+        let canonical = request.encode_to_vec();
+        assert_eq!(
+            decode_request(&canonical).expect("legacy-compatible Activate"),
+            request
+        );
+    }
+
+    #[test]
+    fn signed_relay_reservation_round_trips_canonically_and_changes_the_digest() {
+        let reservation = vec![0xa5, 0x5a, 0x01, 0x00];
+        let lease = activation_lease(1, reservation.clone());
+        let lease_wire = lease.encode_to_vec();
+        assert!(lease_wire.ends_with(&[0x42, 0x04, 0xa5, 0x5a, 0x01, 0x00]));
+
+        let request = activate(vec![lease]);
+        let canonical = request.encode_to_vec();
+        assert_eq!(
+            decode_request(&canonical).expect("canonical Activate"),
+            request
+        );
+        assert_eq!(
+            request
+                .operation
+                .as_ref()
+                .and_then(|operation| match operation {
+                    helper_request::Operation::ActivateLeaseBatch(batch) => batch.leases.first(),
+                    _ => None,
+                })
+                .expect("activation lease")
+                .signed_relay_reservation,
+            reservation
+        );
+
+        let without_reservation = activate(vec![activation_lease(1, Vec::new())]);
+        assert_ne!(
+            operation_digest(&request).expect("reservation-bound digest"),
+            operation_digest(&without_reservation).expect("default digest")
+        );
+    }
+
+    #[test]
+    fn signed_relay_reservation_nested_wire_rejects_unknown_duplicate_and_noncanonical_default() {
+        let canonical = activation_lease(1, vec![0xa5]).encode_to_vec();
+
+        let mut unknown = canonical.clone();
+        unknown.extend_from_slice(&[0x48, 0x01]);
+
+        let mut duplicate = canonical.clone();
+        duplicate.extend_from_slice(&length_delimited_field(&[0x42], &[0x5a]));
+
+        let mut explicit_default = activation_lease(1, Vec::new()).encode_to_vec();
+        explicit_default.extend_from_slice(&[0x42, 0x00]);
+
+        let mut overlong_length = activation_lease(1, Vec::new()).encode_to_vec();
+        overlong_length.extend_from_slice(&[0x42, 0x81, 0x00, 0xa5]);
+
+        for lease_wire in [unknown, duplicate, explicit_default, overlong_length] {
+            assert!(decode_request(&raw_activate_request_with_lease(&lease_wire)).is_err());
+        }
+    }
+
+    #[test]
+    fn signed_relay_reservation_item_and_aggregate_bounds_precede_frame_overhead() {
+        assert_eq!(MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES, MAX_HELPER_FRAME);
+
+        let exact_item = activate(vec![activation_lease(
+            1,
+            vec![0xa5; MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES],
+        )]);
+        assert!(validate_request(&exact_item).is_ok());
+        assert!(matches!(
+            encode_request(&exact_item),
+            Err(HelperProtocolError::TooLarge)
+        ));
+        assert!(matches!(
+            decode_request(&exact_item.encode_to_vec()),
+            Err(HelperProtocolError::TooLarge)
+        ));
+
+        let oversized_item = activate(vec![activation_lease(
+            1,
+            vec![0xa5; MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES + 1],
+        )]);
+        assert!(matches!(
+            validate_request(&oversized_item),
+            Err(HelperProtocolError::Invalid(
+                "signed relay reservation size"
+            ))
+        ));
+
+        let half = MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES / 2;
+        let exact_aggregate = activate(vec![
+            activation_lease(1, vec![0xa5; half]),
+            activation_lease(2, vec![0x5a; half]),
+        ]);
+        assert!(validate_request(&exact_aggregate).is_ok());
+        assert!(matches!(
+            encode_request(&exact_aggregate),
+            Err(HelperProtocolError::TooLarge)
+        ));
+
+        let oversized_aggregate = activate(vec![
+            activation_lease(1, vec![0xa5; half + 1]),
+            activation_lease(2, vec![0x5a; half]),
+        ]);
+        assert!(matches!(
+            validate_request(&oversized_aggregate),
+            Err(HelperProtocolError::Invalid(
+                "signed relay reservation aggregate size"
+            ))
+        ));
     }
 
     #[test]

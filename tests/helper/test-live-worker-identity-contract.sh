@@ -561,6 +561,7 @@ printf '%s\n' \
     connect \
     bind \
     prepare \
+    activate \
     shutdown \
     ready \
     release \
@@ -569,6 +570,7 @@ printf '%s\n' \
     second-cycle-plan \
     second-cycle-bind \
     second-cycle-prepare \
+    second-cycle-activate \
     reuse \
     second-cycle-destroy \
     final-shutdown >"$expected_functional_failure_phases"
@@ -5409,8 +5411,12 @@ for required_hook_contract in \
     'functional_underlay_gateway=192.31.195.1' \
     'functional_underlay_alias=volparossa-proof-underlay-v1' \
     'functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+    'functional_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass' \
     'functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
     'functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+    'functional_peer_public_key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=' \
+    'functional_peer_endpoint=1.1.1.1:51820' \
+    'functional_peer_keepalive=25' \
     'functional_release_byte=G' \
     '/usr/sbin/ip link add name "$functional_underlay" type dummy' \
     '/usr/sbin/ip address add "$functional_underlay_address/24"' \
@@ -5450,14 +5456,24 @@ for required_hook_contract in \
     'worker_identity_from_process_fd' \
     '/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" --' \
     '/usr/bin/wg show interfaces' \
+    'derive_client_peer_address() {' \
+    'wireguard_counter_line_is_exact() {' \
+    'activated_route_destination() {' \
+    '/usr/bin/cat /proc/net/if_inet6' \
+    '/usr/sbin/ip -6 -json route show table main' \
+    '/usr/bin/wg show "$hook_interface" allowed-ips' \
+    '/usr/bin/wg show "$hook_interface" latest-handshakes' \
+    '/usr/bin/wg show "$hook_interface" transfer' \
     'worker_wireguard_interface 7' \
+    'worker_client_peer_address' \
+    'worker_activated_wireguard_is_exact' \
     'printf '"'"'%s'"'"' "$functional_release_byte" >&6' \
     'wait "$hook_functional_probe_pid"' \
     'functional_probe_output_is_exact "$hook_functional_stdout"' \
     'helper_has_no_children "$hook_functional_main_pid"' \
     'worker_process_fd_is_retired 8' \
     'helper_holds_no_worker_custody "$hook_functional_main_pid"' \
-    'worker_wireguard_is_absent 7' \
+    'worker_wireguard_is_absent 7 "$hook_functional_peer_address"' \
     'command exec 8>&-' \
     'command exec 7>&-' \
     'private_network_is_pristine' \
@@ -5481,6 +5497,7 @@ for required_hook_contract in \
     'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
     '[ "${SERVICE_RESULT:-}" = success ]' \
@@ -5531,6 +5548,153 @@ do
         exit 1
     }
 done
+
+activated_parser_functions=$temporary_directory/activated-parser-functions.sh
+for activated_parser_function in \
+    derive_client_peer_address \
+    wireguard_counter_line_is_exact \
+    activated_route_destination
+do
+    sed -n "/^$activated_parser_function() {$/,/^}$/p" "$ipc_hook" \
+        >>"$activated_parser_functions"
+    if [ "$(grep -c "^$activated_parser_function() {$" \
+        "$activated_parser_functions")" -ne 1 ]; then
+        printf 'activated kernel parser is not uniquely extractable: %s\n' \
+            "$activated_parser_function" >&2
+        exit 1
+    fi
+done
+sh -n "$activated_parser_functions"
+# shellcheck source=/dev/null
+. "$activated_parser_functions"
+
+functional_peer_key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=
+functional_interface=vpc1proof
+valid_client_address='fd766f6c70611234567800019abc0001 02 80 00 80 vpc1proof'
+link_local_address='fe80000000000000123456fffe789abc 02 40 20 80 vpc1proof'
+expected_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0002
+observed_peer_address=$(printf '%s\n%s\n' \
+    "$valid_client_address" "$link_local_address" \
+    | derive_client_peer_address "$functional_interface") \
+    || {
+        printf '%s\n' 'valid Client topology address was rejected' >&2
+        exit 1
+    }
+if [ "$observed_peer_address" != "$expected_peer_address" ]; then
+    printf '%s\n' 'Client peer address was not derived as exact topology host ::2' >&2
+    exit 1
+fi
+for invalid_client_address in \
+    'fd776f6c70611234567800019abc0001 02 80 00 80 vpc1proof' \
+    'fd766f6c70611234567800029abc0001 02 80 00 80 vpc1proof' \
+    'fd766f6c70611234567800019abc0002 02 80 00 80 vpc1proof' \
+    'fd766f6c70611234567800019abc0001 02 70 00 80 vpc1proof' \
+    'fd766f6c70611234567800019abc0001 02 80 20 80 vpc1proof' \
+    'fd766f6c70611234567800019abc0001 02 80 00 80 other'
+do
+    if printf '%s\n' "$invalid_client_address" \
+        | derive_client_peer_address "$functional_interface" >/dev/null 2>&1; then
+        printf 'invalid Client topology address was accepted: %s\n' \
+            "$invalid_client_address" >&2
+        exit 1
+    fi
+done
+if printf '%s\n%s\n' "$valid_client_address" "$valid_client_address" \
+    | derive_client_peer_address "$functional_interface" >/dev/null 2>&1; then
+    printf '%s\n' 'duplicate Client topology addresses were accepted' >&2
+    exit 1
+fi
+
+for valid_counter in 0 1 18446744073709551615
+do
+    valid_counter_line=$(printf '%s\t%s' "$functional_peer_key" "$valid_counter")
+    wireguard_counter_line_is_exact \
+        "$valid_counter_line" "$functional_peer_key" 2 || {
+            printf 'canonical WireGuard counter was rejected: %s\n' \
+                "$valid_counter" >&2
+            exit 1
+        }
+done
+valid_transfer_line=$(printf '%s\t%s\t%s' \
+    "$functional_peer_key" 0 18446744073709551615)
+wireguard_counter_line_is_exact \
+    "$valid_transfer_line" "$functional_peer_key" 3 || {
+        printf '%s\n' 'canonical WireGuard rx/tx counters were rejected' >&2
+        exit 1
+    }
+for invalid_counter in 00 01 -1 +1 18446744073709551616 999999999999999999999
+do
+    invalid_counter_line=$(printf '%s\t%s' \
+        "$functional_peer_key" "$invalid_counter")
+    if wireguard_counter_line_is_exact \
+        "$invalid_counter_line" "$functional_peer_key" 2; then
+        printf 'non-canonical WireGuard counter was accepted: %s\n' \
+            "$invalid_counter" >&2
+        exit 1
+    fi
+done
+wrong_key_counter=$(printf '%s\t%s' \
+    AAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg= 0)
+extra_counter=$(printf '%s\t%s\t%s' "$functional_peer_key" 0 0)
+duplicate_counter=$(printf '%s\t0\n%s\t0' \
+    "$functional_peer_key" "$functional_peer_key")
+if wireguard_counter_line_is_exact \
+    "$wrong_key_counter" "$functional_peer_key" 2 \
+    || wireguard_counter_line_is_exact \
+        "$extra_counter" "$functional_peer_key" 2 \
+    || wireguard_counter_line_is_exact \
+        "$duplicate_counter" "$functional_peer_key" 2; then
+    printf '%s\n' 'substituted or non-singleton WireGuard counter record was accepted' >&2
+    exit 1
+fi
+
+valid_route='[{"dst":"fd76:6f6c:7061:1234:5678:1:9abc:2","dev":"vpc1proof","protocol":"static","metric":1024,"flags":[],"pref":"medium"}]'
+observed_route=$(printf '%s\n' "$valid_route" \
+    | activated_route_destination "$functional_interface") || {
+        printf '%s\n' 'exact activated main-table route was rejected' >&2
+        exit 1
+    }
+if [ "$observed_route" != 'fd76:6f6c:7061:1234:5678:1:9abc:2' ]; then
+    printf '%s\n' 'activated route parser changed the exact peer destination' >&2
+    exit 1
+fi
+for route_mutation in \
+    '.[0].dst = "default"' \
+    '.[0].dev = "other"' \
+    '.[0].protocol = "kernel"' \
+    '.[0].metric = 1023' \
+    '.[0].flags = ["onlink"]' \
+    '.[0].pref = "high"' \
+    '.[0].gateway = "fd00::1"' \
+    '.[0].nexthops = [{"dev":"vpc1proof"}]' \
+    '.[0].prefsrc = "fd00::1"' \
+    '.[0].src = "fd00::/64"'
+do
+    mutated_route=$(printf '%s\n' "$valid_route" \
+        | /usr/bin/jq -c "$route_mutation") || exit 1
+    if printf '%s\n' "$mutated_route" \
+        | activated_route_destination "$functional_interface" >/dev/null 2>&1; then
+        printf 'substituted activated route was accepted: %s\n' \
+            "$route_mutation" >&2
+        exit 1
+    fi
+done
+two_routes=$(printf '%s\n%s\n' "$valid_route" "$valid_route" \
+    | /usr/bin/jq -s 'add') || exit 1
+if printf '%s\n' '[]' \
+    | activated_route_destination "$functional_interface" >/dev/null 2>&1 \
+    || printf '%s\n' "$two_routes" \
+        | activated_route_destination "$functional_interface" >/dev/null 2>&1; then
+    printf '%s\n' 'absent or non-singleton activated route was accepted' >&2
+    exit 1
+fi
+if [ "$(grep -Fc \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass' \
+    "$gate")" -ne 1 ]; then
+    printf '%s\n' 'KVM harness does not require one activated-kernel record' >&2
+    exit 1
+fi
+
 hook_process_contract_source_is_exact() {
     [ "$#" -eq 1 ] || return 1
     hook_contract_source=$1
@@ -5792,6 +5956,7 @@ if ! awk '
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass'"'"'/ { marker_root_peer = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass'"'"'/ { marker_bind_after = NR }
     /"\$functional_ready_record"/ { marker_functional_ready = NR }
+    /"\$functional_activated_kernel_record"/ { marker_functional_activated = NR }
     /"\$functional_pass_record"/ { marker_functional_pass = NR }
     /"\$functional_cleanup_record"/ { marker_functional_cleanup = NR }
     END {
@@ -5804,7 +5969,8 @@ if ! awk '
         markers = markers && marker_wrong_gid < marker_root_peer
         markers = markers && marker_root_peer < marker_bind_after
         markers = markers && marker_bind_after < marker_functional_ready
-        markers = markers && marker_functional_ready < marker_functional_pass
+        markers = markers && marker_functional_ready < marker_functional_activated
+        markers = markers && marker_functional_activated < marker_functional_pass
         markers = markers && marker_functional_pass < marker_functional_cleanup
         if (!(probes && markers)) exit 1
     }
@@ -5844,6 +6010,8 @@ if ! awk '
         if (identity_count == 2) identity_after = NR
     }
     in_functional && /worker_wireguard_interface 7/ { wireguard = NR }
+    in_functional && /worker_client_peer_address/ { peer_address = NR }
+    in_functional && /worker_activated_wireguard_is_exact/ { activated = NR }
     in_functional && /rm -f -- "\$hook_functional_fifo"/ { fifo_unlink = NR }
     in_functional && /functional_release_byte.*>&6/ { release = NR }
     in_functional && release && /exec 6>&-/ { release_close = NR }
@@ -5864,7 +6032,8 @@ if ! awk '
         valid = valid && child < custody_before && custody_before < namespace_pin
         valid = valid && namespace_pin < process_pin && process_pin < custody_after_pin
         valid = valid && custody_after_pin < identity_before
-        valid = valid && identity_before < wireguard && wireguard < identity_after
+        valid = valid && identity_before < wireguard && wireguard < peer_address
+        valid = valid && peer_address < activated && activated < identity_after
         valid = valid && identity_after < custody_after_readback
         valid = valid && custody_after_readback < fifo_unlink && fifo_unlink < release
         valid = valid && release < release_close && release_close < waited
@@ -5956,4 +6125,4 @@ if grep -Ei 'capabilit(y|ies)[_-]?state|state[_-]?capabilit(y|ies)' "$ipc_hook" 
 fi
 
 printf '%s\n' \
-    'PASS: live helper identity/fdstore and production IPC plus reusable live Client lease preview, retirement, root refusal, confinement, and no-host-mutation contracts are exact.'
+    'PASS: live helper identity/fdstore and production IPC plus reusable activated Client kernel readback, retirement, root refusal, confinement, and no-host-mutation contracts are exact.'

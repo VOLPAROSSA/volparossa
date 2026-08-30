@@ -104,8 +104,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   observed the final sandbox and sent Accepted, the child disables and reads back `PR_SET_DUMPABLE`
   before Ready or any operational request; the fixed service and transient live-proof driver also
   set `LimitCORE=0`. The production server now uses it only for a one-Client/one-lease
-  functional-alpha Prepare/Destroy backend; Activate, Probe, transport and datapath operations
-  deliberately return `Unavailable`. The package declares a locked, group-isolated `volparossa-worker`, pins its numeric
+  functional-alpha Prepare/Activate/Destroy backend. Activate requires and verifies the exact
+  nested relay/exit signed grant, binds it to helper-owned context/path/client key/expiry, and
+  installs only the signed relay-client peer plus a derived `/128` route. Probe, Commit, transport
+  and usable datapath operations deliberately return `Unavailable`. The package declares a locked,
+  group-isolated `volparossa-worker`, pins its numeric
   identity at startup, and first binds unique local passwd/group names and numeric IDs to exact
   name- and number-based NSS results. Only the canonical `files` or `files systemd` order is
   accepted for passwd/group/shadow and optional initgroups; service group sets must exactly match
@@ -167,11 +170,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   records contain privacy-safe digests and diagnostics only fixed labels. Equality proves stable
   observations at the two fences, not continuous stability between them.
   The same closed probe then creates one fixed dummy underlay only inside the production unit's
-  `PrivateNetwork`, registers an exact tag-35 Client intent and holds its first Prepare at a fixed
-  root-owned FIFO READY barrier. The hook externally checks the direct child's executable, dedicated
-  identity, separate network namespace and live peerless WireGuard interface without publishing
-  keys, ports, handles or runtime IDs. Exact Destroy plus an idempotent absent retry is followed by a
-  second distinct Prepare/Destroy cycle under the same runtime to prove capacity reuse. Final checks
+  `PrivateNetwork`, registers an exact tag-35 Client intent and holds its first signed activation at
+  a fixed root-owned FIFO READY barrier. The hook externally checks the direct child's executable,
+  dedicated identity, separate network namespace, exact relay-client peer and derived `/128` route
+  without publishing keys, ports, handles or runtime IDs. Exact Destroy plus an idempotent absent
+  retry is followed by a second distinct Prepare/Activate/Destroy cycle under the same runtime to
+  prove capacity reuse. Final checks
   require zero helper children, no WireGuard in the retained first-worker namespace, no helper FD
   retaining it or any foreign worker network namespace, an empty descriptor store and the fixed
   exact-one-loopback/no-default-route cleanup predicate after fixture removal.
@@ -638,12 +642,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   before its own deadline, while runtime/task cancellation fails closed and cannot upgrade.
   Terminal unresolved settlement atomically drains captured owners and immediately escalates any
   later owner instead of leaving it stranded.
-  The authenticated child now executes exact single-lease WireGuard Prepare and Destroy against its
-  worker-local `NamespaceKernel`: interface and `/128` are derived from the bound
+  The authenticated child now executes exact single-lease WireGuard Prepare, Activate and Destroy
+  against its worker-local `NamespaceKernel`: interface and `/128` are derived from the bound
   context/path/role, the ephemeral X25519 private key stays in worker-owned secret containers that
   zeroize on drop, and only correlated kernel proof supplies the returned public key and port.
   Prepare failure becomes a normal kernel error only after exact delete and absence proof;
-  otherwise resource/key state is retained as `CleanupIncomplete` for Destroy. Destroy without an
+  otherwise resource/key state is retained as `CleanupIncomplete` for Destroy. Activate consumes a
+  helper-projected verified relay-client peer, installs it and the derived `/128` route, and returns
+  only after exact readback. Destroy without an
   adopted lease returns `NotFound`, not kernel-absence evidence. Successful internal Prepare,
   Activate, Probe and MPTCP endpoint responses must preserve exact request order and identity;
   each credentialed request now carries the parent's fixed absolute Linux `CLOCK_MONOTONIC`
@@ -680,10 +686,16 @@ single clean-build A01--A15 run; the score is not a release claim.
   retries quarantined lineages on later ticks, and makes unexpected driver exit fatal. It is stopped
   and joined before engine shutdown; shutdown succeeds only for empty backend state plus confirmed
   coordinator cleanup. The public `HelperEngine::new` remains fully `Unavailable`.
-  This narrow backend has no Activate, Probe, peer/routing, transport or datapath operation and no
-  durable journal/systemd custody or crash/restart recovery. The committed disposable KVM producer
-  now exercises the no-argument server, first live peerless Client lease, exact/idempotent Destroy
-  and a second capacity-reuse cycle entirely in private namespaces. No retained exact-main PASS
+  This narrow backend additionally verifies one exact canonical nested relay/exit grant against a
+  bounded process-lifetime replay cache before Activate, checks both signer-derived Peer IDs and
+  helper-owned context/path/client-key/expiry scope, and installs/read-backs only the signed
+  relay-client endpoint plus its derived `/128` route. Pure pre-mutation binding failures roll back
+  replay admission; no replay entry is rolled back once worker mutation may have begun. It still has
+  no Probe, Commit, transport or usable datapath operation and no durable journal/systemd custody,
+  restart-persistent replay, trusted selected-operator authority or crash/restart recovery. The
+  committed disposable KVM producer now exercises the no-argument server, signed activation, exact
+  cached retry, exact/idempotent Destroy and a second capacity-reuse cycle entirely in private
+  namespaces. No retained exact-main PASS
   exists yet, so this implemented gate is not earned acceptance evidence. Durable
   pidfd/network-namespace recovery and the separate Add/Remove MPTCP endpoint seam remain required;
   AV1-09, AV1-10 and AV1-11, the 11/100 score, and every datapath or acceptance checkbox remain
@@ -1005,17 +1017,19 @@ single clean-build A01--A15 run; the score is not a release claim.
   reaches the subsequent helper phases in tests.
 - [ ] The v3 lease API exposes only opaque handles and public endpoint material and has no private-key
   input/output. The production server's functional-alpha backend can obtain one helper-owned Client
-  WireGuard lease with kernel-proven key/port and selected direct-underlay IP. The committed
-  disposable KVM producer exercises that no-argument production server, one live peerless lease,
-  exact/idempotent Destroy and a second capacity-reuse cycle in private namespaces. The public
+  WireGuard lease with kernel-proven key/port and selected direct-underlay IP, verify the exact
+  signed relay/exit grant, and install only its relay-client peer and derived `/128` route. The
+  committed disposable KVM producer exercises that no-argument production server, exact cached
+  activation retry, exact/idempotent Destroy and a second capacity-reuse cycle in private
+  namespaces. The public
   `HelperEngine::new` remains `Unavailable`, no production route-manager caller reaches the backend,
   and no retained exact-main PASS exists yet.
 - [ ] Typed/pure/fake helper boundaries prove exact public handles, cardinality, TTL, idempotency,
   state transitions, and handshake/RX/TX proof policy. Agent route tests exercise
   prepare/activate/commit/destroy and destroy-first retirement through fake backends. The helper's
-  functional-alpha backend has no production route-manager caller. Its disposable gate proves a
-  prepared peerless WireGuard interface and normal process-owned cleanup, not an activated tunnel,
-  peer handshake, routed packet, end-to-end worker/kernel tunnel or datapath.
+  functional-alpha backend has no production route-manager caller. Its disposable gate proves one
+  configured peer, derived route and normal process-owned cleanup, not a peer handshake, routed
+  packet, end-to-end worker/kernel tunnel or datapath.
 - [ ] Service ledgers reduce internal available capacity immediately, but production publishes no
   relay/exit advertisement, so advertised free-capacity updates are not wired.
 - [ ] Ledger/service tests prove that explicit expiry purging restores capacity, and the agent

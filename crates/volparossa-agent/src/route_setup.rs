@@ -1045,6 +1045,8 @@ trait ClientReservationProtocol: Send + 'static {
 
     fn grant_path_id(grant: &Self::RelayGrant) -> u32;
 
+    fn signed_relay_reservation(grant: &Self::RelayGrant) -> &[u8];
+
     fn relay_client_endpoint(
         grant: &Self::RelayGrant,
     ) -> Result<PublicWireGuardEndpoint, RouteSetupError>;
@@ -1327,6 +1329,10 @@ impl ClientReservationProtocol for ReservationSession {
 
     fn grant_path_id(grant: &Self::RelayGrant) -> u32 {
         grant.path_id()
+    }
+
+    fn signed_relay_reservation(grant: &Self::RelayGrant) -> &[u8] {
+        grant.signed_relay_reservation()
     }
 
     fn relay_client_endpoint(
@@ -2518,7 +2524,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         self.ensure_live(clock, cancellation, deadline)?;
         self.phase = RouteSetupPhase::Activating;
         let activation = activation_request::<P>(
-            &self.request,
+            self.request.parameters.route_context_id,
             self.prepared
                 .as_ref()
                 .and_then(PreparedContextOwner::endpoints)
@@ -3056,7 +3062,7 @@ fn destroy_authority(route_context_id: [u8; ID_BYTES], handle: &[u8]) -> Option<
 }
 
 fn activation_request<P: ClientReservationProtocol>(
-    request: &RouteSetupRequest,
+    route_context_id: [u8; ID_BYTES],
     batch: &LocalEndpointLeaseBatch,
     grants: &[P::RelayGrant],
 ) -> Result<ActivateLeaseBatch, RouteSetupError> {
@@ -3076,11 +3082,22 @@ fn activation_request<P: ClientReservationProtocol>(
     }
     let mut activations = Vec::with_capacity(batch.client_leases().len());
     for lease in batch.client_leases() {
+        if lease.route_context_id() != &route_context_id {
+            return Err(RouteSetupError::ReservationProtocol(
+                RouteSetupPhase::Activating,
+            ));
+        }
         let grant = by_path
             .get(&lease.path_id())
             .ok_or(RouteSetupError::ReservationProtocol(
                 RouteSetupPhase::Activating,
             ))?;
+        let signed_relay_reservation = P::signed_relay_reservation(grant);
+        if signed_relay_reservation.is_empty() {
+            return Err(RouteSetupError::ReservationProtocol(
+                RouteSetupPhase::Activating,
+            ));
+        }
         let endpoint = P::relay_client_endpoint(grant)?;
         activations.push(LeaseActivation {
             lease_handle: lease.lease_handle().as_bytes().to_vec(),
@@ -3096,10 +3113,14 @@ fn activation_request<P: ClientReservationProtocol>(
             // lease must therefore carry the protocol-canonical zero values.
             maximum_up_mbps: 0,
             maximum_down_mbps: 0,
+            // Preserve byte identity: the production helper verifies this exact canonical signed
+            // envelope and binds it to the prepared lease before mutation. Never decode,
+            // reconstruct, or substitute another path's grant here.
+            signed_relay_reservation: signed_relay_reservation.to_vec(),
         });
     }
     Ok(ActivateLeaseBatch {
-        route_context_id: request.parameters.route_context_id.to_vec(),
+        route_context_id: route_context_id.to_vec(),
         context_handle: batch.context_handle().as_bytes().to_vec(),
         leases: activations,
     })
@@ -3218,7 +3239,7 @@ mod tests {
     use volparossa_relay::{RelayService, RelayServiceConfig};
     use volparossa_routing::{
         CommittedLease, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION, HelperRequest, PreparedLease,
-        UnderlayEvidence, encode_request, helper_request,
+        UnderlayEvidence, encode_request, helper_request, operation_digest,
     };
     use volparossa_selection::{CandidateEvidence, SelectionMix};
     use volparossa_test_support::{ephemeral_signing_key, verified_development_manifest};
@@ -3268,6 +3289,7 @@ mod tests {
         prepared_mptcp_subflows: Option<u32>,
         prepared_lease_count: Option<usize>,
         prepared_lease_identities: Option<Vec<(u32, i32)>>,
+        activation_batches: Vec<ActivateLeaseBatch>,
     }
 
     #[derive(Default)]
@@ -3439,7 +3461,11 @@ mod tests {
             })
             .map_err(|_| FakeLocalError::Definitive)?;
             self.shared.record("local.activate");
-            let block = self.shared.state.lock().expect("fake state").block_activate;
+            let block = {
+                let mut state = self.shared.state.lock().expect("fake state");
+                state.activation_batches.push(request.clone());
+                state.block_activate
+            };
             self.shared.activate_started.notify_one();
             if block {
                 self.shared.activate_release.notified().await;
@@ -3571,6 +3597,56 @@ mod tests {
         )
     }
 
+    fn bound_activation_batch(
+        route_context_id: [u8; ID_BYTES],
+        requested_path_ids: &[u32],
+        response_path_ids: &[u32],
+    ) -> LocalEndpointLeaseBatch {
+        let request = PrepareLeaseBatch {
+            route_context_id: route_context_id.to_vec(),
+            role: ContextRole::Client as i32,
+            mptcp_accepted_addrs: MAX_HELPER_PATHS,
+            mptcp_subflows: MAX_HELPER_PATHS,
+            leases: requested_path_ids
+                .iter()
+                .map(|path_id| LeasePlan {
+                    path_id: *path_id,
+                    role: WireguardRole::Client as i32,
+                })
+                .collect(),
+            setup_expires_at_unix: NOW_MS / 1_000 + 20,
+            hard_expires_at_unix: NOW_MS / 1_000 + 60,
+        };
+        let response = PreparedLeaseBatch {
+            context_handle: vec![99; HELPER_HANDLE_BYTES],
+            leases: response_path_ids
+                .iter()
+                .map(|path_id| {
+                    let path = u8::try_from(*path_id).expect("bounded path id");
+                    PreparedLease {
+                        lease_handle: vec![path; HELPER_HANDLE_BYTES],
+                        path_id: *path_id,
+                        role: WireguardRole::Client as i32,
+                        public_key: vec![path.saturating_add(32); 32],
+                        public_endpoint: Some(PublicUdpEndpoint {
+                            address: vec![8, 8, 4, path.saturating_add(10)],
+                            port: 40_000 + *path_id,
+                        }),
+                        underlay_evidence: UnderlayEvidence::DirectAssigned as i32,
+                    }
+                })
+                .collect(),
+        };
+        bind_prepared_endpoint_leases(&request, response).expect("bound activation batch")
+    }
+
+    fn fake_relay_grant(path_id: u32, signed_relay_reservation: &[u8]) -> FakeRelayGrant {
+        FakeRelayGrant {
+            path_id,
+            signed_relay_reservation: signed_relay_reservation.to_vec(),
+        }
+    }
+
     struct FakeFinalizeRequest {
         path_ids: Vec<u32>,
         encoded: Vec<u8>,
@@ -3583,6 +3659,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeRelayGrant {
         path_id: u32,
+        signed_relay_reservation: Vec<u8>,
     }
 
     struct UniqueSessionToken(u64);
@@ -3941,7 +4018,10 @@ mod tests {
             )?;
             self.shared
                 .record(format!("protocol.verify.relay.{expected}"));
-            Ok(FakeRelayGrant { path_id: expected })
+            Ok(FakeRelayGrant {
+                path_id: expected,
+                signed_relay_reservation: signed_relay,
+            })
         }
 
         fn sign_confirmation(
@@ -3988,6 +4068,10 @@ mod tests {
 
         fn grant_path_id(grant: &Self::RelayGrant) -> u32 {
             grant.path_id
+        }
+
+        fn signed_relay_reservation(grant: &Self::RelayGrant) -> &[u8] {
+            &grant.signed_relay_reservation
         }
 
         fn relay_client_endpoint(
@@ -5956,6 +6040,126 @@ mod tests {
         .expect("retirement fail-stop");
     }
 
+    #[test]
+    fn activation_copies_exact_grant_wires_by_path_in_canonical_order_and_digest() {
+        let route_context_id = [22; ID_BYTES];
+        let batch = bound_activation_batch(route_context_id, &[2, 5, 8], &[8, 2, 5]);
+        let wires = BTreeMap::from([
+            (2, vec![0x00, 0x82, 0xff, 0x02]),
+            (5, vec![0x05, 0x00, 0xa5, 0x5a, 0x05]),
+            (8, vec![0x88, 0x08, 0x00, 0xfe]),
+        ]);
+        let grants = [
+            fake_relay_grant(5, wires.get(&5).expect("path 5 wire")),
+            fake_relay_grant(8, wires.get(&8).expect("path 8 wire")),
+            fake_relay_grant(2, wires.get(&2).expect("path 2 wire")),
+        ];
+
+        let activation = activation_request::<FakeProtocol>(route_context_id, &batch, &grants)
+            .expect("exact provenance-bound activation");
+        assert_eq!(
+            activation
+                .leases
+                .iter()
+                .map(|lease| lease.path_id)
+                .collect::<Vec<_>>(),
+            [2, 5, 8]
+        );
+        for lease in &activation.leases {
+            assert_eq!(
+                &lease.signed_relay_reservation,
+                wires.get(&lease.path_id).expect("wire for activation path"),
+                "one path must receive only its own retained envelope"
+            );
+        }
+
+        let request = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: vec![0xa7; ID_BYTES],
+            operation: Some(helper_request::Operation::ActivateLeaseBatch(
+                activation.clone(),
+            )),
+        };
+        let digest = operation_digest(&request).expect("provenance-bound digest");
+
+        let mut without_provenance = request.clone();
+        let Some(helper_request::Operation::ActivateLeaseBatch(batch)) =
+            without_provenance.operation.as_mut()
+        else {
+            panic!("Activate operation");
+        };
+        for lease in &mut batch.leases {
+            lease.signed_relay_reservation.clear();
+        }
+        assert_ne!(
+            digest,
+            operation_digest(&without_provenance).expect("legacy digest"),
+            "the exact retained envelopes must affect the helper operation digest"
+        );
+
+        let mut substituted = request;
+        let Some(helper_request::Operation::ActivateLeaseBatch(batch)) =
+            substituted.operation.as_mut()
+        else {
+            panic!("Activate operation");
+        };
+        let first_wire = batch.leases[0].signed_relay_reservation.clone();
+        batch.leases[0].signed_relay_reservation = batch.leases[2].signed_relay_reservation.clone();
+        batch.leases[2].signed_relay_reservation = first_wire;
+        assert_ne!(
+            digest,
+            operation_digest(&substituted).expect("path-substituted digest"),
+            "moving exact grant bytes to another path must change the digest"
+        );
+    }
+
+    #[test]
+    fn activation_fails_closed_on_missing_empty_ambiguous_or_foreign_provenance() {
+        let route_context_id = [22; ID_BYTES];
+        let batch = bound_activation_batch(route_context_id, &[2, 5], &[5, 2]);
+        let phase_error = |result: Result<ActivateLeaseBatch, RouteSetupError>| {
+            assert_eq!(
+                result.expect_err("invalid provenance must fail closed"),
+                RouteSetupError::ReservationProtocol(RouteSetupPhase::Activating)
+            );
+        };
+
+        phase_error(activation_request::<FakeProtocol>(
+            route_context_id,
+            &batch,
+            &[fake_relay_grant(2, &[0x22])],
+        ));
+        phase_error(activation_request::<FakeProtocol>(
+            route_context_id,
+            &batch,
+            &[fake_relay_grant(2, &[]), fake_relay_grant(5, &[0x55])],
+        ));
+        phase_error(activation_request::<FakeProtocol>(
+            route_context_id,
+            &batch,
+            &[fake_relay_grant(2, &[0x21]), fake_relay_grant(2, &[0x22])],
+        ));
+        phase_error(activation_request::<FakeProtocol>(
+            route_context_id,
+            &batch,
+            &[fake_relay_grant(2, &[0x22]), fake_relay_grant(8, &[0x88])],
+        ));
+        phase_error(activation_request::<FakeProtocol>(
+            route_context_id,
+            &batch,
+            &[
+                fake_relay_grant(2, &[0x22]),
+                fake_relay_grant(5, &[0x55]),
+                fake_relay_grant(8, &[0x88]),
+            ],
+        ));
+        phase_error(activation_request::<FakeProtocol>(
+            [23; ID_BYTES],
+            &batch,
+            &[fake_relay_grant(2, &[0x22]), fake_relay_grant(5, &[0x55])],
+        ));
+    }
+
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
@@ -6036,6 +6240,24 @@ mod tests {
                 .expect("finalize frames");
             assert_eq!(frames.len(), 3);
             assert!(frames.windows(2).all(|pair| pair[0] == pair[1]));
+            let [activation] = state.activation_batches.as_slice() else {
+                panic!("one exact activation batch");
+            };
+            assert_eq!(
+                activation
+                    .leases
+                    .iter()
+                    .map(|lease| lease.path_id)
+                    .collect::<Vec<_>>(),
+                [2, 5, 8]
+            );
+            for (lease, grant) in activation.leases.iter().zip(&established.relay_grants) {
+                assert_eq!(lease.path_id, grant.path_id);
+                assert_eq!(
+                    lease.signed_relay_reservation, grant.signed_relay_reservation,
+                    "verified response bytes must reach the same-path activation unchanged"
+                );
+            }
         }
         assert_eq!(
             events
@@ -6880,6 +7102,24 @@ mod tests {
         let local_events = fixture.shared.events();
         assert_before(&local_events, "local.prepare", "local.activate");
         assert_before(&local_events, "local.activate", "local.commit");
+        {
+            let state = fixture.shared.state.lock().expect("fake state");
+            let [activation] = state.activation_batches.as_slice() else {
+                panic!("one real-service activation batch");
+            };
+            let [lease] = activation.leases.as_slice() else {
+                panic!("one real-service activation lease");
+            };
+            let [grant] = established.relay_grants.as_slice() else {
+                panic!("one real-service relay grant");
+            };
+            assert!(!grant.signed_relay_reservation().is_empty());
+            assert_eq!(
+                lease.signed_relay_reservation,
+                grant.signed_relay_reservation(),
+                "the real verified relay envelope must reach helper activation byte-for-byte"
+            );
+        }
         assert_eq!(retirement_state.outstanding(), 1);
         assert_eq!(
             established.teardown().await,

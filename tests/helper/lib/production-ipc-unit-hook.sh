@@ -24,10 +24,14 @@ functional_underlay_alias=volparossa-proof-underlay-v1
 functional_underlay_address=192.31.195.254
 functional_underlay_gateway=192.31.195.1
 functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready
+functional_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass
 functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass
 functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass
 functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
 functional_failure_record=$proof_directory/functional-client-lease.failure
+functional_peer_public_key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=
+functional_peer_endpoint=1.1.1.1:51820
+functional_peer_keepalive=25
 functional_release_byte=G
 helper_bootstrap_capability_mask=00000000002031e0
 start_failure_record=$proof_directory/start.failure
@@ -1406,6 +1410,7 @@ worker_wireguard_interface() {
         ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
     esac
     [ "${#hook_public_key}" -eq 44 ] || return 1
+    [ "$hook_public_key" != "$functional_peer_public_key" ] || return 1
     hook_listen_port=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show "$hook_interfaces" listen-port 2>/dev/null) || return 1
     case $hook_listen_port in
@@ -1415,9 +1420,6 @@ worker_wireguard_interface() {
     hook_firewall_mark=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show "$hook_interfaces" fwmark 2>/dev/null) || return 1
     [ "$hook_firewall_mark" = off ] || return 1
-    hook_peers=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
-        /usr/bin/wg show "$hook_interfaces" peers 2>/dev/null) || return 1
-    [ -z "$hook_peers" ] || return 1
     /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/sbin/ip -6 -json address show dev "$hook_interfaces" 2>/dev/null \
         | /usr/bin/jq -e '
@@ -1440,10 +1442,173 @@ worker_wireguard_interface() {
     printf '%s\n' "$hook_interfaces"
 }
 
-worker_wireguard_is_absent() {
+derive_client_peer_address() {
     [ "$#" -eq 1 ] || return 1
+    case $1 in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 15 ] || return 1
+    /usr/bin/awk -v expected_interface="$1" '
+        $6 == expected_interface \
+            && length($1) == 32 \
+            && $1 ~ /^[0-9a-f]+$/ \
+            && substr($1, 1, 12) == "fd766f6c7061" \
+            && substr($1, 21, 4) == "0001" \
+            && substr($1, 29, 4) == "0001" \
+            && $3 == "80" \
+            && $4 == "00" {
+                candidates++
+                peer = substr($1, 1, 28) "0002"
+            }
+        END {
+            if (candidates != 1) exit 1
+            printf "%s:%s:%s:%s:%s:%s:%s:%s\n", \
+                substr(peer, 1, 4), substr(peer, 5, 4), \
+                substr(peer, 9, 4), substr(peer, 13, 4), \
+                substr(peer, 17, 4), substr(peer, 21, 4), \
+                substr(peer, 25, 4), substr(peer, 29, 4)
+        }
+    '
+}
+
+wireguard_counter_line_is_exact() {
+    [ "$#" -eq 3 ] || return 1
+    case $3 in
+        2|3) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$1" | /usr/bin/awk \
+        -F '\t' -v expected_key="$2" -v expected_fields="$3" '
+        function canonical_u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            if (length(value) < 20) return 1
+            return ("x" value) <= "x18446744073709551615"
+        }
+        {
+            records++
+            valid = NF == expected_fields && $1 == expected_key \
+                && canonical_u64($2)
+            if (expected_fields == 3) valid = valid && canonical_u64($3)
+            if (!valid) invalid = 1
+        }
+        END {
+            if (records != 1 || invalid) exit 1
+        }
+    '
+}
+
+activated_route_destination() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 15 ] || return 1
+    /usr/bin/jq -e -r --arg interface "$1" '
+        select(
+            type == "array" and length == 1
+            and (.[0] | keys)
+                == ["dev", "dst", "flags", "metric", "pref", "protocol"]
+            and (.[0].dst | type) == "string"
+            and (.[0].dst | contains(":"))
+            and .[0].dst != "default"
+            and .[0].dev == $interface
+            and .[0].protocol == "static"
+            and .[0].metric == 1024
+            and .[0].flags == []
+            and .[0].pref == "medium"
+            and (.[0] | has("gateway") | not)
+            and (.[0] | has("via") | not)
+            and (.[0] | has("nexthops") | not)
+            and (.[0] | has("nhid") | not)
+            and (.[0] | has("prefsrc") | not)
+            and (.[0] | has("src") | not)
+        )
+        | .[0].dst
+    '
+}
+
+worker_client_peer_address() {
+    [ "$#" -eq 2 ] || return 1
     hook_namespace_fd=$1
+    hook_interface=$2
     fd_number_is_safe "$hook_namespace_fd" || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/cat /proc/net/if_inet6 2>/dev/null \
+        | derive_client_peer_address "$hook_interface"
+}
+
+worker_activated_wireguard_is_exact() {
+    [ "$#" -eq 3 ] || return 1
+    hook_namespace_fd=$1
+    hook_interface=$2
+    hook_peer_address=$3
+    fd_number_is_safe "$hook_namespace_fd" || return 1
+    case $hook_interface in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#hook_interface}" -le 15 ] || return 1
+    case $hook_peer_address in
+        ''|*[!0-9a-f:]*) return 1 ;;
+    esac
+    [ "${#hook_peer_address}" -eq 39 ] || return 1
+
+    # The peer address was independently derived from the full binary Client address above. Query
+    # that exact /128 in table main; never infer route identity from a displayed AllowedIP.
+    hook_route_destination=$(
+        /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+            /usr/sbin/ip -6 -json route show table main \
+                exact "$hook_peer_address/128" 2>/dev/null \
+            | activated_route_destination "$hook_interface" 2>/dev/null
+    ) || return 1
+    case $hook_route_destination in
+        ''|default|*/*|*[!0-9a-f:]*) return 1 ;;
+    esac
+    hook_default_routes=$(
+        /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+            /usr/sbin/ip -6 -json route show table main default 2>/dev/null
+    ) || return 1
+    [ "$hook_default_routes" = '[]' ] || return 1
+
+    # Selector-specific `wg show` reads never expose the interface private key. Every public field
+    # must remain bound to the one fixed peer while the kernel counters may truthfully be zero.
+    hook_peers=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" peers 2>/dev/null) || return 1
+    [ "$hook_peers" = "$functional_peer_public_key" ] || return 1
+    hook_expected_peer_field=$(printf '%s\t%s' \
+        "$functional_peer_public_key" "$functional_peer_endpoint") || return 1
+    hook_peer_field=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" endpoints 2>/dev/null) || return 1
+    [ "$hook_peer_field" = "$hook_expected_peer_field" ] || return 1
+    hook_expected_peer_field=$(printf '%s\t%s/128' \
+        "$functional_peer_public_key" "$hook_route_destination") || return 1
+    hook_peer_field=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" allowed-ips 2>/dev/null) || return 1
+    [ "$hook_peer_field" = "$hook_expected_peer_field" ] || return 1
+    hook_expected_peer_field=$(printf '%s\t%s' \
+        "$functional_peer_public_key" "$functional_peer_keepalive") || return 1
+    hook_peer_field=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" persistent-keepalive 2>/dev/null) || return 1
+    [ "$hook_peer_field" = "$hook_expected_peer_field" ] || return 1
+    hook_peer_field=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" latest-handshakes 2>/dev/null) || return 1
+    wireguard_counter_line_is_exact \
+        "$hook_peer_field" "$functional_peer_public_key" 2 || return 1
+    hook_peer_field=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show "$hook_interface" transfer 2>/dev/null) || return 1
+    wireguard_counter_line_is_exact \
+        "$hook_peer_field" "$functional_peer_public_key" 3
+}
+
+worker_wireguard_is_absent() {
+    [ "$#" -eq 2 ] || return 1
+    hook_namespace_fd=$1
+    hook_peer_address=$2
+    fd_number_is_safe "$hook_namespace_fd" || return 1
+    case $hook_peer_address in
+        ''|*[!0-9a-f:]*) return 1 ;;
+    esac
+    [ "${#hook_peer_address}" -eq 39 ] || return 1
     hook_interfaces=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show interfaces 2>/dev/null) || return 1
     [ -z "$hook_interfaces" ] || return 1
@@ -1455,7 +1620,14 @@ worker_wireguard_is_absent() {
               and all(.[].ifalias?;
                     (type != "string")
                     or (startswith("volparossa:wireguard:ownership-v1:") | not))
-            ' >/dev/null 2>&1
+            ' >/dev/null 2>&1 \
+        || return 1
+    hook_route=$(
+        /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+            /usr/sbin/ip -6 -json route show table main \
+                exact "$hook_peer_address/128" 2>/dev/null
+    ) || return 1
+    [ "$hook_route" = '[]' ]
 }
 
 private_network_is_pristine() {
@@ -1592,8 +1764,9 @@ functional_probe_failure_value_is_safe() {
         "$hook_functional_failure_phase,$hook_functional_failure_class" ] \
         || return 1
     case $hook_functional_failure_phase in
-        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
-        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
+        second-cycle-activate|reuse|\
         second-cycle-destroy|final-shutdown)
             ;;
         *) return 1 ;;
@@ -1839,6 +2012,10 @@ run_functional_client_lease_probe() {
     case $hook_functional_wireguard in
         ''|*[!A-Za-z0-9_.-]*) return 1 ;;
     esac
+    hook_functional_peer_address=$(worker_client_peer_address \
+        7 "$hook_functional_wireguard") || return 1
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_wireguard" "$hook_functional_peer_address" || return 1
     [ "$(worker_identity_from_process_fd \
         8 "$hook_functional_worker_pid" "$hook_functional_main_pid" \
         "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
@@ -1901,7 +2078,7 @@ run_functional_client_lease_probe() {
     [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
         "$hook_functional_process_identity" ] || return 1
     helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
-    worker_wireguard_is_absent 7 || return 1
+    worker_wireguard_is_absent 7 "$hook_functional_peer_address" || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
         "$hook_functional_worker_namespace" ] || return 1
     command exec 8>&- || return 1
@@ -2120,7 +2297,7 @@ start_hook() {
 
     advance_start_failure_stage publication \
         || fail 'start failure stage transition is invalid'
-    hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+    hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
@@ -2129,6 +2306,7 @@ start_hook() {
         'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
         "$functional_ready_record" \
+        "$functional_activated_kernel_record" \
         "$functional_pass_record" \
         "$functional_cleanup_record")
     write_private_file "$proof_directory/start.pass" "$hook_start_pass" \

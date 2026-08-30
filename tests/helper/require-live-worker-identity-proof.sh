@@ -436,8 +436,9 @@ production_functional_probe_failure_value_is_safe() {
         "$production_functional_failure_phase,$production_functional_failure_class" ] \
         || return 1
     case $production_functional_failure_phase in
-        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
-        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
+        second-cycle-activate|reuse|\
         second-cycle-destroy|final-shutdown)
             ;;
         *) return 1 ;;
@@ -3445,6 +3446,7 @@ if [ "$proof_ok" = yes ]; then
         'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
         >"$temporary_stage/expected-production-start.pass"

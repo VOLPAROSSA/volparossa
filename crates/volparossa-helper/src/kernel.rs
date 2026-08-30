@@ -55,6 +55,8 @@ const RTM_DELLINK: u16 = 17;
 const RTM_GETLINK: u16 = 18;
 const RTM_SETLINK: u16 = 19;
 const RTM_NEWADDR: u16 = 20;
+const RTM_NEWROUTE: u16 = 24;
+const RTM_GETROUTE: u16 = 26;
 const IFLA_IFNAME: u16 = 3;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_NET_NS_FD: u16 = 28;
@@ -63,6 +65,24 @@ const IFLA_NEW_IFINDEX: u16 = 49;
 const IFLA_INFO_KIND: u16 = 1;
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
+const RTA_DST: u16 = 1;
+const RTA_OIF: u16 = 4;
+const RTA_GATEWAY: u16 = 5;
+const RTA_PRIORITY: u16 = 6;
+const RTA_PREFSRC: u16 = 7;
+const RTA_MULTIPATH: u16 = 9;
+const RTA_CACHEINFO: u16 = 12;
+const RTA_TABLE: u16 = 15;
+const RTA_PREF: u16 = 20;
+const RT_TABLE_MAIN: u8 = 254;
+const RTPROT_STATIC: u8 = 4;
+const RT_SCOPE_UNIVERSE: u8 = 0;
+const RT_SCOPE_LINK: u8 = 253;
+const RTN_UNICAST: u8 = 1;
+const RTM_F_FIB_MATCH: u32 = 0x2000;
+const IPV6_ROUTER_PREF_MEDIUM: u8 = 0;
+const IPV6_USER_ROUTE_PRIORITY: u32 = 1024;
+const RTA_CACHEINFO_LEN: usize = 32;
 const GENL_ID_CTRL: u16 = 0x10;
 const CTRL_CMD_NEWFAMILY: u8 = 1;
 const CTRL_CMD_GETFAMILY: u8 = 3;
@@ -77,6 +97,7 @@ const BIRTH_LINK_PROGRESS_TAIL: Duration = Duration::from_millis(500);
 const BIRTH_LINK_RECONCILE_TAIL: Duration = Duration::from_millis(250);
 const BIRTH_LINK_IFINDEX_PREFIX: u32 = 0x4000_0000;
 const BIRTH_LINK_IFINDEX_MASK: u32 = 0x3fff_ffff;
+const RTMSG_LEN: usize = 12;
 
 const WG_GENL_NAME: &str = "wireguard";
 const WG_GENL_VERSION: u8 = 1;
@@ -948,21 +969,31 @@ impl NamespaceKernel {
         peer: &WireguardV3PeerConfiguration,
         deadline: HardDeadline,
     ) -> Result<WireguardV3PeerProof, KernelError> {
-        if expected_device_public_key.iter().all(|byte| *byte == 0) || expected_listen_port == 0 {
+        if expected_device_public_key.iter().all(|byte| *byte == 0)
+            || expected_listen_port == 0
+            || peer.allowed_address != resource.peer_address()
+            || peer.allowed_prefix_length != 128
+        {
             return Err(KernelError::Invalid);
         }
         validate_durable_wireguard_resource(resource)?;
-        self.route
+        let index = self
+            .route
             .exact_owned_wireguard_link_details(resource, deadline)?;
         let wireguard = self.wireguard.as_mut().ok_or(KernelError::Unsupported)?;
         wireguard.activate_device_v3(resource, peer, deadline)?;
-        self.probe_wireguard_peer_v3(
+        self.route
+            .add_exact_main_ipv6_link_route(index.index, peer.allowed_address, deadline)?;
+        let proof = self.probe_wireguard_peer_v3(
             resource,
             expected_device_public_key,
             expected_listen_port,
             peer,
             deadline,
-        )
+        )?;
+        self.route
+            .prove_exact_main_ipv6_link_route(index.index, peer.allowed_address, deadline)?;
+        Ok(deadline.complete(proof)?)
     }
 
     /// Prove one exact peer, endpoint, allowed prefix and device identity with a bounded GET.
@@ -977,7 +1008,8 @@ impl NamespaceKernel {
         if expected_device_public_key.iter().all(|byte| *byte == 0)
             || expected_listen_port == 0
             || peer.public_key.iter().all(|byte| *byte == 0)
-            || peer.allowed_prefix_length > 128
+            || peer.allowed_address != resource.peer_address()
+            || peer.allowed_prefix_length != 128
             || peer.endpoint.ip().is_unspecified()
             || peer.endpoint.ip().is_multicast()
             || peer.endpoint.port() == 0
@@ -1019,7 +1051,7 @@ impl NamespaceKernel {
             || proved_peer.endpoint != peer.endpoint
             || proved_peer.persistent_keepalive_seconds != peer.persistent_keepalive_seconds
             || proved_peer.allowed_ips.as_slice() != [expected_allowed]
-            || proved_peer.protocol_version.is_some()
+            || proved_peer.protocol_version != Some(1)
         {
             return Err(KernelError::Malformed);
         }
@@ -1578,6 +1610,192 @@ impl NetlinkClient {
         push_attribute(&mut payload, IFA_LOCAL, address)?;
         self.request_ack(RTM_NEWADDR, NLM_F_CREATE | NLM_F_EXCL, &payload, deadline)
     }
+
+    fn add_exact_main_ipv6_link_route(
+        &mut self,
+        index: u32,
+        destination: Ipv6Addr,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let payload = encode_exact_main_ipv6_link_route(index, destination)?;
+        self.request_ack(RTM_NEWROUTE, NLM_F_CREATE | NLM_F_EXCL, &payload, deadline)
+    }
+
+    fn prove_exact_main_ipv6_link_route(
+        &mut self,
+        index: u32,
+        destination: Ipv6Addr,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let payload = encode_exact_main_ipv6_link_route_query(index, destination)?;
+        let (response, sequence) = self.request_reply(RTM_GETROUTE, &payload, deadline)?;
+        parse_exact_main_ipv6_link_route_reply(
+            &response,
+            sequence,
+            self.local_port_id,
+            index,
+            destination,
+        )?;
+        Ok(deadline.complete(())?)
+    }
+}
+
+fn parse_exact_main_ipv6_link_route_reply(
+    reply: &NetlinkReply,
+    expected_sequence: u32,
+    local_port_id: u32,
+    index: u32,
+    destination: Ipv6Addr,
+) -> Result<(), KernelError> {
+    validate_kernel_sender(&reply.sender)?;
+    let response_frames = frames(&reply.message)?;
+    if response_frames.len() != 1 {
+        return Err(KernelError::Malformed);
+    }
+    let frame = response_frames[0];
+    if read_u16(frame, 4) == Some(NLMSG_ERROR) {
+        parse_ack(reply, expected_sequence, RTM_GETROUTE, local_port_id)?;
+        return Err(KernelError::Malformed);
+    }
+    validate_kernel_header(frame, expected_sequence, RTM_NEWROUTE, local_port_id)?;
+    parse_exact_main_ipv6_link_route(frame, index, destination)
+}
+
+fn encode_exact_main_ipv6_link_route(
+    index: u32,
+    destination: Ipv6Addr,
+) -> Result<Vec<u8>, KernelError> {
+    if index == 0 || destination.is_unspecified() || destination.is_multicast() {
+        return Err(KernelError::Invalid);
+    }
+    let mut payload = Vec::with_capacity(48);
+    payload.push(u8::try_from(libc::AF_INET6).map_err(|_| KernelError::Invalid)?);
+    payload.push(128);
+    payload.push(0);
+    payload.push(0);
+    payload.push(RT_TABLE_MAIN);
+    payload.push(RTPROT_STATIC);
+    payload.push(RT_SCOPE_LINK);
+    payload.push(RTN_UNICAST);
+    payload.extend_from_slice(&0_u32.to_ne_bytes());
+    push_attribute(&mut payload, RTA_DST, &destination.octets())?;
+    push_attribute(&mut payload, RTA_OIF, &index.to_ne_bytes())?;
+    push_attribute(
+        &mut payload,
+        RTA_PRIORITY,
+        &IPV6_USER_ROUTE_PRIORITY.to_ne_bytes(),
+    )?;
+    Ok(payload)
+}
+
+fn encode_exact_main_ipv6_link_route_query(
+    index: u32,
+    destination: Ipv6Addr,
+) -> Result<Vec<u8>, KernelError> {
+    if index == 0 || destination.is_unspecified() || destination.is_multicast() {
+        return Err(KernelError::Invalid);
+    }
+    let mut payload = Vec::with_capacity(48);
+    payload.push(u8::try_from(libc::AF_INET6).map_err(|_| KernelError::Invalid)?);
+    payload.push(128);
+    payload.extend_from_slice(&[0; 6]);
+    payload.extend_from_slice(&RTM_F_FIB_MATCH.to_ne_bytes());
+    push_attribute(&mut payload, RTA_DST, &destination.octets())?;
+    push_attribute(&mut payload, RTA_OIF, &index.to_ne_bytes())?;
+    Ok(payload)
+}
+
+fn parse_exact_main_ipv6_link_route(
+    frame: &[u8],
+    expected_index: u32,
+    expected_destination: Ipv6Addr,
+) -> Result<(), KernelError> {
+    let payload = frame
+        .get(NLMSG_HEADER_LEN..)
+        .filter(|payload| payload.len() >= RTMSG_LEN)
+        .ok_or(KernelError::Malformed)?;
+    let expected_family = u8::try_from(libc::AF_INET6).map_err(|_| KernelError::Invalid)?;
+    if expected_index == 0
+        || expected_destination.is_unspecified()
+        || expected_destination.is_multicast()
+        || payload[0] != expected_family
+        || payload[1] != 128
+        || payload[2] != 0
+        || payload[3] != 0
+        || payload[4] != RT_TABLE_MAIN
+        || payload[5] != RTPROT_STATIC
+        || payload[6] != RT_SCOPE_UNIVERSE
+        || payload[7] != RTN_UNICAST
+        || read_u32(payload, 8) != Some(0)
+    {
+        return Err(KernelError::Malformed);
+    }
+
+    let mut destination = None;
+    let mut output_index = None;
+    let mut table = None;
+    let mut priority = None;
+    let mut cacheinfo_seen = false;
+    let mut preference = None;
+    for (raw_kind, value) in attributes(&payload[RTMSG_LEN..])? {
+        if raw_kind != raw_kind & NLA_TYPE_MASK {
+            return Err(KernelError::Malformed);
+        }
+        match raw_kind {
+            RTA_DST => {
+                if destination.is_some() || value.len() != 16 {
+                    return Err(KernelError::Malformed);
+                }
+                destination = Some(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(value).map_err(|_| KernelError::Malformed)?,
+                ));
+            }
+            RTA_OIF => {
+                if output_index.is_some() || value.len() != 4 {
+                    return Err(KernelError::Malformed);
+                }
+                output_index = read_u32(value, 0);
+            }
+            RTA_TABLE => {
+                if table.is_some() || value.len() != 4 {
+                    return Err(KernelError::Malformed);
+                }
+                table = read_u32(value, 0);
+            }
+            RTA_PRIORITY => {
+                if priority.is_some() || value.len() != 4 {
+                    return Err(KernelError::Malformed);
+                }
+                priority = read_u32(value, 0);
+            }
+            RTA_CACHEINFO => {
+                if cacheinfo_seen
+                    || value.len() != RTA_CACHEINFO_LEN
+                    || value.iter().any(|byte| *byte != 0)
+                {
+                    return Err(KernelError::Malformed);
+                }
+                cacheinfo_seen = true;
+            }
+            RTA_PREF => {
+                if preference.replace(value).is_some() || value != [IPV6_ROUTER_PREF_MEDIUM] {
+                    return Err(KernelError::Malformed);
+                }
+            }
+            RTA_GATEWAY | RTA_PREFSRC | RTA_MULTIPATH => return Err(KernelError::Invalid),
+            _ => return Err(KernelError::Malformed),
+        }
+    }
+    if destination != Some(expected_destination)
+        || output_index != Some(expected_index)
+        || table != Some(u32::from(RT_TABLE_MAIN))
+        || priority != Some(IPV6_USER_ROUTE_PRIORITY)
+        || !cacheinfo_seen
+        || preference != Some([IPV6_ROUTER_PREF_MEDIUM].as_slice())
+    {
+        return Err(KernelError::Invalid);
+    }
+    Ok(())
 }
 
 fn encode_create_wireguard_link(
@@ -1698,7 +1916,8 @@ fn encode_activate_device_v3(
 ) -> Result<Zeroizing<Vec<u8>>, KernelError> {
     validate_durable_wireguard_resource(resource)?;
     if peer.public_key.iter().all(|byte| *byte == 0)
-        || peer.allowed_prefix_length > 128
+        || peer.allowed_address != resource.peer_address()
+        || peer.allowed_prefix_length != 128
         || peer.endpoint.ip().is_unspecified()
         || peer.endpoint.ip().is_multicast()
         || peer.endpoint.port() == 0
@@ -2233,6 +2452,44 @@ mod tests {
         message
     }
 
+    fn exact_route_frame(index: u32, destination: Ipv6Addr) -> Vec<u8> {
+        let mut payload =
+            encode_exact_main_ipv6_link_route(index, destination).expect("exact route");
+        payload[6] = RT_SCOPE_UNIVERSE;
+        push_attribute(
+            &mut payload,
+            RTA_TABLE,
+            &u32::from(RT_TABLE_MAIN).to_ne_bytes(),
+        )
+        .expect("explicit main table");
+        push_attribute(&mut payload, RTA_CACHEINFO, &[0; RTA_CACHEINFO_LEN])
+            .expect("empty route cache information");
+        push_attribute(&mut payload, RTA_PREF, &[IPV6_ROUTER_PREF_MEDIUM])
+            .expect("medium preference");
+        build_netlink_message(RTM_NEWROUTE, 0, TEST_SEQUENCE, &payload).expect("route response")
+    }
+
+    fn exact_route_reply(index: u32, destination: Ipv6Addr) -> NetlinkReply {
+        let mut message = exact_route_frame(index, destination);
+        message[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
+        NetlinkReply {
+            message: Zeroizing::new(message),
+            sender: SocketAddr::new(0, 0),
+        }
+    }
+
+    fn route_acknowledgement(errno: i32) -> NetlinkReply {
+        let mut reply = acknowledgement(errno);
+        let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
+        reply.message[embedded_offset + 4..embedded_offset + 6]
+            .copy_from_slice(&RTM_GETROUTE.to_ne_bytes());
+        reply
+    }
+
+    fn route_frame_from_payload(payload: &[u8]) -> Vec<u8> {
+        build_netlink_message(RTM_NEWROUTE, 0, TEST_SEQUENCE, payload).expect("route response")
+    }
+
     #[test]
     fn netlink_messages_are_bounded_and_length_consistent() {
         let payload = interface_info(0, 0, 0).expect("interface info");
@@ -2302,7 +2559,7 @@ mod tests {
         let peer = WireguardV3PeerConfiguration {
             public_key: [0x33; 32],
             endpoint: "198.51.100.4:51820".parse().expect("endpoint"),
-            allowed_address: "fd00::2".parse().expect("allowed IP"),
+            allowed_address: resource.peer_address(),
             allowed_prefix_length: 128,
             persistent_keepalive_seconds: 5,
         };
@@ -2354,6 +2611,318 @@ mod tests {
         let mut invalid = peer;
         invalid.public_key = [0; 32];
         assert!(encode_activate_device_v3(&resource, &invalid).is_err());
+
+        let mut substituted = invalid;
+        substituted.public_key = [0x33; 32];
+        substituted.allowed_address = resource.local_address();
+        assert!(encode_activate_device_v3(&resource, &substituted).is_err());
+    }
+
+    #[test]
+    fn exact_main_ipv6_link_route_encodings_are_topology_bound() {
+        let resource = durable_resource(7, 11);
+        let destination = resource.peer_address();
+        let create = encode_exact_main_ipv6_link_route(17, destination).expect("create route");
+        assert_eq!(create.len(), RTMSG_LEN + 20 + 8 + 8);
+        assert_eq!(create[0], u8::try_from(libc::AF_INET6).expect("family"));
+        assert_eq!(create[1..8], [128, 0, 0, 254, 4, 253, 1]);
+        assert_eq!(read_u32(&create, 8), Some(0));
+        assert_eq!(
+            attributes(&create[RTMSG_LEN..]).expect("route attributes"),
+            vec![
+                (RTA_DST, destination.octets().as_slice()),
+                (RTA_OIF, 17_u32.to_ne_bytes().as_slice()),
+                (
+                    RTA_PRIORITY,
+                    IPV6_USER_ROUTE_PRIORITY.to_ne_bytes().as_slice()
+                ),
+            ]
+        );
+
+        let query = encode_exact_main_ipv6_link_route_query(17, destination).expect("query route");
+        assert_eq!(query.len(), RTMSG_LEN + 20 + 8);
+        assert_eq!(query[0], u8::try_from(libc::AF_INET6).expect("family"));
+        assert_eq!(query[1..8], [128, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(read_u32(&query, 8), Some(RTM_F_FIB_MATCH));
+        assert_eq!(
+            attributes(&query[RTMSG_LEN..]).expect("query attributes"),
+            attributes(&create[RTMSG_LEN..])
+                .expect("create attributes")
+                .into_iter()
+                .filter(|(kind, _)| *kind != RTA_PRIORITY)
+                .collect::<Vec<_>>()
+        );
+
+        assert!(encode_exact_main_ipv6_link_route(0, destination).is_err());
+        assert!(encode_exact_main_ipv6_link_route(17, Ipv6Addr::UNSPECIFIED).is_err());
+        assert!(
+            encode_exact_main_ipv6_link_route(17, "ff02::1".parse().expect("multicast")).is_err()
+        );
+        assert!(encode_exact_main_ipv6_link_route_query(0, destination).is_err());
+        assert!(encode_exact_main_ipv6_link_route_query(17, Ipv6Addr::UNSPECIFIED).is_err());
+        assert!(
+            encode_exact_main_ipv6_link_route_query(17, "ff02::1".parse().expect("multicast"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_main_ipv6_link_route_success_is_bound_to_kernel_header_and_socket() {
+        let destination = durable_resource(7, 11).peer_address();
+        let parse = |reply: &NetlinkReply, local_port_id| {
+            parse_exact_main_ipv6_link_route_reply(
+                reply,
+                TEST_SEQUENCE,
+                local_port_id,
+                17,
+                destination,
+            )
+        };
+        assert!(parse(&exact_route_reply(17, destination), TEST_PORT_ID).is_ok());
+
+        for (offset, wrong_value) in [
+            (8, TEST_SEQUENCE + 1),
+            (12, 0),
+            (12, 1),
+            (12, TEST_PORT_ID + 1),
+        ] {
+            let mut wrong = exact_route_reply(17, destination);
+            wrong.message[offset..offset + 4].copy_from_slice(&wrong_value.to_ne_bytes());
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
+        assert!(matches!(
+            parse(&exact_route_reply(17, destination), 0),
+            Err(KernelError::Malformed)
+        ));
+
+        let mut wrong = exact_route_reply(17, destination);
+        wrong.message[4..6].copy_from_slice(&RTM_GETROUTE.to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        for sender in [SocketAddr::new(1, 0), SocketAddr::new(0, 1)] {
+            let mut wrong = exact_route_reply(17, destination);
+            wrong.sender = sender;
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
+
+        let mut wrong = exact_route_reply(17, destination);
+        let second = wrong.message.clone();
+        wrong.message.extend_from_slice(&second);
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn exact_main_ipv6_link_route_ack_is_bound_to_request_header_and_socket() {
+        let destination = durable_resource(7, 11).peer_address();
+        let parse = |reply: &NetlinkReply, local_port_id| {
+            parse_exact_main_ipv6_link_route_reply(
+                reply,
+                TEST_SEQUENCE,
+                local_port_id,
+                17,
+                destination,
+            )
+        };
+        assert!(matches!(
+            parse(&route_acknowledgement(-libc::ENOENT), TEST_PORT_ID),
+            Err(KernelError::Errno(libc::ENOENT))
+        ));
+        assert!(matches!(
+            parse(&route_acknowledgement(0), TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        for (offset, wrong_value) in [
+            (8, TEST_SEQUENCE + 1),
+            (12, 0),
+            (12, 1),
+            (12, TEST_PORT_ID + 1),
+        ] {
+            let mut wrong = route_acknowledgement(-libc::ENOENT);
+            wrong.message[offset..offset + 4].copy_from_slice(&wrong_value.to_ne_bytes());
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
+        assert!(matches!(
+            parse(&route_acknowledgement(-libc::ENOENT), 0),
+            Err(KernelError::Malformed)
+        ));
+
+        let mut wrong = route_acknowledgement(-libc::ENOENT);
+        wrong.message[4..6].copy_from_slice(&RTM_NEWROUTE.to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
+        wrong = route_acknowledgement(-libc::ENOENT);
+        wrong.message[embedded_offset + 4..embedded_offset + 6]
+            .copy_from_slice(&RTM_GETLINK.to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        wrong = route_acknowledgement(-libc::ENOENT);
+        wrong.message[embedded_offset + 8..embedded_offset + 12]
+            .copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        for sender in [SocketAddr::new(1, 0), SocketAddr::new(0, 1)] {
+            wrong = route_acknowledgement(-libc::ENOENT);
+            wrong.sender = sender;
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
+    }
+
+    #[test]
+    fn exact_main_ipv6_link_route_readback_rejects_every_identity_substitution() {
+        let destination = durable_resource(7, 11).peer_address();
+        let exact = exact_route_frame(17, destination);
+        assert!(parse_exact_main_ipv6_link_route(&exact, 17, destination).is_ok());
+
+        for offset in [16, 17, 18, 19, 20, 21, 22, 23] {
+            let mut changed = exact.clone();
+            changed[offset] ^= 1;
+            assert!(
+                parse_exact_main_ipv6_link_route(&changed, 17, destination).is_err(),
+                "route header byte {offset} was not bound"
+            );
+        }
+        let mut changed = exact.clone();
+        changed[24..28].copy_from_slice(&1_u32.to_ne_bytes());
+        assert!(parse_exact_main_ipv6_link_route(&changed, 17, destination).is_err());
+        assert!(parse_exact_main_ipv6_link_route(&exact, 18, destination).is_err());
+        assert!(
+            parse_exact_main_ipv6_link_route(&exact, 17, "fd00::9".parse().expect("other route"),)
+                .is_err()
+        );
+
+        for forbidden in [RTA_GATEWAY, RTA_PREFSRC, RTA_MULTIPATH] {
+            let mut payload = exact[NLMSG_HEADER_LEN..].to_vec();
+            push_attribute(&mut payload, forbidden, &[0; 16]).expect("forbidden attribute");
+            let frame = build_netlink_message(RTM_NEWROUTE, 0, TEST_SEQUENCE, &payload)
+                .expect("forbidden route response");
+            assert!(parse_exact_main_ipv6_link_route(&frame, 17, destination).is_err());
+        }
+
+        let mut wrong_table = exact[NLMSG_HEADER_LEN..].to_vec();
+        let table = wrong_table
+            .windows(4)
+            .rposition(|window| window == u32::from(RT_TABLE_MAIN).to_ne_bytes())
+            .expect("table value");
+        wrong_table[table..table + 4].copy_from_slice(&253_u32.to_ne_bytes());
+        let wrong_table = build_netlink_message(RTM_NEWROUTE, 0, TEST_SEQUENCE, &wrong_table)
+            .expect("wrong table response");
+        assert!(parse_exact_main_ipv6_link_route(&wrong_table, 17, destination).is_err());
+    }
+
+    #[test]
+    fn exact_main_ipv6_link_route_readback_requires_every_canonical_attribute() {
+        let destination = durable_resource(7, 11).peer_address();
+        let exact = exact_route_frame(17, destination);
+        let payload = &exact[NLMSG_HEADER_LEN..];
+        let route_attributes = attributes(&payload[RTMSG_LEN..]).expect("canonical attributes");
+        let required = [
+            RTA_DST,
+            RTA_OIF,
+            RTA_PRIORITY,
+            RTA_TABLE,
+            RTA_CACHEINFO,
+            RTA_PREF,
+        ];
+
+        for missing in required {
+            let mut changed = payload[..RTMSG_LEN].to_vec();
+            for (kind, value) in &route_attributes {
+                if *kind != missing {
+                    push_attribute(&mut changed, *kind, value).expect("retained attribute");
+                }
+            }
+            assert!(
+                parse_exact_main_ipv6_link_route(
+                    &route_frame_from_payload(&changed),
+                    17,
+                    destination,
+                )
+                .is_err(),
+                "missing route attribute {missing} was accepted"
+            );
+        }
+
+        for duplicate in required {
+            let value = route_attributes
+                .iter()
+                .find_map(|(kind, value)| (*kind == duplicate).then_some(*value))
+                .expect("required attribute");
+            let mut changed = payload.to_vec();
+            push_attribute(&mut changed, duplicate, value).expect("duplicate attribute");
+            assert!(
+                parse_exact_main_ipv6_link_route(
+                    &route_frame_from_payload(&changed),
+                    17,
+                    destination,
+                )
+                .is_err(),
+                "duplicate route attribute {duplicate} was accepted"
+            );
+        }
+
+        for (kind, value) in [
+            (RTA_PRIORITY, 1025_u32.to_ne_bytes().to_vec()),
+            (RTA_CACHEINFO, {
+                let mut value = vec![0; RTA_CACHEINFO_LEN];
+                value[0] = 1;
+                value
+            }),
+            (RTA_PREF, vec![1]),
+        ] {
+            let mut changed = payload[..RTMSG_LEN].to_vec();
+            for (candidate, original) in &route_attributes {
+                push_attribute(
+                    &mut changed,
+                    *candidate,
+                    if *candidate == kind { &value } else { original },
+                )
+                .expect("substituted attribute");
+            }
+            assert!(
+                parse_exact_main_ipv6_link_route(
+                    &route_frame_from_payload(&changed),
+                    17,
+                    destination,
+                )
+                .is_err()
+            );
+        }
+
+        let mut changed = payload.to_vec();
+        push_attribute(&mut changed, 0x3fff, &[0]).expect("unknown attribute");
+        assert!(
+            parse_exact_main_ipv6_link_route(&route_frame_from_payload(&changed), 17, destination,)
+                .is_err()
+        );
     }
 
     #[test]

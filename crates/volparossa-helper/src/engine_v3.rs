@@ -1,8 +1,9 @@
 //! Fail-closed helper-v3 lease state machine.
 //!
-//! The production server can prepare and destroy one process-owned functional-alpha Client lease
-//! through the authenticated namespace worker. No response can claim a committed tunnel or usable
-//! datapath until activation, probing and transport acquisition are connected to kernel evidence.
+//! The production server can prepare, activate and destroy one process-owned functional-alpha
+//! Client lease through the authenticated namespace worker. No response can claim a committed
+//! tunnel or usable datapath until probing and transport acquisition are connected to kernel
+//! evidence.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -495,7 +496,7 @@ pub(crate) enum BackendError {
 /// timeout remains a soft ambiguity boundary and continues awaiting task settlement.
 ///
 /// The production server installs a deliberately narrow functional-alpha adapter for one Client
-/// lease's Prepare and Destroy only. Activate, Probe, descriptor acquisition and datapath work stay
+/// lease's Prepare, Activate and Destroy only. Probe, descriptor acquisition and datapath work stay
 /// unavailable, and the public [`HelperEngine::new`] constructor deliberately retains the fully
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
@@ -4571,6 +4572,7 @@ mod tests {
                         }),
                         maximum_up_mbps: 0,
                         maximum_down_mbps: 0,
+                        signed_relay_reservation: Vec::new(),
                     }],
                 }),
             ))
@@ -5001,6 +5003,7 @@ mod tests {
                 }),
                 maximum_up_mbps: 0,
                 maximum_down_mbps: 0,
+                signed_relay_reservation: Vec::new(),
             }],
         };
         let mut wrong = activation.clone();

@@ -53,8 +53,9 @@ probe producer.
 
 The production agent route state machine is not yet proven end to end. The no-argument production
 helper can execute at most one live Client context at a time, containing exactly one Client-role
-WireGuard lease, through Bind, Prepare and Destroy. Activate, Commit, Probe, transport acquisition, real two-leg probing,
-client ingress, and live relay/exit publication remain fail closed. The unprivileged tests above
+WireGuard lease, through Bind, Prepare, signed-grant-bound Activate and Destroy. Commit, Probe,
+transport acquisition, real two-leg probing, client ingress, and live relay/exit publication remain
+fail closed. The unprivileged tests above
 create no WireGuard device or host route; the separate disposable gate below confines its network
 fixtures to private namespaces and does not satisfy an acceptance case without retained exact-main
 evidence.
@@ -89,7 +90,10 @@ an unprivileged user from that clean checkout and then runs the fixed producer w
 
 The production phase now runs one closed functional-client-lease probe as the staged agent. The
 root hook creates one fixed dummy underlay only inside the transient unit's `PrivateNetwork`
-namespace, then the probe registers an exact tag-35 intent and prepares one Client-role lease. At a
+namespace, then the probe registers an exact tag-35 intent, prepares one Client-role lease, creates
+an ephemeral self-contained nested relay/exit grant bound to the returned helper key and activates
+that lease. It sends the exact same Activate frame twice; a second success proves that the helper's
+request cache handles an idempotent retry without re-admitting the signed nonces. At a
 fixed root-owned FIFO READY barrier, the source-pinned post hook first proves its own UID 0,
 agent-GID-only credentials, capabilities, no-new-privileges and seccomp state, then independently
 observes one direct helper child through descriptors retained by the parent. The exact parent launch is
@@ -105,21 +109,24 @@ PID/PPID/NSpid, one thread, dedicated credentials, empty groups, NNP/seccomp sta
 custody and authenticated child handshake; it does not claim ptrace-gated cross-credential
 `cmdline` or `exe` inspection. The worker namespace must
 contain only loopback and one UP WireGuard interface with the exact ownership-marker prefix, one
-global `/128`, a non-zero public key and listen port, no peer, and no firewall mark. The probe
+global `/128`, a non-zero public key and listen port, exactly the signed relay-client peer, the
+derived peer `/128` route, and no firewall mark. The probe
 validates exact response correlation, opaque non-zero handles, the fixed `DirectAssigned` underlay
 address and the helper-returned kernel proof; the external observation deliberately does not print
 or independently byte-compare endpoint or key material.
 
 After one fixed release byte, the probe requires exact Destroy followed by an idempotent
-`existed=false` Destroy, then performs a second Prepare/Destroy cycle under the same helper runtime
+`existed=false` Destroy, then performs a second Prepare/Activate/Destroy cycle under the same helper runtime
 with a distinct context, handles and public key. The hook finally requires zero helper children,
 no descriptor-relative `stat` or `status` through the retained process-directory observer, no
 helper pidfd/process-directory/foreign-netns custody, no WireGuard object through the retained
 first-worker namespace observer, an empty systemd descriptor store, and a
 private network satisfying the fixed exact-one-loopback/no-default-route cleanup predicate after
-removing the dummy fixture. These checks prove a live, reusable, peerless Client lease and normal process-owned
-cleanup only. They do not prove activation, a peer handshake, routing, transport, a tunnel,
-crash/restart cleanup, package behavior, or a datapath.
+removing the dummy fixture. These checks prove a live, reusable Client lease with one
+cryptographically bound peer, derived route and normal process-owned cleanup only. They do not
+prove a peer handshake, routed packet, transport, tunnel, crash/restart cleanup, package behavior,
+or datapath. The self-contained probe signers are not evidence that discovery-selected or
+policy-authorized operators were used.
 
 The guest does not wrap that complete root producer in one 1 MiB file-size limit: the reviewed
 helper and IPC-probe binaries are legitimately larger. Instead, each source must be one non-empty,

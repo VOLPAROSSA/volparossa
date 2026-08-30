@@ -308,21 +308,32 @@ impl WireguardDumpParser {
     }
 }
 
-#[derive(Default)]
-struct DeviceAccumulator {
-    ifindex: Option<u32>,
-    interface_name: Option<String>,
+#[derive(Debug, Eq, PartialEq)]
+struct DeviceHeader {
+    ifindex: u32,
+    interface_name: String,
     private_key_seen: bool,
     public_key: Option<[u8; 32]>,
-    listen_port: Option<u16>,
-    firewall_mark: Option<u32>,
+    listen_port: u16,
+    firewall_mark: u32,
+}
+
+#[derive(Default)]
+struct DeviceAccumulator {
+    header: Option<DeviceHeader>,
+    peer_stream_open: bool,
     peers: Vec<PeerAccumulator>,
 }
 
 impl DeviceAccumulator {
     fn parse_frame(&mut self, bytes: &[u8], expected_interface: &str) -> Result<(), KernelError> {
-        let mut frame_name_seen = false;
-        let mut peers_seen = false;
+        let mut ifindex = None;
+        let mut interface_name = None;
+        let mut private_key_seen = false;
+        let mut public_key = None;
+        let mut listen_port = None;
+        let mut firewall_mark = None;
+        let mut peers = None;
         for (raw_kind, value) in attributes(bytes)? {
             let kind = if raw_kind & NLA_TYPE_MASK == WGDEVICE_A_PEERS {
                 if raw_kind != WGDEVICE_A_PEERS | NLA_F_NESTED {
@@ -335,60 +346,85 @@ impl DeviceAccumulator {
             match kind {
                 WGDEVICE_A_IFINDEX => {
                     let value = exact_u32(value)?;
-                    if value == 0 || self.ifindex.replace(value).is_some() {
+                    if value == 0 || ifindex.replace(value).is_some() {
                         return Err(KernelError::Malformed);
                     }
                 }
                 WGDEVICE_A_IFNAME => {
-                    if frame_name_seen {
-                        return Err(KernelError::Malformed);
-                    }
-                    frame_name_seen = true;
                     let value = strict_interface_name(value)?;
-                    if value != expected_interface {
+                    if value != expected_interface || interface_name.replace(value).is_some() {
                         return Err(KernelError::Malformed);
-                    }
-                    match &self.interface_name {
-                        None => self.interface_name = Some(value),
-                        Some(existing) if existing == &value => {}
-                        Some(_) => return Err(KernelError::Malformed),
                     }
                 }
                 WGDEVICE_A_PRIVATE_KEY => {
-                    if self.private_key_seen {
+                    if private_key_seen {
                         return Err(KernelError::Malformed);
                     }
                     exact_nonzero_private_key(value)?;
-                    self.private_key_seen = true;
+                    private_key_seen = true;
                 }
                 WGDEVICE_A_PUBLIC_KEY => {
                     let key = exact_key(value)?;
-                    if self.public_key.replace(key).is_some() {
+                    if key.iter().all(|byte| *byte == 0) || public_key.replace(key).is_some() {
                         return Err(KernelError::Malformed);
                     }
                 }
                 WGDEVICE_A_LISTEN_PORT => {
                     let port = exact_u16(value)?;
-                    if self.listen_port.replace(port).is_some() {
+                    if listen_port.replace(port).is_some() {
                         return Err(KernelError::Malformed);
                     }
                 }
                 WGDEVICE_A_FWMARK => {
-                    if self.firewall_mark.replace(exact_u32(value)?).is_some() {
+                    if firewall_mark.replace(exact_u32(value)?).is_some() {
                         return Err(KernelError::Malformed);
                     }
                 }
                 WGDEVICE_A_PEERS => {
-                    if peers_seen {
+                    if peers.replace(value).is_some() {
                         return Err(KernelError::Malformed);
                     }
-                    peers_seen = true;
-                    self.parse_peers(value)?;
                 }
                 _ => return Err(KernelError::Malformed),
             }
         }
-        if !frame_name_seen {
+
+        let any_header_attribute = ifindex.is_some()
+            || interface_name.is_some()
+            || private_key_seen
+            || public_key.is_some()
+            || listen_port.is_some()
+            || firewall_mark.is_some();
+        let frame_header = if any_header_attribute {
+            if private_key_seen != public_key.is_some() {
+                return Err(KernelError::Malformed);
+            }
+            Some(DeviceHeader {
+                ifindex: ifindex.ok_or(KernelError::Malformed)?,
+                interface_name: interface_name.ok_or(KernelError::Malformed)?,
+                private_key_seen,
+                public_key,
+                listen_port: listen_port.ok_or(KernelError::Malformed)?,
+                firewall_mark: firewall_mark.ok_or(KernelError::Malformed)?,
+            })
+        } else {
+            None
+        };
+
+        match (&self.header, frame_header) {
+            (None, Some(header)) => {
+                self.peer_stream_open = peers.is_some();
+                self.header = Some(header);
+            }
+            (Some(expected), Some(repeated))
+                if self.peer_stream_open && expected == &repeated && peers.is_some() => {}
+            (Some(_), None) if self.peer_stream_open && peers.is_some() => {}
+            _ => return Err(KernelError::Malformed),
+        }
+        if let Some(peers) = peers {
+            self.parse_peers(peers)?;
+        }
+        if self.header.is_none() {
             return Err(KernelError::Malformed);
         }
         Ok(())
@@ -396,17 +432,20 @@ impl DeviceAccumulator {
 
     fn parse_peers(&mut self, bytes: &[u8]) -> Result<(), KernelError> {
         for (kind, value) in attributes(bytes)? {
-            if kind & !NLA_TYPE_MASK != NLA_F_NESTED {
+            if kind != NLA_F_NESTED {
                 return Err(KernelError::Malformed);
             }
             let fragment = PeerFragment::parse(value)?;
             if let Some(last) = self.peers.last_mut() {
                 if last.public_key == fragment.public_key {
-                    if fragment.has_non_continuation_fields() {
+                    if fragment.has_non_continuation_fields() || !fragment.allowed_ips_seen {
                         return Err(KernelError::Malformed);
                     }
                     last.merge_allowed_ips(fragment.allowed_ips)?;
                     continue;
+                }
+                if last.awaiting_allowed_ip_continuation {
+                    return Err(KernelError::Malformed);
                 }
             }
             if self
@@ -423,18 +462,15 @@ impl DeviceAccumulator {
     }
 
     fn finish(self, expected_interface: &str) -> Result<WireguardDeviceState, KernelError> {
-        let ifindex = self.ifindex.ok_or(KernelError::Malformed)?;
-        let interface_name = self.interface_name.ok_or(KernelError::Malformed)?;
+        let header = self.header.ok_or(KernelError::Malformed)?;
         // Linux omits both device-key attributes until the WireGuard device has an identity.
         // They are emitted as one pair once configured; a one-sided response is never canonical.
-        let public_key = match (self.private_key_seen, self.public_key) {
+        let public_key = match (header.private_key_seen, header.public_key) {
             (false, None) => [0; 32],
-            (true, Some(key)) if key.iter().any(|byte| *byte != 0) => key,
+            (true, Some(key)) => key,
             _ => return Err(KernelError::Malformed),
         };
-        let listen_port = self.listen_port.ok_or(KernelError::Malformed)?;
-        let firewall_mark = self.firewall_mark.ok_or(KernelError::Malformed)?;
-        if interface_name != expected_interface {
+        if header.interface_name != expected_interface {
             return Err(KernelError::Malformed);
         }
         let peers = self
@@ -443,11 +479,11 @@ impl DeviceAccumulator {
             .map(PeerAccumulator::finish)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(WireguardDeviceState {
-            ifindex,
-            interface_name,
+            ifindex: header.ifindex,
+            interface_name: header.interface_name,
             public_key,
-            listen_port,
-            firewall_mark,
+            listen_port: header.listen_port,
+            firewall_mark: header.firewall_mark,
             peers,
         })
     }
@@ -468,6 +504,7 @@ struct PeerFragment {
     handshake: Option<(u64, u32)>,
     received_bytes: Option<u64>,
     transmitted_bytes: Option<u64>,
+    allowed_ips_seen: bool,
     allowed_ips: Vec<WireguardAllowedIp>,
     protocol_version: Option<u32>,
 }
@@ -500,8 +537,10 @@ impl PeerFragment {
                     }
                 }
                 WGPEER_A_PRESHARED_KEY => {
-                    exact_key(value)?;
-                    if preshared_key_seen {
+                    if value.len() != 32
+                        || !bool::from(value.ct_eq(&[0_u8; 32]))
+                        || preshared_key_seen
+                    {
                         return Err(KernelError::Malformed);
                     }
                     preshared_key_seen = true;
@@ -538,7 +577,7 @@ impl PeerFragment {
                 }
                 WGPEER_A_PROTOCOL_VERSION => {
                     let version = exact_u32(value)?;
-                    if version > 1 || protocol_version.replace(version).is_some() {
+                    if version != 1 || protocol_version.replace(version).is_some() {
                         return Err(KernelError::Malformed);
                     }
                 }
@@ -558,6 +597,7 @@ impl PeerFragment {
             handshake,
             received_bytes,
             transmitted_bytes,
+            allowed_ips_seen: allowed_ips.is_some(),
             allowed_ips: allowed_ips.unwrap_or_default(),
             protocol_version,
         })
@@ -581,6 +621,7 @@ struct PeerAccumulator {
     handshake: (u64, u32),
     received_bytes: u64,
     transmitted_bytes: u64,
+    awaiting_allowed_ip_continuation: bool,
     allowed_ips: Vec<WireguardAllowedIp>,
     protocol_version: Option<u32>,
 }
@@ -588,8 +629,9 @@ struct PeerAccumulator {
 impl PeerAccumulator {
     fn from_initial(fragment: PeerFragment) -> Result<Self, KernelError> {
         if !fragment.preshared_key_seen
-            || fragment.allowed_ips.is_empty()
+            || !fragment.allowed_ips_seen
             || fragment.allowed_ips.len() > MAX_WIREGUARD_ALLOWED_IPS
+            || fragment.protocol_version != Some(1)
         {
             return Err(KernelError::Malformed);
         }
@@ -600,6 +642,7 @@ impl PeerAccumulator {
             handshake: fragment.handshake.ok_or(KernelError::Malformed)?,
             received_bytes: fragment.received_bytes.ok_or(KernelError::Malformed)?,
             transmitted_bytes: fragment.transmitted_bytes.ok_or(KernelError::Malformed)?,
+            awaiting_allowed_ip_continuation: fragment.allowed_ips.is_empty(),
             allowed_ips: fragment.allowed_ips,
             protocol_version: fragment.protocol_version,
         })
@@ -624,11 +667,12 @@ impl PeerAccumulator {
             }
             self.allowed_ips.push(prefix);
         }
+        self.awaiting_allowed_ip_continuation = false;
         Ok(())
     }
 
     fn finish(self) -> Result<WireguardPeerState, KernelError> {
-        if self.allowed_ips.is_empty() {
+        if self.awaiting_allowed_ip_continuation || self.allowed_ips.is_empty() {
             return Err(KernelError::Malformed);
         }
         Ok(WireguardPeerState {
@@ -648,7 +692,7 @@ impl PeerAccumulator {
 fn parse_allowed_ips(bytes: &[u8]) -> Result<Vec<WireguardAllowedIp>, KernelError> {
     let mut result = Vec::new();
     for (kind, value) in attributes(bytes)? {
-        if kind & !NLA_TYPE_MASK != NLA_F_NESTED || result.len() >= MAX_WIREGUARD_ALLOWED_IPS {
+        if kind != NLA_F_NESTED || result.len() >= MAX_WIREGUARD_ALLOWED_IPS {
             return Err(KernelError::Malformed);
         }
         let mut family = None;
@@ -708,9 +752,6 @@ fn parse_allowed_ips(bytes: &[u8]) -> Result<Vec<WireguardAllowedIp>, KernelErro
             return Err(KernelError::Malformed);
         }
         result.push(prefix);
-    }
-    if result.is_empty() {
-        return Err(KernelError::Malformed);
     }
     Ok(result)
 }
@@ -839,10 +880,10 @@ mod tests {
 
     fn allowed_ip_list(entries: &[(&[u8], u8)]) -> Vec<u8> {
         let mut value = Vec::new();
-        for (position, (address, prefix_length)) in entries.iter().enumerate() {
+        for (address, prefix_length) in entries {
             push_attribute(
                 &mut value,
-                u16::try_from(position + 1).expect("position") | NLA_F_NESTED,
+                NLA_F_NESTED,
                 &allowed_ip(address, *prefix_length),
             )
             .expect("allowed IP wrapper");
@@ -901,7 +942,7 @@ mod tests {
 
     fn peers_attribute(peer: &[u8]) -> Vec<u8> {
         let mut peers = Vec::new();
-        push_attribute(&mut peers, 1 | NLA_F_NESTED, peer).expect("peer wrapper");
+        push_attribute(&mut peers, NLA_F_NESTED, peer).expect("peer wrapper");
         peers
     }
 
@@ -931,7 +972,6 @@ mod tests {
 
     fn continuation_attributes(peer: &[u8]) -> Vec<u8> {
         let mut value = Vec::new();
-        push_string_attribute(&mut value, WGDEVICE_A_IFNAME, TEST_INTERFACE).expect("ifname");
         push_attribute(
             &mut value,
             WGDEVICE_A_PEERS | NLA_F_NESTED,
@@ -1056,6 +1096,169 @@ mod tests {
     }
 
     #[test]
+    fn continuation_accepts_peer_only_or_an_identical_complete_device_header() {
+        let first = [0xfd, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let second = [0xfd, 0x77, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        for continuation in [
+            continuation_attributes(&continuation_peer(&[(&second, 112)])),
+            device_attributes(Some(&continuation_peer(&[(&second, 112)]))),
+        ] {
+            let frames = [
+                data_frame(&device_attributes(Some(&full_peer(&[(&first, 112)])))),
+                data_frame(&continuation),
+                done_frame(0),
+            ];
+            assert_eq!(
+                parse(&frames)
+                    .expect("canonical continuation")
+                    .single_peer()
+                    .expect("peer")
+                    .allowed_ips
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn empty_present_allowed_ips_require_the_adjacent_same_peer_continuation() {
+        let prefix = [0xfd, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let initial = data_frame(&device_attributes(Some(&full_peer(&[]))));
+        let continuation = data_frame(&device_attributes(Some(&continuation_peer(&[(
+            &prefix, 112,
+        )]))));
+        let state =
+            parse(&[initial.clone(), continuation, done_frame(0)]).expect("split first allowed IP");
+        assert_eq!(
+            state
+                .single_peer()
+                .expect("continued peer")
+                .allowed_ips
+                .as_slice(),
+            [WireguardAllowedIp {
+                address: IpAddr::V6(Ipv6Addr::from(prefix)),
+                prefix_length: 112,
+            }]
+        );
+
+        assert!(parse(&[initial.clone(), done_frame(0)]).is_err());
+
+        let different = continuation_peer(&[(&prefix, 112)]);
+        let different_key = [6_u8; 32];
+        let mut different_peer = Vec::new();
+        for (kind, value) in attributes(&different).expect("peer attributes") {
+            let value = if kind & NLA_TYPE_MASK == WGPEER_A_PUBLIC_KEY {
+                &different_key[..]
+            } else {
+                value
+            };
+            push_attribute(&mut different_peer, kind, value).expect("peer attribute");
+        }
+        assert!(
+            parse(&[
+                initial,
+                data_frame(&continuation_attributes(&different_peer)),
+                done_frame(0),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn continuation_rejects_partial_changed_or_peerless_device_headers() {
+        let first = [0xfd, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let second = [0xfd, 0x77, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let initial = data_frame(&device_attributes(Some(&full_peer(&[(&first, 112)]))));
+
+        let mut partial = continuation_attributes(&continuation_peer(&[(&second, 112)]));
+        push_string_attribute(&mut partial, WGDEVICE_A_IFNAME, TEST_INTERFACE).expect("ifname");
+
+        let canonical = device_attributes(Some(&continuation_peer(&[(&second, 112)])));
+        let mut changed = Vec::new();
+        let changed_fwmark = 7_u32.to_ne_bytes();
+        for (kind, value) in attributes(&canonical).expect("attributes") {
+            let value = if kind & NLA_TYPE_MASK == WGDEVICE_A_FWMARK {
+                &changed_fwmark[..]
+            } else {
+                value
+            };
+            push_attribute(&mut changed, kind, value).expect("device attribute");
+        }
+
+        for continuation in [partial, changed, device_attributes(None), Vec::new()] {
+            assert!(
+                parse(&[initial.clone(), data_frame(&continuation), done_frame(0)]).is_err(),
+                "non-canonical continuation must fail closed"
+            );
+        }
+
+        assert!(
+            parse(&[
+                data_frame(&device_attributes(None)),
+                data_frame(&continuation_attributes(&continuation_peer(&[(
+                    &second, 112
+                )]))),
+                done_frame(0),
+            ])
+            .is_err(),
+            "a peerless first frame is terminal"
+        );
+    }
+
+    #[test]
+    fn peer_requires_zero_preshared_key_and_protocol_version_one() {
+        let base = full_peer(&[(&[10, 0, 0, 0], 8)]);
+        for (attribute, replacement) in [
+            (WGPEER_A_PRESHARED_KEY, vec![9_u8; 32]),
+            (WGPEER_A_PRESHARED_KEY, vec![0_u8; 31]),
+            (WGPEER_A_PRESHARED_KEY, vec![0_u8; 33]),
+            (WGPEER_A_PROTOCOL_VERSION, 0_u32.to_ne_bytes().to_vec()),
+            (WGPEER_A_PROTOCOL_VERSION, 2_u32.to_ne_bytes().to_vec()),
+        ] {
+            let mut peer = Vec::new();
+            for (kind, value) in attributes(&base).expect("attributes") {
+                let value = if kind & NLA_TYPE_MASK == attribute {
+                    replacement.as_slice()
+                } else {
+                    value
+                };
+                push_attribute(&mut peer, kind, value).expect("peer attribute");
+            }
+            assert!(
+                parse(&[data_frame(&device_attributes(Some(&peer))), done_frame(0)]).is_err(),
+                "attribute {attribute} replacement must fail closed"
+            );
+        }
+
+        for missing in [WGPEER_A_PRESHARED_KEY, WGPEER_A_PROTOCOL_VERSION] {
+            let mut peer = Vec::new();
+            for (kind, value) in attributes(&base).expect("attributes") {
+                if kind & NLA_TYPE_MASK != missing {
+                    push_attribute(&mut peer, kind, value).expect("peer attribute");
+                }
+            }
+            assert!(
+                parse(&[data_frame(&device_attributes(Some(&peer))), done_frame(0)]).is_err(),
+                "attribute {missing} must be present"
+            );
+        }
+
+        for duplicate in [WGPEER_A_PRESHARED_KEY, WGPEER_A_PROTOCOL_VERSION] {
+            let mut peer = base.clone();
+            let value = if duplicate == WGPEER_A_PRESHARED_KEY {
+                vec![0_u8; 32]
+            } else {
+                1_u32.to_ne_bytes().to_vec()
+            };
+            push_attribute(&mut peer, duplicate, &value).expect("duplicate attribute");
+            assert!(
+                parse(&[data_frame(&device_attributes(Some(&peer))), done_frame(0)]).is_err(),
+                "attribute {duplicate} must be unique"
+            );
+        }
+    }
+
+    #[test]
     fn header_is_bound_to_sender_sequence_pid_family_command_version_and_flags() {
         let reject = |response: NetlinkReply| {
             let mut parser =
@@ -1161,6 +1364,43 @@ mod tests {
         push_attribute(&mut flagged, WGDEVICE_A_PUBLIC_KEY | NLA_F_NESTED, &[4; 32])
             .expect("flagged");
         assert!(parse(&[data_frame(&flagged), done_frame(0)]).is_err());
+
+        let canonical_peer = full_peer(&[(&[10, 0, 0, 0], 8)]);
+        let mut numbered_peers = Vec::new();
+        push_attribute(&mut numbered_peers, 1 | NLA_F_NESTED, &canonical_peer)
+            .expect("numbered peer wrapper");
+        let mut numbered_peer_device = device_attributes(None);
+        push_attribute(
+            &mut numbered_peer_device,
+            WGDEVICE_A_PEERS | NLA_F_NESTED,
+            &numbered_peers,
+        )
+        .expect("peers");
+        assert!(parse(&[data_frame(&numbered_peer_device), done_frame(0)]).is_err());
+
+        let mut numbered_allowed_ips = Vec::new();
+        push_attribute(
+            &mut numbered_allowed_ips,
+            1 | NLA_F_NESTED,
+            &allowed_ip(&[10, 0, 0, 0], 8),
+        )
+        .expect("numbered allowed IP wrapper");
+        let mut numbered_allowed_ip_peer = Vec::new();
+        for (kind, value) in attributes(&canonical_peer).expect("peer attributes") {
+            let value = if kind & NLA_TYPE_MASK == WGPEER_A_ALLOWEDIPS {
+                numbered_allowed_ips.as_slice()
+            } else {
+                value
+            };
+            push_attribute(&mut numbered_allowed_ip_peer, kind, value).expect("peer attribute");
+        }
+        assert!(
+            parse(&[
+                data_frame(&device_attributes(Some(&numbered_allowed_ip_peer))),
+                done_frame(0),
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -1242,16 +1482,32 @@ mod tests {
         let mut parser =
             WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)
                 .expect("parser");
-        let mut name_only = Vec::new();
-        push_string_attribute(&mut name_only, WGDEVICE_A_IFNAME, TEST_INTERFACE).expect("ifname");
-        for _ in 0..MAX_WIREGUARD_DUMP_FRAMES {
+        let first_peer = full_peer(&[(&[10, 0, 1, 0], 24)]);
+        let header = device_attributes(Some(&first_peer));
+        parser
+            .ingest(&reply(&[data_frame(&header)]))
+            .expect("bounded header frame");
+        for key_byte in [1_u8, 2, 3, 4, 6, 7, 8] {
+            let base = full_peer(&[(&[10, 0, key_byte, 0], 24)]);
+            let mut distinct_peer = Vec::new();
+            for (kind, value) in attributes(&base).expect("peer attributes") {
+                let public_key = [key_byte; 32];
+                let value = if kind & NLA_TYPE_MASK == WGPEER_A_PUBLIC_KEY {
+                    &public_key[..]
+                } else {
+                    value
+                };
+                push_attribute(&mut distinct_peer, kind, value).expect("peer attribute");
+            }
             parser
-                .ingest(&reply(&[data_frame(&name_only)]))
+                .ingest(&reply(&[data_frame(&continuation_attributes(
+                    &distinct_peer,
+                ))]))
                 .expect("bounded frame");
         }
         assert!(parser.ingest(&reply(&[done_frame(0)])).is_err());
 
-        let mut oversized = reply(&[data_frame(&name_only)]);
+        let mut oversized = reply(&[data_frame(&header)]);
         oversized.message.resize(MAX_WIREGUARD_DUMP_BYTES + 1, 0);
         let mut parser =
             WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)

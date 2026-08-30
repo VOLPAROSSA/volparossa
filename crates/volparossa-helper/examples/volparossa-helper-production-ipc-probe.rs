@@ -3,8 +3,9 @@
 //! This example accepts no socket path, request bytes or privileged operation from its caller. It
 //! requires one exact expected production PID/GID pair and connects only to the fixed production
 //! socket. Its closed modes exercise read-only runtime binding, bounded fail-closed framing, or two
-//! exact functional Client-lease cycles. The functional mode publishes one fixed READY record,
-//! accepts one fixed release byte on standard input, and never prints handles or endpoint material.
+//! exact functional Client-lease cycles through Activate. The functional mode publishes one fixed
+//! READY record only after the first exact Activated receipt, accepts one fixed release byte on
+//! standard input, and never prints handles or endpoint material.
 
 use std::{
     cell::Cell,
@@ -15,6 +16,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use ed25519_dalek::SigningKey;
 use nix::{
     poll::{PollFd, PollFlags, poll},
     unistd::read,
@@ -26,10 +28,15 @@ use tokio::{
     time::timeout,
 };
 use volparossa_helper::SOCKET_PATH;
+use volparossa_protocol::{
+    RelayAuthorization, RelayReservation, TimePolicy, Transport, WireguardEndpoint, generate_nonce,
+    node_id_from_public_key, sign_control_message,
+};
 use volparossa_routing::{
-    BindHelperRuntime, ClosedPreparePlan, ContextRole, DestroyContext, HELPER_PROTOCOL_VERSION,
-    HelperRequest, HelperResponse, HelperResult, LeasePlan, PrepareIntent, PrepareLeaseBatch,
-    PreparedLeaseBatch, UnderlayEvidence, WireguardRole, encode_request, helper_request,
+    ActivateLeaseBatch, ActivatedLeaseBatch, BindHelperRuntime, ClosedPreparePlan, ContextRole,
+    DestroyContext, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
+    LeaseActivation, LeasePlan, PrepareIntent, PrepareLeaseBatch, PreparedLeaseBatch,
+    PublicUdpEndpoint, UnderlayEvidence, WireguardRole, encode_request, helper_request,
     helper_response, operation_digest, read_response,
 };
 use zeroize::Zeroizing;
@@ -41,6 +48,7 @@ const MAX_DECIMAL_U32_BYTES: usize = 10;
 const ROOT_UID: u32 = 0;
 const HELPER_RUNTIME_DIAGNOSTIC: &str = "HELPER_RUNTIME";
 const LEASES_PREPARED_DIAGNOSTIC: &str = "LEASES_PREPARED";
+const LEASES_ACTIVATED_DIAGNOSTIC: &str = "LEASES_ACTIVATED";
 const CONTEXT_DESTROYED_DIAGNOSTIC: &str = "CONTEXT_DESTROYED";
 const CONTEXT_ABSENT_DIAGNOSTIC: &str = "CONTEXT_ABSENT";
 const FAILURE_RECORD: &str = "VOLPAROSSA_HELPER_V3_IPC_PROBE_V1=fail";
@@ -50,6 +58,18 @@ const FUNCTIONAL_HARD_TTL_SECONDS: u64 = 300;
 const FUNCTIONAL_MPTCP_LIMIT: u32 = 4;
 const FUNCTIONAL_PATH_ID: u32 = 1;
 const FUNCTIONAL_PUBLIC_IPV4: [u8; 4] = [192, 31, 195, 254];
+// This exact public peer tuple is shared with the public helper-protocol Activate fixture. It is
+// intentionally neither a local helper key nor the helper's prepared public endpoint.
+const FUNCTIONAL_PEER_PUBLIC_KEY: [u8; 32] = [8; 32];
+const FUNCTIONAL_PEER_IPV4: [u8; 4] = [1, 1, 1, 1];
+const FUNCTIONAL_PEER_PORT: u16 = 51_820;
+const FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY: [u8; 32] = [9; 32];
+const FUNCTIONAL_RELAY_EXIT_IPV4: [u8; 4] = [8, 8, 8, 8];
+const FUNCTIONAL_RELAY_EXIT_PORT: u16 = 51_821;
+const FUNCTIONAL_EXIT_PUBLIC_KEY: [u8; 32] = [10; 32];
+const FUNCTIONAL_EXIT_IPV4: [u8; 4] = [9, 9, 9, 9];
+const FUNCTIONAL_EXIT_PORT: u16 = 51_822;
+const FUNCTIONAL_SIGNED_RATE_MBPS: u64 = 1;
 const FUNCTIONAL_RELEASE_TIMEOUT_MILLIS: u16 = 10_000;
 const FUNCTIONAL_RELEASE_BYTE: u8 = b'G';
 const FUNCTIONAL_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready";
@@ -140,6 +160,7 @@ enum FunctionalPhase {
     Connect,
     Bind,
     Prepare,
+    Activate,
     Shutdown,
     Ready,
     Release,
@@ -148,6 +169,7 @@ enum FunctionalPhase {
     SecondCyclePlan,
     SecondCycleBind,
     SecondCyclePrepare,
+    SecondCycleActivate,
     Reuse,
     SecondCycleDestroy,
     FinalShutdown,
@@ -160,6 +182,7 @@ impl FunctionalPhase {
             Self::Connect => "connect",
             Self::Bind => "bind",
             Self::Prepare => "prepare",
+            Self::Activate => "activate",
             Self::Shutdown => "shutdown",
             Self::Ready => "ready",
             Self::Release => "release",
@@ -168,6 +191,7 @@ impl FunctionalPhase {
             Self::SecondCyclePlan => "second-cycle-plan",
             Self::SecondCycleBind => "second-cycle-bind",
             Self::SecondCyclePrepare => "second-cycle-prepare",
+            Self::SecondCycleActivate => "second-cycle-activate",
             Self::Reuse => "reuse",
             Self::SecondCycleDestroy => "second-cycle-destroy",
             Self::FinalShutdown => "final-shutdown",
@@ -271,15 +295,17 @@ struct FunctionalCycleIds {
     context: [u8; 16],
     bind_request: [u8; 16],
     prepare_request: [u8; 16],
+    activate_request: [u8; 16],
     destroy_present_request: [u8; 16],
     destroy_absent_request: [u8; 16],
 }
 
 impl FunctionalCycleIds {
-    const fn request_ids(self) -> [[u8; 16]; 4] {
+    const fn request_ids(self) -> [[u8; 16]; 5] {
         [
             self.bind_request,
             self.prepare_request,
+            self.activate_request,
             self.destroy_present_request,
             self.destroy_absent_request,
         ]
@@ -290,6 +316,7 @@ struct FunctionalCyclePlan {
     ids: FunctionalCycleIds,
     bind: FunctionalRequestExchange,
     prepare: FunctionalRequestExchange,
+    hard_expires_at_unix: u64,
 }
 
 impl FunctionalCyclePlan {
@@ -303,6 +330,8 @@ impl FunctionalCyclePlan {
         request_ids.push(bind_request_id);
         let prepare_request_id = random_unique_id(&request_ids)?;
         request_ids.push(prepare_request_id);
+        let activate_request_id = random_unique_id(&request_ids)?;
+        request_ids.push(activate_request_id);
         let destroy_present_request_id = random_unique_id(&request_ids)?;
         request_ids.push(destroy_present_request_id);
         let destroy_absent_request_id = random_unique_id(&request_ids)?;
@@ -311,6 +340,7 @@ impl FunctionalCyclePlan {
                 context: context_id,
                 bind_request: bind_request_id,
                 prepare_request: prepare_request_id,
+                activate_request: activate_request_id,
                 destroy_present_request: destroy_present_request_id,
                 destroy_absent_request: destroy_absent_request_id,
             },
@@ -377,7 +407,12 @@ impl FunctionalCyclePlan {
             )),
         };
         let bind = FunctionalRequestExchange::from_request(&bind_request)?;
-        Ok(Self { ids, bind, prepare })
+        Ok(Self {
+            ids,
+            bind,
+            prepare,
+            hard_expires_at_unix,
+        })
     }
 }
 
@@ -539,13 +574,13 @@ async fn run_functional_client_lease(
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
         let first_context_id = first_plan.ids.context;
         let first_request_ids = first_plan.ids.request_ids();
-
-        let first = prepare_functional_cycle(
+        let first = activate_functional_cycle(
             &mut prepare_stream,
             &first_plan,
             &phase,
             FunctionalPhase::Bind,
             FunctionalPhase::Prepare,
+            FunctionalPhase::Activate,
         )
         .await?;
         phase.set(FunctionalPhase::Shutdown);
@@ -573,12 +608,13 @@ async fn run_functional_client_lease(
         phase.set(FunctionalPhase::SecondCyclePlan);
         let second_plan = FunctionalCyclePlan::random(&[first_context_id], &first_request_ids)
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
-        let second = prepare_functional_cycle(
+        let second = activate_functional_cycle(
             &mut stream,
             &second_plan,
             &phase,
             FunctionalPhase::SecondCycleBind,
             FunctionalPhase::SecondCyclePrepare,
+            FunctionalPhase::SecondCycleActivate,
         )
         .await?;
         phase.set(FunctionalPhase::Reuse);
@@ -604,12 +640,13 @@ async fn run_functional_client_lease(
     .map_err(|_| FunctionalProbeFailure::new(phase.get(), ProbeError::Timeout))?
 }
 
-async fn prepare_functional_cycle(
+async fn activate_functional_cycle(
     stream: &mut UnixStream,
     plan: &FunctionalCyclePlan,
     phase: &Cell<FunctionalPhase>,
     bind_phase: FunctionalPhase,
     prepare_phase: FunctionalPhase,
+    activate_phase: FunctionalPhase,
 ) -> Result<FunctionalCycleResult, FunctionalProbeFailure> {
     phase.set(bind_phase);
     let runtime_outcome = exchange_functional(stream, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC)
@@ -623,10 +660,219 @@ async fn prepare_functional_cycle(
         .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
     let prepared = validate_prepared_outcome(prepared_outcome, plan.ids.context)
         .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    phase.set(activate_phase);
+    let activate = functional_activation_exchange(plan, &prepared)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let activated_outcome = exchange_functional(stream, &activate, LEASES_ACTIVATED_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    validate_activated_outcome(activated_outcome, &prepared)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let retried_outcome = exchange_functional(stream, &activate, LEASES_ACTIVATED_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    validate_activated_outcome(retried_outcome, &prepared)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
     Ok(FunctionalCycleResult {
         helper_runtime_id,
         prepared,
     })
+}
+
+fn functional_activation_exchange(
+    plan: &FunctionalCyclePlan,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<FunctionalRequestExchange, ProbeError> {
+    if prepared.context_id != plan.ids.context
+        || prepared.public_key == FUNCTIONAL_PEER_PUBLIC_KEY
+        || prepared.public_key == FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY
+        || prepared.public_key == FUNCTIONAL_EXIT_PUBLIC_KEY
+        || (FUNCTIONAL_PUBLIC_IPV4, prepared.listen_port)
+            == (FUNCTIONAL_PEER_IPV4, FUNCTIONAL_PEER_PORT)
+    {
+        return Err(ProbeError::Correlation);
+    }
+    let signed_relay_reservation = functional_signed_relay_reservation(plan, prepared)?;
+    FunctionalRequestExchange::from_request(&HelperRequest {
+        protocol_version: HELPER_PROTOCOL_VERSION,
+        request_id: plan.ids.activate_request.to_vec(),
+        operation: Some(helper_request::Operation::ActivateLeaseBatch(
+            ActivateLeaseBatch {
+                route_context_id: prepared.context_id.to_vec(),
+                context_handle: prepared.context_handle.to_vec(),
+                leases: vec![LeaseActivation {
+                    lease_handle: prepared.lease_handle.to_vec(),
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::Client as i32,
+                    peer_public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: FUNCTIONAL_PEER_IPV4.to_vec(),
+                        port: u32::from(FUNCTIONAL_PEER_PORT),
+                    }),
+                    maximum_up_mbps: 0,
+                    maximum_down_mbps: 0,
+                    signed_relay_reservation,
+                }],
+            },
+        )),
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one closed probe builder creates a single internally consistent two-signer grant graph"
+)]
+fn functional_signed_relay_reservation(
+    plan: &FunctionalCyclePlan,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<Vec<u8>, ProbeError> {
+    let created_at_ms = plan
+        .hard_expires_at_unix
+        .checked_sub(FUNCTIONAL_HARD_TTL_SECONDS)
+        .and_then(|created| created.checked_mul(1_000))
+        .ok_or(ProbeError::Protocol)?;
+    let expires_at_ms = plan
+        .hard_expires_at_unix
+        .checked_mul(1_000)
+        .ok_or(ProbeError::Protocol)?;
+    let relay_key = ephemeral_signing_key()?;
+    let exit_key = ephemeral_signing_key()?;
+    let client_session_key = ephemeral_signing_key()?;
+    let control_relay_key = ephemeral_signing_key()?;
+    let relay_public_key = relay_key.verifying_key().to_bytes();
+    let exit_public_key = exit_key.verifying_key().to_bytes();
+    let client_session_public_key = client_session_key.verifying_key().to_bytes();
+    let control_relay_public_key = control_relay_key.verifying_key().to_bytes();
+    let relay_node_id = node_id_from_public_key(&relay_public_key);
+    let exit_node_id = node_id_from_public_key(&exit_public_key);
+    let client_session_id = node_id_from_public_key(&client_session_public_key);
+    let control_relay_node_id = node_id_from_public_key(&control_relay_public_key);
+    let relay_peer_id = peer_id_from_ed25519(&relay_public_key)?;
+    let exit_peer_id = peer_id_from_ed25519(&exit_public_key)?;
+    let control_relay_peer_id = peer_id_from_ed25519(&control_relay_public_key)?;
+    let reservation_id = random_unique_id(&[])?;
+    let capability_id = random_unique_id(&[])?;
+    let exit_boot_id = random_unique_id(&[])?;
+    let hold_id = random_unique_id(&[])?;
+    let finalize_id = random_unique_id(&[])?;
+    let policy_hash = random_nonzero_32()?;
+    let exit_nonce = generate_nonce();
+    let relay_nonce = generate_nonce();
+    let exit_endpoint = WireguardEndpoint {
+        public_key: FUNCTIONAL_EXIT_PUBLIC_KEY.to_vec(),
+        underlay_ip: FUNCTIONAL_EXIT_IPV4.to_vec(),
+        listen_port: u32::from(FUNCTIONAL_EXIT_PORT),
+    };
+    let authorization = RelayAuthorization {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        path_id: FUNCTIONAL_PATH_ID,
+        relay_node_id: relay_node_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports: vec![Transport::TcpMptcp as i32],
+        maximum_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        client_wireguard_public_key: prepared.public_key.to_vec(),
+        exit_wireguard_endpoint: Some(exit_endpoint.clone()),
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: exit_nonce.to_vec(),
+        relay_peer_id: relay_peer_id.clone(),
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id: control_relay_peer_id.clone(),
+        exit_peer_id: exit_peer_id.clone(),
+    };
+    let exit_authorization = sign_control_message(
+        &authorization,
+        &exit_key,
+        created_at_ms,
+        expires_at_ms,
+        exit_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+    let relay = RelayReservation {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        path_id: FUNCTIONAL_PATH_ID,
+        relay_node_id: relay_node_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports: vec![Transport::TcpMptcp as i32],
+        maximum_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        client_wireguard_public_key: prepared.public_key.to_vec(),
+        relay_client_wireguard_endpoint: Some(WireguardEndpoint {
+            public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+            underlay_ip: FUNCTIONAL_PEER_IPV4.to_vec(),
+            listen_port: u32::from(FUNCTIONAL_PEER_PORT),
+        }),
+        relay_exit_wireguard_endpoint: Some(WireguardEndpoint {
+            public_key: FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY.to_vec(),
+            underlay_ip: FUNCTIONAL_RELAY_EXIT_IPV4.to_vec(),
+            listen_port: u32::from(FUNCTIONAL_RELAY_EXIT_PORT),
+        }),
+        exit_wireguard_endpoint: Some(exit_endpoint),
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: relay_nonce.to_vec(),
+        exit_authorization,
+        relay_peer_id,
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id,
+        exit_peer_id,
+    };
+    sign_control_message(
+        &relay,
+        &relay_key,
+        created_at_ms,
+        expires_at_ms,
+        relay_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)
+}
+
+fn ephemeral_signing_key() -> Result<SigningKey, ProbeError> {
+    let mut bytes = [0_u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|_| ProbeError::Random)?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+fn random_nonzero_32() -> Result<[u8; 32], ProbeError> {
+    let mut bytes = [0_u8; 32];
+    for _ in 0..64 {
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|_| ProbeError::Random)?;
+        if bytes.iter().any(|byte| *byte != 0) {
+            return Ok(bytes);
+        }
+    }
+    Err(ProbeError::Random)
+}
+
+fn peer_id_from_ed25519(public_key: &[u8; 32]) -> Result<Vec<u8>, ProbeError> {
+    let public_key = libp2p_identity::ed25519::PublicKey::try_from_bytes(public_key)
+        .map_err(|_| ProbeError::Protocol)?;
+    Ok(libp2p_identity::PublicKey::from(public_key)
+        .to_peer_id()
+        .to_bytes())
 }
 
 async fn destroy_functional_cycle(
@@ -765,6 +1011,28 @@ fn validate_prepared_outcome(
         public_key,
         listen_port,
     })
+}
+
+fn validate_activated_outcome(
+    outcome: helper_response::Outcome,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<(), ProbeError> {
+    let helper_response::Outcome::ActivatedLeaseBatch(ActivatedLeaseBatch {
+        context_handle,
+        lease_handles,
+    }) = outcome
+    else {
+        return Err(ProbeError::Correlation);
+    };
+    let [lease_handle] = lease_handles.as_slice() else {
+        return Err(ProbeError::Correlation);
+    };
+    if context_handle.as_slice() != prepared.context_handle
+        || lease_handle.as_slice() != prepared.lease_handle
+    {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(())
 }
 
 fn validate_destroyed_outcome(
@@ -977,8 +1245,7 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     use volparossa_routing::{
-        DestroyedContext, HelperRuntime, MAX_HELPER_FRAME, PreparedLease, PublicUdpEndpoint,
-        decode_request,
+        DestroyedContext, HelperRuntime, MAX_HELPER_FRAME, PreparedLease, decode_request,
     };
 
     use super::*;
@@ -988,8 +1255,9 @@ mod tests {
             context: [seed; 16],
             bind_request: [seed.wrapping_add(1); 16],
             prepare_request: [seed.wrapping_add(2); 16],
-            destroy_present_request: [seed.wrapping_add(3); 16],
-            destroy_absent_request: [seed.wrapping_add(4); 16],
+            activate_request: [seed.wrapping_add(3); 16],
+            destroy_present_request: [seed.wrapping_add(4); 16],
+            destroy_absent_request: [seed.wrapping_add(5); 16],
         }
     }
 
@@ -1022,6 +1290,13 @@ mod tests {
                 }),
                 underlay_evidence: UnderlayEvidence::DirectAssigned as i32,
             }],
+        })
+    }
+
+    fn valid_activated_outcome(prepared: &FunctionalPreparedReceipt) -> helper_response::Outcome {
+        helper_response::Outcome::ActivatedLeaseBatch(ActivatedLeaseBatch {
+            context_handle: prepared.context_handle.to_vec(),
+            lease_handles: vec![prepared.lease_handle.to_vec()],
         })
     }
 
@@ -1154,6 +1429,8 @@ mod tests {
                 "lease_handle",
                 "public_key",
                 "192.31.195.254",
+                "1.1.1.1",
+                "51820",
             ] {
                 assert!(!record.contains(forbidden));
                 assert!(!FUNCTIONAL_READY_RECORD.contains(forbidden));
@@ -1169,6 +1446,7 @@ mod tests {
             FunctionalPhase::Connect,
             FunctionalPhase::Bind,
             FunctionalPhase::Prepare,
+            FunctionalPhase::Activate,
             FunctionalPhase::Shutdown,
             FunctionalPhase::Ready,
             FunctionalPhase::Release,
@@ -1177,6 +1455,7 @@ mod tests {
             FunctionalPhase::SecondCyclePlan,
             FunctionalPhase::SecondCycleBind,
             FunctionalPhase::SecondCyclePrepare,
+            FunctionalPhase::SecondCycleActivate,
             FunctionalPhase::Reuse,
             FunctionalPhase::SecondCycleDestroy,
             FunctionalPhase::FinalShutdown,
@@ -1259,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn functional_cycle_plan_binds_exact_prepare_intent_and_fresh_destroy_ids() {
+    fn functional_cycle_plan_binds_exact_prepare_and_fresh_lifecycle_ids() {
         let ids = fixed_cycle_ids(0x31);
         let plan = FunctionalCyclePlan::from_ids(ids, 1_000).expect("functional cycle");
         assert_eq!(plan.ids.request_ids(), ids.request_ids());
@@ -1320,9 +1599,70 @@ mod tests {
             })
         );
 
+        let prepared = validate_prepared_outcome(valid_prepared_outcome(0x62, 41_234), ids.context)
+            .expect("prepared receipt");
+        let activate_exchange =
+            functional_activation_exchange(&plan, &prepared).expect("activation exchange");
+        let activate = decode_request(&activate_exchange.frame[4..]).expect("canonical Activate");
+        let Some(helper_request::Operation::ActivateLeaseBatch(value)) =
+            activate.operation.as_ref()
+        else {
+            panic!("ActivateLeaseBatch");
+        };
+        assert_eq!(activate.request_id, ids.activate_request);
+        assert_eq!(value.route_context_id, ids.context);
+        assert_eq!(value.context_handle, prepared.context_handle);
+        let [activation] = value.leases.as_slice() else {
+            panic!("one activation");
+        };
+        assert_eq!(activation.lease_handle, prepared.lease_handle);
+        assert_eq!(activation.path_id, FUNCTIONAL_PATH_ID);
+        assert_eq!(activation.role, WireguardRole::Client as i32);
+        assert_eq!(activation.peer_public_key, FUNCTIONAL_PEER_PUBLIC_KEY);
+        assert_eq!(
+            activation.peer_endpoint,
+            Some(PublicUdpEndpoint {
+                address: FUNCTIONAL_PEER_IPV4.to_vec(),
+                port: u32::from(FUNCTIONAL_PEER_PORT),
+            })
+        );
+        assert_eq!(activation.maximum_up_mbps, 0);
+        assert_eq!(activation.maximum_down_mbps, 0);
+        assert!(!activation.signed_relay_reservation.is_empty());
+        let mut replay = volparossa_protocol::ReplayCache::new(8).expect("probe replay verifier");
+        let (relay, exit) = volparossa_protocol::verify_relay_reservation(
+            &activation.signed_relay_reservation,
+            1_000_000,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("cryptographically valid relay grant");
+        assert_eq!(relay.message().route_context_id, ids.context);
+        assert_eq!(relay.message().path_id, FUNCTIONAL_PATH_ID);
+        assert_eq!(
+            relay.message().client_wireguard_public_key,
+            prepared.public_key
+        );
+        assert_eq!(
+            relay.message().relay_peer_id,
+            peer_id_from_ed25519(relay.sender_public_key()).expect("relay Peer ID")
+        );
+        assert_eq!(
+            exit.message().exit_peer_id,
+            peer_id_from_ed25519(exit.sender_public_key()).expect("exit Peer ID")
+        );
+        assert_eq!(replay.len(), 2);
+        assert_eq!(
+            operation_digest(&activate).expect("Activate digest"),
+            activate_exchange.operation_digest
+        );
+
         let mut duplicate = ids;
         duplicate.destroy_absent_request = duplicate.destroy_present_request;
         assert!(FunctionalCyclePlan::from_ids(duplicate, 1_000).is_err());
+        let mut duplicate_activate = ids;
+        duplicate_activate.activate_request = duplicate_activate.prepare_request;
+        assert!(FunctionalCyclePlan::from_ids(duplicate_activate, 1_000).is_err());
         let mut zero_context = ids;
         zero_context.context = [0; 16];
         assert!(FunctionalCyclePlan::from_ids(zero_context, 1_000).is_err());
@@ -1480,6 +1820,60 @@ mod tests {
             assert!(validate_prepared_outcome(outcome, context_id).is_err());
         }
         assert!(validate_prepared_outcome(valid_prepared_outcome(0x62, 41_234), [0; 16]).is_err());
+    }
+
+    #[test]
+    fn functional_activation_requires_exact_prepared_lineage_and_receipt() {
+        let ids = fixed_cycle_ids(0x69);
+        let plan = FunctionalCyclePlan::from_ids(ids, 1_000).expect("functional cycle");
+        let prepared = validate_prepared_outcome(valid_prepared_outcome(0x6a, 41_234), ids.context)
+            .expect("prepared receipt");
+        let exchange =
+            functional_activation_exchange(&plan, &prepared).expect("activation exchange");
+        let activated = valid_activated_outcome(&prepared);
+        let response =
+            functional_response(&exchange, LEASES_ACTIVATED_DIAGNOSTIC, activated.clone());
+        let outcome =
+            validate_functional_response(response, &exchange, LEASES_ACTIVATED_DIAGNOSTIC)
+                .expect("correlated activation response");
+        validate_activated_outcome(outcome, &prepared).expect("exact activation receipt");
+
+        let mut wrong_context = prepared.clone();
+        wrong_context.context_id[0] ^= 1;
+        assert!(functional_activation_exchange(&plan, &wrong_context).is_err());
+        let mut self_peer = prepared.clone();
+        self_peer.public_key = FUNCTIONAL_PEER_PUBLIC_KEY;
+        assert!(functional_activation_exchange(&plan, &self_peer).is_err());
+
+        let mut substitutions = Vec::new();
+        let mut wrong_context_handle = activated.clone();
+        let helper_response::Outcome::ActivatedLeaseBatch(batch) = &mut wrong_context_handle else {
+            unreachable!();
+        };
+        batch.context_handle[0] ^= 1;
+        substitutions.push(wrong_context_handle);
+        let mut wrong_lease_handle = activated.clone();
+        let helper_response::Outcome::ActivatedLeaseBatch(batch) = &mut wrong_lease_handle else {
+            unreachable!();
+        };
+        batch.lease_handles[0][0] ^= 1;
+        substitutions.push(wrong_lease_handle);
+        let mut absent_lease = activated.clone();
+        let helper_response::Outcome::ActivatedLeaseBatch(batch) = &mut absent_lease else {
+            unreachable!();
+        };
+        batch.lease_handles.clear();
+        substitutions.push(absent_lease);
+        let mut extra_lease = activated;
+        let helper_response::Outcome::ActivatedLeaseBatch(batch) = &mut extra_lease else {
+            unreachable!();
+        };
+        batch.lease_handles.push(vec![0x7f; 32]);
+        substitutions.push(extra_lease);
+        substitutions.push(valid_prepared_outcome(0x6a, 41_234));
+        for outcome in substitutions {
+            assert!(validate_activated_outcome(outcome, &prepared).is_err());
+        }
     }
 
     #[test]

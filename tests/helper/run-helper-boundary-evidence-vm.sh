@@ -479,8 +479,9 @@ non_retained_functional_probe_failure_value_is_safe() {
         "$non_retained_functional_failure_phase,$non_retained_functional_failure_class" ] \
         || return 1
     case $non_retained_functional_failure_phase in
-        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
-        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
+        second-cycle-activate|reuse|\
         second-cycle-destroy|final-shutdown)
             ;;
         *) return 1 ;;
@@ -532,7 +533,7 @@ report_non_retained_production_launch_diagnostic() {
             non_retained_functional_failure_value=
             ;;
         1)
-            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|second-cycle-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
+            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|second-cycle-activate|reuse|second-cycle-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
             [ "$(grep -Ec "$non_retained_functional_diagnostic_pattern" \
                 "$non_retained_diagnostic")" -eq 1 ] || return 1
             non_retained_functional_diagnostic=$(grep -E \

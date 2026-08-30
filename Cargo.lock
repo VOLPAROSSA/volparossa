@@ -4426,7 +4426,9 @@ name = "volparossa-helper"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ed25519-dalek",
  "libc",
+ "libp2p-identity",
  "netlink-sys",
  "nix",
  "prost",
@@ -4440,7 +4442,9 @@ dependencies = [
  "tracing",
  "volparossa-linux-uapi",
  "volparossa-mptcp",
+ "volparossa-protocol",
  "volparossa-routing",
+ "volparossa-test-support",
  "volparossa-wireguard",
  "x25519-dalek",
  "zbus",

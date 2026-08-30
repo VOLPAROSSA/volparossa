@@ -14,8 +14,15 @@ The v3 route-context lifecycle is:
 
 1. `PrepareLeaseBatch` describes a route context, its client/relay/exit role, one to eight paths,
    bounded MPTCP limits, a setup expiry, and a hard expiry.
-2. `ActivateLeaseBatch` presents only the exact public key and public UDP endpoint of every peer,
-   correlated by opaque helper-issued context and lease handles. Relay rate limits are bounded.
+2. `ActivateLeaseBatch` presents the exact public key and public UDP endpoint of every peer,
+   correlated by opaque helper-issued context and lease handles. Relay rate limits are bounded. A
+   tag-8 byte string additionally preserves one signed relay reservation per lease. Empty remains
+   wire-compatible for generic decoding, but the production functional Client backend requires a
+   non-empty value and verifies the exact canonical relay envelope plus its nested exit envelope,
+   both Ed25519 signatures, expiry, replay, signer-to-libp2p-Peer-ID bindings, route context, path,
+   helper-generated client WireGuard key and helper hard expiry before worker dispatch. The copied
+   peer tuple must equal the signed relay-client endpoint, and only that verified endpoint is used
+   to build privileged state. The bytes and complete frame remain bounded by the 128 KiB ceiling.
 3. `CommitLeaseBatch` presents the same opaque handles and identities. Success is permitted only
    after a correlated kernel probe proves a recent handshake and strict growth of both RX and TX
    counters relative to the activation baseline.
@@ -72,10 +79,13 @@ A successful `PrepareLeaseBatch` response is required to contain:
 
 The internal v3 worker protocol, underlay evidence policy, secret-free link derivation, exact
 WireGuard `SET` encoders, and bounded `GET` proof parser have pure tests. The authenticated child
-now executes `Prepare` and `Destroy` for exactly one lease: it reconstructs the canonical interface
-and `/128` from the bound context/path/role and one bounded ownership alias, generates and retains
-the ephemeral X25519 private key in worker-owned secret containers that zeroize on drop, and
-returns only the public key and port from the correlated kernel proof. Failed Prepare deletes the
+now executes `Prepare`, signed-grant-bound `Activate`, and `Destroy` for exactly one lease. Prepare
+reconstructs the canonical interface and `/128` from the bound context/path/role and one bounded
+ownership alias, generates and retains the ephemeral X25519 private key in worker-owned secret
+containers that zeroize on drop, and returns only the public key and port from the correlated
+kernel proof. Activate verifies the exact canonical relay reservation and its nested exit grant,
+binds their identities and route data to the helper-owned prepared lease, and configures only the
+signed relay-client endpoint. Failed Prepare deletes the
 exact resource and returns a normal kernel failure only after proving absence; otherwise it retains
 the resource/key state and returns `CleanupIncomplete` for a later exact Destroy. Destroy without
 an adopted lease returns `NotFound`, never false kernel-absence evidence. Successful internal
@@ -110,9 +120,13 @@ separate reconciliation and cleanup tails; same-runtime owner state retains the 
 every fully sent mutation. Only the
 child's correlated kernel proof supplies the
 public key and UDP port; the response combines that proof with the selected direct-underlay IP.
-Destroy sends the exact child operation and succeeds only after worker termination, reap and
-registry purge. The backend permits no second live context. Activate, Probe, transport acquisition,
-routing, peer configuration and every datapath remain explicitly `Unavailable`; shutdown succeeds
+Activate first performs the signed-grant checks above with one bounded process-lifetime replay
+cache. Pure local binding failures roll back both admitted nonces; admission is committed before
+worker dispatch and is never rolled back after mutation may have begun. The child then installs and
+reads back exactly the signed relay-client peer plus the helper-derived main-table IPv6 `/128` link
+route. Destroy sends the exact child operation and succeeds only after worker termination, reap and
+registry purge. The backend permits no second live context. Commit, Probe, transport acquisition,
+multi-path routing and every usable datapath remain explicitly `Unavailable`; shutdown succeeds
 only with empty backend state and confirmed coordinator cleanup. The periodic driver uses an owned,
 cancellation-safe engine supervisor with nonzero domain-separated exact-lineage correlation; it
 retries cleanup-pending Quarantined contexts and orphan Pending preparations, and unexpected driver
@@ -121,8 +135,10 @@ the durable actor. The driver schedules a sweep once per second with missed tick
 begins only after every earlier request in the serialized operation gate has settled. Once begun,
 its kernel-absence attempt remains bounded by the backend hard deadline. The public
 `HelperEngine::new` constructor remains fully fail-closed and does not select this backend. No
-crash/restart recovery or durable journal/systemd custody is claimed, and no placeholder or
-agent-supplied endpoint is used.
+crash/restart recovery or durable journal/systemd custody is claimed. The signed grant is
+self-contained: the helper does not yet receive a separately trusted selected-relay/exit or policy
+authority, so it cannot distinguish a correctly signed grant from unselected but self-consistent
+relay/exit identities. Replay state is in memory and is lost on helper restart.
 
 ## Ownership journal startup boundary
 
@@ -996,13 +1012,14 @@ after exact adoption still blocks stage mapping and permits only exact-ID retire
 owned unit. It never guesses that a same-named unit belongs to this run.
 
 The child opens its worker-local netlink sockets, activates loopback, and implements exact
-single-lease WireGuard `Prepare` and `Destroy`. The no-argument production server now dispatches it
-through the crate-private functional-alpha backend: for at most one live Client context at a time,
-containing exactly one Client-role lease, the parent exclusively creates and provisionally proves
-the helper-derived birth link at a deterministic retained ifindex, sets and re-proves its exact
-durable alias, and moves it without renumbering into the pinned child `NEWNET` before Prepare.
-Activate, Commit, peer configuration, routing, nftables, sysctl,
-socket-factory operations and every datapath remain rejected. The public `HelperEngine::new`
+single-lease WireGuard `Prepare`, signed-grant-bound `Activate`, and `Destroy`. The no-argument
+production server dispatches it through the crate-private functional-alpha backend: for at most one
+live Client context at a time, containing exactly one Client-role lease, the parent exclusively
+creates and provisionally proves the helper-derived birth link at a deterministic retained ifindex,
+sets and re-proves its exact durable alias, and moves it without renumbering into the pinned child
+`NEWNET` before Prepare. Activate installs exactly one verified relay-client peer and its
+helper-derived `/128` link route. Commit, nftables, sysctl, socket-factory operations and every usable
+datapath remain rejected. The public `HelperEngine::new`
 constructor remains unavailable and does not select this backend.
 
 A separate bounded registry now reserves a non-copyable monotonic generation token before spawn or
@@ -1166,9 +1183,10 @@ The production server's functional-alpha backend now calls this worker path for 
 no production route manager calls it. The production engine supervises cancellation-safe
 PLAN -> CALL -> COMMIT/rollback transactions: it
 reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
-held. The narrow backend implements real Prepare/Destroy only. It returns `Unavailable` for
-Activate, Probe and transport acquisition, and the engine rejects client ingress as `Unavailable`
-before backend dispatch. This process-lifetime composition is not full production readiness.
+held. The narrow backend implements real Prepare, one-lease Activate, and Destroy only. It returns
+`Unavailable` for Probe and transport acquisition, and the engine rejects client ingress as
+`Unavailable` before backend dispatch. This process-lifetime composition is not full production
+readiness.
 
 ### Affine asynchronous engine/backend boundary
 
@@ -1356,8 +1374,8 @@ the request-path issuance/arming writer, restart reaper, trusted worker/kernel-c
 exact manager-absence composition, and cross-runtime proof needed to settle that case do not.
 
 This same-runtime reconciliation path remains containment rather than crash recovery. The
-functional-alpha production adapter can Prepare and Destroy one Client lease, but no production
-route-manager caller drives it and there is no activation, peer route, transport or live datapath.
+functional-alpha production adapter can prepare, activate and destroy one Client lease, but no
+production route-manager caller drives it and there is no handshake, transport or live datapath.
 
 ## Namespace-local transport descriptor
 
@@ -1492,21 +1510,23 @@ remain:
   the final worker must retain only `CAP_NET_ADMIN`;
 - obtain one retained exact-main PASS for the already wired functional-alpha proof: read-only direct
   underlay selection, independently observed sandbox identity, parent birth-link creation and move,
-  child WireGuard Prepare, correlated response validation, exact/idempotent Destroy, worker
-  reap/purge, second-cycle capacity reuse and equal enumerated host-state fences; a non-retained
+  child WireGuard Prepare, cryptographically bound Activate, exact peer/route readback, cached exact
+  Activate retry, exact/idempotent Destroy, worker reap/purge, second-cycle capacity reuse and equal
+  enumerated host-state fences; a non-retained
   branch smoke does not close this evidence gate, and the one-Client/one-lease capacity must then be
   extended without weakening atomic rollback;
-- extend the asynchronous `HelperEngine` backend beyond Prepare/Destroy: Activate, Probe, descriptor
-  acquisition, cached-descriptor cleanup and shutdown need the same plan/call/commit discipline and
-  exact context/generation/phase/handle revalidation;
+- extend the asynchronous `HelperEngine` backend beyond the current single-Client
+  Prepare/Activate/Destroy path: Probe, Commit, descriptor acquisition, cached-descriptor cleanup
+  and complete shutdown need the same plan/call/commit discipline and exact
+  context/generation/phase/handle revalidation;
 - wire descriptor retries to the live production generation registry. The coordinator purges caches
   on death and never retries ambiguous IPC, but the functional-alpha backend advertises descriptor
   acquisition as unsupported;
 - extend the bounded `DirectAssigned` parent snapshot from the current one direct underlay to the
   exact multi-path evidence required by complete route setup, retaining rejection of multipath,
   duplicate, truncated or ambiguous dumps;
-- carry every parent birth link through activation and complete cleanup/quarantine, preserving the
-  exact no-peer/key, link-UP, port-zero `SET`, and correlated public-key/port `GET` ordering;
+- extend the one-lease activation and cleanup path to every role/path while preserving the exact
+  no-peer/key, link-UP, port-zero `SET`, and correlated public-key/port `GET` ordering;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - capture activation baselines and perform correlated handshake/RX/TX commit probes;
 - connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact

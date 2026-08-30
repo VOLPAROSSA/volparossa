@@ -395,7 +395,7 @@ rejected before dispatch.
 | Operation | Typed effect |
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
-| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint; derive local overlay and privileged state |
+| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production one-Client backend requires and verifies that grant before deriving privileged state |
 | `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease |
 | `DestroyContext` | idempotently remove one context and all contained state |
 | `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
@@ -418,6 +418,16 @@ non-canonical before dispatch.
 The active v3 agent API has no private-key field and cannot select an interface name, local overlay
 address, allowed prefix, listen port, nftables expression, sysctl, command, filesystem path, or free-form
 diagnostic.
+The tag-8 `signed_relay_reservation` bytes in each activation lease are preserved exactly by the
+canonical wire and committed by the request digest. Generic decoding retains an empty-compatible
+field, but the production functional Client backend requires it, canonically verifies the relay
+and nested exit envelopes and signatures, applies bounded in-memory replay protection, checks each
+signer-derived libp2p Peer ID, and binds context, path, helper-generated client WireGuard key and
+hard expiry. The untrusted peer tuple is only a correlation copy: privileged activation derives
+exclusively from the verified `relay_client_wireguard_endpoint`, never the relay-exit or exit
+endpoint. Each item and aggregate remain capped by the 128 KiB helper frame ceiling. The grant is
+still self-contained and does not yet carry a separately trusted helper-side selected-operator or
+policy authority; replay memory also does not survive helper restart.
 Responses echo the request identity, return a stable result, a bounded diagnostic code, the BLAKE3
 digest of the canonical request, and an operation-specific success value. Failure responses cannot
 contain a success value.
@@ -501,8 +511,9 @@ housekeeping may precede pinning but carries no socket or namespace authority. P
 validation failure or expiry closes the descriptor and quarantines the generation. Closed worker-side
 factories create and revalidate connected MPTCP, listening MPTCP and unconnected UDP sockets,
 including genuine `MPTCP_INFO` negotiation evidence for a connected stream. The production
-functional-alpha path uses the coordinator only for one Client lease's Initialise, Prepare and
-Destroy operations; the socket factories remain disconnected, so their socketpair/fake-kernel
+functional-alpha path uses the coordinator only for one Client lease's Initialise, Prepare,
+signed-grant-bound Activate and Destroy operations; the socket factories remain disconnected, so
+their socketpair/fake-kernel
 tests do not prove a production namespace socket or datapath.
 
 The production functional-alpha backend connects the bounded rtnetlink `DirectAssigned` collector
@@ -511,20 +522,22 @@ WireGuard lease. A successful `PrepareLeaseBatch` reports only the child's corre
 public key/listen port plus the selected direct-underlay address; it is not evidence of an activated
 tunnel. A server-owned expiry driver schedules cancellation-safe exact cleanup once per second
 without waiting for another agent request, serializes it behind earlier operations, retries
-quarantined lineages, and is joined before backend shutdown. `ActivateLeaseBatch`,
-`CommitLeaseBatch` and `AcquireTransportSocket` remain
-`Unavailable`, and no datapath is connected. The exact proof contract and remaining live-kernel
+quarantined lineages, and is joined before backend shutdown. The exact one-lease
+`ActivateLeaseBatch` installs and reads back one verified relay-client peer plus its helper-derived
+`/128` route. `CommitLeaseBatch` and `AcquireTransportSocket` remain `Unavailable`, and no datapath
+is connected. The exact proof contract and remaining live-kernel
 work are recorded in [Privileged helper protocol v3](HELPER_V3.md).
 
 The committed disposable production-IPC producer exercises only that implemented subset. As the
-staged agent, it performs two exact same-runtime Bind/Prepare/Destroy cycles with distinct contexts,
-handles and public keys; the first cycle pauses at a fixed READY barrier so the root hook can observe
-the exact child identity, separate network namespace and one live peerless WireGuard interface.
-Repeated Destroy must report the context absent, and the second cycle proves that the single-context
-capacity is reusable. Its fixed dummy underlay exists only inside the transient production unit's
-`PrivateNetwork`; successful cleanup leaves that namespace with exactly loopback and no default
-route before retirement. The
-producer configures no peer, handshake, route or datapath. A non-main branch smoke validates and
+staged agent, it performs two exact same-runtime Bind/Prepare/Activate/Destroy cycles with distinct
+contexts, handles, public keys and ephemeral signed grants. Each exact Activate request is sent
+twice to prove response-cache idempotence despite replay protection; the first cycle pauses at a
+fixed READY barrier so the root hook can observe the exact child identity, separate network
+namespace, verified peer and derived `/128` route. Repeated Destroy must report the context absent,
+and the second cycle proves that the single-context capacity is reusable. Its fixed dummy underlay
+exists only inside the transient production unit's `PrivateNetwork`; successful cleanup leaves that
+namespace with exactly loopback and no default route before retirement. The producer establishes no
+handshake or datapath. A non-main branch smoke validates and
 on PASS discards all proof files; its workflow uploads neither branch PASS artifacts nor branch
 failure diagnostics. It is not retained protocol or acceptance evidence. Only a retained,
 host-revalidated exact-main PASS can change that evidence status.
