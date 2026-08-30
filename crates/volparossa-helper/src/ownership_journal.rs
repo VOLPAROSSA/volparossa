@@ -4,10 +4,11 @@
 //! production startup stops and an operator must inspect the host explicitly. Production now opens
 //! the v3 store through one canonical locked actor before publishing its cleanup token or socket.
 //! Startup projects custody-bound `MayOwnCustody`, `MayOwnPrepare` and `CleanupConfirmed` records
-//! without mutation. The installed restart cleanup executor deliberately refuses every trusted
-//! worker-plus-kernel cleanup proof. A complete set consisting only of already durable
+//! without mutation. The installed general restart cleanup executor deliberately refuses every
+//! worker-plus-kernel cleanup proof. One startup-only affine control can confirm only the exact
+//! singleton reaper target. A complete set consisting only of already durable
 //! `CleanupConfirmed` records may receive one-shot exact-target manager-absence evidence from the
-//! external startup join; every `MayOwn` set still refuses. A separate affine production handle
+//! external startup join; every broader `MayOwn` set still refuses. A separate affine production handle
 //! admits live Prepare and can settle only its same-runtime owner after both exact proofs.
 
 #![allow(dead_code)] // The production actor is live; restart-recovery APIs remain private.
@@ -23,15 +24,15 @@ pub(crate) use actor::{
     DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
     DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
     DurablePrepareAnchor, DurablePrepareAnchorParts, DurablePrepareSettlement,
-    DurableRegistrationOutcome, DurableUndispatchedCleanupOutcome, StartupCustodyPhase,
-    StartupCustodyTarget,
+    DurableRegistrationOutcome, DurableUndispatchedCleanupOutcome, RestartNetworkPlan,
+    StartupCustodyPhase, StartupCustodyTarget, StartupRestartPlan,
 };
 
 use crate::{
     deadline::HardDeadline,
     internal_protocol::{InternalEndpointRole, InternalIpPrefix, LeasePlan as InternalLeasePlan},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
-    systemd_custody::CleanupConfirmedManagerAbsenceEvidence,
+    systemd_custody::{CleanupConfirmedManagerAbsenceEvidence, RestartMayOwnCleanupEvidence},
 };
 
 /// Constructs one journal anchor without exposing actor-internal failure types outside this module.
@@ -360,6 +361,17 @@ impl ProductionOwnershipStartup {
         self.startup
             .continue_empty()
             .map(|actor| ProductionOwnershipRuntime { actor })
+    }
+
+    /// Consume one affine exact-reaper proof while retaining the startup actor and journal lock.
+    ///
+    /// This crosses only the actor's single-target `MayOwnCustody -> CleanupConfirmed` CAS. It
+    /// neither removes systemd custody nor continues startup.
+    pub(crate) fn confirm_single_restart_cleanup(
+        &mut self,
+        evidence: RestartMayOwnCleanupEvidence,
+    ) -> Result<&[StartupCustodyTarget], DurableOwnershipError> {
+        self.startup.confirm_single_restart_cleanup(evidence)
     }
 
     /// Continue the retained startup only with fresh exact manager-absence evidence for its full

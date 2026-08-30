@@ -3,9 +3,11 @@
 use std::{ffi::OsString, process::ExitCode};
 
 use volparossa_helper::{
-    INTERNAL_DEAD_WORKER_REAPER_ARGUMENT, INTERNAL_WORKER_V3_ARGUMENT,
+    INTERNAL_DEAD_WORKER_REAPER_ARGUMENT, INTERNAL_RESTART_REAPER_ARGUMENT,
+    INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT, INTERNAL_WORKER_V3_ARGUMENT,
     INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT, WorkerV3LiveProofFailureStage,
-    run_internal_dead_worker_reaper_entry, run_internal_worker_v3_entry,
+    run_internal_dead_worker_reaper_entry, run_internal_restart_reaper_entry,
+    run_internal_restart_reaper_fail_stop_live_proof, run_internal_worker_v3_entry,
     run_internal_worker_v3_live_proof_staged, run_production_server,
 };
 use volparossa_linux_uapi::take_systemd_listen_fd_set_once;
@@ -39,6 +41,8 @@ const fn live_proof_failure_record(stage: WorkerV3LiveProofFailureStage) -> &'st
 enum Invocation {
     Production,
     InternalWorkerV3,
+    InternalRestartReaper,
+    InternalRestartReaperFailStopLiveProof,
     InternalWorkerV3LiveProof,
     InternalDeadWorkerReaper,
 }
@@ -48,6 +52,14 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
     match (arguments.next(), arguments.next()) {
         (Some(argument), None) if argument == INTERNAL_WORKER_V3_ARGUMENT => {
             Ok(Invocation::InternalWorkerV3)
+        }
+        (Some(argument), None) if argument == INTERNAL_RESTART_REAPER_ARGUMENT => {
+            Ok(Invocation::InternalRestartReaper)
+        }
+        (Some(argument), None)
+            if argument == INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT =>
+        {
+            Ok(Invocation::InternalRestartReaperFailStopLiveProof)
         }
         (Some(argument), None) if argument == INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT => {
             Ok(Invocation::InternalWorkerV3LiveProof)
@@ -65,6 +77,20 @@ fn main() -> ExitCode {
     match invocation {
         Ok(Invocation::InternalWorkerV3) => {
             if run_internal_worker_v3_entry() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(Invocation::InternalRestartReaper) => {
+            if run_internal_restart_reaper_entry() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(Invocation::InternalRestartReaperFailStopLiveProof) => {
+            if run_internal_restart_reaper_fail_stop_live_proof() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -207,6 +233,25 @@ mod tests {
         assert_eq!(
             parse_invocation([INTERNAL_DEAD_WORKER_REAPER_ARGUMENT.into()]),
             Ok(Invocation::InternalDeadWorkerReaper)
+        );
+        assert_eq!(
+            parse_invocation([INTERNAL_RESTART_REAPER_ARGUMENT.into()]),
+            Ok(Invocation::InternalRestartReaper)
+        );
+        assert_eq!(
+            parse_invocation([INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT.into()]),
+            Ok(Invocation::InternalRestartReaperFailStopLiveProof)
+        );
+        assert_eq!(
+            parse_invocation([INTERNAL_RESTART_REAPER_ARGUMENT.into(), "unexpected".into(),]),
+            Err(())
+        );
+        assert_eq!(
+            parse_invocation([
+                INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT.into(),
+                "unexpected".into(),
+            ]),
+            Err(())
         );
         assert_eq!(
             parse_invocation([

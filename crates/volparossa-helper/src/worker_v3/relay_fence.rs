@@ -941,6 +941,50 @@ pub(super) fn cleanup_dead_worker_relay_fence(
     }
 }
 
+/// Reconstruct and retire only the exact pre-dispatch Relay baseline after a process restart.
+///
+/// A semantically empty ruleset is accepted as the sole retry successor: the preceding reaper may
+/// have committed deletion and exited before its challenge-bound reply reached the parent. Active,
+/// foreign, partially matching or unstable state is always rejected.
+pub(super) fn recover_and_retire_restart_relay_fence(
+    namespace: RelayFenceNamespaceAuthority,
+    identity: RelayFenceIdentity,
+    deadline: HardDeadline,
+) -> Result<RetiredRelayFence, RelayFenceError> {
+    namespace.verify()?;
+    let observed = observe_stable_ruleset(deadline)?;
+    if observed.snapshot.is_empty() {
+        return Ok(RetiredRelayFence {
+            generation: observed.generation,
+            namespace,
+        });
+    }
+    let exact = observed.snapshot.exact_restricted_observation(&identity)?;
+    let restricted = RestrictedPolicyDrop {
+        journal: RestrictedRelayFenceJournal {
+            identity,
+            generation: observed.generation,
+            handles: exact.handles,
+        },
+        namespace,
+    };
+    retire_relay_fence_baseline(restricted, deadline).map_err(|failure| failure.source)
+}
+
+/// Re-observe the terminal exact-empty ruleset while retaining the recovered namespace lineage.
+pub(super) fn verify_restart_relay_fence_retired(
+    retired: &RetiredRelayFence,
+    deadline: HardDeadline,
+) -> Result<(), RelayFenceError> {
+    retired.namespace.verify()?;
+    let observed = observe_stable_ruleset(deadline)?;
+    if observed.snapshot.is_empty() {
+        Ok(())
+    } else {
+        Err(RelayFenceError::UnexpectedPolicy)
+    }
+}
+
 /// Atomically create and read back the context-bound policy-drop baseline.
 pub(super) fn create_relay_fence_baseline(
     pristine: PristineRelayFence,
@@ -6088,6 +6132,35 @@ mod tests {
             read_exact_be_u32(attribute.payload).expect("generation value"),
             generation
         );
+    }
+
+    #[test]
+    fn restart_recovery_accepts_only_exact_empty_or_exact_restricted_and_retires_by_handles() {
+        let source = include_str!("relay_fence.rs");
+        let start = source
+            .find("pub(super) fn recover_and_retire_restart_relay_fence")
+            .expect("restart relay recovery");
+        let end = source[start..]
+            .find("pub(super) fn verify_restart_relay_fence_retired")
+            .map(|offset| start + offset)
+            .expect("restart relay recovery end");
+        let recovery = &source[start..end];
+        assert!(recovery.contains("observed.snapshot.is_empty()"));
+        assert!(recovery.contains("exact_restricted_observation(&identity)"));
+        assert!(recovery.contains("RestrictedPolicyDrop"));
+        assert!(recovery.contains("handles: exact.handles"));
+        assert!(recovery.contains("retire_relay_fence_baseline"));
+        assert!(!recovery.contains("ActivePolicy"));
+        assert!(!recovery.contains("create_relay_fence_baseline"));
+
+        let verify_start = end;
+        let verify_end = source[verify_start..]
+            .find("/// Atomically create")
+            .map(|offset| verify_start + offset)
+            .expect("restart relay verification end");
+        let verify = &source[verify_start..verify_end];
+        assert!(verify.contains("observed.snapshot.is_empty()"));
+        assert!(!verify.contains("exact_restricted_observation"));
     }
 
     fn delete_handles(

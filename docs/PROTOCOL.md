@@ -906,15 +906,19 @@ affine owner through systemd custody, durable `MayOwnPrepare`, dispatch, and cle
 settlement. No production route-manager caller reaches this transaction. Production starts one boot-scoped,
 secret-free canonical/CAS ownership actor before publishing its cleanup token or socket, and joins
 it after expiry-driver and engine cleanup. Startup may durably settle never-dispatched `Intent` and
-one bounded restart state: a full set of already durable `CleanupConfirmed` targets. Each
+two bounded restart states. The first is a full set of already durable `CleanupConfirmed` targets. Each
 exact-present pair is removed once in canonical name order and must produce a stable complete
 predecessor-minus-pair successor; already-absent members are skipped. Journal revalidation plus a
 fresh final manager barrier and two stable exact-empty snapshots precede one-shot full-set evidence
 for `CleanupConfirmed -> Absent`. Restart removal errors erase retry authority and stop that
-process. The deliberately refusing cleanup executor leaves every inherited `MayOwnCustody` or
-`MayOwnPrepare` byte-identical and blocks
-the internal socket-publication boundary. No inherited-custody recovery backend, restart reaper, or
-cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
+process. The second is exactly one same-boot, same-helper-image, single-path
+`MayOwnCustody + ExactPresent` pre-dispatch namespace. A fixed `/proc/self/exe` reaper receives one
+challenge-bound namespace FD over authenticated bounded `SOCK_SEQPACKET`, proves the role baseline,
+retires only an exact Relay restricted fence when present, and is sandbox-attested and exactly
+pidfd-reaped before a startup-only actor CAS. The existing `CleanupConfirmed` removal/absence chain
+then completes before socket publication. The general cleanup executor still leaves
+`MayOwnPrepare`, no-store, multi-target and multi-path cases byte-identical. No broad
+inherited-custody recovery backend or cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
 authority remains quarantined rather than being misreported as absent; an absent journal is not
 cleanup evidence.
 
