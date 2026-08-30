@@ -1251,7 +1251,7 @@ fn service_sandbox_check() -> Check {
 }
 
 fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind) -> bool {
-    if !common_unit_sandbox_matches(service) {
+    if !common_unit_sandbox_matches(service, kind) {
         return false;
     }
 
@@ -1334,7 +1334,15 @@ fn unit_has_required_sandbox(service: &BTreeMap<String, String>, kind: UnitKind)
         }
 }
 
-fn common_unit_sandbox_matches(service: &BTreeMap<String, String>) -> bool {
+fn common_unit_sandbox_matches(service: &BTreeMap<String, String>, kind: UnitKind) -> bool {
+    // systemd v257 implements RestrictSUIDSGID by rejecting every openat2(2) call because seccomp
+    // cannot inspect the indirect open_how mode. The privileged helper deliberately requires
+    // openat2 without an unsafe openat fallback for pinned process/cgroup/namespace resolution.
+    // The unprivileged services do not have that requirement and retain the restriction.
+    let restrict_suid_sgid = match kind {
+        UnitKind::Helper => "no",
+        UnitKind::Agent | UnitKind::Native => "yes",
+    };
     [
         ("UMask", "0077"),
         ("NoNewPrivileges", "yes"),
@@ -1349,7 +1357,7 @@ fn common_unit_sandbox_matches(service: &BTreeMap<String, String>) -> bool {
         ("LockPersonality", "yes"),
         ("MemoryDenyWriteExecute", "yes"),
         ("RestrictRealtime", "yes"),
-        ("RestrictSUIDSGID", "yes"),
+        ("RestrictSUIDSGID", restrict_suid_sgid),
         ("SystemCallArchitectures", "native"),
         ("SystemCallErrorNumber", "EPERM"),
     ]
@@ -2303,6 +2311,27 @@ mod tests {
     }
 
     #[test]
+    fn helper_openat2_compatibility_exception_is_kind_specific() {
+        let mut helper = sandbox_fixture(UnitKind::Helper);
+        assert_eq!(
+            helper.get("RestrictSUIDSGID").map(String::as_str),
+            Some("no")
+        );
+        helper.insert("RestrictSUIDSGID".to_owned(), "yes".to_owned());
+        assert!(!unit_has_required_sandbox(&helper, UnitKind::Helper));
+
+        for kind in [UnitKind::Agent, UnitKind::Native] {
+            let mut service = sandbox_fixture(kind);
+            assert_eq!(
+                service.get("RestrictSUIDSGID").map(String::as_str),
+                Some("yes")
+            );
+            service.insert("RestrictSUIDSGID".to_owned(), "no".to_owned());
+            assert!(!unit_has_required_sandbox(&service, kind));
+        }
+    }
+
+    #[test]
     fn packaged_helper_has_only_the_reviewed_worker_bootstrap_capabilities() {
         let helper = parse_service_unit(include_bytes!(
             "../../../packaging/systemd/volparossa-helper.service"
@@ -2320,6 +2349,10 @@ mod tests {
         );
         assert_eq!(helper.get("Delegate").map(String::as_str), Some("no"));
         assert_eq!(helper.get("PrivatePIDs").map(String::as_str), Some("no"));
+        assert_eq!(
+            helper.get("RestrictSUIDSGID").map(String::as_str),
+            Some("no")
+        );
         assert_eq!(helper.get("LimitCORE").map(String::as_str), Some("0"));
         assert_eq!(
             helper.get("FileDescriptorStoreMax").map(String::as_str),
@@ -2787,6 +2820,10 @@ mod tests {
     }
 
     fn sandbox_fixture(kind: UnitKind) -> BTreeMap<String, String> {
+        let restrict_suid_sgid = match kind {
+            UnitKind::Helper => "no",
+            UnitKind::Agent | UnitKind::Native => "yes",
+        };
         let mut service = [
             ("Group", "volparossa"),
             ("UMask", "0077"),
@@ -2802,7 +2839,7 @@ mod tests {
             ("LockPersonality", "yes"),
             ("MemoryDenyWriteExecute", "yes"),
             ("RestrictRealtime", "yes"),
-            ("RestrictSUIDSGID", "yes"),
+            ("RestrictSUIDSGID", restrict_suid_sgid),
             ("SystemCallArchitectures", "native"),
             ("SystemCallErrorNumber", "EPERM"),
         ]

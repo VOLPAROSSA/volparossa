@@ -45,7 +45,9 @@ ProtectHostname=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
+# systemd v257 blocks openat2(2) wholesale when this is enabled. The helper requires openat2
+# without fallback for race-free pinned process, cgroup, and namespace resolution.
+RestrictSUIDSGID=no
 RestrictNamespaces=net
 PrivateMounts=yes
 SystemCallArchitectures=native

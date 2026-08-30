@@ -1,10 +1,12 @@
 //! Read-only collection and fail-closed selection of a directly assigned public underlay address.
 //!
-//! The collector is intentionally not connected to the production helper engine yet. It performs
-//! only bounded `NETLINK_ROUTE` dumps and never changes links, addresses, routes, DNS or firewall
-//! state. Production remains `Unavailable` until the complete helper-v3 transaction is atomic.
+//! The functional-alpha production backend uses this collector before its one-lease mutation. It
+//! performs only bounded `NETLINK_ROUTE` dumps and never changes links, addresses, routes, DNS or
+//! firewall state. Broader multi-path selection remains unavailable.
 
 mod netlink;
+
+pub(crate) use netlink::collect_consistent_direct_underlay;
 
 use std::net::IpAddr;
 use volparossa_routing::is_public_routable_ip;

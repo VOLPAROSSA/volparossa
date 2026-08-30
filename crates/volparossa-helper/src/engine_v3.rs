@@ -1,8 +1,8 @@
 //! Fail-closed helper-v3 lease state machine.
 //!
-//! Production preparation remains unavailable until read-only underlay discovery and the internal
-//! namespace worker are connected. No response can claim a public endpoint or committed tunnel
-//! without kernel evidence.
+//! The production server can prepare and destroy one process-owned functional-alpha Client lease
+//! through the authenticated namespace worker. No response can claim a committed tunnel or usable
+//! datapath until activation, probing and transport acquisition are connected to kernel evidence.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -36,6 +36,7 @@ const SETUP_TTL_SECONDS: u64 = 30;
 const HARD_TTL_SECONDS: u64 = 15 * 60;
 const RESPONSE_CACHE_SECONDS: u64 = 30;
 const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+const MAINTENANCE_REAP_DOMAIN: &[u8] = b"VOLPAROSSA helper-v3 maintenance reap v1";
 
 /// Stateful authenticated helper-v3 dispatcher.
 #[derive(Clone)]
@@ -476,21 +477,28 @@ pub(crate) enum BackendError {
     CleanupIncomplete,
 }
 
-/// Cancellation-safe affine boundary for a future privileged worker adapter.
+/// Cancellation-safe affine boundary for privileged worker adapters.
 ///
 /// Every returned future must enforce `binding.call_deadline` as its own absolute hard deadline.
-/// It may return `Ok` only after the exact operation is quiescent and durably settled. Definitive
-/// `Err` variants guarantee no mutation, detached work, or owned descriptor survives.
+/// It may return `Ok` only after the exact operation is quiescent and any live resources remain
+/// under exact backend authority. Prepare success may retain process-owned resources for the same
+/// helper runtime; that is not crash durability. Definitive `Err` variants guarantee no mutation,
+/// detached work, or owned descriptor survives.
 /// `CleanupIncomplete` instead means exact-lineage resources may remain only under backend-owned
 /// quarantine/reaper authority, so the engine must issue exact rollback/destroy. Every Acquire
 /// error closes every descriptor it created, and no error may leave *unowned* detached work.
 /// Destroy success is stronger: `ConfirmedAbsent` proves that the exact stable lineage's worker is
-/// reaped and its pins, journal authority, and descriptors are absent. Dropping any future must be
-/// safe. The engine's timeout remains a soft ambiguity boundary and continues awaiting task
-/// settlement.
+/// reaped and every resource, pin, authority and descriptor acquired by that backend is absent for
+/// the live runtime. A complete production backend must additionally settle durable journal and
+/// systemd custody so that this proof survives restart; the functional-alpha backend acquires no
+/// such custody and makes no restart-recovery claim. Dropping any future must be safe. The engine's
+/// timeout remains a soft ambiguity boundary and continues awaiting task settlement.
 ///
-/// No production implementation is installed yet. A real adapter requires integration tests for
-/// all of these properties before `HelperEngine::new` may select it.
+/// The production server installs a deliberately narrow functional-alpha adapter for one Client
+/// lease's Prepare and Destroy only. Activate, Probe, descriptor acquisition and datapath work stay
+/// unavailable, and the public [`HelperEngine::new`] constructor deliberately retains the fully
+/// unavailable backend. A complete production adapter still requires integration tests for all of
+/// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
     fn prepare(
         self: Arc<Self>,
@@ -638,11 +646,19 @@ enum ReapOutcome {
     ResponseSent,
 }
 
+#[derive(Clone, Copy)]
+struct ReapTarget {
+    context_id: [u8; 16],
+    generation: u64,
+    prior_phase: Option<ContextPhase>,
+    lineage: BackendLineage,
+}
+
 impl HelperEngine {
-    /// Create the production engine.
+    /// Create a standalone fail-closed engine.
     ///
-    /// Preparation deliberately returns Unavailable until the read-only underlay collector and
-    /// secret-owning namespace worker are wired.
+    /// Every lease-backend operation deliberately returns `Unavailable`. The production server is
+    /// the only crate-internal caller that selects the narrow functional-alpha backend.
     ///
     /// The engine immediately moves the argument into zeroizing storage. Because fixed arrays are
     /// `Copy`, a caller that retains another source copy remains responsible for wiping that copy.
@@ -663,7 +679,7 @@ impl HelperEngine {
     }
 
     /// Install one crate-internal asynchronous backend without exposing test clocks or handles.
-    /// The public production constructor continues to select the unavailable backend.
+    /// The public standalone constructor continues to select the unavailable backend.
     pub(crate) fn new_with_backend(
         cleanup_token: Zeroizing<[u8; 32]>,
         trusted_agent_uid: u32,
@@ -3078,50 +3094,18 @@ impl HelperEngine {
             let token = {
                 let now = self.inner.clock.now_unix();
                 let mut state = self.inner.state.lock().await;
-                let expired = state.contexts.iter().find_map(|(context_id, context)| {
-                    let setup_expired = context.phase == ContextPhase::Prepared
-                        && now >= context.setup_expires_at_unix;
-                    (context.phase != ContextPhase::Quarantined
-                        && (setup_expired || now >= context.hard_expires_at_unix))
-                        .then_some((*context_id, context.generation, context.phase))
-                });
-                let target = expired
-                    .map(|(context_id, generation, prior_phase)| {
-                        (context_id, generation, Some(prior_phase))
-                    })
-                    .or_else(|| {
-                        state
-                            .prepare_reconciliations
-                            .iter()
-                            .find_map(|(context_id, record)| {
-                                (record.phase == PrepareReconciliationPhase::Pending
-                                    && now >= record.setup_expires_at_unix
-                                    && !state.contexts.contains_key(context_id))
-                                .then_some((*context_id, record.backend_generation, None))
-                            })
-                    });
-                let Some((context_id, generation, prior_phase)) = target else {
+                let Some(target) = expired_reap_target(&state, now, false) else {
                     return ReapOutcome::Complete;
                 };
-                let lineage = state.contexts.get(&context_id).map_or_else(
-                    || {
-                        state
-                            .prepare_reconciliations
-                            .get(&context_id)
-                            .map(|record| reconciliation_backend_lineage(context_id, record))
-                            .expect("selected Pending reconciliation")
-                    },
-                    |context| context_backend_lineage(context_id, context),
-                );
                 let Some(token) = begin_operation(
                     &mut state,
                     request_id,
                     digest,
-                    context_id,
-                    generation,
-                    prior_phase,
+                    target.context_id,
+                    target.generation,
+                    target.prior_phase,
                     OperationKind::Reap,
-                    lineage,
+                    target.lineage,
                     Instant::now() + self.inner.backend_timeout,
                 ) else {
                     return ReapOutcome::Failure(Box::new(execution(
@@ -3129,10 +3113,12 @@ impl HelperEngine {
                         None,
                     )));
                 };
-                if let Some(context) = state.contexts.get_mut(&context_id) {
+                if let Some(context) = state.contexts.get_mut(&target.context_id) {
                     context.phase = ContextPhase::Quarantined;
                 }
-                state.cleanup_pending.insert((context_id, generation));
+                state
+                    .cleanup_pending
+                    .insert((target.context_id, target.generation));
                 token
             };
             let cleanup = self.destroy_generation(token, request, sender).await;
@@ -3158,6 +3144,22 @@ impl HelperEngine {
         token: OperationOwner,
         request: &HelperRequest,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> CleanupOutcome {
+        self.destroy_generation_inner(token, Some((request, sender)))
+            .await
+    }
+
+    async fn destroy_generation_quiet(&self, token: OperationOwner) -> bool {
+        self.destroy_generation_inner(token, None).await.confirmed
+    }
+
+    async fn destroy_generation_inner(
+        &self,
+        token: OperationOwner,
+        ambiguity: Option<(
+            &HelperRequest,
+            &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+        )>,
     ) -> CleanupOutcome {
         let operation = token.token();
         let safe = {
@@ -3229,7 +3231,12 @@ impl HelperEngine {
                 }
             }
             BackendCall::TimedOut(task) => {
-                self.send_ambiguous(request, sender).await;
+                let response_sent = if let Some((request, sender)) = ambiguity {
+                    self.send_ambiguous(request, sender).await;
+                    true
+                } else {
+                    false
+                };
                 let confirmed = matches!(
                     task.await,
                     Ok(BackendCompletion {
@@ -3240,7 +3247,7 @@ impl HelperEngine {
                 self.finish_cleanup(token, confirmed).await;
                 CleanupOutcome {
                     confirmed,
-                    response_sent: true,
+                    response_sent,
                 }
             }
         }
@@ -3273,7 +3280,7 @@ impl HelperEngine {
     /// Stop and clean every context during authenticated process shutdown.
     ///
     /// The owned task preserves cleanup if its caller is cancelled. Backend destroy itself must
-    /// still have a hard implementation deadline before a production backend can be enabled.
+    /// enforce the installed binding's absolute hard deadline; the functional-alpha backend does.
     pub async fn shutdown_cleanup(&self) -> bool {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let engine = self.clone();
@@ -3282,6 +3289,58 @@ impl HelperEngine {
             let _ = sender.send(complete);
         });
         receiver.await.unwrap_or(false)
+    }
+
+    /// Reap every expired or already quarantined generation without relying on another agent
+    /// request.
+    ///
+    /// The cleanup task owns the operation after this future is cancelled. A failed proof leaves
+    /// the exact lineage quarantined for the next periodic retry or shutdown cleanup.
+    pub(crate) async fn reap_expired_cleanup(&self) -> bool {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let complete = engine.reap_expired_serial().await;
+            let _ = sender.send(complete);
+        });
+        receiver.await.unwrap_or(false)
+    }
+
+    async fn reap_expired_serial(&self) -> bool {
+        let _operation_guard = self.inner.operation_gate.lock().await;
+        loop {
+            let token = {
+                let now = self.inner.clock.now_unix();
+                let mut state = self.inner.state.lock().await;
+                let Some(target) = expired_reap_target(&state, now, true) else {
+                    return true;
+                };
+                let (request_id, digest) = maintenance_reap_correlation(target.lineage);
+                let Some(token) = begin_operation(
+                    &mut state,
+                    request_id,
+                    digest,
+                    target.context_id,
+                    target.generation,
+                    target.prior_phase,
+                    OperationKind::Reap,
+                    target.lineage,
+                    Instant::now() + self.inner.backend_timeout,
+                ) else {
+                    return false;
+                };
+                if let Some(context) = state.contexts.get_mut(&target.context_id) {
+                    context.phase = ContextPhase::Quarantined;
+                }
+                state
+                    .cleanup_pending
+                    .insert((target.context_id, target.generation));
+                token
+            };
+            if !self.destroy_generation_quiet(token).await {
+                return false;
+            }
+        }
     }
 
     #[allow(clippy::too_many_lines)] // Both exact cleanup waves must settle before one runtime shutdown.
@@ -3508,6 +3567,81 @@ impl HelperEngine {
     pub fn trusted_agent_uid(&self) -> u32 {
         self.inner.trusted_agent_uid
     }
+}
+
+fn expired_reap_target(
+    state: &EngineState,
+    now: u64,
+    retry_quarantined: bool,
+) -> Option<ReapTarget> {
+    let context_target = |context_id: &[u8; 16], context: &ContextRecord| ReapTarget {
+        context_id: *context_id,
+        generation: context.generation,
+        prior_phase: Some(context.phase),
+        lineage: context_backend_lineage(*context_id, context),
+    };
+    retry_quarantined
+        .then(|| {
+            state.contexts.iter().find_map(|(context_id, context)| {
+                (context.phase == ContextPhase::Quarantined
+                    && state
+                        .cleanup_pending
+                        .contains(&(*context_id, context.generation)))
+                .then_some(context_target(context_id, context))
+            })
+        })
+        .flatten()
+        .or_else(|| {
+            state.contexts.iter().find_map(|(context_id, context)| {
+                let setup_expired =
+                    context.phase == ContextPhase::Prepared && now >= context.setup_expires_at_unix;
+                (context.phase != ContextPhase::Quarantined
+                    && (setup_expired || now >= context.hard_expires_at_unix))
+                    .then_some(context_target(context_id, context))
+            })
+        })
+        .or_else(|| {
+            state
+                .prepare_reconciliations
+                .iter()
+                .find_map(|(context_id, record)| {
+                    (record.phase == PrepareReconciliationPhase::Pending
+                        && !state.contexts.contains_key(context_id)
+                        && (now >= record.setup_expires_at_unix
+                            || (retry_quarantined
+                                && state
+                                    .cleanup_pending
+                                    .contains(&(*context_id, record.backend_generation)))))
+                    .then_some(ReapTarget {
+                        context_id: *context_id,
+                        generation: record.backend_generation,
+                        prior_phase: None,
+                        lineage: reconciliation_backend_lineage(*context_id, record),
+                    })
+                })
+        })
+}
+
+fn maintenance_reap_correlation(lineage: BackendLineage) -> ([u8; 16], [u8; 32]) {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(MAINTENANCE_REAP_DOMAIN);
+    hasher.update(&lineage.helper_runtime_id);
+    hasher.update(&lineage.context_id);
+    hasher.update(&lineage.backend_generation.to_be_bytes());
+    hasher.update(&lineage.prepare_request_id);
+    hasher.update(&lineage.prepare_operation_digest);
+    hasher.update(&lineage.setup_expires_at_unix.to_be_bytes());
+    hasher.update(&lineage.hard_expires_at_unix.to_be_bytes());
+    let mut digest = *hasher.finalize().as_bytes();
+    if digest.iter().all(|byte| *byte == 0) {
+        digest[31] = 1;
+    }
+    let mut request_id = [0_u8; 16];
+    request_id.copy_from_slice(&digest[..16]);
+    if request_id.iter().all(|byte| *byte == 0) {
+        request_id[15] = 1;
+    }
+    (request_id, digest)
 }
 
 fn random_runtime_id() -> [u8; 32] {
@@ -4509,7 +4643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_client_ingress_lifecycle_is_unavailable_before_state_or_network() {
+    async fn client_ingress_lifecycle_is_unavailable_before_backend_state_or_network() {
         let engine = HelperEngine::new([9; 32], 1_000);
         let operations = [
             helper_request::Operation::PrepareClientIngress(
@@ -4563,7 +4697,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_prepare_is_explicitly_unavailable_and_creates_nothing() {
+    async fn unavailable_backend_prepare_is_explicit_and_creates_nothing() {
         let engine = HelperEngine::with_components(
             [9; 32],
             1_000,
@@ -5038,7 +5172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_acquire_fails_unavailable_before_context_or_network_work() {
+    async fn standalone_acquire_fails_unavailable_before_context_or_network_work() {
         let engine = HelperEngine::new([9; 32], 1_000);
         let execution = engine
             .execute_with_descriptor(request(
@@ -5103,6 +5237,133 @@ mod tests {
             backend.destroyed.lock().expect("destroyed").as_slice(),
             &[[7; 16]]
         );
+    }
+
+    #[tokio::test]
+    async fn maintenance_reaper_removes_expired_prepare_without_an_agent_request() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), Arc::clone(&clock));
+        assert_eq!(
+            execute_prepare(&engine, prepare_request(81)).await.result,
+            HelperResult::Ok as i32
+        );
+
+        assert!(engine.reap_expired_cleanup().await);
+        assert!(
+            backend
+                .destroy_calls
+                .lock()
+                .expect("destroy calls")
+                .is_empty()
+        );
+
+        clock.0.store(120, Ordering::Release);
+        assert!(engine.reap_expired_cleanup().await);
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
+        let calls = backend.destroy_calls.lock().expect("destroy calls");
+        let (binding, value) = calls.last().expect("maintenance Destroy");
+        assert_eq!(binding.operation_kind, OperationKind::Reap);
+        assert_eq!(binding.prior_phase, Some(ContextPhase::Prepared));
+        assert!(binding.request_id.iter().any(|byte| *byte != 0));
+        assert!(binding.request_digest.iter().any(|byte| *byte != 0));
+        assert_eq!(value.context_id, [7; 16]);
+    }
+
+    #[tokio::test]
+    async fn maintenance_reaper_retries_exact_quarantined_lineage() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_destroy.store(true, Ordering::Release);
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), Arc::clone(&clock));
+        assert_eq!(
+            execute_prepare(&engine, prepare_request(82)).await.result,
+            HelperResult::Ok as i32
+        );
+
+        clock.0.store(120, Ordering::Release);
+        assert!(!engine.reap_expired_cleanup().await);
+        {
+            let state = engine.inner.state.lock().await;
+            let context = state.contexts.get(&[7; 16]).expect("quarantined context");
+            assert_eq!(context.phase, ContextPhase::Quarantined);
+            assert!(
+                state
+                    .cleanup_pending
+                    .contains(&([7; 16], context.generation))
+            );
+        }
+
+        backend.fail_destroy.store(false, Ordering::Release);
+        assert!(engine.reap_expired_cleanup().await);
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
+        let calls = backend.destroy_calls.lock().expect("destroy calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0.lineage, calls[1].0.lineage);
+        assert_eq!(calls[0].0.request_id, calls[1].0.request_id);
+        assert_eq!(calls[0].0.request_digest, calls[1].0.request_digest);
+        assert_eq!(calls[0].0.prior_phase, Some(ContextPhase::Prepared));
+        assert_eq!(calls[1].0.prior_phase, Some(ContextPhase::Quarantined));
+    }
+
+    #[tokio::test]
+    async fn maintenance_reaper_retries_owned_orphan_before_setup_expiry() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_prepare_capacity.store(true, Ordering::Release);
+        backend.fail_destroy.store(true, Ordering::Release);
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let response = execute_prepare(&engine, prepare_request(84)).await;
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        {
+            let state = engine.inner.state.lock().await;
+            assert!(state.contexts.is_empty());
+            let record = state
+                .prepare_reconciliations
+                .get(&[7; 16])
+                .expect("owned orphan");
+            assert_eq!(record.phase, PrepareReconciliationPhase::Pending);
+            assert!(
+                state
+                    .cleanup_pending
+                    .contains(&([7; 16], record.backend_generation))
+            );
+        }
+
+        backend.fail_destroy.store(false, Ordering::Release);
+        assert!(engine.reap_expired_cleanup().await);
+        let state = engine.inner.state.lock().await;
+        assert!(cleanup_state_complete(&state));
+        assert_eq!(
+            state
+                .prepare_reconciliations
+                .get(&[7; 16])
+                .map(|record| record.phase),
+            Some(PrepareReconciliationPhase::Absent)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_maintenance_waiter_cannot_cancel_owned_destroy() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.block_destroy.store(true, Ordering::Release);
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), Arc::clone(&clock));
+        assert_eq!(
+            execute_prepare(&engine, prepare_request(83)).await.result,
+            HelperResult::Ok as i32
+        );
+        clock.0.store(120, Ordering::Release);
+
+        let reaping_engine = engine.clone();
+        let waiter = tokio::spawn(async move { reaping_engine.reap_expired_cleanup().await });
+        wait_for_destroy_entry(&backend).await;
+        waiter.abort();
+        assert!(waiter.await.expect_err("cancelled waiter").is_cancelled());
+
+        backend.release_destroy();
+        wait_for_supervisor_settlement(&engine).await;
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
     }
 
     async fn wait_for_prepare_entry(backend: &FakeBackend) {

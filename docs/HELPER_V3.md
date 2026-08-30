@@ -32,8 +32,10 @@ contains a required closed recovery plan: the exact context role and strictly or
 role-complete `(path_id, WireGuard role)` identities projected from that same Prepare. Prepare itself
 requires the same canonical identity order. The helper stores the complete binding in runtime-global
 state and requires an exact plan match before that target can enter `Pending` or invoke its Prepare
-backend call; unrelated global expiry housekeeping may run before target admission. The server does
-not bind the intent to that connection. Same-stream use is therefore a client-side socket-swap
+backend call; unrelated global expiry housekeeping may run before target admission. A server-owned
+driver also invokes that cleanup every second, with missed ticks skipped, so cleanup does not depend
+on another agent request. The server does not bind the intent to that connection. Same-stream use is
+therefore a client-side socket-swap
 defence, not a server-side session authorization rule.
 
 Role cardinality is exact for every path: client has one client endpoint, relay has one client-facing
@@ -58,7 +60,7 @@ reused. A raw occurrence of any retired tag is rejected as unknown/non-canonical
 version 1, version 2, future versions, unknown operations, and non-canonical encodings likewise fail
 closed. Regression tests cover every retired tag, including the former secret-bearing tag 11.
 
-## Prepare evidence and current fail-closed result
+## Prepare evidence and current functional-alpha boundary
 
 A successful `PrepareLeaseBatch` response is required to contain:
 
@@ -80,6 +82,11 @@ an adopted lease returns `NotFound`, never false kernel-absence evidence. Succes
 Prepare, Activate, Probe and MPTCP endpoint responses are bound to the request's exact identity
 order; the external engine
 also rejects duplicate public keys and public endpoints before pairing affine handles.
+Each credentialed worker request carries one canonical envelope with the parent's fixed absolute
+Linux `CLOCK_MONOTONIC` expiry. The child projects a no-later local deadline and reuses it for the
+operation and response, so transport delay cannot create a fresh five-second mutation budget. The
+affine `MayOwnPrepare` owner can canonically project its ordered durable resources into internal-v3
+lease descriptors; call sites supply none of the path, role, `/128`, expiry or ownership alias.
 `NamespaceKernel` contains v3 prepare, peer-activation, and probe primitives plus a complete-batch
 preflight that requires exact name, current ownership alias,
 WireGuard kind and fresh DOWN/key-zero/port-zero/fwmark-zero/peerless state before mutation. Its
@@ -91,10 +98,31 @@ kernel entry point consumes that typed resource and rejects any non-exact marker
 The underlay parser independently accepts only the exact helper grammar and interface binding,
 rejecting malformed, legacy, or mismatched helper aliases. The marker is evidence, not current
 journal-phase or cleanup authority. The child transaction is not connected to the production
-parent birth-link/dispatch path or `HelperEngine`; transaction-wide production rollback is still
-absent. The production `HelperEngine::new` backend therefore returns the explicit `Unavailable`
-/ `PREPARE_FAILED` result and creates no context. It never returns an agent-supplied address,
-placeholder address, guessed port, public key, or endpoint.
+durable-journal path; transaction-wide crash/restart rollback is still absent. The production
+server now selects a crate-private functional-alpha backend for exactly one Client context with
+exactly one `WireguardRole::Client` lease. It obtains a consistent read-only direct-underlay
+snapshot before mutation, opens a process-owned worker coordinator, initializes the authenticated
+child, exclusively creates the helper-derived WireGuard birth link at one deterministic high
+ifindex in the parent, proves its provisional DOWN name/kind identity, sets the exact ownership
+alias by that index, re-proves the full marked identity, and requires the move to preserve the same
+index in the pinned child `NEWNET` before dispatching Prepare. The single outer deadline reserves
+separate reconciliation and cleanup tails; same-runtime owner state retains the exact index after
+every fully sent mutation. Only the
+child's correlated kernel proof supplies the
+public key and UDP port; the response combines that proof with the selected direct-underlay IP.
+Destroy sends the exact child operation and succeeds only after worker termination, reap and
+registry purge. The backend permits no second live context. Activate, Probe, transport acquisition,
+routing, peer configuration and every datapath remain explicitly `Unavailable`; shutdown succeeds
+only with empty backend state and confirmed coordinator cleanup. The periodic driver uses an owned,
+cancellation-safe engine supervisor with nonzero domain-separated exact-lineage correlation; it
+retries cleanup-pending Quarantined contexts and orphan Pending preparations, and unexpected driver
+exit stops the server. Shutdown first stops and joins this driver, then cleans the engine, then joins
+the durable actor. The driver schedules a sweep once per second with missed ticks skipped; a sweep
+begins only after every earlier request in the serialized operation gate has settled. Once begun,
+its kernel-absence attempt remains bounded by the backend hard deadline. The public
+`HelperEngine::new` constructor remains fully fail-closed and does not select this backend. No
+crash/restart recovery or durable journal/systemd custody is claimed, and no placeholder or
+agent-supplied endpoint is used.
 
 ## Ownership journal startup boundary
 
@@ -486,9 +514,10 @@ PID.
 
 ### Authenticated worker-v3 lifecycle foundation
 
-The separate fixed `--internal-worker-v3` child entry now has a disconnected, tested parent
-launcher. It has no production caller and `HelperEngine` still returns `Unavailable` before spawn or
-network work. The launcher reopens the exact running Linux image through `/proc/self/exe`, creates a
+The separate fixed `--internal-worker-v3` child entry has a tested parent launcher. The production
+server's narrow functional-alpha backend now uses that launcher for one Client lease; the public
+`HelperEngine::new` constructor still returns `Unavailable` before spawn or network work. The
+launcher reopens the exact running Linux image through `/proc/self/exe`, creates a
 private credential-enabled Unix seqpacket socketpair and generates a 256-bit OS-CSPRNG challenge. It
 maps only the child endpoint to stdin, clears the environment, selects `/` as the working directory
 and maps stdout and stderr to `/dev/null`. The launcher deliberately does not scan the process-wide
@@ -503,7 +532,7 @@ flags unchanged. While the spawn lock is held and after retirement-permit acquis
 reads `Seccomp` and `Seccomp_filters` from `/proc/thread-self/status` immediately before
 `Command::spawn`; the child therefore inherits that exact per-thread filter baseline.
 
-One 30-second absolute monotonic deadline now follows the disconnected launcher through setup,
+One 30-second absolute monotonic deadline follows launcher setup,
 the post-lock pre-spawn check, credentialed handshake records, sandbox observation and liveness
 proofs. Spawn-lock acquisition repeatedly uses `try_lock` with deadline-bounded sleeps and rechecks
 the same deadline after acquiring the mutex, so an expired queued caller creates no child. The
@@ -512,8 +541,8 @@ constructs an armed retirement owner with its permit and empty child slot. The s
 that slot and moves a successfully returned `Child` into it before returning, so no allocation,
 deadline check or other fallible post-spawn step can observe an unowned child. Late setup or
 handshake failure therefore retires that exact child boundedly or transfers the same owner to the
-escalation reaper. This is a disconnected launcher bound, not production route-setup or acceptance
-evidence.
+escalation reaper. Production reuses this bound only for its single functional-alpha Client lease;
+it is not route setup, a datapath, crash recovery, or acceptance evidence.
 
 After exec, the child closes raw descriptor 3 if present, atomically duplicates stdin with
 `fcntl_dupfd_cloexec` using minimum 3, requires the returned descriptor to be exactly 3 and closes
@@ -625,10 +654,27 @@ the child drops it before the namespace-pin barrier and proves a final `CAP_NET_
 The contract rejects `CAP_SYS_PTRACE` and adds only the individual `seccomp` syscall to the existing systemd syscall
 groups so the fixed child filter can be installed without allowing all of `@sandbox`. After the drop, the worker's
 distinct UID/GID plus exact `CAP_NET_ADMIN` set excludes same-UID signalling of the root parent and
-access through the root:`volparossa` runtime-directory mode. This is not yet a production claim:
-the launcher remains disconnected from the engine, and the complete account transition,
-pre-filter task state, path access denials and parent-signal denial still require a disposable
-Debian 13 live-root acceptance run.
+access through the root:`volparossa` runtime-directory mode. The functional-alpha backend now calls
+the launcher. The committed disposable driver now exercises the account transition, pre-filter task
+state, path access denials and parent-signal denial first through its diagnostic selector and then
+observes the functional worker created by the no-argument production server. This remains an
+implemented gate rather than earned acceptance evidence until the exact merged `main` revision
+produces a retained, host-revalidated PASS; it is not installed-package or restart evidence.
+
+The helper unit deliberately sets `RestrictSUIDSGID=no`, unlike the agent and native MPQUIC units,
+which retain `yes`. In systemd v257.13 that setting installs a separate seccomp filter which returns
+`ENOSYS` for every `openat2(2)` call because seccomp cannot inspect the mode in the indirect
+`open_how` argument. The helper cannot use systemd's suggested `openat(2)` fallback. It uses
+non-fallback `openat2` both to constrain ordinary process records and cgroup paths with
+`RESOLVE_BENEATH`, `NO_MAGICLINKS` and `NO_SYMLINKS`, and to deliberately follow only the fixed
+`exe` and `ns/cgroup` procfs magic links relative to an already pinned exact process directory.
+The helper-specific compatibility exception therefore preserves those distinct `openat2`
+operations and their fail-closed resolution. Its compensating boundaries
+are the fixed typed protocol with no caller-selected filesystem paths, `NoNewPrivileges=yes`,
+`ProtectSystem=strict`, fixed host-visible writable runtime paths, private temporary directories,
+`UMask=0077`, and a capability set without `CAP_CHOWN`, `CAP_FSETID` or `CAP_SETFCAP`. The dedicated
+worker then drops to its distinct UID/GID and final `CAP_NET_ADMIN`-only state before accepting any
+operation.
 
 ### Sequential live worker and production IPC proof driver
 
@@ -641,9 +687,21 @@ regular files with one hard link and at most 128 MiB. Each copy runs under its o
 file-size ceiling and is fenced by stable source identity, metadata, and matching source/staged
 digests. After those two large copies, the root producer sets and verifies its own 1 MiB soft/hard
 file-size limit before copying the bounded hook or writing account, capture, and report files; its
-fixed path never raises that limit. It then creates collision-free synthetic service identities,
-binds the staged passwd, group, shadow and nsswitch files read-only, and grants the helper parent
-exactly the reviewed seven bootstrap capabilities. The transient unit has `PrivateNetwork=yes`,
+fixed path never raises that limit. It then creates collision-free synthetic service identities and
+binds the staged passwd, group, shadow and nsswitch files read-only. systemd v257 resolves static
+`User=` and `Group=` credentials before constructing those private bind mounts, so both transient
+services declare only the host-resolvable `User=0`, `Group=0`, and an empty
+`SupplementaryGroups=` assignment. After the namespace exists, the exact root-owned
+`/usr/bin/setpriv` image changes only the primary and singleton supplementary group to the raw
+staged agent GID and then executes the staged helper in the same MainPID. The unchanged helper
+parent contract rejects any other UID/GID quartet, supplementary-group vector, capability set,
+no-new-privileges state, or seccomp state in the diagnostic phase. The production hook
+independently reads the no-argument helper's live `/proc/<MainPID>/status`, requires the same exact
+credential and five-capability-set envelope plus seccomp mode 2 and a bounded positive filter
+count, and includes that canonical observation in every existing running-identity revalidation.
+This avoids all host account changes while granting the helper parent exactly the reviewed seven
+bootstrap capabilities. The transient unit has
+`PrivateNetwork=yes`,
 `NotifyAccess=main`, `FileDescriptorStoreMax=128`, `FileDescriptorStorePreserve=yes`, and a private
 temporary `/run`. The canonical root-owned system bus socket is bound read-only into that
 private `/run`, and the unit pins `DBUS_SYSTEM_BUS_ADDRESS` to that verified path, so the
@@ -655,16 +713,21 @@ inventory barrier; systemd v257 does not restore that socket automatically for a
 `TemporaryFileSystem=/run`. Strict cgroup protection is submitted through the string-valued
 `ProtectControlGroupsEx=strict` D-Bus property. The legacy `ProtectControlGroups` property is
 boolean-only in systemd-run v257 and is deliberately forbidden by the static contract. The staged
-helper aliases remain absolute, read-only `/run` paths; an exact
-`ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient property suppresses systemd v257's
-host-namespace executable preflight while preserving the driver's fixed child `PATH`. The driver
-reads that property back from PID 1 for both transient units before accepting their contracts.
+helper aliases remain absolute, read-only `/run` paths passed as arguments to the exact host-visible
+`/usr/bin/setpriv` executable. An exact `ExecSearchPath=/usr/sbin /usr/bin /sbin /bin` transient
+property preserves the driver's fixed child `PATH`; the driver reads that property back from PID 1
+for both transient units before accepting their contracts. Both calls also set and read back
+`RestrictSUIDSGID=no`: v257's `yes` filter would reject the mandatory `openat2` recovery-anchor
+resolution before the internal worker handshake. The private transient `/run` remains explicitly
+`nosuid,noexec`, and all other applicable helper sandbox boundaries remain pinned.
 Both units also pin and read back `CollectMode=inactive`: a real failure therefore remains loaded
 long enough for exact terminal inspection, while successful or reset units can still be collected
 during bounded retirement. Neither transient launch uses `--ignore-failure` or the aggressive
 `--collect` shortcut. The diagnostic phase uses blocking `Type=exec` startup: PID 1 completes the
-start job only after successful `execve`; its separate `RuntimeMaxSec=45s` is also read back
-exactly. A fast diagnostic `exit(1)` can nevertheless make systemd v257's blocking client return
+start job after successful execution of the fixed credential trampoline. The exact terminal
+records, MainPID executable and process predicates then independently require its replacement by
+the staged helper; the separate `RuntimeMaxSec=45s` is also read back exactly. A fast diagnostic
+`exit(1)` can nevertheless make systemd v257's blocking client return
 from the failed start-job wait before its later JSON `InvocationID` acquisition and print path. In
 that one case the driver may recover diagnostic authority only when the launch captures are safe,
 stdout is exactly empty, no JSON binding was accepted, and the nonzero launch status accompanies
@@ -749,8 +812,29 @@ right socket group, right UID with the wrong primary GID but the right supplemen
 and root UID rejection. Every negative credential case therefore passes filesystem DAC before the
 server applies exact `SO_PEERCRED` policy. The probe additionally requires the server peer PID and
 primary GID to equal the unit's exact `MainPID` and staged agent GID, while the hook brackets one
-socket inode. The hook publishes seven distinct fixed proof records only after all probe output and
-the unchanged `MainPID`, executable inode and `InvocationID` have been checked. PID 1 bounds the
+socket inode.
+
+The hook then creates one fixed dummy underlay only inside that production unit's
+`PrivateNetwork` namespace. The staged-agent probe registers an exact tag-35 intent, prepares one
+Client-role lease, closes its first stream and publishes a fixed READY record. While it waits on a
+root-owned FIFO, the hook requires one direct child of the unchanged helper `MainPID`, stable
+process starttime and dedicated UID/GID, a network namespace distinct from the helper, and exactly one
+live WireGuard interface beside loopback. That interface must be UP, carry the exact ownership-marker
+prefix and one global `/128`, expose a non-zero public key/listen port, and have neither peers nor a
+firewall mark. The probe validates the exact correlated response and `DirectAssigned` fixture
+endpoint without printing handles, keys, ports or runtime IDs; the external hook deliberately does
+not claim an independent byte-for-byte join to those response values.
+
+One fixed release byte authorizes exact Destroy and an idempotent `existed=false` retry. A second
+distinct context is then prepared and destroyed under the same helper runtime; distinct context and
+lease handles plus a distinct public key prove capacity reuse. After both cycles, the hook requires
+zero helper children, no WireGuard object in its retained first-worker namespace pin, no helper FD
+retaining that namespace or any foreign worker network namespace, an empty descriptor store and the
+fixed exact-one-loopback/no-default-route cleanup predicate after the dummy underlay is removed.
+Only after all probe output and the unchanged manager launch tuple, bound helper image metadata,
+process starttime, `MainPID` and `InvocationID` have been checked does the hook publish ten distinct fixed proof
+records: the seven read-only/negative IPC records followed by READY, functional PASS and
+external-cleanup PASS. PID 1 bounds the
 second unit to three minutes even if the runner disappears, and each transient unit independently
 receives a 1 MiB hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are attested as `null`, so structured
 helper rejection logs cannot grow host files. The start hook proves that the same captured lock inode
@@ -766,12 +850,14 @@ following respect:
 - it is a non-aggressively collected `Type=exec` with `RemainAfterExit=yes`, a 45-second activation
   and runtime bound, no restart, and the private proof selector instead of the production
   no-argument server;
-- it uses a collision-free numeric staged primary group and requests no additional
-  `SupplementaryGroups=` entries, rather than resolving the installed `volparossa` group from the
-  host account database. An empty `SupplementaryGroups=` assignment does not override groups from
-  the account database: systemd initializes them before installing the unit's synthetic account-file
-  bind mounts. The helper therefore accepts exactly one kernel supplementary group, the staged agent
-  GID; any additional group membership configured for host root blocks the proof;
+- PID 1 installs only host-resolvable root/root unit credentials with an empty
+  `SupplementaryGroups=` assignment because systemd resolves static credentials before installing
+  the synthetic account-file bind mounts. Once inside that completed sandbox, the fixed
+  `/usr/bin/setpriv` trampoline installs the raw collision-free staged GID as both primary group and
+  the singleton supplementary group, then executes the helper without changing its UID or
+  capabilities. The diagnostic helper parent contract and the production hook's repeated live
+  process-status contract reject leaked host-root groups and every other final identity; no host
+  account is created or modified;
 - it overlays four synthetic account files read-only, adds `PrivateNetwork=yes`, and replaces host
   `/run` with a 16 MiB private tmpfs; the root-owned staged helper image is also bound read-only into
   that private `/run`, together with a read-only bind of the host system bus socket and an exact
@@ -794,11 +880,107 @@ recovery requires the exact per-stage marker before adopting the manager's curre
 diagnostic unit is reset to inactive before its descriptor store is cleaned. Retirement cleans only
 that unit's `fdstore`, requires either
 `NFileDescriptorStore=0` or `LoadState=not-found`, resets it when still present and waits boundedly
-for collection; any ambiguous observation fails the gate. The driver has not yet produced a
-successful evidence report from the required disposable VM. Its second phase exercises the
-production server entry point, but not an installed package, the shipped unit file, restart policy,
-or inherited-descriptor adoption/recovery. Until a successful run is durably tied to the same clean
-commit, it is a reviewed driver rather than earned live-root, package, datapath, A14 or A15 evidence.
+for collection; any ambiguous observation fails the gate. The driver has not yet produced a retained
+exact-main PASS. A non-main branch run may exercise and validate the same disposable proof, but
+on PASS `non-retained-pr-smoke` deliberately discards its report, hash, environment, console and
+proof diagnostics and requires an empty output directory. Its workflow never uploads branch PASS
+artifacts or failure diagnostics; a failed smoke exposes only one fixed allowlisted category (or
+`unclassified`) on job stderr. `worker-launch-status` may additionally expose only a fixed structural
+launch-binding/terminal/stage classification. After branch
+[run 33273482691](https://github.com/VOLPAROSSA/volparossa/actions/runs/33273482691) reached
+`worker-confinement`, that category may additionally expose only its first fixed `bounding`,
+`ambient`, `private-network` or `control-group` subcategory. It never reports the property value,
+unit name, cgroup path or capability payload, and a missing, duplicate, malformed or late
+confinement record is suppressed. Follow-up branch
+[run 33274272679](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679) at
+`80e0dd077ceab4c8c8a33590a83299e179dde10f` ran the disposable VM in
+[job 99158142816](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679/job/99158142816)
+and retained `control-group`. The already completed internal live proof had pinned the helper parent
+and worker to the same cgroup path and inode while both existed. The external manager readback
+occurred after the retained diagnostic service reached `active (exited)`, when systemd had
+released its empty service cgroup and consequently returned an empty `ControlGroup`. The diagnostic
+unit now explicitly selects `system.slice`, requires an exactly empty terminal `ControlGroup` plus
+exact persistent `Slice=system.slice`, and derives the fixed former service-cgroup path only for its
+post-retirement absence check. The production transient also selects and reads back exact
+`Slice=system.slice`; its process remains running during observation and its exact nonempty live
+`ControlGroup` readback is still mandatory. The next non-retained branch
+[run 33275030601](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601) at
+`20f8a121f7aa020450587251dad9de66ec7738fc` ran that correction in
+[job 99160142810](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601/job/99160142810),
+but the guest gate exited with status 2 before its normal fixed final report, so the runner could
+retain only `unclassified`. Static review found two fail-closed observations that could mask a
+fixed production predicate with that shell status: an unsafe or missing `unit.identity` left its
+later retirement executable operand unset under `set -u`, and a failed redirection on the POSIX
+special builtin `exec` could terminate the non-interactive shell before its `else` branch. All
+identity operands are now initialized before validation, and the lock probe uses `command exec` so
+redirection failure is an ordinary recorded predicate failure. As a bounded fallback, the existing
+EXIT cleanup emits exactly one of eight value-free monotonic driver phases only for a nonzero exit
+before normal final reporting; it never changes the original or cleanup-derived exit status. A
+non-retained runner exposes that single phase only beside `unclassified`, rejecting missing,
+duplicate, malformed, mixed, private-key-bearing or non-allowlisted records. This failed run is not
+PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open. Follow-up branch
+[run 33275945986](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986) at
+`38ee44a81991f660168a76342584416d04a6ef5d` ran the disposable VM in
+[job 99162565524](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986/job/99162565524)
+and reached the fixed first failure `production-launch-status`. The production service still sends
+both output streams to systemd null targets, so that failed run provides no raw `ExecStartPost`
+message. The fixed start hook now advances through one fixed monotonic stage allowlist covering
+preflight/runtime, identity, active-lock, each protocol probe group, functional underlay,
+probe-ready, worker observation, probe finish, cleanup and publication. On failure it atomically
+publishes at most one root-owned mode-0600 single-link `start.failure` containing only that stage.
+All potentially failing hook descriptor opens and closes use ordinary-failure `command exec`,
+including the background probe handoff, so redirection errors return through the same fixed failure
+path. The gate accepts one exact canonical record only when the first recorded predicate is
+`production-launch-status`; the non-retained runner exposes that fixed stage only paired with the
+same exact category and rejects missing, duplicate, invalid, mixed and privacy-unsafe input. This
+failed run remains non-PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains
+Open. Exact branch
+[run 33278664815](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815) at
+`b050fe576ebd2e77cc4d3c871dad22f9d91e267b` ran the disposable VM in
+[job 99169908991](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815/job/99169908991)
+and retained `production-launch-status` with diagnostic `identity-command`. The preceding typed
+manager fix therefore worked, but the separately confined hook could not read the non-dumpable
+agent-GID helper's `/proc/<pid>/cmdline` and `exe` magic link. Granting `CAP_SYS_PTRACE` or binding
+systemd's private manager socket would weaken the proof boundary, so neither is done.
+
+The replacement launch lineage is externally anchored at PID 1. Over the read-only policy-mediated
+system bus, the hook requires exact systemd v257 `ExecStart` and `ExecStartEx` ten-field tuple
+shapes, matching running timestamps and PID, false/empty flags, and exactly
+`/usr/bin/setpriv --regid=<agent-gid> --groups=<agent-gid> --
+/run/volparossa-helper-production`. The bind-mounted launch image must independently remain one
+root-owned, mode-0500, single-link regular file. Its initial metadata and SHA-256 are recorded; the
+gate requires that digest to equal the already fenced staged helper digest, and ordinary identity
+rechecks compare metadata without repeatedly hashing the roughly 78 MiB image. One stable bracket
+observes `InvocationID`, `MainPID`, launch tuple, image, canonical process starttime, exact status,
+then starttime, image, `MainPID` and `InvocationID` in reverse. Each socket probe inside the wider
+hook is still bound by `SO_PEERCRED == MainPID`, and the same full identity artifact brackets it.
+Post-retirement observation uses the captured starttime rather than a procfs magic link, treats a
+different token as PID reuse, and never treats an extant unreadable proc record as absent. The
+worker-side external check deliberately makes no byte-for-byte executable claim. The production
+start/stop hook is source-pinned through `setpriv` to UID 0 with all GID fields and its sole group
+equal to the agent GID; its own status must retain the helper capability mask, no-new-privileges and
+seccomp contract. This matches the staged helper's procfs credentials without adding
+`CAP_SYS_PTRACE`, making the manager's retained descriptors observable. `ExecStartPost` and
+`ExecStopPost` are not yet independently re-read as typed manager tuples, so this is a
+source-pinned command plus exact hook-self-status seam rather than an atomic PID-1 command proof.
+At READY, every parent-held pidfd must name the one direct child in both `Pid` and `NSpid` fdinfo
+fields and every pidfd duplicate must identify the same kernel object. Every retained numeric proc
+directory must be `/proc/<child>`, and all parent-held foreign network-namespace descriptors must
+identify the same distinct namespace. The hook duplicates one parent process-directory pin to FD 8
+and one namespace pin to FD 7. Descriptor-relative `stat` and `status` observations bind the child
+PID, PPID, namespace PID, single thread, starttime, dedicated credentials, empty groups,
+no-new-privileges, one additional seccomp filter and the exact worker-only `CAP_NET_ADMIN` masks
+before and after the namespace readback. After Destroy, FD 8 must expose no process records, the
+helper must retain no pidfd, proc-directory or foreign-netns worker custody, and FD 7 must show no
+WireGuard object before both observer pins close. The root-owned setgid mode-2700 proof directory
+keeps hook-created artifacts root:root mode 0600 despite the agent GID. This failed run and the
+correction are not PASS evidence; a
+fresh exact-main KVM remains required and the alpha score remains **11/100**. The second phase
+exercises the production server entry point, but not an installed package,
+the shipped unit
+file, restart policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run
+is durably tied to the same clean commit and retained, the gate is not earned package, datapath, A14
+or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
@@ -813,10 +995,15 @@ no unit mutation, fails the proof, and requires the disposable VM to be discarde
 after exact adoption still blocks stage mapping and permits only exact-ID retirement of that already
 owned unit. It never guesses that a same-named unit belongs to this run.
 
-The child now opens its worker-local netlink sockets, activates loopback, and implements exact
-single-lease WireGuard `Prepare` and `Destroy`. It does not create or move the parent-side birth
-link, and Activate, Commit, routing, nftables, sysctl and socket-factory operations remain rejected.
-Production cannot dispatch this path and still fails closed through the unavailable engine.
+The child opens its worker-local netlink sockets, activates loopback, and implements exact
+single-lease WireGuard `Prepare` and `Destroy`. The no-argument production server now dispatches it
+through the crate-private functional-alpha backend: for at most one live Client context at a time,
+containing exactly one Client-role lease, the parent exclusively creates and provisionally proves
+the helper-derived birth link at a deterministic retained ifindex, sets and re-proves its exact
+durable alias, and moves it without renumbering into the pinned child `NEWNET` before Prepare.
+Activate, Commit, peer configuration, routing, nftables, sysctl,
+socket-factory operations and every datapath remain rejected. The public `HelperEngine::new`
+constructor remains unavailable and does not select this backend.
 
 A separate bounded registry now reserves a non-copyable monotonic generation token before spawn or
 handshake. Pending tokens count against the same 64-context cap, are bound to one context and expiry,
@@ -869,9 +1056,10 @@ restart reaper is connected.
 Exact cache hits use a registry-lock-free point-in-time process probe followed by registry-locked
 checks of the atomic hint, expiry, generation and shutdown state. There is deliberately no watcher
 or pidfd, so a child can still die after a positive probe. The in-memory fallback queue is not a
-replacement for durable secret-free ownership and crash recovery; production remains disconnected.
+replacement for durable secret-free ownership and crash recovery; the functional-alpha production
+adapter deliberately remains process-lifetime-only.
 
-The disconnected async coordinator demonstrates the required transaction shape: PLAN records the
+The async coordinator enforces the required transaction shape: PLAN records the
 exact context, generation, phase, token, request digest and one caller-owned monotonic deadline
 under its short mutex, then starts an owned supervisor before the caller can wait on the oneshot
 result. `execute_until` rejects expiry again immediately before PLAN, leaving no tombstone,
@@ -974,13 +1162,13 @@ registry mutation, no-runtime polling before admission or PLAN, mutex-poison own
 around PLAN, generation ABA, late/dead commit rejection, descriptor closure, tombstone bounds and
 registry-lock availability.
 
-Neither the launcher, registry, coordinator, nor production route manager calls this worker path.
-The production engine already supervises cancellation-safe PLAN -> CALL -> COMMIT/rollback
-transactions: it
+The production server's functional-alpha backend now calls this worker path for one Client lease;
+no production route manager calls it. The production engine supervises cancellation-safe
+PLAN -> CALL -> COMMIT/rollback transactions: it
 reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
-held. This orchestration does not make the disconnected worker implementation production-ready.
-The production backend still returns `Unavailable` for Prepare and transport acquisition, and the
-engine rejects client ingress as `Unavailable` before backend dispatch.
+held. The narrow backend implements real Prepare/Destroy only. It returns `Unavailable` for
+Activate, Probe and transport acquisition, and the engine rejects client ingress as `Unavailable`
+before backend dispatch. This process-lifetime composition is not full production readiness.
 
 ### Affine asynchronous engine/backend boundary
 
@@ -1012,8 +1200,8 @@ Fake/adversarial tests cover factory and poll panic, caller cancellation, missin
 recovery, stale-owner rejection, generation overflow, deadline and completion substitution, runtime
 shutdown correlation, wrong-binding and timed-out Acquire descriptor closure before Destroy, and
 retryable shutdown after incomplete cleanup. This establishes only the adapter boundary. The public
-production constructor still installs the unavailable backend and performs no worker or network
-mutation.
+standalone constructor still installs the unavailable backend and performs no worker or network
+mutation; only the production server selects the functional-alpha adapter.
 
 A private dormant worker-lifecycle seam now reserves a coordinator-local generation, changes its
 reservation to a non-expiring `LifecycleOwned` shutdown fence, authenticates one passive sandboxed
@@ -1101,19 +1289,20 @@ adapter and shared manager-mutation serialization now exist, but a production re
 old-worker death proof, exact namespace/kernel cleanup, and authority-preserving composition of the
 two settlement proofs remain required before those phases can progress.
 
-Production wiring remains a separate audited change with these explicit blockers:
+Full durable production wiring remains a separate audited change with these explicit blockers:
 
-- No production adapter maps `BackendLineage`/`OperationBinding` and a durable ownership key to the
-  dormant lifecycle owner, or carries that owner from journal Intent through authenticated anchor,
-  durable MayOwn, child dispatch and exact settlement. No adapter obtains a phase-authorized
-  per-link resource after durable `MayOwnPrepare` or carries it through birth-link creation,
-  namespace movement, mutation, cleanup, and exact settlement; the typed resource deliberately
-  proves neither current journal phase nor cleanup authority. The adapter also does not carry the
-  engine's exact deadline through the complete lifecycle and into `execute_until`. Before returning
-  success it must also revalidate every adopted kernel object
+- The functional-alpha adapter maps `BackendLineage`/`OperationBinding` to one process-owned Client
+  worker generation and carries the engine deadline into the worker call. A separate non-cloneable
+  live owner distinguishes same-runtime create/delete authority from its public WireGuard marker
+  metadata. It does not bind that
+  lineage to a durable ownership key or carry an owner from journal Intent through authenticated
+  anchor, durable MayOwn, child dispatch and exact settlement. It does not obtain a phase-authorized
+  per-link resource after durable `MayOwnPrepare`; its typed resource deliberately proves neither
+  current journal phase nor crash-cleanup authority. Before a complete adapter returns success it
+  must also revalidate every adopted kernel object
   against the requested socket kind, protocol, local/remote tuple, nonblocking/listening state and
-  genuine MPTCP evidence. The implemented deadline, adoption and retryable-shutdown machinery
-  therefore remains disconnected from `HelperEngine`.
+  genuine MPTCP evidence. Descriptor adoption and complete-operation retryable shutdown therefore
+  remain disconnected from the functional-alpha path.
 - Retryable shutdown ownership and the escalation reaper are still process-memory-only. The
   journal has a production startup owner but no request-path issuance/arming writer or restart
   reaper, so helper-crash reconciliation is not yet durable.
@@ -1166,9 +1355,9 @@ quarantines rather than releasing. A production-started secret-free journal subs
 the request-path issuance/arming writer, restart reaper, trusted worker/kernel-cleanup executor,
 exact manager-absence composition, and cross-runtime proof needed to settle that case do not.
 
-This entire path is dormant containment, not a live route implementation. Production Prepare still
-returns `Unavailable`, and no production route-manager caller drives the helper-backed setup
-transaction.
+This same-runtime reconciliation path remains containment rather than crash recovery. The
+functional-alpha production adapter can Prepare and Destroy one Client lease, but no production
+route-manager caller drives it and there is no activation, peer route, transport or live datapath.
 
 ## Namespace-local transport descriptor
 
@@ -1285,35 +1474,39 @@ one-shot guard is defense in depth, not a substitute for that privileged invaria
 
 ## WRITE-STOP: remaining live-kernel gaps
 
-No host networking was executed for this slice. Before `Prepare`, `Activate`, `Commit`, transport
+No development-host network configuration is mutated or authorized for this slice. The committed gate confines
+its fixed dummy underlay and ephemeral WireGuard leases to a transient `PrivateNetwork` and child
+network namespaces inside the disposable VM. Before `Prepare`, `Activate`, `Commit`, transport
 acquisition, client ingress, or datapath operation can be called complete, all of the following
 remain:
 
-- run the complete dedicated `volparossa-worker` UID/GID transition in a disposable Debian 13
-  live-root environment and prove exact post-drop credentials/groups/capabilities, parent-signal
-  denial, runtime token/socket path denial, pre-filter single-task state, namespace pin lifetime and
-  unchanged host state; portable tests and package inspection do not substitute for this gate;
+- obtain one retained exact-main PASS from the committed disposable Debian 13 driver for the complete
+  dedicated `volparossa-worker` UID/GID transition, exact post-drop credentials/groups/capabilities,
+  parent-signal denial, runtime token/socket path denial, pre-filter single-task state, namespace-pin
+  lifetime and equal enumerated host-state fences; a non-retained branch smoke, portable tests and
+  package inspection do not substitute for this gate;
 - validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
   the final worker must retain only `CAP_NET_ADMIN`;
-- connect the authenticated worker-v3 launcher and generation registry to creation of the anonymous
-  namespace only as part of an atomic underlay-snapshot, capability-reduction,
-  independently observed sandbox-proof, birth-link, WireGuard-prepare and rollback transaction; the
-  current child can prepare and destroy only an already-present exact single-lease WireGuard birth
-  link, while parent birth-link creation/movement and production dispatch remain absent;
-- replace the synchronous `HelperEngine` backend interface across every caller with the tested
-  plan/call/commit shape: validation and snapshot under the state lock, one bounded worker call
-  outside it, and exact context/generation/phase/handle revalidation before publishing. Reap,
-  cleanup, destroy, shutdown, and cached-descriptor paths require the same atomic refactor;
-- wire descriptor retries to the live generation registry. The disconnected facade already purges
-  caches on death and never retries ambiguous IPC, but the production engine is not yet using it;
-- collect a bounded `DirectAssigned` snapshot from parent-side read-only rtnetlink link/address/route
-  dumps before birth-link mutation, rejecting multipath, duplicate, truncated, or ambiguous state;
-- connect parent birth-link creation/movement to the inactive v3 kernel primitives, preserving the
-  exact no-peer/key, link-UP, port-zero `SET`, and correlated public-key/port `GET` ordering with
-  full rollback or quarantine;
+- obtain one retained exact-main PASS for the already wired functional-alpha proof: read-only direct
+  underlay selection, independently observed sandbox identity, parent birth-link creation and move,
+  child WireGuard Prepare, correlated response validation, exact/idempotent Destroy, worker
+  reap/purge, second-cycle capacity reuse and equal enumerated host-state fences; a non-retained
+  branch smoke does not close this evidence gate, and the one-Client/one-lease capacity must then be
+  extended without weakening atomic rollback;
+- extend the asynchronous `HelperEngine` backend beyond Prepare/Destroy: Activate, Probe, descriptor
+  acquisition, cached-descriptor cleanup and shutdown need the same plan/call/commit discipline and
+  exact context/generation/phase/handle revalidation;
+- wire descriptor retries to the live production generation registry. The coordinator purges caches
+  on death and never retries ambiguous IPC, but the functional-alpha backend advertises descriptor
+  acquisition as unsupported;
+- extend the bounded `DirectAssigned` parent snapshot from the current one direct underlay to the
+  exact multi-path evidence required by complete route setup, retaining rejection of multipath,
+  duplicate, truncated or ambiguous dumps;
+- carry every parent birth link through activation and complete cleanup/quarantine, preserving the
+  exact no-peer/key, link-UP, port-zero `SET`, and correlated public-key/port `GET` ordering;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - capture activation baselines and perform correlated handshake/RX/TX commit probes;
 - connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact

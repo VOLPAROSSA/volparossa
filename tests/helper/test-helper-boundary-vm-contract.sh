@@ -15,6 +15,7 @@ umask 077
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
 runner=$script_directory/run-helper-boundary-evidence-vm.sh
+live_gate=$script_directory/require-live-worker-identity-proof.sh
 manifest=$script_directory/debian13-amd64-image-v1.json
 workflow=$repository_directory/.github/workflows/helper-boundary-evidence.yml
 supervisor=$script_directory/qemu-pidfd-supervisor.py
@@ -41,7 +42,7 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 77
 fi
 for required_file in \
-    "$runner" "$manifest" "$workflow" "$supervisor" \
+    "$runner" "$live_gate" "$manifest" "$workflow" "$supervisor" \
     "$environment_validator" "$environment_test"
 do
     if [ ! -f "$required_file" ] || [ -L "$required_file" ]; then
@@ -59,7 +60,65 @@ do
     fi
 done
 sh -n "$runner"
+sh -n "$live_gate"
 jq -e . "$manifest" >/dev/null
+
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 2 ] \
+    || grep -F -- '--property=RestrictSUIDSGID=yes' "$live_gate" >/dev/null \
+    || [ "$(grep -Fc -- \
+        "capture_unit_property RestrictSUIDSGID \\" "$live_gate")" -ne 2 ]; then
+    printf '%s\n' \
+        'the VM payload does not preserve the helper-specific openat2 compatibility contract' >&2
+    exit 1
+fi
+if [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|final-verification)$' \
+        "$live_gate")" -ne 8 ] \
+    || [ "$(grep -Ec '^[[:space:]]*final_checkpoint=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|publication-fence|stage-retirement)$' \
+        "$live_gate")" -ne 11 ] \
+    || [ "$(grep -Fc 'structured_failure_reported=yes' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'report_unexpected_driver_phase "${driver_phase:-}" || :' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'report_unexpected_final_checkpoint "${final_checkpoint:-}" || :' \
+        "$live_gate")" -ne 1 ]; then
+    printf '%s\n' \
+        'the VM payload does not preserve fixed unexpected driver and final-checkpoint records' >&2
+    exit 1
+fi
+if [ "$(grep -Fxc '    identity_launch=' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'if command exec 9<>"$production_lock_path"; then' \
+        "$live_gate")" -ne 1 ] \
+    || grep -F 'if exec 9<>"$production_lock_path"; then' "$live_gate" >/dev/null; then
+    printf '%s\n' \
+        'the VM payload does not preserve status-2-safe production observation and lock probing' >&2
+    exit 1
+fi
+if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property Slice "$temporary_stage/unit-slice"' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- '[ -n "$observed_terminal_control_group" ]' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- '[ "$observed_slice" != system.slice ]' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'worker_control_group=/system.slice/$unit_name' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property Slice "$temporary_stage/production-slice"' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- '[ "$production_slice" != system.slice ]' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc -- \
+        'capture_unit_property ControlGroup "$temporary_stage/production-control-group"' \
+        "$live_gate")" -ne 1 ]; then
+    printf '%s\n' \
+        'the VM payload does not preserve exact terminal worker placement and live production cgroup proof' >&2
+    exit 1
+fi
 
 expected_manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 actual_manifest_sha256=$(sha256sum "$manifest" | awk '{print $1}')
@@ -127,14 +186,17 @@ if [ -s "$last_stderr" ]; then
     exit 1
 fi
 expect_status 64 "$runner" --preview --yes
+expect_status 64 "$runner" --preview --retained-main
 expect_status 64 "$runner" --preview --image /tmp/image
 expect_status 64 "$runner" --execute
 expect_status 64 "$runner" --execute --yes --yes
+expect_status 64 "$runner" --execute --yes --retained-main --non-retained-pr-smoke
 expect_status 64 "$runner" --execute --yes --image
 expect_status 64 "$runner" --execute --yes --image /tmp/image --output /tmp/output
 expect_status 64 "$runner" --unknown
-expect_status 77 "$runner" --execute --yes \
+expect_status 77 "$runner" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output --expected-commit invalid \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity '1:2:a:b:character special file'
@@ -153,9 +215,18 @@ chmod 0700 "$argument_parser_fixture"
 canonical_commit=1111111111111111111111111111111111111111
 canonical_kvm_identity='1:2:a:b:character special file'
 
-expect_status 0 "$argument_parser_fixture" --execute --yes \
+expect_status 0 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+
+expect_status 0 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/feature/helper-smoke \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
@@ -163,58 +234,121 @@ expect_status 0 "$argument_parser_fixture" --execute --yes \
 expect_status 64 "$argument_parser_fixture" --execute --yes \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
     --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/feature/helper-smoke \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'retained evidence requires refs/heads/main' "$last_stderr" >/dev/null
+expect_status 77 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'main can never select non-retained PR smoke' "$last_stderr" >/dev/null
+expect_status 77 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/tags/not-a-branch \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'the expected source ref is not one branch ref' "$last_stderr" >/dev/null
+expect_status 64 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/feature/helper-smoke \
+    --expected-source-ref refs/heads/feature/substitution \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 77 "$argument_parser_fixture" --execute --yes --non-retained-pr-smoke \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/-unsafe \
+    --expected-host-uid 1000 \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+grep -F 'the expected source ref is not canonical' "$last_stderr" >/dev/null
+
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-kvm-gid 108 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
+    --expected-host-uid 1000 \
+    --expected-kvm-identity "$canonical_kvm_identity"
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
+    --image /tmp/image --output /tmp/output \
+    --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108
 
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
-expect_status 64 "$argument_parser_fixture" --execute --yes \
+expect_status 64 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity" \
     --expected-kvm-identity "$canonical_kvm_identity"
 
-expect_status 77 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid invalid \
     --expected-kvm-gid 108 \
     --expected-kvm-identity "$canonical_kvm_identity"
 grep -F 'the expected host UID is not canonical nonzero decimal' \
     "$last_stderr" >/dev/null
-expect_status 77 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 0 \
     --expected-kvm-identity "$canonical_kvm_identity"
 grep -F 'the expected KVM GID is not canonical nonzero decimal' \
     "$last_stderr" >/dev/null
-expect_status 77 "$argument_parser_fixture" --execute --yes \
+expect_status 77 "$argument_parser_fixture" --execute --yes --retained-main \
     --image /tmp/image --output /tmp/output \
     --expected-commit "$canonical_commit" \
+    --expected-source-ref refs/heads/main \
     --expected-host-uid 1000 \
     --expected-kvm-gid 108 \
     --expected-kvm-identity invalid
@@ -235,6 +369,13 @@ if command -v shellcheck >/dev/null 2>&1; then
 fi
 
 for exact_runner_text in \
+    '--retained-main' \
+    '--non-retained-pr-smoke' \
+    '--expected-source-ref refs/heads/BRANCH' \
+    '[ "$expected_source_ref" = refs/heads/main ]' \
+    '[ "$expected_source_ref" != refs/heads/main ]' \
+    '[ "$source_branch" = "$expected_source_branch" ]' \
+    'main can never run non-retained PR smoke' \
     '-machine q35,accel=kvm' \
     '-no-user-config -nodefaults' \
     '-device VGA,id=video0,bus=pcie.0,addr=0x1' \
@@ -245,6 +386,7 @@ for exact_runner_text in \
     "qemu_netdev='user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:22222-:22'" \
     '-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny' \
     '--no-hardlinks --depth 1 --no-tags --single-branch --branch main' \
+    '--branch "$expected_source_branch"' \
     'qemu-pidfd-supervisor.py' \
     'validate-helper-boundary-vm-environment-v1.sh' \
     'StrictHostKeyChecking=yes' \
@@ -264,10 +406,42 @@ for exact_runner_text in \
     'cargo fetch --locked' \
     'cargo build --locked --offline' \
     'proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"}' \
-    'post_image_sha512=$(sha512sum "$image_path"'
+    'post_image_sha512=$(sha512sum "$image_path"' \
+    '[ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]' \
+    'if [ "$proof_mode" = retained-main ]; then' \
+    'the non-retained PR smoke output directory is not empty' \
+    'PASS: non-retained helper-boundary PR smoke completed in the disposable Debian 13 KVM.'
 do
     grep -F -- "$exact_runner_text" "$runner" >/dev/null
 done
+
+success_console_start=$(grep -n -m 1 -F \
+    "settle_console || failed 'the bounded console log did not settle'" \
+    "$runner" | cut -d: -f1)
+success_console_end=$(grep -n -m 1 -F \
+    'post_image_sha512=$(sha512sum "$image_path"' "$runner" | cut -d: -f1)
+if [ -z "$success_console_start" ] || [ -z "$success_console_end" ] \
+    || [ "$success_console_start" -ge "$success_console_end" ]; then
+    printf '%s\n' 'the successful console-publication fence is missing or reordered' >&2
+    exit 1
+fi
+success_console_block=$temporary_directory/success-console-publication.sh
+sed -n "${success_console_start},$((success_console_end - 1))p" "$runner" \
+    >"$success_console_block"
+if [ "$(grep -Fc 'if [ "$proof_mode" = retained-main ]; then' \
+        "$success_console_block")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        "publish_console || failed 'the bounded console log could not be published atomically'" \
+        "$success_console_block")" -ne 1 ] \
+    || ! awk '
+        /if \[ "\$proof_mode" = retained-main \]; then/ { opened = NR }
+        /publish_console \|\| failed/ { published = NR }
+        /^fi$/ { closed = NR }
+        END { if (!(opened < published && published < closed)) exit 1 }
+      ' "$success_console_block"; then
+    printf '%s\n' 'successful console publication is not retained-main-only' >&2
+    exit 1
+fi
 if grep -F -- 'sudo -n prlimit --fsize=' "$guest_proof_fixture" >/dev/null \
     || grep -F -- 'prlimit --fsize=1048576:1048576 --' \
         "$guest_proof_fixture" >/dev/null; then
@@ -543,6 +717,412 @@ cmp -s "$console_log" "$published_console_log"
 test "$(find "$publication_output" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" \
     = vm-console.log
 
+# A failed non-retained proof may publish only enumerated privacy-safe category
+# and progress records. Exercise the reviewed parsers rather than test-only copies.
+branch_failure_functions=$temporary_directory/branch-failure-functions.sh
+{
+    sed -n '/^non_retained_proof_failure_reason_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_driver_phase_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_final_checkpoint_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_driver_phase() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_final_checkpoint() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_worker_confinement_diagnostic() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_production_launch_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
+} >"$branch_failure_functions"
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 12
+sh -n "$branch_failure_functions"
+# shellcheck disable=SC1090
+. "$branch_failure_functions"
+
+for non_retained_final_checkpoint in \
+    host-state structured-reporting cleanup-summary lifecycle-summary \
+    artifact-integrity source-integrity report-times report-generation \
+    report-validation publication-fence stage-retirement; do
+    non_retained_final_checkpoint_is_safe "$non_retained_final_checkpoint" || {
+        printf 'non-retained parser rejected fixed final checkpoint: %s\n' \
+            "$non_retained_final_checkpoint" >&2
+        exit 1
+    }
+done
+
+for non_retained_functional_phase in \
+    plan connect bind prepare shutdown ready release reconnect destroy \
+    second-cycle-plan second-cycle-bind second-cycle-prepare reuse \
+    second-cycle-destroy final-shutdown; do
+    for non_retained_functional_class in \
+        random protocol io timeout untrusted correlation unexpected-response; do
+        non_retained_functional_probe_failure_value_is_safe \
+            "$non_retained_functional_phase,$non_retained_functional_class" || {
+            printf 'non-retained parser rejected fixed functional value: %s,%s\n' \
+                "$non_retained_functional_phase" \
+                "$non_retained_functional_class" >&2
+            exit 1
+        }
+    done
+done
+for non_retained_functional_mutant in \
+    '' private,io prepare,private prepare,io,extra prepare/io; do
+    if non_retained_functional_probe_failure_value_is_safe \
+        "$non_retained_functional_mutant"; then
+        printf 'non-retained parser accepted functional mutant: %s\n' \
+            "$non_retained_functional_mutant" >&2
+        exit 1
+    fi
+done
+
+branch_failure_diagnostic=$temporary_directory/branch-proof.stderr.log
+branch_failure_privacy_sentinel='private-runtime-payload-must-not-escape'
+printf '%s\n%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-status-203,stage-publication' \
+    'live worker-identity proof failed: predicate rejected: worker-launch-status' \
+    >"$branch_failure_diagnostic"
+chmod 0600 "$branch_failure_diagnostic"
+expect_status 0 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke failure category: worker-launch-status' \
+    "$last_stderr" >/dev/null
+expect_status 0 report_non_retained_worker_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke worker launch diagnostic: run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-status-203,stage-publication' \
+    "$last_stderr" >/dev/null
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'branch failure diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=lifecycle-summary' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_final_checkpoint "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke final checkpoint: lifecycle-summary' \
+    "$last_stderr" >/dev/null
+test "$(wc -l <"$last_stderr")" -eq 1
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'final checkpoint exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=report-validation' \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=report-validation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_final_checkpoint "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=secret-publication' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_final_checkpoint "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-ready' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke failure category: production-launch-status'
+expect_status 0 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'non-retained helper-boundary PR smoke production launch diagnostic: functional-probe-ready'
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'production launch diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=prepare,unexpected-response' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'non-retained helper-boundary PR smoke production launch diagnostic: functional-probe-wait' \
+    'non-retained helper-boundary PR smoke functional client lease diagnostic: prepare,unexpected-response' \
+    >"$temporary_directory/expected-branch-functional-diagnostic"
+cmp -s "$temporary_directory/expected-branch-functional-diagnostic" "$last_stderr"
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'functional probe diagnostic exposed a private payload' >&2
+    exit 1
+fi
+
+while read -r functional_mutant_name functional_mutant_stage \
+    functional_mutant_value; do
+    printf '%s\n%s\n%s\n' \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=$functional_mutant_stage" \
+        "VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=$functional_mutant_value" \
+        'live worker-identity proof failed: predicate rejected: production-launch-status' \
+        >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_production_launch_diagnostic \
+        "$branch_failure_diagnostic"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'functional diagnostic mutant escaped: %s\n' \
+            "$functional_mutant_name" >&2
+        exit 1
+    fi
+done <<'EOF'
+private-phase functional-probe-wait private,io
+private-class functional-probe-wait prepare,private
+extra-field functional-probe-wait prepare,io,extra
+wrong-stage functional-probe-identity prepare,io
+EOF
+
+printf '%s\n%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=prepare,io' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=connect,io' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+# Missing, duplicate, malformed, mixed and private-key-bearing production
+# launch records fail closed without printing any captured payload.
+printf '%s\n' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=identity-process' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=publication' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=private-stage' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-cleanup' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    '-----BEGIN PRIVATE KEY-----' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-underlay' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+if grep -F -- '-----BEGIN PRIVATE KEY-----' "$last_stderr" >/dev/null \
+    || grep -F 'production launch diagnostic:' "$last_stderr" >/dev/null; then
+    printf '%s\n' 'production launch parser exposed private or invalid diagnostics' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=active-lock' \
+    'live worker-identity proof failed: predicate rejected: production-running-state' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+# An unclassified unexpected exit may expose exactly one fixed phase and no
+# captured payload. Missing, duplicate, invalid and mixed records fail closed.
+printf '%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-observation' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke driver phase: production-observation' \
+    "$last_stderr" >/dev/null
+test "$(wc -l <"$last_stderr")" -eq 1
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'driver phase exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n' "$branch_failure_privacy_sentinel" >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-secret-observation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-secret-observation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=final-verification' \
+    'live worker-identity proof failed: predicate rejected: production-retirement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    '-----BEGIN PRIVATE KEY-----' \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-launch' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_driver_phase "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+if grep -F -- '-----BEGIN PRIVATE KEY-----' "$last_stderr" >/dev/null \
+    || grep -F 'driver phase:' "$last_stderr" >/dev/null; then
+    printf '%s\n' 'driver phase parser exposed private or invalid diagnostics' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke failure category: worker-confinement' \
+    "$last_stderr" >/dev/null
+expect_status 0 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke worker confinement diagnostic: ambient' \
+    "$last_stderr" >/dev/null
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'worker confinement diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=bounding' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=control-group' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=private-record' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=private-record' \
+    'live worker-identity proof failed: predicate rejected: worker-confinement' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_worker_confinement_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+printf '%s\n' 'attacker-controlled diagnostic payload' >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'live worker-identity proof failed: predicate rejected: production-secret-leak' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_proof_failure_reason \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+branch_failure_link=$temporary_directory/branch-proof.stderr.link
+ln -s "$branch_failure_diagnostic" "$branch_failure_link"
+expect_status 1 report_non_retained_proof_failure_reason "$branch_failure_link"
+test ! -s "$last_stdout"
+test ! -s "$last_stderr"
+
+grep -F \
+    'report_non_retained_proof_failure_reason "$proof_stderr_log"' \
+    "$runner" >/dev/null
+grep -F \
+    'non-retained helper-boundary PR smoke failure category: unclassified' \
+    "$runner" >/dev/null
+grep -F \
+    'report_non_retained_driver_phase "$proof_stderr_log" || true' \
+    "$runner" >/dev/null
+grep -F \
+    'report_non_retained_final_checkpoint "$proof_stderr_log" || true' \
+    "$runner" >/dev/null
+grep -E \
+    '^[[:space:]]+report_non_retained_worker_launch_diagnostic([[:space:]]|$)' \
+    "$runner" >/dev/null
+grep -E \
+    '^[[:space:]]+report_non_retained_worker_confinement_diagnostic([[:space:]]|$)' \
+    "$runner" >/dev/null
+grep -E \
+    '^[[:space:]]+report_non_retained_production_launch_diagnostic([[:space:]]|$)' \
+    "$runner" >/dev/null
+grep -F \
+    'elif [ "$non_retained_failure_reason" = worker-confinement ]; then' \
+    "$runner" >/dev/null
+grep -F \
+    'elif [ "$non_retained_failure_reason" = production-launch-status ]; then' \
+    "$runner" >/dev/null
+
 # Early QEMU exits retain only canonical status fields plus the supervisor's
 # bounded QMP event record and stream-scanned stderr tail in the allowlisted diagnostic file.
 qemu_diagnostic_functions=$temporary_directory/qemu-diagnostic-functions.sh
@@ -724,7 +1304,16 @@ grep -Fx 'linked file must not be touched' "$scrub_link_target" >/dev/null
 for exact_workflow_text in \
     '  workflow_dispatch:' \
     '  contents: read' \
+    'id: source_selection' \
     'test "$SELECTED_REF" = refs/heads/main' \
+    'proof_mode=retained-main' \
+    'proof_mode=non-retained-pr-smoke' \
+    'test "$selected_branch" != main' \
+    'PROOF_MODE: ${{ steps.source_selection.outputs.proof_mode }}' \
+    'proof_mode_flag=--retained-main' \
+    'proof_mode_flag=--non-retained-pr-smoke' \
+    '"$proof_mode_flag"' \
+    '--expected-source-ref "$SELECTED_REF"' \
     'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
     'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
     'persist-credentials: false' \
@@ -755,7 +1344,12 @@ for exact_workflow_text in \
     'tests/helper/validate-helper-boundary-evidence-v1.sh' \
     'tests/helper/validate-helper-boundary-vm-environment-v1.sh' \
     "grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'" \
-    'VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}'
+    'VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}' \
+    "steps.source_selection.outputs.proof_mode == 'retained-main'" \
+    "steps.source_selection.outputs.proof_mode == 'non-retained-pr-smoke'" \
+    'name: Require a non-retained PR smoke PASS' \
+    'test "$GITHUB_REF" != refs/heads/main' \
+    'PASS: exact branch/SHA completed the non-retained disposable KVM smoke.'
 do
     grep -F -- "$exact_workflow_text" "$workflow" >/dev/null
 done
@@ -891,9 +1485,43 @@ fi
 verify_kvm_state_line=$(grep -n -m 1 -F \
     'name: Verify the KVM device and ACL remained unchanged' "$workflow" | cut -d: -f1)
 pass_upload_line=$(grep -n -m 1 -F 'name: Upload bounded helper-boundary evidence' "$workflow" | cut -d: -f1)
+failure_upload_line=$(grep -n -m 1 -F 'name: Upload bounded failure diagnostics' \
+    "$workflow" | cut -d: -f1)
+retained_gate_line=$(grep -n -m 1 -F 'name: Require a retained PASS' \
+    "$workflow" | cut -d: -f1)
+smoke_gate_line=$(grep -n -m 1 -F 'name: Require a non-retained PR smoke PASS' \
+    "$workflow" | cut -d: -f1)
 if [ -z "$verify_kvm_state_line" ] || [ -z "$pass_upload_line" ] \
-    || [ "$verify_kvm_state_line" -ge "$pass_upload_line" ]; then
+    || [ -z "$failure_upload_line" ] || [ -z "$retained_gate_line" ] \
+    || [ -z "$smoke_gate_line" ] \
+    || [ "$verify_kvm_state_line" -ge "$pass_upload_line" ] \
+    || [ "$pass_upload_line" -ge "$failure_upload_line" ] \
+    || [ "$failure_upload_line" -ge "$retained_gate_line" ] \
+    || [ "$retained_gate_line" -ge "$smoke_gate_line" ]; then
     printf '%s\n' 'the PASS artifact can be uploaded before exact KVM state comparison' >&2
+    exit 1
+fi
+pass_upload_fixture=$temporary_directory/pass-upload-step.yml
+failure_upload_fixture=$temporary_directory/failure-upload-step.yml
+smoke_gate_fixture=$temporary_directory/non-retained-smoke-step.yml
+sed -n "${pass_upload_line},$((failure_upload_line - 1))p" "$workflow" \
+    >"$pass_upload_fixture"
+sed -n "${failure_upload_line},$((retained_gate_line - 1))p" "$workflow" \
+    >"$failure_upload_fixture"
+sed -n "${smoke_gate_line},\$p" "$workflow" >"$smoke_gate_fixture"
+for retained_upload_fixture in "$pass_upload_fixture" "$failure_upload_fixture"; do
+    grep -F "steps.source_selection.outputs.proof_mode == 'retained-main'" \
+        "$retained_upload_fixture" >/dev/null
+    if grep -F 'non-retained-pr-smoke' "$retained_upload_fixture" >/dev/null; then
+        printf '%s\n' 'a retained upload step is reachable from PR smoke' >&2
+        exit 1
+    fi
+done
+grep -F "steps.source_selection.outputs.proof_mode == 'non-retained-pr-smoke'" \
+    "$smoke_gate_fixture" >/dev/null
+grep -F 'test "$GITHUB_REF" != refs/heads/main' "$smoke_gate_fixture" >/dev/null
+if grep -F 'uses: actions/upload-artifact@' "$smoke_gate_fixture" >/dev/null; then
+    printf '%s\n' 'the non-retained smoke gate uploads an artifact' >&2
     exit 1
 fi
 
@@ -920,4 +1548,4 @@ if [ "$uses_count" -ne 3 ]; then
 fi
 
 printf '%s\n' \
-    'PASS: helper-boundary VM preview, image provenance, KVM-only runner, and main-only workflow contracts are exact.'
+    'PASS: helper-boundary VM preview, retained-main, non-retained branch smoke, and KVM contracts are exact.'

@@ -51,9 +51,13 @@ confirmation/receipt binding, exact successful retries, replay/expiry, capacity 
 removal of permanent client Peer ID fields. Test-only exact evidence verifiers do not make a real
 probe producer.
 
-The production agent route state machine is not yet proven end to end. Helper `Prepare`, real
-two-leg probing, client ingress, and live relay/exit publication remain fail-closed. None of the
-tests above creates a WireGuard device or host route or satisfies a privileged acceptance case.
+The production agent route state machine is not yet proven end to end. The no-argument production
+helper can execute at most one live Client context at a time, containing exactly one Client-role
+WireGuard lease, through Bind, Prepare and Destroy. Activate, Commit, Probe, transport acquisition, real two-leg probing,
+client ingress, and live relay/exit publication remain fail closed. The unprivileged tests above
+create no WireGuard device or host route; the separate disposable gate below confines its network
+fixtures to private namespaces and does not satisfy an acceptance case without retained exact-main
+evidence.
 
 ## Helper-boundary evidence
 
@@ -82,6 +86,40 @@ standalone validator checks the report contract, not the authenticity of an arbi
 the gate also does not infer that a pre-existing binary was built from the observed commit. Retained
 evidence must therefore include the trusted disposable-VM job which first builds both binaries as
 an unprivileged user from that clean checkout and then runs the fixed producer without changing it.
+
+The production phase now runs one closed functional-client-lease probe as the staged agent. The
+root hook creates one fixed dummy underlay only inside the transient unit's `PrivateNetwork`
+namespace, then the probe registers an exact tag-35 intent and prepares one Client-role lease. At a
+fixed root-owned FIFO READY barrier, the source-pinned post hook first proves its own UID 0,
+agent-GID-only credentials, capabilities, no-new-privileges and seccomp state, then independently
+observes one direct helper child through descriptors retained by the parent. The exact parent launch is
+anchored independently by PID 1's typed `ExecStart`/`ExecStartEx` tuple, the root-owned mode-0500
+bind image metadata and staged-image SHA-256, `InvocationID`, `MainPID`, process starttime and exact
+status. Every probe also requires server `SO_PEERCRED` to equal that `MainPID`. The worker join
+requires every retained pidfd to name that child in both fdinfo PID fields and identify the same
+kernel object, every numeric proc-directory pin to identify that child, and every foreign netns pin
+to identify the same distinct namespace. One parent process-directory pin and namespace pin are
+duplicated to hook FDs 8 and 7. Descriptor-relative starttime and status brackets require exact
+PID/PPID/NSpid, one thread, dedicated credentials, empty groups, NNP/seccomp state and worker
+`CAP_NET_ADMIN` masks around the network readback. This relies on the launched helper's retained
+custody and authenticated child handshake; it does not claim ptrace-gated cross-credential
+`cmdline` or `exe` inspection. The worker namespace must
+contain only loopback and one UP WireGuard interface with the exact ownership-marker prefix, one
+global `/128`, a non-zero public key and listen port, no peer, and no firewall mark. The probe
+validates exact response correlation, opaque non-zero handles, the fixed `DirectAssigned` underlay
+address and the helper-returned kernel proof; the external observation deliberately does not print
+or independently byte-compare endpoint or key material.
+
+After one fixed release byte, the probe requires exact Destroy followed by an idempotent
+`existed=false` Destroy, then performs a second Prepare/Destroy cycle under the same helper runtime
+with a distinct context, handles and public key. The hook finally requires zero helper children,
+no descriptor-relative `stat` or `status` through the retained process-directory observer, no
+helper pidfd/process-directory/foreign-netns custody, no WireGuard object through the retained
+first-worker namespace observer, an empty systemd descriptor store, and a
+private network satisfying the fixed exact-one-loopback/no-default-route cleanup predicate after
+removing the dummy fixture. These checks prove a live, reusable, peerless Client lease and normal process-owned
+cleanup only. They do not prove activation, a peer handshake, routing, transport, a tunnel,
+crash/restart cleanup, package behavior, or a datapath.
 
 The guest does not wrap that complete root producer in one 1 MiB file-size limit: the reviewed
 helper and IPC-probe binaries are legitimately larger. Instead, each source must be one non-empty,
@@ -129,15 +167,28 @@ boundary and does not claim package behavior, restart recovery, `CleanupOwned`, 
 any A01--A15 result. AV1-09 remains Open until
 the exact committed gate passes on the required clean disposable VM and its report is retained.
 
-### Retained main-branch VM evidence
+### Manual non-retained branch smoke and retained main-branch VM evidence
 
-`.github/workflows/helper-boundary-evidence.yml` is an intentionally manual, post-merge evidence
-job. Start it with **Actions -> Helper boundary evidence -> Run workflow** and select `main`. The
-job rejects every selected ref other than `refs/heads/main`, checks out that exact revision without
-persisted GitHub credentials, and binds both the VM runner and the resulting report to
-`GITHUB_SHA`. Separate branch, pull-request, and local preview runs can be useful during
-development, but this retained-evidence workflow rejects them and they do not count as AV1-09
-evidence.
+`.github/workflows/helper-boundary-evidence.yml` is intentionally manual. Start it with
+**Actions -> Helper boundary evidence -> Run workflow** and select one branch. Exact
+`refs/heads/main` selects `retained-main`: the job checks out that exact revision without persisted
+GitHub credentials, binds the VM runner and report to `GITHUB_SHA`, revalidates the bounded output
+on the host, and uploads the allowlisted artifacts. A canonical non-main `refs/heads/*` selects
+`non-retained-pr-smoke`: the same exact branch/SHA disposable KVM proof and its environment/report
+validation run. On PASS every proof file is discarded and the output directory must be empty; the
+workflow uploads neither branch PASS artifacts nor branch failure diagnostics. This is manual branch selection, not an
+automatic `pull_request` trigger and not support for `refs/pull/*`. Only a retained exact-main PASS
+can count as AV1-09 evidence or change the alpha score.
+
+If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
+category (or `unclassified`) to job stderr. For `worker-launch-status` only, it may additionally emit
+one fixed structural classification of launch binding, terminal state and payload-free helper stage.
+If and only if the gate exits nonzero before its normal final reporting path and the generic category
+is consequently `unclassified`, the EXIT cleanup may additionally emit one fixed value-free driver
+phase: staging, worker launch, worker terminal observation, worker retirement, production launch,
+production observation, production retirement, or final verification. The runner requires exactly
+one allowlisted phase and suppresses missing, duplicate, malformed, mixed or privacy-unsafe records.
+It does not print or upload the proof diagnostic file.
 
 The job first verifies the exact canonical bytes and complete object in
 `tests/helper/debian13-amd64-image-v1.json`, and only then reads its HTTPS URL, filename, and
@@ -150,6 +201,8 @@ an exact process-scoped KVM authority boundary. In outline, with each value firs
 runner path made canonical and absolute, that boundary is:
 
 ```sh
+proof_mode_flag=--retained-main
+source_ref=refs/heads/main
 runner_uid=$(id -u)
 kvm_gid=$(stat -Lc '%g' /dev/kvm)
 kvm_identity=$(stat -Lc '%d:%i:%t:%T:%F' /dev/kvm)
@@ -167,13 +220,19 @@ sudo -n -- /usr/bin/setpriv \
   "$runner_path" \
   --execute \
   --yes \
+  "$proof_mode_flag" \
   --image "$VOLPAROSSA_VM_IMAGE" \
   --output "$VOLPAROSSA_EVIDENCE_OUTPUT" \
   --expected-commit "$GITHUB_SHA" \
+  --expected-source-ref "$source_ref" \
   --expected-host-uid "$runner_uid" \
   --expected-kvm-gid "$kvm_gid" \
   --expected-kvm-identity "$kvm_identity"
 ```
+
+For a non-main smoke, the workflow substitutes `--non-retained-pr-smoke` and the exact selected
+`refs/heads/<branch>` value. Execute mode requires exactly one proof mode and one matching canonical
+source ref; `main` can never select the non-retained mode.
 
 The driver uses two KVM boots of one disposable overlay. In the first boot, fixed provisioning
 commands use unrestricted egress for `apt` and `cargo fetch`; no destination allowlist is claimed.
@@ -184,10 +243,11 @@ pins a fresh Ed25519 guest host key before the first SSH probe; it never uses SS
 An identity-bound pidfd supervisor owns each QEMU lifetime, and byte-oriented collectors actively
 cap and drain the VM console and command output.
 
-The host revalidates a successful canonical report, its SHA-256, and the exact PASS-only environment
-record including the commit, image, guest versions, KVM, restricted network mode, and report hash
-crosslink. A successful retained artifact contains only the report, report hash, bounded environment
-record, VM console, and proof stderr, for 90 days. A caught VM/proof failure may retain only its
+In `retained-main` mode, the host revalidates a successful canonical report, its SHA-256, and the
+exact PASS-only environment record including the commit, image, guest versions, KVM, restricted
+network mode, and report hash crosslink. A successful retained artifact contains only the report,
+report hash, bounded environment record, VM console, and proof stderr, for 90 days. A caught
+VM/proof failure may retain only its
 bounded environment diagnostic, console, and proof stderr for diagnosis; before the guest proof,
 that stderr file may instead contain the canonical supervisor status and a private rolling tail of
 QEMU stderr. The identity-bound supervisor continuously drains the supervised stream, retains at

@@ -30,11 +30,13 @@ use volparossa_linux_uapi::{
 use crate::{
     deadline::{HardDeadline, wait_for_fd, wait_for_readable_fd},
     internal_protocol::{
-        AcquireTransportSocket, InternalEndpointRole, InternalProtocolError, InternalSocketAddress,
-        InternalTransportSocketKind, InternalWorkerRequest, InternalWorkerResponse,
-        InternalWorkerResult, MAX_INTERNAL_WORKER_FRAME, decode_request, decode_response,
-        encode_request, encode_response, internal_worker_request, transport_descriptor_binding,
-        transport_descriptor_source_released_binding, validate_response_for_request,
+        AcquireTransportSocket, DeadlineBoundWorkerRequest, InternalEndpointRole,
+        InternalProtocolError, InternalSocketAddress, InternalTransportSocketKind,
+        InternalWorkerRequest, InternalWorkerResponse, InternalWorkerResult,
+        MAX_INTERNAL_WORKER_FRAME, decode_deadline_bound_request, decode_request, decode_response,
+        encode_deadline_bound_request, encode_request, encode_response, internal_worker_request,
+        transport_descriptor_binding, transport_descriptor_source_released_binding,
+        validate_response_for_request,
     },
     worker_sandbox::PinnedWorkerNetworkNamespace,
 };
@@ -589,7 +591,9 @@ pub(crate) fn send_credential_worker_request_with_deadline<S: AsFd>(
     deadline: HardDeadline,
 ) -> Result<(), WorkerTransportError> {
     deadline.ensure_remaining()?;
-    let encoded = encode_request(request).map_err(protocol_error)?;
+    let monotonic_deadline_ns = deadline.monotonic_expiry_nanos()?;
+    let encoded =
+        encode_deadline_bound_request(request, monotonic_deadline_ns).map_err(protocol_error)?;
     send_credential_record_with_deadline(channel, encoded.as_slice(), deadline)?;
     Ok(())
 }
@@ -602,7 +606,7 @@ pub(crate) fn send_credential_worker_request_with_deadline<S: AsFd>(
 pub(crate) fn receive_credential_worker_request<S: AsFd>(
     channel: &S,
     expected: ExpectedUnixCredentials,
-) -> Result<InternalWorkerRequest, WorkerTransportError> {
+) -> Result<DeadlineBoundWorkerRequest, WorkerTransportError> {
     let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
     receive_credential_worker_request_with_deadline(channel, expected, deadline)
 }
@@ -612,7 +616,7 @@ pub(crate) fn receive_credential_worker_request_with_deadline<S: AsFd>(
     channel: &S,
     expected: ExpectedUnixCredentials,
     deadline: HardDeadline,
-) -> Result<InternalWorkerRequest, WorkerTransportError> {
+) -> Result<DeadlineBoundWorkerRequest, WorkerTransportError> {
     deadline.ensure_remaining()?;
     let encoded = receive_credential_record_with_deadline(
         channel,
@@ -620,7 +624,7 @@ pub(crate) fn receive_credential_worker_request_with_deadline<S: AsFd>(
         expected,
         deadline,
     )?;
-    let request = decode_request(&encoded).map_err(protocol_error)?;
+    let request = decode_deadline_bound_request(&encoded).map_err(protocol_error)?;
     deadline.complete(request).map_err(Into::into)
 }
 
@@ -1508,7 +1512,9 @@ mod tests {
 
         send_credential_worker_request(&parent, &request).expect("typed request send");
         assert_eq!(
-            receive_credential_worker_request(&worker, expected).expect("typed request receive"),
+            receive_credential_worker_request(&worker, expected)
+                .expect("typed request receive")
+                .request,
             request
         );
 
@@ -1551,6 +1557,40 @@ mod tests {
             send_credential_worker_response(&worker, &request, &success, None),
             Err(WorkerTransportError::Invalid)
         ));
+    }
+
+    #[test]
+    fn credentialed_request_carries_the_same_nonrefreshable_parent_deadline() {
+        let expected = current_expected_credentials();
+        let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        let parent_deadline =
+            HardDeadline::after(Duration::from_millis(200)).expect("parent deadline");
+        let expected_wire_deadline = parent_deadline
+            .monotonic_expiry_nanos()
+            .expect("parent wire deadline");
+
+        send_credential_worker_request_with_deadline(&parent, &request, parent_deadline)
+            .expect("deadline-bound request send");
+        let received = receive_credential_worker_request(&worker, expected)
+            .expect("deadline-bound request receive");
+        assert_eq!(received.request, request);
+        assert_eq!(received.monotonic_deadline_ns, expected_wire_deadline);
+
+        thread::sleep(Duration::from_millis(5));
+        let child_deadline = HardDeadline::from_monotonic_expiry_nanos(
+            received.monotonic_deadline_ns,
+            WORKER_IPC_TIMEOUT,
+        )
+        .expect("bounded child deadline");
+        assert_eq!(
+            child_deadline
+                .monotonic_expiry_nanos()
+                .expect("child wire deadline"),
+            expected_wire_deadline
+        );
+        assert!(child_deadline.expires_at() <= parent_deadline.expires_at());
     }
 
     #[test]

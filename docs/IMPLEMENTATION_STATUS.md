@@ -90,7 +90,7 @@ single clean-build A01--A15 run; the score is not a release claim.
 - [ ] `volparossa` CLI implements every command in the master specification.
 - [ ] Unprivileged `volparossa-agent` owns control-plane, selection, sessions, and local metrics.
 - [ ] Minimal `volparossa-helper` owns only allowlisted privileged network operations; v3
-  has a bounded typed external state machine plus a disconnected child bootstrap that applies and
+  has a bounded typed external state machine plus a child bootstrap that applies and
   independently verifies NEWNET, pre-barrier NNP plus a fixed descendant-and-namespace-transition
   denying seccomp filter, a parent-pinned pre-drop namespace, exact descriptors and one task, an
   exact dedicated non-root UID/GID with empty supplementary groups, exact capability reduction,
@@ -103,9 +103,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   namespace-pin barrier, including post-Ready and across exec. After the parent has independently
   observed the final sandbox and sent Accepted, the child disables and reads back `PR_SET_DUMPABLE`
   before Ready or any operational request; the fixed service and transient live-proof driver also
-  set `LimitCORE=0`. It has no production caller and
-  production deliberately returns
-  `Unavailable`. The package declares a locked, group-isolated `volparossa-worker`, pins its numeric
+  set `LimitCORE=0`. The production server now uses it only for a one-Client/one-lease
+  functional-alpha Prepare/Destroy backend; Activate, Probe, transport and datapath operations
+  deliberately return `Unavailable`. The package declares a locked, group-isolated `volparossa-worker`, pins its numeric
   identity at startup, and first binds unique local passwd/group names and numeric IDs to exact
   name- and number-based NSS results. Only the canonical `files` or `files systemd` order is
   accepted for passwd/group/shadow and optional initgroups; service group sets must exactly match
@@ -114,9 +114,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   `!`, the worker account expiry is exactly `1`, and root-owned metadata is not writable by either
   service identity, with group read limited to the resolved
   `shadow` group. The bounded zeroizing read cannot reallocate hashes. This is still not complete isolation or
-  context cleanup: disposable Debian 13 live-root proof of the identity transition, parent-signal
-  and runtime-path denials, pre-filter process-tree state and unchanged host state is outstanding;
-  retirement also owns only the exact leader. A preview-first root driver now stages the real
+  context cleanup: a retained exact-main Debian 13 live-root PASS for the identity transition,
+  parent-signal and runtime-path denials, pre-filter process-tree state and equal enumerated host-state
+  fences is outstanding; retirement also owns only the exact leader. A preview-first root driver now
+  stages the real
   component in a transient `PrivateNetwork` systemd unit with synthetic read-only account overlays,
   a private `/run`, the exact seven-capability parent set, exact singleton staged-agent
   supplementary-group attestation (so inherited host-root groups fail closed), confirmed leader
@@ -134,8 +135,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   proof of the exact marker and a nonzero current ID. Remaining ambiguity causes zero unit mutation
   and requires discarding the disposable VM. After that first unit is collected, the same driver
   now requires its cgroup to be absent before reusing the random unit name with a different marker
-  and `InvocationID` for the true argumentless production server. A fixed, read-only probe then
-  proves two same-process runtime binds, bounded frame and canonical-wire rejection, and independent
+  and `InvocationID` for the true argumentless production server. A fixed, closed-mode probe first
+  proves two same-process read-only runtime binds, bounded frame and canonical-wire rejection, and
+  independent
   wrong-UID, wrong-primary-GID and root-peer rejection after each peer has passed Unix DAC. Every
   probe pins the server's `SO_PEERCRED` PID/GID to the exact unit `MainPID`/agent GID and brackets one
   socket inode. The retained-evidence producer now stages the non-empty helper and IPC probe under
@@ -164,6 +166,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   bracketing nft observations. Raw table names and rules remain in the root-only stage; retained
   records contain privacy-safe digests and diagnostics only fixed labels. Equality proves stable
   observations at the two fences, not continuous stability between them.
+  The same closed probe then creates one fixed dummy underlay only inside the production unit's
+  `PrivateNetwork`, registers an exact tag-35 Client intent and holds its first Prepare at a fixed
+  root-owned FIFO READY barrier. The hook externally checks the direct child's executable, dedicated
+  identity, separate network namespace and live peerless WireGuard interface without publishing
+  keys, ports, handles or runtime IDs. Exact Destroy plus an idempotent absent retry is followed by a
+  second distinct Prepare/Destroy cycle under the same runtime to prove capacity reuse. Final checks
+  require zero helper children, no WireGuard in the retained first-worker namespace, no helper FD
+  retaining it or any foreign worker network namespace, an empty descriptor store and the fixed
+  exact-one-loopback/no-default-route cleanup predicate after fixture removal.
   A successful execute-mode run now emits one bounded canonical helper-boundary evidence-v1
   JSON document on stdout only after separate observed clean-source and executed-artifact
   bookends, both distinct invocations, retirement, equal digests for the exact enumerated host
@@ -171,16 +182,19 @@ single clean-build A01--A15 run; the score is not a release claim.
   output is confined to stderr. It does not infer that a pre-existing binary was built from the
   observed commit. Its validator rejects reordered or missing
   checks and malformed or internally inconsistent false-PASS combinations; it is not a
-  cryptographic attestation of who ran the producer. A manual `main`-only workflow and a
+  cryptographic attestation of who ran the producer. A manual two-mode workflow and a
   preview-first KVM/QEMU driver now pin a manually reviewed Debian image and its checksum provenance,
   transfer only a clean tracked source clone, fetch locked dependencies in a provisioning boot,
   then deny proof-boot egress and build offline. Ephemeral SSH host identity, pidfd-bound QEMU
   cleanup, active log bounds, exact environment/report crosslinks and post-use image hashing fail
-  closed; their unprivileged contracts pass. The expanded live driver has not yet succeeded in a
-  trusted job which builds the artifacts from one unchanged clean commit immediately before the
-  required disposable Debian 13 VM proof,
-  validates no installed package or shipped-unit restart behavior, and closes no checkbox or
-  scorecard row until durable live evidence exists.
+  closed; their unprivileged contracts pass. Selecting `main` requires retained, host-revalidated
+  evidence; selecting one canonical non-main branch runs the same exact branch/SHA proof as
+  `non-retained-pr-smoke`. On PASS it validates the proof internally, discards every proof file and
+  requires an empty output directory; the workflow uploads neither branch PASS artifacts nor branch
+  failure diagnostics. This is manual branch selection rather than an automatic pull-request trigger. No
+  retained exact-main job has yet succeeded for the expanded live driver. It validates no installed
+  package or shipped-unit restart behavior, and a non-retained branch PASS closes no checkbox or
+  scorecard row.
   The private capture and production-lock metadata predicates now use the numeric regular-file
   type plus exact owner, mode and single-link fields, so intentionally empty successful stderr,
   validator and lock files are not misclassified by GNU `stat` as a different type. Content
@@ -255,12 +269,141 @@ single clean-build A01--A15 run; the score is not a release claim.
   after adoption and again before mapping the byte-exact stage. Nonempty or malformed stdout,
   `not-found`, marker/ID drift and failed observations remain generic. This exception cannot pass
   the proof: success still requires status zero, exact JSON, empty client stderr and the exact
-  successful terminal tuple. None of the failed runs is PASS evidence; the score remains **11/100**
-  and AV1-09 remains Open until a new exact-main retained run succeeds.
+  successful terminal tuple. A non-retained helper-boundary branch smoke
+  [run 33270993243](https://github.com/VOLPAROSSA/volparossa/actions/runs/33270993243) at
+  `b4eb5eed8ee601e7f63ff71f45d7a9b2244feb61` then reached the exact bounded diagnostic
+  `terminal-failed-exit-status-216,stage-empty`, still classified as `worker-launch-status`.
+  systemd's status 216 is `EXIT_GROUP`: v257 resolves static `Group=` credentials before creating
+  the unit mount namespace, while the gate deliberately selected a staged GID absent from the host
+  account database. Its private `/etc/group` bind was therefore necessarily too late. Both
+  transient services now give PID 1 only host-resolvable root/root credentials and use the exact
+  validated root-owned `/usr/bin/setpriv` trampoline, after namespace construction, to install the
+  raw staged primary and singleton supplementary GID before executing the helper in the same
+  MainPID. The diagnostic helper parent contract continues to attest the final identity,
+  capabilities, no-new-privileges state and seccomp state. The production hook independently
+  requires and repeatedly revalidates all four UID/GID fields, its singleton group, NNP, seccomp
+  mode and bounded filter count, and all five capability masks against the exact seven-capability
+  set. The next non-retained branch smoke
+  [run 33272380911](https://github.com/VOLPAROSSA/volparossa/actions/runs/33272380911) at
+  `4dad3621fe9ec43ac23de432f57f6b0b7a3582ca` ran the disposable VM in
+  [job 99153099364](https://github.com/VOLPAROSSA/volparossa/actions/runs/33272380911/job/99153099364)
+  and reached the helper-emitted fixed category `worker-helper-worker-spawn`. This proves that PID 1
+  executed the staged helper after the `setpriv` transition and that the helper passed its exact
+  parent contract plus production-runtime preparation before its internal worker failed. Exact
+  systemd v257.13 source identifies the deterministic incompatibility: `RestrictSUIDSGID=yes`
+  installs a separate seccomp filter that returns `ENOSYS` for every `openat2(2)` call because its
+  mode is inside the indirect `open_how` argument. The worker parent intentionally uses rustix's
+  non-fallback `openat2` immediately: ordinary process records and cgroup paths use
+  `RESOLVE_BENEATH`, `NO_MAGICLINKS` and `NO_SYMLINKS`, while only the fixed `exe` and `ns/cgroup`
+  procfs magic links are deliberately followed relative to the already pinned exact process
+  directory. The rejection therefore fails closed instead of silently weakening either resolution
+  contract. The shipped helper and both transient helper
+  profiles now explicitly set and read back `RestrictSUIDSGID=no`; the doctor makes this exception
+  helper-specific, while the agent and native MPQUIC services retain `yes`. Compensating boundaries
+  remain the typed path-free helper protocol, `NoNewPrivileges=yes`, strict filesystem protection,
+  fixed host-visible writable runtime paths, private transient temporary filesystems (including a
+  `nosuid,noexec` `/run`), `UMask=0077`, and the absence of `CAP_CHOWN`, `CAP_FSETID` and
+  `CAP_SETFCAP` from the helper capability set. The resulting non-retained branch smoke
+  [run 33273482691](https://github.com/VOLPAROSSA/volparossa/actions/runs/33273482691) at
+  `7f23bc855b7f9922f9b055cb95098394d913313c` ran the disposable VM in
+  [job 99156047492](https://github.com/VOLPAROSSA/volparossa/actions/runs/33273482691/job/99156047492)
+  and advanced to the fixed first-failure category `worker-confinement`. The earlier ordered
+  predicates therefore prove that the diagnostic helper completed its internal live-worker proof,
+  published both exact records and left two descriptors in PID 1's store. The retained category
+  intentionally did not reveal which of the capability bounding set, ambient capability set,
+  private-network flag or exact control-group readback failed, so no production correction is
+  inferred from it. The gate now retains only the first matching fixed subcategory (`bounding`,
+  `ambient`, `private-network` or `control-group`) and the non-retained driver exposes that label
+  only when the generic first failure is exactly `worker-confinement`; missing, duplicated,
+  malformed and non-allowlisted diagnostic records expose nothing. None of the failed runs is PASS
+  evidence. The follow-up non-retained branch smoke
+  [run 33274272679](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679) at
+  `80e0dd077ceab4c8c8a33590a83299e179dde10f` ran the disposable VM in
+  [job 99158142816](https://github.com/VOLPAROSSA/volparossa/actions/runs/33274272679/job/99158142816)
+  and retained the exact `control-group` subcategory. The worker's preceding internal live proof had
+  already pinned the helper parent and worker to the same cgroup path and inode while both existed.
+  The external manager observation happened only after the deliberately retained
+  `Type=exec` unit reached `active (exited)`: systemd had then released the empty service cgroup and
+  returned an empty `ControlGroup`, even though the unit metadata remained loaded. This was a
+  terminal evidence-contract defect, not evidence of incorrect live placement. The diagnostic
+  transient unit now explicitly selects `system.slice`; after terminal state the gate requires the
+  manager's `ControlGroup` to be exactly empty and `Slice` to be exactly `system.slice`, then derives
+  the fixed
+  `/system.slice/<exact-random-unit-name>` only for bounded post-retirement cgroup-absence checks.
+  The production transient unit also selects and reads back exact `Slice=system.slice`, remains
+  running during observation, and still requires exact live
+  `ControlGroup=/system.slice/<exact-random-unit-name>` readback. The next non-retained branch smoke
+  [run 33275030601](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601) at
+  `20f8a121f7aa020450587251dad9de66ec7738fc` ran the disposable VM in
+  [job 99160142810](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275030601/job/99160142810)
+  but exited with shell status 2 before the fixed final failure line, leaving only `unclassified`.
+  Static review found two production-observation paths capable of masking their fixed predicate:
+  missing or unsafe `unit.identity` could leave its later retirement executable operand unset under
+  `set -u`, and redirection failure on special builtin `exec` could terminate the shell rather than
+  enter its recorded lock-release failure branch. The identity fields now start empty and the probe
+  uses ordinary-failure `command exec`. The EXIT cleanup also emits one fixed value-free monotonic
+  phase only when a nonzero exit occurs before normal final reporting, without changing original or
+  cleanup status; branch smoke may expose that phase only with `unclassified` and rejects missing,
+  duplicate, malformed, mixed or privacy-unsafe records. This run is not PASS evidence. The score
+  remains **11/100** and AV1-09 remains Open until a new exact-main retained run succeeds. The next
+  non-retained branch smoke
+  [run 33275945986](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986) at
+  `38ee44a81991f660168a76342584416d04a6ef5d` ran the disposable VM in
+  [job 99162565524](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986/job/99162565524)
+  and reached the fixed first failure `production-launch-status`. Production service stdout and
+  stderr intentionally remained null, so this result does not identify which fixed `ExecStartPost`
+  assertion failed. The start hook now maintains one fixed monotonic allowlist spanning combined
+  preflight/runtime validation, helper identity, active-lock proof, each protocol-probe group,
+  functional underlay, probe-ready, worker observation, probe finish, cleanup and final publication.
+  Any failed start atomically writes at most one root-owned, mode-0600, single-link
+  `start.failure`; every hook descriptor open and close uses ordinary-failure `command exec`, so a
+  redirection failure reaches that record instead of terminating the shell as a special builtin.
+  The live gate parses an exact canonical record only when its first failure remains
+  `production-launch-status`, and the branch runner exposes only the fixed stage paired with that
+  exact category. Missing, duplicate, malformed, mixed and privacy-unsafe records expose no stage;
+  raw hook messages and service streams remain unavailable. Run 33275945986 is not PASS evidence,
+  so the score remains **11/100** and AV1-09 remains Open.
+  Exact branch [run 33278664815](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815)
+  at `b050fe576ebd2e77cc4d3c871dad22f9d91e267b` then ran the disposable VM in
+  [job 99169908991](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815/job/99169908991)
+  and retained `production-launch-status` with diagnostic `identity-command`. That failed run is
+  not PASS evidence. Static reproduction identified an evidence defect: the separately confined
+  root hook cannot honestly read the non-dumpable staged-agent process's `/proc/<pid>/cmdline` or
+  `exe` magic link without ptrace-equivalent authority. The proof does not add `CAP_SYS_PTRACE` or
+  a private-manager bind. Instead, `identity-launch` reads both systemd v257 `ExecStart` and
+  `ExecStartEx` over the policy-mediated system bus and requires their exact ten-field signatures,
+  empty/false flags, running timestamps, `MainPID`, and the exact
+  `/usr/bin/setpriv --regid=<agent-gid> --groups=<agent-gid> --
+  /run/volparossa-helper-production` tuple. `identity-birth` binds that command to the root-owned,
+  mode-0500, single-link helper image: it records metadata plus one SHA-256 that must equal the
+  driver's fenced staged digest, while later checks re-read metadata instead of repeatedly hashing
+  the roughly 78 MiB image. The manager `InvocationID` and `MainPID`, canonical
+  `/proc/<pid>/stat` starttime, exact process-status record, second starttime, image metadata,
+  `MainPID`, and `InvocationID` form one forward/reverse replacement and PID-reuse bracket. Every
+  authenticated probe still requires server `SO_PEERCRED` to equal that exact `MainPID` and is
+  bracketed by the complete identity artifact. Retirement distinguishes the old process from PID
+  reuse by starttime and fails closed when an extant proc record becomes unreadable. The worker
+  observation likewise makes no cross-credential executable claim. Source-pinned
+  `ExecStartPost`/`ExecStopPost` commands now enter through `setpriv` with UID 0 and all GID/group
+  fields equal to the agent GID; each hook validates that identity, the helper capability mask,
+  no-new-privileges and seccomp state. This makes parent FD observation use matching procfs
+  credentials without `CAP_SYS_PTRACE`. The hook then requires every parent pidfd fdinfo `Pid` and
+  `NSpid` to equal the one direct child, all pidfds to identify one kernel object, every retained
+  numeric proc directory to identify that child, and every foreign netns FD to identify one
+  distinct namespace. Parent-owned process-directory and namespace pins are duplicated to hook FDs
+  8 and 7. Descriptor-relative starttime/status brackets require exact PID, PPid, NSpid,
+  single-thread state, dedicated credentials, empty groups, NNP, seccomp/filter count and worker
+  capability masks around the WireGuard readback. After Destroy, the pinned proc directory must
+  expose no `stat` or `status`, the parent must retain no pidfd/proc-dir/foreign-netns custody, and
+  the pinned namespace must contain no WireGuard object before observer closure. The root-owned
+  setgid proof directory keeps every mode-0600 artifact root:root. The post-hook command remains a
+  source contract plus exact self-status check rather than a separately typed PID-1 readback. A
+  fresh exact-main KVM PASS remains
+  required; this correction does not raise the **11/100** score or close AV1-09.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
-  live root integration remains outstanding.
+  retained exact-main live-root integration evidence remains outstanding.
 - [ ] Dormant helper tags 35/28 register one exact runtime-global Prepare intent and reconcile only
   an expired same-runtime lineage. HelperClient uses one authenticated stream and one absolute
   five-second budget for each Bind-plus-operation sequence; post-Prepare-write failures transfer
@@ -273,8 +416,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   mismatch and missing evidence quarantine, target-only cleanup never removes
   Activated/Committed state, and exact retries re-evaluate a capped 1024-entry runtime-lifetime
   `Absent` ledger. There is no tombstone ACK; tag 28 retries exact Pending/Owned cleanup, while tag 29
-  is an independent process-wide operation outside per-route reconciliation. Production Prepare
-  remains `Unavailable`, and no production manager calls this path. A boot-scoped, secret-free
+  is an independent process-wide operation outside per-route reconciliation. The production server
+  can dispatch the one-Client functional-alpha Prepare backend, but no production manager calls this
+  path. A boot-scoped, secret-free
   canonical/CAS ownership store and actor transitions have temp-directory tests; the production
   wrapper has explicit composition and ordering tests. Production opens and locks the actor after
   fixed runtime identity/directory validation but before cleanup-token publication, stale-socket
@@ -356,7 +500,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   Adversarial fake-backend tests cover factory/poll panic, caller cancellation, missing-binding
   recovery without stale-owner substitution, overflow, completion/deadline substitution,
   `CleanupIncomplete` quarantine, shutdown correlation, and wrong/late Acquire descriptor closure
-  before exact Destroy. The disconnected `WorkerCoordinator` now carries one absolute deadline from
+  before exact Destroy. `WorkerCoordinator` carries one absolute deadline from
   pre-PLAN admission through request, response, optional Acquire FD, liveness and COMMIT; expiry
   before PLAN leaves no state, late completion cannot commit, and a late installed FD is closed.
   This is a success/COMMIT acceptance boundary rather than a wall-clock return guarantee because
@@ -502,7 +646,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   otherwise resource/key state is retained as `CleanupIncomplete` for Destroy. Destroy without an
   adopted lease returns `NotFound`, not kernel-absence evidence. Successful internal Prepare,
   Activate, Probe and MPTCP endpoint responses must preserve exact request order and identity;
-  engine Prepare proof also rejects
+  each credentialed request now carries the parent's fixed absolute Linux `CLOCK_MONOTONIC`
+  expiry in a canonical envelope, and the child reuses a no-later projection through mutation and
+  response instead of refreshing a five-second budget. The affine `MayOwnPrepare` token now has one
+  canonical durable-resource projector for path, role, `/128`, expiries and ownership alias; it
+  still has no production durable-journal dispatch caller. The engine Prepare proof also rejects
   duplicate public keys or public endpoints before affine handles can be paired. A worker
   `CleanupIncomplete` result now
   quarantines and detaches that exact generation instead of caching an apparently stable failure.
@@ -514,14 +662,32 @@ single clean-build A01--A15 run; the score is not a release claim.
   not change it. Owner-sensitive kernel entry points accept only that typed resource and reject any
   non-exact marker. The underlay parser independently enforces exact helper grammar and interface
   binding and rejects malformed, legacy, or mismatched helper aliases in pure tests. The marker is
-  evidence rather than current journal-phase or cleanup authority and has no production
-  parent-dispatch call site, so these primitives remain disconnected.
-  Production still installs only the `Unavailable` backend. The child operation remains private and
-  dormant: parent birth-link creation/movement, production request-path issuance/arming and dispatch,
-  restart reaping and live datapath evidence are absent. Production adapter wiring, durable
-  pidfd/network-namespace custody and recovery, and the separate Add/Remove MPTCP endpoint seam
-  remain required; AV1-09, AV1-10 and AV1-11, the 11/100 score, and every datapath or acceptance
-  checkbox remain unchanged.
+  evidence rather than current journal-phase or cleanup authority.
+  The production server now installs a crate-private functional-alpha backend for exactly one
+  Client context containing exactly one Client-role lease. Before mutation it selects one
+  consistent direct underlay through bounded read-only state, then opens a process-owned
+  coordinator, initializes the authenticated child, exclusively creates the helper-derived
+  WireGuard birth link under a separate non-cloneable live owner at one deterministic high
+  ifindex in the parent, proves the provisional DOWN name/kind identity, sets and re-proves the
+  exact durable alias by that retained index, and moves it without renumbering into the pinned
+  child `NEWNET`. The outer deadline reserves separate response-reconciliation and cleanup tails.
+  Child Prepare supplies only the
+  correlated kernel public key/port proof; the response adds the selected direct-underlay IP.
+  Destroy dispatches the exact child operation and confirms worker termination, reap and registry
+  purge before success. A server-owned driver schedules cancellation-safe exact expiry cleanup once
+  per second without waiting for another agent request; execution is serialized behind earlier
+  operations. It immediately retries cleanup-pending orphan preparations once it owns that gate,
+  retries quarantined lineages on later ticks, and makes unexpected driver exit fatal. It is stopped
+  and joined before engine shutdown; shutdown succeeds only for empty backend state plus confirmed
+  coordinator cleanup. The public `HelperEngine::new` remains fully `Unavailable`.
+  This narrow backend has no Activate, Probe, peer/routing, transport or datapath operation and no
+  durable journal/systemd custody or crash/restart recovery. The committed disposable KVM producer
+  now exercises the no-argument server, first live peerless Client lease, exact/idempotent Destroy
+  and a second capacity-reuse cycle entirely in private namespaces. No retained exact-main PASS
+  exists yet, so this implemented gate is not earned acceptance evidence. Durable
+  pidfd/network-namespace recovery and the separate Add/Remove MPTCP endpoint seam remain required;
+  AV1-09, AV1-10 and AV1-11, the 11/100 score, and every datapath or acceptance checkbox remain
+  unchanged.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
 - [ ] systemd services use minimum capabilities and restrictive sandboxing; the shipped helper unit
   and doctor contract now require exactly the reviewed seven-capability bootstrap set
@@ -583,13 +749,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   read-only restart-classification boundary plus dormant publication/removal foundation, not
   composed production adoption, restart settlement, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
-  exists, but staged-package and
-  disposable Debian 13 live-root execution remain outstanding, and the final worker proof permits
-  only `CAP_NET_ADMIN`.
+  exists and the production-server phase of the committed disposable driver now exercises one normal
+  functional worker lifetime. Staged-package validation and a retained exact-main Debian 13 PASS
+  remain outstanding, and the final worker proof permits only `CAP_NET_ADMIN`.
 - [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
-  but live namespace/kernel cleanup proof does not.
-- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v3 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. The disconnected coordinator duplicates the already attested worker namespace pin affinely before this Acquire request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. Production still returns `Unavailable` before network work; committed child Acquire dispatch, datapath adoption and live route proof remain.
+  and the disposable production-server gate covers normal exact Destroy, worker reap/purge and
+  namespace/link release. Forced helper crash/termination cleanup and restart recovery remain
+  without live evidence.
+- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v3 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. The still-disconnected Acquire path duplicates the already attested worker namespace pin affinely before this request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. Production still returns `Unavailable` for Acquire before socket work; committed child Acquire dispatch, datapath adoption and live route proof remain.
 - [ ] Native MPQUIC API v6 preflights an exact role/process lifetime, targets every later operation to that instance, requires nonce plus canonical-request digest response correlation, and consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero otherwise. Start requests bind reservation/finalize IDs derived from the signed scope, bearer commitment, certificate digest, and both process instances; Rust and C share exact request/descriptor hash vectors and independently reject bearer/commitment mismatch. Native samples BOOTTIME before REALTIME, maintains a monotone wall floor, converts accepted wall expiry once to a BOOTTIME deadline, and fails closed on clock failure, regression, or overflow. A fixed 128-record process-local ledger has no live eviction, rejects exact pair replay and half-key scope reuse, permits only byte-identical live client retries, and tombstones stop, expiry, and valid exit attempts before the dormant backend boundary. Rust and two independent C boundaries enforce server `10.76.0.1/32`, client `10.76.0.2/32` through `10.76.0.254/32`, optional client `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`, and MTU 1280--1420. The native client deep-copies one assignment, permits only an identical active duplicate, exposes it only after `ESTABLISHED`, enforces outbound source and reverse-destination ownership, and wipes it on fatal transport failure. Focused tests cover these clock/replay/capacity and assignment-state rules, exact current-path projection with retired closed records only, typed terminal reverse-queue overflow, distinct framed exit nonces, stale-instance without hidden retry, response/assignment shape, socket tuple/flag checks, binding and ownership behavior, digest-failure FD cleanup, stream fragmentation with exactly-one ancillary transfer, incomplete/late/extra descriptors, timeout cleanup, and the dormant exit runtime closing its listener before `exit_listener_orchestration_unavailable`. The clean full-graph API-v6 ASan+UBSan gate passes. Peer-control v4 retains separate zeroizing, non-cloneable one-shot client/exit authorizations. Isolated native foundations now model one bounded, externally serialized exit session and validate the leaf identity in a bounded PEM certificate chain against its private key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval, canonical complete-leaf DER digest, and DER SPKI digest. They have no runtime caller and do not perform trust-chain validation. Native still does not verify the signed bundle, cache general request nonces, or retain ledger state across restart; production also lacks a preverified affine handoff through the agent, separate role service identities/sockets, exact helper-derived millisecond-to-trusted-interval conversion, a fixed independent Rust/C DER-SPKI vector, parser fuzzing, server-side pool allocation/uniqueness/lifetime binding plus exact-namespace assigned-address proof, disposable-topology evidence, trusted helper provenance, and the actual exit backend, so route setup and the launcher remain blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 
@@ -836,12 +1004,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   exit-participating disposable probe producer exist; only an explicit test-only evidence verifier
   reaches the subsequent helper phases in tests.
 - [ ] The v3 lease API exposes only opaque handles and public endpoint material and has no private-key
-  input/output. Production obtains no WireGuard lease because `HelperEngine::new` returns
-  `Unavailable` before endpoint publication or helper-owned kernel key/port/underlay proof.
+  input/output. The production server's functional-alpha backend can obtain one helper-owned Client
+  WireGuard lease with kernel-proven key/port and selected direct-underlay IP. The committed
+  disposable KVM producer exercises that no-argument production server, one live peerless lease,
+  exact/idempotent Destroy and a second capacity-reuse cycle in private namespaces. The public
+  `HelperEngine::new` remains `Unavailable`, no production route-manager caller reaches the backend,
+  and no retained exact-main PASS exists yet.
 - [ ] Typed/pure/fake helper boundaries prove exact public handles, cardinality, TTL, idempotency,
   state transitions, and handshake/RX/TX proof policy. Agent route tests exercise
-  prepare/activate/commit/destroy and destroy-first retirement through fake backends, but the
-  coordinator has no production caller and no live worker/kernel tunnel exists.
+  prepare/activate/commit/destroy and destroy-first retirement through fake backends. The helper's
+  functional-alpha backend has no production route-manager caller. Its disposable gate proves a
+  prepared peerless WireGuard interface and normal process-owned cleanup, not an activated tunnel,
+  peer handshake, routed packet, end-to-end worker/kernel tunnel or datapath.
 - [ ] Service ledgers reduce internal available capacity immediately, but production publishes no
   relay/exit advertisement, so advertised free-capacity updates are not wired.
 - [ ] Ledger/service tests prove that explicit expiry purging restores capacity, and the agent

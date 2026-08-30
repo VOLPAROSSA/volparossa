@@ -17,7 +17,7 @@ nix = { workspace = true, features = ["sched", "uio"] }
 prost.workspace = true
 socket2.workspace = true
 rand_core.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["time"] }
 subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

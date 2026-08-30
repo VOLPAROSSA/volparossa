@@ -10,17 +10,21 @@ umask 077
 
 mode=preview
 approval=no
+proof_mode=
 image_path=
 output_directory=
 expected_commit=
+expected_source_ref=
 expected_host_uid=
 expected_kvm_gid=
 expected_kvm_identity=
 seen_mode=no
 seen_approval=no
+seen_proof_mode=no
 seen_image=no
 seen_output=no
 seen_commit=no
+seen_source_ref=no
 seen_host_uid=no
 seen_kvm_gid=no
 seen_kvm_identity=no
@@ -29,12 +33,31 @@ usage() {
     printf '%s\n' \
         'usage: tests/helper/run-helper-boundary-evidence-vm.sh [--preview]' \
         '       tests/helper/run-helper-boundary-evidence-vm.sh --execute --yes' \
+        '         (--retained-main|--non-retained-pr-smoke)' \
         '         --image PATH --output DIRECTORY --expected-commit SHA' \
+        '         --expected-source-ref refs/heads/BRANCH' \
         '         --expected-host-uid UID --expected-kvm-gid GID' \
         '         --expected-kvm-identity IDENTITY'
 }
 
 print_plan() {
+    if [ "$proof_mode" = non-retained-pr-smoke ]; then
+        printf '%s\n' \
+            'VOLPAROSSA non-retained helper-boundary PR smoke VM plan:' \
+            '  require an unprivileged host user and usable KVM; never fall back to TCG;' \
+            '  require one exact clean non-main branch commit and clone only its tracked Git state;' \
+            '  require the reviewed Debian 13 amd64 genericcloud image by exact SHA-512;' \
+            '  create one temporary qcow2 overlay, NoCloud seed and ephemeral SSH keys;' \
+            '  pin the injected guest host key before the first SSH connection;' \
+            '  provision and fetch locked dependencies in a first disposable KVM boot;' \
+            '  restart with QEMU user-network egress denied and prove that denial;' \
+            '  build fully offline as the unprivileged guest user in the restricted boot;' \
+            '  run only the fixed helper-boundary proof as guest root;' \
+            '  shut down, rehash the base image, validate, and discard all proof files;' \
+            '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
+            'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
+        return
+    fi
     printf '%s\n' \
         'VOLPAROSSA helper-boundary evidence VM plan:' \
         '  require an unprivileged host user and usable KVM; never fall back to TCG;' \
@@ -68,6 +91,16 @@ while [ "$#" -gt 0 ]; do
             approval=yes
             seen_approval=yes
             ;;
+        --retained-main)
+            [ "$seen_proof_mode" = no ] || { usage >&2; exit 64; }
+            proof_mode=retained-main
+            seen_proof_mode=yes
+            ;;
+        --non-retained-pr-smoke)
+            [ "$seen_proof_mode" = no ] || { usage >&2; exit 64; }
+            proof_mode=non-retained-pr-smoke
+            seen_proof_mode=yes
+            ;;
         --image)
             if [ "$seen_image" != no ] || [ "$#" -lt 2 ]; then
                 usage >&2
@@ -93,6 +126,15 @@ while [ "$#" -gt 0 ]; do
             fi
             expected_commit=$2
             seen_commit=yes
+            shift
+            ;;
+        --expected-source-ref)
+            if [ "$seen_source_ref" != no ] || [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 64
+            fi
+            expected_source_ref=$2
+            seen_source_ref=yes
             shift
             ;;
         --expected-host-uid)
@@ -135,8 +177,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$mode" = preview ]; then
-    if [ "$approval" = yes ] || [ "$seen_image" = yes ] \
+    if [ "$approval" = yes ] || [ "$seen_proof_mode" = yes ] \
+        || [ "$seen_image" = yes ] \
         || [ "$seen_output" = yes ] || [ "$seen_commit" = yes ] \
+        || [ "$seen_source_ref" = yes ] \
         || [ "$seen_host_uid" = yes ] || [ "$seen_kvm_gid" = yes ] \
         || [ "$seen_kvm_identity" = yes ]; then
         usage >&2
@@ -147,8 +191,10 @@ if [ "$mode" = preview ]; then
     exit 0
 fi
 
-if [ "$approval" != yes ] || [ "$seen_image" != yes ] \
+if [ "$approval" != yes ] || [ "$seen_proof_mode" != yes ] \
+    || [ "$seen_image" != yes ] \
     || [ "$seen_output" != yes ] || [ "$seen_commit" != yes ] \
+    || [ "$seen_source_ref" != yes ] \
     || [ "$seen_host_uid" != yes ] || [ "$seen_kvm_gid" != yes ] \
     || [ "$seen_kvm_identity" != yes ]; then
     print_plan >&2
@@ -167,6 +213,360 @@ failed() {
     exit 1
 }
 
+non_retained_proof_failure_reason_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        worker-launch-status|\
+        worker-launch-envelope|\
+        worker-manager-binding|\
+        worker-helper-parent-contract|\
+        worker-helper-runtime-preparation|\
+        worker-helper-worker-spawn|\
+        worker-helper-publication|\
+        worker-helper-retirement-cleanup|\
+        worker-terminal-state|\
+        worker-unit-contract|\
+        worker-proof-records|\
+        worker-confinement|\
+        worker-retirement|\
+        production-launch-status|\
+        production-launch-envelope|\
+        production-manager-binding|\
+        production-running-state|\
+        production-unit-contract|\
+        production-confinement|\
+        production-process-identity|\
+        production-socket-identity|\
+        production-start-records|\
+        production-runtime-layout|\
+        production-process-stability|\
+        production-retirement|\
+        production-lock-release|\
+        production-stop-records)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_driver_phase_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        staging|\
+        worker-launch|\
+        worker-terminal-observation|\
+        worker-retirement|\
+        production-launch|\
+        production-observation|\
+        production-retirement|\
+        final-verification)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_final_checkpoint_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        host-state|\
+        structured-reporting|\
+        cleanup-summary|\
+        lifecycle-summary|\
+        artifact-integrity|\
+        source-integrity|\
+        report-times|\
+        report-generation|\
+        report-validation|\
+        publication-fence|\
+        stage-retirement)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_non_retained_proof_failure_reason() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_failure_line=$(tail -n 1 -- "$non_retained_diagnostic") \
+        || return 1
+    non_retained_failure_prefix='live worker-identity proof failed: predicate rejected: '
+    case $non_retained_failure_line in
+        "$non_retained_failure_prefix"*)
+            non_retained_failure_reason=${non_retained_failure_line#"$non_retained_failure_prefix"}
+            ;;
+        *) return 1 ;;
+    esac
+    non_retained_proof_failure_reason_is_safe "$non_retained_failure_reason" \
+        || return 1
+    printf 'non-retained helper-boundary PR smoke failure category: %s\n' \
+        "$non_retained_failure_reason" >&2
+}
+
+report_non_retained_driver_phase() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_driver_phase_prefix=VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=
+    [ "$(grep -Ec "^$non_retained_driver_phase_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|final-verification)$'
+    [ "$(grep -Ec "$non_retained_driver_phase_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_mixed_diagnostic_pattern='^(live worker-identity proof failed: predicate rejected: |VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=)'
+    [ "$(grep -Ec "$non_retained_mixed_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 0 ] || return 1
+    non_retained_driver_phase=$(grep -E "$non_retained_driver_phase_pattern" \
+        "$non_retained_diagnostic") || return 1
+    non_retained_driver_phase=${non_retained_driver_phase#"$non_retained_driver_phase_prefix"}
+    non_retained_driver_phase_is_safe "$non_retained_driver_phase" || return 1
+    printf 'non-retained helper-boundary PR smoke driver phase: %s\n' \
+        "$non_retained_driver_phase" >&2
+}
+
+report_non_retained_final_checkpoint() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_checkpoint_prefix=VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=
+    [ "$(grep -Ec "^$non_retained_checkpoint_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_checkpoint_pattern='^VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|publication-fence|stage-retirement)$'
+    [ "$(grep -Ec "$non_retained_checkpoint_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_checkpoint=$(grep -E "$non_retained_checkpoint_pattern" \
+        "$non_retained_diagnostic") || return 1
+    non_retained_checkpoint=${non_retained_checkpoint#"$non_retained_checkpoint_prefix"}
+    non_retained_final_checkpoint_is_safe "$non_retained_checkpoint" || return 1
+    printf 'non-retained helper-boundary PR smoke final checkpoint: %s\n' \
+        "$non_retained_checkpoint" >&2
+}
+
+report_non_retained_worker_launch_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_worker_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-(zero|nonzero|invalid),captures-(yes|no|invalid),json-(yes|no|invalid),manager-(yes|no|invalid),client-stderr-(empty|nonempty|unsafe),terminal-(success|failed-exit-one|failed-exit-status-(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|other),stage-(empty|parent-contract|runtime-preparation|worker-spawn|publication|retirement-cleanup|other|unsafe)$'
+    [ "$(grep -Ec "$non_retained_worker_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_worker_diagnostic=$(grep -E \
+        "$non_retained_worker_diagnostic_pattern" "$non_retained_diagnostic") \
+        || return 1
+    non_retained_worker_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=
+    case $non_retained_worker_diagnostic in
+        "$non_retained_worker_diagnostic_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    printf 'non-retained helper-boundary PR smoke worker launch diagnostic: %s\n' \
+        "${non_retained_worker_diagnostic#"$non_retained_worker_diagnostic_prefix"}" >&2
+}
+
+report_non_retained_worker_confinement_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_confinement_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=
+    [ "$(grep -Ec "^$non_retained_confinement_diagnostic_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_confinement_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=(bounding|ambient|private-network|control-group)$'
+    [ "$(grep -Ec "$non_retained_confinement_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_confinement_diagnostic=$(grep -E \
+        "$non_retained_confinement_diagnostic_pattern" "$non_retained_diagnostic") \
+        || return 1
+    case $non_retained_confinement_diagnostic in
+        "$non_retained_confinement_diagnostic_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    printf 'non-retained helper-boundary PR smoke worker confinement diagnostic: %s\n' \
+        "${non_retained_confinement_diagnostic#"$non_retained_confinement_diagnostic_prefix"}" >&2
+}
+
+non_retained_production_launch_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        preflight-runtime|\
+        identity-socket|\
+        identity-lock|\
+        identity-manager|\
+        identity-launch|\
+        identity-birth|\
+        identity-process|\
+        identity-stability|\
+        identity-publication|\
+        active-lock|\
+        protocol-bind-before|\
+        protocol-frame-bounds|\
+        protocol-wire-shapes|\
+        protocol-wrong-uid|\
+        protocol-wrong-gid|\
+        protocol-root-peer|\
+        protocol-bind-after|\
+        functional-underlay|\
+        functional-underlay-parent-contract|\
+        functional-underlay-pristine-namespace|\
+        functional-underlay-pristine-link|\
+        functional-underlay-pristine-ipv-four|\
+        functional-underlay-pristine-ipv-six|\
+        functional-underlay-absent|\
+        functional-underlay-link|\
+        functional-underlay-address|\
+        functional-underlay-route|\
+        functional-underlay-ifindex|\
+        functional-underlay-readback-link|\
+        functional-underlay-readback-address|\
+        functional-underlay-readback-route|\
+        functional-probe-ready|\
+        functional-probe-fixture|\
+        functional-probe-launch|\
+        functional-probe-wait|\
+        functional-probe-identity|\
+        functional-probe-socket|\
+        functional-probe-fdstore|\
+        functional-worker-observation|\
+        functional-probe-finish|\
+        functional-cleanup|\
+        publication)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+non_retained_functional_probe_failure_value_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_functional_failure_value=$1
+    non_retained_functional_failure_phase=${non_retained_functional_failure_value%%,*}
+    non_retained_functional_failure_class=${non_retained_functional_failure_value#*,}
+    [ "$non_retained_functional_failure_value" = \
+        "$non_retained_functional_failure_phase,$non_retained_functional_failure_class" ] \
+        || return 1
+    case $non_retained_functional_failure_phase in
+        plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|\
+        second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|\
+        second-cycle-destroy|final-shutdown)
+            ;;
+        *) return 1 ;;
+    esac
+    case $non_retained_functional_failure_class in
+        random|protocol|io|timeout|untrusted|correlation|unexpected-response)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_non_retained_production_launch_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_production_failure='live worker-identity proof failed: predicate rejected: production-launch-status'
+    [ "$(grep -Fxc "$non_retained_production_failure" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    [ "$(tail -n 1 -- "$non_retained_diagnostic")" = \
+        "$non_retained_production_failure" ] || return 1
+    non_retained_failure_pattern='^live worker-identity proof failed: predicate rejected: '
+    [ "$(grep -Ec "$non_retained_failure_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
+    [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-probe-finish|functional-cleanup|publication)$'
+    [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_functional_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
+    if non_retained_functional_diagnostic_count=$(grep -Ec \
+        "^$non_retained_functional_diagnostic_prefix" \
+        "$non_retained_diagnostic"); then
+        :
+    else
+        non_retained_functional_grep_status=$?
+        [ "$non_retained_functional_grep_status" -eq 1 ] || return 1
+    fi
+    case $non_retained_functional_diagnostic_count in
+        0)
+            non_retained_functional_failure_value=
+            ;;
+        1)
+            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|shutdown|ready|release|reconnect|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|reuse|second-cycle-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
+            [ "$(grep -Ec "$non_retained_functional_diagnostic_pattern" \
+                "$non_retained_diagnostic")" -eq 1 ] || return 1
+            non_retained_functional_diagnostic=$(grep -E \
+                "$non_retained_functional_diagnostic_pattern" \
+                "$non_retained_diagnostic") || return 1
+            non_retained_functional_failure_value=${non_retained_functional_diagnostic#"$non_retained_functional_diagnostic_prefix"}
+            non_retained_functional_probe_failure_value_is_safe \
+                "$non_retained_functional_failure_value" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    non_retained_production_mixed_pattern='^(VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=|VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=|VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=)'
+    [ "$(grep -Ec "$non_retained_production_mixed_pattern" \
+        "$non_retained_diagnostic")" -eq 0 ] || return 1
+    non_retained_production_diagnostic=$(grep -E \
+        "$non_retained_production_diagnostic_pattern" "$non_retained_diagnostic") \
+        || return 1
+    non_retained_production_stage=${non_retained_production_diagnostic#"$non_retained_production_diagnostic_prefix"}
+    non_retained_production_launch_stage_is_safe "$non_retained_production_stage" \
+        || return 1
+    if [ -n "$non_retained_functional_failure_value" ]; then
+        case $non_retained_production_stage in
+            functional-probe-wait|functional-probe-finish) ;;
+            *) return 1 ;;
+        esac
+    fi
+    printf 'non-retained helper-boundary PR smoke production launch diagnostic: %s\n' \
+        "$non_retained_production_stage" >&2
+    if [ -n "$non_retained_functional_failure_value" ]; then
+        printf 'non-retained helper-boundary PR smoke functional client lease diagnostic: %s\n' \
+            "$non_retained_functional_failure_value" >&2
+    fi
+}
+
 case ${#expected_commit} in
     40|64) ;;
     *) blocked 'the expected commit is not a canonical Git object ID' ;;
@@ -175,6 +575,26 @@ case $expected_commit in
     *[!0-9a-f]*|0000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000)
         blocked 'the expected commit is not lowercase nonzero hexadecimal'
         ;;
+esac
+case $expected_source_ref in
+    refs/heads/*) expected_source_branch=${expected_source_ref#refs/heads/} ;;
+    *) blocked 'the expected source ref is not one branch ref' ;;
+esac
+if [ -z "$expected_source_branch" ] || [ "${#expected_source_ref}" -gt 255 ] \
+    || ! git check-ref-format "$expected_source_ref" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$expected_source_branch" >/dev/null 2>&1; then
+    blocked 'the expected source ref is not canonical'
+fi
+case $proof_mode in
+    retained-main)
+        [ "$expected_source_ref" = refs/heads/main ] \
+            || blocked 'retained evidence requires refs/heads/main'
+        ;;
+    non-retained-pr-smoke)
+        [ "$expected_source_ref" != refs/heads/main ] \
+            || blocked 'main can never select non-retained PR smoke'
+        ;;
+    *) blocked 'the proof mode is not canonical' ;;
 esac
 case $expected_host_uid in
     ''|0|0*|*[!0-9]*) blocked 'the expected host UID is not canonical nonzero decimal' ;;
@@ -269,8 +689,14 @@ source_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}' 
     || blocked 'the source HEAD cannot be established'
 [ "$source_head" = "$expected_commit" ] || blocked 'HEAD differs from the expected commit'
 source_branch=$(git -C "$repository_directory" symbolic-ref --quiet --short HEAD 2>/dev/null) \
-    || blocked 'the source must be the checked-out main branch'
-[ "$source_branch" = main ] || blocked 'retained VM evidence is restricted to main'
+    || blocked 'the source must be one checked-out branch'
+[ "$source_branch" = "$expected_source_branch" ] \
+    || blocked 'the checked-out branch differs from the expected source ref'
+if [ "$proof_mode" = retained-main ]; then
+    [ "$source_branch" = main ] || blocked 'retained VM evidence is restricted to main'
+else
+    [ "$source_branch" != main ] || blocked 'main can never run non-retained PR smoke'
+fi
 source_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$repository_directory" \
     status --porcelain=v1 --untracked-files=normal --ignore-submodules=none 2>/dev/null) \
     || blocked 'the source worktree state cannot be established'
@@ -874,7 +1300,7 @@ cleanup() {
         reap_qemu no || cleanup_status=1
     fi
     if settle_console; then
-        if [ "$safe_to_remove" = yes ]; then
+        if [ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]; then
             publish_console || cleanup_status=1
         fi
     else
@@ -931,12 +1357,23 @@ jq -S -c -n \
 chmod 0600 "$environment_report"
 
 source_clone=$run_directory/source
-git -c protocol.file.allow=always clone \
-    --no-hardlinks --depth 1 --no-tags --single-branch --branch main \
-    "file://$repository_directory" "$source_clone" >/dev/null 2>&1 \
-    || failed 'the bounded tracked-only source clone failed'
+if [ "$proof_mode" = retained-main ]; then
+    git -c protocol.file.allow=always clone \
+        --no-hardlinks --depth 1 --no-tags --single-branch --branch main \
+        "file://$repository_directory" "$source_clone" >/dev/null 2>&1 \
+        || failed 'the bounded tracked-only main source clone failed'
+else
+    git -c protocol.file.allow=always clone \
+        --no-hardlinks --depth 1 --no-tags --single-branch \
+        --branch "$expected_source_branch" \
+        "file://$repository_directory" "$source_clone" >/dev/null 2>&1 \
+        || failed 'the bounded tracked-only PR source clone failed'
+fi
 [ "$(git -C "$source_clone" rev-parse HEAD)" = "$expected_commit" ] \
     || failed 'the bounded source clone selected the wrong commit'
+[ "$(git -C "$source_clone" symbolic-ref --quiet --short HEAD)" \
+    = "$expected_source_branch" ] \
+    || failed 'the bounded source clone selected the wrong branch'
 [ -z "$(git -C "$source_clone" status --porcelain=v1 --untracked-files=all)" ] \
     || failed 'the bounded source clone is not clean'
 [ ! -e "$source_clone/.git/objects/info/alternates" ] \
@@ -1407,6 +1844,25 @@ fi
     || failed 'the retrieved proof diagnostics exceed 1 MiB'
 install -m 0600 -- "$retrieved_stderr" "$proof_stderr_log"
 if [ "$guest_status" -ne 0 ]; then
+    if [ "$proof_mode" = non-retained-pr-smoke ]; then
+        if report_non_retained_proof_failure_reason "$proof_stderr_log"; then
+            if [ "$non_retained_failure_reason" = worker-launch-status ]; then
+                report_non_retained_worker_launch_diagnostic \
+                    "$proof_stderr_log" || true
+            elif [ "$non_retained_failure_reason" = worker-confinement ]; then
+                report_non_retained_worker_confinement_diagnostic \
+                    "$proof_stderr_log" || true
+            elif [ "$non_retained_failure_reason" = production-launch-status ]; then
+                report_non_retained_production_launch_diagnostic \
+                    "$proof_stderr_log" || true
+            fi
+        else
+            printf '%s\n' \
+                'non-retained helper-boundary PR smoke failure category: unclassified' >&2
+            report_non_retained_driver_phase "$proof_stderr_log" || true
+            report_non_retained_final_checkpoint "$proof_stderr_log" || true
+        fi
+    fi
     failed "the guest helper-boundary proof exited with status $guest_status"
 fi
 bounded_run retrieve-report 2 guest_scp_from_raw \
@@ -1420,7 +1876,9 @@ bounded_run proof-kvm-uevent-settle 1 udevadm settle --timeout=10 \
 verify_kvm_contract \
     || failed 'the KVM authority changed after the restricted proof'
 settle_console || failed 'the bounded console log did not settle'
-publish_console || failed 'the bounded console log could not be published atomically'
+if [ "$proof_mode" = retained-main ]; then
+    publish_console || failed 'the bounded console log could not be published atomically'
+fi
 
 post_image_sha512=$(sha512sum "$image_path" | awk '{print $1}') \
     || failed 'the reviewed base image cannot be rehashed after VM use'
@@ -1447,10 +1905,14 @@ fi
 
 late_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}') \
     || failed 'the late source HEAD fence failed'
+late_branch=$(git -C "$repository_directory" symbolic-ref --quiet --short HEAD) \
+    || failed 'the late source branch fence failed'
 late_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$repository_directory" \
     status --porcelain=v1 --untracked-files=normal --ignore-submodules=none) \
     || failed 'the late source clean fence failed'
-if [ "$late_head" != "$expected_commit" ] || [ -n "$late_status" ]; then
+if [ "$late_head" != "$expected_commit" ] \
+    || [ "$late_branch" != "$expected_source_branch" ] \
+    || [ -n "$late_status" ]; then
     failed 'the source changed while the VM proof ran'
 fi
 
@@ -1490,10 +1952,28 @@ if [ -s "$environment_validator_stdout" ] || [ -s "$environment_validator_stderr
     failed 'the local VM-environment validator was not silent'
 fi
 
-install -m 0600 -- "$retrieved_report" \
-    "$output_directory/helper-boundary-evidence-v1.json"
-install -m 0600 -- "$report_hash_file" \
-    "$output_directory/helper-boundary-evidence-v1.json.sha256"
-install -m 0600 -- "$successful_environment" "$environment_report"
-
-printf '%s\n' 'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
+if [ "$proof_mode" = retained-main ]; then
+    install -m 0600 -- "$retrieved_report" \
+        "$output_directory/helper-boundary-evidence-v1.json"
+    install -m 0600 -- "$report_hash_file" \
+        "$output_directory/helper-boundary-evidence-v1.json.sha256"
+    install -m 0600 -- "$successful_environment" "$environment_report"
+    printf '%s\n' \
+        'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
+else
+    for non_retained_output in "$proof_stderr_log" "$environment_report"; do
+        if [ ! -f "$non_retained_output" ] || [ -L "$non_retained_output" ] \
+            || [ "$(stat -Lc '%h:%u:%a' "$non_retained_output" 2>/dev/null || true)" \
+                != "1:$(id -u):600" ]; then
+            failed 'a non-retained smoke output cannot be discarded safely'
+        fi
+        rm -f -- "$non_retained_output" \
+            || failed 'a non-retained smoke output could not be discarded'
+    done
+    if find "$output_directory" -mindepth 1 -maxdepth 1 -print -quit \
+        | grep -q .; then
+        failed 'the non-retained PR smoke output directory is not empty'
+    fi
+    printf '%s\n' \
+        'PASS: non-retained helper-boundary PR smoke completed in the disposable Debian 13 KVM.' >&2
+fi

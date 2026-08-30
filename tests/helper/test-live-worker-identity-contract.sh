@@ -15,6 +15,8 @@ capture_library=$repository_directory/tests/helper/lib/live-worker-proof-capture
 ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
+worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
+worker_sandbox_source=$repository_directory/crates/volparossa-helper/src/worker_sandbox.rs
 temporary_directory=$(mktemp -d /tmp/volparossa-helper-proof-contract.XXXXXX)
 resolver_authority_outside=
 resolver_runtime_directory=
@@ -81,6 +83,12 @@ if [ ! -f "$evidence_schema" ] || [ ! -r "$evidence_schema" ] \
     printf '%s\n' 'helper-boundary evidence schema is not one readable regular file' >&2
     exit 1
 fi
+for worker_contract_source in "$worker_source" "$worker_sandbox_source"; do
+    if [ ! -f "$worker_contract_source" ] || [ -L "$worker_contract_source" ]; then
+        printf 'worker contract source is unsafe: %s\n' "$worker_contract_source" >&2
+        exit 1
+    fi
+done
 sh -n "$gate"
 sh -n "$capture_library"
 sh -n "$ipc_hook"
@@ -113,24 +121,242 @@ expect_status() {
     fi
 }
 
+# Unexpected shell exits may disclose only fixed, coarse progress markers from
+# the real EXIT cleanup. Exercise the exact helpers and the status-preserving trap.
+driver_phase_functions=$temporary_directory/driver-phase-functions.sh
+{
+    sed -n '/^driver_phase_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^report_unexpected_driver_phase() {$/,/^}$/p' "$gate"
+    sed -n '/^final_checkpoint_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^report_unexpected_final_checkpoint() {$/,/^}$/p' "$gate"
+} >"$driver_phase_functions"
+if [ "$(grep -c '^driver_phase_is_safe() {$' "$driver_phase_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_unexpected_driver_phase() {$' \
+        "$driver_phase_functions")" -ne 1 ] \
+    || [ "$(grep -c '^final_checkpoint_is_safe() {$' \
+        "$driver_phase_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_unexpected_final_checkpoint() {$' \
+        "$driver_phase_functions")" -ne 1 ]; then
+    printf '%s\n' 'the unexpected progress helpers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$driver_phase_functions"
+# shellcheck disable=SC1090
+. "$driver_phase_functions"
+
+expected_driver_phases=$temporary_directory/expected-driver-phases
+printf '%s\n' \
+    staging \
+    worker-launch \
+    worker-terminal-observation \
+    worker-retirement \
+    production-launch \
+    production-observation \
+    production-retirement \
+    final-verification >"$expected_driver_phases"
+while IFS= read -r expected_driver_phase; do
+    driver_phase_is_safe "$expected_driver_phase" || {
+        printf 'driver phase is not allowlisted: %s\n' "$expected_driver_phase" >&2
+        exit 1
+    }
+    expect_status 0 report_unexpected_driver_phase "$expected_driver_phase"
+    if [ -s "$last_stdout" ] \
+        || [ "$(cat "$last_stderr")" \
+            != "VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=$expected_driver_phase" ] \
+        || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+        printf 'driver phase did not emit one fixed record: %s\n' \
+            "$expected_driver_phase" >&2
+        exit 1
+    fi
+done <"$expected_driver_phases"
+expect_status 1 report_unexpected_driver_phase
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_unexpected_driver_phase 'production-observation/private-record'
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+expected_final_checkpoints=$temporary_directory/expected-final-checkpoints
+printf '%s\n' \
+    host-state \
+    structured-reporting \
+    cleanup-summary \
+    lifecycle-summary \
+    artifact-integrity \
+    source-integrity \
+    report-times \
+    report-generation \
+    report-validation \
+    publication-fence \
+    stage-retirement >"$expected_final_checkpoints"
+while IFS= read -r expected_final_checkpoint; do
+    final_checkpoint_is_safe "$expected_final_checkpoint" || {
+        printf 'final checkpoint is not allowlisted: %s\n' \
+            "$expected_final_checkpoint" >&2
+        exit 1
+    }
+    expect_status 0 report_unexpected_final_checkpoint "$expected_final_checkpoint"
+    if [ -s "$last_stdout" ] \
+        || [ "$(cat "$last_stderr")" \
+            != "VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=$expected_final_checkpoint" ] \
+        || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+        printf 'final checkpoint did not emit one fixed record: %s\n' \
+            "$expected_final_checkpoint" >&2
+        exit 1
+    fi
+done <"$expected_final_checkpoints"
+expect_status 1 report_unexpected_final_checkpoint
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_unexpected_final_checkpoint 'report-validation/private-record'
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+gate_cleanup_function=$temporary_directory/gate-cleanup-function.sh
+sed -n '/^cleanup() {$/,/^}$/p' "$gate" >"$gate_cleanup_function"
+# This is a literal gate-source contract; expansion here would defeat it.
+# shellcheck disable=SC2016
+if [ "$(grep -c '^cleanup() {$' "$gate_cleanup_function")" -ne 1 ] \
+    || [ "$(grep -Fc 'report_unexpected_driver_phase "${driver_phase:-}" || :' \
+        "$gate_cleanup_function")" -ne 1 ]; then
+    printf '%s\n' 'the status-preserving driver-phase cleanup is not unique' >&2
+    exit 1
+fi
+sh -n "$gate_cleanup_function"
+exercise_gate_cleanup() (
+    phase=$1
+    checkpoint=$2
+    structured=$3
+    requested_status=$4
+    retire_status=$5
+    removal_status=$6
+    # Invoked indirectly by the extracted EXIT cleanup.
+    # shellcheck disable=SC2317
+    retire_unit() { return "$retire_status"; }
+    # shellcheck disable=SC2317
+    remove_temporary_stage() { return "$removal_status"; }
+    cleanup_error=no
+    structured_failure_reported=$structured
+    if [ "$phase" = missing ]; then
+        unset driver_phase
+    else
+        driver_phase=$phase
+    fi
+    if [ "$checkpoint" = missing ]; then
+        unset final_checkpoint
+    else
+        final_checkpoint=$checkpoint
+    fi
+    : "$cleanup_error" "$structured_failure_reported" \
+        "${driver_phase:-}" "${final_checkpoint:-}"
+    # shellcheck disable=SC1090
+    . "$gate_cleanup_function"
+    trap cleanup EXIT
+    exit "$requested_status"
+)
+expect_status 2 exercise_gate_cleanup worker-terminal-observation missing no 2 0 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-terminal-observation'
+expect_status 2 exercise_gate_cleanup missing missing no 2 0 0
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 2 exercise_gate_cleanup invalid-phase missing no 2 0 0
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 2 exercise_gate_cleanup production-launch report-validation yes 2 0 0
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 exercise_gate_cleanup worker-retirement missing no 0 1 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement'
+expect_status 2 exercise_gate_cleanup production-retirement missing no 2 1 1
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement'
+expect_status 2 exercise_gate_cleanup final-verification report-validation no 2 0 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=final-verification
+VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=report-validation'
+expect_status 2 exercise_gate_cleanup final-verification invalid-checkpoint no 2 0 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=final-verification'
+
+if ! awk '
+    /^driver_phase=staging$/ { staging++; staging_line = NR }
+    /^driver_phase=worker-launch$/ { worker_launch++; worker_launch_line = NR }
+    /^driver_phase=worker-terminal-observation$/ {
+        worker_terminal++; worker_terminal_line = NR
+    }
+    /^driver_phase=worker-retirement$/ { worker_retirement++; worker_retirement_line = NR }
+    /^    driver_phase=production-launch$/ {
+        production_launch++; production_launch_line = NR
+    }
+    /^    driver_phase=production-observation$/ {
+        production_observation++; production_observation_line = NR
+    }
+    /^    driver_phase=production-retirement$/ {
+        production_retirement++; production_retirement_line = NR
+    }
+    /^driver_phase=final-verification$/ { final_verification++; final_verification_line = NR }
+    /^final_checkpoint=structured-reporting$/ {
+        structured_checkpoint++; structured_checkpoint_line = NR
+    }
+    END {
+        valid = staging == 1 && worker_launch == 1 && worker_terminal == 1
+        valid = valid && worker_retirement == 1 && production_launch == 1
+        valid = valid && production_observation == 1 && production_retirement == 1
+        valid = valid && final_verification == 1 && structured_checkpoint == 1
+        valid = valid && staging_line < worker_launch_line
+        valid = valid && worker_launch_line < worker_terminal_line
+        valid = valid && worker_terminal_line < worker_retirement_line
+        valid = valid && worker_retirement_line < production_launch_line
+        valid = valid && production_launch_line < production_observation_line
+        valid = valid && production_observation_line < production_retirement_line
+        valid = valid && production_retirement_line < final_verification_line
+        valid = valid && final_verification_line < structured_checkpoint_line
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'the coarse driver phases are not unique and monotonic' >&2
+    exit 1
+fi
+
 # Retained VM evidence may expose only one fixed, privacy-safe predicate group.
 # Exercise the exact gate helpers and pin both the allowlist and first-failure rule.
 proof_failure_functions=$temporary_directory/proof-failure-functions.sh
 {
     sed -n '/^proof_failure_reason_is_safe() {$/,/^}$/p' "$gate"
     sed -n '/^record_proof_failure() {$/,/^}$/p' "$gate"
+    sed -n '/^worker_confinement_failure_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^record_worker_confinement_failure() {$/,/^}$/p' "$gate"
     sed -n '/^record_helper_live_proof_failure_stage() {$/,/^}$/p' "$gate"
     sed -n '/^classify_worker_live_proof_terminal() {$/,/^}$/p' "$gate"
     sed -n '/^record_worker_launch_failure() {$/,/^}$/p' "$gate"
+    sed -n '/^report_worker_launch_diagnostic() {$/,/^}$/p' "$gate"
+    sed -n '/^report_worker_confinement_diagnostic() {$/,/^}$/p' "$gate"
+    sed -n '/^production_start_failure_stage_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^production_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^report_production_launch_diagnostic() {$/,/^}$/p' "$gate"
     sed -n '/^report_proof_failure() {$/,/^}$/p' "$gate"
 } >"$proof_failure_functions"
 if [ "$(grep -c '^proof_failure_reason_is_safe() {$' "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^record_proof_failure() {$' "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^worker_confinement_failure_is_safe() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^record_worker_confinement_failure() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^record_helper_live_proof_failure_stage() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^classify_worker_live_proof_terminal() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^record_worker_launch_failure() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_worker_launch_diagnostic() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_worker_confinement_diagnostic() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^production_start_failure_stage_is_safe() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^production_functional_probe_failure_value_is_safe() {$' \
+        "$proof_failure_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_production_launch_diagnostic() {$' \
         "$proof_failure_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_proof_failure() {$' "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the privacy-safe proof failure helpers are not uniquely extractable' >&2
@@ -251,7 +477,9 @@ fi
 # These are literal gate-source contracts; expansion here would defeat them.
 # shellcheck disable=SC2016
 if [ "$(grep -Fc 'report_proof_failure "$proof_failure_reason"' "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc 'failed "predicate rejected: $1"' \
+    || [ "$(grep -Ec '^[[:space:]]+report_worker_launch_diagnostic([[:space:]]|$)' \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "printf 'live worker-identity proof failed: predicate rejected: %s\\n' \"\$1\" >&2" \
         "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the final proof failure does not use the revalidating reporter once' >&2
     exit 1
@@ -270,6 +498,417 @@ while IFS= read -r proof_failure_reason_under_test; do
         exit 1
     }
 done <"$expected_proof_failure_reasons"
+
+expected_production_start_stages=$temporary_directory/expected-production-start-stages
+printf '%s\n' \
+    preflight-runtime \
+    identity-socket \
+    identity-lock \
+    identity-manager \
+    identity-launch \
+    identity-birth \
+    identity-process \
+    identity-stability \
+    identity-publication \
+    active-lock \
+    protocol-bind-before \
+    protocol-frame-bounds \
+    protocol-wire-shapes \
+    protocol-wrong-uid \
+    protocol-wrong-gid \
+    protocol-root-peer \
+    protocol-bind-after \
+    functional-underlay \
+    functional-underlay-parent-contract \
+    functional-underlay-pristine-namespace \
+    functional-underlay-pristine-link \
+    functional-underlay-pristine-ipv-four \
+    functional-underlay-pristine-ipv-six \
+    functional-underlay-absent \
+    functional-underlay-link \
+    functional-underlay-address \
+    functional-underlay-route \
+    functional-underlay-ifindex \
+    functional-underlay-readback-link \
+    functional-underlay-readback-address \
+    functional-underlay-readback-route \
+    functional-probe-ready \
+    functional-probe-fixture \
+    functional-probe-launch \
+    functional-probe-wait \
+    functional-probe-identity \
+    functional-probe-socket \
+    functional-probe-fdstore \
+    functional-worker-observation \
+    functional-probe-finish \
+    functional-cleanup \
+    publication >"$expected_production_start_stages"
+while IFS= read -r expected_production_start_stage; do
+    production_start_failure_stage_is_safe "$expected_production_start_stage" || {
+        printf 'production start stage is not allowlisted: %s\n' \
+            "$expected_production_start_stage" >&2
+        exit 1
+    }
+done <"$expected_production_start_stages"
+if production_start_failure_stage_is_safe 'functional-private-value'; then
+    printf '%s\n' 'an unbounded production start stage was accepted' >&2
+    exit 1
+fi
+
+expected_functional_failure_phases=$temporary_directory/expected-functional-failure-phases
+printf '%s\n' \
+    plan \
+    connect \
+    bind \
+    prepare \
+    shutdown \
+    ready \
+    release \
+    reconnect \
+    destroy \
+    second-cycle-plan \
+    second-cycle-bind \
+    second-cycle-prepare \
+    reuse \
+    second-cycle-destroy \
+    final-shutdown >"$expected_functional_failure_phases"
+expected_functional_failure_classes=$temporary_directory/expected-functional-failure-classes
+printf '%s\n' \
+    random \
+    protocol \
+    io \
+    timeout \
+    untrusted \
+    correlation \
+    unexpected-response >"$expected_functional_failure_classes"
+while IFS= read -r functional_failure_phase; do
+    while IFS= read -r functional_failure_class; do
+        production_functional_probe_failure_value_is_safe \
+            "$functional_failure_phase,$functional_failure_class" || {
+            printf 'gate rejected functional failure value: %s,%s\n' \
+                "$functional_failure_phase" "$functional_failure_class" >&2
+            exit 1
+        }
+    done <"$expected_functional_failure_classes"
+done <"$expected_functional_failure_phases"
+for invalid_functional_failure_value in \
+    '' private,io prepare,private prepare,io,extra prepare/io; do
+    if production_functional_probe_failure_value_is_safe \
+        "$invalid_functional_failure_value"; then
+        printf 'gate accepted functional failure mutant: %s\n' \
+            "$invalid_functional_failure_value" >&2
+        exit 1
+    fi
+done
+
+exercise_production_launch_diagnostic() (
+    [ "$#" -eq 2 ] || exit 98
+    production_diagnostic_name=$1
+    production_diagnostic_stage=$2
+    temporary_stage=$temporary_directory/production-launch-$production_diagnostic_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=%s\n' \
+        "$production_diagnostic_stage" \
+        >"$temporary_stage/production-output/start.failure"
+    chmod 0600 "$temporary_stage/production-output/start.failure"
+    proof_failure_reason=production-launch-status
+    report_production_launch_diagnostic
+)
+expect_status 0 exercise_production_launch_diagnostic exact functional-worker-observation
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-worker-observation'
+production_launch_privacy_sentinel='private-production-launch-value'
+expect_status 1 exercise_production_launch_diagnostic invalid \
+    "$production_launch_privacy_sentinel"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+exercise_production_functional_probe_diagnostic() (
+    [ "$#" -eq 3 ] || exit 98
+    production_diagnostic_name=$1
+    production_diagnostic_stage=$2
+    production_functional_payload=$3
+    temporary_stage=$temporary_directory/production-functional-$production_diagnostic_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=%s\n' \
+        "$production_diagnostic_stage" \
+        >"$temporary_stage/production-output/start.failure"
+    printf 'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=%s\n' \
+        "$production_functional_payload" \
+        >"$temporary_stage/production-output/functional-client-lease.failure"
+    chmod 0600 \
+        "$temporary_stage/production-output/start.failure" \
+        "$temporary_stage/production-output/functional-client-lease.failure"
+    proof_failure_reason=production-launch-status
+    report_production_launch_diagnostic
+)
+expect_status 0 exercise_production_functional_probe_diagnostic \
+    exact functional-probe-wait prepare,unexpected-response
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-wait' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=prepare,unexpected-response' \
+    >"$temporary_directory/expected-functional-production-diagnostic"
+cmp -s "$temporary_directory/expected-functional-production-diagnostic" "$last_stderr"
+while read -r production_functional_mutant_name production_functional_mutant; do
+    expect_status 1 exercise_production_functional_probe_diagnostic \
+        "$production_functional_mutant_name" functional-probe-wait \
+        "$production_functional_mutant"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done <<'EOF'
+private-phase private-phase,io
+private-class prepare,private-class
+extra-field prepare,io,extra
+wrong-separator prepare/io
+EOF
+expect_status 1 exercise_production_functional_probe_diagnostic \
+    wrong-stage functional-probe-identity prepare,io
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+reject_production_functional_probe_capture() (
+    [ "$#" -eq 2 ] || exit 98
+    production_functional_shape_name=$1
+    production_functional_shape=$2
+    temporary_stage=$temporary_directory/production-functional-shape-$production_functional_shape_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=functional-probe-wait' \
+        >"$temporary_stage/production-output/start.failure"
+    chmod 0600 "$temporary_stage/production-output/start.failure"
+    production_functional_file=$temporary_stage/production-output/functional-client-lease.failure
+    case $production_functional_shape in
+        duplicate)
+            printf '%s\n%s\n' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=connect,io' \
+                >"$production_functional_file"
+            ;;
+        truncated)
+            printf '%s' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                >"$production_functional_file"
+            ;;
+        oversized)
+            awk 'BEGIN { for (i = 0; i < 129; i++) printf "x"; printf "\n" }' \
+                >"$production_functional_file"
+            ;;
+        symlink)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                >"$production_functional_file.target"
+            chmod 0600 "$production_functional_file.target"
+            ln -s "$production_functional_file.target" "$production_functional_file"
+            ;;
+        next)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=prepare,io' \
+                >"$production_functional_file"
+            : >"$production_functional_file.next"
+            chmod 0600 "$production_functional_file.next"
+            ;;
+        *) exit 97 ;;
+    esac
+    if [ "$production_functional_shape" != symlink ]; then
+        chmod 0600 "$production_functional_file"
+    fi
+    proof_failure_reason=production-launch-status
+    if report_production_launch_diagnostic; then
+        exit 96
+    fi
+)
+for production_functional_shape in duplicate truncated oversized symlink next; do
+    expect_status 0 reject_production_functional_probe_capture \
+        "$production_functional_shape" "$production_functional_shape"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+
+exercise_production_launch_diagnostic_missing() (
+    temporary_stage=$temporary_directory/production-launch-missing
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    proof_failure_reason=production-launch-status
+    report_production_launch_diagnostic
+)
+expect_status 1 exercise_production_launch_diagnostic_missing
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+exercise_production_launch_diagnostic_wrong_reason() (
+    temporary_stage=$temporary_directory/production-launch-wrong-reason
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=publication' \
+        >"$temporary_stage/production-output/start.failure"
+    chmod 0600 "$temporary_stage/production-output/start.failure"
+    proof_failure_reason=production-running-state
+    report_production_launch_diagnostic
+)
+expect_status 1 exercise_production_launch_diagnostic_wrong_reason
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+reject_production_launch_capture() (
+    [ "$#" -eq 3 ] || exit 98
+    production_rejection_name=$1
+    production_rejection_shape=$2
+    production_rejection_mode=$3
+    temporary_stage=$temporary_directory/production-launch-reject-$production_rejection_name
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    case $production_rejection_shape in
+        duplicate)
+            printf '%s\n%s\n' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=publication' \
+                >"$temporary_stage/production-output/start.failure"
+            ;;
+        truncated)
+            printf '%s' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
+                >"$temporary_stage/production-output/start.failure"
+            ;;
+        with-pass)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
+                >"$temporary_stage/production-output/start.failure"
+            : >"$temporary_stage/production-output/start.pass"
+            chmod 0600 "$temporary_stage/production-output/start.pass"
+            ;;
+        exact)
+            printf '%s\n' \
+                'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=identity-process' \
+                >"$temporary_stage/production-output/start.failure"
+            ;;
+        *) exit 97 ;;
+    esac
+    chmod "$production_rejection_mode" \
+        "$temporary_stage/production-output/start.failure"
+    proof_failure_reason=production-launch-status
+    if report_production_launch_diagnostic; then
+        exit 96
+    fi
+)
+while read -r production_rejection_name production_rejection_shape \
+    production_rejection_mode; do
+    expect_status 0 reject_production_launch_capture \
+        "$production_rejection_name" "$production_rejection_shape" \
+        "$production_rejection_mode"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done <<'EOF'
+duplicate duplicate 0600
+truncated truncated 0600
+unsafe-mode exact 0644
+mixed-pass with-pass 0600
+EOF
+
+# Run the exact production identity fragment with its artifact missing. Every
+# downstream operand must stay defined and the fixed predicate must survive.
+production_identity_fragment=$temporary_directory/production-identity-fragment.sh
+awk '
+    /^    identity_invocation=$/ { capture = 1 }
+    /^    production_socket_identity_file=/ { capture = 0 }
+    capture {
+        line = $0
+        sub(/^    /, "", line)
+        print line
+    }
+' "$gate" >"$production_identity_fragment"
+if [ "$(grep -c '^identity_launch=$' "$production_identity_fragment")" -ne 1 ] \
+    || [ "$(grep -c '^production_identity=' "$production_identity_fragment")" -ne 1 ]; then
+    printf '%s\n' 'the production identity fallback is not uniquely executable' >&2
+    exit 1
+fi
+sh -n "$production_identity_fragment"
+exercise_missing_production_identity() (
+    set -u
+    temporary_stage=$temporary_directory/missing-production-identity
+    agent_gid=61000
+    : "$agent_gid"
+    proof_failure_reason=
+    # Invoked by the exact extracted observation fragment.
+    # shellcheck disable=SC2317
+    vp_capture_file_is_safe() { return 1; }
+    # shellcheck disable=SC2317
+    record_proof_failure() {
+        [ -z "$proof_failure_reason" ] && proof_failure_reason=$1
+    }
+    # shellcheck disable=SC1090
+    . "$production_identity_fragment"
+    [ "$proof_failure_reason" = production-process-identity ] \
+        && [ -z "$identity_invocation" ] \
+        && [ -z "$identity_main_pid" ] \
+        && [ -z "$identity_launch" ] \
+        && [ -z "$identity_launch_image" ] \
+        && [ -z "$identity_starttime" ] \
+        && [ -z "$identity_starttime_value" ] \
+        && [ -z "$identity_process_contract" ] \
+        && [ -z "$identity_extra" ] \
+        && [ -z "$identity_seccomp_filters" ]
+)
+expect_status 0 exercise_missing_production_identity
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+# A failed redirection on POSIX special builtin `exec` used to terminate dash
+# with status 2. The exact `command exec` form must remain an ordinary failure.
+# These are literal gate-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+grep -Fx '    if command exec 9<>"$production_lock_path"; then' "$gate" >/dev/null
+# shellcheck disable=SC2016
+if grep -F 'if exec 9<>"$production_lock_path"; then' "$gate" >/dev/null; then
+    printf '%s\n' 'the production lock probe restored fatal special-builtin semantics' >&2
+    exit 1
+fi
+exercise_missing_production_lock() (
+    set -eu
+    production_lock_path=$temporary_directory/absent-directory/lock
+    if command exec 9<>"$production_lock_path"; then
+        exit 91
+    else
+        lock_open_status=$?
+    fi
+    [ "$lock_open_status" -eq 2 ]
+)
+expect_status 0 exercise_missing_production_lock
+test ! -s "$last_stdout"
+grep -F 'cannot create' "$last_stderr" >/dev/null
+
+exercise_worker_launch_diagnostic() (
+    [ "$#" -eq 3 ] || exit 98
+    diagnostic_name=$1
+    diagnostic_stage_payload=$2
+    diagnostic_exec_status=$3
+    temporary_stage=$temporary_directory/worker-launch-diagnostic-$diagnostic_name
+    mkdir -m 0700 "$temporary_stage"
+    printf '%s\n' 'fixed systemd client failure' >"$temporary_stage/systemd-run.stderr"
+    printf '%s\n' "$diagnostic_stage_payload" >"$temporary_stage/proof.stderr"
+    chmod 0600 "$temporary_stage/systemd-run.stderr" "$temporary_stage/proof.stderr"
+    proof_failure_reason=worker-launch-status
+    run_status=1
+    worker_launch_captures_ok=yes
+    worker_launch_json_ok=no
+    worker_manager_binding_ok=no
+    active_state=failed
+    sub_state=failed
+    result=exit-code
+    exec_code=1
+    exec_status=$diagnostic_exec_status
+    report_worker_launch_diagnostic
+)
+expect_status 0 exercise_worker_launch_diagnostic valid \
+    'VOLPAROSSA_HELPER_LIVE_PROOF_FAILURE_STAGE_V1=publication' 203
+test ! -s "$last_stdout"
+grep -Fx \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-failed-exit-status-203,stage-publication' \
+    "$last_stderr" >/dev/null
+
+worker_launch_privacy_sentinel='private-worker-launch-value'
+expect_status 0 exercise_worker_launch_diagnostic other \
+    "$worker_launch_privacy_sentinel" 999
+test ! -s "$last_stdout"
+grep -Fx \
+    'VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=run-nonzero,captures-yes,json-no,manager-no,client-stderr-nonempty,terminal-other,stage-other' \
+    "$last_stderr" >/dev/null
+if grep -F "$worker_launch_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'worker launch diagnostic exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
 if proof_failure_reason_is_safe 'worker-launch-status/private-record'; then
     printf '%s\n' 'an unbounded proof failure reason was accepted' >&2
     exit 1
@@ -781,6 +1420,64 @@ if command -v mawk >/dev/null 2>&1; then
     fi
 fi
 
+for confinement_reason in bounding ambient private-network control-group; do
+    confinement_application_count=3
+    if [ "$confinement_reason" = control-group ]; then
+        confinement_application_count=6
+    fi
+    if ! worker_confinement_failure_is_safe "$confinement_reason" \
+        || [ "$(grep -Fc "record_worker_confinement_failure '$confinement_reason'" \
+            "$gate")" -ne "$confinement_application_count" ]; then
+        printf 'worker confinement reason is not closed and fully applied: %s\n' \
+            "$confinement_reason" >&2
+        exit 1
+    fi
+done
+if worker_confinement_failure_is_safe '' \
+    || worker_confinement_failure_is_safe 'control-group/private-record'; then
+    printf '%s\n' 'the worker confinement subcategory allowlist is not closed' >&2
+    exit 1
+fi
+
+report_worker_confinement_first_failure() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    worker_confinement_failure=
+    record_worker_confinement_failure 'ambient'
+    record_worker_confinement_failure 'control-group'
+    if [ "$proof_ok" != no ] || [ "${production_ok+x}" = x ] \
+        || [ "$proof_failure_reason" != worker-confinement ] \
+        || [ "$worker_confinement_failure" != ambient ]; then
+        exit 99
+    fi
+    report_worker_confinement_diagnostic
+)
+expect_status 0 report_worker_confinement_first_failure
+if [ -s "$last_stdout" ] \
+    || ! grep -Fx \
+        'VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=ambient' \
+        "$last_stderr" >/dev/null \
+    || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+    printf '%s\n' 'the worker confinement diagnostic did not retain its first fixed reason' >&2
+    exit 1
+fi
+
+reject_late_worker_confinement_diagnostic() (
+    proof_failure_reason=
+    proof_ok=yes
+    unset production_ok
+    worker_confinement_failure=
+    record_proof_failure 'worker-unit-contract'
+    record_worker_confinement_failure 'bounding'
+    report_worker_confinement_diagnostic
+)
+expect_status 1 reject_late_worker_confinement_diagnostic
+if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+    printf '%s\n' 'a later worker confinement predicate escaped first-failure precedence' >&2
+    exit 1
+fi
+
 report_worker_first_failure() (
     proof_failure_reason=
     proof_ok=yes
@@ -795,7 +1492,7 @@ report_worker_first_failure() (
 )
 expect_status 1 report_worker_first_failure
 if [ -s "$last_stdout" ] \
-    || ! grep -Fx 'diagnostic failure: predicate rejected: worker-launch-status' \
+    || ! grep -Fx 'live worker-identity proof failed: predicate rejected: worker-launch-status' \
         "$last_stderr" >/dev/null \
     || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
     printf '%s\n' 'the worker diagnostic did not retain only its first fixed reason' >&2
@@ -870,7 +1567,7 @@ report_production_first_failure() (
 )
 expect_status 1 report_production_first_failure
 if [ -s "$last_stdout" ] \
-    || ! grep -Fx 'diagnostic failure: predicate rejected: production-running-state' \
+    || ! grep -Fx 'live worker-identity proof failed: predicate rejected: production-running-state' \
         "$last_stderr" >/dev/null \
     || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
     printf '%s\n' 'the production diagnostic did not retain only its first fixed reason' >&2
@@ -2822,13 +3519,15 @@ printf '%s\n' \
     '  copy the already-built real helper into one validated root-only temporary stage;' \
     '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
     '  bind account files plus the system bus socket read-only in two sequential invocations;' \
+    '  let PID 1 resolve only host-present root/root unit credentials before those binds;' \
+    '  use exact /usr/bin/setpriv to install the staged primary and singleton agent GID;' \
     '  bind the canonical systemd notify socket read-only inside both private /run trees;' \
     '  pin its D-Bus system address to that verified socket inside the private /run;' \
     '  run with PrivateNetwork=yes, a private temporary /run, and no host account changes;' \
     '  require the host /run/volparossa path absent before and after both private unit runs;' \
     '  set NotifyAccess=main, FileDescriptorStoreMax=128, and' \
     '    FileDescriptorStorePreserve=yes on that transient service;' \
-    '  start the diagnostic helper as blocking Type=exec, then poll its exact ID to terminal;' \
+    '  start its fixed credential trampoline as blocking Type=exec, then require helper exec;' \
     '  retain diagnostic success with RemainAfterExit=yes and failures with CollectMode=inactive;' \
     '  forbid ignore-failure, aggressive collection, and asynchronous or waiting client modes;' \
     '  grant exactly CAP_KILL, CAP_NET_ADMIN, CAP_NET_RAW, CAP_SETGID, CAP_SETPCAP,' \
@@ -2848,14 +3547,20 @@ printf '%s\n' \
     '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
     '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
     '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
+    '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
+    '  hold the first functional Client Prepare at a fixed root-owned FIFO READY barrier;' \
+    '  externally prove its child PID, executable, identity, distinct netns, and live WireGuard;' \
+    '  release exactly one byte, require Destroy plus a second capacity-reuse Prepare/Destroy;' \
+    '  prove the old worker and WireGuard absent, release its netns pin, and remove the fixture;' \
     '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
     '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
     '  collect that exact second invocation and remove the validated temporary stage;' \
     '  compare privacy-safe before/after host account, resolver, mount, firewall, WireGuard,' \
     '    and network digests;' \
     '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
-    'This stages the helper identity and production IPC boundary. It creates no host account, link,' \
-    'route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+    'This stages the helper identity and production IPC boundary. It creates no host account,' \
+    'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
+    'One dummy underlay and ephemeral WireGuard lease exist only inside private namespaces.' \
     'It is not package-install, restart-recovery, CleanupOwned, datapath, or A01-A15 evidence.' \
     'PREVIEW ONLY: no file, account, service, or network state was changed.' \
     >"$expected_preview"
@@ -3089,7 +3794,15 @@ fi
 # These are literal source contracts; expansion here would defeat the check.
 # shellcheck disable=SC2016
 for required_contract in \
-    'paste prlimit readlink rm sed setpriv' \
+    'awk busctl cat chmod chown' \
+    'nsenter paste prlimit readlink rm sed setpriv' \
+    'busctl_path=/usr/bin/busctl' \
+    '[ "$(command -v busctl)" != "$busctl_path" ]' \
+    "blocked 'the fixed root-owned systemd bus client is unavailable'" \
+    'setpriv_path=/usr/bin/setpriv' \
+    '[ "$(command -v setpriv)" != "$setpriv_path" ]' \
+    "!= 'regular file:0:0:755:1' ]; then" \
+    "blocked 'the fixed root-owned setpriv credential trampoline is unavailable'" \
     'staged_executable_max_bytes=134217728' \
     'proof_file_max_bytes=1048576' \
     'source_snapshot_is_exact() {' \
@@ -3109,11 +3822,15 @@ for required_contract in \
     '--property=PrivateNetwork=yes' \
     '--property=PrivateMounts=yes' \
     '--property=NoNewPrivileges=yes' \
+    '--property=RestrictSUIDSGID=no' \
     '--property=LimitCORE=0' \
     '--property=LimitFSIZE=1048576' \
     '--property=NotifyAccess=main' \
     '--property=FileDescriptorStoreMax=128' \
     '--property=FileDescriptorStorePreserve=yes' \
+    '--property=User=0' \
+    '--property=Group=0' \
+    '--property=SupplementaryGroups=' \
     '--property=CollectMode=inactive' \
     '--property=RuntimeMaxSec=45s' \
     '--property=TimeoutStartSec=45s' \
@@ -3131,13 +3848,24 @@ for required_contract in \
     '--property="AmbientCapabilities=$capabilities"' \
     'helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-live-proof:norbind"' \
     'production_helper_bind="$temporary_stage/volparossa-helper:/run/volparossa-helper-production:norbind"' \
+    '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-live-proof --internal-worker-v3-live-proof' \
+    '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production' \
     '--property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind $notify_socket_bind"' \
-    '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind $notify_socket_bind"' \
+    '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $production_host_network_identity_bind $account_binds $system_bus_bind $notify_socket_bind"' \
     '--property="BindPaths=$production_runtime_bind $production_output_bind"' \
     "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" \
-    '--property="ExecStartPost=/run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid"' \
-    '--property="ExecStopPost=/run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid"' \
+    '--property="ExecStartPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid"' \
+    '--property="ExecStopPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid"' \
     'install -d -o root -g root -m 2700 "$temporary_stage/production-output"' \
+    'production_host_network_identity_file=$temporary_stage/production-host-network.identity' \
+    'production_driver_network_identity=$(stat -Lc' \
+    '/proc/self/ns/net)' \
+    'production_host_network_identity=$(stat -Lc' \
+    '/proc/1/ns/net)' \
+    '[ "$production_driver_network_identity" = "$production_host_network_identity" ]' \
+    'production_host_network_identity_bind="$production_host_network_identity_file:/run/volparossa-helper-production-host-network.identity:norbind"' \
+    'vp_capture_run "$production_host_network_identity_file"' \
+    'vp_capture_file_is_safe "$production_host_network_identity_file"' \
     '--property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket' \
     'system_bus_socket=/run/dbus/system_bus_socket' \
     'notify_socket=/run/systemd/notify' \
@@ -3191,6 +3919,8 @@ for required_contract in \
     '[ "$observed_description" != "$unit_ownership_marker" ]' \
     'capture_unit_property NFileDescriptorStore "$temporary_stage/unit-fdstore-count"' \
     'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
+    'capture_unit_property Slice "$temporary_stage/unit-slice"' \
+    'capture_unit_property Slice "$temporary_stage/production-slice"' \
     'capture_unit_property ControlGroup "$temporary_stage/production-control-group"' \
     'capture_unit_property RuntimeMaxUSec' \
     'capture_unit_property LimitFSIZE "$temporary_stage/production-limit-fsize"' \
@@ -3204,6 +3934,18 @@ for required_contract in \
     '[ "$production_limit_fsize_soft" != 1048576 ]' \
     '[ "$production_standard_output" != null ]' \
     '[ "$production_standard_error" != null ]' \
+    'identity_launch=$(sed -n '"'"'3p'"'"' "$production_identity")' \
+    'identity_launch_image=$(sed -n '"'"'4p'"'"' "$production_identity")' \
+    'identity_starttime=$(sed -n '"'"'5p'"'"' "$production_identity")' \
+    'identity_process_contract=$(sed -n '"'"'6p'"'"' "$production_identity")' \
+    'identity_extra=$(sed -n '"'"'7p'"'"' "$production_identity")' \
+    'systemd_launch_record_is_safe "$identity_launch"' \
+    'launch_image_record_is_safe' \
+    'identity_starttime_prefix=process-starttime-v1=' \
+    'expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"' \
+    'identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}' \
+    '[ "${#identity_seccomp_filters}" -gt 10 ]' \
+    '[ "$identity_seccomp_filters" -gt 1024 ]' \
     'production_socket_identity_file=$temporary_stage/production-output/socket.identity' \
     'production_lock_identity_file=$temporary_stage/production-output/lock.identity' \
     'production_lock_fd_identity=$(stat -Lc' \
@@ -3218,7 +3960,8 @@ for required_contract in \
     'retired_runtime_is_absent' \
     'retired_cgroup_path=/sys/fs/cgroup$retired_control_group' \
     '[ "$retired_attempt" -lt 1200 ]' \
-    '"/proc/$retired_main_pid/exe"' \
+    'retired_starttime_path=/proc/$retired_starttime_pid/stat' \
+    '"$retired_process_starttime"' \
     '[ "$poll_attempt" -ge 1000 ]' \
     'systemctl reset-failed "$unit_name"' \
     '--internal-worker-v3-live-proof' \
@@ -3244,6 +3987,8 @@ for required_contract in \
     "blocked 'the source worktree must be clean before live evidence execution'" \
     "failed 'the exact clean source revision changed during live execution'" \
     'jq -n -S -c' \
+    'install -o root -g root -m 0600 /dev/null "$validator_stdout"' \
+    'install -o root -g root -m 0600 /dev/null "$validator_stderr"' \
     '"$evidence_validator" "$report_path" >"$validator_stdout" 2>"$validator_stderr"' \
     '[ "$validator_status" -ne 0 ]' \
     '[ -s "$validator_stdout" ]' \
@@ -3258,6 +4003,14 @@ do
         exit 1
     }
 done
+# These are literal gate-source contracts; expansion here would defeat the assertions.
+# shellcheck disable=SC2016
+if grep -F '"$validator_stdout" "$validator_stderr"' "$gate" >/dev/null \
+    || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$validator_stdout"' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$validator_stderr"' "$gate")" -ne 1 ]; then
+    printf '%s\n' 'private validator captures are not created as two exact files' >&2
+    exit 1
+fi
 if ! awk '
     /^[[:space:]]*resolver_runtime_uid=\$\(/ { runtime_uid_derived = NR }
     /^[[:space:]]*resolver_runtime_gid=\$\(/ { runtime_gid_derived = NR }
@@ -3340,15 +4093,16 @@ if ! awk '
         if (short_option_line ~ /(^|[[:space:]])-[^-[:space:]]/) invalid++
         if (argument_line ~ /^--/) {
             option_copy = argument_line
+            sub(/=.*/, "", option_copy)
             if (gsub(/--/, "", option_copy) != 1) invalid++
             if (argument_line !~ /^--json=/ \
                 && argument_line !~ /^--unit=/ \
+                && argument_line !~ /^--slice=/ \
                 && argument_line !~ /^--description=/ \
                 && argument_line !~ /^--service-type=/ \
                 && argument_line !~ /^--remain-after-exit([[:space:]]|\\|$)/ \
                 && argument_line !~ /^--property=/) invalid++
-        } else if (argument_line !~ /^\/run\/volparossa-helper-live-proof([[:space:]]|$)/ \
-            && argument_line !~ /^\/run\/volparossa-helper-production([[:space:]]|$)/ \
+        } else if (argument_line !~ /^\/usr\/bin\/setpriv([[:space:]]|$)/ \
             && argument_line !~ /^>/ \
             && argument_line !~ /^2>/) invalid++
         if (index($0, "--ignore-failure") > 0 \
@@ -3368,6 +4122,11 @@ if ! awk '
         if (index($0, "CollectMode=") > 0) collect_assignments[run_count]++
         if ($0 ~ /^[[:space:]]*--property=CollectMode=inactive \\$/) {
             exact_collect_modes[run_count]++
+        }
+
+        if (index($0, "--slice=") > 0) slice_assignments[run_count]++
+        if ($0 ~ /^[[:space:]]*--slice=system\.slice \\$/) {
+            exact_worker_slice[run_count]++
         }
 
         if (index($0, "--remain-after-exit") > 0 \
@@ -3397,6 +4156,8 @@ if ! awk '
         }
         valid = valid && remain_assignments[1] == 1 && exact_remain[1] == 1
         valid = valid && remain_assignments[2] == 0 && exact_remain[2] == 0
+        valid = valid && slice_assignments[1] == 1 && exact_worker_slice[1] == 1
+        valid = valid && slice_assignments[2] == 1 && exact_worker_slice[2] == 1
         valid = valid && exact_worker_runtime[1] == 1
         valid = valid && exact_worker_runtime[2] == 0
         valid = valid && exact_production_runtime[1] == 0
@@ -3480,6 +4241,143 @@ do
         exit 1
     fi
 done
+transient_slice_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    worker_slice_source=$1
+    [ -f "$worker_slice_source" ] && [ ! -L "$worker_slice_source" ] || return 1
+    awk '
+        /^[[:space:]]+--slice=system\.slice \\$/ {
+            slice_assignment++
+            if (slice_assignment == 1) worker_slice_assignment_line = NR
+            if (slice_assignment == 2) production_slice_assignment_line = NR
+        }
+        /^if capture_unit_property ActiveState "\$temporary_stage\/unit-active-state"; then$/ {
+            terminal_read++
+            terminal_read_line = NR
+        }
+        /^if capture_unit_property ControlGroup "\$temporary_stage\/unit-control-group"; then$/ {
+            terminal_control_group_read++
+            terminal_control_group_read_line = NR
+        }
+        /^if capture_unit_property Slice "\$temporary_stage\/unit-slice"; then$/ {
+            worker_slice_read++
+            worker_slice_read_line = NR
+        }
+        /^if \[ -n "\$observed_terminal_control_group" \]; then$/ {
+            terminal_control_group_empty++
+            terminal_control_group_empty_line = NR
+        }
+        /^if \[ "\$observed_slice" != system\.slice \]; then$/ {
+            worker_slice_requirement++
+            worker_slice_requirement_line = NR
+        }
+        /^worker_control_group=\/system\.slice\/\$unit_name$/ {
+            cgroup_derivation++
+            cgroup_derivation_line = NR
+        }
+        /^    if capture_unit_property Slice "\$temporary_stage\/production-slice"; then$/ {
+            production_slice_read++
+            production_slice_read_line = NR
+        }
+        /\|\| \[ "\$production_slice" != system\.slice \] \\$/ {
+            production_slice_requirement++
+            production_slice_requirement_line = NR
+        }
+        /capture_unit_property ControlGroup "\$temporary_stage\/production-control-group"/ {
+            production_control_group_read++
+            production_control_group_read_line = NR
+        }
+        /^if ! retire_unit; then$/ {
+            retirement++
+            retirement_line = NR
+        }
+        END {
+            valid = slice_assignment == 2 && terminal_read == 1
+            valid = valid && worker_slice_read == 1 && worker_slice_requirement == 1
+            valid = valid && terminal_control_group_read == 1
+            valid = valid && terminal_control_group_empty == 1 && cgroup_derivation == 1
+            valid = valid && production_slice_read == 1
+            valid = valid && production_slice_requirement == 1
+            valid = valid && production_control_group_read == 1 && retirement == 1
+            valid = valid && worker_slice_assignment_line < terminal_read_line
+            valid = valid && terminal_read_line < terminal_control_group_read_line
+            valid = valid && terminal_control_group_read_line < worker_slice_read_line
+            valid = valid && worker_slice_read_line < terminal_control_group_empty_line
+            valid = valid && terminal_control_group_empty_line < worker_slice_requirement_line
+            valid = valid && worker_slice_requirement_line < cgroup_derivation_line
+            valid = valid && cgroup_derivation_line < retirement_line
+            valid = valid && retirement_line < production_slice_assignment_line
+            valid = valid && production_slice_assignment_line < production_slice_read_line
+            valid = valid && production_slice_read_line < production_slice_requirement_line
+            valid = valid && production_slice_requirement_line < production_control_group_read_line
+            if (!valid) exit 1
+        }
+    ' "$worker_slice_source"
+}
+if ! transient_slice_contract_is_exact "$gate"; then
+    printf '%s\n' \
+        'the transient slice, terminal cgroup and derived retirement contracts are not exact' >&2
+    exit 1
+fi
+# These mutations must retain literal gate variables; the contract, not this
+# test shell, expands them.
+# shellcheck disable=SC2016
+for worker_slice_mutation in \
+    assignment terminal-control-read terminal-empty readback requirement derivation \
+    production-readback production-requirement
+do
+    worker_slice_mutant=$temporary_directory/worker-slice-$worker_slice_mutation.sh
+    case $worker_slice_mutation in
+        assignment)
+            sed '0,/--slice=system\.slice/s//--slice=user.slice/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        terminal-control-read)
+            sed '0,/capture_unit_property ControlGroup "\$temporary_stage\/unit-control-group"/s//capture_unit_property Slice "$temporary_stage\/unit-control-group"/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        terminal-empty)
+            sed '0,/\[ -n "\$observed_terminal_control_group" \]/s//[ -z "$observed_terminal_control_group" ]/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        readback)
+            sed '0,/capture_unit_property Slice "\$temporary_stage\/unit-slice"/s//capture_unit_property ControlGroup "$temporary_stage\/unit-slice"/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        requirement)
+            sed '0,/"\$observed_slice" != system\.slice/s//"$observed_slice" != user.slice/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        derivation)
+            sed '0,/worker_control_group=\/system\.slice\/\$unit_name/s//worker_control_group=\/user.slice\/$unit_name/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        production-readback)
+            sed '0,/capture_unit_property Slice "\$temporary_stage\/production-slice"/s//capture_unit_property ControlGroup "$temporary_stage\/production-slice"/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        production-requirement)
+            sed '0,/"\$production_slice" != system\.slice/s//"$production_slice" != user.slice/' \
+                "$gate" >"$worker_slice_mutant"
+            ;;
+        *) exit 1 ;;
+    esac
+    chmod 0600 "$worker_slice_mutant"
+    if transient_slice_contract_is_exact "$worker_slice_mutant"; then
+        printf 'worker slice contract accepted mutation: %s\n' \
+            "$worker_slice_mutation" >&2
+        exit 1
+    fi
+done
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 2 ] \
+    || grep -F -- '--property=RestrictSUIDSGID=yes' "$gate" >/dev/null \
+    || [ "$(grep -Fc -- \
+        "capture_unit_property RestrictSUIDSGID \\" "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- 'restrict_suid_sgid" != no ]' "$gate")" -ne 2 ]; then
+    printf '%s\n' \
+        'both transient helpers must disable and read back the v257 openat2-incompatible restriction' >&2
+    exit 1
+fi
 if grep -F -- 'ProtectControlGroups=' "$gate" >/dev/null; then
     printf '%s\n' 'a transient helper still assigns the boolean-only legacy cgroup property' >&2
     exit 1
@@ -3513,9 +4411,103 @@ do
         exit 1
     fi
 done
-if [ "$(grep -Ec '^[[:space:]]*/run/volparossa-helper-live-proof --internal-worker-v3-live-proof \\{1}$' "$gate")" -ne 1 ] \
-    || [ "$(grep -Ec '^[[:space:]]*/run/volparossa-helper-production \\{1}$' "$gate")" -ne 1 ]; then
-    printf '%s\n' 'transient helper main commands are not exact absolute private paths' >&2
+# These are literal gate-source contracts; expansion here would defeat the checks.
+# shellcheck disable=SC1003,SC2016
+if [ "$(grep -Fc \
+    '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-live-proof --internal-worker-v3-live-proof \' \
+    "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production \' \
+        "$gate")" -ne 1 ]; then
+    printf '%s\n' 'transient helper credential trampolines are not exact' >&2
+    exit 1
+fi
+# PID 1 must never resolve the deliberately host-absent staged GID. The exact
+# trampoline is the sole authority that may install it after the private account
+# binds exist, while the helper parent contract proves the resulting identity.
+unit_credential_source_contract_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    credential_contract_source=$1
+    [ -f "$credential_contract_source" ] \
+        && [ ! -L "$credential_contract_source" ] || return 1
+    awk '
+        /^[[:space:]]+--property=User=/ {
+            user++
+            if ($0 ~ /^[[:space:]]+--property=User=0 \\$/) exact_user++
+        }
+        /^[[:space:]]+--property=Group=/ {
+            group++
+            if ($0 ~ /^[[:space:]]+--property=Group=0 \\$/) exact_group++
+        }
+        /^[[:space:]]+--property=SupplementaryGroups=/ {
+            supplementary++
+            if ($0 ~ /^[[:space:]]+--property=SupplementaryGroups= \\$/) {
+                exact_supplementary++
+            }
+        }
+        END {
+            valid = user == 2 && exact_user == 2
+            valid = valid && group == 2 && exact_group == 2
+            valid = valid && supplementary == 2 && exact_supplementary == 2
+            if (!valid) exit 1
+        }
+    ' "$credential_contract_source"
+}
+# This is a literal gate-source contract; expansion would defeat the check.
+# shellcheck disable=SC2016
+if ! unit_credential_source_contract_is_exact "$gate" \
+    || grep -F -- '--property=Group="$agent_gid"' "$gate" >/dev/null; then
+    printf '%s\n' 'transient units do not use exact host-resolvable root/root credentials' >&2
+    exit 1
+fi
+for credential_mutation in user-suffix group-suffix supplementary-value
+do
+    credential_mutant=$temporary_directory/credential-$credential_mutation.sh
+    case $credential_mutation in
+        user-suffix)
+            sed '0,/--property=User=0/s//--property=User=00/' \
+                "$gate" >"$credential_mutant"
+            ;;
+        group-suffix)
+            sed '0,/--property=Group=0/s//--property=Group=00/' \
+                "$gate" >"$credential_mutant"
+            ;;
+        supplementary-value)
+            sed '0,/--property=SupplementaryGroups=/s//--property=SupplementaryGroups=0/' \
+                "$gate" >"$credential_mutant"
+            ;;
+        *) exit 1 ;;
+    esac
+    chmod 0600 "$credential_mutant"
+    if unit_credential_source_contract_is_exact "$credential_mutant"; then
+        printf 'transient credential contract accepted mutation: %s\n' \
+            "$credential_mutation" >&2
+        exit 1
+    fi
+done
+# These are literal gate-source contracts; expansion here would defeat the checks.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'setpriv_path=/usr/bin/setpriv' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc '[ "$(command -v setpriv)" != "$setpriv_path" ]' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "stat -Lc '%F:%u:%g:%a:%h' \"\$setpriv_path\" 2>/dev/null || true" \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "!= 'regular file:0:0:755:1' ]; then" "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc \
+        "blocked 'the fixed root-owned setpriv credential trampoline is unavailable'" \
+        "$gate")" -ne 1 ]; then
+    printf '%s\n' 'the fixed root-owned setpriv credential trampoline is not pinned' >&2
+    exit 1
+fi
+# This is a literal gate-source contract; expansion would defeat the check.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'busctl_path=/usr/bin/busctl' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc '[ "$(command -v busctl)" != "$busctl_path" ]' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc "stat -Lc '%F:%u:%g:%a:%h' \"\$busctl_path\" 2>/dev/null || true" \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        "blocked 'the fixed root-owned systemd bus client is unavailable'" \
+        "$gate")" -ne 1 ]; then
+    printf '%s\n' 'the fixed root-owned systemd bus client is not pinned' >&2
     exit 1
 fi
 for cgroup_assignment_contract in \
@@ -3533,6 +4525,782 @@ do
         exit 1
     fi
 done
+
+# The production hook is root inside a private /run. Query typed properties
+# through the explicit policy-mediated system bus and never widen the sandbox
+# with systemd's privileged private manager socket.
+# These are literal hook-source contracts; expansion would defeat the checks.
+# shellcheck disable=SC2016
+if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 5 ] \
+    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 5 ] \
+    || [ "$(grep -Fc 'GetUnit s "$1" 2>/dev/null)' "$ipc_hook")" -ne 1 ] \
+    || grep -F -- 'SYSTEMCTL_FORCE_BUS' "$ipc_hook" >/dev/null \
+    || grep -F -- 'systemctl ' "$ipc_hook" >/dev/null \
+    || grep -F -- '/run/systemd/private' "$gate" >/dev/null \
+    || grep -F -- '/run/systemd/private' "$ipc_hook" >/dev/null; then
+    printf '%s\n' \
+        'production hook does not use the exact policy-mediated systemd bus' >&2
+    exit 1
+fi
+
+# Debian 13 systemd v257 exposes the service launch command through two
+# differently typed ten-field tuples. Exercise the exact parser against both
+# shapes and representative substitutions before trusting the source contract.
+hook_launch_parser_functions=$temporary_directory/hook-launch-parser-functions.sh
+{
+    sed -n '/^systemd_exec_record_from_json() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^process_starttime_from_stat() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^capture_process_starttime() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_launch_parser_functions"
+if [ "$(grep -c '^systemd_exec_record_from_json() {$' \
+        "$hook_launch_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^process_starttime_from_stat() {$' \
+        "$hook_launch_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^capture_process_starttime() {$' \
+        "$hook_launch_parser_functions")" -ne 1 ]; then
+    printf '%s\n' 'production launch parsers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$hook_launch_parser_functions"
+# shellcheck disable=SC2034,SC2317
+exercise_hook_launch_parsers() (
+    number_is_safe() {
+        [ "$#" -eq 1 ] || return 1
+        case $1 in
+            ''|0|0*|*[!0-9]*) return 1 ;;
+            *) [ "${#1}" -le 10 ] && [ "$1" -le 4294967294 ] ;;
+        esac
+    }
+    production_helper=/run/volparossa-helper-production
+    # shellcheck disable=SC1090
+    . "$hook_launch_parser_functions"
+    basic='{"type":"a(sasbttttuii)","data":[["/usr/bin/setpriv",["/usr/bin/setpriv","--regid=61000","--groups=61000","--","/run/volparossa-helper-production"],false,123456789,234567890,0,0,4242,0,0]]}'
+    extended='{"type":"a(sasasttttuii)","data":[["/usr/bin/setpriv",["/usr/bin/setpriv","--regid=61000","--groups=61000","--","/run/volparossa-helper-production"],[],123456789,234567890,0,0,4242,0,0]]}'
+    expected='systemd-launch-v1=pid:4242;gid:61000;start-realtime:123456789;start-monotonic:234567890'
+    [ "$(systemd_exec_record_from_json \
+        "$basic" basic 4242 61000 'a(sasbttttuii)')" = "$expected" ]
+    [ "$(systemd_exec_record_from_json \
+        "$extended" extended 4242 61000 'a(sasasttttuii)')" = "$expected" ]
+    for mutation in wrong-path wrong-argument wrong-gid wrong-pid wrong-type \
+        wrong-flag nonzero-stop nonzero-status duplicate-document
+    do
+        case $mutation in
+            wrong-path) candidate=$(printf '%s' "$basic" | sed 's#/usr/bin/setpriv#/usr/bin/env#') ;;
+            wrong-argument) candidate=$(printf '%s' "$basic" | sed 's/"--",/"--bad",/') ;;
+            wrong-gid) candidate=$(printf '%s' "$basic" | sed 's/--groups=61000/--groups=61001/') ;;
+            wrong-pid) candidate=$(printf '%s' "$basic" | sed 's/,4242,0,0/,4243,0,0/') ;;
+            wrong-type) candidate=$(printf '%s' "$basic" | sed 's/a(sasbttttuii)/a(sasasttttuii)/') ;;
+            wrong-flag) candidate=$(printf '%s' "$basic" | sed 's/],false,/],true,/' ) ;;
+            nonzero-stop) candidate=$(printf '%s' "$basic" | sed 's/,234567890,0,0,/,234567890,1,0,/') ;;
+            nonzero-status) candidate=$(printf '%s' "$basic" | sed 's/,4242,0,0]]/,4242,0,1]]/') ;;
+            duplicate-document) candidate=$(printf '%s\n%s' "$basic" "$basic") ;;
+            *) exit 99 ;;
+        esac
+        if systemd_exec_record_from_json \
+            "$candidate" basic 4242 61000 'a(sasbttttuii)' >/dev/null 2>&1; then
+            printf 'production launch parser accepted mutation: %s\n' "$mutation" >&2
+            exit 1
+        fi
+    done
+
+    valid_stat=$(awk 'BEGIN {
+        printf "4242 (worker ) name) S"
+        for (field = 4; field <= 21; field++) printf " %d", field
+        printf " 98765"
+        for (field = 23; field <= 52; field++) printf " 0"
+    }')
+    [ "$(process_starttime_from_stat "$valid_stat" 4242)" = 98765 ]
+    embedded_close_stat=$(printf '%s' "$valid_stat" | sed 's/worker ) name/worker ) name ) tail/')
+    [ "$(process_starttime_from_stat "$embedded_close_stat" 4242)" = 98765 ]
+    for invalid_stat in \
+        "$(printf '%s' "$valid_stat" | sed 's/^4242 /4243 /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/) S /) Z /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/) S /) S  /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/ 98765 / 0 /')" \
+        "$(printf '%s' "$valid_stat" | sed 's/ 98765 / 123456789012345678901 /')" \
+        "$(printf '%s\n%s' "$valid_stat" "$valid_stat")"
+    do
+        if process_starttime_from_stat "$invalid_stat" 4242 >/dev/null 2>&1; then
+            printf '%s\n' 'process starttime parser accepted a malformed stat record' >&2
+            exit 1
+        fi
+    done
+    current_starttime=$(capture_process_starttime "$$")
+    case $current_starttime in
+        ''|0|0*|*[!0-9]*) exit 1 ;;
+    esac
+)
+exercise_hook_launch_parsers || {
+    printf '%s\n' 'production launch parser behavior is not exact' >&2
+    exit 1
+}
+
+# Parent descriptors are kernel indexes, so canonical FD zero is valid even
+# though the PID/UID/GID validator deliberately rejects zero. Exercise that
+# boundary and the pidfd record parser independently of a live privileged run.
+hook_custody_parser_functions=$temporary_directory/hook-custody-parser-functions.sh
+{
+    sed -n '/^number_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^fd_number_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^pidfd_record_from_fdinfo() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_custody_parser_functions"
+if [ "$(grep -c '^number_is_safe() {$' "$hook_custody_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^fd_number_is_safe() {$' \
+        "$hook_custody_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^pidfd_record_from_fdinfo() {$' \
+        "$hook_custody_parser_functions")" -ne 1 ]; then
+    printf '%s\n' 'worker custody parsers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$hook_custody_parser_functions"
+# shellcheck disable=SC1090,SC2317
+exercise_hook_custody_parsers() (
+    . "$hook_custody_parser_functions"
+    for valid_fd in 0 1 4294967294; do
+        fd_number_is_safe "$valid_fd"
+    done
+    for invalid_fd in '' 00 01 -1 1x 4294967295 99999999999; do
+        if fd_number_is_safe "$invalid_fd"; then
+            exit 1
+        fi
+    done
+    if number_is_safe 0; then
+        exit 1
+    fi
+
+    valid_pidfd_info=$(printf '%s\n' \
+        'pos: 0' \
+        'flags: 02000002' \
+        'mnt_id: 5' \
+        'ino: 123' \
+        'Pid: 4242' \
+        'NSpid: 4242')
+    [ "$(pidfd_record_from_fdinfo "$valid_pidfd_info" 0 4242)" = \
+        'pidfd-v1=fd:0;pid:4242' ]
+    for invalid_pidfd_info in \
+        "$(printf '%s\n' "$valid_pidfd_info" 'Pid: 4242')" \
+        "$(printf '%s\n' "$valid_pidfd_info" 'NSpid: 4242')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed 's/Pid: 4242/Pid: 4243/')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed 's/NSpid: 4242/NSpid: 1 4242/')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed '/^Pid:/d')" \
+        "$(printf '%s\n' "$valid_pidfd_info" | sed '/^NSpid:/d')"
+    do
+        if pidfd_record_from_fdinfo \
+            "$invalid_pidfd_info" 0 4242 >/dev/null 2>&1; then
+            printf '%s\n' 'pidfd parser accepted a malformed identity record' >&2
+            exit 1
+        fi
+    done
+    if pidfd_record_from_fdinfo "$valid_pidfd_info" 00 4242 \
+        >/dev/null 2>&1 \
+        || pidfd_record_from_fdinfo "$valid_pidfd_info" 4294967295 4242 \
+            >/dev/null 2>&1; then
+        exit 1
+    fi
+)
+exercise_hook_custody_parsers || {
+    printf '%s\n' 'worker custody parser behavior is not exact' >&2
+    exit 1
+}
+# These are literal hook variable names. PID and identity numbers remain on the
+# positive-number validator, while every descriptor index uses the FD domain.
+# shellcheck disable=SC2016
+for exact_fd_variable in \
+    hook_worker_process_fd hook_pidfd_number hook_custody_fd hook_namespace_fd
+do
+    if grep -E "^[[:space:]]*number_is_safe \"\\\$$exact_fd_variable\"" \
+        "$ipc_hook" >/dev/null \
+        || ! grep -E "^[[:space:]]*fd_number_is_safe \"\\\$$exact_fd_variable\"" \
+            "$ipc_hook" >/dev/null; then
+        printf 'descriptor does not use the canonical FD validator: %s\n' \
+            "$exact_fd_variable" >&2
+        exit 1
+    fi
+done
+
+# A producer-side `exit` inside a POSIX pipeline is masked by the final sort.
+# Both procfs inventories must finish in a checked command substitution before
+# any separately checked normalization or ordering command consumes them.
+producer_pipeline_is_absent() {
+    [ "$#" -eq 1 ] || return 1
+    if grep -E '^[[:space:]]*done([[:space:]]|\\)*\|' "$1" >/dev/null; then
+        return 1
+    fi
+}
+for inventory_function in direct_helper_child capture_parent_worker_custody; do
+    inventory_body=$temporary_directory/$inventory_function.body
+    inventory_mutant=$temporary_directory/$inventory_function.pipeline-mutant
+    sed -n "/^$inventory_function() {\$/,/^}\$/p" "$ipc_hook" >"$inventory_body"
+    [ "$(grep -c "^$inventory_function() {\$" "$inventory_body")" -eq 1 ] || {
+        printf 'procfs inventory is not uniquely extractable: %s\n' \
+            "$inventory_function" >&2
+        exit 1
+    }
+    producer_pipeline_is_absent "$inventory_body" || {
+        printf 'procfs inventory masks producer failure: %s\n' \
+            "$inventory_function" >&2
+        exit 1
+    }
+    sed '0,/^        done$/s//        done | sort -n/' \
+        "$inventory_body" >"$inventory_mutant"
+    if producer_pipeline_is_absent "$inventory_mutant"; then
+        printf 'procfs inventory pipeline mutant was accepted: %s\n' \
+            "$inventory_function" >&2
+        exit 1
+    fi
+done
+
+# iproute2 may omit a route field that was already constrained on the command
+# line. Keep the underlay readback as three checked producer captures followed
+# by separate jq validation, and query the complete main-table default set so
+# the output still carries the device that the proof compares.
+# The preceding pristine-network inventory uses the same producer/consumer
+# boundary: a partial `ip` result must never become trusted through POSIX
+# pipeline status masking.
+# These patterns deliberately name literal hook variables.
+# shellcheck disable=SC2016
+private_network_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fxc \
+        '    hook_private_links=$(' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fxc \
+        '        /usr/sbin/ip -details -json link show 2>/dev/null' \
+        "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fxc '    ) || return 1' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc -- \
+        '--argjson observed "$hook_private_links"' "$1")" -eq 1 ] \
+        || return 1
+}
+private_network_body=$temporary_directory/private-network.body
+private_network_mutant=$temporary_directory/private-network.pipeline-mutant
+sed -n '/^private_network_is_pristine() {$/,/^}$/p' \
+    "$ipc_hook" >"$private_network_body"
+private_network_source_is_exact "$private_network_body" || {
+    printf '%s\n' 'private-network inventory masks producer failure' >&2
+    exit 1
+}
+sed '0,/ip -details -json link show/s/$/ | \/usr\/bin\/jq -e ./' \
+    "$private_network_body" >"$private_network_mutant"
+if private_network_source_is_exact "$private_network_mutant"; then
+    printf '%s\n' 'private-network inventory accepted a producer-pipeline mutant' >&2
+    exit 1
+fi
+
+# These patterns deliberately name literal hook variables.
+# shellcheck disable=SC2016
+functional_underlay_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -c '^[[:space:]]*hook_underlay_.*_json=\$(' "$1")" -eq 3 ] \
+        || return 1
+    [ "$(grep -c '^[[:space:]]*) || return 1$' "$1")" -eq 3 ] \
+        || return 1
+    for hook_underlay_exact_line in \
+        '        /usr/sbin/ip -details -json link show dev "$functional_underlay" 2>/dev/null' \
+        '        /usr/sbin/ip -4 -json address show dev "$functional_underlay" 2>/dev/null' \
+        '        /usr/sbin/ip -4 -json route show table main default 2>/dev/null'
+    do
+        [ "$(grep -Fxc -- "$hook_underlay_exact_line" "$1")" -eq 1 ] \
+            || return 1
+    done
+    for hook_underlay_exact_consumer in \
+        '--argjson observed "$hook_underlay_link_json"' \
+        '--argjson observed "$hook_underlay_address_json"' \
+        '--argjson observed "$hook_underlay_route_json"'
+    do
+        [ "$(grep -Fc -- "$hook_underlay_exact_consumer" "$1")" -eq 1 ] \
+            || return 1
+    done
+    ! grep -F 'route show default dev "$functional_underlay"' "$1" >/dev/null
+}
+functional_underlay_body=$temporary_directory/functional-underlay.body
+functional_underlay_mutant=$temporary_directory/functional-underlay.mutant
+sed -n '/^functional_underlay_is_exact() {$/,/^}$/p' \
+    "$ipc_hook" >"$functional_underlay_body"
+functional_underlay_source_is_exact "$functional_underlay_body" || {
+    printf '%s\n' 'functional underlay readback is not fail-closed and field-complete' >&2
+    exit 1
+}
+# This recreates the Debian 13/iproute2 failure where `dev` disappears from
+# JSON because it was consumed as a route-show filter.
+# shellcheck disable=SC2016
+sed '0,/route show table main default/s//route show default dev "$functional_underlay"/' \
+    "$functional_underlay_body" >"$functional_underlay_mutant"
+if functional_underlay_source_is_exact "$functional_underlay_mutant"; then
+    printf '%s\n' 'functional underlay accepted the iproute2 field-omission mutant' >&2
+    exit 1
+fi
+sed '0,/) || return 1/s//) || :/' \
+    "$functional_underlay_body" >"$functional_underlay_mutant"
+if functional_underlay_source_is_exact "$functional_underlay_mutant"; then
+    printf '%s\n' 'functional underlay accepted an unchecked producer mutant' >&2
+    exit 1
+fi
+# A checked command substitution still masks an `ip` failure when the producer
+# is silently changed back into a POSIX pipeline whose final command succeeds.
+sed '0,/ip -details -json link show dev/s/$/ | \/usr\/bin\/jq -e ./' \
+    "$functional_underlay_body" >"$functional_underlay_mutant"
+if functional_underlay_source_is_exact "$functional_underlay_mutant"; then
+    printf '%s\n' 'functional underlay accepted a producer-pipeline mutant' >&2
+    exit 1
+fi
+if ! awk '
+    /^direct_helper_child\(\) \{$/ { direct = 1; next }
+    /^helper_has_no_children\(\) \{$/ { direct = 0 }
+    direct && /hook_children_raw=\$\(/ { raw = NR }
+    direct && /^        done$/ { direct_done = NR }
+    direct && /^    \) \|\| return 1$/ {
+        direct_close_count++
+        if (direct_close_count == 1) raw_close = NR
+        if (direct_close_count == 2) lines_close = NR
+        if (direct_close_count == 3) nonempty_close = NR
+        if (direct_close_count == 4) sorted_close = NR
+    }
+    direct && /hook_children_lines=\$\(tr / { lines = NR }
+    direct && /hook_children_nonempty=\$\(sed / { nonempty = NR }
+    direct && /hook_children=\$\(sort -u / { sorted = NR }
+    /^capture_parent_worker_custody\(\) \{$/ { custody = 1; next }
+    /^worker_wireguard_interface\(\) \{$/ { custody = 0 }
+    custody && /hook_custody_fd_unsorted=\$\(/ { fd_raw = NR }
+    custody && /^        done$/ { fd_done = NR }
+    custody && /^    \) \|\| return 1$/ {
+        fd_close_count++
+        if (fd_close_count == 1) fd_raw_close = NR
+        if (fd_close_count == 2) fd_sorted_close = NR
+    }
+    custody && /hook_custody_fd_numbers=\$\(sort -n / { fd_sorted = NR }
+    END {
+        direct_ok = direct_close_count == 4 && raw < direct_done
+        direct_ok = direct_ok && direct_done < raw_close && raw_close < lines
+        direct_ok = direct_ok && lines < lines_close && lines_close < nonempty
+        direct_ok = direct_ok && nonempty < nonempty_close
+        direct_ok = direct_ok && nonempty_close < sorted && sorted < sorted_close
+        custody_ok = fd_close_count == 2 && fd_raw < fd_done
+        custody_ok = custody_ok && fd_done < fd_raw_close
+        custody_ok = custody_ok && fd_raw_close < fd_sorted
+        custody_ok = custody_ok && fd_sorted < fd_sorted_close
+        if (!(direct_ok && custody_ok)) exit 1
+    }
+' "$ipc_hook"; then
+    printf '%s\n' 'procfs inventories are not fail-closed before normalization' >&2
+    exit 1
+fi
+
+gate_launch_identity_functions=$temporary_directory/gate-launch-identity-functions.sh
+{
+    sed -n '/^systemd_launch_record_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^launch_image_record_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^process_starttime_from_stat() {$/,/^}$/p' "$gate"
+    sed -n '/^capture_process_starttime() {$/,/^}$/p' "$gate"
+    sed -n '/^retired_runtime_is_absent() {$/,/^}$/p' "$gate"
+} >"$gate_launch_identity_functions"
+if [ "$(grep -c '^systemd_launch_record_is_safe() {$' \
+        "$gate_launch_identity_functions")" -ne 1 ] \
+    || [ "$(grep -c '^launch_image_record_is_safe() {$' \
+        "$gate_launch_identity_functions")" -ne 1 ] \
+    || [ "$(grep -c '^retired_runtime_is_absent() {$' \
+        "$gate_launch_identity_functions")" -ne 1 ]; then
+    printf '%s\n' 'gate launch identity helpers are not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$gate_launch_identity_functions"
+# shellcheck disable=SC1090,SC2317
+exercise_gate_launch_identity() (
+    . "$gate_launch_identity_functions"
+    launch='systemd-launch-v1=pid:4242;gid:61000;start-realtime:123456789;start-monotonic:234567890'
+    digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    image="launch-image-v1=device:17;inode:23;size:81726341;sha256:$digest"
+    systemd_launch_record_is_safe "$launch" 4242 61000
+    launch_image_record_is_safe "$image" "$digest"
+    if systemd_launch_record_is_safe "$launch" 4243 61000 \
+        || systemd_launch_record_is_safe \
+            "${launch};start-monotonic:1" 4242 61000 \
+        || launch_image_record_is_safe \
+            "launch-image-v1=device:17;inode:23;size:134217729;sha256:$digest" \
+            "$digest" \
+        || launch_image_record_is_safe "$image" \
+            bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then
+        exit 1
+    fi
+
+    current_starttime=$(capture_process_starttime "$$")
+    synthetic_unit=volparossa-helper-live-proof-TST123.service
+    synthetic_group=/system.slice/$synthetic_unit
+    [ ! -e "/sys/fs/cgroup$synthetic_group" ]
+    retired_runtime_is_absent "$synthetic_unit" "$synthetic_group" \
+        "$$" "${current_starttime}9"
+    # An existing PID with the same birth token must remain present and fail
+    # the bounded retirement predicate. Remove wall-clock delay in this
+    # contract process while preserving all 1,200 exact observations.
+    sleep() { :; }
+    ! retired_runtime_is_absent "$synthetic_unit" "$synthetic_group" \
+        "$$" "$current_starttime"
+)
+exercise_gate_launch_identity || {
+    printf '%s\n' 'gate launch identity or PID-reuse behavior is not fail closed' >&2
+    exit 1
+}
+
+# Cross-credential procfs magic-link and argument reads require ptrace-like
+# authority. The evidence path must neither depend on those reads nor widen
+# the transient sandbox to make them possible.
+# shellcheck disable=SC2016
+if grep -F '/proc/$hook_identity_pid/exe' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_identity_pid/cmdline' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_worker_pid/exe' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_worker_pid/cmdline' "$ipc_hook" >/dev/null \
+    || grep -F '/proc/$hook_functional_worker_pid/ns/net' "$ipc_hook" >/dev/null \
+    || grep -F 'CAP_SYS_PTRACE' "$gate" "$ipc_hook" >/dev/null \
+    || grep -F '/run/systemd/private' "$gate" "$ipc_hook" >/dev/null; then
+    printf '%s\n' 'production launch evidence widened or retained ptrace-gated reads' >&2
+    exit 1
+fi
+if ! awk '
+    /^worker_identity_from_process_fd\(\) \{$/ { in_identity = 1; next }
+    /^worker_wireguard_interface\(\) \{$/ { in_identity = 0 }
+    in_identity && /capture_process_starttime_from_fd/ {
+        starttime_count++
+        if (starttime_count == 1) start_before = NR
+        if (starttime_count == 2) start_after = NR
+    }
+    in_identity && /worker_status_from_process_fd_is_exact/ {
+        status_count++
+        if (status_count == 1) status_before = NR
+        if (status_count == 2) status_after = NR
+    }
+    END {
+        valid = starttime_count == 2 && status_count == 2
+        valid = valid && start_before < status_before
+        valid = valid && status_before < start_after && start_after < status_after
+        if (!valid) exit 1
+    }
+' "$ipc_hook"; then
+    printf '%s\n' 'worker external identity is not stably bracketed' >&2
+    exit 1
+fi
+
+# Failed production start hooks publish only one private fixed stage. Exercise
+# the exact allowlist and transition graph, then pin the failure trap and all
+# fallible descriptor redirections to ordinary `command exec` semantics.
+hook_start_stage_functions=$temporary_directory/hook-start-stage-functions.sh
+{
+    sed -n '/^start_failure_stage_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^advance_start_failure_stage() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_start_stage_functions"
+test "$(grep -c '^start_failure_stage_is_safe() {$' \
+    "$hook_start_stage_functions")" -eq 1
+test "$(grep -c '^advance_start_failure_stage() {$' \
+    "$hook_start_stage_functions")" -eq 1
+sh -n "$hook_start_stage_functions"
+# shellcheck disable=SC1090
+. "$hook_start_stage_functions"
+observed_hook_start_stages=$temporary_directory/observed-hook-start-stages
+sed -n '/^start_failure_stage_is_safe() {$/,/^}$/p' "$ipc_hook" \
+    | sed -nE 's/^[[:space:]]*([a-z][a-z-]*)(\|\\|\))[[:space:]]*$/\1/p' \
+    >"$observed_hook_start_stages"
+cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
+    printf '%s\n' 'production hook start failure stages differ from the fixed allowlist' >&2
+    exit 1
+}
+start_failure_stage=
+hook_stage_index=0
+while IFS= read -r hook_start_stage; do
+    hook_stage_index=$((hook_stage_index + 1))
+    if [ "$hook_stage_index" -eq 1 ]; then
+        [ "$hook_start_stage" = preflight-runtime ] || exit 1
+        start_failure_stage=$hook_start_stage
+    else
+        advance_start_failure_stage "$hook_start_stage" || {
+            printf 'production hook rejected monotone start stage: %s\n' \
+                "$hook_start_stage" >&2
+            exit 1
+        }
+    fi
+done <"$expected_production_start_stages"
+[ "$start_failure_stage" = publication ] || {
+    printf '%s\n' 'production hook start stage did not reach publication' >&2
+    exit 1
+}
+if advance_start_failure_stage identity-socket \
+    || { start_failure_stage=preflight-runtime; advance_start_failure_stage active-lock; }; then
+    printf '%s\n' 'production hook start stage accepted a skipped or regressed transition' >&2
+    exit 1
+fi
+
+# The initial capture must run in the hook shell so its fixed stages survive;
+# ordinary reobservations retain their stdout surface and never move the stage.
+hook_identity_capture_function=$temporary_directory/hook-identity-capture-function.sh
+sed -n '/^capture_running_identity() {$/,/^}$/p' "$ipc_hook" \
+    >"$hook_identity_capture_function"
+test "$(grep -c '^capture_running_identity() {$' \
+    "$hook_identity_capture_function")" -eq 1
+sh -n "$hook_identity_capture_function"
+# These functions and assignments satisfy symbols in the dynamically sourced
+# capture function, which static ShellCheck analysis cannot follow.
+# shellcheck disable=SC2034,SC2154,SC2317
+exercise_hook_identity_capture_modes() (
+    # shellcheck disable=SC1090
+    . "$hook_start_stage_functions"
+    # shellcheck disable=SC1090
+    . "$hook_identity_capture_function"
+    number_is_safe() { return 0; }
+    unit_invocation_id() { printf '%s\n' 11111111111111111111111111111111; }
+    unit_main_pid() { printf '%s\n' 4242; }
+    capture_systemd_launch_contract() {
+        printf '%s\n' \
+            'systemd-launch-v1=pid:4242;gid:7;start-realtime:123;start-monotonic:456'
+    }
+    capture_launch_image_identity() {
+        printf '%s\n' \
+            'launch-image-v1=device:1;inode:2;size:3;sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    }
+    launch_image_matches_identity() {
+        [ "$2" = \
+            'launch-image-v1=device:1;inode:2;size:3;sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]
+    }
+    capture_process_starttime() { printf '%s\n' 789; }
+    capture_helper_process_contract() { printf '%s\n' process-contract-v1; }
+    production_helper=/run/exact-helper
+    expected_launch_image='launch-image-v1=device:1;inode:2;size:3;sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    expected_identity=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+        11111111111111111111111111111111 \
+        4242 \
+        'systemd-launch-v1=pid:4242;gid:7;start-realtime:123;start-monotonic:456' \
+        "$expected_launch_image" \
+        process-starttime-v1=789 \
+        process-contract-v1)
+
+    start_failure_stage=identity-lock
+    capture_running_identity exact.service 7 initial \
+        >"$temporary_directory/initial-identity.stdout"
+    [ ! -s "$temporary_directory/initial-identity.stdout" ]
+    [ "$start_failure_stage" = identity-stability ]
+    [ "$hook_captured_running_identity" = "$expected_identity" ]
+
+    start_failure_stage=active-lock
+    observed_identity=$(capture_running_identity \
+        exact.service 7 "$expected_launch_image")
+    [ "$start_failure_stage" = active-lock ]
+    [ "$observed_identity" = "$expected_identity" ]
+    ! capture_running_identity exact.service 7 substituted
+)
+exercise_hook_identity_capture_modes || {
+    printf '%s\n' 'production hook identity capture modes are not affine to start stages' >&2
+    exit 1
+}
+# These are literal hook-source contracts; expansion would defeat the checks.
+# shellcheck disable=SC2016
+for fixed_start_failure_contract in \
+    'start_failure_record=$proof_directory/start.failure' \
+    "write_private_file \"\$start_failure_record\" \\" \
+    'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=$start_failure_stage' \
+    'trap start_failure_exit EXIT' \
+    'capture_running_identity "$hook_unit" "$agent_gid" initial' \
+    'hook_identity=$hook_captured_running_identity' \
+    'start_failure_armed=no' \
+    'trap - EXIT'
+do
+    grep -F -- "$fixed_start_failure_contract" "$ipc_hook" >/dev/null || {
+        printf 'production hook start failure contract is missing: %s\n' \
+            "$fixed_start_failure_contract" >&2
+        exit 1
+    }
+done
+if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
+    "$ipc_hook" >/dev/null \
+    || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
+        "$ipc_hook")" -ne 11 ] \
+    || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
+        "$ipc_hook")" -ne 1 ]; then
+    printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
+    exit 1
+fi
+hook_start_exit_functions=$temporary_directory/hook-start-exit-functions.sh
+{
+    sed -n '/^start_failure_stage_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^publish_start_failure() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^start_failure_exit() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_start_exit_functions"
+test "$(grep -c '^[_a-z].*() {$' "$hook_start_exit_functions")" -eq 3
+sh -n "$hook_start_exit_functions"
+forced_fd_script=$temporary_directory/forced-hook-fd-failure.sh
+{
+    printf '%s\n' '#!/bin/sh' 'set -eu'
+    printf '. %s\n' "$hook_start_exit_functions"
+    cat <<'EOF'
+write_private_file() {
+    [ "$#" -eq 2 ] || return 1
+    forced_destination=$1
+    forced_payload=$2
+    (
+        umask 077
+        set -C
+        printf '%s\n' "$forced_payload" >"$forced_destination"
+    ) 2>/dev/null || return 1
+    [ "$(stat -Lc '%F:%h:%u:%a' "$forced_destination")" = \
+        "regular file:1:$(id -u):600" ]
+}
+start_failure_record=$1
+start_failure_stage=functional-probe-ready
+start_failure_armed=yes
+start_failure_published=no
+trap start_failure_exit EXIT
+force_fd_failure() {
+    command exec 8<>"$1" || return 1
+}
+force_fd_failure "$2"
+EOF
+} >"$forced_fd_script"
+chmod 0700 "$forced_fd_script"
+forced_fd_record=$temporary_directory/forced-hook-fd.start.failure
+set +e
+dash "$forced_fd_script" "$forced_fd_record" \
+    "$temporary_directory/absent-directory/fd" \
+    >"$temporary_directory/forced-hook-fd.stdout" \
+    2>"$temporary_directory/forced-hook-fd.stderr"
+forced_fd_status=$?
+set -e
+if [ "$forced_fd_status" -ne 1 ] \
+    || [ -s "$temporary_directory/forced-hook-fd.stdout" ] \
+    || [ "$(stat -Lc '%F:%h:%u:%a' "$forced_fd_record" 2>/dev/null || true)" \
+        != "regular file:1:$(id -u):600" ] \
+    || ! printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=functional-probe-ready' \
+        | cmp -s - "$forced_fd_record"; then
+    printf '%s\n' 'forced hook FD failure did not return status 1 with one fixed stage' >&2
+    exit 1
+fi
+
+# The hook may retain a failed functional child only after observing its exact
+# exit status with wait and validating one bounded, fully enumerated record.
+hook_functional_failure_functions=$temporary_directory/hook-functional-failure-functions.sh
+{
+    sed -n '/^functional_probe_failure_value_is_safe() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^functional_probe_failure_record_is_exact() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^publish_functional_probe_failure() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^observe_functional_probe_failure() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_functional_failure_functions"
+test "$(grep -c '^[_a-z].*() {$' "$hook_functional_failure_functions")" -eq 4
+sh -n "$hook_functional_failure_functions"
+# shellcheck disable=SC1090
+. "$hook_functional_failure_functions"
+while IFS= read -r functional_failure_phase; do
+    while IFS= read -r functional_failure_class; do
+        functional_probe_failure_value_is_safe \
+            "$functional_failure_phase,$functional_failure_class" || {
+            printf 'hook rejected functional failure value: %s,%s\n' \
+                "$functional_failure_phase" "$functional_failure_class" >&2
+            exit 1
+        }
+    done <"$expected_functional_failure_classes"
+done <"$expected_functional_failure_phases"
+for invalid_functional_failure_value in \
+    '' private,io prepare,private prepare,io,extra prepare/io; do
+    if functional_probe_failure_value_is_safe "$invalid_functional_failure_value"; then
+        printf 'hook accepted functional failure mutant: %s\n' \
+            "$invalid_functional_failure_value" >&2
+        exit 1
+    fi
+done
+exercise_hook_functional_failure() (
+    [ "$#" -eq 3 ] || exit 98
+    hook_failure_name=$1
+    hook_failure_value=$2
+    hook_failure_status=$3
+    hook_failure_directory=$temporary_directory/hook-functional-failure-$hook_failure_name
+    mkdir -m 0700 "$hook_failure_directory"
+    hook_failure_source=$hook_failure_directory/probe.stderr
+    functional_failure_record=$hook_failure_directory/probe.failure
+    functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
+    printf '%s%s\n' "$functional_failure_prefix" "$hook_failure_value" \
+        >"$hook_failure_source"
+    chmod 0600 "$hook_failure_source"
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    private_file_is_safe() {
+        [ "$#" -eq 1 ] || return 1
+        [ -f "$1" ] && [ ! -L "$1" ] \
+            && [ "$(stat -Lc '%f:%u:%g:%a:%h' "$1" 2>/dev/null || true)" = \
+                "8180:$(id -u):$(id -g):600:1" ]
+    }
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    write_private_file() {
+        [ "$#" -eq 2 ] || return 1
+        printf '%s\n' "$2" >"$1.next" || return 1
+        chmod 0600 "$1.next" || return 1
+        private_file_is_safe "$1.next" || return 1
+        mv -- "$1.next" "$1" || return 1
+        private_file_is_safe "$1"
+    }
+    # shellcheck disable=SC1090
+    . "$hook_functional_failure_functions"
+    publish_functional_probe_failure "$hook_failure_status" "$hook_failure_source"
+    functional_probe_failure_record_is_exact "$functional_failure_record"
+)
+expect_status 0 exercise_hook_functional_failure \
+    exact second-cycle-prepare,correlation 1
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+while read -r hook_failure_name hook_failure_value hook_failure_status; do
+    expect_status 1 exercise_hook_functional_failure \
+        "$hook_failure_name" "$hook_failure_value" "$hook_failure_status"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done <<'EOF'
+bad-phase private,io 1
+bad-class prepare,private 1
+extra-field prepare,io,extra 1
+wrong-status prepare,io 2
+success-status prepare,io 0
+EOF
+
+exercise_hook_functional_failure_wait() (
+    hook_failure_directory=$temporary_directory/hook-functional-failure-wait
+    mkdir -m 0700 "$hook_failure_directory"
+    hook_failure_source=$hook_failure_directory/probe.stderr
+    functional_failure_record=$hook_failure_directory/probe.failure
+    functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
+    printf '%s\n' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=connect,io' \
+        >"$hook_failure_source"
+    chmod 0600 "$hook_failure_source"
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    private_file_is_safe() {
+        [ "$#" -eq 1 ] || return 1
+        [ -f "$1" ] && [ ! -L "$1" ] \
+            && [ "$(stat -Lc '%f:%u:%g:%a:%h' "$1" 2>/dev/null || true)" = \
+                "8180:$(id -u):$(id -g):600:1" ]
+    }
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    write_private_file() {
+        printf '%s\n' "$2" >"$1.next" || return 1
+        chmod 0600 "$1.next" || return 1
+        mv -- "$1.next" "$1"
+    }
+    # Invoked indirectly by the extracted production hook helpers.
+    # shellcheck disable=SC2317
+    number_is_safe() {
+        case $1 in ''|0|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+    }
+    # shellcheck disable=SC1090
+    . "$hook_functional_failure_functions"
+    (exit 1) &
+    hook_failure_pid=$!
+    observe_functional_probe_failure "$hook_failure_pid" "$hook_failure_source"
+    functional_probe_failure_record_is_exact "$functional_failure_record"
+)
+expect_status 0 exercise_hook_functional_failure_wait
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+# These are literal hook-source contracts; expansion would defeat the checks.
+# shellcheck disable=SC2016
+if [ "$(grep -Fc 'wait "$hook_functional_failure_pid"' "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc 'wait "$hook_functional_failure_pid"; then' "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 2 ]; then
+    printf '%s\n' 'functional probe failures are not observed through exact child waits' >&2
+    exit 1
+fi
 if [ "$(grep -Fc -- 'capture_unit_property CollectMode' "$gate")" -ne 2 ] \
     || [ "$(grep -Fc -- 'collect_mode" != inactive' "$gate")" -ne 2 ]; then
     printf '%s\n' \
@@ -3568,13 +5336,47 @@ fi
 # shellcheck disable=SC2016
 for required_hook_contract in \
     'runtime_directory=/run/volparossa' \
+    'host_network_identity_record=/run/volparossa-helper-production-host-network.identity' \
     'helper_socket=$runtime_directory/helper.sock' \
     'cleanup_token=$runtime_directory/helper.cleanup-token' \
     'probe=/run/volparossa-helper-production-ipc-probe' \
     'production_helper=/run/volparossa-helper-production' \
+    'helper_bootstrap_capability_mask=00000000002031e0' \
     "'directory:0:0:2700'" \
-    'command_line_is_argumentless "$hook_identity_pid"' \
-    'running_identity_is_unchanged "$hook_probe_unit" "$hook_probe_identity"' \
+    'systemd_exec_record_from_json() {' \
+    "basic:'a(sasbttttuii)'|extended:'a(sasasttttuii)'" \
+    '--arg expected_path /usr/bin/setpriv' \
+    '--arg expected_regid "--regid=$hook_exec_gid"' \
+    '--arg expected_groups "--groups=$hook_exec_gid"' \
+    'capture_systemd_launch_contract() {' \
+    'org.freedesktop.systemd1.Service' \
+    'ExecStart 2>/dev/null)' \
+    'ExecStartEx 2>/dev/null)' \
+    'capture_launch_image_metadata() {' \
+    "stat -Lc '%d:%i:%F:%u:%g:%a:%h:%s'" \
+    'capture_launch_image_identity() {' \
+    'hook_image_digest=$(checksum_file "$1")' \
+    'launch_image_matches_identity() {' \
+    'process_starttime_from_stat() {' \
+    'hook_starttime_path=/proc/$hook_starttime_pid/stat' \
+    'process-starttime-v1=$hook_process_starttime' \
+    'capture_helper_process_contract() {' \
+    'hook_contract_status=/proc/$hook_contract_pid/status' \
+    '$1 == "Uid:" {' \
+    '$1 == "Gid:" {' \
+    '$1 == "Groups:" {' \
+    '$1 == "NoNewPrivs:" {' \
+    '$1 == "Seccomp:" {' \
+    '$1 == "Seccomp_filters:" {' \
+    '$1 == "CapInh:" {' \
+    '$1 == "CapPrm:" {' \
+    '$1 == "CapEff:" {' \
+    '$1 == "CapBnd:" {' \
+    '$1 == "CapAmb:" {' \
+    'process-status-v1=uid:0:0:0:0;gid:%s:%s:%s:%s;groups:%s;nnp:1;seccomp:2;caps:%s;filters:%s' \
+    'hook_process_contract=$(capture_helper_process_contract' \
+    '"$hook_identity_pid" "$hook_identity_gid")' \
+    '"$hook_probe_unit" "$hook_probe_identity" "$hook_expected_agent_gid"' \
     'capture_socket_identity' \
     'socket_identity_is_unchanged' \
     'capture_lock_identity' \
@@ -3584,7 +5386,8 @@ for required_hook_contract in \
     'hook_active_lock_fd_identity=$(stat -Lc' \
     '/usr/bin/flock -n -x -E 42 8' \
     '[ "$hook_active_flock_status" -eq 42 ]' \
-    'running_identity_is_unchanged "$hook_unit" "$proof_directory/unit.identity"' \
+    'running_identity_is_unchanged "$hook_unit"' \
+    '"$proof_directory/unit.identity" "$agent_gid"' \
     'exec 8>&-' \
     '/usr/bin/setpriv' \
     '--clear-groups' \
@@ -3602,6 +5405,72 @@ for required_hook_contract in \
     'run_probe wrong-gid expect-unauthorised-peer "$agent_uid" "$operator_gid" "$agent_gid"' \
     'run_probe root-peer expect-unauthorised-peer 0 "$agent_gid" clear' \
     'run_probe bind-after bind-runtime "$agent_uid" "$agent_gid" "$operator_gid"' \
+    'functional_underlay_address=192.31.195.254' \
+    'functional_underlay_gateway=192.31.195.1' \
+    'functional_underlay_alias=volparossa-proof-underlay-v1' \
+    'functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+    'functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
+    'functional_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+    'functional_release_byte=G' \
+    '/usr/sbin/ip link add name "$functional_underlay" type dummy' \
+    '/usr/sbin/ip address add "$functional_underlay_address/24"' \
+    '/usr/sbin/ip route add default via "$functional_underlay_gateway"' \
+    'mkfifo -m 0600 "$hook_functional_fifo"' \
+    "'fifo:0:0:600:1'" \
+    'command exec 6<>"$hook_functional_fifo"' \
+    '"$probe" functional-client-lease' \
+    '<"$hook_functional_fifo"' \
+    'probe_output_is_exact' \
+    '"$hook_functional_stdout" "$functional_ready_record"' \
+    '[ "$hook_functional_wait_attempt" -lt 300 ] || return 1' \
+    'hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid")' \
+    'hook_entry_contract_is_exact() {' \
+    'capture_helper_process_contract "$$" "$hook_entry_gid"' \
+    'hook_entry_contract_is_exact "$agent_gid"' \
+    'hook_entry_contract_is_exact "$hook_expected_agent_gid"' \
+    'process_contract_filter_count() {' \
+    'fd_number_is_safe() {' \
+    'worker_status_from_process_fd_is_exact() {' \
+    'worker_identity_from_process_fd() {' \
+    'capture_process_starttime_from_fd() {' \
+    'hook_worker_expected_filters=$((hook_worker_parent_filters + 1))' \
+    'if (NF != 2 || $2 != expected_pid) invalid = 1' \
+    'if (NF != 2 || $2 != expected_filters) invalid = 1' \
+    'if (NF != 2 || $2 != "0000000000001000") invalid = 1' \
+    'pidfd_record_from_fdinfo() {' \
+    'capture_parent_pidfd_record() {' \
+    'hook_custody_pidfd_identity=$hook_custody_observed_identity' \
+    'capture_parent_worker_custody() {' \
+    "'anon_inode:[pidfd]'" \
+    'capture_parent_process_fd_identity' \
+    'capture_parent_namespace_fd_identity' \
+    '"$hook_functional_parent_namespace" != "$hook_functional_worker_namespace"' \
+    'command exec 7<"$hook_functional_parent_namespace_path"' \
+    'command exec 8<"$hook_functional_parent_process_path"' \
+    'worker_identity_from_process_fd' \
+    '/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" --' \
+    '/usr/bin/wg show interfaces' \
+    'worker_wireguard_interface 7' \
+    'printf '"'"'%s'"'"' "$functional_release_byte" >&6' \
+    'wait "$hook_functional_probe_pid"' \
+    'functional_probe_output_is_exact "$hook_functional_stdout"' \
+    'helper_has_no_children "$hook_functional_main_pid"' \
+    'worker_process_fd_is_retired 8' \
+    'helper_holds_no_worker_custody "$hook_functional_main_pid"' \
+    'worker_wireguard_is_absent 7' \
+    'command exec 8>&-' \
+    'command exec 7>&-' \
+    'private_network_is_pristine' \
+    'private_file_is_safe "$host_network_identity_record"' \
+    'hook_host_namespace=$(cat "$host_network_identity_record")' \
+    'kernel_object_identity_is_safe "$hook_host_namespace"' \
+    '"$hook_private_namespace" != "$hook_host_namespace"' \
+    '[ "$(cat "$host_network_identity_record")" = "$hook_host_namespace" ]' \
+    '/usr/sbin/ip -json route show default' \
+    '/usr/sbin/ip -6 -json route show default' \
+    'unit_fdstore_is_empty' \
+    'remove_functional_underlay "$hook_functional_ifindex"' \
+    'run_functional_client_lease_probe' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_RUNTIME_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
@@ -3611,6 +5480,9 @@ for required_hook_contract in \
     'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
     '[ "${SERVICE_RESULT:-}" = success ]' \
     '[ "${EXIT_CODE:-}" = exited ]' \
     '[ "${EXIT_STATUS:-}" = 0 ]' \
@@ -3619,10 +5491,11 @@ for required_hook_contract in \
     'capture_journal_state' \
     "stat -c '%d:%i:%f:%u:%g:%a:%h:%s:%y:%z'" \
     'hook_expected_lock_identity=$(cat "$proof_directory/lock.identity")' \
-    'exec 9<>"$journal_lock"' \
+    'command exec 9<>"$journal_lock"' \
     'hook_lock_fd_identity=$(stat -Lc' \
     '/usr/bin/flock -n 9' \
-    'systemctl show --property=NFileDescriptorStore --value' \
+    'unit_u32_property' \
+    'NFileDescriptorStore' \
     '[ "$hook_fdstore_count" = 0 ]' \
     'VOLPAROSSA_HELPER_V3_IPC_CLEAN_SHUTDOWN_V1=pass'
 do
@@ -3630,6 +5503,176 @@ do
         printf 'missing production IPC hook contract: %s\n' "$required_hook_contract" >&2
         exit 1
     }
+done
+if grep -F '/proc/1/ns/net' "$ipc_hook" >/dev/null; then
+    printf '%s\n' \
+        'production hook regained ptrace-gated PID 1 namespace inspection' >&2
+    exit 1
+fi
+for worker_launch_anchor in \
+    'crate::worker_sandbox::WorkerKernelPins::pin_process(child)' \
+    'ExpectedUnixCredentials::new(child_pid, worker_identity.uid(), worker_identity.gid())' \
+    'parent_handshake(&process, observation, challenge, binding)' \
+    'prctl::set_dumpable(false)' \
+    'send_credential_record(&channel, &accepted.sandbox_ready().encode())'
+do
+    grep -F -- "$worker_launch_anchor" "$worker_source" >/dev/null || {
+        printf 'worker launch anchor is missing: %s\n' "$worker_launch_anchor" >&2
+        exit 1
+    }
+done
+for worker_kernel_anchor in \
+    'let pidfd = pidfd_open(pid, PidfdFlags::empty())' \
+    'process_directory = open(' \
+    'pin_network_namespace_before_identity_drop('
+do
+    grep -F -- "$worker_kernel_anchor" "$worker_sandbox_source" >/dev/null || {
+        printf 'worker kernel anchor is missing: %s\n' "$worker_kernel_anchor" >&2
+        exit 1
+    }
+done
+hook_process_contract_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_contract_source=$1
+    [ -f "$hook_contract_source" ] && [ ! -L "$hook_contract_source" ] || return 1
+    awk '
+        $0 == "helper_bootstrap_capability_mask=00000000002031e0" { mask++ }
+        /^capture_helper_process_contract\(\) \{$/ { in_contract = 1; next }
+        /^capture_running_identity\(\) \{$/ {
+            in_contract = 0
+            in_identity = 1
+            next
+        }
+        /^running_identity_is_unchanged\(\) \{$/ {
+            in_identity = 0
+            in_recheck = 1
+            next
+        }
+        /^probe_output_is_exact\(\) \{$/ { in_recheck = 0 }
+        in_contract && /\$1 == "Pid:"/ { pid_field++ }
+        in_contract && /\$1 == "Uid:"/ { uid_field++ }
+        in_contract && /\$1 == "Gid:"/ { gid_field++ }
+        in_contract && /\$1 == "Groups:"/ { groups_field++ }
+        in_contract && /\$1 == "NoNewPrivs:"/ { nnp_field++ }
+        in_contract && /\$1 == "Seccomp:"/ { seccomp_field++ }
+        in_contract && /\$1 == "Seccomp_filters:"/ { filters_field++ }
+        in_contract && /\$1 == "CapInh:"/ { inherited_field++ }
+        in_contract && /\$1 == "CapPrm:"/ { permitted_field++ }
+        in_contract && /\$1 == "CapEff:"/ { effective_field++ }
+        in_contract && /\$1 == "CapBnd:"/ { bounding_field++ }
+        in_contract && /\$1 == "CapAmb:"/ { ambient_field++ }
+        in_contract && /NF != 5 \|\| \$2 != 0 \|\| \$3 != 0/ { uid_exact++ }
+        in_contract && /NF != 5 \|\| \$2 != expected_gid/ { gid_exact++ }
+        in_contract && /NF != 2 \|\| \$2 != expected_gid/ { groups_exact++ }
+        in_contract && /NF != 2 \|\| \$2 != 1/ { nnp_exact++ }
+        in_contract && /NF != 2 \|\| \$2 != 2/ { seccomp_exact++ }
+        in_contract && /filters !~ \/\^\[1-9\]\[0-9\]\*\$\// { filters_canonical++ }
+        in_contract && /length\(filters\) > 10 \|\| filters > 1024/ { filters_bounded++ }
+        in_contract && /NF != 2 \|\| \$2 != expected_caps/ { exact_capsets++ }
+        in_contract && /process-status-v1=uid:0:0:0:0;gid:%s:%s:%s:%s;/ {
+            canonical_record++
+        }
+        in_contract && /valid = valid && groups_count == 1 && nnp_count == 1/ {
+            group_counts++
+        }
+        in_contract && /valid = valid && ambient_count == 1/ { exact_counts++ }
+        in_identity && /hook_process_contract=\$\(capture_helper_process_contract/ {
+            process_capture = NR
+        }
+        in_identity && /unit_invocation_id "\$hook_identity_unit"/ {
+            invocation_observations++
+            if (invocation_observations == 2) invocation_after = NR
+        }
+        in_identity && /unit_main_pid "\$hook_identity_unit"/ {
+            pid_observations++
+            if (pid_observations == 2) pid_after = NR
+        }
+        in_identity && /capture_systemd_launch_contract/ {
+            launch_observations++
+            launch_before = NR
+        }
+        in_identity && /capture_process_starttime/ {
+            starttime_observations++
+            if (starttime_observations == 1) starttime_before = NR
+            if (starttime_observations == 2) starttime_after = NR
+        }
+        in_identity && /capture_launch_image_identity/ { image_capture = NR }
+        in_identity && /launch_image_matches_identity/ {
+            image_observations++
+            if (image_observations == 1) image_before = NR
+            if (image_observations == 2) image_after = NR
+        }
+        in_recheck && /hook_observed_identity=\$\(capture_running_identity/ {
+            recheck_capture = NR
+        }
+        in_recheck && /"\$hook_identity_unit" "\$hook_identity_gid"/ {
+            recheck_gid = NR
+        }
+        END {
+            valid = mask == 1 && pid_field == 1 && uid_field == 1 && gid_field == 1
+            valid = valid && groups_field == 1 && nnp_field == 1
+            valid = valid && seccomp_field == 1 && filters_field == 1
+            valid = valid && inherited_field == 1 && permitted_field == 1
+            valid = valid && effective_field == 1 && bounding_field == 1
+            valid = valid && ambient_field == 1 && exact_capsets == 5
+            valid = valid && uid_exact == 1 && gid_exact == 1 && groups_exact == 1
+            valid = valid && nnp_exact == 1 && seccomp_exact == 1
+            valid = valid && filters_canonical == 1 && filters_bounded == 1
+            valid = valid && canonical_record == 1 && group_counts == 1
+            valid = valid && exact_counts == 1
+            valid = valid && launch_observations == 1 && starttime_observations == 2
+            valid = valid && image_observations == 2
+            valid = valid && launch_before < image_capture
+            valid = valid && image_capture < image_before
+            valid = valid && image_before < starttime_before
+            valid = valid && starttime_before < process_capture
+            valid = valid && process_capture < starttime_after
+            valid = valid && starttime_after < image_after
+            valid = valid && image_after < pid_after
+            valid = valid && pid_after < invocation_after
+            valid = valid && recheck_capture < recheck_gid
+            if (!valid) exit 1
+        }
+    ' "$hook_contract_source"
+}
+if ! hook_process_contract_source_is_exact "$ipc_hook"; then
+    printf '%s\n' 'production helper process-status contract is incomplete or unordered' >&2
+    exit 1
+fi
+for hook_contract_mutation in capability-mask group-count ambient-field \
+    starttime-recheck launch-image-recheck
+do
+    hook_contract_mutant=$temporary_directory/hook-$hook_contract_mutation.sh
+    case $hook_contract_mutation in
+        capability-mask)
+            sed '0,/00000000002031e0/s//0000000000000000/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        group-count)
+            sed '0,/groups_count == 1/s//groups_count == 0/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        ambient-field)
+            sed '0,/CapAmb:/s//CapXYZ:/' "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        starttime-recheck)
+            # shellcheck disable=SC2016
+            sed '0,/\[ "$(capture_process_starttime/s/capture_process_starttime/unchecked_process_starttime/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        launch-image-recheck)
+            # shellcheck disable=SC2016
+            sed '0,/launch_image_matches_identity "\$production_helper" "\$hook_launch_image"/s/launch_image_matches_identity/unchecked_launch_image/' \
+                "$ipc_hook" >"$hook_contract_mutant"
+            ;;
+        *) exit 1 ;;
+    esac
+    chmod 0600 "$hook_contract_mutant"
+    if hook_process_contract_source_is_exact "$hook_contract_mutant"; then
+        printf 'production helper process-status contract accepted mutation: %s\n' \
+            "$hook_contract_mutation" >&2
+        exit 1
+    fi
 done
 if ! awk '
     /^start_hook\(\) \{$/ { in_start = 1; next }
@@ -3703,7 +5746,7 @@ if ! awk '
         if (probe_count == 2) second_probe = NR
     }
     in_probe && /"\$hook_probe_status" -eq 0/ { status_gate = NR }
-    /^start_hook\(\) \{$/ { in_probe = 0 }
+    /^functional_underlay_is_exact\(\) \{$/ { in_probe = 0 }
     END {
         valid = socket_count == 2 && identity_count == 2 && probe_count == 2
         valid = valid && identity_before < socket_before && socket_before < first_probe
@@ -3740,6 +5783,7 @@ if ! awk '
     /run_probe wrong-gid expect-unauthorised-peer/ { wrong_gid = NR }
     /run_probe root-peer expect-unauthorised-peer/ { root_peer = NR }
     /run_probe bind-after bind-runtime/ { bind_after = NR }
+    /^    run_functional_client_lease_probe/ { functional = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass'"'"'/ { marker_bind_before = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass'"'"'/ { marker_frame = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass'"'"'/ { marker_wire = NR }
@@ -3747,19 +5791,96 @@ if ! awk '
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_WRONG_GID_V1=pass'"'"'/ { marker_wrong_gid = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass'"'"'/ { marker_root_peer = NR }
     /'"'"'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass'"'"'/ { marker_bind_after = NR }
+    /"\$functional_ready_record"/ { marker_functional_ready = NR }
+    /"\$functional_pass_record"/ { marker_functional_pass = NR }
+    /"\$functional_cleanup_record"/ { marker_functional_cleanup = NR }
     END {
         probes = bind_before < frame && frame < wire && wire < wrong_uid
         probes = probes && wrong_uid < wrong_gid && wrong_gid < root_peer
-        probes = probes && root_peer < bind_after
+        probes = probes && root_peer < bind_after && bind_after < functional
         markers = bind_after < marker_bind_before && marker_bind_before < marker_frame
         markers = markers && marker_frame < marker_wire && marker_wire < marker_wrong_uid
         markers = markers && marker_wrong_uid < marker_wrong_gid
         markers = markers && marker_wrong_gid < marker_root_peer
         markers = markers && marker_root_peer < marker_bind_after
+        markers = markers && marker_bind_after < marker_functional_ready
+        markers = markers && marker_functional_ready < marker_functional_pass
+        markers = markers && marker_functional_pass < marker_functional_cleanup
         if (!(probes && markers)) exit 1
     }
 ' "$ipc_hook"; then
     printf '%s\n' 'production IPC probes or hook-owned records are not in exact order' >&2
+    exit 1
+fi
+if ! awk '
+    /^run_functional_client_lease_probe\(\) \{$/ { in_functional = 1; next }
+    /^validate_runtime_metadata\(\) \{$/ { in_functional = 0 }
+    in_functional && /private_network_is_pristine/ {
+        pristine_count++
+        if (pristine_count == 1) pristine_before = NR
+        if (pristine_count == 2) pristine_after = NR
+    }
+    in_functional && /\/usr\/sbin\/ip link add name/ { fixture = NR }
+    in_functional && /mkfifo -m 0600/ { fifo = NR }
+    in_functional && /exec 6<>"\$hook_functional_fifo"/ { fifo_open = NR }
+    in_functional && /"\$probe" functional-client-lease/ { probe = NR }
+    in_functional && /while ! probe_output_is_exact/ { ready = NR }
+    in_functional && /direct_helper_child/ { child = NR }
+    in_functional && /capture_parent_worker_custody/ {
+        custody_count++
+        if (custody_count == 1) custody_before = NR
+        if (custody_count == 2) custody_after_pin = NR
+        if (custody_count == 3) custody_after_readback = NR
+    }
+    in_functional && /command exec 7<"\$hook_functional_parent_namespace_path"/ {
+        namespace_pin = NR
+    }
+    in_functional && /command exec 8<"\$hook_functional_parent_process_path"/ {
+        process_pin = NR
+    }
+    in_functional && /worker_identity_from_process_fd/ {
+        identity_count++
+        if (identity_count == 1) identity_before = NR
+        if (identity_count == 2) identity_after = NR
+    }
+    in_functional && /worker_wireguard_interface 7/ { wireguard = NR }
+    in_functional && /rm -f -- "\$hook_functional_fifo"/ { fifo_unlink = NR }
+    in_functional && /functional_release_byte.*>&6/ { release = NR }
+    in_functional && release && /exec 6>&-/ { release_close = NR }
+    in_functional && /wait "\$hook_functional_probe_pid"/ { waited = NR }
+    in_functional && /functional_probe_output_is_exact/ { final_output = NR }
+    in_functional && /helper_has_no_children/ { no_children = NR }
+    in_functional && /worker_process_fd_is_retired 8/ { process_retired = NR }
+    in_functional && /helper_holds_no_worker_custody/ { custody_absent = NR }
+    in_functional && /worker_wireguard_is_absent 7/ { wireguard_absent = NR }
+    in_functional && /command exec 8>&-/ { process_release = NR }
+    in_functional && /command exec 7>&-/ { namespace_release = NR }
+    in_functional && /remove_functional_underlay/ { fixture_remove = NR }
+    END {
+        valid = pristine_count == 2 && pristine_before < fixture
+        valid = valid && fixture < fifo && fifo < fifo_open && fifo_open < probe
+        valid = valid && probe < ready && ready < child
+        valid = valid && custody_count == 3 && identity_count == 2
+        valid = valid && child < custody_before && custody_before < namespace_pin
+        valid = valid && namespace_pin < process_pin && process_pin < custody_after_pin
+        valid = valid && custody_after_pin < identity_before
+        valid = valid && identity_before < wireguard && wireguard < identity_after
+        valid = valid && identity_after < custody_after_readback
+        valid = valid && custody_after_readback < fifo_unlink && fifo_unlink < release
+        valid = valid && release < release_close && release_close < waited
+        valid = valid && waited < final_output && final_output < no_children
+        valid = valid && no_children < process_retired
+        valid = valid && process_retired < custody_absent
+        valid = valid && custody_absent < wireguard_absent
+        valid = valid && wireguard_absent < process_release
+        valid = valid && process_release < namespace_release
+        valid = valid && namespace_release < fixture_remove
+        valid = valid && fixture_remove < pristine_after
+        if (!valid) exit 1
+    }
+' "$ipc_hook"; then
+    printf '%s\n' \
+        'functional lease READY, live observation, release, and cleanup are not fail-closed' >&2
     exit 1
 fi
 if ! awk '
@@ -3801,12 +5922,38 @@ if grep -E '(^|[;&|[:space:]])sysctl[[:space:]]+-w([;&|[:space:]]|$)' \
     || grep -E '(^|[;&|[:space:]])wg[[:space:]]+([^#]*[[:space:]])?set([[:space:]]|$)' \
         "$gate" "$ipc_hook" >/dev/null \
     || grep -E '(^|[;&|[:space:]])ip[[:space:]]+([^#]*[[:space:]])?(add|delete|replace|set)([[:space:]]|$)' \
-        "$gate" "$ipc_hook" >/dev/null \
+        "$gate" >/dev/null \
     || grep -E '(^|[;&|[:space:]])nft[[:space:]]+([^#]*[[:space:]])?(add|delete|flush)([[:space:]]|$)' \
         "$gate" "$ipc_hook" >/dev/null; then
     printf '%s\n' 'live helper proof gate contains a host network mutator' >&2
     exit 1
 fi
+hook_ip_mutator_count=$(grep -Ec \
+    '^[[:space:]]*/usr/sbin/ip[[:space:]]+(link|address|route)[[:space:]]+(add|delete|set)([[:space:]]|$)' \
+    "$ipc_hook")
+# These are literal hook contracts; expansion here would defeat the check.
+# shellcheck disable=SC2016
+if [ "$hook_ip_mutator_count" -ne 6 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link add name "$functional_underlay" type dummy' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link set dev "$functional_underlay" alias' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link set dev "$functional_underlay" up' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip address add "$functional_underlay_address/24"' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip route add default via "$functional_underlay_gateway"' \
+        "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc '/usr/sbin/ip link delete dev "$functional_underlay"' \
+        "$ipc_hook")" -ne 1 ]; then
+    printf '%s\n' \
+        'production hook network mutation is not the exact private fixture lifecycle' >&2
+    exit 1
+fi
+if grep -Ei 'capabilit(y|ies)[_-]?state|state[_-]?capabilit(y|ies)' "$ipc_hook" >/dev/null; then
+    printf '%s\n' 'functional lease proof contains a capability state file' >&2
+    exit 1
+fi
 
 printf '%s\n' \
-    'PASS: live helper identity/fdstore and production IPC preview, retirement, root refusal, confinement, and no-mutation contracts are exact.'
+    'PASS: live helper identity/fdstore and production IPC plus reusable live Client lease preview, retirement, root refusal, confinement, and no-host-mutation contracts are exact.'

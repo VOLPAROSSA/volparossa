@@ -1,7 +1,8 @@
 //! Bounded, read-only `NETLINK_ROUTE` snapshot collection.
 //!
-//! This collector is deliberately isolated from `HelperEngine`. It is a foundation for a future
-//! helper-v3 transaction and cannot activate routes, links, addresses, DNS or firewall state.
+//! The production functional-alpha backend uses this collector before its single Client-lease
+//! Prepare transaction. The collector cannot activate routes, links, addresses, DNS or firewall
+//! state.
 
 use std::{
     io,
@@ -98,7 +99,7 @@ const MAX_IFALIAS_BYTES: usize = 255;
 
 /// A fixed, non-sensitive failure produced by the read-only collector.
 #[derive(Debug, Error)]
-pub(super) enum UnderlayNetlinkError {
+pub(crate) enum UnderlayNetlinkError {
     /// The netlink socket or bounded wait failed.
     #[error("underlay netlink I/O failed")]
     Io(#[from] io::Error),
@@ -235,15 +236,17 @@ impl CollectionBudget {
 struct DumpState {
     kind: DumpKind,
     sequence: u32,
+    local_port_id: u32,
     done: bool,
     snapshot: UnderlaySnapshot,
 }
 
 impl DumpState {
-    fn new(kind: DumpKind, sequence: u32) -> Self {
+    fn new(kind: DumpKind, sequence: u32, local_port_id: u32) -> Self {
         Self {
             kind,
             sequence,
+            local_port_id,
             done: false,
             snapshot: UnderlaySnapshot::default(),
         }
@@ -289,7 +292,11 @@ impl DumpState {
     }
 
     fn ingest_frame(&mut self, frame: &[u8]) -> Result<(), UnderlayNetlinkError> {
-        if read_u32(frame, 8) != Some(self.sequence) || read_u32(frame, 12) != Some(0) {
+        // The sender sockaddr remains kernel-owned (port zero), while dump reply headers carry
+        // the receiving socket's kernel-assigned port ID. Bind both identities and the sequence.
+        if read_u32(frame, 8) != Some(self.sequence)
+            || read_u32(frame, 12) != Some(self.local_port_id)
+        {
             return Err(UnderlayNetlinkError::Malformed);
         }
         let message_type = read_u16(frame, 4).ok_or(UnderlayNetlinkError::Malformed)?;
@@ -336,7 +343,16 @@ impl DumpState {
 
 struct NetlinkCollector {
     socket: Socket,
+    local_port_id: u32,
     sequence: u32,
+}
+
+fn bound_unicast_port_id(address: SocketAddr) -> Result<u32, UnderlayNetlinkError> {
+    let port_id = address.port_number();
+    if port_id == 0 || address.multicast_groups() != 0 {
+        return Err(UnderlayNetlinkError::Malformed);
+    }
+    Ok(port_id)
 }
 
 impl NetlinkCollector {
@@ -344,7 +360,7 @@ impl NetlinkCollector {
         deadline.ensure_remaining()?;
         let mut socket = Socket::new(NETLINK_ROUTE)?;
         deadline.ensure_remaining()?;
-        socket.bind_auto()?;
+        let local_port_id = bound_unicast_port_id(socket.bind_auto()?)?;
         deadline.ensure_remaining()?;
         socket.connect(&SocketAddr::new(0, 0))?;
         deadline.ensure_remaining()?;
@@ -352,6 +368,7 @@ impl NetlinkCollector {
         deadline.ensure_remaining()?;
         Ok(Self {
             socket,
+            local_port_id,
             sequence: 1,
         })
     }
@@ -389,7 +406,7 @@ impl NetlinkCollector {
         let sequence = self.next_sequence();
         let request = encode_dump_request(kind, sequence)?;
         send_bounded(&self.socket, &request, deadline)?;
-        let mut state = DumpState::new(kind, sequence);
+        let mut state = DumpState::new(kind, sequence, self.local_port_id);
         while !state.done {
             let (bytes, sender) = receive_bounded(&self.socket, deadline, budget)?;
             state.ingest(sender, &bytes, budget)?;
@@ -401,11 +418,11 @@ impl NetlinkCollector {
 
 /// Collect two identical bounded snapshots, then make the pure fail-closed selection.
 ///
-/// This function is intentionally not called by production while helper-v3 lifecycle rollback is
-/// incomplete. It is read-only, opens only `NETLINK_ROUTE`, and uses one deadline for all six dumps.
-/// Its result proves only local assignment plus an unambiguous main-table default route; it never
-/// infers NAT behaviour or global reachability.
-pub(super) fn collect_consistent_direct_underlay(
+/// The production functional-alpha backend calls this before any mutation. It is read-only, opens
+/// only `NETLINK_ROUTE`, and uses one deadline for all six dumps. Its result proves only local
+/// assignment plus an unambiguous main-table default route; it never infers NAT behaviour or global
+/// reachability.
+pub(crate) fn collect_consistent_direct_underlay(
     deadline: HardDeadline,
 ) -> Result<UnderlayCandidate, UnderlayNetlinkError> {
     deadline.ensure_remaining()?;
@@ -586,6 +603,9 @@ fn decode_link(frame: &[u8]) -> Result<UnderlayLink, UnderlayNetlinkError> {
                 parse_nul_string(attribute.value, true, MAX_IFALIAS_BYTES)?,
                 attribute.flags,
             )?,
+            // Current kernels emit empty nested capability markers in link dumps. They carry no
+            // selectable fact; non-empty nested or differently flagged critical unknowns fail.
+            _ if attribute.flags == NLA_F_NESTED && attribute.value.is_empty() => {}
             _ => reject_unknown_flags(attribute.flags)?,
         }
     }
@@ -954,6 +974,7 @@ mod tests {
     use super::*;
 
     const SEQ: u32 = 41;
+    const PORT_ID: u32 = 4_242;
 
     fn attr(kind: u16, value: &[u8]) -> Vec<u8> {
         let length = ATTRIBUTE_HEADER_LEN + value.len();
@@ -978,7 +999,7 @@ mod tests {
         bytes.extend_from_slice(&kind.to_ne_bytes());
         bytes.extend_from_slice(&flags.to_ne_bytes());
         bytes.extend_from_slice(&sequence.to_ne_bytes());
-        bytes.extend_from_slice(&0_u32.to_ne_bytes());
+        bytes.extend_from_slice(&PORT_ID.to_ne_bytes());
         bytes.extend_from_slice(payload);
         bytes.resize(align4(length), 0);
         bytes
@@ -1064,7 +1085,7 @@ mod tests {
         kind: DumpKind,
         datagrams: &[Vec<u8>],
     ) -> Result<UnderlaySnapshot, UnderlayNetlinkError> {
-        let mut state = DumpState::new(kind, SEQ);
+        let mut state = DumpState::new(kind, SEQ, PORT_ID);
         let mut budget = CollectionBudget::production();
         for datagram in datagrams {
             state.ingest(SocketAddr::new(0, 0), datagram, &mut budget)?;
@@ -1120,6 +1141,24 @@ mod tests {
     }
 
     #[test]
+    fn bound_address_requires_one_nonzero_unicast_port_id() {
+        assert_eq!(
+            bound_unicast_port_id(SocketAddr::new(PORT_ID, 0)).expect("unicast port"),
+            PORT_ID
+        );
+        for address in [
+            SocketAddr::new(0, 0),
+            SocketAddr::new(PORT_ID, 1),
+            SocketAddr::new(0, 1),
+        ] {
+            assert!(matches!(
+                bound_unicast_port_id(address),
+                Err(UnderlayNetlinkError::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn multipart_reordering_is_canonical_but_identity_errors_fail() {
         let first = link(8, b"eth8", None);
         let second = link(7, b"eth7", None);
@@ -1132,17 +1171,20 @@ mod tests {
         assert_eq!(forward, reverse);
 
         for sender in [SocketAddr::new(1, 0), SocketAddr::new(0, 1)] {
-            let mut state = DumpState::new(DumpKind::Link, SEQ);
+            let mut state = DumpState::new(DumpKind::Link, SEQ, PORT_ID);
             let mut budget = CollectionBudget::production();
             assert!(matches!(
                 state.ingest(sender, &first, &mut budget),
                 Err(UnderlayNetlinkError::Malformed)
             ));
         }
-        for (offset, replacement) in [(8, (SEQ + 1).to_ne_bytes()), (12, 1_u32.to_ne_bytes())] {
-            let mut invalid = first.clone();
-            invalid[offset..offset + 4].copy_from_slice(&replacement);
-            assert!(parse(DumpKind::Link, &[invalid, done()]).is_err());
+        let mut wrong_sequence = first.clone();
+        wrong_sequence[8..12].copy_from_slice(&(SEQ + 1).to_ne_bytes());
+        assert!(parse(DumpKind::Link, &[wrong_sequence, done()]).is_err());
+        for wrong_port_id in [0, 1, PORT_ID + 1] {
+            let mut wrong_port = first.clone();
+            wrong_port[12..16].copy_from_slice(&wrong_port_id.to_ne_bytes());
+            assert!(parse(DumpKind::Link, &[wrong_port, done()]).is_err());
         }
         assert!(
             parse(
@@ -1234,7 +1276,7 @@ mod tests {
             max_bytes: MAX_DATAGRAM_BYTES,
             max_frames: 1,
         };
-        let mut state = DumpState::new(DumpKind::Link, SEQ);
+        let mut state = DumpState::new(DumpKind::Link, SEQ, PORT_ID);
         assert!(matches!(
             state.ingest(SocketAddr::new(0, 0), &bytes, &mut frame_budget),
             Err(UnderlayNetlinkError::Limit)
@@ -1245,7 +1287,7 @@ mod tests {
             max_bytes: NLMSG_HEADER_LEN,
             max_frames: MAX_TOTAL_FRAMES,
         };
-        let mut state = DumpState::new(DumpKind::Link, SEQ);
+        let mut state = DumpState::new(DumpKind::Link, SEQ, PORT_ID);
         assert!(matches!(
             state.ingest(SocketAddr::new(0, 0), &bytes, &mut byte_budget),
             Err(UnderlayNetlinkError::Limit)
@@ -1448,6 +1490,41 @@ mod tests {
         let claimed_length = u32::try_from(truncated.len() + 4).expect("small transcript");
         truncated[0..4].copy_from_slice(&claimed_length.to_ne_bytes());
         assert!(parse(DumpKind::Link, &[truncated, done()]).is_err());
+
+        let mut empty_nested_payload = vec![0; IFINFO_LEN];
+        empty_nested_payload[4..8].copy_from_slice(&7_i32.to_ne_bytes());
+        empty_nested_payload.extend_from_slice(&attr(IFLA_IFNAME, &nul(b"eth7")));
+        empty_nested_payload.extend_from_slice(&attr(63 | NLA_F_NESTED, &[]));
+        assert_eq!(
+            parse(
+                DumpKind::Link,
+                &[
+                    msg(RTM_NEWLINK, NLM_F_MULTI, SEQ, &empty_nested_payload),
+                    done()
+                ]
+            )
+            .expect("empty nested capability marker")
+            .links[0]
+                .ifindex,
+            7
+        );
+
+        for wrong_flags in [NLA_F_NET_BYTEORDER, NLA_F_NESTED | NLA_F_NET_BYTEORDER] {
+            let mut wrong_flag_payload = vec![0; IFINFO_LEN];
+            wrong_flag_payload[4..8].copy_from_slice(&7_i32.to_ne_bytes());
+            wrong_flag_payload.extend_from_slice(&attr(IFLA_IFNAME, &nul(b"eth7")));
+            wrong_flag_payload.extend_from_slice(&attr(63 | wrong_flags, &[]));
+            assert!(matches!(
+                parse(
+                    DumpKind::Link,
+                    &[
+                        msg(RTM_NEWLINK, NLM_F_MULTI, SEQ, &wrong_flag_payload),
+                        done()
+                    ]
+                ),
+                Err(UnderlayNetlinkError::Ambiguous)
+            ));
+        }
 
         let mut critical_payload = vec![0; IFINFO_LEN];
         critical_payload[4..8].copy_from_slice(&7_i32.to_ne_bytes());
