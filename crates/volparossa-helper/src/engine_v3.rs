@@ -1,9 +1,10 @@
 //! Fail-closed helper-v3 lease state machine.
 //!
-//! The production server can prepare, activate and destroy one process-owned functional-alpha
-//! Client lease through the authenticated namespace worker. No response can claim a committed
-//! tunnel or usable datapath until probing and transport acquisition are connected to kernel
-//! evidence.
+//! The production server can prepare, activate, probe-commit and destroy one process-owned
+//! functional-alpha Client or Exit singleton lease through the authenticated namespace worker. A
+//! committed response proves only the exact `WireGuard` identity, signed peer, `/128` route, recent
+//! handshake and strict bidirectional counter growth; it does not claim a usable VPN datapath or
+//! crash/restart recovery.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -501,11 +502,11 @@ pub(crate) enum BackendError {
 /// such custody and makes no restart-recovery claim. Dropping any future must be safe. The engine's
 /// timeout remains a soft ambiguity boundary and continues awaiting task settlement.
 ///
-/// The production server installs a deliberately narrow functional-alpha adapter for one Client
-/// lease's Prepare, Activate and Destroy only. Probe, descriptor acquisition and datapath work stay
-/// unavailable, and the public [`HelperEngine::new`] constructor deliberately retains the fully
-/// unavailable backend. A complete production adapter still requires integration tests for all of
-/// these properties.
+/// The production server installs a deliberately narrow functional-alpha adapter for one Client or
+/// Exit singleton lease's Prepare, Activate, Probe-Commit and Destroy. Descriptor acquisition and
+/// a usable datapath stay unavailable, and the public [`HelperEngine::new`] constructor deliberately
+/// retains the fully unavailable backend. A complete production adapter still requires integration
+/// tests for all of these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
     fn prepare(
         self: Arc<Self>,

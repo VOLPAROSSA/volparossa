@@ -226,20 +226,26 @@ private key to be generated and retained only inside the route namespace worker;
 agent receives an opaque lease handle plus the kernel-proven public key and public UDP endpoint.
 Interface names are derived, bounded to Linux's 15-character limit, and never accepted from the
 agent. The production functional-alpha backend now runs Prepare, Activate, Probe/Commit and Destroy
-for exactly one process-owned Client-role lease. It verifies the exact nested relay/exit grant, binds it
-to the helper-generated key, installs only the signed relay-client peer plus the helper-derived
-`/128` route, and retains the activation counter baseline. Commit re-proves the exact lease and
-requires a handshake no older than activation plus strict RX/TX growth before entering Committed.
-Multi-path routing and every usable datapath remain unavailable. The expanded non-retained branch
-helper-boundary gate exercises this exact same-runtime one-lease lifecycle in private namespaces.
-It creates one temporary relay-side WireGuard peer, carries one bounded ICMPv6 echo across the
+for exactly one process-owned Client-or-Exit singleton lease. It verifies the exact nested
+relay/exit grant and binds it to helper-owned context/path/role/expiry. Client binds its generated
+key and installs only the signed relay-client peer. Exit binds its complete generated
+key/public-underlay/listen-port tuple to the dual-signed exit endpoint and installs only the
+relay-signed relay-exit peer. Both roles use only the helper-derived `/128` route and retain the
+activation counter baseline. Commit re-proves the exact lease and requires a handshake no older than
+activation plus strict RX/TX growth before entering Committed. Multi-path routing and every usable
+datapath remain unavailable.
+
+The disposable helper-boundary gate exercises these singleton roles sequentially in private
+namespaces. The Client cycle creates a temporary relay-side peer, carries bounded ICMPv6 across the
 client-to-relay leg, proves the recent handshake and strict bidirectional growth, removes that
-fixture exactly, requires an identical cached Commit retry and then destroys the context.
-Until that implementation is merged and an exact-main run is retained, it remains branch smoke
-rather than earned acceptance evidence. It proves no trusted selection/policy authority, second
-relay-to-exit leg, transport descriptor, ingress, usable VPN/datapath or crash recovery. Keys must
-never be persisted and are destroyed with the worker context; the fixed alpha score remains
-**11/100 (11%)**.
+fixture exactly, requires an identical cached Commit retry and destroys the context. Exact-main run
+33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` retained that scoped Client evidence. The
+expanded branch starts Exit in a fresh worker/namespace and repeats the proof over a distinct
+`vpre0` relay-to-exit leg before Exit Commit retry and Destroy; that addition remains non-retained
+until merged and followed by an exact-main PASS. These sequential legs prove no trusted
+selection/policy authority, simultaneous two-leg route, Relay forwarding, transport descriptor,
+ingress, usable VPN/datapath or crash recovery. Keys are never persisted and are destroyed with the
+worker context; the fixed alpha score remains **11/100 (11%)**.
 
 ## Privileged helper boundary
 
@@ -306,8 +312,9 @@ The v4 wire types, service state machines, forwarding codecs, helper plan/call/c
 authorization binding have unprivileged tests. They are not proof of a live route. The production
 two-leg probe producer does not exist. The actor-linearized candidate snapshot and staged preflight
 described above are dormant and report no production-usable candidates. The no-argument production
-helper can now execute the exact one-Client/one-lease Bind/Prepare/Activate/Probe-Commit/Destroy
-subset, and the expanded non-retained branch gate exercises it in private namespaces. The production manager does not call
+helper can now execute the exact Client-or-Exit singleton Bind/Prepare/Activate/Probe-Commit/Destroy
+subset, and the expanded non-retained branch gate exercises both roles sequentially in private
+namespaces. The production manager does not call
 that helper-backed transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
 cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
 never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
@@ -317,10 +324,11 @@ closed Prepare plan needed by that store, but production does not yet issue it; 
 not cleanup proof. Client ingress is also
 blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
 helper's isolated single-lease probe reaches Probe/Commit. Route-level end-to-end configuration and
-Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. The expanded branch gate
-proves only one client-to-relay WireGuard leg, bounded ICMPv6, recent handshake, strict RX/TX growth,
-cached Commit retry, normal process-owned Destroy and capacity reuse. It has no trusted
-selection/policy authority, second relay-to-exit leg, transport descriptor, ingress, usable
-VPN/datapath or crash/restart recovery; it is not retained exact-main evidence, closes no A01--A15
-result and leaves the alpha score at **11/100 (11%)**. See
+Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. Retained run 33294974441
+proves the Client-only client-to-relay leg. The expanded non-retained branch gate separately proves
+an Exit relay-to-exit leg; both cover bounded ICMPv6, recent handshake, strict RX/TX growth, cached
+Commit retry, normal process-owned Destroy and sequential capacity reuse. They have no trusted
+selection/policy authority, simultaneous two-leg route, Relay forwarding, transport descriptor,
+ingress, usable VPN/datapath or crash/restart recovery. The Exit expansion is not retained exact-main
+evidence, and neither result closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
