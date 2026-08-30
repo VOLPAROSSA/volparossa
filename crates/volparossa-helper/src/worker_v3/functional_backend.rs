@@ -66,6 +66,8 @@ const STAGE_ACTIVATE: u8 = 3;
 const STAGE_DESTROY: u8 = 4;
 const STAGE_PROBE_COMMIT: u8 = 5;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
+/// Outer call budget reserved for exact process reap and immediate namespace-pin release.
+const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
 /// Install the deliberately narrow process-owned backend used only by the production server.
 pub(crate) fn functional_alpha_lease_backend() -> Arc<dyn AsyncLeaseBackend> {
@@ -186,8 +188,9 @@ impl FunctionalAlphaLeaseBackend {
             .and_then(|lease| u8::try_from(lease.path_id).ok())
             .ok_or(BackendError::Invalid)?;
         let deadline = prepare_deadline(binding)?;
-        let underlay =
-            collect_consistent_direct_underlay(deadline).map_err(|_| BackendError::Unavailable)?;
+        let operation_deadline = worker_operation_deadline(deadline)?;
+        let underlay = collect_consistent_direct_underlay(operation_deadline)
+            .map_err(|_| BackendError::Unavailable)?;
         let wireguard = leases
             .iter()
             .map(|lease| process_owned_resource(key, lease))
@@ -206,18 +209,25 @@ impl FunctionalAlphaLeaseBackend {
         let prepare = internal_prepare_batch_plan(&wireguard, key, &leases)?;
 
         self.reserve_entry(key, context_role, wireguard, prepare, underlay)?;
-        self.admit_worker(key, context_role, path_id, context_ttl, deadline)
-            .await?;
-        if let Err(error) = self.retain_recovery_source(key, deadline) {
+        self.admit_worker(
+            key,
+            context_role,
+            path_id,
+            context_ttl,
+            operation_deadline,
+            deadline,
+        )
+        .await?;
+        if let Err(error) = self.retain_recovery_source(key, operation_deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        if let Err(error) = self.initialise_child(key, &value, deadline).await {
+        if let Err(error) = self.initialise_child(key, &value, operation_deadline).await {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        if let Err(error) = self.create_birth_links(key, deadline) {
+        if let Err(error) = self.create_birth_links(key, operation_deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
-        let prepared = match self.prepare_child(key, &leases, deadline).await {
+        let prepared = match self.prepare_child(key, &leases, operation_deadline).await {
             Ok(prepared) => prepared,
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
@@ -282,14 +292,15 @@ impl FunctionalAlphaLeaseBackend {
         context_role: ContextRole,
         path_id: u8,
         context_ttl: Duration,
-        deadline: HardDeadline,
+        operation_deadline: HardDeadline,
+        cleanup_deadline: HardDeadline,
     ) -> Result<(), BackendError> {
         let admission = self.coordinator.reserve_spawn_register_for_context_until(
             key.context_id,
             context_role,
             path_id,
             context_ttl,
-            deadline,
+            operation_deadline,
         );
         match admission {
             WorkerLifecycleAdmission::Registered(worker) => {
@@ -308,7 +319,7 @@ impl FunctionalAlphaLeaseBackend {
                     let mut state = lock_state(&self.state);
                     exact_entry_mut(&mut state, key)?.worker = Some(ownership);
                 }
-                Err(if self.cleanup_exact(key, deadline, false).await {
+                Err(if self.cleanup_exact(key, cleanup_deadline, false).await {
                     definite_worker_error(&error)
                 } else {
                     BackendError::CleanupIncomplete
@@ -479,6 +490,10 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<KernelCounters>, BackendError> {
         let (key, activations) = validate_activate_batch_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
+        let operation_deadline = match worker_operation_deadline(deadline) {
+            Ok(deadline) => deadline,
+            Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
+        };
         let now_ms = unix_milliseconds()?;
         let (prepared, plan) = {
             let state = lock_state(&self.state);
@@ -510,7 +525,10 @@ impl FunctionalAlphaLeaseBackend {
                 )?,
             )
         };
-        let counters = match self.activate_child(key, &prepared, plan, deadline).await {
+        let counters = match self
+            .activate_child(key, &prepared, plan, operation_deadline)
+            .await
+        {
             Ok(counters) => counters,
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
@@ -590,6 +608,10 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<KernelCounters>, BackendError> {
         let (key, commits, activated_at_unix) = validate_probe_batch_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
+        let operation_deadline = match worker_operation_deadline(deadline) {
+            Ok(deadline) => deadline,
+            Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
+        };
         let activated = {
             let state = lock_state(&self.state);
             let entry = exact_entry(state.as_ref(), key)?;
@@ -628,7 +650,7 @@ impl FunctionalAlphaLeaseBackend {
         );
         let execution = self
             .coordinator
-            .execute_until(key.context_id, generation, request, deadline)
+            .execute_until(key.context_id, generation, request, operation_deadline)
             .await;
         let proof = match execution {
             Ok(execution) => {
@@ -716,10 +738,12 @@ impl FunctionalAlphaLeaseBackend {
                     route_context_id: key.context_id.to_vec(),
                 }),
             );
-            let _ = self
-                .coordinator
-                .execute_until(key.context_id, generation, destroy, deadline)
-                .await;
+            if let Ok(destroy_deadline) = worker_operation_deadline(deadline) {
+                let _ = self
+                    .coordinator
+                    .execute_until(key.context_id, generation, destroy, destroy_deadline)
+                    .await;
+            }
         }
 
         let worker = {
@@ -2334,6 +2358,12 @@ fn response_error(
 
 fn prepare_deadline(binding: BackendBinding) -> Result<HardDeadline, BackendError> {
     HardDeadline::at(binding.call_deadline.into_std()).map_err(|_| BackendError::Unavailable)
+}
+
+fn worker_operation_deadline(deadline: HardDeadline) -> Result<HardDeadline, BackendError> {
+    deadline
+        .before_tail(WORKER_FAIL_CLOSED_RETIREMENT_TAIL)
+        .map_err(|_| BackendError::CleanupIncomplete)
 }
 
 fn definite_worker_error(error: &WorkerV3Error) -> BackendError {
@@ -5055,13 +5085,21 @@ mod tests {
             state: Mutex::new(Some(entry)),
         };
 
+        let cleanup_deadline =
+            HardDeadline::after(Duration::from_millis(650)).expect("cleanup deadline");
+        let operation_deadline =
+            worker_operation_deadline(cleanup_deadline).expect("reserved retirement tail");
+        tokio::time::sleep(
+            operation_deadline
+                .remaining()
+                .expect("live operation deadline")
+                + Duration::from_millis(10),
+        )
+        .await;
+        assert!(operation_deadline.ensure_remaining().is_err());
         assert!(
             !backend
-                .cleanup_exact(
-                    open_key,
-                    HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
-                    false,
-                )
+                .cleanup_exact(open_key, cleanup_deadline, false)
                 .await
         );
         assert!(!alive.load(Ordering::SeqCst));
