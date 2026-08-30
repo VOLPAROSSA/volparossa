@@ -321,7 +321,10 @@ Before any parent-side birth-link mutation, internal worker protocol v4 requires
 accept the same canonical role-complete Prepare plan and stage its exact child-namespace cleanup
 set. If Prepare never adopts a moved birth link, Destroy must delete and prove that staged set absent
 inside the still-pinned child namespace; `NotFound` is cleanup evidence only for a genuinely
-pre-birth lineage.
+pre-birth lineage. A response-lost durable `Initialise` moves to a cleanup-only phase without
+killing the authenticated child. The next exact Destroy has a separate deadline and may reconcile
+at most one fully correlated late `Initialise` response; it never replays `Initialise`, accepts no
+foreign or duplicate record, and does not treat a lost Destroy response as cleanup evidence.
 
 At the half-open setup boundary (`now >= setup expiry`), retirement reconnects, sends read-only
 `BindHelperRuntime(None)`, and compares the retained per-process runtime ID before tag 28. Runtime

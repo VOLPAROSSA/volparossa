@@ -1493,8 +1493,15 @@ mismatch takes nothing, while ambiguous admission or actor state remains retaine
 publish systemd custody, open dispatch, send an internal worker request, or mutate network resources;
 exact process retirement and reap are its only worker-side actions.
 
-For a published same-runtime Prepare, exact Destroy requires a correlated child `Destroyed`
-response for the complete adopted or staged lease set, confirms worker-generation reap and parent
+For a published same-runtime Prepare, exact Destroy requires either a correlated child `Destroyed`
+response for the complete adopted or staged lease set, or, only before every parent birth, a
+correlated `NotFound` response while all birth flags remain false. If an `Initialise` response
+misses its original deadline after durable dispatch, the authenticated child remains in its request
+loop and the coordinator retains that one exact canonical request in a cleanup-only phase. A later
+Destroy uses its own caller deadline and may drain at most one descriptor-free late `Initialise`
+response after exact credential, request, digest and outcome validation; duplicate, foreign and
+cross-context records fail closed, and `Initialise` is never replayed. A genuinely lost Destroy
+response is not cleanup evidence. Exact cleanup then confirms worker-generation reap and parent
 birth-link absence, and only then consumes the affine settlement owner into durable
 `CleanupConfirmed`. It removes the exact attested systemd custody name against the retained
 post-publication inventory; an ambiguous send is observation-reconciled and never blindly retried.

@@ -577,7 +577,12 @@ that staged set while its namespace remains pinned. If no lease lifecycle was ad
 absent inside the child namespace, and only then retires the restricted Relay baseline. Missing or
 substituted staged state is invalid and partial absence proof remains `CleanupIncomplete`; a
 context-level `NotFound` counts as cleanup evidence only before every parent birth flag remained
-false.
+false. If the correlated `Initialise` response misses the parent's deadline after durable dispatch,
+the child preserves the cleanup executor instead of retrying a possibly queued response. The
+cleanup-only parent retains the exact canonical `Initialise` request; its later Destroy, under a new
+caller deadline, may consume at most one exact credentialed, digest-bound, descriptor-free late
+response before the Destroy response. Duplicate, foreign or cross-context responses fail closed.
+A lost Destroy response remains ambiguous and is never promoted to cleanup proof.
 
 The production functional-alpha backend connects the bounded rtnetlink `DirectAssigned` collector
 and the v4 parent/worker kernel transaction for exactly one live context containing either one

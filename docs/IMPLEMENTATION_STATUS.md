@@ -770,6 +770,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   without an adopted lease deletes and proves that complete staged set absent inside the pinned
   child namespace before Relay baseline retirement; partial cleanup stays retryable, and only a
   pre-birth context-level `NotFound` with every birth flag false can count as cleanup evidence.
+  A durable `Initialise` whose response misses the original deadline enters a cleanup-only phase
+  without terminating the authenticated child. The coordinator retains only that exact canonical
+  request; a later Destroy has a separate caller deadline and may drain at most one fully
+  credential-, request-, digest- and outcome-correlated descriptor-free late response. It never
+  replays `Initialise`, rejects duplicate, foreign and cross-context records, and does not promote a
+  genuinely lost Destroy response to cleanup evidence.
   Successful internal Prepare,
   Activate, Probe and MPTCP endpoint responses must preserve exact request order and identity;
   each credentialed request now carries the parent's fixed absolute Linux `CLOCK_MONOTONIC`
