@@ -47,7 +47,9 @@ use zeroize::Zeroizing;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const FUNCTIONAL_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
-const MAX_MODE_ARGUMENT_BYTES: usize = "prove-restart-cleanup-confirmed".len();
+const MAX_MODE_ARGUMENT_BYTES: usize = "prove-restart-may-own-relay-cleanup-confirmed".len();
+const CUSTODY_NAME_BYTES: usize = 86;
+const CUSTODY_NAME_PREFIX: &str = "volparossa-custody-v1-";
 const MAX_DECIMAL_U32_BYTES: usize = 10;
 const ROOT_UID: u32 = 0;
 const HELPER_RUNTIME_DIAGNOSTIC: &str = "HELPER_RUNTIME";
@@ -129,6 +131,9 @@ enum Mode {
     ProveSettledJournal,
     ProveRestartCleanupConfirmed,
     ProveRestartSettled,
+    ProveRestartMayOwnRelay,
+    ProveRestartMayOwnRelayCleanupConfirmed,
+    ProveRestartMayOwnRelaySettled,
     RejectFrameBounds,
     RejectWireShapes,
     ExpectUnauthorisedPeer,
@@ -140,10 +145,11 @@ struct ExpectedPeer {
     gid: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ProbeInvocation {
     mode: Mode,
     expected_peer: ExpectedPeer,
+    expected_custody_name: Option<String>,
 }
 
 impl Mode {
@@ -157,6 +163,13 @@ impl Mode {
             }
             Self::ProveRestartSettled => {
                 "VOLPAROSSA_HELPER_V3_RESTART_EXACT_PRESENT_SETTLED_V1=pass"
+            }
+            Self::ProveRestartMayOwnRelay => "VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_V1=pass",
+            Self::ProveRestartMayOwnRelayCleanupConfirmed => {
+                "VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_CLEANUP_CONFIRMED_V1=pass"
+            }
+            Self::ProveRestartMayOwnRelaySettled => {
+                "VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_SETTLED_V1=pass"
             }
             Self::RejectFrameBounds => "VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass",
             Self::RejectWireShapes => "VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass",
@@ -725,9 +738,10 @@ async fn main() -> ExitCode {
         eprintln!("{USAGE_RECORD}");
         return ExitCode::from(2);
     };
+    let mode = invocation.mode;
     match run_mode(invocation).await {
         Ok(()) => {
-            println!("{}", invocation.mode.success_record());
+            println!("{}", mode.success_record());
             ExitCode::SUCCESS
         }
         Err(ProbeFailure::Functional(failure)) => {
@@ -750,6 +764,7 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Pro
     let mode_argument = arguments.next()?;
     let pid_argument = arguments.next()?;
     let gid_argument = arguments.next()?;
+    let custody_argument = arguments.next();
     if arguments.next().is_some() {
         return None;
     }
@@ -762,6 +777,11 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Pro
         "prove-settled-journal" => Mode::ProveSettledJournal,
         "prove-restart-cleanup-confirmed" => Mode::ProveRestartCleanupConfirmed,
         "prove-restart-settled" => Mode::ProveRestartSettled,
+        "prove-restart-may-own-relay" => Mode::ProveRestartMayOwnRelay,
+        "prove-restart-may-own-relay-cleanup-confirmed" => {
+            Mode::ProveRestartMayOwnRelayCleanupConfirmed
+        }
+        "prove-restart-may-own-relay-settled" => Mode::ProveRestartMayOwnRelaySettled,
         "reject-frame-bounds" => Mode::RejectFrameBounds,
         "reject-wire-shapes" => Mode::RejectWireShapes,
         "expect-unauthorised-peer" => Mode::ExpectUnauthorisedPeer,
@@ -769,9 +789,32 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Pro
     };
     let pid = i32::try_from(parse_nonzero_decimal_u32(&pid_argument)?).ok()?;
     let gid = parse_nonzero_decimal_u32(&gid_argument)?;
+    let expects_custody = matches!(
+        mode,
+        Mode::ProveRestartMayOwnRelay
+            | Mode::ProveRestartMayOwnRelayCleanupConfirmed
+            | Mode::ProveRestartMayOwnRelaySettled
+    );
+    let expected_custody_name = match (expects_custody, custody_argument) {
+        (true, Some(value)) => {
+            let value = value.into_string().ok()?;
+            if value.len() != CUSTODY_NAME_BYTES
+                || !value.starts_with(CUSTODY_NAME_PREFIX)
+                || !value.as_bytes()[CUSTODY_NAME_PREFIX.len()..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return None;
+            }
+            Some(value)
+        }
+        (false, None) => None,
+        _ => return None,
+    };
     Some(ProbeInvocation {
         mode,
         expected_peer: ExpectedPeer { pid, gid },
+        expected_custody_name,
     })
 }
 
@@ -811,6 +854,23 @@ async fn run_mode(invocation: ProbeInvocation) -> Result<(), ProbeFailure> {
         Mode::ProveRestartSettled => {
             prove_restart_settled(invocation.expected_peer).map_err(|_| ProbeFailure::Generic)
         }
+        Mode::ProveRestartMayOwnRelay => prove_restart_may_own_relay(
+            invocation.expected_peer,
+            invocation.expected_custody_name.as_deref(),
+        )
+        .map_err(|_| ProbeFailure::Generic),
+        Mode::ProveRestartMayOwnRelayCleanupConfirmed => {
+            prove_restart_may_own_relay_cleanup_confirmed(
+                invocation.expected_peer,
+                invocation.expected_custody_name.as_deref(),
+            )
+            .map_err(|_| ProbeFailure::Generic)
+        }
+        Mode::ProveRestartMayOwnRelaySettled => prove_restart_may_own_relay_settled(
+            invocation.expected_peer,
+            invocation.expected_custody_name.as_deref(),
+        )
+        .map_err(|_| ProbeFailure::Generic),
         Mode::RejectFrameBounds => run_reject_frame_bounds(invocation.expected_peer)
             .await
             .map_err(|_| ProbeFailure::Generic),
@@ -850,6 +910,53 @@ fn prove_restart_settled(expected_peer: ExpectedPeer) -> Result<(), ProbeError> 
         || getegid().as_raw() != expected_peer.gid
         || expected_peer.pid <= 0
         || !volparossa_helper::production_functional_journal_is_exactly_restart_settled()
+    {
+        return Err(ProbeError::UntrustedServer);
+    }
+    Ok(())
+}
+
+fn prove_restart_may_own_relay(
+    expected_peer: ExpectedPeer,
+    expected_custody_name: Option<&str>,
+) -> Result<(), ProbeError> {
+    if geteuid().as_raw() != ROOT_UID
+        || getegid().as_raw() != expected_peer.gid
+        || expected_peer.pid <= 0
+        || !expected_custody_name
+            .is_some_and(volparossa_helper::production_functional_journal_is_exactly_may_own_relay)
+    {
+        return Err(ProbeError::UntrustedServer);
+    }
+    Ok(())
+}
+
+fn prove_restart_may_own_relay_cleanup_confirmed(
+    expected_peer: ExpectedPeer,
+    expected_custody_name: Option<&str>,
+) -> Result<(), ProbeError> {
+    if geteuid().as_raw() != ROOT_UID
+        || getegid().as_raw() != expected_peer.gid
+        || expected_peer.pid <= 0
+        || !expected_custody_name.is_some_and(
+            volparossa_helper::production_functional_journal_is_exactly_may_own_relay_cleanup_confirmed,
+        )
+    {
+        return Err(ProbeError::UntrustedServer);
+    }
+    Ok(())
+}
+
+fn prove_restart_may_own_relay_settled(
+    expected_peer: ExpectedPeer,
+    expected_custody_name: Option<&str>,
+) -> Result<(), ProbeError> {
+    if geteuid().as_raw() != ROOT_UID
+        || getegid().as_raw() != expected_peer.gid
+        || expected_peer.pid <= 0
+        || !expected_custody_name.is_some_and(
+            volparossa_helper::production_functional_journal_is_exactly_may_own_relay_settled,
+        )
     {
         return Err(ProbeError::UntrustedServer);
     }
@@ -2685,9 +2792,73 @@ mod tests {
                 Some(ProbeInvocation {
                     mode: expected,
                     expected_peer,
+                    expected_custody_name: None,
                 })
             );
         }
+        let custody_name = "volparossa-custody-v1-0000000000000000000000000000000000000000000000000000000000000001";
+        for (argument, expected) in [
+            ("prove-restart-may-own-relay", Mode::ProveRestartMayOwnRelay),
+            (
+                "prove-restart-may-own-relay-cleanup-confirmed",
+                Mode::ProveRestartMayOwnRelayCleanupConfirmed,
+            ),
+            (
+                "prove-restart-may-own-relay-settled",
+                Mode::ProveRestartMayOwnRelaySettled,
+            ),
+        ] {
+            assert_eq!(
+                parse_invocation([
+                    OsString::from(argument),
+                    OsString::from("1234"),
+                    OsString::from("61000"),
+                    OsString::from(custody_name),
+                ]),
+                Some(ProbeInvocation {
+                    mode: expected,
+                    expected_peer,
+                    expected_custody_name: Some(custody_name.to_owned()),
+                })
+            );
+            assert_eq!(
+                parse_invocation([
+                    OsString::from(argument),
+                    OsString::from("1234"),
+                    OsString::from("61000"),
+                ]),
+                None
+            );
+        }
+        assert_eq!(
+            parse_invocation([
+                OsString::from("bind-runtime"),
+                OsString::from("1234"),
+                OsString::from("61000"),
+                OsString::from(custody_name),
+            ]),
+            None
+        );
+        assert_eq!(
+            parse_invocation([
+                OsString::from("prove-restart-may-own-relay"),
+                OsString::from("1234"),
+                OsString::from("61000"),
+                OsString::from("volparossa-custody-v1-short"),
+            ]),
+            None
+        );
+        let uppercase_custody_name = custody_name.replacen('0', "A", 1);
+        assert_eq!(uppercase_custody_name.len(), CUSTODY_NAME_BYTES);
+        assert_eq!(
+            parse_invocation([
+                OsString::from("prove-restart-may-own-relay"),
+                OsString::from("1234"),
+                OsString::from("61000"),
+                OsString::from(uppercase_custody_name),
+            ]),
+            None
+        );
         assert_eq!(parse_invocation([]), None);
         assert_eq!(
             parse_invocation([
@@ -2800,10 +2971,25 @@ mod tests {
             Mode::ProveSettledJournal.success_record(),
             "VOLPAROSSA_HELPER_V3_FUNCTIONAL_JOURNAL_SETTLED_V1=pass"
         );
+        assert_eq!(
+            Mode::ProveRestartMayOwnRelay.success_record(),
+            "VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_V1=pass"
+        );
+        assert_eq!(
+            Mode::ProveRestartMayOwnRelayCleanupConfirmed.success_record(),
+            "VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_CLEANUP_CONFIRMED_V1=pass"
+        );
+        assert_eq!(
+            Mode::ProveRestartMayOwnRelaySettled.success_record(),
+            "VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_SETTLED_V1=pass"
+        );
         for record in [
             Mode::BindRuntime.success_record(),
             Mode::FunctionalClientLease.success_record(),
             Mode::ProveSettledJournal.success_record(),
+            Mode::ProveRestartMayOwnRelay.success_record(),
+            Mode::ProveRestartMayOwnRelayCleanupConfirmed.success_record(),
+            Mode::ProveRestartMayOwnRelaySettled.success_record(),
             Mode::RejectFrameBounds.success_record(),
             Mode::RejectWireShapes.success_record(),
             Mode::ExpectUnauthorisedPeer.success_record(),

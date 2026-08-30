@@ -372,6 +372,17 @@ fn custody_name_digest_for_coordinates(
     DurableCustodyNameDigest(*digest.finalize().as_bytes())
 }
 
+pub(super) fn custody_name_digest_for_record(
+    record: &super::OwnershipRecord,
+) -> DurableCustodyNameDigest {
+    custody_name_digest_for_coordinates(OwnershipCoordinates {
+        journal_epoch_id: record.journal_epoch_id,
+        context_id: record.context_id,
+        ownership_id: record.ownership_id,
+        generation: record.generation,
+    })
+}
+
 /// Durable phase of one exact startup custody target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StartupCustodyPhase {

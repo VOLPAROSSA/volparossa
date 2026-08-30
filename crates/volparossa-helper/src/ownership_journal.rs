@@ -33,6 +33,7 @@ use crate::{
     internal_protocol::{InternalEndpointRole, InternalIpPrefix, LeasePlan as InternalLeasePlan},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
     systemd_custody::{CleanupConfirmedManagerAbsenceEvidence, RestartMayOwnCleanupEvidence},
+    systemd_fdstore::CustodyFdName,
 };
 
 /// Constructs one journal anchor without exposing actor-internal failure types outside this module.
@@ -130,7 +131,49 @@ pub(crate) fn production_functional_journal_is_exactly_restart_settled() -> bool
     production_journal_matches_stably(functional_snapshot_is_exactly_restart_settled)
 }
 
-fn production_journal_matches_stably(predicate: fn(&JournalSnapshot) -> bool) -> bool {
+/// Read-only KVM evidence seam for the exact singleton Relay post-publication boundary.
+pub(crate) fn production_functional_journal_is_exactly_may_own_relay(custody_name: &str) -> bool {
+    let Ok(custody_name) = CustodyFdName::parse(custody_name) else {
+        return false;
+    };
+    production_journal_matches_stably(|snapshot| {
+        functional_snapshot_is_exactly_may_own_relay(
+            snapshot,
+            custody_name,
+            OwnershipPhase::MayOwnCustody,
+        )
+    })
+}
+
+/// Read-only KVM evidence seam for the exact singleton Relay cleanup-confirmed boundary.
+pub(crate) fn production_functional_journal_is_exactly_may_own_relay_cleanup_confirmed(
+    custody_name: &str,
+) -> bool {
+    let Ok(custody_name) = CustodyFdName::parse(custody_name) else {
+        return false;
+    };
+    production_journal_matches_stably(|snapshot| {
+        functional_snapshot_is_exactly_may_own_relay(
+            snapshot,
+            custody_name,
+            OwnershipPhase::CleanupConfirmed,
+        )
+    })
+}
+
+/// Read-only KVM evidence seam for the exact singleton Relay recovered tombstone.
+pub(crate) fn production_functional_journal_is_exactly_may_own_relay_settled(
+    custody_name: &str,
+) -> bool {
+    let Ok(custody_name) = CustodyFdName::parse(custody_name) else {
+        return false;
+    };
+    production_journal_matches_stably(|snapshot| {
+        functional_snapshot_is_exactly_may_own_relay_settled(snapshot, custody_name)
+    })
+}
+
+fn production_journal_matches_stably(predicate: impl Fn(&JournalSnapshot) -> bool) -> bool {
     let config = JournalConfig::production();
     let Ok(parent_directory) = open_verified_parent(&config) else {
         return false;
@@ -288,6 +331,96 @@ fn functional_snapshot_is_exactly_restart_settled(snapshot: &JournalSnapshot) ->
         }
     }
     (client, relay, exit) == (2, 1, 1)
+}
+
+fn functional_snapshot_is_exactly_may_own_relay(
+    snapshot: &JournalSnapshot,
+    expected_custody_name: CustodyFdName,
+    expected_phase: OwnershipPhase,
+) -> bool {
+    if snapshot.records.len() != 7
+        || !matches!(
+            expected_phase,
+            OwnershipPhase::MayOwnCustody | OwnershipPhase::CleanupConfirmed
+        )
+    {
+        return false;
+    }
+    let mut settled_client = 0_u8;
+    let mut settled_relay = 0_u8;
+    let mut settled_exit = 0_u8;
+    let mut exact_recovery_relay = 0_u8;
+    for record in snapshot.records.values() {
+        if is_exact_recovered_tombstone(record) {
+            match functional_journal_record_kind(record) {
+                Some(FunctionalJournalRecordKind::Client) => {
+                    settled_client = settled_client.saturating_add(1);
+                }
+                Some(FunctionalJournalRecordKind::Relay) => {
+                    settled_relay = settled_relay.saturating_add(1);
+                }
+                Some(FunctionalJournalRecordKind::Exit) => {
+                    settled_exit = settled_exit.saturating_add(1);
+                }
+                None => return false,
+            }
+            continue;
+        }
+        let exact_name =
+            CustodyFdName::from_durable_digest(actor::custody_name_digest_for_record(record));
+        if record.phase == expected_phase
+            && exact_name == expected_custody_name
+            && functional_journal_record_kind(record) == Some(FunctionalJournalRecordKind::Relay)
+            && record.absent_origin.is_none()
+            && matches!(
+                record.recovery_evidence,
+                Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+            )
+            && record.reconcile.is_none()
+        {
+            exact_recovery_relay = exact_recovery_relay.saturating_add(1);
+        } else {
+            return false;
+        }
+    }
+    (
+        settled_client,
+        settled_relay,
+        settled_exit,
+        exact_recovery_relay,
+    ) == (3, 1, 2, 1)
+}
+
+fn functional_snapshot_is_exactly_may_own_relay_settled(
+    snapshot: &JournalSnapshot,
+    expected_custody_name: CustodyFdName,
+) -> bool {
+    if snapshot.records.len() != 7 {
+        return false;
+    }
+    let mut client = 0_u8;
+    let mut relay = 0_u8;
+    let mut exit = 0_u8;
+    let mut exact_recovered_relay = 0_u8;
+    for record in snapshot.records.values() {
+        if !is_exact_recovered_tombstone(record) {
+            return false;
+        }
+        match functional_journal_record_kind(record) {
+            Some(FunctionalJournalRecordKind::Client) => client = client.saturating_add(1),
+            Some(FunctionalJournalRecordKind::Relay) => {
+                relay = relay.saturating_add(1);
+                if CustodyFdName::from_durable_digest(actor::custody_name_digest_for_record(record))
+                    == expected_custody_name
+                {
+                    exact_recovered_relay = exact_recovered_relay.saturating_add(1);
+                }
+            }
+            Some(FunctionalJournalRecordKind::Exit) => exit = exit.saturating_add(1),
+            None => return false,
+        }
+    }
+    (client, relay, exit, exact_recovered_relay) == (3, 2, 2, 1)
 }
 
 #[cfg(test)]
@@ -3664,6 +3797,112 @@ mod tests {
         }
     }
 
+    fn functional_record(
+        journal_epoch_id: JournalEpochId,
+        ownership_seed: u8,
+        context_seed: u8,
+        prepare_seed: u8,
+        generation: u64,
+        role: ContextRole,
+        phase: OwnershipPhase,
+    ) -> OwnershipRecord {
+        let mut value = record(
+            journal_epoch_id,
+            ownership_seed,
+            context_seed,
+            prepare_seed,
+            generation,
+            phase,
+        );
+        value.plan = match role {
+            ContextRole::Client => ClosedPlan::new(
+                ContextRole::Client,
+                vec![PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::Client,
+                }],
+            ),
+            ContextRole::Relay => ClosedPlan::new(
+                ContextRole::Relay,
+                vec![
+                    PathPlan {
+                        path_id: 1,
+                        role: WireguardRole::RelayClient,
+                    },
+                    PathPlan {
+                        path_id: 1,
+                        role: WireguardRole::RelayExit,
+                    },
+                ],
+            ),
+            ContextRole::Exit => ClosedPlan::new(
+                ContextRole::Exit,
+                vec![PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::Exit,
+                }],
+            ),
+        }
+        .expect("fixed functional plan");
+        if phase == OwnershipPhase::Absent {
+            value.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        }
+        value
+    }
+
+    fn may_own_relay_fixture() -> (
+        Vec<OwnershipRecord>,
+        OwnershipRecord,
+        CustodyFdName,
+        CustodyFdName,
+    ) {
+        let journal_epoch = epoch(1);
+        let settled = [
+            (1, 11, 21, 1, ContextRole::Client),
+            (2, 12, 22, 2, ContextRole::Relay),
+            (3, 13, 23, 3, ContextRole::Exit),
+            (4, 14, 24, 4, ContextRole::Client),
+            (5, 15, 25, 5, ContextRole::Client),
+            (6, 16, 26, 6, ContextRole::Exit),
+        ]
+        .into_iter()
+        .map(|(owner, context, prepare, generation, role)| {
+            functional_record(
+                journal_epoch,
+                owner,
+                context,
+                prepare,
+                generation,
+                role,
+                OwnershipPhase::Absent,
+            )
+        })
+        .collect();
+        let target = functional_record(
+            journal_epoch,
+            7,
+            17,
+            27,
+            7,
+            ContextRole::Relay,
+            OwnershipPhase::MayOwnCustody,
+        );
+        let expected_name =
+            CustodyFdName::from_durable_digest(actor::custody_name_digest_for_record(&target));
+        let other = functional_record(
+            journal_epoch,
+            8,
+            18,
+            28,
+            8,
+            ContextRole::Relay,
+            OwnershipPhase::MayOwnCustody,
+        );
+        let wrong_name =
+            CustodyFdName::from_durable_digest(actor::custody_name_digest_for_record(&other));
+        (settled, target, expected_name, wrong_name)
+    }
+
     fn test_config(parent: &Path) -> JournalConfig {
         let metadata = fs::metadata(parent).expect("temporary parent metadata");
         JournalConfig::for_test(
@@ -6653,6 +6892,74 @@ mod tests {
         restart_client.absent_origin = Some(AbsentOrigin::NeverDispatched);
         assert!(!functional_snapshot_is_exactly_restart_settled(
             &snapshot_with(vec![restart_client])
+        ));
+    }
+
+    #[test]
+    fn may_own_relay_evidence_is_name_phase_role_and_exact_set_bound() {
+        let (settled, may_own_relay, expected_name, wrong_name) = may_own_relay_fixture();
+        let mut precrash_records = settled.clone();
+        precrash_records.push(may_own_relay.clone());
+        let precrash = snapshot_with(precrash_records);
+        assert!(functional_snapshot_is_exactly_may_own_relay(
+            &precrash,
+            expected_name,
+            OwnershipPhase::MayOwnCustody,
+        ));
+        assert!(!functional_snapshot_is_exactly_may_own_relay(
+            &precrash,
+            wrong_name,
+            OwnershipPhase::MayOwnCustody,
+        ));
+
+        let mut cleanup_confirmed_relay = may_own_relay.clone();
+        cleanup_confirmed_relay.phase = OwnershipPhase::CleanupConfirmed;
+        let mut cleanup_confirmed_records = settled.clone();
+        cleanup_confirmed_records.push(cleanup_confirmed_relay.clone());
+        let cleanup_confirmed = snapshot_with(cleanup_confirmed_records);
+        assert!(functional_snapshot_is_exactly_may_own_relay(
+            &cleanup_confirmed,
+            expected_name,
+            OwnershipPhase::CleanupConfirmed,
+        ));
+        assert!(!functional_snapshot_is_exactly_may_own_relay(
+            &cleanup_confirmed,
+            expected_name,
+            OwnershipPhase::MayOwnCustody,
+        ));
+
+        let mut lost_custody = cleanup_confirmed_relay.clone();
+        lost_custody.recovery_evidence = None;
+        let mut lost_custody_records = settled.clone();
+        lost_custody_records.push(lost_custody);
+        assert!(!functional_snapshot_is_exactly_may_own_relay(
+            &snapshot_with(lost_custody_records),
+            expected_name,
+            OwnershipPhase::CleanupConfirmed,
+        ));
+
+        let mut recovered_relay = cleanup_confirmed_relay;
+        recovered_relay.phase = OwnershipPhase::Absent;
+        recovered_relay.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        recovered_relay.recovery_evidence = None;
+        let mut recovered_records = settled;
+        recovered_records.push(recovered_relay.clone());
+        let recovered = snapshot_with(recovered_records);
+        assert!(functional_snapshot_is_exactly_may_own_relay_settled(
+            &recovered,
+            expected_name,
+        ));
+        recovered_relay.absent_origin = Some(AbsentOrigin::NeverDispatched);
+        let mut wrong_origin_records = recovered
+            .records
+            .values()
+            .filter(|record| record.ownership_id != recovered_relay.ownership_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        wrong_origin_records.push(recovered_relay);
+        assert!(!functional_snapshot_is_exactly_may_own_relay_settled(
+            &snapshot_with(wrong_origin_records),
+            expected_name,
         ));
     }
 

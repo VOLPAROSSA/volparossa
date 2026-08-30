@@ -61,6 +61,16 @@ restart_resumed_record=$proof_directory/restart.resumed
 restart_readiness_failure_record=$proof_directory/restart.readiness-failure
 restart_journal_settled_state_record=$proof_directory/restart.journal.settled.state
 restart_exact_present_mode=no
+may_own_debugger_armed_record=$proof_directory/may-own.debugger-armed
+may_own_first_boundary_record=$proof_directory/may-own.first-boundary
+may_own_second_boundary_record=$proof_directory/may-own.second-boundary
+may_own_third_boundary_record=$proof_directory/may-own.third-boundary
+may_own_resumed_record=$proof_directory/may-own.resumed
+may_own_driver_second_ready_record=$proof_directory/may-own.driver-second-ready
+may_own_driver_third_ready_record=$proof_directory/may-own.driver-third-ready
+may_own_relay_mode=no
+may_own_driver_observer_mode=no
+may_own_driver_expected_main_pid=
 functional_peer_public_key=$functional_relay_public_key
 functional_peer_endpoint=$functional_underlay_address:$functional_relay_listen_port
 functional_exit_peer_public_key=$functional_exit_relay_public_key
@@ -1366,6 +1376,83 @@ probe_output_is_exact() {
         return 1
     fi
     rm -f -- "$hook_expected_output"
+}
+
+may_own_driver_entry_contract_is_exact() {
+    [ "$#" -eq 3 ] || return 1
+    hook_driver_unit=$1
+    hook_driver_gid=$2
+    hook_driver_main_pid=$3
+    unit_name_is_safe "$hook_driver_unit" || return 1
+    number_is_safe "$hook_driver_gid" || return 1
+    number_is_safe "$hook_driver_main_pid" || return 1
+    [ "$$" != "$hook_driver_main_pid" ] || return 1
+    hook_driver_status=/proc/$$/status
+    hook_driver_cgroup_record=/proc/$$/cgroup
+    [ -f "$hook_driver_status" ] && [ ! -L "$hook_driver_status" ] \
+        && [ -f "$hook_driver_cgroup_record" ] \
+        && [ ! -L "$hook_driver_cgroup_record" ] || return 1
+    /usr/bin/awk -v expected_gid="$hook_driver_gid" '
+        $1 == "Uid:" {
+            uid_count++
+            if (NF != 5 || $2 != 0 || $3 != 0 || $4 != 0 || $5 != 0) invalid = 1
+            next
+        }
+        $1 == "Gid:" {
+            gid_count++
+            if (NF != 5 || $2 != expected_gid || $3 != expected_gid \
+                || $4 != expected_gid || $5 != expected_gid) invalid = 1
+            next
+        }
+        $1 == "Groups:" {
+            groups_count++
+            if (NF != 2 || $2 != expected_gid) invalid = 1
+            next
+        }
+        $1 == "NoNewPrivs:" {
+            nnp_count++
+            if (NF != 2 || $2 != 1) invalid = 1
+            next
+        }
+        END {
+            if (invalid || uid_count != 1 || gid_count != 1 \
+                || groups_count != 1 || nnp_count != 1) exit 1
+        }
+    ' "$hook_driver_status" || return 1
+    hook_driver_cgroup=$(/usr/bin/awk '
+        NR == 1 && $0 ~ /^0::\// {
+            print substr($0, 4)
+            accepted = 1
+            next
+        }
+        { invalid = 1 }
+        END { if (invalid || NR != 1 || accepted != 1) exit 1 }
+    ' "$hook_driver_cgroup_record") || return 1
+    [ "${#hook_driver_cgroup}" -le 4096 ] || return 1
+    case $hook_driver_cgroup in
+        "/system.slice/$hook_driver_unit"|"/system.slice/$hook_driver_unit/"*)
+            return 1
+            ;;
+        /*) ;;
+        *) return 1 ;;
+    esac
+    [ "$(unit_main_pid "$hook_driver_unit")" = "$hook_driver_main_pid" ] \
+        || return 1
+    hook_driver_network_identity=$(stat -Lc '%d:%i' /proc/$$/ns/net) \
+        || return 1
+    [ "$hook_driver_network_identity" = \
+        "$(stat -Lc '%d:%i' "/proc/$hook_driver_main_pid/ns/net")" ] \
+        || return 1
+    [ "$(unit_u32_property "$hook_driver_unit" \
+        org.freedesktop.systemd1.Service ControlPID)" = 0 ] || return 1
+    hook_driver_service_cgroup=/sys/fs/cgroup/system.slice/$hook_driver_unit
+    hook_driver_service_procs=$hook_driver_service_cgroup/cgroup.procs
+    [ -f "$hook_driver_service_procs" ] \
+        && [ ! -L "$hook_driver_service_procs" ] || return 1
+    /usr/bin/awk -v expected_pid="$hook_driver_main_pid" '
+        NR > 32 || $0 != expected_pid { invalid = 1 }
+        END { if (invalid || NR < 1) exit 1 }
+    ' "$hook_driver_service_procs"
 }
 
 run_probe() {
@@ -4509,6 +4596,64 @@ unit_fdstore_exact_active_custody() {
     printf '%s\n' "$hook_fdstore_custody_name"
 }
 
+fdstore_dump_single_custody_name() {
+    [ "$#" -eq 1 ] || return 1
+    hook_fdstore_dump_input=$1
+    [ "${#hook_fdstore_dump_input}" -le 8192 ] || return 1
+    printf '%s' "$hook_fdstore_dump_input" | /usr/bin/jq -ers -r '
+        def exact_u32:
+            type == "number" and . >= 0 and . <= 4294967295 and floor == .;
+        def exact_u53:
+            type == "number" and . >= 0 and . <= 9007199254740991 and floor == .;
+        def exact_entry:
+            type == "array" and length == 9
+            and (.[0] | type == "string"
+                and test("^volparossa-custody-v1-[0-9a-f]{64}$"))
+            and (.[1] | exact_u32 and . > 0)
+            and (.[2] | exact_u32)
+            and (.[3] | exact_u32)
+            and (.[4] | exact_u53 and . > 0)
+            and (.[5] | exact_u32)
+            and (.[6] | exact_u32)
+            and (.[7] | type == "string" and length <= 256)
+            and (.[8] | exact_u32);
+        if length == 1
+            and (.[0] | keys) == ["data", "type"]
+            and .[0].type == "a(suuutuusu)"
+            and (.[0].data | type == "array" and length == 1)
+            and (.[0].data[0] | type == "array" and length == 2)
+            and all(.[0].data[0][]; exact_entry)
+            and .[0].data[0][0][0] == .[0].data[0][1][0]
+        then .[0].data[0][0][0]
+        else empty
+        end
+    '
+}
+
+unit_fdstore_single_custody() {
+    [ "$#" -eq 1 ] || return 1
+    hook_fdstore_unit=$1
+    unit_name_is_safe "$hook_fdstore_unit" || return 1
+    hook_fdstore_count_before=$(unit_u32_property \
+        "$hook_fdstore_unit" org.freedesktop.systemd1.Service \
+        NFileDescriptorStore) || return 1
+    [ "$hook_fdstore_count_before" = 2 ] || return 1
+    hook_fdstore_object=$(unit_object_path "$hook_fdstore_unit") || return 1
+    hook_fdstore_dump=$(/usr/bin/busctl \
+        --address="$system_bus_address" --json=short call \
+        org.freedesktop.systemd1 "$hook_fdstore_object" \
+        org.freedesktop.systemd1.Service DumpFileDescriptorStore 2>/dev/null) \
+        || return 1
+    hook_fdstore_custody_name=$(fdstore_dump_single_custody_name \
+        "$hook_fdstore_dump") || return 1
+    custody_fd_name_is_safe "$hook_fdstore_custody_name" || return 1
+    hook_fdstore_count_after=$(unit_u32_property \
+        "$hook_fdstore_unit" org.freedesktop.systemd1.Service \
+        NFileDescriptorStore) || return 1
+    [ "$hook_fdstore_count_after" = 2 ] || return 1
+    printf '%s\n' "$hook_fdstore_custody_name"
+}
+
 unit_fdstore_prior_custody_is_absent() {
     [ "$#" -eq 2 ] || return 1
     custody_fd_name_is_safe "$2" || return 1
@@ -6208,6 +6353,371 @@ restart_start_hook() {
         || fail 'restart resumed record could not be published'
 }
 
+may_own_record_line() {
+    [ "$#" -eq 2 ] || return 1
+    private_file_is_safe "$1" || return 1
+    sed -n "$2"p "$1"
+}
+
+may_own_socket_is_absent_or_initial() {
+    [ "$#" -eq 2 ] || return 1
+    hook_may_own_expected_socket=$1
+    hook_may_own_expected_gid=$2
+    if [ ! -e "$helper_socket" ] && [ ! -L "$helper_socket" ]; then
+        return 0
+    fi
+    [ ! -L "$helper_socket" ] || return 1
+    if hook_may_own_observed_socket=$(capture_socket_identity \
+        "$hook_may_own_expected_gid"); then
+        [ "$hook_may_own_observed_socket" = "$hook_may_own_expected_socket" ]
+        return
+    fi
+    [ ! -e "$helper_socket" ] && [ ! -L "$helper_socket" ]
+}
+
+may_own_observe_hook() {
+    [ "$#" -eq 4 ] || fail 'MayOwn observer argument count is invalid'
+    hook_may_own_phase=$1
+    hook_may_own_unit=$2
+    hook_may_own_gid=$3
+    hook_may_own_main_pid=$4
+    unit_name_is_safe "$hook_may_own_unit" || fail 'MayOwn unit name is unsafe'
+    number_is_safe "$hook_may_own_gid" || fail 'MayOwn agent GID is invalid'
+    number_is_safe "$hook_may_own_main_pid" || fail 'MayOwn MainPID is invalid'
+    case $hook_may_own_phase in
+        after-first-crash|after-second-crash)
+            [ "$(unit_main_pid "$hook_may_own_unit")" = 0 ] \
+                || fail 'killed MayOwn MainPID remains manager-bound'
+            ;;
+        *)
+            [ "$(unit_main_pid "$hook_may_own_unit")" = \
+                "$hook_may_own_main_pid" ] \
+                || fail 'MayOwn MainPID is not manager-bound'
+            ;;
+    esac
+    case $hook_may_own_phase in
+        armed)
+            if [ -e "$may_own_debugger_armed_record" ] \
+                || [ -L "$may_own_debugger_armed_record" ]; then
+                fail 'MayOwn debugger marker already exists'
+            fi
+            write_private_file "$may_own_debugger_armed_record" \
+                'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DEBUGGER_ARMED_V1=pass' \
+                || fail 'MayOwn debugger marker could not be published'
+            return 0
+            ;;
+        first-publication|after-first-crash|second-confirm|after-second-crash|third-removal)
+            ;;
+        *) fail 'MayOwn observer phase is invalid' ;;
+    esac
+
+    hook_may_own_custody=$(unit_fdstore_single_custody "$hook_may_own_unit") \
+        || fail 'MayOwn exact manager custody is unavailable'
+    [ "$hook_fdstore_count_before:$hook_fdstore_count_after" = 2:2 ] \
+        || fail 'MayOwn manager custody count changed'
+    hook_may_own_restart_count=$(unit_u32_property \
+        "$hook_may_own_unit" org.freedesktop.systemd1.Service NRestarts) \
+        || fail 'MayOwn restart count is unavailable'
+    case $hook_may_own_phase in
+        first-publication|after-first-crash)
+            hook_may_own_expected_restarts=0
+            ;;
+        second-confirm|after-second-crash)
+            hook_may_own_expected_restarts=1
+            ;;
+        third-removal)
+            hook_may_own_expected_restarts=2
+            ;;
+    esac
+    [ "$hook_may_own_restart_count" = "$hook_may_own_expected_restarts" ] \
+        || fail 'MayOwn restart count changed'
+    case $hook_may_own_phase in
+        third-removal)
+            hook_may_own_journal=$(
+                "$probe" prove-restart-may-own-relay-cleanup-confirmed \
+                    "$hook_may_own_main_pid" "$hook_may_own_gid" \
+                    "$hook_may_own_custody" 2>/dev/null
+            ) || fail 'MayOwn Relay CleanupConfirmed journal is unavailable'
+            [ "$hook_may_own_journal" = \
+                'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_CLEANUP_CONFIRMED_V1=pass' ] \
+                || fail 'MayOwn Relay CleanupConfirmed journal proof is invalid'
+            ;;
+        *)
+            hook_may_own_journal=$(
+                "$probe" prove-restart-may-own-relay \
+                    "$hook_may_own_main_pid" "$hook_may_own_gid" \
+                    "$hook_may_own_custody" 2>/dev/null
+            ) || fail 'MayOwn Relay journal is unavailable'
+            [ "$hook_may_own_journal" = \
+                'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_V1=pass' ] \
+                || fail 'MayOwn Relay journal proof is invalid'
+            ;;
+    esac
+
+    hook_may_own_first_invocation=
+    hook_may_own_second_invocation=
+    hook_may_own_first_custody=
+    hook_may_own_first_socket=
+    if private_file_is_safe "$may_own_first_boundary_record"; then
+        hook_may_own_first_invocation=$(may_own_record_line \
+            "$may_own_first_boundary_record" 2) \
+            || fail 'MayOwn first invocation is unavailable'
+        hook_may_own_first_custody=$(may_own_record_line \
+            "$may_own_first_boundary_record" 4) \
+            || fail 'MayOwn first custody is unavailable'
+        hook_may_own_first_socket=$(may_own_record_line \
+            "$may_own_first_boundary_record" 6) \
+            || fail 'MayOwn first socket identity is unavailable'
+        invocation_id_is_safe "$hook_may_own_first_invocation" \
+            || fail 'MayOwn first invocation is invalid'
+        [ "$hook_may_own_first_custody" = "$hook_may_own_custody" ] \
+            || fail 'MayOwn custody lineage changed'
+        may_own_socket_is_absent_or_initial \
+            "$hook_may_own_first_socket" "$hook_may_own_gid" \
+            || fail 'MayOwn socket changed before restart settlement'
+    fi
+    if private_file_is_safe "$may_own_second_boundary_record"; then
+        hook_may_own_second_invocation=$(may_own_record_line \
+            "$may_own_second_boundary_record" 2) \
+            || fail 'MayOwn second invocation is unavailable'
+        invocation_id_is_safe "$hook_may_own_second_invocation" \
+            || fail 'MayOwn second invocation is invalid'
+        [ "$(may_own_record_line "$may_own_second_boundary_record" 4)" = \
+            "$hook_may_own_custody" ] \
+            || fail 'MayOwn second custody lineage changed'
+    fi
+
+    case $hook_may_own_phase in
+        first-publication)
+            if [ -e "$may_own_first_boundary_record" ] \
+                || [ -L "$may_own_first_boundary_record" ]; then
+                fail 'MayOwn first boundary already exists'
+            fi
+            hook_may_own_invocation=$(unit_invocation_id "$hook_may_own_unit") \
+                || fail 'MayOwn first invocation is unavailable'
+            hook_may_own_socket=$(capture_socket_identity "$hook_may_own_gid") \
+                || fail 'MayOwn first socket identity is unavailable'
+            hook_may_own_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+                || fail 'MayOwn first boundary time is unavailable'
+            hook_may_own_record=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+                "$hook_may_own_time" "$hook_may_own_invocation" \
+                "$hook_may_own_main_pid" "$hook_may_own_custody" 2 \
+                "$hook_may_own_socket" \
+                'crash-boundary-v1=worker_v3::DurableCustodyPublicationTerminalGuard::retain_published') \
+                || fail 'MayOwn first boundary record is unavailable'
+            write_private_file "$may_own_first_boundary_record" \
+                "$hook_may_own_record" \
+                || fail 'MayOwn first boundary record could not be published'
+            ;;
+        after-first-crash)
+            private_file_is_safe "$may_own_first_boundary_record" \
+                || fail 'MayOwn first boundary is unavailable after crash'
+            ;;
+        second-confirm)
+            private_file_is_safe "$may_own_first_boundary_record" \
+                || fail 'MayOwn first boundary is unavailable'
+            if [ -e "$may_own_second_boundary_record" ] \
+                || [ -L "$may_own_second_boundary_record" ]; then
+                fail 'MayOwn second boundary already exists'
+            fi
+            hook_may_own_invocation=$(unit_invocation_id "$hook_may_own_unit") \
+                || fail 'MayOwn second invocation is unavailable'
+            [ "$hook_may_own_invocation" != "$hook_may_own_first_invocation" ] \
+                || fail 'MayOwn second invocation was reused'
+            hook_may_own_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+                || fail 'MayOwn second boundary time is unavailable'
+            hook_may_own_record=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+                "$hook_may_own_time" "$hook_may_own_invocation" \
+                "$hook_may_own_main_pid" "$hook_may_own_custody" 2 \
+                'crash-boundary-v1=ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup') \
+                || fail 'MayOwn second boundary record is unavailable'
+            write_private_file "$may_own_second_boundary_record" \
+                "$hook_may_own_record" \
+                || fail 'MayOwn second boundary record could not be published'
+            ;;
+        after-second-crash)
+            if ! private_file_is_safe "$may_own_first_boundary_record" \
+                || ! private_file_is_safe "$may_own_second_boundary_record"; then
+                fail 'MayOwn crash lineage is unavailable'
+            fi
+            [ "$hook_may_own_first_invocation" != \
+                "$hook_may_own_second_invocation" ] \
+                || fail 'MayOwn crash invocation lineage collapsed'
+            ;;
+        third-removal)
+            if ! private_file_is_safe "$may_own_first_boundary_record" \
+                || ! private_file_is_safe "$may_own_second_boundary_record"; then
+                fail 'MayOwn prior boundary lineage is unavailable'
+            fi
+            if [ -e "$may_own_third_boundary_record" ] \
+                || [ -L "$may_own_third_boundary_record" ]; then
+                fail 'MayOwn third boundary already exists'
+            fi
+            hook_may_own_invocation=$(unit_invocation_id "$hook_may_own_unit") \
+                || fail 'MayOwn third invocation is unavailable'
+            if [ "$hook_may_own_invocation" = "$hook_may_own_first_invocation" ] \
+                || [ "$hook_may_own_invocation" = \
+                    "$hook_may_own_second_invocation" ]; then
+                fail 'MayOwn third invocation was reused'
+            fi
+            hook_may_own_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+                || fail 'MayOwn removal boundary time is unavailable'
+            hook_may_own_record=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+                "$hook_may_own_time" "$hook_may_own_invocation" \
+                "$hook_may_own_main_pid" "$hook_may_own_custody" 2 \
+                'observation-boundary-v1=systemd_fdstore::remove_restart_custody') \
+                || fail 'MayOwn third boundary record is unavailable'
+            write_private_file "$may_own_third_boundary_record" \
+                "$hook_may_own_record" \
+                || fail 'MayOwn third boundary record could not be published'
+            ;;
+    esac
+}
+
+may_own_start_hook() {
+    [ "$#" -eq 7 ] || fail 'MayOwn start hook argument count is invalid'
+    hook_may_own_unit=$1
+    hook_may_own_gid=$3
+    may_own_driver_expected_main_pid=$7
+    [ "$may_own_driver_observer_mode" = yes ] \
+        || fail 'MayOwn start hook is not driver-observed'
+    may_own_driver_entry_contract_is_exact \
+        "$hook_may_own_unit" "$hook_may_own_gid" \
+        "$may_own_driver_expected_main_pid" \
+        || fail 'MayOwn driver observer boundary is not exact'
+    hook_may_own_driver_invocation=$(unit_invocation_id "$hook_may_own_unit") \
+        || fail 'MayOwn driver invocation is unavailable'
+    if [ ! -e "$may_own_first_boundary_record" ] \
+        && [ ! -L "$may_own_first_boundary_record" ]; then
+        may_own_relay_mode=yes
+        start_hook "$1" "$2" "$3" "$4" "$5" "$6"
+        fail 'MayOwn first invocation crossed the forced-crash boundary'
+    fi
+    private_file_is_safe "$may_own_first_boundary_record" \
+        || fail 'MayOwn first boundary is unavailable at startup'
+    hook_may_own_initial_socket=$(may_own_record_line \
+        "$may_own_first_boundary_record" 6) \
+        || fail 'MayOwn initial socket identity is unavailable at startup'
+    if [ ! -e "$may_own_second_boundary_record" ] \
+        && [ ! -L "$may_own_second_boundary_record" ]; then
+        if [ -e "$may_own_driver_second_ready_record" ] \
+            || [ -L "$may_own_driver_second_ready_record" ]; then
+            fail 'MayOwn second driver-ready path is unsafe'
+        fi
+        hook_may_own_driver_ready=$(printf '%s\n%s\n%s' \
+            'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DRIVER_SECOND_READY_V1=pass' \
+            "$hook_may_own_driver_invocation" \
+            "$may_own_driver_expected_main_pid") \
+            || fail 'MayOwn second driver-ready record is unavailable'
+        write_private_file "$may_own_driver_second_ready_record" \
+            "$hook_may_own_driver_ready" \
+            || fail 'MayOwn second driver-ready record could not be published'
+        hook_may_own_wait=0
+        while ! private_file_is_safe "$may_own_second_boundary_record"; do
+            if [ -e "$may_own_second_boundary_record" ] \
+                || [ -L "$may_own_second_boundary_record" ]; then
+                fail 'MayOwn second crash boundary is unsafe'
+            fi
+            may_own_socket_is_absent_or_initial \
+                "$hook_may_own_initial_socket" "$hook_may_own_gid" \
+                || fail 'MayOwn successor published a socket before the second crash'
+            hook_may_own_wait=$((hook_may_own_wait + 1))
+            [ "$hook_may_own_wait" -lt 1200 ] \
+                || fail 'MayOwn second crash boundary did not arrive'
+            sleep 0.05
+        done
+        may_own_socket_is_absent_or_initial \
+            "$hook_may_own_initial_socket" "$hook_may_own_gid" \
+            || fail 'MayOwn successor published a socket before the second crash'
+        return 0
+    fi
+    private_file_is_safe "$may_own_second_boundary_record" \
+        || fail 'MayOwn second boundary is unavailable at startup'
+    if [ -e "$may_own_driver_third_ready_record" ] \
+        || [ -L "$may_own_driver_third_ready_record" ]; then
+        fail 'MayOwn third driver-ready path is unsafe'
+    fi
+    hook_may_own_driver_ready=$(printf '%s\n%s\n%s' \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DRIVER_THIRD_READY_V1=pass' \
+        "$hook_may_own_driver_invocation" \
+        "$may_own_driver_expected_main_pid") \
+        || fail 'MayOwn third driver-ready record is unavailable'
+    write_private_file "$may_own_driver_third_ready_record" \
+        "$hook_may_own_driver_ready" \
+        || fail 'MayOwn third driver-ready record could not be published'
+    hook_may_own_wait=0
+    while ! private_file_is_safe "$may_own_third_boundary_record"; do
+        if [ -e "$may_own_third_boundary_record" ] \
+            || [ -L "$may_own_third_boundary_record" ]; then
+            fail 'MayOwn removal boundary is unsafe'
+        fi
+        may_own_socket_is_absent_or_initial \
+            "$hook_may_own_initial_socket" "$hook_may_own_gid" \
+            || fail 'MayOwn third invocation published a socket before removal'
+        hook_may_own_wait=$((hook_may_own_wait + 1))
+        [ "$hook_may_own_wait" -lt 1200 ] \
+            || fail 'MayOwn removal boundary did not arrive'
+        sleep 0.05
+    done
+    may_own_socket_is_absent_or_initial \
+        "$hook_may_own_initial_socket" "$hook_may_own_gid" \
+        || fail 'MayOwn third invocation published a socket before removal'
+    hook_may_own_new_socket=
+    hook_may_own_wait=0
+    while [ -z "$hook_may_own_new_socket" ]; do
+        if [ -L "$helper_socket" ]; then
+            fail 'MayOwn resumed socket path is a link'
+        fi
+        if [ -e "$helper_socket" ]; then
+            if hook_may_own_candidate_socket=$(capture_socket_identity \
+                "$hook_may_own_gid"); then
+                if [ "$hook_may_own_candidate_socket" != \
+                    "$hook_may_own_initial_socket" ]; then
+                    hook_may_own_new_socket=$hook_may_own_candidate_socket
+                    break
+                fi
+            elif [ -e "$helper_socket" ] || [ -L "$helper_socket" ]; then
+                fail 'MayOwn resumed socket identity is unsafe'
+            fi
+        fi
+        hook_may_own_wait=$((hook_may_own_wait + 1))
+        [ "$hook_may_own_wait" -lt 1200 ] \
+            || fail 'MayOwn third invocation did not publish a new socket'
+        sleep 0.05
+    done
+    validate_runtime_metadata "$hook_may_own_gid" \
+        || fail 'MayOwn resumed runtime metadata is invalid'
+    hook_may_own_custody=$(may_own_record_line \
+        "$may_own_first_boundary_record" 4) \
+        || fail 'MayOwn custody lineage is unavailable after settlement'
+    unit_fdstore_is_empty "$hook_may_own_unit" \
+        || fail 'MayOwn descriptor store is not stably empty'
+    hook_may_own_settled=$(
+        "$probe" prove-restart-may-own-relay-settled \
+            "$(unit_main_pid "$hook_may_own_unit")" "$hook_may_own_gid" \
+            "$hook_may_own_custody" 2>/dev/null
+    ) || fail 'MayOwn settled Relay journal is unavailable'
+    [ "$hook_may_own_settled" = \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_SETTLED_V1=pass' ] \
+        || fail 'MayOwn settled Relay journal proof is invalid'
+    hook_may_own_current_invocation=$(unit_invocation_id "$hook_may_own_unit") \
+        || fail 'MayOwn resumed invocation is unavailable'
+    [ "$hook_may_own_current_invocation" = \
+        "$(may_own_record_line "$may_own_third_boundary_record" 2)" ] \
+        || fail 'MayOwn resumed invocation changed after removal'
+    [ "$hook_may_own_new_socket" != "$hook_may_own_initial_socket" ] \
+        || fail 'MayOwn resumed socket identity was reused'
+    hook_may_own_settled_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+        || fail 'MayOwn settlement time is unavailable'
+    hook_may_own_resumed=$(printf '%s\n%s\n%s\n%s\n%s' \
+        "$hook_may_own_settled_at" "$hook_may_own_current_invocation" \
+        "$hook_may_own_new_socket" 0 \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_SETTLED_V1=pass') \
+        || fail 'MayOwn resumed record is unavailable'
+    write_private_file "$may_own_resumed_record" "$hook_may_own_resumed" \
+        || fail 'MayOwn resumed record could not be published'
+}
+
 validate_runtime_metadata() {
     [ "$#" -eq 1 ] || return 1
     hook_agent_gid=$1
@@ -6265,8 +6775,16 @@ start_hook() {
         || [ "$operator_gid" -eq "$worker_gid" ]; then
         fail 'staged identities overlap'
     fi
-    hook_entry_contract_is_exact "$agent_gid" \
-        || fail 'start hook process contract is invalid'
+    if [ "$may_own_driver_observer_mode" = yes ]; then
+        [ "$may_own_driver_expected_main_pid" = \
+            "$(unit_main_pid "$hook_unit")" ] \
+            || fail 'MayOwn driver MainPID changed before start proof'
+    elif [ "$may_own_driver_observer_mode" = no ]; then
+        hook_entry_contract_is_exact "$agent_gid" \
+            || fail 'start hook process contract is invalid'
+    else
+        fail 'MayOwn driver observer mode is invalid'
+    fi
     [ "$(stat -c '%F:%u:%g:%a' "$proof_directory" 2>/dev/null || true)" = \
         'directory:0:0:2700' ] || fail 'proof directory is unsafe'
     [ "$(stat -c '%F:%u:%g:%a:%h' "$probe" 2>/dev/null || true)" = \
@@ -6413,6 +6931,21 @@ start_hook() {
         "$bind_pass" "$hook_unit" "$identity_file" "$socket_identity_file" \
         "$hook_expected_main_pid" "$agent_gid" \
         || fail 'final authenticated runtime bind failed'
+
+    if [ "$may_own_relay_mode" = yes ]; then
+        hook_may_own_wait=0
+        while ! private_file_is_safe "$may_own_debugger_armed_record"; do
+            hook_may_own_wait=$((hook_may_own_wait + 1))
+            [ "$hook_may_own_wait" -lt 600 ] \
+                || fail 'MayOwn debugger did not arm before the functional cycles'
+            sleep 0.05
+        done
+        [ "$(cat "$may_own_debugger_armed_record")" = \
+            'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DEBUGGER_ARMED_V1=pass' ] \
+            || fail 'MayOwn debugger marker is invalid'
+    elif [ "$may_own_relay_mode" != no ]; then
+        fail 'MayOwn mode is invalid'
+    fi
 
     advance_start_failure_stage functional-underlay \
         || fail 'start failure stage transition is invalid'
@@ -6572,6 +7105,20 @@ case ${1:-} in
     restart-observe)
         shift
         restart_observe_hook "$@"
+        ;;
+    may-own-driver-start)
+        shift
+        may_own_driver_observer_mode=yes
+        start_failure_stage=preflight-runtime
+        start_failure_armed=yes
+        trap start_failure_exit EXIT
+        may_own_start_hook "$@"
+        start_failure_armed=no
+        trap - EXIT
+        ;;
+    may-own-observe)
+        shift
+        may_own_observe_hook "$@"
         ;;
     *) fail 'hook mode is invalid' ;;
 esac

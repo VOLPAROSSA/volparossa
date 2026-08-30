@@ -127,6 +127,34 @@ pub fn production_functional_journal_is_exactly_restart_settled() -> bool {
     ownership_journal::production_functional_journal_is_exactly_restart_settled()
 }
 
+/// Read-only fixed-path proof that the post-publication singleton KVM target is the exact
+/// `MayOwnCustody` Relay named by systemd's retained descriptor pair.
+#[doc(hidden)]
+#[must_use]
+pub fn production_functional_journal_is_exactly_may_own_relay(custody_name: &str) -> bool {
+    ownership_journal::production_functional_journal_is_exactly_may_own_relay(custody_name)
+}
+
+/// Read-only fixed-path proof that the exact singleton Relay target reached
+/// `CleanupConfirmed` while systemd still retained its descriptor pair.
+#[doc(hidden)]
+#[must_use]
+pub fn production_functional_journal_is_exactly_may_own_relay_cleanup_confirmed(
+    custody_name: &str,
+) -> bool {
+    ownership_journal::production_functional_journal_is_exactly_may_own_relay_cleanup_confirmed(
+        custody_name,
+    )
+}
+
+/// Read-only fixed-path proof that the exact singleton Relay target became one recovered
+/// tombstone after its retained manager custody was removed.
+#[doc(hidden)]
+#[must_use]
+pub fn production_functional_journal_is_exactly_may_own_relay_settled(custody_name: &str) -> bool {
+    ownership_journal::production_functional_journal_is_exactly_may_own_relay_settled(custody_name)
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::{needs_drop, size_of};

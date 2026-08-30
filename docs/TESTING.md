@@ -243,6 +243,25 @@ The Client, Exit and Relay-pair Probe/Commit plus ICMPv6 fixtures described abov
 retained exact-main evidence identified above. The Relay result proves both endpoint leases in one
 worker namespace, but does not prove cross-leg forwarding or a simultaneous end-to-end route.
 
+The same disposable runner now also has two separately validated restart reports. The first is the
+exact singleton `CleanupConfirmed + ExactPresent` forced-crash slice. The second is
+`helper-restart-may-own-custody-relay-evidence-v1.json`: three distinct argumentless systemd
+invocations force two `SIGKILL`s, first after the exact Relay publication terminal has retained its
+published custody and then when the successor reaches the exact singleton reaper journal boundary;
+the third invocation observes the same two-descriptor custody at startup removal and can publish a
+new socket only after the journal is `Absent(RecoveredMayOwn)` and the manager store is empty. The
+MayOwn transient service uses the production-required `Type=simple` and three-second restart delay
+with no `ExecStartPost`. Per-invocation observers enter only its private mount and network
+namespaces from the driver cgroup; an exec-stop/release handshake requires `ControlPID=0` and a
+`cgroup.procs` set containing only the current `MainPID`. At each crash boundary, GDB then remains
+stopped until the driver has observed `frozen 1` from the service cgroup before releasing the
+single pending kill, so the three-second restart cannot outrun successor adoption. Its
+claim is deliberately limited to one fixed single-path Relay target in
+`MayOwnCustody + ExactPresent`. It is not general restart recovery, `CleanupOwned`, an installed
+service proof, a usable datapath, or acceptance evidence. A non-main run validates all three
+reports and their environments but retains nothing. Exact main alone may retain the separate
+report/hash/environment triples, and source support without a retained PASS is not a live result.
+
 If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
 category (or `unclassified`) to job stderr. For `worker-launch-status` only, it may additionally emit
 one fixed structural classification of launch binding, terminal state and payload-free helper stage.
@@ -306,10 +325,11 @@ pins a fresh Ed25519 guest host key before the first SSH probe; it never uses SS
 An identity-bound pidfd supervisor owns each QEMU lifetime, and byte-oriented collectors actively
 cap and drain the VM console and command output.
 
-In `retained-main` mode, the host revalidates a successful canonical report, its SHA-256, and the
-exact PASS-only environment record including the commit, image, guest versions, KVM, restricted
-network mode, and report hash crosslink. A successful retained artifact contains only the report,
-report hash, bounded environment record, VM console, and proof stderr, for 90 days. A caught
+In `retained-main` mode, the host revalidates all three successful canonical reports, their SHA-256
+files, and their exact PASS-only environment records including the commit, image, guest versions,
+KVM, restricted network mode, and report hash crosslink. The retained output contains only those
+three report/hash/environment triples, the VM console, and proof stderr; GitHub uploads them as
+three separately scoped 90-day artifacts. A caught
 VM/proof failure may retain only its
 bounded environment diagnostic, console, and proof stderr for diagnosis; before the guest proof,
 that stderr file may instead contain the canonical supervisor status and a private rolling tail of

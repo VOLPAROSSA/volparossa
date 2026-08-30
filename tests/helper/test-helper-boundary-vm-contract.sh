@@ -64,7 +64,7 @@ sh -n "$runner"
 sh -n "$live_gate"
 jq -e . "$manifest" >/dev/null
 
-if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 3 ] \
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 4 ] \
     || grep -F -- '--property=RestrictSUIDSGID=yes' "$live_gate" >/dev/null \
     || [ "$(grep -Fc -- \
         "capture_unit_property RestrictSUIDSGID \\" "$live_gate")" -ne 2 ]; then
@@ -74,8 +74,8 @@ if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 3 ] \
 fi
 if [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$live_gate")" -ne 1 ] \
     || [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=' "$live_gate")" -ne 1 ] \
-    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|final-verification)$' \
-        "$live_gate")" -ne 11 ] \
+    || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|may-own-launch|may-own-first-crash|may-own-second-crash|may-own-recovery|may-own-retirement|final-verification)$' \
+        "$live_gate")" -ne 16 ] \
     || [ "$(grep -Ec '^[[:space:]]*final_checkpoint=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|restart-report-validation|publication-fence|stage-retirement)$' \
         "$live_gate")" -ne 12 ] \
     || [ "$(grep -Fc 'structured_failure_reported=yes' "$live_gate")" -ne 1 ] \
@@ -95,7 +95,7 @@ if [ "$(grep -Fxc '    identity_launch=' "$live_gate")" -ne 1 ] \
         'the VM payload does not preserve status-2-safe production observation and lock probing' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 3 ] \
+if [ "$(grep -Fc -- '--slice=system.slice' "$live_gate")" -ne 4 ] \
     || [ "$(grep -Fc -- \
         'capture_unit_property ControlGroup "$temporary_stage/unit-control-group"' \
         "$live_gate")" -ne 1 ] \
@@ -406,7 +406,8 @@ for exact_runner_text in \
     'sudo -n -- ./tests/helper/require-live-worker-identity-proof.sh --execute --yes' \
     'cargo fetch --locked' \
     'cargo build --locked --offline' \
-    'run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
+    'run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
+    'shut down, rehash the base image, validate, and publish eleven bounded files;' \
     'proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"}' \
     'post_image_sha512=$(sha512sum "$image_path"' \
     '[ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]' \
@@ -2500,8 +2501,8 @@ if grep -Eq 'pull_request_target:|pull_request:|push:|schedule:|secrets\.' "$wor
     exit 1
 fi
 uses_count=$(grep -c '^[[:space:]]*uses:' "$workflow")
-if [ "$uses_count" -ne 4 ]; then
-    printf 'expected exactly four pinned action uses, got %s\n' "$uses_count" >&2
+if [ "$uses_count" -ne 5 ]; then
+    printf 'expected exactly five pinned action uses, got %s\n' "$uses_count" >&2
     exit 1
 fi
 

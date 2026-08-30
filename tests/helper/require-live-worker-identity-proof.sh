@@ -1874,6 +1874,11 @@ driver_phase_is_safe() {
         restart-launch|\
         restart-observation|\
         restart-retirement|\
+        may-own-launch|\
+        may-own-first-crash|\
+        may-own-second-crash|\
+        may-own-recovery|\
+        may-own-retirement|\
         final-verification)
             return 0
             ;;
@@ -2020,6 +2025,13 @@ if [ ! -f "$restart_evidence_validator" ] || [ ! -x "$restart_evidence_validator
     || [ "$(stat -Lc '%F:%h' "$restart_evidence_validator" 2>/dev/null || true)" \
         != 'regular file:1' ]; then
     blocked 'the restart evidence validator is not one executable regular file'
+fi
+may_own_evidence_validator=$script_directory/validate-helper-restart-may-own-custody-relay-evidence-v1.sh
+if [ ! -f "$may_own_evidence_validator" ] || [ ! -x "$may_own_evidence_validator" ] \
+    || [ -L "$may_own_evidence_validator" ] \
+    || [ "$(stat -Lc '%F:%h' "$may_own_evidence_validator" 2>/dev/null || true)" \
+        != 'regular file:1' ]; then
+    blocked 'the MayOwn Relay evidence validator is not one executable regular file'
 fi
 debugger_path=/usr/bin/gdb
 if [ "$(command -v gdb)" != "$debugger_path" ] \
@@ -2755,6 +2767,7 @@ ipc_probe_source=$repository_directory/target/debug/examples/volparossa-helper-p
 ipc_hook_source=$script_directory/lib/production-ipc-unit-hook.sh
 restart_observer_source=$script_directory/lib/restart-exact-present-observer.sh
 restart_launcher_source=$script_directory/lib/restart-exact-present-launcher.sh
+may_own_observer_source=$script_directory/lib/restart-may-own-relay-observer.sh
 staged_executable_max_bytes=134217728
 proof_file_max_bytes=1048576
 repository_owner_uid=$(stat -Lc '%u' "$repository_directory" 2>/dev/null) \
@@ -2868,6 +2881,20 @@ if ! source_snapshot_is_exact \
         "$restart_launcher_initial_snapshot" 755 "$proof_file_max_bytes"; then
     blocked 'the restart launcher has unsafe workspace metadata'
 fi
+if [ ! -f "$may_own_observer_source" ] || [ ! -x "$may_own_observer_source" ] \
+    || [ -L "$may_own_observer_source" ]; then
+    blocked 'the MayOwn Relay observer must be one executable regular file with one hard link'
+fi
+may_own_observer_initial_snapshot=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$may_own_observer_source" 2>/dev/null || true)
+if ! source_snapshot_is_exact \
+    "$may_own_observer_initial_snapshot" 700 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$may_own_observer_initial_snapshot" 750 "$proof_file_max_bytes" \
+    && ! source_snapshot_is_exact \
+        "$may_own_observer_initial_snapshot" 755 "$proof_file_max_bytes"; then
+    blocked 'the MayOwn Relay observer has unsafe workspace metadata'
+fi
 
 if [ "$(stat -c '%F:%u:%g:%a' /var/tmp)" != 'directory:0:0:1777' ]; then
     blocked '/var/tmp is not the canonical root-owned sticky staging parent'
@@ -2903,6 +2930,17 @@ restart_mount_keeper_pid=
 restart_mount_keeper_starttime=
 restart_successor_debugger_pid=
 restart_successor_debugger_starttime=
+may_own_invocation_one=
+may_own_invocation_two=
+may_own_invocation_three=
+may_own_retired_load_state=
+may_own_evidence_validated=false
+may_own_mount_keeper_pid=
+may_own_mount_keeper_starttime=
+may_own_debugger_pid=
+may_own_debugger_starttime=
+may_own_cgroup=
+may_own_cgroup_frozen=no
 driver_phase=staging
 structured_failure_reported=no
 final_checkpoint=
@@ -3114,6 +3152,24 @@ capture_restart_journal_state_record() {
         | cmp -s - "$restart_journal_record_path" || return 1
     printf 'PRESENT\n%s\n%s\n' \
         "$restart_journal_record_metadata" "$restart_journal_record_digest"
+}
+
+prepare_may_own_unit_identity() {
+    [ "$restart_evidence_validated" = true ] || return 1
+    [ -z "$unit_name" ] || return 1
+    [ "$unit_owned" = no ] || return 1
+    [ "$unit_may_own" = no ] || return 1
+    [ -z "$unit_invocation_id" ] || return 1
+    [ -z "$unit_ownership_marker" ] || return 1
+    case $stage_suffix in
+        [A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+        *) return 1 ;;
+    esac
+    may_own_identity_suffix=C${stage_suffix#?}
+    may_own_identity_name=volparossa-helper-live-proof-$may_own_identity_suffix.service
+    [ "$may_own_identity_name" != "$production_unit_name" ] \
+        && [ "$may_own_identity_name" != "$restart_unit_name" ] || return 1
+    unit_name=$may_own_identity_name
 }
 
 unit_load_state() {
@@ -3552,6 +3608,257 @@ recover_successful_restart_manager_binding() {
     restart_initial_invocation_id=$unit_invocation_id
 }
 
+recover_successful_may_own_manager_binding() {
+    [ "$may_own_run_status" -eq 0 ] || return 1
+    [ "$may_own_launch_captures_ok" = yes ] || return 1
+    [ "$may_own_launch_json_ok" = no ] || return 1
+    [ "$may_own_launch_fresh" = no ] || return 1
+    [ "$may_own_launch_stderr" = empty ] || return 1
+    vp_capture_file_is_safe "$temporary_stage/systemd-run-may-own.stdout" || return 1
+    vp_capture_file_is_safe "$temporary_stage/systemd-run-may-own.stderr" || return 1
+    [ "$(stat -Lc '%s' "$temporary_stage/systemd-run-may-own.stderr")" = 0 ] \
+        || return 1
+    case $may_own_launch_stdout in
+        empty)
+            [ "$(stat -Lc '%s' \
+                "$temporary_stage/systemd-run-may-own.stdout")" = 0 ] \
+                || return 1
+            ;;
+        unit-only)
+            jq -ers -e --arg expected_unit "$unit_name" '
+                length == 1
+                    and (.[0] | type) == "object"
+                    and (.[0] | keys) == ["unit"]
+                    and .[0].unit == $expected_unit
+            ' "$temporary_stage/systemd-run-may-own.stdout" \
+                >/dev/null 2>&1 || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    [ "$unit_owned" = no ] || return 1
+    [ "$unit_may_own" = yes ] || return 1
+    adopt_launched_tentative_unit || return 1
+    [ "$unit_owned" = yes ] || return 1
+    [ "$unit_may_own" = no ] || return 1
+    if ! unit_invocation_id_is_safe "$unit_invocation_id" \
+        || ! unit_invocation_is_current \
+        || ! unit_description_matches_marker \
+        || [ "$unit_invocation_id" = "$worker_invocation_id" ] \
+        || [ "$unit_invocation_id" = "$production_invocation_id" ] \
+        || [ "$unit_invocation_id" = "$restart_initial_invocation_id" ] \
+        || [ "$unit_invocation_id" = "$restart_successor_invocation_id" ]; then
+        unit_may_own=yes unit_owned=no unit_invocation_id=
+        return 1
+    fi
+    may_own_invocation_one=$unit_invocation_id
+}
+
+may_own_service_shape_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_shape_main_pid=$1
+    case $may_own_shape_main_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "$(systemctl show --property=Type --value "$unit_name")" = simple ] \
+        || return 1
+    [ "$(systemctl show --property=RestartUSec --value "$unit_name")" = 3s ] \
+        || return 1
+    [ "$(systemctl show --property=ControlPID --value "$unit_name")" = 0 ] \
+        || return 1
+    [ "$(systemctl show --property=MainPID --value "$unit_name")" = \
+        "$may_own_shape_main_pid" ] || return 1
+    [ -z "$(systemctl show --property=ExecStartPost --value "$unit_name")" ] \
+        || return 1
+    may_own_shape_cgroup=/sys/fs/cgroup/system.slice/$unit_name
+    [ -d "$may_own_shape_cgroup" ] && [ ! -L "$may_own_shape_cgroup" ] \
+        || return 1
+    may_own_shape_procs=$may_own_shape_cgroup/cgroup.procs
+    [ -f "$may_own_shape_procs" ] && [ ! -L "$may_own_shape_procs" ] \
+        || return 1
+    /usr/bin/awk -v expected_pid="$may_own_shape_main_pid" '
+        NR > 32 || $0 != expected_pid { invalid = 1 }
+        END { if (invalid || NR < 1) exit 1 }
+    ' "$may_own_shape_procs"
+}
+
+may_own_cgroup_is_fully_frozen() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_frozen_cgroup=$1
+    [ "$may_own_frozen_cgroup" = "/sys/fs/cgroup/system.slice/$unit_name" ] \
+        || return 1
+    may_own_frozen_events=$may_own_frozen_cgroup/cgroup.events
+    [ -f "$may_own_frozen_events" ] && [ ! -L "$may_own_frozen_events" ] \
+        || return 1
+    /usr/bin/awk '
+        NR > 32 { exit 1 }
+        $1 == "frozen" {
+            if (seen || NF != 2 || $2 != "1") exit 1
+            seen = 1
+        }
+        END { if (!seen) exit 1 }
+    ' "$may_own_frozen_events"
+}
+
+freeze_may_own_cgroup_before_forced_crash() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_freeze_main_pid=$1
+    may_own_service_shape_is_exact "$may_own_freeze_main_pid" || return 1
+    [ "$may_own_cgroup" = "/sys/fs/cgroup/system.slice/$unit_name" ] \
+        || return 1
+    [ -f "$may_own_cgroup/cgroup.freeze" ] \
+        && [ ! -L "$may_own_cgroup/cgroup.freeze" ] || return 1
+    printf '%s\n' 1 >"$may_own_cgroup/cgroup.freeze" || return 1
+    may_own_cgroup_frozen=yes
+    [ "$(cat "$may_own_cgroup/cgroup.freeze")" = 1 ] || return 1
+    may_own_freeze_wait=0
+    while ! may_own_cgroup_is_fully_frozen "$may_own_cgroup"; do
+        [ "$(capture_process_starttime "$may_own_debugger_pid" \
+            2>/dev/null || true)" = "$may_own_debugger_starttime" ] \
+            || return 1
+        may_own_freeze_wait=$((may_own_freeze_wait + 1))
+        [ "$may_own_freeze_wait" -lt 600 ] || return 1
+        sleep 0.05
+    done
+}
+
+may_own_initial_namespaces_are_ready() {
+    [ "$#" -eq 3 ] || return 1
+    may_own_namespace_main_pid=$1
+    may_own_namespace_invocation=$2
+    may_own_namespace_starttime=$3
+    case $may_own_namespace_main_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    unit_invocation_id_is_safe "$may_own_namespace_invocation" || return 1
+    case $may_own_namespace_starttime in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    may_own_host_mount_identity=$(stat -Lc '%d:%i' /proc/1/ns/mnt) \
+        || return 1
+    may_own_host_network_identity=$(stat -Lc '%d:%i' /proc/1/ns/net) \
+        || return 1
+    may_own_namespace_attempt=0
+    while :; do
+        if [ "$(systemctl show --property=MainPID --value "$unit_name" \
+            2>/dev/null || true)" = "$may_own_namespace_main_pid" ] \
+            && [ "$(unit_current_invocation_id 2>/dev/null || true)" = \
+                "$may_own_namespace_invocation" ] \
+            && [ "$(capture_process_starttime "$may_own_namespace_main_pid" \
+                2>/dev/null || true)" = "$may_own_namespace_starttime" ]; then
+            may_own_mount_identity_before=$(stat -Lc '%d:%i' \
+                "/proc/$may_own_namespace_main_pid/ns/mnt" 2>/dev/null || true)
+            may_own_network_identity_before=$(stat -Lc '%d:%i' \
+                "/proc/$may_own_namespace_main_pid/ns/net" 2>/dev/null || true)
+            may_own_hook_identity_before=$(stat -Lc '%F:%u:%g:%a:%h' \
+                "/proc/$may_own_namespace_main_pid/root/run/volparossa-helper-production-ipc-hook" \
+                2>/dev/null || true)
+            may_own_mount_identity_after=$(stat -Lc '%d:%i' \
+                "/proc/$may_own_namespace_main_pid/ns/mnt" 2>/dev/null || true)
+            may_own_network_identity_after=$(stat -Lc '%d:%i' \
+                "/proc/$may_own_namespace_main_pid/ns/net" 2>/dev/null || true)
+            may_own_hook_identity_after=$(stat -Lc '%F:%u:%g:%a:%h' \
+                "/proc/$may_own_namespace_main_pid/root/run/volparossa-helper-production-ipc-hook" \
+                2>/dev/null || true)
+            if [ "$may_own_mount_identity_before" = \
+                "$may_own_mount_identity_after" ] \
+                && [ "$may_own_network_identity_before" = \
+                    "$may_own_network_identity_after" ] \
+                && [ "$may_own_hook_identity_before" = \
+                    "$may_own_hook_identity_after" ] \
+                && [ "$may_own_mount_identity_before" != \
+                    "$may_own_host_mount_identity" ] \
+                && [ "$may_own_network_identity_before" != \
+                    "$may_own_host_network_identity" ] \
+                && [ "$may_own_hook_identity_before" = \
+                    'regular file:0:0:500:1' ]; then
+                return 0
+            fi
+        fi
+        may_own_namespace_attempt=$((may_own_namespace_attempt + 1))
+        [ "$may_own_namespace_attempt" -lt 600 ] || return 1
+        sleep 0.05
+    done
+}
+
+start_may_own_driver_observer() {
+    [ "$#" -eq 3 ] || return 1
+    may_own_driver_label=$1
+    may_own_driver_main_pid=$2
+    may_own_driver_expected_invocation=$3
+    case $may_own_driver_label in one|two|three) ;; *) return 1 ;; esac
+    case $may_own_driver_main_pid in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    unit_invocation_id_is_safe "$may_own_driver_expected_invocation" \
+        || return 1
+    [ -z "${may_own_driver_observer_pid:-}" ] \
+        && [ -z "${may_own_driver_observer_starttime:-}" ] || return 1
+    [ "$(unit_current_invocation_id)" = \
+        "$may_own_driver_expected_invocation" ] || return 1
+    [ "$(systemctl show --property=MainPID --value "$unit_name")" = \
+        "$may_own_driver_main_pid" ] || return 1
+    [ "$(stat -Lc '%d:%i' "/proc/$may_own_driver_main_pid/ns/mnt")" != \
+        "$(stat -Lc '%d:%i' /proc/1/ns/mnt)" ] || return 1
+    [ "$(stat -Lc '%d:%i' "/proc/$may_own_driver_main_pid/ns/net")" != \
+        "$(stat -Lc '%d:%i' /proc/1/ns/net)" ] || return 1
+    unit_description_matches_marker || return 1
+    may_own_driver_observer_stdout=$temporary_stage/may-own-driver-$may_own_driver_label.stdout
+    may_own_driver_observer_stderr=$temporary_stage/may-own-driver-$may_own_driver_label.stderr
+    for may_own_driver_absent_path in \
+        "$may_own_driver_observer_stdout" "$may_own_driver_observer_stderr"; do
+        if [ -e "$may_own_driver_absent_path" ] \
+            || [ -L "$may_own_driver_absent_path" ]; then
+            return 1
+        fi
+    done
+    timeout --preserve-status --signal=TERM --kill-after=5s 180s \
+        prlimit --core=0:0 --fsize=1048576:1048576 -- \
+        /usr/bin/nsenter --mount="/proc/$may_own_driver_main_pid/ns/mnt" \
+            --net="/proc/$may_own_driver_main_pid/ns/net" -- \
+        /usr/bin/setpriv --no-new-privs --reuid=0 \
+            --regid="$agent_gid" --groups="$agent_gid" -- \
+        /run/volparossa-helper-production-ipc-hook may-own-driver-start \
+            "$unit_name" "$agent_uid" "$agent_gid" "$operator_gid" \
+            "$worker_uid" "$worker_gid" "$may_own_driver_main_pid" \
+        >"$may_own_driver_observer_stdout" \
+        2>"$may_own_driver_observer_stderr" &
+    may_own_driver_observer_pid=$!
+    if ! may_own_driver_observer_starttime=$(capture_process_starttime \
+        "$may_own_driver_observer_pid"); then
+        kill "$may_own_driver_observer_pid" 2>/dev/null || :
+        wait "$may_own_driver_observer_pid" 2>/dev/null || :
+        may_own_driver_observer_pid=
+        may_own_driver_observer_starttime=
+        return 1
+    fi
+}
+
+wait_may_own_driver_observer() {
+    [ "$#" -eq 1 ] || return 1
+    may_own_driver_expected_result=$1
+    case $may_own_driver_expected_result in success|forced-crash) ;; *) return 1 ;; esac
+    case ${may_own_driver_observer_pid:-} in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    if wait "$may_own_driver_observer_pid"; then
+        may_own_driver_observer_status=0
+    else
+        may_own_driver_observer_status=$?
+    fi
+    may_own_driver_observer_pid=
+    may_own_driver_observer_starttime=
+    for may_own_driver_log in \
+        "$may_own_driver_observer_stdout" "$may_own_driver_observer_stderr"; do
+        vp_capture_file_is_safe "$may_own_driver_log" || return 1
+        [ "$(stat -Lc '%s' "$may_own_driver_log")" -le 1048576 ] \
+            || return 1
+    done
+    case $may_own_driver_expected_result:$may_own_driver_observer_status in
+        success:0|forced-crash:1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 retire_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -3738,6 +4045,46 @@ remove_temporary_stage() {
 cleanup() {
     saved_status=$?
     trap - EXIT HUP INT TERM
+    if [ -n "${may_own_driver_observer_pid:-}" ]; then
+        if [ "$(capture_process_starttime "$may_own_driver_observer_pid" \
+            2>/dev/null || true)" = \
+            "${may_own_driver_observer_starttime:-}" ]; then
+            kill "$may_own_driver_observer_pid" 2>/dev/null || :
+        fi
+        wait "$may_own_driver_observer_pid" 2>/dev/null || :
+        may_own_driver_observer_pid=
+        may_own_driver_observer_starttime=
+    fi
+    if [ -n "${may_own_debugger_pid:-}" ]; then
+        if [ "$(capture_process_starttime "$may_own_debugger_pid" \
+            2>/dev/null || true)" = "${may_own_debugger_starttime:-}" ]; then
+            kill "$may_own_debugger_pid" 2>/dev/null || :
+        fi
+        wait "$may_own_debugger_pid" 2>/dev/null || :
+        may_own_debugger_pid=
+        may_own_debugger_starttime=
+    fi
+    if [ -n "${may_own_mount_keeper_pid:-}" ]; then
+        if [ "$(capture_process_starttime "$may_own_mount_keeper_pid" \
+            2>/dev/null || true)" = "${may_own_mount_keeper_starttime:-}" ]; then
+            kill "$may_own_mount_keeper_pid" 2>/dev/null || :
+        fi
+        wait "$may_own_mount_keeper_pid" 2>/dev/null || :
+        may_own_mount_keeper_pid=
+        may_own_mount_keeper_starttime=
+    fi
+    if [ "${may_own_cgroup_frozen:-no}" = yes ]; then
+        if unit_name_is_safe \
+            && [ "$may_own_cgroup" = "/sys/fs/cgroup/system.slice/$unit_name" ] \
+            && [ -f "$may_own_cgroup/cgroup.freeze" ] \
+            && [ ! -L "$may_own_cgroup/cgroup.freeze" ]; then
+            printf '%s\n' 0 >"$may_own_cgroup/cgroup.freeze" 2>/dev/null \
+                || cleanup_error=yes
+        else
+            cleanup_error=yes
+        fi
+        may_own_cgroup_frozen=no
+    fi
     if [ -n "${restart_successor_debugger_pid:-}" ]; then
         if [ "$(capture_process_starttime "$restart_successor_debugger_pid" \
             2>/dev/null || true)" = "${restart_successor_debugger_starttime:-}" ]; then
@@ -3971,6 +4318,29 @@ if [ "$restart_launcher_before" != "$restart_launcher_after" ] \
         != 'regular file:0:0:500:1' ]; then
     failed 'the restart launcher changed while copied or its staged image is unsafe'
 fi
+may_own_observer_before=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$may_own_observer_source")
+[ "$may_own_observer_before" = "$may_own_observer_initial_snapshot" ] \
+    || failed 'the MayOwn Relay observer identity changed before staging'
+may_own_observer_digest_before=$(vp_capture_sha256_file "$may_own_observer_source") \
+    || failed 'the MayOwn Relay observer could not be hashed'
+install -o root -g root -m 0500 "$may_own_observer_source" \
+    "$temporary_stage/may-own-observer"
+may_own_observer_after=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$may_own_observer_source")
+may_own_observer_digest_after=$(vp_capture_sha256_file "$may_own_observer_source") \
+    || failed 'the MayOwn Relay observer could not be re-hashed'
+staged_may_own_observer_digest=$(vp_capture_sha256_file \
+    "$temporary_stage/may-own-observer") \
+    || failed 'the staged MayOwn Relay observer could not be hashed'
+if [ "$may_own_observer_before" != "$may_own_observer_after" ] \
+    || [ "$may_own_observer_digest_before" != "$may_own_observer_digest_after" ] \
+    || [ "$may_own_observer_digest_before" != \
+        "$staged_may_own_observer_digest" ] \
+    || [ "$(stat -Lc '%F:%u:%g:%a:%h' "$temporary_stage/may-own-observer")" \
+        != 'regular file:0:0:500:1' ]; then
+    failed 'the MayOwn Relay observer changed while copied or its staged image is unsafe'
+fi
 
 printf '%s\n' \
     'root:x:0:0:root:/root:/bin/sh' \
@@ -4023,6 +4393,7 @@ mkfifo -m 0600 "$restart_successor_release_fifo" \
     "$restart_successor_release_fifo" 2>/dev/null || true)" \
     = 'fifo:0:0:600:1' ] \
     || failed 'the restart successor release FIFO is unsafe'
+install -d -o root -g root -m 2700 "$temporary_stage/may-own-output"
 
 state_records='production_runtime_path accounts namespaces mounts resolver sysctls links addresses routes rules nexthops qdiscs nftables wireguard legacy_ipv4_firewall legacy_ipv6_firewall'
 
@@ -6124,6 +6495,680 @@ if [ "$proof_ok" = yes ]; then
         failed 'restart journal lock could not be opened after retirement'
     fi
     restart_evidence_validated=true
+
+    prepare_may_own_unit_identity \
+        || failed 'ExactPresent retirement was not confirmed before MayOwn proof'
+    driver_phase=may-own-launch
+    unit_name_is_safe || failed 'MayOwn singleton unit name is unsafe'
+    may_own_initial_load_state=$(unit_load_state) \
+        || failed 'MayOwn singleton unit state could not be determined'
+    [ "$may_own_initial_load_state" = not-found ] \
+        || failed 'MayOwn singleton unit name is already loaded'
+    may_own_symbol_counts=$(nm -C "$temporary_stage/volparossa-helper" | awk '
+        /volparossa_helper::worker_v3::DurableCustodyPublicationTerminalGuard::retain_published/ {
+            retained_all++
+            if ($2 ~ /^[Tt]$/) retained_text++
+        }
+        /volparossa_helper::ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup/ {
+            confirmed_all++
+            if ($2 ~ /^[Tt]$/) confirmed_text++
+        }
+        $3 == "volparossa_helper::systemd_fdstore::remove_restart_custody" {
+            removal_all++
+            if ($2 ~ /^[Tt]$/) removal_text++
+        }
+        END {
+            print retained_all + 0 ":" retained_text + 0 ":" \
+                confirmed_all + 0 ":" confirmed_text + 0 ":" \
+                removal_all + 0 ":" removal_text + 0
+        }
+    ') || failed 'MayOwn debugger symbols could not be inspected'
+    [ "$may_own_symbol_counts" = '1:1:1:1:1:1' ] \
+        || failed 'MayOwn debugger symbols are not exact and unique'
+    may_own_marker_line=$(printf '%s\n%s\n%s\n' \
+        'VOLPAROSSA helper singleton MayOwn Relay restart marker v1' \
+        "$unit_name" "$temporary_stage_identity" | sha256sum) \
+        || failed 'MayOwn ownership marker could not be derived'
+    may_own_marker_digest=$(vp_capture_checksum_from_line "$may_own_marker_line") \
+        || failed 'MayOwn ownership marker is non-canonical'
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-$may_own_marker_digest
+    unit_ownership_marker_is_safe "$unit_ownership_marker" \
+        || failed 'MayOwn ownership marker is unsafe'
+    may_own_observer_bind="$temporary_stage/may-own-observer:/run/volparossa-helper-may-own-observer:norbind"
+    may_own_output_bind="$temporary_stage/may-own-output:/run/volparossa-helper-production-proof:norbind"
+    may_own_debugger_one_commands=$temporary_stage/may-own-debugger-one.gdb
+    may_own_debugger_two_commands=$temporary_stage/may-own-debugger-two.gdb
+    may_own_debugger_three_commands=$temporary_stage/may-own-debugger-three.gdb
+    for may_own_absent_path in \
+        "$may_own_debugger_one_commands" "$may_own_debugger_two_commands" \
+        "$may_own_debugger_three_commands"; do
+        if [ -e "$may_own_absent_path" ] || [ -L "$may_own_absent_path" ]; then
+            failed 'MayOwn debugger command path was not initially absent'
+        fi
+    done
+
+    unit_may_own=yes
+    set +e
+    systemd-run \
+        --no-block \
+        --json=short \
+        --unit="$unit_name" \
+        --slice=system.slice \
+        --description="$unit_ownership_marker" \
+        --service-type=simple \
+        --property=CollectMode=inactive \
+        --property=Restart=on-failure \
+        --property='RestartPreventExitStatus=70 71' \
+        --property=RestartSec=3s \
+        --property=StartLimitBurst=3 \
+        --property=RuntimeMaxSec=360s \
+        --property=NotifyAccess=main \
+        --property=FileDescriptorStoreMax=128 \
+        --property=FileDescriptorStorePreserve=yes \
+        --property=User=0 \
+        --property=Group=0 \
+        --property=SupplementaryGroups= \
+        --property=UMask=0077 \
+        --property=LimitCORE=0 \
+        --property=LimitFSIZE=1048576 \
+        --property=NoNewPrivileges=yes \
+        --property="CapabilityBoundingSet=$capabilities" \
+        --property="AmbientCapabilities=$capabilities" \
+        --property=PrivateNetwork=yes \
+        --property=PrivateMounts=yes \
+        --property=PrivateTmp=yes \
+        --property=PrivateDevices=no \
+        --property=DevicePolicy=closed \
+        --property='DeviceAllow=/dev/net/tun rw' \
+        --property=ProtectSystem=strict \
+        --property=ProtectHome=yes \
+        --property=ProtectControlGroupsEx=strict \
+        --property=Delegate=no \
+        --property=PrivatePIDs=no \
+        --property=ProtectKernelModules=yes \
+        --property=ProtectKernelLogs=yes \
+        --property=ProtectClock=yes \
+        --property=ProtectHostname=yes \
+        --property=LockPersonality=yes \
+        --property=MemoryDenyWriteExecute=yes \
+        --property=RestrictRealtime=yes \
+        --property=RestrictSUIDSGID=no \
+        --property=RestrictNamespaces=net \
+        --property=SystemCallArchitectures=native \
+        --property='SystemCallFilter=@system-service @network-io seccomp' \
+        --property='SystemCallFilter=~@mount' \
+        --property=SystemCallErrorNumber=EPERM \
+        --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+        --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
+        --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $may_own_observer_bind $production_host_network_identity_bind $account_binds $system_bus_bind $notify_socket_bind" \
+        --property="BindPaths=$production_runtime_bind $may_own_output_bind" \
+        --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
+        --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+        --property=KillSignal=SIGTERM \
+        --property=KillMode=control-group \
+        --property=SendSIGKILL=yes \
+        --property=TimeoutStartSec=240s \
+        --property=TimeoutStopSec=45s \
+        --property=TasksMax=64 \
+        --property=SetLoginEnvironment=no \
+        --property=StandardOutput=null \
+        --property=StandardError=null \
+        /usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production \
+        >"$temporary_stage/systemd-run-may-own.stdout" \
+        2>"$temporary_stage/systemd-run-may-own.stderr"
+    may_own_run_status=$?
+    set -e
+    [ "$may_own_run_status" -eq 0 ] \
+        || failed 'MayOwn singleton unit could not be launched'
+    may_own_launch_captures_ok=no
+    may_own_launch_json_ok=no
+    may_own_launch_fresh=no
+    may_own_launch_stdout=unsafe
+    may_own_launch_stderr=unsafe
+    may_own_launch_binding_ok=no
+    may_own_invocation_one=
+    if vp_capture_file_is_safe "$temporary_stage/systemd-run-may-own.stdout" \
+        && vp_capture_file_is_safe "$temporary_stage/systemd-run-may-own.stderr"; then
+        may_own_launch_captures_ok=yes
+        if [ ! -s "$temporary_stage/systemd-run-may-own.stdout" ]; then
+            may_own_launch_stdout=empty
+        elif jq -ers -e --arg expected_unit "$unit_name" '
+            length == 1
+                and (.[0] | type) == "object"
+                and (.[0] | keys) == ["unit"]
+                and .[0].unit == $expected_unit
+        ' "$temporary_stage/systemd-run-may-own.stdout" \
+            >/dev/null 2>&1; then
+            may_own_launch_stdout=unit-only
+        else
+            may_own_launch_stdout=nonempty
+        fi
+        if [ -s "$temporary_stage/systemd-run-may-own.stderr" ]; then
+            may_own_launch_stderr=nonempty
+        else
+            may_own_launch_stderr=empty
+        fi
+        may_own_invocation_one=$(jq -ers --arg expected_unit "$unit_name" '
+            if length == 1
+               and (.[0] | type) == "object"
+               and (.[0] | keys) == ["invocation_id","unit"]
+               and .[0].unit == $expected_unit
+               and (.[0].invocation_id | type) == "string"
+            then .[0].invocation_id else empty end
+        ' "$temporary_stage/systemd-run-may-own.stdout" 2>/dev/null) \
+            || may_own_invocation_one=
+        if unit_invocation_id_is_safe "$may_own_invocation_one"; then
+            may_own_launch_json_ok=yes
+            if [ "$may_own_invocation_one" != "$worker_invocation_id" ] \
+                && [ "$may_own_invocation_one" != "$production_invocation_id" ] \
+                && [ "$may_own_invocation_one" != \
+                    "$restart_initial_invocation_id" ] \
+                && [ "$may_own_invocation_one" != \
+                    "$restart_successor_invocation_id" ]; then
+                may_own_launch_fresh=yes
+            fi
+        fi
+    fi
+    if [ "$may_own_launch_captures_ok" = yes ] \
+        && [ "$may_own_launch_json_ok" = yes ] \
+        && [ "$may_own_launch_fresh" = yes ] \
+        && [ "$may_own_launch_stderr" = empty ]; then
+        unit_invocation_id=$may_own_invocation_one unit_owned=yes unit_may_own=no
+        if unit_invocation_is_current && unit_description_matches_marker; then
+            may_own_launch_binding_ok=yes
+        else
+            unit_may_own=yes unit_owned=no unit_invocation_id=
+        fi
+    elif recover_successful_may_own_manager_binding; then
+        may_own_launch_binding_ok=yes
+    fi
+    if [ "$may_own_launch_binding_ok" != yes ]; then
+        failed 'MayOwn singleton launch envelope is invalid'
+    fi
+    may_own_wait=0
+    may_own_pid_one=
+    while :; do
+        may_own_pid_one=$(systemctl show --property=MainPID --value \
+            "$unit_name" 2>/dev/null || true)
+        case $may_own_pid_one in
+            ''|0|0*|*[!0-9]*) ;;
+            *) break ;;
+        esac
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 1200 ] \
+            || failed 'MayOwn first MainPID did not appear'
+        sleep 0.05
+    done
+    may_own_pid_one_starttime=$(capture_process_starttime "$may_own_pid_one") \
+        || failed 'MayOwn first MainPID birth token is unavailable'
+    may_own_initial_namespaces_are_ready "$may_own_pid_one" \
+        "$may_own_invocation_one" "$may_own_pid_one_starttime" \
+        || failed 'MayOwn first private namespaces did not become stable'
+    /usr/bin/nsenter --mount="/proc/$may_own_pid_one/ns/mnt" -- \
+        /usr/bin/sleep 180 &
+    may_own_mount_keeper_pid=$!
+    may_own_mount_keeper_starttime=$(capture_process_starttime \
+        "$may_own_mount_keeper_pid") \
+        || failed 'MayOwn first mount keeper identity is unavailable'
+    start_may_own_driver_observer one "$may_own_pid_one" \
+        "$may_own_invocation_one" \
+        || failed 'MayOwn first driver-side observer could not be started'
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$temporary_stage/may-own-output/unit.identity"; do
+        kill -0 "$may_own_driver_observer_pid" 2>/dev/null \
+            || failed 'MayOwn first driver-side observer exited before identity proof'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 1200 ] \
+            || failed 'MayOwn first invocation identity did not appear'
+        sleep 0.05
+    done
+    if [ "$(sed -n '1p' "$temporary_stage/may-own-output/unit.identity")" != \
+        "$may_own_invocation_one" ] \
+        || [ "$(sed -n '2p' "$temporary_stage/may-own-output/unit.identity")" != \
+            "$may_own_pid_one" ]; then
+        failed 'MayOwn first invocation is not hook-bound'
+    fi
+    may_own_service_shape_is_exact "$may_own_pid_one" \
+        || failed 'MayOwn first service shape is not production-exact'
+    may_own_cgroup=/sys/fs/cgroup/system.slice/$unit_name
+    if [ ! -f "$may_own_cgroup/cgroup.freeze" ] \
+        || [ -L "$may_own_cgroup/cgroup.freeze" ] \
+        || [ "$(stat -Lc '%u:%g:%a:%h' "$may_own_cgroup/cgroup.freeze" \
+            2>/dev/null || true)" != '0:0:644:1' ]; then
+        failed 'MayOwn cgroup freezer is unavailable'
+    fi
+    may_own_first_kill_ready=$temporary_stage/may-own-first-kill.ready
+    may_own_first_freeze_release=$temporary_stage/may-own-first-freeze.release
+    for may_own_first_absent_path in \
+        "$may_own_first_kill_ready" "$may_own_first_freeze_release"; do
+        if [ -e "$may_own_first_absent_path" ] \
+            || [ -L "$may_own_first_absent_path" ]; then
+            failed 'MayOwn first freeze handshake path is unsafe'
+        fi
+    done
+    driver_phase=may-own-first-crash
+    printf '%s\n' \
+        'set pagination off' \
+        'set confirm off' \
+        'set breakpoint pending off' \
+        'break volparossa_helper::worker_v3::DurableCustodyPublicationTerminalGuard::retain_published' \
+        'ignore 1 2' \
+        'commands' \
+        'silent' \
+        "shell /usr/bin/nsenter --mount=/proc/$may_own_pid_one/ns/mnt -- /run/volparossa-helper-may-own-observer first-publication $unit_name $agent_gid $may_own_pid_one" \
+        "shell printf '%s\\n' VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_FIRST_KILL_READY_V1=pass >$may_own_first_kill_ready" \
+        "shell while [ ! -f $may_own_first_freeze_release ]; do /usr/bin/sleep 0.05; done" \
+        'kill' \
+        'quit 0' \
+        'end' \
+        "shell /usr/bin/nsenter --mount=/proc/$may_own_pid_one/ns/mnt -- /run/volparossa-helper-may-own-observer armed $unit_name $agent_gid $may_own_pid_one" \
+        'continue' >"$may_own_debugger_one_commands" \
+        || failed 'MayOwn first debugger commands could not be written'
+    chmod 0600 "$may_own_debugger_one_commands"
+    timeout --preserve-status --signal=TERM --kill-after=5s 60s \
+        prlimit --core=0:0 --fsize=1048576:1048576 -- \
+        "$debugger_path" --batch --quiet --nx --pid="$may_own_pid_one" \
+            --command="$may_own_debugger_one_commands" \
+        >"$temporary_stage/may-own-debugger-one.stdout" \
+        2>"$temporary_stage/may-own-debugger-one.stderr" &
+    may_own_debugger_pid=$!
+    may_own_debugger_starttime=$(capture_process_starttime \
+        "$may_own_debugger_pid") \
+        || failed 'MayOwn first debugger identity is unavailable'
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$may_own_first_kill_ready"; do
+        kill -0 "$may_own_debugger_pid" 2>/dev/null \
+            || failed 'MayOwn first debugger exited before the freeze fence'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] \
+            || failed 'MayOwn first debugger did not reach the crash boundary'
+        sleep 0.05
+    done
+    [ "$(cat "$may_own_first_kill_ready")" = \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_FIRST_KILL_READY_V1=pass' ] \
+        || failed 'MayOwn first kill-ready marker is invalid'
+    freeze_may_own_cgroup_before_forced_crash "$may_own_pid_one" \
+        || failed 'MayOwn cgroup did not freeze before the first crash'
+    vp_capture_run "$may_own_first_freeze_release" \
+        printf '%s\n' \
+            'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_FIRST_FREEZE_RELEASE_V1=pass' \
+        || failed 'MayOwn first freeze release could not be published'
+    wait "$may_own_debugger_pid" \
+        || failed 'MayOwn first forced-crash debugger did not complete'
+    may_own_debugger_pid=
+    may_own_debugger_starttime=
+    may_own_wait=0
+    while [ "$(systemctl show --property=MainPID --value "$unit_name")" != 0 ]; do
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] || failed 'MayOwn first crash did not settle'
+        sleep 0.05
+    done
+    if [ "$(systemctl show --property=NRestarts --value "$unit_name")" != 0 ] \
+        || [ "$(systemctl show --property=Result --value "$unit_name")" != signal ] \
+        || [ "$(systemctl show --property=ExecMainCode --value "$unit_name")" != killed ] \
+        || [ "$(systemctl show --property=ExecMainStatus --value "$unit_name")" != 9 ]; then
+        failed 'MayOwn first forced-crash fence is not exact'
+    fi
+    wait_may_own_driver_observer forced-crash \
+        || failed 'MayOwn first driver-side observer did not terminate at the forced crash'
+    may_own_crash_one_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+        || failed 'MayOwn first crash time is unavailable'
+    /usr/bin/nsenter --mount="/proc/$may_own_mount_keeper_pid/ns/mnt" -- \
+        /run/volparossa-helper-may-own-observer after-first-crash \
+            "$unit_name" "$agent_gid" "$may_own_pid_one" \
+        || failed 'MayOwn first crash did not preserve exact Relay custody'
+    unit_owned=no
+    unit_may_own=yes
+    unit_invocation_id=
+    kill "$may_own_mount_keeper_pid" 2>/dev/null || true
+    wait "$may_own_mount_keeper_pid" 2>/dev/null || true
+    may_own_mount_keeper_pid=
+    may_own_mount_keeper_starttime=
+
+    driver_phase=may-own-second-crash
+    may_own_wait=0
+    may_own_pid_two=
+    while :; do
+        may_own_pid_two=$(systemctl show --property=MainPID --value \
+            "$unit_name" 2>/dev/null || true)
+        case $may_own_pid_two in
+            ''|0|0*|*[!0-9]*) ;;
+            *) [ "$may_own_pid_two" != "$may_own_pid_one" ] && break ;;
+        esac
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] || failed 'MayOwn second invocation did not appear'
+        sleep 0.05
+    done
+    unit_description_matches_marker \
+        || failed 'MayOwn second invocation lost the ownership marker'
+    adopt_tentative_unit || failed 'MayOwn second invocation could not be adopted'
+    may_own_invocation_two=$unit_invocation_id
+    if ! unit_invocation_id_is_safe "$may_own_invocation_two" \
+        || [ "$may_own_invocation_two" = "$may_own_invocation_one" ] \
+        || [ "$(systemctl show --property=NRestarts --value "$unit_name")" != 1 ]; then
+        failed 'MayOwn second invocation lineage is invalid'
+    fi
+    may_own_driver_second_ready=$temporary_stage/may-own-output/may-own.driver-second-ready
+    may_own_tracer_ready=$temporary_stage/may-own-second-tracer.ready
+    may_own_second_helper_exec_ready=$temporary_stage/may-own-second-helper-exec.ready
+    may_own_second_driver_release=$temporary_stage/may-own-second-driver.release
+    may_own_second_kill_ready=$temporary_stage/may-own-second-kill.ready
+    may_own_second_freeze_release=$temporary_stage/may-own-second-freeze.release
+    for may_own_second_absent_path in \
+        "$may_own_second_helper_exec_ready" "$may_own_second_driver_release" \
+        "$may_own_second_kill_ready" "$may_own_second_freeze_release"; do
+        if [ -e "$may_own_second_absent_path" ] \
+            || [ -L "$may_own_second_absent_path" ]; then
+            failed 'MayOwn second driver handshake path is unsafe'
+        fi
+    done
+    printf '%s\n' \
+        'set pagination off' \
+        'set confirm off' \
+        'set breakpoint pending off' \
+        'tcatch exec' \
+        "shell printf '%s\\n' ready >$may_own_tracer_ready" \
+        'continue' \
+        'tcatch exec' \
+        'continue' \
+        "shell printf '%s\\n' ready >$may_own_second_helper_exec_ready" \
+        "shell while [ ! -f $may_own_second_driver_release ]; do /usr/bin/sleep 0.05; done" \
+        'break volparossa_helper::ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup' \
+        'commands' \
+        'silent' \
+        "shell /usr/bin/nsenter --mount=/proc/$may_own_pid_two/ns/mnt -- /run/volparossa-helper-may-own-observer second-confirm $unit_name $agent_gid $may_own_pid_two" \
+        "shell printf '%s\\n' VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_SECOND_KILL_READY_V1=pass >$may_own_second_kill_ready" \
+        "shell while [ ! -f $may_own_second_freeze_release ]; do /usr/bin/sleep 0.05; done" \
+        'kill' \
+        'quit 0' \
+        'end' \
+        'continue' >"$may_own_debugger_two_commands" \
+        || failed 'MayOwn second debugger commands could not be written'
+    chmod 0600 "$may_own_debugger_two_commands"
+    timeout --preserve-status --signal=TERM --kill-after=5s 60s \
+        prlimit --core=0:0 --fsize=1048576:1048576 -- \
+        "$debugger_path" --batch --quiet --nx --pid="$may_own_pid_two" \
+            --command="$may_own_debugger_two_commands" \
+        >"$temporary_stage/may-own-debugger-two.stdout" \
+        2>"$temporary_stage/may-own-debugger-two.stderr" &
+    may_own_debugger_pid=$!
+    may_own_debugger_starttime=$(capture_process_starttime "$may_own_debugger_pid") \
+        || failed 'MayOwn second debugger identity is unavailable'
+    may_own_wait=0
+    while [ ! -f "$may_own_tracer_ready" ]; do
+        kill -0 "$may_own_debugger_pid" 2>/dev/null \
+            || failed 'MayOwn second debugger exited before arming'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] || failed 'MayOwn second debugger did not arm'
+        sleep 0.05
+    done
+    printf '%s\n' 0 >"$may_own_cgroup/cgroup.freeze" \
+        || failed 'MayOwn cgroup could not be thawed for second invocation'
+    may_own_cgroup_frozen=no
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$may_own_second_helper_exec_ready"; do
+        kill -0 "$may_own_debugger_pid" 2>/dev/null \
+            || failed 'MayOwn second debugger exited before helper exec'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] \
+            || failed 'MayOwn second helper exec was not observed'
+        sleep 0.05
+    done
+    [ "$(cat "$may_own_second_helper_exec_ready")" = ready ] \
+        || failed 'MayOwn second helper-exec marker is invalid'
+    /usr/bin/nsenter --mount="/proc/$may_own_pid_two/ns/mnt" -- \
+        /usr/bin/sleep 180 &
+    may_own_mount_keeper_pid=$!
+    may_own_mount_keeper_starttime=$(capture_process_starttime \
+        "$may_own_mount_keeper_pid") \
+        || failed 'MayOwn second mount keeper identity is unavailable'
+    start_may_own_driver_observer two "$may_own_pid_two" \
+        "$may_own_invocation_two" \
+        || failed 'MayOwn second driver-side observer could not be started'
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$may_own_driver_second_ready"; do
+        kill -0 "$may_own_driver_observer_pid" 2>/dev/null \
+            || failed 'MayOwn second driver-side observer exited before arming'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] \
+            || failed 'MayOwn second driver-side observer did not arm'
+        sleep 0.05
+    done
+    if [ "$(sed -n '1p' "$may_own_driver_second_ready")" != \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DRIVER_SECOND_READY_V1=pass' ] \
+        || [ "$(sed -n '2p' "$may_own_driver_second_ready")" != \
+            "$may_own_invocation_two" ] \
+        || [ "$(sed -n '3p' "$may_own_driver_second_ready")" != \
+            "$may_own_pid_two" ]; then
+        failed 'MayOwn second driver-ready record is invalid'
+    fi
+    may_own_service_shape_is_exact "$may_own_pid_two" \
+        || failed 'MayOwn second service shape is not production-exact'
+    vp_capture_run "$may_own_second_driver_release" \
+        printf '%s\n' \
+            'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DRIVER_SECOND_RELEASE_V1=pass' \
+        || failed 'MayOwn second driver release could not be published'
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$may_own_second_kill_ready"; do
+        kill -0 "$may_own_debugger_pid" 2>/dev/null \
+            || failed 'MayOwn second debugger exited before the freeze fence'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] \
+            || failed 'MayOwn second debugger did not reach the crash boundary'
+        sleep 0.05
+    done
+    [ "$(cat "$may_own_second_kill_ready")" = \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_SECOND_KILL_READY_V1=pass' ] \
+        || failed 'MayOwn second kill-ready marker is invalid'
+    freeze_may_own_cgroup_before_forced_crash "$may_own_pid_two" \
+        || failed 'MayOwn cgroup did not freeze before the second crash'
+    vp_capture_run "$may_own_second_freeze_release" \
+        printf '%s\n' \
+            'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_SECOND_FREEZE_RELEASE_V1=pass' \
+        || failed 'MayOwn second freeze release could not be published'
+    wait "$may_own_debugger_pid" \
+        || failed 'MayOwn second forced-crash debugger did not complete'
+    may_own_debugger_pid=
+    may_own_debugger_starttime=
+    may_own_wait=0
+    while [ "$(systemctl show --property=MainPID --value "$unit_name")" != 0 ]; do
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] || failed 'MayOwn second crash did not settle'
+        sleep 0.05
+    done
+    if [ "$(systemctl show --property=NRestarts --value "$unit_name")" != 1 ] \
+        || [ "$(systemctl show --property=Result --value "$unit_name")" != signal ] \
+        || [ "$(systemctl show --property=ExecMainCode --value "$unit_name")" != killed ] \
+        || [ "$(systemctl show --property=ExecMainStatus --value "$unit_name")" != 9 ]; then
+        failed 'MayOwn second forced-crash fence is not exact'
+    fi
+    wait_may_own_driver_observer success \
+        || failed 'MayOwn second driver-side observer did not preserve the crash boundary'
+    may_own_crash_two_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
+        || failed 'MayOwn second crash time is unavailable'
+    /usr/bin/nsenter --mount="/proc/$may_own_mount_keeper_pid/ns/mnt" -- \
+        /run/volparossa-helper-may-own-observer after-second-crash \
+            "$unit_name" "$agent_gid" "$may_own_pid_two" \
+        || failed 'MayOwn second crash did not preserve exact Relay custody'
+    unit_owned=no
+    unit_may_own=yes
+    unit_invocation_id=
+    kill "$may_own_mount_keeper_pid" 2>/dev/null || true
+    wait "$may_own_mount_keeper_pid" 2>/dev/null || true
+    may_own_mount_keeper_pid=
+    may_own_mount_keeper_starttime=
+
+    driver_phase=may-own-recovery
+    may_own_wait=0
+    may_own_pid_three=
+    while :; do
+        may_own_pid_three=$(systemctl show --property=MainPID --value \
+            "$unit_name" 2>/dev/null || true)
+        case $may_own_pid_three in
+            ''|0|0*|*[!0-9]*) ;;
+            *)
+                if [ "$may_own_pid_three" != "$may_own_pid_one" ] \
+                    && [ "$may_own_pid_three" != "$may_own_pid_two" ]; then
+                    break
+                fi
+                ;;
+        esac
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] || failed 'MayOwn third invocation did not appear'
+        sleep 0.05
+    done
+    unit_description_matches_marker \
+        || failed 'MayOwn third invocation lost the ownership marker'
+    adopt_tentative_unit || failed 'MayOwn third invocation could not be adopted'
+    may_own_invocation_three=$unit_invocation_id
+    if ! unit_invocation_id_is_safe "$may_own_invocation_three" \
+        || [ "$may_own_invocation_three" = "$may_own_invocation_one" ] \
+        || [ "$may_own_invocation_three" = "$may_own_invocation_two" ] \
+        || [ "$(systemctl show --property=NRestarts --value "$unit_name")" != 2 ]; then
+        failed 'MayOwn third invocation lineage is invalid'
+    fi
+    may_own_driver_third_ready=$temporary_stage/may-own-output/may-own.driver-third-ready
+    may_own_third_tracer_ready=$temporary_stage/may-own-third-tracer.ready
+    may_own_third_helper_exec_ready=$temporary_stage/may-own-third-helper-exec.ready
+    may_own_third_driver_release=$temporary_stage/may-own-third-driver.release
+    for may_own_third_absent_path in \
+        "$may_own_third_helper_exec_ready" "$may_own_third_driver_release"; do
+        if [ -e "$may_own_third_absent_path" ] \
+            || [ -L "$may_own_third_absent_path" ]; then
+            failed 'MayOwn third driver handshake path is unsafe'
+        fi
+    done
+    printf '%s\n' \
+        'set pagination off' \
+        'set confirm off' \
+        'set breakpoint pending off' \
+        'tcatch exec' \
+        "shell printf '%s\\n' ready >$may_own_third_tracer_ready" \
+        'continue' \
+        'tcatch exec' \
+        'continue' \
+        "shell printf '%s\\n' ready >$may_own_third_helper_exec_ready" \
+        "shell while [ ! -f $may_own_third_driver_release ]; do /usr/bin/sleep 0.05; done" \
+        'break volparossa_helper::systemd_fdstore::remove_restart_custody' \
+        'commands' \
+        'silent' \
+        "shell /usr/bin/nsenter --mount=/proc/$may_own_pid_three/ns/mnt -- /run/volparossa-helper-may-own-observer third-removal $unit_name $agent_gid $may_own_pid_three" \
+        'detach' \
+        'quit' \
+        'end' \
+        'continue' >"$may_own_debugger_three_commands" \
+        || failed 'MayOwn third debugger commands could not be written'
+    chmod 0600 "$may_own_debugger_three_commands"
+    timeout --preserve-status --signal=TERM --kill-after=5s 60s \
+        prlimit --core=0:0 --fsize=1048576:1048576 -- \
+        "$debugger_path" --batch --quiet --nx --pid="$may_own_pid_three" \
+            --command="$may_own_debugger_three_commands" \
+        >"$temporary_stage/may-own-debugger-three.stdout" \
+        2>"$temporary_stage/may-own-debugger-three.stderr" &
+    may_own_debugger_pid=$!
+    may_own_debugger_starttime=$(capture_process_starttime "$may_own_debugger_pid") \
+        || failed 'MayOwn third debugger identity is unavailable'
+    may_own_wait=0
+    while [ ! -f "$may_own_third_tracer_ready" ]; do
+        kill -0 "$may_own_debugger_pid" 2>/dev/null \
+            || failed 'MayOwn third debugger exited before arming'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] || failed 'MayOwn third debugger did not arm'
+        sleep 0.05
+    done
+    printf '%s\n' 0 >"$may_own_cgroup/cgroup.freeze" \
+        || failed 'MayOwn cgroup could not be thawed for recovery'
+    may_own_cgroup_frozen=no
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$may_own_third_helper_exec_ready"; do
+        kill -0 "$may_own_debugger_pid" 2>/dev/null \
+            || failed 'MayOwn third debugger exited before helper exec'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] \
+            || failed 'MayOwn third helper exec was not observed'
+        sleep 0.05
+    done
+    [ "$(cat "$may_own_third_helper_exec_ready")" = ready ] \
+        || failed 'MayOwn third helper-exec marker is invalid'
+    start_may_own_driver_observer three "$may_own_pid_three" \
+        "$may_own_invocation_three" \
+        || failed 'MayOwn third driver-side observer could not be started'
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$may_own_driver_third_ready"; do
+        kill -0 "$may_own_driver_observer_pid" 2>/dev/null \
+            || failed 'MayOwn third driver-side observer exited before arming'
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 600 ] \
+            || failed 'MayOwn third driver-side observer did not arm'
+        sleep 0.05
+    done
+    if [ "$(sed -n '1p' "$may_own_driver_third_ready")" != \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DRIVER_THIRD_READY_V1=pass' ] \
+        || [ "$(sed -n '2p' "$may_own_driver_third_ready")" != \
+            "$may_own_invocation_three" ] \
+        || [ "$(sed -n '3p' "$may_own_driver_third_ready")" != \
+            "$may_own_pid_three" ]; then
+        failed 'MayOwn third driver-ready record is invalid'
+    fi
+    may_own_service_shape_is_exact "$may_own_pid_three" \
+        || failed 'MayOwn third service shape is not production-exact'
+    vp_capture_run "$may_own_third_driver_release" \
+        printf '%s\n' \
+            'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_DRIVER_THIRD_RELEASE_V1=pass' \
+        || failed 'MayOwn third driver release could not be published'
+    wait "$may_own_debugger_pid" \
+        || failed 'MayOwn removal-boundary debugger did not complete'
+    may_own_debugger_pid=
+    may_own_debugger_starttime=
+    may_own_wait=0
+    while ! vp_capture_file_is_safe "$temporary_stage/may-own-output/may-own.resumed"; do
+        may_own_wait=$((may_own_wait + 1))
+        [ "$may_own_wait" -lt 1800 ] \
+            || failed 'MayOwn Relay settlement did not complete'
+        sleep 0.05
+    done
+    [ "$(sed -n '2p' "$temporary_stage/may-own-output/may-own.resumed")" = \
+        "$may_own_invocation_three" ] \
+        || failed 'MayOwn resumed record changed the third invocation'
+    wait_may_own_driver_observer success \
+        || failed 'MayOwn third driver-side observer did not validate settlement'
+    unit_invocation_id=$may_own_invocation_three
+    driver_phase=may-own-retirement
+    may_own_unit_name=$unit_name
+    if ! retire_unit; then
+        cleanup_error=yes
+        failed 'MayOwn recovered unit could not be retired'
+    fi
+    unit_name=$may_own_unit_name
+    may_own_retired_load_state=$(unit_load_state) || may_own_retired_load_state=
+    [ "$may_own_retired_load_state" = not-found ] \
+        || failed 'MayOwn recovered unit was not collected'
+    forget_unit_ownership
+    may_own_lock_path=$temporary_stage/production-runtime/helper.ownership-v3.lock
+    if command exec 9<>"$may_own_lock_path"; then
+        /usr/bin/flock -n 9 || failed 'MayOwn journal lock remained held'
+        command exec 9>&-
+    else
+        failed 'MayOwn journal lock could not be opened after retirement'
+    fi
+    if [ -e "$temporary_stage/production-runtime/helper.sock" ] \
+        || [ -L "$temporary_stage/production-runtime/helper.sock" ] \
+        || [ -e "$temporary_stage/production-runtime/helper.ownership-v3.next" ] \
+        || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
+        failed 'MayOwn runtime did not retire cleanly'
+    fi
+    may_own_final_journal=$(
+        /usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- \
+            "$temporary_stage/production-ipc-probe" \
+                prove-restart-may-own-relay-settled "$may_own_pid_three" \
+                "$agent_gid" \
+                "$(sed -n '4p' "$temporary_stage/may-own-output/may-own.first-boundary")" \
+                2>/dev/null
+    ) || failed 'MayOwn final journal could not be revalidated'
+    [ "$may_own_final_journal" = \
+        'VOLPAROSSA_HELPER_V3_RESTART_MAY_OWN_RELAY_SETTLED_V1=pass' ] \
+        || failed 'MayOwn final journal proof is invalid'
+    may_own_evidence_validated=true
     if [ "$production_ok" != "$proof_ok" ]; then
         failed 'internal production proof failure state is inconsistent'
     fi
@@ -6169,7 +7214,9 @@ if [ "$worker_fdstore_before_retirement" != 2 ] \
     || [ "$production_journal_settled_absent" != true ] \
     || [ "$production_retired_load_state" != not-found ] \
     || [ "$restart_evidence_validated" != true ] \
-    || [ "$restart_retired_load_state" != not-found ]; then
+    || [ "$restart_retired_load_state" != not-found ] \
+    || [ "$may_own_evidence_validated" != true ] \
+    || [ "$may_own_retired_load_state" != not-found ]; then
     failed 'the retained fdstore or exact-unit retirement observations are incomplete'
 fi
 
@@ -6212,6 +7259,14 @@ staged_restart_launcher_digest_final=$(vp_capture_sha256_file \
     || failed 'the staged restart launcher could not be revalidated'
 staged_restart_launcher_final=$(stat -Lc '%F:%u:%g:%a:%h' \
     "$temporary_stage/restart-launcher" 2>/dev/null || true)
+may_own_observer_final=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' \
+    "$may_own_observer_source") \
+    || failed 'the MayOwn Relay observer metadata could not be revalidated'
+may_own_observer_digest_final=$(vp_capture_sha256_file "$may_own_observer_source") \
+    || failed 'the MayOwn Relay observer source could not be revalidated'
+staged_may_own_observer_digest_final=$(vp_capture_sha256_file \
+    "$temporary_stage/may-own-observer") \
+    || failed 'the staged MayOwn Relay observer could not be revalidated'
 debugger_digest_final=$(vp_capture_sha256_file "$debugger_path") \
     || failed 'the debugger could not be revalidated'
 if [ "$source_before" != "$source_final" ] \
@@ -6233,6 +7288,10 @@ if [ "$source_before" != "$source_final" ] \
     || [ "$staged_restart_launcher_digest" != \
         "$staged_restart_launcher_digest_final" ] \
     || [ "$staged_restart_launcher_final" != 'regular file:0:0:500:1' ] \
+    || [ "$may_own_observer_before" != "$may_own_observer_final" ] \
+    || [ "$may_own_observer_digest_before" != "$may_own_observer_digest_final" ] \
+    || [ "$staged_may_own_observer_digest" != \
+        "$staged_may_own_observer_digest_final" ] \
     || [ "$debugger_digest" != "$debugger_digest_final" ]; then
     failed 'a source or staged proof artifact changed during live execution'
 fi
@@ -6581,6 +7640,213 @@ if [ -z "$validated_restart_report" ] \
     || [ "${#validated_restart_report}" -gt 32768 ]; then
     failed 'the validated restart report has an invalid publication size'
 fi
+
+may_own_first_boundary_at=$(sed -n '1p' \
+    "$temporary_stage/may-own-output/may-own.first-boundary") \
+    || failed 'MayOwn first boundary time is unavailable'
+may_own_first_boundary_call=$(sed -n '7p' \
+    "$temporary_stage/may-own-output/may-own.first-boundary") \
+    || failed 'MayOwn first boundary call is unavailable'
+may_own_second_boundary_at=$(sed -n '1p' \
+    "$temporary_stage/may-own-output/may-own.second-boundary") \
+    || failed 'MayOwn second boundary time is unavailable'
+may_own_second_boundary_call=$(sed -n '6p' \
+    "$temporary_stage/may-own-output/may-own.second-boundary") \
+    || failed 'MayOwn second boundary call is unavailable'
+may_own_third_boundary_at=$(sed -n '1p' \
+    "$temporary_stage/may-own-output/may-own.third-boundary") \
+    || failed 'MayOwn third boundary time is unavailable'
+may_own_third_boundary_call=$(sed -n '6p' \
+    "$temporary_stage/may-own-output/may-own.third-boundary") \
+    || failed 'MayOwn removal boundary call is unavailable'
+may_own_settled_at=$(sed -n '1p' \
+    "$temporary_stage/may-own-output/may-own.resumed") \
+    || failed 'MayOwn settlement time is unavailable'
+may_own_manager_after=$(sed -n '4p' \
+    "$temporary_stage/may-own-output/may-own.resumed") \
+    || failed 'MayOwn post-removal descriptor count is unavailable'
+if [ "$may_own_first_boundary_call" != \
+    'crash-boundary-v1=worker_v3::DurableCustodyPublicationTerminalGuard::retain_published' ] \
+    || [ "$may_own_second_boundary_call" != \
+        'crash-boundary-v1=ownership_journal::actor::DurableOwnershipStartup::confirm_single_restart_cleanup' ] \
+    || [ "$may_own_third_boundary_call" != \
+        'observation-boundary-v1=systemd_fdstore::remove_restart_custody' ] \
+    || [ "$may_own_manager_after" != 0 ]; then
+    failed 'MayOwn live observation records are not exact'
+fi
+may_own_first_boundary_call=${may_own_first_boundary_call#crash-boundary-v1=}
+may_own_second_boundary_call=${may_own_second_boundary_call#crash-boundary-v1=}
+may_own_third_boundary_call=${may_own_third_boundary_call#observation-boundary-v1=}
+may_own_report_path=$temporary_stage/helper-restart-may-own-custody-relay-evidence-v1.json
+jq -n -S -c \
+    --arg source_commit "$source_commit" \
+    --arg helper_digest "$staged_digest" \
+    --arg probe_digest "$staged_ipc_probe_digest" \
+    --arg hook_digest "$staged_ipc_hook_digest" \
+    --arg observer_digest "$staged_may_own_observer_digest" \
+    --arg debugger_digest "$debugger_digest" \
+    --arg kernel_release "$kernel_release" \
+    --arg started_at "$started_at" \
+    --arg first_boundary_at "$may_own_first_boundary_at" \
+    --arg first_crashed_at "$may_own_crash_one_at" \
+    --arg second_boundary_at "$may_own_second_boundary_at" \
+    --arg second_crashed_at "$may_own_crash_two_at" \
+    --arg third_boundary_at "$may_own_third_boundary_at" \
+    --arg settled_at "$may_own_settled_at" \
+    --arg finished_at "$finished_at" \
+    --arg generated_at "$generated_at" \
+    --arg invocation_one "$may_own_invocation_one" \
+    --arg invocation_two "$may_own_invocation_two" \
+    --arg invocation_three "$may_own_invocation_three" \
+    --arg first_call "$may_own_first_boundary_call" \
+    --arg second_call "$may_own_second_boundary_call" \
+    --arg removal_call "$may_own_third_boundary_call" \
+    --arg before_digest "$before_digest" \
+    --arg after_digest "$after_digest" \
+    --arg state_records "$state_records" '
+    {
+      schema_version: 1,
+      report_kind: "volparossa-helper-restart-may-own-custody-relay-evidence",
+      observed_source: {commit_sha: $source_commit, worktree_clean: true},
+      observed_artifact_hashes: {
+        debugger_sha256: $debugger_digest,
+        may_own_observer_sha256: $observer_digest,
+        production_ipc_probe_sha256: $probe_digest,
+        production_ipc_unit_hook_sha256: $hook_digest,
+        volparossa_helper_sha256: $helper_digest
+      },
+      environment: {
+        debian_version: "13", dpkg_architecture: "amd64",
+        machine: "x86_64", kernel_release: $kernel_release,
+        systemd_version: 257, virtualization: "vm"
+      },
+      started_at: $started_at,
+      finished_at: $finished_at,
+      generated_at: $generated_at,
+      invocation_ids: [$invocation_one, $invocation_two, $invocation_three],
+      restart: {
+        initial: {
+          argumentless: true,
+          target_count: 1,
+          target_role: "Relay",
+          target_phase: "MayOwnCustody",
+          target_disposition: "ExactPresent",
+          manager_fdstore_count: 2,
+          publication_boundary: $first_call,
+          publication_observed_at: $first_boundary_at
+        },
+        crashes: [
+          {
+            sequence: 1,
+            boundary: $first_call,
+            crashed_at: $first_crashed_at,
+            signal: "SIGKILL", unit_result: "signal",
+            exec_main_code: "killed", exec_main_status: 9,
+            manager_fdstore_after_crash: 2,
+            journal_phase_after_crash: "MayOwnCustody"
+          },
+          {
+            sequence: 2,
+            boundary: $second_call,
+            boundary_observed_at: $second_boundary_at,
+            crashed_at: $second_crashed_at,
+            signal: "SIGKILL", unit_result: "signal",
+            exec_main_code: "killed", exec_main_status: 9,
+            manager_fdstore_after_crash: 2,
+            journal_phase_after_crash: "MayOwnCustody"
+          }
+        ],
+        recovered: {
+          argumentless: true,
+          target_count: 1,
+          target_role: "Relay",
+          inherited_descriptor_count: 2,
+          cleanup_confirmed_before_removal: true,
+          removal_boundary: $removal_call,
+          removal_observed_at: $third_boundary_at,
+          manager_fdstore_after_removal: 0,
+          journal_phase_after_settlement: "Absent",
+          journal_absent_origin: "RecoveredMayOwn",
+          new_socket_published_before_settlement: false,
+          new_socket_published_after_settlement: true,
+          settled_at: $settled_at,
+          unit_load_state_after_retirement: "not-found"
+        }
+      },
+      retirement: {
+        journal_settled_absent: true,
+        lock_released: true,
+        socket_absent: true
+      },
+      enumerated_host_state: {
+        before_sha256: $before_digest,
+        after_sha256: $after_digest,
+        equal_at_fences: true,
+        records: ($state_records | split(" "))
+      },
+      scope: {
+        helper_boundary_only: true,
+        may_own_custody_exact_present_singleton_relay: true,
+        forced_helper_crash_count: 2,
+        general_restart_recovery: false,
+        cleanup_owned: false,
+        installed_package: false,
+        usable_datapath: false,
+        acceptance_a01_a15: false
+      },
+      checks: [
+        "OBSERVED_SOURCE_TREE_CLEAN",
+        "OBSERVED_ARTIFACT_HASHES",
+        "DEBIAN_13_AMD64_X86_64_SYSTEMD_257_VM",
+        "INITIAL_INVOCATION_BOUND",
+        "INITIAL_ARGUMENTLESS_PRODUCTION_BOUNDARY",
+        "SINGLETON_RELAY_MAY_OWN_CUSTODY_EXACT_PRESENT",
+        "FIRST_CRASH_AT_PUBLISHED_TERMINAL_GUARD",
+        "FIRST_FORCED_HELPER_SIGKILL_OBSERVED",
+        "FIRST_SYSTEMD_FDSTORE_EXACT_CUSTODY_PRESERVED",
+        "SECOND_DISTINCT_ARGUMENTLESS_INVOCATION_BOUND",
+        "SECOND_INHERITED_SINGLETON_MAY_OWN_EXACT_PRESENT",
+        "REAPER_CLEANUP_EVIDENCE_REACHED_JOURNAL_BOUNDARY",
+        "SECOND_FORCED_HELPER_SIGKILL_OBSERVED",
+        "SECOND_SYSTEMD_FDSTORE_EXACT_CUSTODY_PRESERVED",
+        "THIRD_DISTINCT_ARGUMENTLESS_INVOCATION_BOUND",
+        "THIRD_INHERITED_SINGLETON_MAY_OWN_EXACT_PRESENT",
+        "CLEANUP_CONFIRMED_BEFORE_MANAGER_REMOVAL",
+        "STARTUP_REMOVAL_CALL_OBSERVED",
+        "MANAGER_FDSTORE_ZERO_AFTER_REMOVAL",
+        "JOURNAL_ABSENT_RECOVERED_MAY_OWN",
+        "SOCKET_PUBLISHED_ONLY_AFTER_SETTLEMENT",
+        "RECOVERED_UNIT_RETIRED_NOT_FOUND",
+        "RETIREMENT_LOCK_RELEASED",
+        "RETIREMENT_SOCKET_ABSENT",
+        "ENUMERATED_HOST_STATE_EQUAL_AT_FENCES"
+      ] | map({id: ., result: "PASS"}),
+      overall: "PASS"
+    }
+' >"$may_own_report_path" \
+    || failed 'the canonical MayOwn Relay report could not be generated'
+chmod 0600 "$may_own_report_path" \
+    || failed 'the MayOwn Relay report mode could not be fixed'
+may_own_validator_stdout=$temporary_stage/may-own-validator.stdout
+may_own_validator_stderr=$temporary_stage/may-own-validator.stderr
+install -o root -g root -m 0600 /dev/null \
+    "$may_own_validator_stdout" "$may_own_validator_stderr"
+set +e
+"$may_own_evidence_validator" "$may_own_report_path" \
+    >"$may_own_validator_stdout" 2>"$may_own_validator_stderr"
+may_own_validator_status=$?
+set -e
+if [ "$may_own_validator_status" -ne 0 ] \
+    || [ -s "$may_own_validator_stdout" ] \
+    || [ -s "$may_own_validator_stderr" ]; then
+    failed 'the MayOwn Relay report failed strict validation'
+fi
+validated_may_own_report=$(cat "$may_own_report_path") \
+    || failed 'the validated MayOwn Relay report could not be retained'
+if [ -z "$validated_may_own_report" ] \
+    || [ "${#validated_may_own_report}" -gt 32768 ]; then
+    failed 'the validated MayOwn Relay report has an invalid publication size'
+fi
 final_checkpoint=publication-fence
 publication_source_commit=$(git -c safe.directory="$repository_directory" \
     -C "$repository_directory" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
@@ -6600,7 +7866,8 @@ if ! remove_temporary_stage; then
 fi
 
 printf '%s\n' \
-    'PASS: staged helper identity, production IPC, and one forced singleton CleanupConfirmed ExactPresent restart were proved.' \
-    'SCOPE: helper boundary only; no mixed, MayOwn, CleanupOwned, general restart-recovery, datapath, or A01-A15 claim.' >&2
+    'PASS: staged helper identity plus exact CleanupConfirmed and MayOwn Relay singleton restart slices were proved.' \
+    'SCOPE: helper boundary only; no mixed, CleanupOwned, general restart-recovery, usable datapath, or A01-A15 claim.' >&2
 printf '%s\n' "$validated_report"
 printf '%s\n' "$validated_restart_report"
+printf '%s\n' "$validated_may_own_report"

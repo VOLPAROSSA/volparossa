@@ -294,6 +294,11 @@ set_property_fixture '{"type":"u","data":4294967295}'
 expect_failure 'reserved maximum u32 MainPID' \
     unit_main_pid "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT"
 
+set_property_fixture '{"type":"u","data":0}'
+expect_success 0 'zero ControlPID' \
+    unit_u32_property "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT" \
+    org.freedesktop.systemd1.Service ControlPID
+
 set_property_fixture '{"type":"u","data":1}'
 expect_failure 'wrong property interface' \
     unit_u32_property "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT" \

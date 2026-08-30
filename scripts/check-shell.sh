@@ -29,6 +29,7 @@ set -- \
     tests/helper/lib/production-ipc-unit-hook.sh \
     tests/helper/lib/restart-exact-present-launcher.sh \
     tests/helper/lib/restart-exact-present-observer.sh \
+    tests/helper/lib/restart-may-own-relay-observer.sh \
     tests/helper/require-live-worker-identity-proof.sh \
     tests/helper/run-helper-boundary-evidence-vm.sh \
     tests/helper/test-helper-boundary-evidence-v1.sh \
@@ -37,6 +38,8 @@ set -- \
     tests/helper/test-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/test-helper-restart-kvm-contract.sh \
     tests/helper/test-helper-restart-vm-environment-v1.sh \
+    tests/helper/test-helper-restart-may-own-kvm-contract.sh \
+    tests/helper/test-helper-restart-service-shape-contract.sh \
     tests/helper/test-live-worker-identity-contract.sh \
     tests/helper/test-production-ipc-busctl-parser.sh \
     tests/helper/test-qemu-pidfd-supervisor.sh \
@@ -44,6 +47,8 @@ set -- \
     tests/helper/validate-helper-boundary-vm-environment-v1.sh \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
+    tests/helper/validate-helper-restart-may-own-custody-relay-evidence-v1.sh \
+    tests/helper/validate-helper-restart-may-own-custody-relay-vm-environment-v1.sh \
     tests/integration/run.sh \
     tests/integration/test-harness.sh \
     tests/integration/validate-report.sh \

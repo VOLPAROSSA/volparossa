@@ -3641,10 +3641,13 @@ if restart_successor_start_failure_category "$restart_failure_record" \
 fi
 rm -f -- "$restart_failure_record.next"
 
-# The failed empty-cgroup freezer assumption is completely absent. The fixed
-# FIFO release happens only after private GDB readiness and before waiting for
-# the exact debugger child to complete.
-if grep -E 'restart_cgroup|cgroup\.freeze|restart cgroup' "$gate" >/dev/null; then
+# The failed ExactPresent empty-cgroup freezer assumption is completely absent.
+# A later MayOwn proof may freeze its separately named, non-empty, shape-checked
+# service cgroup; it is not part of this ExactPresent handshake. The fixed FIFO
+# release happens only after private GDB readiness and before waiting for the
+# exact debugger child to complete.
+if grep -E '(^|[^[:alnum:]_])restart_cgroup([^[:alnum:]_]|$)|restart cgroup' \
+    "$gate" >/dev/null; then
     printf '%s\n' 'restart proof still depends on an empty unit cgroup freezer' >&2
     exit 1
 fi
@@ -3944,8 +3947,8 @@ if ! awk '
     exit 1
 fi
 
-[ "$(grep -Fc 'timeout --preserve-status --signal=TERM --kill-after=5s' "$gate")" -eq 2 ]
-[ "$(grep -Fc 'prlimit --core=0:0 --fsize=1048576:1048576 --' "$gate")" -eq 2 ]
+[ "$(grep -Fc 'timeout --preserve-status --signal=TERM --kill-after=5s' "$gate")" -eq 6 ]
+[ "$(grep -Fc 'prlimit --core=0:0 --fsize=1048576:1048576 --' "$gate")" -eq 6 ]
 grep -F '30s \' "$gate" >/dev/null
 grep -F '45s \' "$gate" >/dev/null
 [ "$(grep -Fc '"$restart_wait" -lt 2400' "$gate")" -eq 1 ]

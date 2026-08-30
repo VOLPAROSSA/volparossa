@@ -52,7 +52,7 @@ print_plan() {
             '  provision and fetch locked dependencies in a first disposable KVM boot;' \
             '  restart with QEMU user-network egress denied and prove that denial;' \
             '  build fully offline as the unprivileged guest user in the restricted boot;' \
-            '  run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
+            '  run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
             '  shut down, rehash the base image, validate, and discard all proof files;' \
             '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
             'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
@@ -68,8 +68,8 @@ print_plan() {
         '  provision and fetch locked dependencies in a first disposable KVM boot;' \
         '  restart with QEMU user-network egress denied and prove that denial;' \
         '  build fully offline as the unprivileged guest user in the restricted boot;' \
-        '  run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
-        '  shut down, rehash the base image, validate, and publish five bounded files;' \
+        '  run the fixed helper-boundary proof plus exact CleanupConfirmed and MayOwn Relay restart slices as guest root;' \
+        '  shut down, rehash the base image, validate, and publish eleven bounded files;' \
         '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
         'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
 }
@@ -395,6 +395,11 @@ non_retained_driver_phase_is_safe() {
         restart-launch|\
         restart-observation|\
         restart-retirement|\
+        may-own-launch|\
+        may-own-first-crash|\
+        may-own-second-crash|\
+        may-own-recovery|\
+        may-own-retirement|\
         final-verification)
             return 0
             ;;
@@ -1073,7 +1078,7 @@ report_non_retained_driver_phase() {
     non_retained_driver_phase_prefix=VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=
     [ "$(grep -Ec "^$non_retained_driver_phase_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|final-verification)$'
+    non_retained_driver_phase_pattern='^VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|restart-launch|restart-observation|restart-retirement|may-own-launch|may-own-first-crash|may-own-second-crash|may-own-recovery|may-own-retirement|final-verification)$'
     [ "$(grep -Ec "$non_retained_driver_phase_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_mixed_diagnostic_pattern='^(live worker-identity proof failed: predicate rejected: |VOLPAROSSA_HELPER_LIVE_WORKER_LAUNCH_DIAGNOSTIC_V1=|VOLPAROSSA_HELPER_LIVE_WORKER_CONFINEMENT_DIAGNOSTIC_V1=)'
@@ -1406,8 +1411,10 @@ repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd -P)
 manifest=$script_directory/debian13-amd64-image-v1.json
 report_validator=$script_directory/validate-helper-boundary-evidence-v1.sh
 restart_report_validator=$script_directory/validate-helper-restart-exact-present-evidence-v1.sh
+may_own_report_validator=$script_directory/validate-helper-restart-may-own-custody-relay-evidence-v1.sh
 environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
 restart_environment_validator=$script_directory/validate-helper-restart-vm-environment-v1.sh
+may_own_environment_validator=$script_directory/validate-helper-restart-may-own-custody-relay-vm-environment-v1.sh
 qemu_supervisor=$script_directory/qemu-pidfd-supervisor.py
 manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
@@ -1443,7 +1450,9 @@ jq -e \
 jq -S -c . "$manifest" | cmp -s - "$manifest" \
     || blocked 'the Debian image manifest serialization is not canonical'
 for fixed_tool in "$report_validator" "$restart_report_validator" \
-    "$environment_validator" "$restart_environment_validator" "$qemu_supervisor"; do
+    "$may_own_report_validator" "$environment_validator" \
+    "$restart_environment_validator" "$may_own_environment_validator" \
+    "$qemu_supervisor"; do
     if [ ! -f "$fixed_tool" ] || [ -L "$fixed_tool" ] \
         || [ "$(stat -Lc '%h' "$fixed_tool" 2>/dev/null || true)" != 1 ]; then
         blocked "a fixed evidence tool is unavailable: ${fixed_tool##*/}"
@@ -2047,7 +2056,13 @@ scrub_sensitive_run_state() {
         helper-restart-exact-present-evidence-v1.json.sha256 \
         helper-restart-vm-environment-v1.json restart-validator.stdout \
         restart-validator.stderr restart-environment-validator.stdout \
-        restart-environment-validator.stderr vm-environment-v1.json \
+        restart-environment-validator.stderr \
+        helper-restart-may-own-custody-relay-evidence-v1.json \
+        helper-restart-may-own-custody-relay-evidence-v1.json.sha256 \
+        helper-restart-may-own-custody-relay-vm-environment-v1.json \
+        may-own-validator.stdout may-own-validator.stderr \
+        may-own-environment-validator.stdout may-own-environment-validator.stderr \
+        vm-environment-v1.json \
         validator.stdout validator.stderr \
         environment-validator.stdout environment-validator.stderr vm-console.log \
         console.fifo console.done
@@ -2191,6 +2206,7 @@ guest_setup=$run_directory/guest-setup.sh
 guest_proof=$run_directory/guest-proof.sh
 retrieved_report=$run_directory/helper-boundary-evidence-v1.json
 retrieved_restart_report=$run_directory/helper-restart-exact-present-evidence-v1.json
+retrieved_may_own_report=$run_directory/helper-restart-may-own-custody-relay-evidence-v1.json
 retrieved_stderr=$run_directory/helper-boundary-proof.stderr.log
 
 qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$overlay" 12G \
@@ -2333,18 +2349,23 @@ test "$(stat -c '%s' /home/volparossa/helper-boundary-proof.stderr.log)" -le 104
 if test "$proof_status" -ne 0; then
     exit "$proof_status"
 fi
-test "$(wc -l </home/volparossa/helper-proof-reports.jsonl)" -eq 2
+test "$(wc -l </home/volparossa/helper-proof-reports.jsonl)" -eq 3
 sed -n '1p' /home/volparossa/helper-proof-reports.jsonl \
     >/home/volparossa/helper-boundary-evidence-v1.json
 sed -n '2p' /home/volparossa/helper-proof-reports.jsonl \
     >/home/volparossa/helper-restart-exact-present-evidence-v1.json
+sed -n '3p' /home/volparossa/helper-proof-reports.jsonl \
+    >/home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json
 rm -f -- /home/volparossa/helper-proof-reports.jsonl
 chmod 0600 /home/volparossa/helper-boundary-evidence-v1.json \
-    /home/volparossa/helper-restart-exact-present-evidence-v1.json
+    /home/volparossa/helper-restart-exact-present-evidence-v1.json \
+    /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json
 test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -ge 1
 test "$(stat -c '%s' /home/volparossa/helper-boundary-evidence-v1.json)" -le 32768
 test "$(stat -c '%s' /home/volparossa/helper-restart-exact-present-evidence-v1.json)" -ge 1
 test "$(stat -c '%s' /home/volparossa/helper-restart-exact-present-evidence-v1.json)" -le 32768
+test "$(stat -c '%s' /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json)" -ge 1
+test "$(stat -c '%s' /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json)" -le 32768
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 GUEST_PROOF
 chmod 0700 "$guest_proof"
@@ -2677,6 +2698,10 @@ bounded_run retrieve-restart-report 2 guest_scp_from_raw \
     /home/volparossa/helper-restart-exact-present-evidence-v1.json \
     "$retrieved_restart_report" \
     || failed 'the canonical restart report could not be retrieved'
+bounded_run retrieve-may-own-report 2 guest_scp_from_raw \
+    /home/volparossa/helper-restart-may-own-custody-relay-evidence-v1.json \
+    "$retrieved_may_own_report" \
+    || failed 'the canonical MayOwn Relay report could not be retrieved'
 
 guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
 reap_qemu yes || failed 'the restricted proof VM did not power off cleanly'
@@ -2727,6 +2752,22 @@ jq -e --arg commit "$expected_commit" \
     '.overall == "PASS" and .observed_source.commit_sha == $commit' \
     "$retrieved_restart_report" >/dev/null \
     || failed 'the restart report is not a PASS for the expected commit'
+may_own_validator_stdout=$run_directory/may-own-validator.stdout
+may_own_validator_stderr=$run_directory/may-own-validator.stderr
+set +e
+"$may_own_report_validator" "$retrieved_may_own_report" \
+    >"$may_own_validator_stdout" 2>"$may_own_validator_stderr"
+may_own_validator_status=$?
+set -e
+[ "$may_own_validator_status" -eq 0 ] \
+    || failed 'the retrieved MayOwn Relay report failed local validation'
+if [ -s "$may_own_validator_stdout" ] || [ -s "$may_own_validator_stderr" ]; then
+    failed 'the local MayOwn Relay report validator was not silent'
+fi
+jq -e --arg commit "$expected_commit" \
+    '.overall == "PASS" and .observed_source.commit_sha == $commit' \
+    "$retrieved_may_own_report" >/dev/null \
+    || failed 'the MayOwn Relay report is not a PASS for the expected commit'
 
 late_head=$(git -C "$repository_directory" rev-parse --verify 'HEAD^{commit}') \
     || failed 'the late source HEAD fence failed'
@@ -2750,6 +2791,11 @@ restart_report_hash=$(sha256sum "$retrieved_restart_report" | awk '{print $1}') 
 restart_report_hash_file=$run_directory/helper-restart-exact-present-evidence-v1.json.sha256
 printf '%s  helper-restart-exact-present-evidence-v1.json\n' \
     "$restart_report_hash" >"$restart_report_hash_file"
+may_own_report_hash=$(sha256sum "$retrieved_may_own_report" | awk '{print $1}') \
+    || failed 'the retained MayOwn Relay report hash could not be calculated'
+may_own_report_hash_file=$run_directory/helper-restart-may-own-custody-relay-evidence-v1.json.sha256
+printf '%s  helper-restart-may-own-custody-relay-evidence-v1.json\n' \
+    "$may_own_report_hash" >"$may_own_report_hash_file"
 successful_environment=$run_directory/vm-environment-v1.json
 jq -S -c -n \
     --arg commit "$expected_commit" \
@@ -2784,6 +2830,23 @@ jq -S -c -n \
       report_sha256: $report_sha256,
       schema_version: 1,
       status: "PASS"}' >"$successful_restart_environment"
+successful_may_own_environment=$run_directory/helper-restart-may-own-custody-relay-vm-environment-v1.json
+jq -S -c -n \
+    --arg commit "$expected_commit" \
+    --arg image_sha512 "$image_sha512" \
+    --arg report_sha256 "$may_own_report_hash" \
+    --arg release_build 20260826-2582 \
+    '{expected_commit: $commit,
+      guest: {architecture: "amd64", cargo_version: "1.85.0",
+        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+        virtualization: "kvm"},
+      image_release_build: $release_build,
+      image_sha512: $image_sha512,
+      proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
+      report_kind: "volparossa-helper-restart-may-own-custody-relay-vm-environment",
+      report_sha256: $report_sha256,
+      schema_version: 1,
+      status: "PASS"}' >"$successful_may_own_environment"
 
 environment_validator_stdout=$run_directory/environment-validator.stdout
 environment_validator_stderr=$run_directory/environment-validator.stderr
@@ -2813,6 +2876,21 @@ if [ -s "$restart_environment_validator_stdout" ] \
     || [ -s "$restart_environment_validator_stderr" ]; then
     failed 'the restart VM-environment validator was not silent'
 fi
+may_own_environment_validator_stdout=$run_directory/may-own-environment-validator.stdout
+may_own_environment_validator_stderr=$run_directory/may-own-environment-validator.stderr
+set +e
+"$may_own_environment_validator" "$successful_may_own_environment" \
+    "$retrieved_may_own_report" "$expected_commit" "$image_sha512" \
+    >"$may_own_environment_validator_stdout" \
+    2>"$may_own_environment_validator_stderr"
+may_own_environment_validator_status=$?
+set -e
+[ "$may_own_environment_validator_status" -eq 0 ] \
+    || failed 'the MayOwn Relay VM-environment record failed local validation'
+if [ -s "$may_own_environment_validator_stdout" ] \
+    || [ -s "$may_own_environment_validator_stderr" ]; then
+    failed 'the MayOwn Relay VM-environment validator was not silent'
+fi
 
 if [ "$proof_mode" = retained-main ]; then
     install -m 0600 -- "$retrieved_report" \
@@ -2826,6 +2904,12 @@ if [ "$proof_mode" = retained-main ]; then
         "$output_directory/helper-restart-exact-present-evidence-v1.json.sha256"
     install -m 0600 -- "$successful_restart_environment" \
         "$output_directory/helper-restart-vm-environment-v1.json"
+    install -m 0600 -- "$retrieved_may_own_report" \
+        "$output_directory/helper-restart-may-own-custody-relay-evidence-v1.json"
+    install -m 0600 -- "$may_own_report_hash_file" \
+        "$output_directory/helper-restart-may-own-custody-relay-evidence-v1.json.sha256"
+    install -m 0600 -- "$successful_may_own_environment" \
+        "$output_directory/helper-restart-may-own-custody-relay-vm-environment-v1.json"
     printf '%s\n' \
         'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
 else

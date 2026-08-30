@@ -406,6 +406,9 @@ jobs:
               helper-restart-exact-present-evidence-v1.json|\
               helper-restart-exact-present-evidence-v1.json.sha256|\
               helper-restart-vm-environment-v1.json|\
+              helper-restart-may-own-custody-relay-evidence-v1.json|\
+              helper-restart-may-own-custody-relay-evidence-v1.json.sha256|\
+              helper-restart-may-own-custody-relay-vm-environment-v1.json|\
               vm-environment-v1.json|\
               vm-console.log|\
               helper-boundary-proof.stderr.log)
@@ -450,7 +453,9 @@ jobs:
               case "$name" in
                 helper-boundary-evidence-v1.json|helper-boundary-evidence-v1.json.sha256|\
                 helper-restart-exact-present-evidence-v1.json|\
-                helper-restart-exact-present-evidence-v1.json.sha256)
+                helper-restart-exact-present-evidence-v1.json.sha256|\
+                helper-restart-may-own-custody-relay-evidence-v1.json|\
+                helper-restart-may-own-custody-relay-evidence-v1.json.sha256)
                   if test "$PROOF_EXIT_CODE" != 0; then
                     continue
                   fi
@@ -476,7 +481,18 @@ jobs:
                 helper-restart-exact-present-evidence-v1.json.sha256)
                   test "$size" -eq 112
                   ;;
+                helper-restart-may-own-custody-relay-evidence-v1.json)
+                  test "$size" -ge 1
+                  test "$size" -le 32768
+                  ;;
+                helper-restart-may-own-custody-relay-evidence-v1.json.sha256)
+                  test "$size" -eq 120
+                  ;;
                 helper-restart-vm-environment-v1.json)
+                  test "$size" -ge 1
+                  test "$size" -le 32768
+                  ;;
+                helper-restart-may-own-custody-relay-vm-environment-v1.json)
                   test "$size" -ge 1
                   test "$size" -le 32768
                   ;;
@@ -527,6 +543,9 @@ jobs:
           restart_report="$retained_dir/helper-restart-exact-present-evidence-v1.json"
           restart_report_hash="$retained_dir/helper-restart-exact-present-evidence-v1.json.sha256"
           restart_environment="$retained_dir/helper-restart-vm-environment-v1.json"
+          may_own_report="$retained_dir/helper-restart-may-own-custody-relay-evidence-v1.json"
+          may_own_report_hash="$retained_dir/helper-restart-may-own-custody-relay-evidence-v1.json.sha256"
+          may_own_environment="$retained_dir/helper-restart-may-own-custody-relay-vm-environment-v1.json"
           environment="$retained_dir/vm-environment-v1.json"
           console="$retained_dir/vm-console.log"
           proof_stderr="$retained_dir/helper-boundary-proof.stderr.log"
@@ -545,6 +564,9 @@ jobs:
             "$restart_report" \
             "$restart_report_hash" \
             "$restart_environment" \
+            "$may_own_report" \
+            "$may_own_report_hash" \
+            "$may_own_environment" \
             "$environment" \
             "$console" \
             "$proof_stderr"
@@ -615,6 +637,36 @@ jobs:
             2>"$restart_environment_validator_stderr"
           test ! -s "$restart_environment_validator_stdout"
           test ! -s "$restart_environment_validator_stderr"
+          may_own_validator_stdout="$RUNNER_TEMP/may-own-validator.stdout"
+          may_own_validator_stderr="$RUNNER_TEMP/may-own-validator.stderr"
+          tests/helper/validate-helper-restart-may-own-custody-relay-evidence-v1.sh \
+            "$may_own_report" >"$may_own_validator_stdout" \
+            2>"$may_own_validator_stderr"
+          test ! -s "$may_own_validator_stdout"
+          test ! -s "$may_own_validator_stderr"
+          jq -e --arg commit "$GITHUB_SHA" \
+            '.observed_source.commit_sha == $commit' \
+            "$may_own_report" >/dev/null
+          test "$(stat -c '%s' -- "$may_own_report_hash")" -eq 120
+          grep -Eq \
+            '^[0-9a-f]{64}  helper-restart-may-own-custody-relay-evidence-v1\.json$' \
+            "$may_own_report_hash"
+          (
+            cd "$retained_dir"
+            sha256sum --check --strict \
+              helper-restart-may-own-custody-relay-evidence-v1.json.sha256
+          )
+          may_own_environment_validator_stdout="$RUNNER_TEMP/may-own-environment-validator.stdout"
+          may_own_environment_validator_stderr="$RUNNER_TEMP/may-own-environment-validator.stderr"
+          tests/helper/validate-helper-restart-may-own-custody-relay-vm-environment-v1.sh \
+            "$may_own_environment" \
+            "$may_own_report" \
+            "$GITHUB_SHA" \
+            184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003 \
+            >"$may_own_environment_validator_stdout" \
+            2>"$may_own_environment_validator_stderr"
+          test ! -s "$may_own_environment_validator_stdout"
+          test ! -s "$may_own_environment_validator_stderr"
           require_source_fence
 
           chmod 0400 -- \
@@ -623,6 +675,9 @@ jobs:
             "$restart_report" \
             "$restart_report_hash" \
             "$restart_environment" \
+            "$may_own_report" \
+            "$may_own_report_hash" \
+            "$may_own_environment" \
             "$environment" \
             "$console" \
             "$proof_stderr"
@@ -709,6 +764,26 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Upload bounded singleton MayOwn Relay restart evidence
+        id: may_own_restart_pass_artifact_upload
+        if: >-
+          always() &&
+          steps.source_selection.outputs.proof_mode == 'retained-main' &&
+          steps.vm_proof.outputs.exit_code == '0' &&
+          steps.host_validation.outcome == 'success' &&
+          steps.verify_kvm_state.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: helper-restart-may-own-custody-relay-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/helper-boundary-retained/helper-restart-may-own-custody-relay-evidence-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/helper-restart-may-own-custody-relay-evidence-v1.json.sha256
+            ${{ runner.temp }}/helper-boundary-retained/helper-restart-may-own-custody-relay-vm-environment-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/vm-console.log
+            ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Require a retained PASS
         if: >-
           always() &&
@@ -719,6 +794,7 @@ jobs:
           RETAINED_ARTIFACTS_OUTCOME: ${{ steps.retained_artifacts.outcome }}
           PASS_ARTIFACT_UPLOAD_OUTCOME: ${{ steps.pass_artifact_upload.outcome }}
           RESTART_PASS_ARTIFACT_UPLOAD_OUTCOME: ${{ steps.restart_pass_artifact_upload.outcome }}
+          MAY_OWN_RESTART_PASS_ARTIFACT_UPLOAD_OUTCOME: ${{ steps.may_own_restart_pass_artifact_upload.outcome }}
           VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}
         run: |
           set -euo pipefail
@@ -727,6 +803,7 @@ jobs:
           test "$RETAINED_ARTIFACTS_OUTCOME" = success
           test "$PASS_ARTIFACT_UPLOAD_OUTCOME" = success
           test "$RESTART_PASS_ARTIFACT_UPLOAD_OUTCOME" = success
+          test "$MAY_OWN_RESTART_PASS_ARTIFACT_UPLOAD_OUTCOME" = success
           test "$VERIFY_KVM_STATE_OUTCOME" = success
 
       - name: Require a non-retained PR smoke PASS

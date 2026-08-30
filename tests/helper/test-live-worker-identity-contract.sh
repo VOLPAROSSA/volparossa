@@ -4581,6 +4581,7 @@ if ! awk '
         if (run_count == 1) first_run = NR
         if (run_count == 2) second_run = NR
         if (run_count == 3) third_run = NR
+        if (run_count == 4) fourth_run = NR
     }
     /^worker_unit_name=\$unit_name$/ { first_identity_saved = NR }
     /^        unit_name=\$worker_unit_name$/ { name_reused = NR }
@@ -4590,6 +4591,9 @@ if ! awk '
     }
     /VOLPAROSSA helper singleton ExactPresent restart marker v1/ {
         restart_marker = NR
+    }
+    /VOLPAROSSA helper singleton MayOwn Relay restart marker v1/ {
+        may_own_marker = NR
     }
     /^    production_retirement_confirmed=no$/ {
         production_retirement_init = NR
@@ -4625,7 +4629,7 @@ if ! awk '
         restart_not_found_required = NR
     }
     END {
-        valid = run_count == 3 && first_run < first_identity_saved
+        valid = run_count == 4 && first_run < first_identity_saved
         valid = valid && first_identity_saved < name_reused
         valid = valid && name_reused < not_found_required
         valid = valid && not_found_required < production_marker
@@ -4645,6 +4649,7 @@ if ! awk '
         valid = valid && restart_identity_prepared < restart_not_found_required
         valid = valid && restart_not_found_required < restart_marker
         valid = valid && restart_marker < third_run
+        valid = valid && third_run < may_own_marker && may_own_marker < fourth_run
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -5115,8 +5120,8 @@ if ! awk '
     printf '%s\n' 'validated report publication is not ordered after proof and stage removal' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 3 ]; then
-    printf '%s\n' 'all three transient helper invocations do not have the exact file-size limit' >&2
+if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 4 ]; then
+    printf '%s\n' 'all four transient helper invocations do not have the exact file-size limit' >&2
     exit 1
 fi
 if ! awk '
@@ -5159,7 +5164,12 @@ if ! awk '
         if ($0 ~ /^[[:space:]]*--no-block \\$/) exact_no_block[run_count]++
 
         if (index($0, "--service-type=") > 0) type_assignments[run_count]++
-        if ($0 ~ /^[[:space:]]*--service-type=exec \\$/) exact_types[run_count]++
+        if ($0 ~ /^[[:space:]]*--service-type=exec \\$/) {
+            exact_exec_types[run_count]++
+        }
+        if ($0 ~ /^[[:space:]]*--service-type=simple \\$/) {
+            exact_simple_types[run_count]++
+        }
         if (index($0, "Type=") > 0 \
             && index($0, "--service-type=") == 0) invalid++
 
@@ -5187,6 +5197,9 @@ if ! awk '
         if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=240s \\$/) {
             exact_restart_runtime[run_count]++
         }
+        if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=360s \\$/) {
+            exact_may_own_runtime[run_count]++
+        }
 
         if ($0 !~ /\\[[:space:]]*$/) {
             in_run = 0
@@ -5194,31 +5207,45 @@ if ! awk '
         }
     }
     END {
-        valid = !in_run && invalid == 0 && run_count == 3 && run_end_count == 3
-        for (run = 1; run <= 3; run++) {
-            valid = valid && type_assignments[run] == 1 && exact_types[run] == 1
+        valid = !in_run && invalid == 0 && run_count == 4 && run_end_count == 4
+        for (run = 1; run <= 4; run++) {
+            valid = valid && type_assignments[run] == 1
             valid = valid && collect_assignments[run] == 1
             valid = valid && exact_collect_modes[run] == 1
             valid = valid && runtime_assignments[run] == 1
         }
+        valid = valid && exact_exec_types[1] == 1 && exact_simple_types[1] == 0
+        valid = valid && exact_exec_types[2] == 1 && exact_simple_types[2] == 0
+        valid = valid && exact_exec_types[3] == 1 && exact_simple_types[3] == 0
+        valid = valid && exact_exec_types[4] == 0 && exact_simple_types[4] == 1
         valid = valid && remain_assignments[1] == 1 && exact_remain[1] == 1
         valid = valid && remain_assignments[2] == 0 && exact_remain[2] == 0
         valid = valid && remain_assignments[3] == 0 && exact_remain[3] == 0
+        valid = valid && remain_assignments[4] == 0 && exact_remain[4] == 0
         valid = valid && slice_assignments[1] == 1 && exact_worker_slice[1] == 1
         valid = valid && slice_assignments[2] == 1 && exact_worker_slice[2] == 1
         valid = valid && slice_assignments[3] == 1 && exact_worker_slice[3] == 1
+        valid = valid && slice_assignments[4] == 1 && exact_worker_slice[4] == 1
         valid = valid && no_block_assignments[1] == 0 && exact_no_block[1] == 0
         valid = valid && no_block_assignments[2] == 0 && exact_no_block[2] == 0
         valid = valid && no_block_assignments[3] == 1 && exact_no_block[3] == 1
+        valid = valid && no_block_assignments[4] == 1 && exact_no_block[4] == 1
         valid = valid && exact_worker_runtime[1] == 1
         valid = valid && exact_worker_runtime[2] == 0
         valid = valid && exact_worker_runtime[3] == 0
+        valid = valid && exact_worker_runtime[4] == 0
         valid = valid && exact_production_runtime[1] == 0
         valid = valid && exact_production_runtime[2] == 1
         valid = valid && exact_production_runtime[3] == 0
+        valid = valid && exact_production_runtime[4] == 0
         valid = valid && exact_restart_runtime[1] == 0
         valid = valid && exact_restart_runtime[2] == 0
         valid = valid && exact_restart_runtime[3] == 1
+        valid = valid && exact_restart_runtime[4] == 0
+        valid = valid && exact_may_own_runtime[1] == 0
+        valid = valid && exact_may_own_runtime[2] == 0
+        valid = valid && exact_may_own_runtime[3] == 0
+        valid = valid && exact_may_own_runtime[4] == 1
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -5292,8 +5319,8 @@ for exact_cgroup_property in \
     "--property='SystemCallFilter=@system-service @network-io seccomp'" \
     "--property='SystemCallFilter=~@mount'"
 do
-    if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 3 ]; then
-        printf 'all three transient helper invocations lack exact cgroup isolation: %s\n' \
+    if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 4 ]; then
+        printf 'all four transient helper invocations lack exact cgroup isolation: %s\n' \
             "$exact_cgroup_property" >&2
         exit 1
     fi
@@ -5308,6 +5335,7 @@ transient_slice_contract_is_exact() {
             if (slice_assignment == 1) worker_slice_assignment_line = NR
             if (slice_assignment == 2) production_slice_assignment_line = NR
             if (slice_assignment == 3) restart_slice_assignment_line = NR
+            if (slice_assignment == 4) may_own_slice_assignment_line = NR
         }
         /^if capture_unit_property ActiveState "\$temporary_stage\/unit-active-state"; then$/ {
             terminal_read++
@@ -5350,7 +5378,7 @@ transient_slice_contract_is_exact() {
             retirement_line = NR
         }
         END {
-            valid = slice_assignment == 3 && terminal_read == 1
+            valid = slice_assignment == 4 && terminal_read == 1
             valid = valid && worker_slice_read == 1 && worker_slice_requirement == 1
             valid = valid && terminal_control_group_read == 1
             valid = valid && terminal_control_group_empty == 1 && cgroup_derivation == 1
@@ -5369,6 +5397,7 @@ transient_slice_contract_is_exact() {
             valid = valid && production_slice_read_line < production_slice_requirement_line
             valid = valid && production_slice_requirement_line < production_control_group_read_line
             valid = valid && production_control_group_read_line < restart_slice_assignment_line
+            valid = valid && restart_slice_assignment_line < may_own_slice_assignment_line
             if (!valid) exit 1
         }
     ' "$worker_slice_source"
@@ -5428,7 +5457,7 @@ do
         exit 1
     fi
 done
-if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 3 ] \
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 4 ] \
     || grep -F -- '--property=RestrictSUIDSGID=yes' "$gate" >/dev/null \
     || [ "$(grep -Fc -- \
         "capture_unit_property RestrictSUIDSGID \\" "$gate")" -ne 2 ] \
@@ -5441,8 +5470,8 @@ if grep -F -- 'ProtectControlGroups=' "$gate" >/dev/null; then
     printf '%s\n' 'a transient helper still assigns the boolean-only legacy cgroup property' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 3 ]; then
-    printf '%s\n' 'all three transient helper invocations lack the exact fixed executable search path' >&2
+if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 4 ]; then
+    printf '%s\n' 'all four transient helper invocations lack the exact fixed executable search path' >&2
     exit 1
 fi
 # These are literal gate-source contracts; expansion here would defeat the checks.
@@ -5455,8 +5484,8 @@ if [ "$(grep -Fc 'notify_socket=/run/systemd/notify' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc "!= 'socket:0:0:777:1' ]; then" "$gate")" -ne 1 ] \
     || [ "$(grep -Fc 'notify_socket_bind="$notify_socket:$notify_socket:norbind"' \
         "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc '$notify_socket_bind' "$gate")" -ne 3 ]; then
-    printf '%s\n' 'the exact canonical systemd notify-socket preflight and three binds are not pinned' >&2
+    || [ "$(grep -Fc '$notify_socket_bind' "$gate")" -ne 4 ]; then
+    printf '%s\n' 'the exact canonical systemd notify-socket preflight and four binds are not pinned' >&2
     exit 1
 fi
 # These are literal source assignments; expansion here would defeat the check.
@@ -5477,7 +5506,7 @@ if [ "$(grep -Fc \
     "$gate")" -ne 1 ] \
     || [ "$(grep -Fc \
         '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production \' \
-        "$gate")" -ne 1 ] \
+        "$gate")" -ne 2 ] \
     || [ "$(grep -Fc \
         '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-restart-launcher \' \
         "$gate")" -ne 1 ]; then
@@ -5508,9 +5537,9 @@ unit_credential_source_contract_is_exact() {
             }
         }
         END {
-            valid = user == 3 && exact_user == 3
-            valid = valid && group == 3 && exact_group == 3
-            valid = valid && supplementary == 3 && exact_supplementary == 3
+            valid = user == 4 && exact_user == 4
+            valid = valid && group == 4 && exact_group == 4
+            valid = valid && supplementary == 4 && exact_supplementary == 4
             if (!valid) exit 1
         }
     ' "$credential_contract_source"
@@ -5573,10 +5602,10 @@ if [ "$(grep -Fc 'busctl_path=/usr/bin/busctl' "$gate")" -ne 1 ] \
     exit 1
 fi
 for cgroup_assignment_contract in \
-    'ProtectControlGroupsEx=:3' \
-    'Delegate=:3' \
-    'PrivatePIDs=:3' \
-    'SystemCallFilter=:6'
+    'ProtectControlGroupsEx=:4' \
+    'Delegate=:4' \
+    'PrivatePIDs=:4' \
+    'SystemCallFilter=:8'
 do
     assignment_key=${cgroup_assignment_contract%:*}
     expected_count=${cgroup_assignment_contract##*:}
@@ -5595,11 +5624,11 @@ done
 # shellcheck disable=SC2016
 if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
         "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 7 ] \
-    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 7 ] \
+    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 8 ] \
+    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 8 ] \
     || [ "$(grep -Fc 'GetUnit s "$1" 2>/dev/null)' "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc 'DumpFileDescriptorStore 2>/dev/null)' \
-        "$ipc_hook")" -ne 2 ] \
+        "$ipc_hook")" -ne 3 ] \
     || grep -F -- 'SYSTEMCTL_FORCE_BUS' "$ipc_hook" >/dev/null \
     || grep -F -- 'systemctl ' "$ipc_hook" >/dev/null \
     || grep -F -- '/run/systemd/private' "$gate" >/dev/null \
@@ -7254,9 +7283,9 @@ if [ "$(grep -Fc -- '--property=RuntimeMaxSec=180s' "$gate")" -ne 1 ]; then
     printf '%s\n' 'production IPC invocation does not have one exact runtime limit' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--property=StandardOutput=null' "$gate")" -ne 2 ] \
-    || [ "$(grep -Fc -- '--property=StandardError=null' "$gate")" -ne 2 ]; then
-    printf '%s\n' 'production IPC and restart invocations do not have exact null output streams' >&2
+if [ "$(grep -Fc -- '--property=StandardOutput=null' "$gate")" -ne 3 ] \
+    || [ "$(grep -Fc -- '--property=StandardError=null' "$gate")" -ne 3 ]; then
+    printf '%s\n' 'production IPC and both restart invocations do not have exact null output streams' >&2
     exit 1
 fi
 # These are literal source paths; expansion here would defeat the check.
