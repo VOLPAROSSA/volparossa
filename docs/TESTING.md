@@ -58,9 +58,11 @@ Prepare, signed-authority-bound Activate, correlated Probe/Commit and Destroy. U
 failure-injection tests prove complete-batch preflight, rollback after partial Prepare/Activate,
 rejection of role/path/peer substitution before mutation, no partial pair Commit, and complete-pair
 Destroy retry. Commit requires a handshake no older than activation plus strict RX and TX growth for
-every lease and caches the exact successful receipt for an identical retry. Transport acquisition,
-Relay forwarding, real end-to-end two-leg probing, client ingress, and live relay/exit publication
-remain fail closed. Relay authority tests verify one five-record replay transaction comprising the
+every lease and caches the exact successful receipt for an identical retry. The same helper-internal
+seam can forward the exact Relay pair and hand off one unconnected QUIC UDP descriptor per valid
+committed Client/Exit Acquire request. MPTCP/Relay socket acquisition, a production route/transport
+caller, simultaneous end-to-end probing, client ingress and live relay/exit publication remain fail
+closed. Relay authority tests verify one five-record replay transaction comprising the
 outer client-signed request, its embedded signed ClientSessionCapability and ExitReservation, the
 relay-signed response commitment and exact nested RelayAuthorization. They reject signer, TTL,
 replay, capability/exit/authorization scope and endpoint substitution before mutation, but do not

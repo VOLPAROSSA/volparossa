@@ -109,6 +109,15 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --offline --workspace --all-features
 
+      - name: Report functional QUIC UDP namespace proof outcome
+        run: |
+          cargo test --locked --offline -p volparossa-helper --lib --all-features \
+            worker_v3::functional_backend::tests::committed_client_and_exit_handoff_one_validated_quic_udp_descriptor \
+            -- --exact --nocapture --test-threads=1
+          cargo test --locked --offline -p volparossa-helper --lib --all-features \
+            worker_v3::functional_backend::tests::dropped_acquire_future_leaves_no_descriptor_cache_or_in_flight_call \
+            -- --exact --nocapture --test-threads=1
+
       - name: Check non-mutating integration harness
         run: |
           ./tests/netns/test-lifecycle-contract.sh

@@ -258,11 +258,12 @@ fn bind_production_socket(
 /// The crate-internal production engine can prepare, activate, probe-commit and destroy one
 /// process-owned functional-alpha Client or Exit singleton lease. A committed response proves only
 /// the exact `WireGuard` identity, signed peer, `/128` route, recent handshake and strict
-/// bidirectional counter growth; transport descriptor acquisition and every usable datapath remain
-/// unavailable. A successful return proves the engine was cleaned before the durable journal actor
-/// became quiescent. Startup still refuses `MayOwnPrepare` because no production restart reaper can
-/// yet prove absence of stale kernel state. Unexpected expiry-driver exit stops serving and fails
-/// the runtime closed.
+/// bidirectional counter growth. The same exact committed singleton can hand off one bound,
+/// explicitly unconnected QUIC UDP descriptor; MPTCP, Relay transport handoff, route-manager
+/// adoption and every usable datapath remain unavailable. A successful return proves the engine
+/// was cleaned before the durable journal actor became quiescent. Startup still refuses
+/// `MayOwnPrepare` because no production restart reaper can yet prove absence of stale kernel
+/// state. Unexpected expiry-driver exit stops serving and fails the runtime closed.
 ///
 /// # Errors
 ///

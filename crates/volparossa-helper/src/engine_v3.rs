@@ -32,6 +32,7 @@ use zeroize::Zeroizing;
 
 const MAX_CONTEXTS: usize = 64;
 const MAX_CACHED_REQUESTS: usize = 1_024;
+const MAX_TRANSPORT_ACQUIRE_REQUEST_IDS: usize = 1_024;
 const MAX_PREPARE_RECONCILIATIONS: usize = 1_024;
 const MAX_RECONCILIATION_REQUEST_IDS: usize = 1_024;
 const MAX_CLOSED_PREPARE_IDENTITIES: usize = 16;
@@ -71,6 +72,7 @@ struct EngineState {
     cleanup_pending: BTreeSet<([u8; 16], u64)>,
     prepare_reconciliations: HashMap<[u8; 16], PrepareReconciliationRecord>,
     reconciliation_request_ids: HashMap<[u8; 16], ReconciliationRequestRecord>,
+    transport_acquire_request_ids: HashMap<[u8; 16], TransportAcquireRequestRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +168,18 @@ impl ClosedPreparePlanBinding {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct ReconciliationRequestRecord {
+    digest: [u8; 32],
+    context_id: [u8; 16],
+    generation: u64,
+}
+
+/// Descriptorless replay authority retained for one exact live context generation in this runtime.
+///
+/// After backend success is committed, this bounded record prevents the affine FD from being
+/// reproduced even when outer response/FD delivery is ambiguous. It binds the outer request ID to
+/// the canonical digest until exact Destroy confirms that the whole generation is absent.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct TransportAcquireRequestRecord {
     digest: [u8; 32],
     context_id: [u8; 16],
     generation: u64,
@@ -506,16 +520,19 @@ pub(crate) enum BackendError {
 /// error closes every descriptor it created, and no error may leave *unowned* detached work.
 /// Destroy success is stronger: `ConfirmedAbsent` proves that the exact stable lineage's worker is
 /// reaped and every resource, pin, authority and descriptor acquired by that backend is absent for
-/// the live runtime. The functional-alpha backend additionally settles its same-runtime durable
-/// journal and systemd custody before returning this proof, but makes no restart-recovery claim.
+/// the live runtime. A descriptor already transferred to the caller is no longer backend-owned and
+/// must be closed by that caller before Destroy; `ConfirmedAbsent` cannot revoke an external
+/// `OwnedFd`. The functional-alpha backend additionally settles its same-runtime durable journal and
+/// systemd custody before returning this proof, but makes no restart-recovery claim.
 /// Dropping any future must be safe. The engine's
 /// timeout remains a soft ambiguity boundary and continues awaiting task settlement.
 ///
 /// The production server installs a deliberately narrow functional-alpha adapter for one Client or
-/// Exit singleton lease's Prepare, Activate, Probe-Commit and Destroy. Descriptor acquisition and
-/// a usable datapath stay unavailable, and the public [`HelperEngine::new`] constructor deliberately
-/// retains the fully unavailable backend. A complete production adapter still requires integration
-/// tests for all of these properties.
+/// Exit singleton lease's Prepare, Activate, Probe-Commit, unconnected QUIC UDP descriptor
+/// acquisition and Destroy. MPTCP, Relay descriptor acquisition and every usable datapath stay
+/// unavailable, and the public [`HelperEngine::new`] constructor deliberately retains the fully
+/// unavailable backend. A complete production adapter still requires integration tests for all of
+/// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
     fn prepare(
         self: Arc<Self>,
@@ -944,14 +961,42 @@ impl HelperEngine {
             request.operation.as_ref(),
             Some(helper_request::Operation::ReconcileExpiredPrepare(_))
         );
+        let is_transport_acquire = matches!(
+            request.operation.as_ref(),
+            Some(helper_request::Operation::AcquireTransportSocket(_))
+        );
 
-        // Tag 28 deliberately re-evaluates exact retries instead of caching a response, but its
-        // outer request ID remains globally bound to one canonical request digest. Check the
-        // dedicated runtime-lifetime
-        // tombstone before any Bind, global reap, target transition or backend call. A new tag-28
-        // ID is reserved later, only after its exact live lineage has been validated.
+        // Tag 28 and committed Acquire success both retain dedicated non-evictable request-ID
+        // bindings. Check them before Bind, global reap, target transition or any backend call.
+        // Acquire success cannot reproduce its affine FD: the exact retry gets one fixed
+        // descriptorless AlreadyExists response for this helper-runtime context generation.
         {
             let state = self.inner.state.lock().await;
+            if let Some(record) = state.transport_acquire_request_ids.get(&request_id) {
+                return Some(
+                    if is_transport_acquire && record.digest.ct_eq(&digest).unwrap_u8() == 1 {
+                        execution(
+                            response(
+                                request,
+                                HelperResult::AlreadyExists,
+                                "TRANSPORT_SOCKET_ALREADY_ACQUIRED",
+                                None,
+                            ),
+                            None,
+                        )
+                    } else {
+                        execution(
+                            response(
+                                request,
+                                HelperResult::InvalidRequest,
+                                "REQUEST_ID_CONFLICT",
+                                None,
+                            ),
+                            None,
+                        )
+                    },
+                );
+            }
             let request_id_conflict = if is_reconciliation {
                 state
                     .cache
@@ -1221,6 +1266,20 @@ impl HelperEngine {
             }
             _ => now.saturating_add(RESPONSE_CACHE_SECONDS),
         };
+        let descriptor_success_was_committed = matches!(
+            request.operation.as_ref(),
+            Some(helper_request::Operation::AcquireTransportSocket(_))
+        ) && result.response.result
+            == HelperResult::Ok as i32
+            && result.descriptor.is_some();
+        if descriptor_success_was_committed {
+            // Acquire success was already committed to the non-evictable, descriptorless
+            // same-runtime context-generation ledger in `acquire_async`. Never retain an FD or
+            // downgrade that lifetime binding to the generic 30-second evictable response cache.
+            return;
+        }
+        let cached_response = result.response.clone();
+        let cached_descriptor = result.descriptor.clone();
         let mut state = self.inner.state.lock().await;
         insert_cache(
             &mut state,
@@ -1228,8 +1287,8 @@ impl HelperEngine {
             CachedResponse {
                 digest: operation_digest(request).unwrap_or([0; 32]),
                 expires_at_unix,
-                response: result.response.clone(),
-                descriptor: result.descriptor.clone(),
+                response: cached_response,
+                descriptor: cached_descriptor,
                 context_id: if bind_context {
                     request_context_id(request)
                 } else {
@@ -1460,6 +1519,7 @@ impl HelperEngine {
         if confirmed {
             if exact_operation && exact_generation {
                 state.contexts.remove(&token.context_id);
+                purge_transport_acquire_generation(&mut state, token.context_id, token.generation);
                 state
                     .cleanup_pending
                     .remove(&(token.context_id, token.generation));
@@ -2949,6 +3009,20 @@ impl HelperEngine {
                     None,
                 ));
             }
+            // Only new successful Acquire IDs consume this generation-lifetime ledger. Its fixed
+            // bound never applies to Destroy, so descriptor replay pressure cannot block terminal
+            // cleanup.
+            if state.transport_acquire_request_ids.len() >= MAX_TRANSPORT_ACQUIRE_REQUEST_IDS {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::Capacity,
+                        "TRANSPORT_ACQUIRE_REPLAY_CAPACITY",
+                        None,
+                    ),
+                    None,
+                ));
+            }
             let generation = context.generation;
             let lineage = context_backend_lineage(context_id, context);
             let Some(token) = begin_operation(
@@ -3074,6 +3148,37 @@ impl HelperEngine {
                 None,
             ));
         }
+        if state.transport_acquire_request_ids.len() >= MAX_TRANSPORT_ACQUIRE_REQUEST_IDS
+            || state
+                .transport_acquire_request_ids
+                .contains_key(&request_id)
+        {
+            // The operation gate makes this unreachable after successful PLAN. Treat any internal
+            // admission drift as stale authority and destroy the exact generation fail-closed.
+            drop(state);
+            drop(descriptor);
+            let cleanup = self.rollback_context(token, request, sender).await;
+            if cleanup.response_sent {
+                return None;
+            }
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::CleanupIncomplete,
+                    "TRANSPORT_REPLAY_COMMIT_INCONSISTENT",
+                    None,
+                ),
+                None,
+            ));
+        }
+        state.transport_acquire_request_ids.insert(
+            request_id,
+            TransportAcquireRequestRecord {
+                digest,
+                context_id,
+                generation: operation.generation,
+            },
+        );
         state
             .cleanup_pending
             .remove(&(context_id, operation.generation));
@@ -4247,6 +4352,7 @@ fn cleanup_state_complete(state: &EngineState) -> bool {
     state.contexts.is_empty()
         && state.cleanup_pending.is_empty()
         && state.in_flight.is_none()
+        && state.transport_acquire_request_ids.is_empty()
         && state.prepare_reconciliations.values().all(|record| {
             matches!(
                 record.phase,
@@ -4262,6 +4368,16 @@ fn purge_context_cache(state: &mut EngineState, context_id: [u8; 16]) {
     state
         .cache_order
         .retain(|request_id| state.cache.contains_key(request_id));
+}
+
+fn purge_transport_acquire_generation(
+    state: &mut EngineState,
+    context_id: [u8; 16],
+    generation: u64,
+) {
+    state
+        .transport_acquire_request_ids
+        .retain(|_, record| record.context_id != context_id || record.generation != generation);
 }
 
 fn insert_cache(state: &mut EngineState, request_id: [u8; 16], value: CachedResponse) {
@@ -4480,7 +4596,9 @@ mod tests {
         proof_increment: AtomicU64,
         destroyed: StdMutex<Vec<[u8; 16]>>,
         transport_calls: AtomicU64,
+        transport_bindings: StdMutex<Vec<BackendBinding>>,
         transport_peers: StdMutex<Vec<StdUnixStream>>,
+        validate_functional_acquire_binding: AtomicBool,
         block_prepare: AtomicBool,
         prepare_entered: AtomicBool,
         prepare_released: AtomicBool,
@@ -4702,9 +4820,25 @@ mod tests {
             self: Arc<Self>,
             request: BackendRequest<AcquireTransportSocket>,
         ) -> BackendFuture<BackendCompletion<OwnedFd>> {
-            let (completion, _request) = request.into_parts();
+            let (completion, request) = request.into_parts();
+            let binding = completion.binding();
+            self.transport_bindings
+                .lock()
+                .expect("transport bindings")
+                .push(binding);
+            let functional_validation = self
+                .validate_functional_acquire_binding
+                .load(Ordering::Acquire)
+                .then(|| {
+                    crate::worker_v3::validate_functional_acquire_binding_for_test(
+                        binding, &request,
+                    )
+                })
+                .transpose();
             Box::pin(async move {
-                let result = if self.fail_acquire_cleanup.load(Ordering::Acquire) {
+                let result = if let Err(error) = functional_validation {
+                    Err(error)
+                } else if self.fail_acquire_cleanup.load(Ordering::Acquire) {
                     Err(BackendError::CleanupIncomplete)
                 } else {
                     StdUnixStream::pair()
@@ -5462,7 +5596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn committed_transport_handoffs_are_typed_cached_and_closed_on_destroy() {
+    async fn fake_backend_handoffs_are_typed_and_same_request_id_is_at_most_once() {
         let backend = Arc::new(FakeBackend::default());
         let clock = Arc::new(FixedClock(AtomicU64::new(100)));
         let engine = fake_engine(Arc::clone(&backend), clock);
@@ -5500,10 +5634,13 @@ mod tests {
             assert_eq!(ready.descriptor_kind, kind as i32);
             assert_eq!(ready.remote, remote);
             let second = engine.execute_with_descriptor(acquire).await;
-            assert_eq!(first.response, second.response);
-            let first_descriptor = first.descriptor.as_ref().expect("first descriptor");
-            let second_descriptor = second.descriptor.as_ref().expect("cached descriptor");
-            assert!(Arc::ptr_eq(first_descriptor, second_descriptor));
+            assert_eq!(second.response.result, HelperResult::AlreadyExists as i32);
+            assert_eq!(
+                second.response.diagnostic_code,
+                "TRANSPORT_SOCKET_ALREADY_ACQUIRED"
+            );
+            assert!(first.descriptor.is_some());
+            assert!(second.descriptor.is_none());
             drop(first);
             drop(second);
         }
@@ -5547,8 +5684,267 @@ mod tests {
             peer.set_read_timeout(Some(Duration::from_secs(1)))
                 .expect("read timeout");
             let mut byte = [0_u8; 1];
-            assert_eq!(peer.read(&mut byte).expect("closed cached descriptor"), 0);
+            assert_eq!(
+                peer.read(&mut byte).expect("closed handed-off descriptor"),
+                0
+            );
         }
+        assert!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .is_empty(),
+            "confirmed Destroy must purge every descriptorless Acquire replay binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_request_id_can_acquire_again_for_same_transport_scope() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+        let first_request = acquire_request_for(&prepared, 30);
+
+        let first = engine.execute_with_descriptor(first_request.clone()).await;
+        assert_eq!(first.response.result, HelperResult::Ok as i32);
+        assert!(first.descriptor.is_some());
+        drop(first);
+
+        let same_id = engine.execute_with_descriptor(first_request.clone()).await;
+        assert_eq!(same_id.response.result, HelperResult::AlreadyExists as i32);
+        assert_eq!(
+            same_id.response.diagnostic_code,
+            "TRANSPORT_SOCKET_ALREADY_ACQUIRED"
+        );
+        assert!(same_id.descriptor.is_none());
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 1);
+
+        let fresh_id = engine
+            .execute_with_descriptor(acquire_request_for(&prepared, 31))
+            .await;
+        assert_eq!(fresh_id.response.result, HelperResult::Ok as i32);
+        assert!(fresh_id.descriptor.is_some());
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 2);
+        drop(fresh_id);
+        assert_eq!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .len(),
+            2,
+            "a fresh request must not replace the first replay binding"
+        );
+
+        let first_id_after_fresh = engine.execute_with_descriptor(first_request).await;
+        assert_eq!(
+            first_id_after_fresh.response.result,
+            HelperResult::AlreadyExists as i32
+        );
+        assert_eq!(
+            first_id_after_fresh.response.diagnostic_code,
+            "TRANSPORT_SOCKET_ALREADY_ACQUIRED"
+        );
+        assert!(first_id_after_fresh.descriptor.is_none());
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 2);
+
+        let destroyed = engine
+            .execute(request(
+                32,
+                helper_request::Operation::DestroyContext(volparossa_routing::DestroyContext {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                }),
+            ))
+            .await;
+        assert_eq!(destroyed.result, HelperResult::Ok as i32);
+        assert!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_replay_ledger_survives_cache_loss_and_conflicts_without_backend() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), Arc::clone(&clock));
+        let prepared = commit_client_context(&engine, &backend).await;
+        let acquire = acquire_request_for(&prepared, 10);
+        let acquire_digest = operation_digest(&acquire).expect("Acquire digest");
+
+        let first = engine.execute_with_descriptor(acquire.clone()).await;
+        assert_eq!(first.response.result, HelperResult::Ok as i32);
+        assert!(first.descriptor.is_some());
+        drop(first);
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 1);
+        let runtime_queries_after_first = backend
+            .runtime_bindings
+            .lock()
+            .expect("runtime bindings")
+            .len();
+        {
+            let mut state = engine.inner.state.lock().await;
+            let generation = state.contexts.get(&[7; 16]).expect("context").generation;
+            assert!(
+                state
+                    .transport_acquire_request_ids
+                    .get(&[10; 16])
+                    .is_some_and(|record| {
+                        *record
+                            == TransportAcquireRequestRecord {
+                                digest: acquire_digest,
+                                context_id: [7; 16],
+                                generation,
+                            }
+                    })
+            );
+            assert!(
+                !state.cache.contains_key(&[10; 16]),
+                "committed descriptor success must not enter the evictable response cache"
+            );
+            // Model arbitrary generic-cache eviction before the exact retry.
+            state.cache.clear();
+            state.cache_order.clear();
+        }
+
+        clock.0.store(131, Ordering::Relaxed);
+        let replay = engine.execute_with_descriptor(acquire.clone()).await;
+        assert_eq!(replay.response.result, HelperResult::AlreadyExists as i32);
+        assert_eq!(
+            replay.response.diagnostic_code,
+            "TRANSPORT_SOCKET_ALREADY_ACQUIRED"
+        );
+        assert!(replay.descriptor.is_none());
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            backend
+                .runtime_bindings
+                .lock()
+                .expect("runtime bindings")
+                .len(),
+            runtime_queries_after_first,
+            "lifetime replay must return before every backend query or socket factory call"
+        );
+
+        let mut conflicting = acquire.clone();
+        let Some(helper_request::Operation::AcquireTransportSocket(value)) =
+            conflicting.operation.as_mut()
+        else {
+            panic!("Acquire operation")
+        };
+        value.expected_local = Some(transport_address([10, 77, 0, 2], 42_001));
+        let conflict = engine.execute_with_descriptor(conflicting).await;
+        assert_eq!(
+            conflict.response.result,
+            HelperResult::InvalidRequest as i32
+        );
+        assert_eq!(conflict.response.diagnostic_code, "REQUEST_ID_CONFLICT");
+        assert!(conflict.descriptor.is_none());
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn acquire_replay_ledger_bounds_admission_but_never_blocks_destroy() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+        let acquire = acquire_request_for(&prepared, 20);
+        let first = engine.execute_with_descriptor(acquire.clone()).await;
+        assert_eq!(first.response.result, HelperResult::Ok as i32);
+        assert!(first.descriptor.is_some());
+        drop(first);
+
+        {
+            let mut state = engine.inner.state.lock().await;
+            let generation = state.contexts.get(&[7; 16]).expect("context").generation;
+            let mut serial = 1_u128;
+            while state.transport_acquire_request_ids.len() < MAX_TRANSPORT_ACQUIRE_REQUEST_IDS {
+                let request_id = serial.to_be_bytes();
+                serial += 1;
+                state
+                    .transport_acquire_request_ids
+                    .entry(request_id)
+                    .or_insert(TransportAcquireRequestRecord {
+                        digest: *blake3::hash(&request_id).as_bytes(),
+                        context_id: [7; 16],
+                        generation,
+                    });
+            }
+        }
+        let saturated = engine
+            .execute_with_descriptor(acquire_request_for(&prepared, 21))
+            .await;
+        assert_eq!(saturated.response.result, HelperResult::Capacity as i32);
+        assert_eq!(
+            saturated.response.diagnostic_code,
+            "TRANSPORT_ACQUIRE_REPLAY_CAPACITY"
+        );
+        assert!(saturated.descriptor.is_none());
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 1);
+
+        backend.fail_destroy.store(true, Ordering::Release);
+        let unconfirmed = engine
+            .execute(request(
+                22,
+                helper_request::Operation::DestroyContext(volparossa_routing::DestroyContext {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                }),
+            ))
+            .await;
+        assert_eq!(unconfirmed.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .len(),
+            MAX_TRANSPORT_ACQUIRE_REQUEST_IDS,
+            "unconfirmed cleanup must retain every generation-lifetime replay binding"
+        );
+
+        backend.fail_destroy.store(false, Ordering::Release);
+        let destroyed = engine
+            .execute(request(
+                23,
+                helper_request::Operation::DestroyContext(volparossa_routing::DestroyContext {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                }),
+            ))
+            .await;
+        assert_eq!(destroyed.result, HelperResult::Ok as i32);
+        assert!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .is_empty(),
+            "terminal Destroy admission and confirmed retirement must purge a saturated ledger"
+        );
+
+        let after_destroy = engine.execute_with_descriptor(acquire).await;
+        assert_eq!(after_destroy.response.result, HelperResult::NotFound as i32);
+        assert_eq!(after_destroy.response.diagnostic_code, "CONTEXT_ABSENT");
+        assert!(after_destroy.descriptor.is_none());
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -6415,6 +6811,84 @@ mod tests {
         assert_eq!(binding.operation_kind, OperationKind::Destroy);
         assert_eq!(payload.context_id, [7; 16]);
         assert_eq!(payload.backend_generation, backend_generation);
+    }
+
+    #[tokio::test]
+    async fn rotated_committed_generation_reaches_functional_acquire_validator() {
+        let backend = Arc::new(FakeBackend::default());
+        backend
+            .validate_functional_acquire_binding
+            .store(true, Ordering::Release);
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture wall clock")
+            .as_secs();
+        let now_boottime = clock_nanos(ClockId::Boottime);
+        let (operation_generation, backend_generation) = {
+            let mut state = engine.inner.state.lock().await;
+            let context = state.contexts.get_mut(&[7; 16]).expect("Committed context");
+            // The functional validator independently checks real wall/boottime liveness. Keep the
+            // lifecycle-created context and generations, but project its test-only expiry forward.
+            context.setup_expires_at_unix = now_unix + 20;
+            context.hard_expires_at_unix = now_unix + 120;
+            context.setup_expires_at_boottime_ns = now_boottime + 20 * NANOSECONDS_PER_SECOND;
+            context.hard_expires_at_boottime_ns = now_boottime + 120 * NANOSECONDS_PER_SECOND;
+            (context.generation, context.backend_generation)
+        };
+        assert_ne!(operation_generation, backend_generation);
+
+        let mut local = [0_u8; 16];
+        local[0] = 0xfd;
+        local[15] = 2;
+        let acquired = engine
+            .execute_with_descriptor(request(
+                47,
+                helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    descriptor_kind: volparossa_routing::TransportSocketKind::QuicUdpUnconnected
+                        as i32,
+                    expected_local: Some(volparossa_routing::TransportSocketAddress {
+                        address: local.to_vec(),
+                        port: 42_047,
+                    }),
+                    expected_remote: None,
+                }),
+            ))
+            .await;
+        assert_eq!(acquired.response.result, HelperResult::Ok as i32);
+        assert!(acquired.descriptor.is_some());
+        let binding = {
+            let bindings = backend
+                .transport_bindings
+                .lock()
+                .expect("transport bindings");
+            *bindings.last().expect("Acquire binding")
+        };
+        assert_eq!(binding.operation_generation, operation_generation);
+        assert_eq!(binding.lineage.backend_generation, backend_generation);
+        assert_ne!(
+            binding.operation_generation,
+            binding.lineage.backend_generation
+        );
+        drop(acquired);
+
+        let destroyed = engine
+            .execute(request(
+                48,
+                helper_request::Operation::DestroyContext(volparossa_routing::DestroyContext {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                }),
+            ))
+            .await;
+        assert_eq!(destroyed.result, HelperResult::Ok as i32);
     }
 
     #[tokio::test]
