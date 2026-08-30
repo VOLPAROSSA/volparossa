@@ -724,8 +724,9 @@ observes the functional worker created by the no-argument production server. Thi
 implemented helper-boundary gate. Its Client-only predecessor produced a retained,
 host-revalidated exact-main PASS in run 33294974441 at
 `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`. The subsequent Exit expansion produced its retained
-exact-main PASS in run 33296892632 at `1ca51fe0d2a2be855adb182e85c229d1d12bc017`. The Relay-pair
-KVM/CI proof remains pending and non-retained. None of these scoped results is installed-package,
+exact-main PASS in run 33296892632 at `1ca51fe0d2a2be855adb182e85c229d1d12bc017`. Relay-pair
+exact-main run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` retained artifact
+9729172274. None of these scoped results is installed-package,
 restart, forwarding, usable-datapath or acceptance evidence.
 
 The helper unit deliberately sets `RestrictSUIDSGID=no`, unlike the agent and native MPQUIC units,
@@ -903,7 +904,7 @@ temporary relay interface and its route, proves their exact absence, and proves 
 activated object and grown counters remain unchanged. One fixed release byte then permits exact
 Commit plus a byte-identical cached retry, exact Destroy and its idempotent `existed=false` retry.
 
-The expanded branch then starts a fresh singleton Exit context in a different direct child PID and
+The retained implementation then starts a fresh singleton Exit context in a different direct child PID and
 different child network namespace. It prepares and activates one Exit-role lease, binding the
 helper-proven local key, `DirectAssigned` public underlay and listen port to the dual-signed exit
 tuple and installing only the relay-signed relay-exit peer. At the separate Exit READY barrier, the
@@ -915,15 +916,14 @@ growth at both peer views. The hook deletes `vpre0` by its retained alias, ifind
 lineage, proves its route and link absent while the worker state remains unchanged, and only then
 releases the probe for Exit Commit plus byte-identical retry and exact Destroy.
 
-The current Relay-pair branch also defines a third, separately spawned worker/namespace cycle for
-the exact ordered `RelayClient` + `RelayExit` pair. Its two temporary external peers are intended to
-exercise both local Relay endpoints concurrently, with both handshakes and both strict RX/TX-growth
-proofs required before the single pair Commit, followed by complete pair Destroy. No disposable-KVM
-or CI result for that Relay cycle has been accepted or retained yet. Even when it passes, packets
-terminate independently at the two Relay interfaces; the fixture installs no cross-leg forwarding
-and cannot prove a relay datapath.
+The retained Relay-pair implementation defines a third, separately spawned worker/namespace cycle
+for the exact ordered `RelayClient` + `RelayExit` pair. Exact-main run 33301595311 at
+`0095b113e450a0ab29da853fafa53b2b130f05fc` proved both simultaneous local Relay endpoints, both
+independent handshakes, strict RX/TX growth, pair Commit plus retry and complete pair Destroy, and
+retained artifact 9729172274. Packets terminate independently at the two Relay interfaces; the
+fixture installs no cross-leg forwarding and cannot prove a relay datapath.
 
-After both sequential cycles, the hook requires zero helper children and no helper FD retaining a
+After all three cycles, the hook requires zero helper children and no helper FD retaining a
 worker namespace or any foreign worker network namespace. Each retired process pin must be terminal
 and each pinned worker namespace must be WireGuard-empty before that cycle's observer closes. The
 descriptor store must be empty, followed by the fixed exact-one-loopback/no-default-route cleanup
@@ -947,9 +947,10 @@ The subsequent Exit cycle has retained, host-revalidated exact-main evidence fro
 [run 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017`, artifact
 [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
-Both retained cycles use self-contained fixture signers, not trusted selection or policy authority.
-The Relay-pair KVM/CI proof remains pending and non-retained. The retained sequential legs do not
-prove a simultaneous two-leg route, Relay forwarding, transport descriptor, ingress, usable
+All three retained cycles use self-contained fixture signers, not trusted selection or policy
+authority. The retained Relay pair proves two simultaneous endpoint leases, both independent
+handshakes, RX/TX-counter growth, pair Commit plus retry and cleanup, but does not prove a
+simultaneous two-leg route, Relay forwarding, transport descriptor, ingress, usable
 VPN/datapath, crash/restart recovery, A01--A15 acceptance result or alpha-score increase; the fixed
 score remains **11/100 (11%)**.
 
@@ -989,8 +990,9 @@ recovery requires the exact per-stage marker before adopting the manager's curre
 diagnostic unit is reset to inactive before its descriptor store is cleaned. Retirement cleans only
 that unit's `fdstore`, requires either
 `NFileDescriptorStore=0` or `LoadState=not-found`, resets it when still present and waits boundedly
-for collection; any ambiguous observation fails the gate. The driver has not yet produced a retained
-exact-main PASS. A non-main branch run may exercise and validate the same disposable proof, but
+for collection; any ambiguous observation fails the gate. The driver has produced the scoped
+retained exact-main PASSes identified below; none is package, restart, forwarding, datapath or
+acceptance evidence. A non-main branch run may exercise and validate the same disposable proof, but
 on PASS `non-retained-pr-smoke` deliberately discards its report, hash, environment, console and
 proof diagnostics and requires an empty output directory. Its workflow never uploads branch PASS
 artifacts or failure diagnostics; a failed smoke exposes only one fixed allowlisted category (or
@@ -1087,10 +1089,12 @@ keeps hook-created artifacts root:root mode 0600 despite the agent GID. This fai
 correction were not PASS evidence. The subsequent Client-only exact-main run 33294974441 at
 `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` succeeded and retained artifact 9727163813. Exit exact-main
 run 33296892632 at `1ca51fe0d2a2be855adb182e85c229d1d12bc017` subsequently succeeded and retained
-artifact 9727739271. The Relay-pair KVM/CI proof remains pending. The alpha score remains **11/100**.
+artifact 9727739271. Relay-pair exact-main run 33301595311 at
+`0095b113e450a0ab29da853fafa53b2b130f05fc` retained artifact 9729172274. The alpha score remains
+**11/100**.
 The second phase exercises the production server entry point, but not an installed package, the
-shipped unit file, restart policy, or inherited-descriptor adoption/recovery. The retained Client
-and Exit results are not package, datapath, A14 or A15 evidence.
+shipped unit file, restart policy, or inherited-descriptor adoption/recovery. The retained Client,
+Exit and Relay-pair results are not package, datapath, A14 or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
@@ -1606,16 +1610,18 @@ acquisition, client ingress, or datapath operation can be called complete, all o
 remain. The Client lifecycle and equal enumerated host-state fences have retained exact-main
 evidence from run 33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`; the separate Exit
 lifecycle has retained exact-main evidence from run 33296892632 at
-`1ca51fe0d2a2be855adb182e85c229d1d12bc017`. Those scoped sequential results are not staged-package,
-Relay-pair, simultaneous-route, restart or acceptance evidence.
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017`; and Relay-pair run 33301595311 at
+`0095b113e450a0ab29da853fafa53b2b130f05fc` retained the simultaneous endpoint-pair proof. Those
+scoped results are not staged-package, simultaneous-route, forwarding, restart or acceptance
+evidence.
 
 - validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
   the final worker must retain only `CAP_NET_ADMIN`;
-- obtain a retained exact-main KVM/CI PASS for the branch Relay endpoint-pair fixture. Until then,
-  the unit-tested atomic pair lifecycle is not live-kernel evidence;
+- extend the retained exact-main Relay endpoint-pair lifecycle with an exact cross-leg forwarding
+  fence and live traffic proof; the present retained result proves both endpoints but no forwarding;
 - extend the asynchronous `HelperEngine` backend beyond the current
   Client/Exit-singleton-or-Relay-pair
   Prepare/Activate/Probe-Commit/Destroy path: descriptor acquisition, cached-descriptor cleanup and
@@ -1631,7 +1637,7 @@ Relay-pair, simultaneous-route, restart or acceptance evidence.
   batch preflight, rollback, proof and cleanup;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
 - add a Relay forwarding fence and cross-leg forwarding, then join the separately retained Client
-  and Exit singleton baselines and the pending Relay endpoint pair into one simultaneous
+  and Exit singleton baselines and the retained Relay endpoint pair into one simultaneous
   client-to-relay-to-exit route with correlated handshake/RX/TX Commit proof for every selected
   path;
 - connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact

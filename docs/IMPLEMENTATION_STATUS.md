@@ -130,10 +130,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   `!`, the worker account expiry is exactly `1`, and root-owned metadata is not writable by either
   service identity, with group read limited to the resolved
   `shadow` group. The bounded zeroizing read cannot reallocate hashes. This is still not complete isolation or
-  context cleanup: the Client and Exit singleton cycles have separate retained exact-main Debian 13
+  context cleanup: the Client and Exit singleton cycles and the Relay endpoint-pair cycle have
+  separate retained exact-main Debian 13
   live-root PASS evidence for the identity transition, parent-signal and runtime-path denials,
-  pre-filter process-tree state and equal enumerated host-state fences, but the Relay-pair KVM/CI
-  proof remains pending and retirement still owns only the exact leader. A preview-first root driver now
+  pre-filter process-tree state and equal enumerated host-state fences, but retirement still owns
+  only the exact leader. A preview-first root driver now
   stages the real
   component in a transient `PrivateNetwork` systemd unit with synthetic read-only account overlays,
   a private `/run`, the exact seven-capability parent set, exact singleton staged-agent
@@ -194,10 +195,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   distinct `vpre0` fixture with a second deterministic key carries bounded ICMPv6 over a real,
   separate relay-to-exit WireGuard leg, proves recent handshake and strict bidirectional growth, and
   is removed by exact alias/ifindex/WireGuard-kind lineage before Exit Commit with byte-identical
-  retry and Destroy. The current branch defines a third, separate worker/namespace cycle for the
+  retry and Destroy. A third, separate worker/namespace cycle exercises the
   exact ordered Relay endpoint pair, with two simultaneous external endpoint fixtures, both
   handshakes and strict RX/TX growth required before pair Commit, followed by complete-pair Destroy.
-  That Relay cycle has no accepted or retained KVM/CI result yet; it installs no cross-leg forwarding.
+  Exact-main run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc`
+  retained that Relay-pair proof as artifact 9729172274. It installs no cross-leg forwarding.
   Final checks require zero helper children and no helper FD retaining a worker namespace or any
   foreign worker network namespace. Each cycle's retired process pin must be terminal and its pinned
   namespace WireGuard-empty before that observer closes; the descriptor store must be empty and the
@@ -221,8 +223,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   failure diagnostics. This is manual branch selection rather than an automatic pull-request trigger.
   Client exact-main run 33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` retained artifact
   9727163813. Exit exact-main run 33296892632 at
-  `1ca51fe0d2a2be855adb182e85c229d1d12bc017` succeeded and retained artifact 9727739271. The Relay
-  pair has no retained KVM/CI PASS. These self-contained fixture identities do not validate trusted
+  `1ca51fe0d2a2be855adb182e85c229d1d12bc017` succeeded and retained artifact 9727739271. Relay-pair
+  exact-main run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` succeeded and retained
+  artifact 9729172274. These self-contained fixture identities do not validate trusted
   selection/policy authority or provide an independent discovery/connection trust anchor, a
   simultaneous two-leg route or Relay forwarding, transport descriptor, ingress, usable VPN
   datapath, crash recovery, installed package or shipped-unit restart behavior. A non-retained
@@ -441,14 +444,17 @@ single clean-build A01--A15 run; the score is not a release claim.
   at `1ca51fe0d2a2be855adb182e85c229d1d12bc017` succeeded and retained the Exit-expanded
   helper-boundary artifact
   [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
-  Neither result covers the Relay endpoint pair or establishes installed-package, restart,
-  trusted-selection, forwarding or usable-datapath readiness, and neither raises the **11/100**
+  [Exact-main run 33301595311](https://github.com/VOLPAROSSA/volparossa/actions/runs/33301595311)
+  at `0095b113e450a0ab29da853fafa53b2b130f05fc` subsequently retained the Relay-pair artifact
+  [9729172274](https://github.com/VOLPAROSSA/volparossa/actions/runs/33301595311/artifacts/9729172274).
+  None of these results establishes installed-package, restart, trusted-selection, forwarding or
+  usable-datapath readiness, and none raises the **11/100**
   score or closes AV1-09.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
-  retained exact-main live-root integration evidence now exists separately for the scoped Client
-  and Exit singleton cycles, but not for the Relay pair or complete production integration.
+  retained exact-main live-root integration evidence now exists separately for the scoped Client,
+  Exit and Relay-pair cycles, but not for complete production integration or forwarding.
 - [ ] Dormant helper tags 35/28 register one exact runtime-global Prepare intent and reconcile only
   an expired same-runtime lineage. HelperClient uses one authenticated stream and one absolute
   five-second budget for each Bind-plus-operation sequence; post-Prepare-write failures transfer
@@ -760,9 +766,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   run 33294974441 retained that scoped exact-main evidence. Run 33296892632 at
   `1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained the fresh Exit worker/namespace,
   dual-signed local tuple, relay-signed relay-exit peer, separate `vpre0` relay-to-exit leg, bounded
-  ICMPv6, Probe/Commit retry and cleanup as artifact 9727739271. The Relay pair has unit and failure
-  injection coverage, but its KVM/CI proof remains pending and non-retained. Neither retained
-  sequential proof is a simultaneous two-leg route or Relay-forwarding proof. Durable
+  ICMPv6, Probe/Commit retry and cleanup as artifact 9727739271. Relay-pair run 33301595311 at
+  `0095b113e450a0ab29da853fafa53b2b130f05fc` retained the simultaneous two-endpoint worker proof as
+  artifact 9729172274. It is not a cross-leg route or Relay-forwarding proof. Durable
   pidfd/network-namespace recovery and the separate Add/Remove MPTCP endpoint seam remain required;
   AV1-09, AV1-10 and AV1-11, the **11/100 (11%)** score, and every datapath or A01--A15 acceptance
   checkbox remain unchanged.
@@ -1098,8 +1104,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   `1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained the fresh Exit worker/namespace, separate
   `vpre0` relay-to-exit WireGuard leg, bounded ICMPv6, strict bidirectional growth, exact fixture
   cleanup, exact Commit plus byte-identical retry and exact Destroy as artifact 9727739271. The
-  public `HelperEngine::new` remains `Unavailable`, no production route-manager caller reaches the
-  backend, Relay forwarding is absent, and the Relay-pair KVM/CI proof remains pending.
+  Relay-pair exact-main run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc`
+  retained the complete-pair worker proof as artifact 9729172274. The public `HelperEngine::new`
+  remains `Unavailable`, no production route-manager caller reaches the backend, and Relay
+  forwarding is absent.
 - [ ] Typed/pure/fake helper boundaries prove exact public handles, cardinality, TTL, idempotency,
   state transitions, and handshake/RX/TX proof policy. Agent route tests exercise
   prepare/activate/commit/destroy and destroy-first retirement through fake backends. The helper's
@@ -1109,8 +1117,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   retry and normal process-owned cleanup. They do not prove trusted selection/policy authority, a
   simultaneous two-leg route, Relay forwarding, transport descriptor, ingress, a usable end-to-end
   VPN/datapath, crash recovery, A01--A15 acceptance, or any increase from the **11/100 (11%)** alpha
-  score. The atomic Relay-pair unit/failure-injection tests do not substitute for its pending
-  live-kernel KVM/CI proof.
+  score. The retained Relay-pair KVM proof establishes two simultaneous endpoint leases, not
+  forwarding between them.
 - [ ] Service ledgers reduce internal available capacity immediately, but production publishes no
   relay/exit advertisement, so advertised free-capacity updates are not wired.
 - [ ] Ledger/service tests prove that explicit expiry purging restores capacity, and the agent
