@@ -2854,6 +2854,81 @@ retire_functional_peer_keeper() {
         && [ ! -L "/proc/$hook_peer_pid" ]
 }
 
+canonical_expanded_ipv6_address() {
+    [ "$#" -eq 1 ] || return 1
+    hook_expanded_ipv6_address=$1
+    case $hook_expanded_ipv6_address in
+        ''|*[!0-9a-f:]*) return 1 ;;
+    esac
+    [ "${#hook_expanded_ipv6_address}" -eq 39 ] || return 1
+    printf '%s\n' "$hook_expanded_ipv6_address" | /usr/bin/awk -F: '
+        function canonical_group(group) {
+            sub(/^0+/, "", group)
+            return group == "" ? "0" : group
+        }
+        NR == 1 {
+            if (NF != 8) {
+                invalid = 1
+                next
+            }
+            for (position = 1; position <= 8; position++) {
+                if (length($position) != 4 \
+                    || $position !~ /^[0-9a-f]+$/) invalid = 1
+            }
+            if (invalid) next
+
+            run_start = 0
+            run_length = 0
+            best_start = 0
+            best_length = 0
+            for (position = 1; position <= 9; position++) {
+                if (position <= 8 && $position == "0000") {
+                    if (run_start == 0) run_start = position
+                    run_length++
+                } else {
+                    if (run_length > best_length) {
+                        best_start = run_start
+                        best_length = run_length
+                    }
+                    run_start = 0
+                    run_length = 0
+                }
+            }
+            if (best_length < 2) {
+                best_start = 0
+                best_length = 0
+            }
+
+            canonical = ""
+            position = 1
+            while (position <= 8) {
+                if (position == best_start) {
+                    canonical = canonical == "" ? "::" : canonical "::"
+                    position += best_length
+                    continue
+                }
+                group = canonical_group($position)
+                if (canonical == "" || substr(canonical, length(canonical), 1) == ":") {
+                    canonical = canonical group
+                } else {
+                    canonical = canonical ":" group
+                }
+                position++
+            }
+            if (canonical !~ /^[0-9a-f:]+$/ \
+                || index(canonical, ":") == 0 \
+                || length(canonical) < 2 \
+                || length(canonical) > 39) invalid = 1
+            accepted++
+        }
+        NR > 1 { invalid = 1 }
+        END {
+            if (invalid || NR != 1 || accepted != 1) exit 1
+            print canonical
+        }
+    '
+}
+
 functional_pair_parent_wireguard_is_exact() {
     [ "$#" -eq 9 ] || return 1
     hook_peer_interface=$1
@@ -2865,6 +2940,10 @@ functional_pair_parent_wireguard_is_exact() {
     hook_worker_listen_port=$7
     hook_worker_address=$8
     hook_cross_address=$9
+    hook_canonical_worker_address=$(canonical_expanded_ipv6_address \
+        "$hook_worker_address") || return 1
+    hook_canonical_cross_address=$(canonical_expanded_ipv6_address \
+        "$hook_cross_address") || return 1
     /usr/sbin/ip -details -json link show dev \
         "$hook_peer_interface" 2>/dev/null \
         | /usr/bin/jq -e \
@@ -2894,8 +2973,8 @@ functional_pair_parent_wireguard_is_exact() {
         allowed-ips 2>/dev/null) || return 1
     printf '%s\n' "$hook_allowed_ips" | /usr/bin/awk -F '\t' \
         -v expected_key="$hook_worker_public_key" \
-        -v first="$hook_worker_address/128" \
-        -v second="$hook_cross_address/128" '
+        -v first="$hook_canonical_worker_address/128" \
+        -v second="$hook_canonical_cross_address/128" '
           NR == 1 && NF == 2 && $1 == expected_key {
               count = split($2, address, " ")
               if (count == 2 \
@@ -2979,6 +3058,10 @@ functional_pair_peer_fixture_is_exact() {
     hook_peer_local_address=$2
     hook_worker_address=$3
     hook_cross_address=$4
+    hook_canonical_worker_address=$(canonical_expanded_ipv6_address \
+        "$hook_worker_address") || return 1
+    hook_canonical_cross_address=$(canonical_expanded_ipv6_address \
+        "$hook_cross_address") || return 1
     functional_peer_keeper_is_exact \
         "$hook_peer_pid" "$hook_peer_starttime" \
         "$hook_peer_namespace_identity" || return 1
@@ -3012,7 +3095,8 @@ functional_pair_peer_fixture_is_exact() {
               }
               END { if (records != 1 || matches != 1) exit 1 }
             ' /proc/net/if_inet6 || return 1
-    for hook_route_address in "$hook_worker_address" "$hook_cross_address"; do
+    for hook_route_address in \
+        "$hook_canonical_worker_address" "$hook_canonical_cross_address"; do
         hook_route_destination=$(/usr/bin/nsenter \
             --net="/proc/$hook_peer_pid/ns/net" -- \
             /usr/sbin/ip -6 -json route show table main \
@@ -3054,8 +3138,8 @@ functional_pair_peer_fixture_is_exact() {
         || return 1
     printf '%s\n' "$hook_peer_field" | /usr/bin/awk -F '\t' \
         -v expected_key="$hook_worker_public_key" \
-        -v first="$hook_worker_address/128" \
-        -v second="$hook_cross_address/128" '
+        -v first="$hook_canonical_worker_address/128" \
+        -v second="$hook_canonical_cross_address/128" '
           NR == 1 && NF == 2 && $1 == expected_key {
               count = split($2, address, " ")
               if (count == 2 \
@@ -3125,6 +3209,32 @@ functional_relay_pair_fixtures_are_exact() {
         "$functional_pair_exit_peer_address" \
         "$functional_pair_exit_worker_address" \
         "$functional_pair_client_peer_address"
+}
+
+functional_pair_moved_link_ifindex() {
+    [ "$#" -eq 2 ] || return 1
+    hook_peer_pid=$1
+    hook_peer_interface=$2
+    number_is_safe "$hook_peer_pid" || return 1
+    case $hook_peer_interface in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#hook_peer_interface}" -le 15 ] || return 1
+    /usr/bin/nsenter --net="/proc/$hook_peer_pid/ns/net" -- \
+        /usr/sbin/ip -details -json link show dev \
+            "$hook_peer_interface" 2>/dev/null \
+        | /usr/bin/jq -e -r --arg name "$hook_peer_interface" '
+              select(
+                  type == "array" and length == 1
+                  and .[0].ifname == $name
+                  and (.[0].ifindex | type) == "number"
+                  and .[0].ifindex == (.[0].ifindex | floor)
+                  and .[0].ifindex >= 1
+                  and .[0].ifindex <= 4294967294
+                  and .[0].linkinfo.info_kind == "wireguard"
+              )
+              | .[0].ifindex
+            '
 }
 
 build_functional_relay_pair_fixtures() {
@@ -3209,9 +3319,8 @@ build_functional_relay_pair_fixtures() {
     /usr/sbin/ip link set dev "$functional_relay" \
         netns "$functional_pair_client_keeper_pid" || return 1
     functional_pair_client_link_state=moved
-    hook_pair_moved_ifindex=$(/usr/bin/nsenter \
-        --net="/proc/$functional_pair_client_keeper_pid/ns/net" -- \
-        /usr/bin/cat "/sys/class/net/$functional_relay/ifindex") || return 1
+    hook_pair_moved_ifindex=$(functional_pair_moved_link_ifindex \
+        "$functional_pair_client_keeper_pid" "$functional_relay") || return 1
     number_is_safe "$hook_pair_moved_ifindex" \
         && [ "$hook_pair_moved_ifindex" = \
             "$functional_pair_client_ifindex" ] || return 1
@@ -3229,9 +3338,8 @@ build_functional_relay_pair_fixtures() {
     /usr/sbin/ip link set dev "$functional_exit_relay" \
         netns "$functional_pair_exit_keeper_pid" || return 1
     functional_pair_exit_link_state=moved
-    hook_pair_moved_ifindex=$(/usr/bin/nsenter \
-        --net="/proc/$functional_pair_exit_keeper_pid/ns/net" -- \
-        /usr/bin/cat "/sys/class/net/$functional_exit_relay/ifindex") || return 1
+    hook_pair_moved_ifindex=$(functional_pair_moved_link_ifindex \
+        "$functional_pair_exit_keeper_pid" "$functional_exit_relay") || return 1
     number_is_safe "$hook_pair_moved_ifindex" \
         && [ "$hook_pair_moved_ifindex" = \
             "$functional_pair_exit_ifindex" ] || return 1
