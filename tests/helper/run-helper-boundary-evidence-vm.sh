@@ -52,7 +52,7 @@ print_plan() {
             '  provision and fetch locked dependencies in a first disposable KVM boot;' \
             '  restart with QEMU user-network egress denied and prove that denial;' \
             '  build fully offline as the unprivileged guest user in the restricted boot;' \
-            '  run only the fixed sequential Client/Exit helper-boundary proof as guest root;' \
+            '  run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
             '  shut down, rehash the base image, validate, and discard all proof files;' \
             '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
             'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
@@ -68,7 +68,7 @@ print_plan() {
         '  provision and fetch locked dependencies in a first disposable KVM boot;' \
         '  restart with QEMU user-network egress denied and prove that denial;' \
         '  build fully offline as the unprivileged guest user in the restricted boot;' \
-        '  run only the fixed sequential Client/Exit helper-boundary proof as guest root;' \
+        '  run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
         '  shut down, rehash the base image, validate, and publish five bounded files;' \
         '  bind QEMU lifecycle to pidfds and remove keys, seed and overlay on exit.' \
         'No bridge, TAP device, host route, firewall, DNS, sysctl or VPN state is changed.'
@@ -471,6 +471,13 @@ non_retained_production_launch_stage_is_safe() {
         functional-exit-relay-fixture|\
         functional-exit-relay-traffic|\
         functional-exit-relay-cleanup|\
+        functional-exit-release|\
+        functional-exit-cleanup|\
+        functional-relay-pair-ready|\
+        functional-relay-pair-worker-observation|\
+        functional-relay-pair-fixtures|\
+        functional-relay-pair-traffic|\
+        functional-relay-pair-cleanup|\
         functional-probe-finish|\
         functional-cleanup|\
         publication)
@@ -493,7 +500,10 @@ non_retained_functional_probe_failure_value_is_safe() {
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|\
         second-cycle-release|second-cycle-reconnect|second-cycle-commit|\
-        second-cycle-destroy|final-shutdown)
+        second-cycle-destroy|relay-pair-plan|relay-pair-bind|relay-pair-prepare|\
+        relay-pair-activate|relay-pair-reuse|relay-pair-shutdown|relay-pair-ready|\
+        relay-pair-release|relay-pair-reconnect|relay-pair-commit|\
+        relay-pair-destroy|final-shutdown)
             ;;
         *) return 1 ;;
     esac
@@ -527,7 +537,7 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
     [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-probe-finish|functional-cleanup|publication)$'
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-exit-release|functional-exit-cleanup|functional-relay-pair-ready|functional-relay-pair-worker-observation|functional-relay-pair-fixtures|functional-relay-pair-traffic|functional-relay-pair-cleanup|functional-probe-finish|functional-cleanup|publication)$'
     [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_functional_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
@@ -544,7 +554,7 @@ report_non_retained_production_launch_diagnostic() {
             non_retained_functional_failure_value=
             ;;
         1)
-            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|second-cycle-release|second-cycle-reconnect|second-cycle-commit|second-cycle-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
+            non_retained_functional_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=(plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|second-cycle-plan|second-cycle-bind|second-cycle-prepare|second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|second-cycle-release|second-cycle-reconnect|second-cycle-commit|second-cycle-destroy|relay-pair-plan|relay-pair-bind|relay-pair-prepare|relay-pair-activate|relay-pair-reuse|relay-pair-shutdown|relay-pair-ready|relay-pair-release|relay-pair-reconnect|relay-pair-commit|relay-pair-destroy|final-shutdown),(random|protocol|io|timeout|untrusted|correlation|unexpected-response)$'
             [ "$(grep -Ec "$non_retained_functional_diagnostic_pattern" \
                 "$non_retained_diagnostic")" -eq 1 ] || return 1
             non_retained_functional_diagnostic=$(grep -E \
@@ -567,14 +577,15 @@ report_non_retained_production_launch_diagnostic() {
         || return 1
     if [ -n "$non_retained_functional_failure_value" ]; then
         case $non_retained_production_stage in
-            functional-probe-wait|functional-client-release|functional-probe-finish) ;;
+            functional-probe-wait|functional-client-release|functional-exit-release|\
+            functional-probe-finish) ;;
             *) return 1 ;;
         esac
     fi
     printf 'non-retained helper-boundary PR smoke production launch diagnostic: %s\n' \
         "$non_retained_production_stage" >&2
     if [ -n "$non_retained_functional_failure_value" ]; then
-        printf 'non-retained helper-boundary PR smoke sequential Client/Exit lease diagnostic: %s\n' \
+        printf 'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: %s\n' \
             "$non_retained_functional_failure_value" >&2
     fi
 }

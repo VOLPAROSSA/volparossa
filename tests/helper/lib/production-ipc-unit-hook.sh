@@ -33,6 +33,7 @@ functional_exit_relay_listen_port=10001
 functional_exit_relay_public_key=c7LYt2qptTZgAyvI9di+46OuTjs6f9Sa3oH3NHo0qmg=
 functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready
 functional_exit_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=ready
+functional_relay_pair_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=ready
 functional_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass
 functional_committed_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_COMMITTED_KERNEL_V1=pass
 functional_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass
@@ -41,6 +42,10 @@ functional_exit_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEA
 functional_exit_committed_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_COMMITTED_KERNEL_V1=pass
 functional_exit_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass
 functional_exit_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_EXTERNAL_CLEANUP_V1=pass
+functional_relay_pair_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_ACTIVATED_KERNEL_V1=pass
+functional_relay_pair_committed_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_COMMITTED_KERNEL_V1=pass
+functional_relay_pair_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass
+functional_relay_pair_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_EXTERNAL_CLEANUP_V1=pass
 functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
 functional_failure_record=$proof_directory/functional-client-lease.failure
 functional_peer_public_key=$functional_relay_public_key
@@ -60,6 +65,7 @@ functional_relay_client_address=
 functional_exit_relay_state=absent
 functional_exit_relay_ifindex=
 functional_exit_relay_exit_address=
+functional_fixture_shape=single
 
 fail() {
     printf 'production IPC unit hook failed: %s\n' "$1" >&2
@@ -221,6 +227,13 @@ start_failure_stage_is_safe() {
         functional-exit-relay-fixture|\
         functional-exit-relay-traffic|\
         functional-exit-relay-cleanup|\
+        functional-exit-release|\
+        functional-exit-cleanup|\
+        functional-relay-pair-ready|\
+        functional-relay-pair-worker-observation|\
+        functional-relay-pair-fixtures|\
+        functional-relay-pair-traffic|\
+        functional-relay-pair-cleanup|\
         functional-probe-finish|\
         functional-cleanup|\
         publication)
@@ -281,7 +294,14 @@ advance_start_failure_stage() {
         functional-exit-worker-observation:functional-exit-relay-fixture|\
         functional-exit-relay-fixture:functional-exit-relay-traffic|\
         functional-exit-relay-traffic:functional-exit-relay-cleanup|\
-        functional-exit-relay-cleanup:functional-probe-finish|\
+        functional-exit-relay-cleanup:functional-exit-release|\
+        functional-exit-release:functional-exit-cleanup|\
+        functional-exit-cleanup:functional-relay-pair-ready|\
+        functional-relay-pair-ready:functional-relay-pair-worker-observation|\
+        functional-relay-pair-worker-observation:functional-relay-pair-fixtures|\
+        functional-relay-pair-fixtures:functional-relay-pair-traffic|\
+        functional-relay-pair-traffic:functional-relay-pair-cleanup|\
+        functional-relay-pair-cleanup:functional-probe-finish|\
         functional-probe-finish:functional-cleanup|\
         functional-cleanup:publication)
             start_failure_stage=$1
@@ -303,16 +323,26 @@ publish_start_failure() {
 start_failure_exit() {
     start_failure_status=$?
     trap - EXIT
-    if [ "$functional_exit_relay_state" != absent ]; then
-        if ! remove_functional_exit_relay_fixture; then
-            start_failure_status=1
-        fi
-    fi
-    if [ "$functional_relay_state" != absent ]; then
-        if ! remove_functional_relay_fixture; then
-            start_failure_status=1
-        fi
-    fi
+    case $functional_fixture_shape in
+        pair)
+            if ! remove_functional_relay_pair_fixtures; then
+                start_failure_status=1
+            fi
+            ;;
+        single)
+            if [ "$functional_exit_relay_state" != absent ]; then
+                if ! remove_functional_exit_relay_fixture; then
+                    start_failure_status=1
+                fi
+            fi
+            if [ "$functional_relay_state" != absent ]; then
+                if ! remove_functional_relay_fixture; then
+                    start_failure_status=1
+                fi
+            fi
+            ;;
+        *) start_failure_status=1 ;;
+    esac
     if [ "$start_failure_status" -ne 0 ] \
         && [ "$start_failure_armed" = yes ] \
         && [ "$start_failure_published" = no ]; then
@@ -1511,6 +1541,188 @@ worker_wireguard_interface() {
     printf '%s\n' "$hook_interfaces"
 }
 
+worker_relay_pair_interfaces() {
+    [ "$#" -eq 1 ] || return 1
+    hook_namespace_fd=$1
+    fd_number_is_safe "$hook_namespace_fd" || return 1
+    hook_pair_interfaces=$(/usr/bin/nsenter \
+        --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/wg show interfaces 2>/dev/null) || return 1
+    case $hook_pair_interfaces in
+        ''|*[!A-Za-z0-9_.\ -]*) return 1 ;;
+    esac
+    # The allowlist above excludes glob metacharacters; splitting the one kernel
+    # `wg show interfaces` record is intentional and must yield exactly two names.
+    # shellcheck disable=SC2086
+    set -- $hook_pair_interfaces
+    [ "$#" -eq 2 ] || return 1
+    hook_relay_client_interface=
+    hook_relay_exit_interface=
+    for hook_pair_interface in "$@"; do
+        [ "${#hook_pair_interface}" -le 15 ] || return 1
+        case $hook_pair_interface in
+            vpr1????????)
+                [ -z "$hook_relay_client_interface" ] || return 1
+                hook_relay_client_interface=$hook_pair_interface
+                hook_pair_tail=${hook_pair_interface#vpr}
+                ;;
+            vps1????????)
+                [ -z "$hook_relay_exit_interface" ] || return 1
+                hook_relay_exit_interface=$hook_pair_interface
+                hook_pair_tail=${hook_pair_interface#vps}
+                ;;
+            *) return 1 ;;
+        esac
+        case $hook_pair_tail in
+            1????????) ;;
+            *) return 1 ;;
+        esac
+        case $hook_pair_tail in
+            *[!0-9a-f]*) return 1 ;;
+        esac
+    done
+    [ -n "$hook_relay_client_interface" ] \
+        && [ -n "$hook_relay_exit_interface" ] || return 1
+    [ "${hook_relay_client_interface#vpr}" = \
+        "${hook_relay_exit_interface#vps}" ] || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/sbin/ip -details -json link show 2>/dev/null \
+        | /usr/bin/jq -e \
+            --arg relay_client "$hook_relay_client_interface" \
+            --arg relay_exit "$hook_relay_exit_interface" '
+              type == "array" and length == 3
+              and any(.[]; .ifname == "lo")
+              and any(.[];
+                    .ifname == $relay_client
+                    and .linkinfo.info_kind == "wireguard"
+                    and (.flags | index("UP")) != null
+                    and (.["ifalias"] | type) == "string"
+                    and (.["ifalias"]
+                        | test("^volparossa:wireguard:ownership-v1:"
+                            + $relay_client + ":[0-9a-f]{64}$")))
+              and any(.[];
+                    .ifname == $relay_exit
+                    and .linkinfo.info_kind == "wireguard"
+                    and (.flags | index("UP")) != null
+                    and (.["ifalias"] | type) == "string"
+                    and (.["ifalias"]
+                        | test("^volparossa:wireguard:ownership-v1:"
+                            + $relay_exit + ":[0-9a-f]{64}$")))
+              and all(.[];
+                    .ifname == "lo"
+                    or .ifname == $relay_client
+                    or .ifname == $relay_exit)
+            ' >/dev/null 2>&1 || return 1
+    hook_relay_client_public_key=
+    hook_relay_exit_public_key=
+    hook_relay_client_listen_port=
+    hook_relay_exit_listen_port=
+    for hook_pair_interface in \
+        "$hook_relay_client_interface" "$hook_relay_exit_interface"; do
+        /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+            /usr/sbin/ip -6 -json address show dev "$hook_pair_interface" 2>/dev/null \
+            | /usr/bin/jq -e '
+                  type == "array" and length == 1
+                  and ([.[0].addr_info[]
+                        | select(.family == "inet6"
+                            and .prefixlen == 128
+                            and .scope == "global")] | length) == 1
+                ' >/dev/null 2>&1 || return 1
+        hook_pair_public_key=$(/usr/bin/nsenter \
+            --net="/proc/self/fd/$hook_namespace_fd" -- \
+            /usr/bin/wg show "$hook_pair_interface" public-key 2>/dev/null) \
+            || return 1
+        case $hook_pair_public_key in
+            ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
+        esac
+        [ "${#hook_pair_public_key}" -eq 44 ] \
+            && [ "$hook_pair_public_key" != "$functional_peer_public_key" ] \
+            && [ "$hook_pair_public_key" != \
+                "$functional_exit_peer_public_key" ] || return 1
+        hook_pair_listen_port=$(/usr/bin/nsenter \
+            --net="/proc/self/fd/$hook_namespace_fd" -- \
+            /usr/bin/wg show "$hook_pair_interface" listen-port 2>/dev/null) \
+            || return 1
+        number_is_safe "$hook_pair_listen_port" \
+            && [ "$hook_pair_listen_port" -le 65535 ] \
+            && [ "$hook_pair_listen_port" -ne \
+                "$functional_relay_listen_port" ] \
+            && [ "$hook_pair_listen_port" -ne \
+                "$functional_exit_relay_listen_port" ] || return 1
+        hook_pair_firewall_mark=$(/usr/bin/nsenter \
+            --net="/proc/self/fd/$hook_namespace_fd" -- \
+            /usr/bin/wg show "$hook_pair_interface" fwmark 2>/dev/null) \
+            || return 1
+        [ "$hook_pair_firewall_mark" = off ] || return 1
+        if [ "$hook_pair_interface" = "$hook_relay_client_interface" ]; then
+            hook_relay_client_public_key=$hook_pair_public_key
+            hook_relay_client_listen_port=$hook_pair_listen_port
+        else
+            hook_relay_exit_public_key=$hook_pair_public_key
+            hook_relay_exit_listen_port=$hook_pair_listen_port
+        fi
+    done
+    [ "$hook_relay_client_public_key" != "$hook_relay_exit_public_key" ] \
+        && [ "$hook_relay_client_listen_port" != \
+            "$hook_relay_exit_listen_port" ] || return 1
+    printf '%s\t%s\n' \
+        "$hook_relay_client_interface" "$hook_relay_exit_interface"
+}
+
+derive_relay_pair_address() {
+    [ "$#" -eq 3 ] || return 1
+    hook_pair_address_interface=$1
+    hook_pair_address_expected_host=$2
+    hook_pair_address_desired_host=$3
+    case $hook_pair_address_interface in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#hook_pair_address_interface}" -le 15 ] || return 1
+    case $hook_pair_address_expected_host:$hook_pair_address_desired_host in
+        0002:0001|0002:0002|0003:0003|0003:0004) ;;
+        *) return 1 ;;
+    esac
+    /usr/bin/awk \
+        -v expected_interface="$hook_pair_address_interface" \
+        -v expected_host="$hook_pair_address_expected_host" \
+        -v desired_host="$hook_pair_address_desired_host" '
+        $6 == expected_interface \
+            && length($1) == 32 \
+            && $1 ~ /^[0-9a-f]+$/ \
+            && substr($1, 1, 12) == "fd766f6c7061" \
+            && substr($1, 21, 4) == "0001" \
+            && substr($1, 29, 4) == expected_host \
+            && $3 == "80" \
+            && $4 == "00" {
+                candidates++
+                address = substr($1, 1, 28) desired_host
+            }
+        END {
+            if (candidates != 1) exit 1
+            printf "%s:%s:%s:%s:%s:%s:%s:%s\n", \
+                substr(address, 1, 4), substr(address, 5, 4), \
+                substr(address, 9, 4), substr(address, 13, 4), \
+                substr(address, 17, 4), substr(address, 21, 4), \
+                substr(address, 25, 4), substr(address, 29, 4)
+        }
+    '
+}
+
+worker_relay_pair_address() {
+    [ "$#" -eq 4 ] || return 1
+    hook_namespace_fd=$1
+    hook_pair_address_interface=$2
+    hook_pair_address_expected_host=$3
+    hook_pair_address_desired_host=$4
+    fd_number_is_safe "$hook_namespace_fd" || return 1
+    /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
+        /usr/bin/cat /proc/net/if_inet6 2>/dev/null \
+        | derive_relay_pair_address \
+            "$hook_pair_address_interface" \
+            "$hook_pair_address_expected_host" \
+            "$hook_pair_address_desired_host"
+}
+
 derive_client_peer_address() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -1926,6 +2138,60 @@ functional_relay_link_is_exact() {
             ' >/dev/null 2>&1
 }
 
+functional_peer_namespace_shape_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    hook_primary_fixture=$1
+    case $functional_fixture_shape:$hook_primary_fixture in
+        single:"$functional_relay"|single:"$functional_exit_relay")
+            /usr/sbin/ip -details -json link show 2>/dev/null \
+                | /usr/bin/jq -e \
+                    --arg underlay "$functional_underlay" \
+                    --arg primary "$hook_primary_fixture" '
+                      type == "array" and length == 3
+                      and any(.[]; .ifname == "lo")
+                      and any(.[];
+                            .ifname == $underlay
+                            and .linkinfo.info_kind == "dummy")
+                      and any(.[];
+                            .ifname == $primary
+                            and .linkinfo.info_kind == "wireguard"
+                            and (.flags | index("UP")) != null)
+                      and all(.[];
+                            .ifname == "lo"
+                            or .ifname == $underlay
+                            or .ifname == $primary)
+                    ' >/dev/null 2>&1
+            ;;
+        pair:"$functional_relay"|pair:"$functional_exit_relay")
+            /usr/sbin/ip -details -json link show 2>/dev/null \
+                | /usr/bin/jq -e \
+                    --arg underlay "$functional_underlay" \
+                    --arg relay_client "$functional_relay" \
+                    --arg relay_exit "$functional_exit_relay" '
+                      type == "array" and length == 4
+                      and any(.[]; .ifname == "lo")
+                      and any(.[];
+                            .ifname == $underlay
+                            and .linkinfo.info_kind == "dummy")
+                      and any(.[];
+                            .ifname == $relay_client
+                            and .linkinfo.info_kind == "wireguard"
+                            and (.flags | index("UP")) != null)
+                      and any(.[];
+                            .ifname == $relay_exit
+                            and .linkinfo.info_kind == "wireguard"
+                            and (.flags | index("UP")) != null)
+                      and all(.[];
+                            .ifname == "lo"
+                            or .ifname == $underlay
+                            or .ifname == $relay_client
+                            or .ifname == $relay_exit)
+                    ' >/dev/null 2>&1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 functional_relay_fixture_is_exact() {
     [ "$#" -eq 5 ] || return 1
     hook_expected_ifindex=$1
@@ -1934,20 +2200,7 @@ functional_relay_fixture_is_exact() {
     hook_client_local_address=$4
     hook_relay_local_address=$5
     functional_relay_link_is_exact "$hook_expected_ifindex" || return 1
-    /usr/sbin/ip -details -json link show 2>/dev/null \
-        | /usr/bin/jq -e \
-            --arg underlay "$functional_underlay" \
-            --arg relay "$functional_relay" '
-              type == "array" and length == 3
-              and any(.[]; .ifname == "lo")
-              and any(.[]; .ifname == $underlay and .linkinfo.info_kind == "dummy")
-              and any(.[];
-                    .ifname == $relay
-                    and .linkinfo.info_kind == "wireguard"
-                    and (.flags | index("UP")) != null)
-              and all(.[];
-                    .ifname == "lo" or .ifname == $underlay or .ifname == $relay)
-            ' >/dev/null 2>&1 || return 1
+    functional_peer_namespace_shape_is_exact "$functional_relay" || return 1
     hook_relay_public_key=$(/usr/bin/wg show \
         "$functional_relay" public-key 2>/dev/null) || return 1
     [ "$hook_relay_public_key" = "$functional_relay_public_key" ] || return 1
@@ -2210,20 +2463,7 @@ functional_exit_relay_fixture_is_exact() {
     hook_exit_local_address=$4
     hook_exit_relay_local_address=$5
     functional_exit_relay_link_is_exact "$hook_expected_ifindex" || return 1
-    /usr/sbin/ip -details -json link show 2>/dev/null \
-        | /usr/bin/jq -e \
-            --arg underlay "$functional_underlay" \
-            --arg relay "$functional_exit_relay" '
-              type == "array" and length == 3
-              and any(.[]; .ifname == "lo")
-              and any(.[]; .ifname == $underlay and .linkinfo.info_kind == "dummy")
-              and any(.[];
-                    .ifname == $relay
-                    and .linkinfo.info_kind == "wireguard"
-                    and (.flags | index("UP")) != null)
-              and all(.[];
-                    .ifname == "lo" or .ifname == $underlay or .ifname == $relay)
-            ' >/dev/null 2>&1 || return 1
+    functional_peer_namespace_shape_is_exact "$functional_exit_relay" || return 1
     hook_exit_relay_public_key=$(/usr/bin/wg show \
         "$functional_exit_relay" public-key 2>/dev/null) || return 1
     [ "$hook_exit_relay_public_key" = "$functional_exit_relay_public_key" ] || return 1
@@ -2434,6 +2674,35 @@ remove_functional_exit_relay_fixture() {
     forget_functional_exit_relay_fixture
 }
 
+create_functional_relay_pair_fixtures() {
+    [ "$#" -eq 8 ] || return 1
+    functional_fixture_shape=single
+    if ! create_functional_relay_fixture "$1" "$2" "$3" "$4"; then
+        remove_functional_relay_fixture || return 1
+        return 1
+    fi
+    functional_fixture_shape=pair
+    if create_functional_exit_relay_fixture "$5" "$6" "$7" "$8"; then
+        if functional_relay_fixture_is_exact \
+            "$functional_relay_ifindex" "$1" "$2" "$3" "$4"; then
+            return 0
+        fi
+    fi
+    remove_functional_exit_relay_fixture || return 1
+    functional_fixture_shape=single
+    remove_functional_relay_fixture || return 1
+    return 1
+}
+
+# shellcheck disable=SC2120
+remove_functional_relay_pair_fixtures() {
+    [ "$#" -eq 0 ] || return 1
+    functional_fixture_shape=pair
+    remove_functional_exit_relay_fixture || return 1
+    functional_fixture_shape=single
+    remove_functional_relay_fixture
+}
+
 worker_wireguard_is_absent() {
     [ "$#" -eq 2 ] || return 1
     hook_namespace_fd=$1
@@ -2578,10 +2847,12 @@ functional_probe_output_is_exact() {
     hook_functional_expected=$hook_functional_output.expected
     [ ! -e "$hook_functional_expected" ] && [ ! -L "$hook_functional_expected" ] \
         || return 1
-    printf '%s\n%s\n%s\n%s\n' \
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$functional_ready_record" \
         "$functional_exit_ready_record" \
         "$functional_exit_pass_record" \
+        "$functional_relay_pair_ready_record" \
+        "$functional_relay_pair_pass_record" \
         "$functional_pass_record" \
         >"$hook_functional_expected" || return 1
     chmod 0600 "$hook_functional_expected" || return 1
@@ -2606,7 +2877,10 @@ functional_probe_failure_value_is_safe() {
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|\
         second-cycle-release|second-cycle-reconnect|second-cycle-commit|\
-        second-cycle-destroy|final-shutdown)
+        second-cycle-destroy|relay-pair-plan|relay-pair-bind|relay-pair-prepare|\
+        relay-pair-activate|relay-pair-reuse|relay-pair-shutdown|relay-pair-ready|\
+        relay-pair-release|relay-pair-reconnect|relay-pair-commit|\
+        relay-pair-destroy|final-shutdown)
             ;;
         *) return 1 ;;
     esac
@@ -3152,6 +3426,352 @@ run_functional_client_lease_probe() {
         && [ "$hook_custody_namespace_identity" = \
             "$hook_functional_exit_worker_namespace" ] || return 1
 
+    advance_start_failure_stage functional-exit-release || return 1
+    printf '%s' "$functional_release_byte" >&6 || return 1
+    hook_functional_relay_pair_ready_output=$(printf '%s\n%s\n%s\n%s' \
+        "$functional_ready_record" \
+        "$functional_exit_ready_record" \
+        "$functional_exit_pass_record" \
+        "$functional_relay_pair_ready_record") || return 1
+    hook_functional_wait_attempt=0
+    while ! probe_output_is_exact \
+        "$hook_functional_stdout" "$hook_functional_relay_pair_ready_output"; do
+        private_file_is_safe "$hook_functional_stderr" || return 1
+        if [ -s "$hook_functional_stderr" ] \
+            || ! kill -0 "$hook_functional_probe_pid" 2>/dev/null; then
+            observe_functional_probe_failure \
+                "$hook_functional_probe_pid" "$hook_functional_stderr" || return 1
+            return 1
+        fi
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 300 ] || return 1
+        sleep 0.05
+    done
+
+    advance_start_failure_stage functional-exit-cleanup || return 1
+    hook_functional_wait_attempt=0
+    while ! worker_process_fd_is_retired 8; do
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
+        sleep 0.05
+    done
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+        "$hook_functional_exit_process_identity" ] || return 1
+    worker_wireguard_is_absent \
+        7 "$hook_functional_exit_peer_address" || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+        "$hook_functional_exit_worker_namespace" ] || return 1
+    command exec 8>&- || return 1
+    [ ! -e /proc/self/fd/8 ] && [ ! -L /proc/self/fd/8 ] || return 1
+    command exec 7>&- || return 1
+    [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
+
+    advance_start_failure_stage functional-relay-pair-ready || return 1
+    running_identity_is_unchanged \
+        "$hook_functional_unit" \
+        "$proof_directory/unit.identity" \
+        "$hook_functional_agent_gid" || return 1
+    socket_identity_is_unchanged \
+        "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
+    unit_fdstore_is_empty "$hook_functional_unit" || return 1
+
+    advance_start_failure_stage functional-relay-pair-worker-observation || return 1
+    hook_functional_pair_worker_pid=$(direct_helper_child \
+        "$hook_functional_main_pid") || return 1
+    [ "$hook_functional_pair_worker_pid" != "$hook_functional_worker_pid" ] \
+        && [ "$hook_functional_pair_worker_pid" != \
+            "$hook_functional_exit_worker_pid" ] || return 1
+    capture_parent_worker_custody \
+        "$hook_functional_main_pid" "$hook_functional_pair_worker_pid" || return 1
+    hook_functional_pair_pidfd_count=$hook_custody_pidfd_count
+    hook_functional_pair_pidfd_identity=$hook_custody_pidfd_identity
+    hook_functional_pair_process_count=$hook_custody_process_count
+    hook_functional_pair_namespace_count=$hook_custody_namespace_count
+    hook_functional_pair_parent_namespace=$hook_custody_parent_namespace
+    hook_functional_pair_process_parent_fd=$hook_custody_process_fd
+    hook_functional_pair_process_identity=$hook_custody_process_identity
+    hook_functional_pair_namespace_parent_fd=$hook_custody_namespace_fd
+    hook_functional_pair_worker_namespace=$hook_custody_namespace_identity
+    [ "$hook_functional_pair_parent_namespace" = \
+        "$hook_functional_parent_namespace" ] \
+        && [ "$hook_functional_pair_parent_namespace" != \
+            "$hook_functional_pair_worker_namespace" ] \
+        && [ "$hook_functional_pair_worker_namespace" != \
+            "$hook_functional_worker_namespace" ] \
+        && [ "$hook_functional_pair_worker_namespace" != \
+            "$hook_functional_exit_worker_namespace" ] || return 1
+    hook_functional_pair_parent_process_path=/proc/$hook_functional_main_pid/fd/$hook_functional_pair_process_parent_fd
+    hook_functional_pair_parent_namespace_path=/proc/$hook_functional_main_pid/fd/$hook_functional_pair_namespace_parent_fd
+    [ "$(capture_parent_process_fd_identity \
+        "$hook_functional_main_pid" "$hook_functional_pair_process_parent_fd" \
+        "$hook_functional_pair_worker_pid")" = \
+        "$hook_functional_pair_process_identity" ] || return 1
+    [ "$(capture_parent_namespace_fd_identity \
+        "$hook_functional_main_pid" "$hook_functional_pair_namespace_parent_fd")" = \
+        "$hook_functional_pair_worker_namespace" ] || return 1
+    command exec 7<"$hook_functional_pair_parent_namespace_path" || return 1
+    command exec 8<"$hook_functional_pair_parent_process_path" || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
+        "$hook_functional_pair_worker_namespace" ] || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
+        "$hook_functional_pair_process_identity" ] || return 1
+    capture_parent_worker_custody \
+        "$hook_functional_main_pid" "$hook_functional_pair_worker_pid" || return 1
+    [ "$hook_custody_pidfd_count" = "$hook_functional_pair_pidfd_count" ] \
+        && [ "$hook_custody_pidfd_identity" = \
+            "$hook_functional_pair_pidfd_identity" ] \
+        && [ "$hook_custody_process_count" = \
+            "$hook_functional_pair_process_count" ] \
+        && [ "$hook_custody_namespace_count" = \
+            "$hook_functional_pair_namespace_count" ] \
+        && [ "$hook_custody_process_fd" = \
+            "$hook_functional_pair_process_parent_fd" ] \
+        && [ "$hook_custody_process_identity" = \
+            "$hook_functional_pair_process_identity" ] \
+        && [ "$hook_custody_namespace_fd" = \
+            "$hook_functional_pair_namespace_parent_fd" ] \
+        && [ "$hook_custody_namespace_identity" = \
+            "$hook_functional_pair_worker_namespace" ] || return 1
+    hook_functional_pair_worker_starttime=$(worker_identity_from_process_fd \
+        8 "$hook_functional_pair_worker_pid" "$hook_functional_main_pid" \
+        "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
+        "$hook_functional_parent_filters") || return 1
+
+    hook_functional_pair_interfaces=$(worker_relay_pair_interfaces 7) || return 1
+    hook_functional_pair_relay_client_interface=$(printf '%s\n' \
+        "$hook_functional_pair_interfaces" \
+        | /usr/bin/awk -F '\t' 'NF == 2 { records++; value = $1 }
+            END { if (records != 1) exit 1; print value }') || return 1
+    hook_functional_pair_relay_exit_interface=$(printf '%s\n' \
+        "$hook_functional_pair_interfaces" \
+        | /usr/bin/awk -F '\t' 'NF == 2 { records++; value = $2 }
+            END { if (records != 1) exit 1; print value }') || return 1
+    hook_functional_pair_client_peer_address=$(worker_relay_pair_address \
+        7 "$hook_functional_pair_relay_client_interface" 0002 0001) || return 1
+    hook_functional_pair_client_local_address=$(worker_relay_pair_address \
+        7 "$hook_functional_pair_relay_client_interface" 0002 0002) || return 1
+    hook_functional_pair_exit_local_address=$(worker_relay_pair_address \
+        7 "$hook_functional_pair_relay_exit_interface" 0003 0003) || return 1
+    hook_functional_pair_exit_peer_address=$(worker_relay_pair_address \
+        7 "$hook_functional_pair_relay_exit_interface" 0003 0004) || return 1
+    hook_functional_pair_prefix=${hook_functional_pair_client_local_address%:*}
+    [ "$hook_functional_pair_prefix" = \
+        "${hook_functional_pair_client_peer_address%:*}" ] \
+        && [ "$hook_functional_pair_prefix" = \
+            "${hook_functional_pair_exit_local_address%:*}" ] \
+        && [ "$hook_functional_pair_prefix" = \
+            "${hook_functional_pair_exit_peer_address%:*}" ] \
+        && [ "$hook_functional_pair_client_peer_address" != \
+            "$hook_functional_pair_client_local_address" ] \
+        && [ "$hook_functional_pair_client_peer_address" != \
+            "$hook_functional_pair_exit_local_address" ] \
+        && [ "$hook_functional_pair_client_peer_address" != \
+            "$hook_functional_pair_exit_peer_address" ] \
+        && [ "$hook_functional_pair_client_local_address" != \
+            "$hook_functional_pair_exit_local_address" ] \
+        && [ "$hook_functional_pair_client_local_address" != \
+            "$hook_functional_pair_exit_peer_address" ] \
+        && [ "$hook_functional_pair_exit_local_address" != \
+            "$hook_functional_pair_exit_peer_address" ] || return 1
+
+    hook_functional_pair_client_public_key=$(/usr/bin/nsenter \
+        --net=/proc/self/fd/7 -- \
+        /usr/bin/wg show "$hook_functional_pair_relay_client_interface" \
+            public-key 2>/dev/null) || return 1
+    hook_functional_pair_exit_public_key=$(/usr/bin/nsenter \
+        --net=/proc/self/fd/7 -- \
+        /usr/bin/wg show "$hook_functional_pair_relay_exit_interface" \
+            public-key 2>/dev/null) || return 1
+    for hook_functional_pair_public_key in \
+        "$hook_functional_pair_client_public_key" \
+        "$hook_functional_pair_exit_public_key"; do
+        case $hook_functional_pair_public_key in
+            ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
+        esac
+        [ "${#hook_functional_pair_public_key}" -eq 44 ] \
+            && [ "$hook_functional_pair_public_key" != \
+                "$functional_relay_public_key" ] \
+            && [ "$hook_functional_pair_public_key" != \
+                "$functional_exit_relay_public_key" ] || return 1
+    done
+    [ "$hook_functional_pair_client_public_key" != \
+        "$hook_functional_pair_exit_public_key" ] || return 1
+    hook_functional_pair_client_listen_port=$(/usr/bin/nsenter \
+        --net=/proc/self/fd/7 -- \
+        /usr/bin/wg show "$hook_functional_pair_relay_client_interface" \
+            listen-port 2>/dev/null) || return 1
+    hook_functional_pair_exit_listen_port=$(/usr/bin/nsenter \
+        --net=/proc/self/fd/7 -- \
+        /usr/bin/wg show "$hook_functional_pair_relay_exit_interface" \
+            listen-port 2>/dev/null) || return 1
+    for hook_functional_pair_listen_port in \
+        "$hook_functional_pair_client_listen_port" \
+        "$hook_functional_pair_exit_listen_port"; do
+        number_is_safe "$hook_functional_pair_listen_port" \
+            && [ "$hook_functional_pair_listen_port" -le 65535 ] \
+            && [ "$hook_functional_pair_listen_port" -ne \
+                "$functional_relay_listen_port" ] \
+            && [ "$hook_functional_pair_listen_port" -ne \
+                "$functional_exit_relay_listen_port" ] || return 1
+    done
+    [ "$hook_functional_pair_client_listen_port" != \
+        "$hook_functional_pair_exit_listen_port" ] || return 1
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_pair_relay_client_interface" \
+        "$hook_functional_pair_client_peer_address" \
+        "$functional_peer_public_key" "$functional_peer_endpoint" || return 1
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_pair_relay_exit_interface" \
+        "$hook_functional_pair_exit_peer_address" \
+        "$functional_exit_peer_public_key" \
+        "$functional_exit_peer_endpoint" || return 1
+    hook_functional_pair_client_baseline=$(worker_wireguard_snapshot \
+        7 "$hook_functional_pair_relay_client_interface" \
+        "$functional_relay_public_key") || return 1
+    hook_functional_pair_exit_baseline=$(worker_wireguard_snapshot \
+        7 "$hook_functional_pair_relay_exit_interface" \
+        "$functional_exit_relay_public_key") || return 1
+
+    advance_start_failure_stage functional-relay-pair-fixtures || return 1
+    create_functional_relay_pair_fixtures \
+        "$hook_functional_pair_client_public_key" \
+        "$hook_functional_pair_client_listen_port" \
+        "$hook_functional_pair_client_local_address" \
+        "$hook_functional_pair_client_peer_address" \
+        "$hook_functional_pair_exit_public_key" \
+        "$hook_functional_pair_exit_listen_port" \
+        "$hook_functional_pair_exit_local_address" \
+        "$hook_functional_pair_exit_peer_address" || return 1
+    hook_functional_pair_relay_client_baseline=$(relay_wireguard_snapshot \
+        "$functional_relay" \
+        "$hook_functional_pair_client_public_key") || return 1
+    hook_functional_pair_relay_exit_baseline=$(relay_wireguard_snapshot \
+        "$functional_exit_relay" \
+        "$hook_functional_pair_exit_public_key") || return 1
+
+    advance_start_failure_stage functional-relay-pair-traffic || return 1
+    /usr/bin/ping -6 -n -I "$functional_relay" -c 1 -W 3 \
+        "$hook_functional_pair_client_local_address" >/dev/null 2>&1 &
+    hook_functional_pair_client_ping_pid=$!
+    number_is_safe "$hook_functional_pair_client_ping_pid" || return 1
+    /usr/bin/ping -6 -n -I "$functional_exit_relay" -c 1 -W 3 \
+        "$hook_functional_pair_exit_local_address" >/dev/null 2>&1 &
+    hook_functional_pair_exit_ping_pid=$!
+    number_is_safe "$hook_functional_pair_exit_ping_pid" || return 1
+    if wait "$hook_functional_pair_client_ping_pid"; then
+        hook_functional_pair_client_ping_status=0
+    else
+        hook_functional_pair_client_ping_status=$?
+    fi
+    if wait "$hook_functional_pair_exit_ping_pid"; then
+        hook_functional_pair_exit_ping_status=0
+    else
+        hook_functional_pair_exit_ping_status=$?
+    fi
+    [ "$hook_functional_pair_client_ping_status" -eq 0 ] \
+        && [ "$hook_functional_pair_exit_ping_status" -eq 0 ] || return 1
+    hook_functional_wait_attempt=0
+    while :; do
+        hook_functional_pair_client_current=$(worker_wireguard_snapshot \
+            7 "$hook_functional_pair_relay_client_interface" \
+            "$functional_relay_public_key") || return 1
+        hook_functional_pair_exit_current=$(worker_wireguard_snapshot \
+            7 "$hook_functional_pair_relay_exit_interface" \
+            "$functional_exit_relay_public_key") || return 1
+        hook_functional_pair_relay_client_current=$(relay_wireguard_snapshot \
+            "$functional_relay" \
+            "$hook_functional_pair_client_public_key") || return 1
+        hook_functional_pair_relay_exit_current=$(relay_wireguard_snapshot \
+            "$functional_exit_relay" \
+            "$hook_functional_pair_exit_public_key") || return 1
+        if wireguard_snapshot_has_growth \
+            "$hook_functional_pair_client_baseline" \
+            "$hook_functional_pair_client_current" \
+            && wireguard_snapshot_has_growth \
+                "$hook_functional_pair_exit_baseline" \
+                "$hook_functional_pair_exit_current" \
+            && wireguard_snapshot_has_growth \
+                "$hook_functional_pair_relay_client_baseline" \
+                "$hook_functional_pair_relay_client_current" \
+            && wireguard_snapshot_has_growth \
+                "$hook_functional_pair_relay_exit_baseline" \
+                "$hook_functional_pair_relay_exit_current"; then
+            break
+        fi
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
+        sleep 0.05
+    done
+    functional_relay_fixture_is_exact \
+        "$functional_relay_ifindex" \
+        "$hook_functional_pair_client_public_key" \
+        "$hook_functional_pair_client_listen_port" \
+        "$hook_functional_pair_client_local_address" \
+        "$hook_functional_pair_client_peer_address" || return 1
+    functional_exit_relay_fixture_is_exact \
+        "$functional_exit_relay_ifindex" \
+        "$hook_functional_pair_exit_public_key" \
+        "$hook_functional_pair_exit_listen_port" \
+        "$hook_functional_pair_exit_local_address" \
+        "$hook_functional_pair_exit_peer_address" || return 1
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_pair_relay_client_interface" \
+        "$hook_functional_pair_client_peer_address" \
+        "$functional_peer_public_key" "$functional_peer_endpoint" || return 1
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_pair_relay_exit_interface" \
+        "$hook_functional_pair_exit_peer_address" \
+        "$functional_exit_peer_public_key" \
+        "$functional_exit_peer_endpoint" || return 1
+
+    advance_start_failure_stage functional-relay-pair-cleanup || return 1
+    # shellcheck disable=SC2119
+    remove_functional_relay_pair_fixtures || return 1
+    functional_fixture_shape=single
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_pair_relay_client_interface" \
+        "$hook_functional_pair_client_peer_address" \
+        "$functional_peer_public_key" "$functional_peer_endpoint" || return 1
+    worker_activated_wireguard_is_exact \
+        7 "$hook_functional_pair_relay_exit_interface" \
+        "$hook_functional_pair_exit_peer_address" \
+        "$functional_exit_peer_public_key" \
+        "$functional_exit_peer_endpoint" || return 1
+    hook_functional_pair_client_retained=$(worker_wireguard_snapshot \
+        7 "$hook_functional_pair_relay_client_interface" \
+        "$functional_relay_public_key") || return 1
+    hook_functional_pair_exit_retained=$(worker_wireguard_snapshot \
+        7 "$hook_functional_pair_relay_exit_interface" \
+        "$functional_exit_relay_public_key") || return 1
+    wireguard_snapshot_has_growth \
+        "$hook_functional_pair_client_baseline" \
+        "$hook_functional_pair_client_retained" || return 1
+    wireguard_snapshot_has_growth \
+        "$hook_functional_pair_exit_baseline" \
+        "$hook_functional_pair_exit_retained" || return 1
+    [ "$(worker_identity_from_process_fd \
+        8 "$hook_functional_pair_worker_pid" "$hook_functional_main_pid" \
+        "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
+        "$hook_functional_parent_filters")" = \
+        "$hook_functional_pair_worker_starttime" ] || return 1
+    capture_parent_worker_custody \
+        "$hook_functional_main_pid" "$hook_functional_pair_worker_pid" || return 1
+    [ "$hook_custody_pidfd_count" = "$hook_functional_pair_pidfd_count" ] \
+        && [ "$hook_custody_pidfd_identity" = \
+            "$hook_functional_pair_pidfd_identity" ] \
+        && [ "$hook_custody_process_count" = \
+            "$hook_functional_pair_process_count" ] \
+        && [ "$hook_custody_namespace_count" = \
+            "$hook_functional_pair_namespace_count" ] \
+        && [ "$hook_custody_process_fd" = \
+            "$hook_functional_pair_process_parent_fd" ] \
+        && [ "$hook_custody_process_identity" = \
+            "$hook_functional_pair_process_identity" ] \
+        && [ "$hook_custody_namespace_fd" = \
+            "$hook_functional_pair_namespace_parent_fd" ] \
+        && [ "$hook_custody_namespace_identity" = \
+            "$hook_functional_pair_worker_namespace" ] || return 1
+
     advance_start_failure_stage functional-probe-finish || return 1
 
     rm -f -- "$hook_functional_fifo" || return 1
@@ -3190,11 +3810,14 @@ run_functional_client_lease_probe() {
     done
     worker_process_fd_is_retired 8 || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
-        "$hook_functional_exit_process_identity" ] || return 1
+        "$hook_functional_pair_process_identity" ] || return 1
     helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
-    worker_wireguard_is_absent 7 "$hook_functional_exit_peer_address" || return 1
+    worker_wireguard_is_absent \
+        7 "$hook_functional_pair_client_peer_address" || return 1
+    worker_wireguard_is_absent \
+        7 "$hook_functional_pair_exit_peer_address" || return 1
     [ "$(stat -Lc '%d:%i' /proc/self/fd/7 2>/dev/null)" = \
-        "$hook_functional_exit_worker_namespace" ] || return 1
+        "$hook_functional_pair_worker_namespace" ] || return 1
     command exec 8>&- || return 1
     [ ! -e /proc/self/fd/8 ] && [ ! -L /proc/self/fd/8 ] || return 1
     command exec 7>&- || return 1
@@ -3407,11 +4030,11 @@ start_hook() {
         "$operator_gid" \
         "$worker_uid" \
         "$worker_gid" \
-        || fail 'sequential functional Client/Exit lease live proof failed'
+        || fail 'sequential Client/Exit and simultaneous Relay-pair live proof failed'
 
     advance_start_failure_stage publication \
         || fail 'start failure stage transition is invalid'
-    hook_start_pass=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+    hook_start_pass=$(printf '%s\n' \
         'VOLPAROSSA_HELPER_V3_IPC_BIND_BEFORE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass' \
         'VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass' \
@@ -3428,7 +4051,12 @@ start_hook() {
         "$functional_exit_activated_kernel_record" \
         "$functional_exit_committed_kernel_record" \
         "$functional_exit_pass_record" \
-        "$functional_exit_cleanup_record")
+        "$functional_exit_cleanup_record" \
+        "$functional_relay_pair_ready_record" \
+        "$functional_relay_pair_activated_kernel_record" \
+        "$functional_relay_pair_committed_kernel_record" \
+        "$functional_relay_pair_pass_record" \
+        "$functional_relay_pair_cleanup_record")
     write_private_file "$proof_directory/start.pass" "$hook_start_pass" \
         || fail 'production IPC start proof could not be published'
 }

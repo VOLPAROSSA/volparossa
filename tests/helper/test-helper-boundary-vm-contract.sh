@@ -405,7 +405,7 @@ for exact_runner_text in \
     'sudo -n -- ./tests/helper/require-live-worker-identity-proof.sh --execute --yes' \
     'cargo fetch --locked' \
     'cargo build --locked --offline' \
-    'run only the fixed sequential Client/Exit helper-boundary proof as guest root;' \
+    'run only the fixed Client/Exit plus simultaneous Relay-pair helper-boundary proof as guest root;' \
     'proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"}' \
     'post_image_sha512=$(sha512sum "$image_path"' \
     '[ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]' \
@@ -757,6 +757,10 @@ for non_retained_production_stage in \
     functional-client-release functional-client-cleanup functional-exit-ready \
     functional-exit-worker-observation functional-exit-relay-fixture \
     functional-exit-relay-traffic functional-exit-relay-cleanup \
+    functional-exit-release functional-exit-cleanup \
+    functional-relay-pair-ready functional-relay-pair-worker-observation \
+    functional-relay-pair-fixtures functional-relay-pair-traffic \
+    functional-relay-pair-cleanup \
     functional-probe-finish; do
     non_retained_production_launch_stage_is_safe \
         "$non_retained_production_stage" || {
@@ -771,7 +775,10 @@ for non_retained_functional_phase in \
     second-cycle-plan second-cycle-bind second-cycle-prepare \
     second-cycle-activate reuse second-cycle-shutdown second-cycle-ready \
     second-cycle-release second-cycle-reconnect second-cycle-commit \
-    second-cycle-destroy final-shutdown; do
+    second-cycle-destroy relay-pair-plan relay-pair-bind relay-pair-prepare \
+    relay-pair-activate relay-pair-reuse relay-pair-shutdown relay-pair-ready \
+    relay-pair-release relay-pair-reconnect relay-pair-commit \
+    relay-pair-destroy final-shutdown; do
     for non_retained_functional_class in \
         random protocol io timeout untrusted correlation unexpected-response; do
         non_retained_functional_probe_failure_value_is_safe \
@@ -877,7 +884,7 @@ expect_status 0 report_non_retained_production_launch_diagnostic \
 test ! -s "$last_stdout"
 printf '%s\n%s\n' \
     'non-retained helper-boundary PR smoke production launch diagnostic: functional-probe-wait' \
-    'non-retained helper-boundary PR smoke sequential Client/Exit lease diagnostic: prepare,unexpected-response' \
+    'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: prepare,unexpected-response' \
     >"$temporary_directory/expected-branch-functional-diagnostic"
 cmp -s "$temporary_directory/expected-branch-functional-diagnostic" "$last_stderr"
 if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
@@ -895,10 +902,42 @@ expect_status 0 report_non_retained_production_launch_diagnostic \
 test ! -s "$last_stdout"
 printf '%s\n%s\n' \
     'non-retained helper-boundary PR smoke production launch diagnostic: functional-client-release' \
-    'non-retained helper-boundary PR smoke sequential Client/Exit lease diagnostic: second-cycle-ready,timeout' \
+    'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: second-cycle-ready,timeout' \
     >"$temporary_directory/expected-branch-functional-exit-ready-diagnostic"
 cmp -s \
     "$temporary_directory/expected-branch-functional-exit-ready-diagnostic" \
+    "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-exit-release' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=relay-pair-ready,timeout' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'non-retained helper-boundary PR smoke production launch diagnostic: functional-exit-release' \
+    'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: relay-pair-ready,timeout' \
+    >"$temporary_directory/expected-branch-functional-pair-ready-diagnostic"
+cmp -s \
+    "$temporary_directory/expected-branch-functional-pair-ready-diagnostic" \
+    "$last_stderr"
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-probe-finish' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=relay-pair-commit,correlation' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'non-retained helper-boundary PR smoke production launch diagnostic: functional-probe-finish' \
+    'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: relay-pair-commit,correlation' \
+    >"$temporary_directory/expected-branch-functional-pair-commit-diagnostic"
+cmp -s \
+    "$temporary_directory/expected-branch-functional-pair-commit-diagnostic" \
     "$last_stderr"
 
 while read -r functional_mutant_name functional_mutant_stage \
