@@ -1051,7 +1051,7 @@ impl NamespaceKernel {
             || proved_peer.endpoint != peer.endpoint
             || proved_peer.persistent_keepalive_seconds != peer.persistent_keepalive_seconds
             || proved_peer.allowed_ips.as_slice() != [expected_allowed]
-            || proved_peer.protocol_version.is_some()
+            || proved_peer.protocol_version != Some(1)
         {
             return Err(KernelError::Malformed);
         }
@@ -1629,20 +1629,36 @@ impl NetlinkClient {
     ) -> Result<(), KernelError> {
         let payload = encode_exact_main_ipv6_link_route_query(index, destination)?;
         let (response, sequence) = self.request_reply(RTM_GETROUTE, &payload, deadline)?;
-        validate_kernel_sender(&response.sender)?;
-        let response_frames = frames(&response.message)?;
-        if response_frames.len() != 1 {
-            return Err(KernelError::Malformed);
-        }
-        let frame = response_frames[0];
-        if read_u16(frame, 4) == Some(NLMSG_ERROR) {
-            parse_ack(&response, sequence, RTM_GETROUTE)?;
-            return Err(KernelError::Malformed);
-        }
-        validate_kernel_header(frame, sequence, RTM_NEWROUTE)?;
-        parse_exact_main_ipv6_link_route(frame, index, destination)?;
+        parse_exact_main_ipv6_link_route_reply(
+            &response,
+            sequence,
+            self.local_port_id,
+            index,
+            destination,
+        )?;
         Ok(deadline.complete(())?)
     }
+}
+
+fn parse_exact_main_ipv6_link_route_reply(
+    reply: &NetlinkReply,
+    expected_sequence: u32,
+    local_port_id: u32,
+    index: u32,
+    destination: Ipv6Addr,
+) -> Result<(), KernelError> {
+    validate_kernel_sender(&reply.sender)?;
+    let response_frames = frames(&reply.message)?;
+    if response_frames.len() != 1 {
+        return Err(KernelError::Malformed);
+    }
+    let frame = response_frames[0];
+    if read_u16(frame, 4) == Some(NLMSG_ERROR) {
+        parse_ack(reply, expected_sequence, RTM_GETROUTE, local_port_id)?;
+        return Err(KernelError::Malformed);
+    }
+    validate_kernel_header(frame, expected_sequence, RTM_NEWROUTE, local_port_id)?;
+    parse_exact_main_ipv6_link_route(frame, index, destination)
 }
 
 fn encode_exact_main_ipv6_link_route(
@@ -2453,6 +2469,23 @@ mod tests {
         build_netlink_message(RTM_NEWROUTE, 0, TEST_SEQUENCE, &payload).expect("route response")
     }
 
+    fn exact_route_reply(index: u32, destination: Ipv6Addr) -> NetlinkReply {
+        let mut message = exact_route_frame(index, destination);
+        message[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
+        NetlinkReply {
+            message: Zeroizing::new(message),
+            sender: SocketAddr::new(0, 0),
+        }
+    }
+
+    fn route_acknowledgement(errno: i32) -> NetlinkReply {
+        let mut reply = acknowledgement(errno);
+        let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
+        reply.message[embedded_offset + 4..embedded_offset + 6]
+            .copy_from_slice(&RTM_GETROUTE.to_ne_bytes());
+        reply
+    }
+
     fn route_frame_from_payload(payload: &[u8]) -> Vec<u8> {
         build_netlink_message(RTM_NEWROUTE, 0, TEST_SEQUENCE, payload).expect("route response")
     }
@@ -2631,6 +2664,136 @@ mod tests {
             encode_exact_main_ipv6_link_route_query(17, "ff02::1".parse().expect("multicast"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn exact_main_ipv6_link_route_success_is_bound_to_kernel_header_and_socket() {
+        let destination = durable_resource(7, 11).peer_address();
+        let parse = |reply: &NetlinkReply, local_port_id| {
+            parse_exact_main_ipv6_link_route_reply(
+                reply,
+                TEST_SEQUENCE,
+                local_port_id,
+                17,
+                destination,
+            )
+        };
+        assert!(parse(&exact_route_reply(17, destination), TEST_PORT_ID).is_ok());
+
+        for (offset, wrong_value) in [
+            (8, TEST_SEQUENCE + 1),
+            (12, 0),
+            (12, 1),
+            (12, TEST_PORT_ID + 1),
+        ] {
+            let mut wrong = exact_route_reply(17, destination);
+            wrong.message[offset..offset + 4].copy_from_slice(&wrong_value.to_ne_bytes());
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
+        assert!(matches!(
+            parse(&exact_route_reply(17, destination), 0),
+            Err(KernelError::Malformed)
+        ));
+
+        let mut wrong = exact_route_reply(17, destination);
+        wrong.message[4..6].copy_from_slice(&RTM_GETROUTE.to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        for sender in [SocketAddr::new(1, 0), SocketAddr::new(0, 1)] {
+            let mut wrong = exact_route_reply(17, destination);
+            wrong.sender = sender;
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
+
+        let mut wrong = exact_route_reply(17, destination);
+        let second = wrong.message.clone();
+        wrong.message.extend_from_slice(&second);
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn exact_main_ipv6_link_route_ack_is_bound_to_request_header_and_socket() {
+        let destination = durable_resource(7, 11).peer_address();
+        let parse = |reply: &NetlinkReply, local_port_id| {
+            parse_exact_main_ipv6_link_route_reply(
+                reply,
+                TEST_SEQUENCE,
+                local_port_id,
+                17,
+                destination,
+            )
+        };
+        assert!(matches!(
+            parse(&route_acknowledgement(-libc::ENOENT), TEST_PORT_ID),
+            Err(KernelError::Errno(libc::ENOENT))
+        ));
+        assert!(matches!(
+            parse(&route_acknowledgement(0), TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        for (offset, wrong_value) in [
+            (8, TEST_SEQUENCE + 1),
+            (12, 0),
+            (12, 1),
+            (12, TEST_PORT_ID + 1),
+        ] {
+            let mut wrong = route_acknowledgement(-libc::ENOENT);
+            wrong.message[offset..offset + 4].copy_from_slice(&wrong_value.to_ne_bytes());
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
+        assert!(matches!(
+            parse(&route_acknowledgement(-libc::ENOENT), 0),
+            Err(KernelError::Malformed)
+        ));
+
+        let mut wrong = route_acknowledgement(-libc::ENOENT);
+        wrong.message[4..6].copy_from_slice(&RTM_NEWROUTE.to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
+        wrong = route_acknowledgement(-libc::ENOENT);
+        wrong.message[embedded_offset + 4..embedded_offset + 6]
+            .copy_from_slice(&RTM_GETLINK.to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        wrong = route_acknowledgement(-libc::ENOENT);
+        wrong.message[embedded_offset + 8..embedded_offset + 12]
+            .copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
+        assert!(matches!(
+            parse(&wrong, TEST_PORT_ID),
+            Err(KernelError::Malformed)
+        ));
+
+        for sender in [SocketAddr::new(1, 0), SocketAddr::new(0, 1)] {
+            wrong = route_acknowledgement(-libc::ENOENT);
+            wrong.sender = sender;
+            assert!(matches!(
+                parse(&wrong, TEST_PORT_ID),
+                Err(KernelError::Malformed)
+            ));
+        }
     }
 
     #[test]
