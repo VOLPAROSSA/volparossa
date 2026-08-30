@@ -991,8 +991,6 @@ impl NamespaceKernel {
             peer,
             deadline,
         )?;
-        self.route
-            .prove_exact_main_ipv6_link_route(index.index, peer.allowed_address, deadline)?;
         Ok(deadline.complete(proof)?)
     }
 
@@ -1055,6 +1053,8 @@ impl NamespaceKernel {
         {
             return Err(KernelError::Malformed);
         }
+        self.route
+            .prove_exact_main_ipv6_link_route(index, peer.allowed_address, deadline)?;
         deadline.ensure_remaining()?;
         Ok(WireguardV3PeerProof {
             latest_handshake_unix: proved_peer.last_handshake_seconds,

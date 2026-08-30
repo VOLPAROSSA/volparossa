@@ -26,7 +26,7 @@ use crate::{
     deadline::HardDeadline,
     engine::{
         AsyncLeaseBackend, BackendAction, BackendBinding, BackendCompletion, BackendDestroy,
-        BackendError, BackendFuture, BackendLineage, BackendPhase, BackendRequest,
+        BackendError, BackendFuture, BackendLineage, BackendPhase, BackendProbe, BackendRequest,
         BackendRuntimeCompletion, BackendRuntimeRequest, ConfirmedAbsent, ContextPhase,
         KernelCounters, OperationKind, PreparedKernelLease,
     },
@@ -34,8 +34,8 @@ use crate::{
         ActivateLeases, DestroyContext, INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION,
         InitialiseContext, InternalContextRole, InternalEndpointRole, InternalIpPrefix,
         InternalUdpEndpoint, InternalWorkerRequest, InternalWorkerResult,
-        LeaseActivation as InternalLeaseActivation, LeasePlan as InternalLeasePlan, PrepareLeases,
-        internal_worker_request, internal_worker_response,
+        LeaseActivation as InternalLeaseActivation, LeasePlan as InternalLeasePlan, LeaseProbe,
+        PrepareLeases, ProbeCommitLeases, internal_worker_request, internal_worker_response,
     },
     kernel::{BirthLinkError, BirthNamespaceKernel, LiveWireguardLeaseOwner},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
@@ -56,6 +56,7 @@ const STAGE_INITIALISE: u8 = 1;
 const STAGE_PREPARE: u8 = 2;
 const STAGE_ACTIVATE: u8 = 3;
 const STAGE_DESTROY: u8 = 4;
+const STAGE_PROBE_COMMIT: u8 = 5;
 const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
 
 /// Install the deliberately narrow process-owned backend used only by the production server.
@@ -117,6 +118,7 @@ enum OpenLeasePhase {
     BirthMayExist,
     Prepared,
     Activated,
+    Committed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +127,13 @@ struct PreparedWorkerLease {
     role: i32,
     public_key: [u8; 32],
     listen_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActivatedWorkerLease {
+    prepared: PreparedWorkerLease,
+    peer_public_key: [u8; 32],
+    baseline: KernelCounters,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +151,7 @@ struct OpenLeaseEntry {
     prepare: PrepareLeases,
     underlay: UnderlayCandidate,
     prepared: Option<PreparedWorkerLease>,
+    activated: Option<ActivatedWorkerLease>,
     phase: OpenLeasePhase,
     birth_may_exist: bool,
 }
@@ -221,6 +231,7 @@ impl FunctionalAlphaLeaseBackend {
             prepare,
             underlay,
             prepared: None,
+            activated: None,
             phase: OpenLeasePhase::Reserved,
             birth_may_exist: false,
         });
@@ -418,11 +429,26 @@ impl FunctionalAlphaLeaseBackend {
             Ok(counters) => counters,
             Err(error) => return Err(self.cleanup_after_failure(key, deadline, error).await),
         };
+        let [baseline] = counters.as_slice() else {
+            return Err(self
+                .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                .await);
+        };
 
+        let peer_public_key: [u8; 32] = activation
+            .peer_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| BackendError::Invalid)?;
         let phase_committed = {
             let mut state = lock_state(&self.state);
             exact_entry_mut(&mut state, key).is_ok_and(|entry| {
                 if entry.phase == OpenLeasePhase::Prepared && entry.prepared == Some(prepared) {
+                    entry.activated = Some(ActivatedWorkerLease {
+                        prepared,
+                        peer_public_key,
+                        baseline: *baseline,
+                    });
                     entry.phase = OpenLeasePhase::Activated;
                     true
                 } else {
@@ -464,6 +490,89 @@ impl FunctionalAlphaLeaseBackend {
             .ok_or_else(|| response_error(execution))
     }
 
+    async fn probe_one(
+        &self,
+        binding: BackendBinding,
+        value: BackendProbe,
+    ) -> Result<Vec<KernelCounters>, BackendError> {
+        let (key, commit, activated_at_unix) = validate_probe_binding(binding, &value)?;
+        let deadline = prepare_deadline(binding)?;
+        let activated = {
+            let state = lock_state(&self.state);
+            let entry = exact_entry(state.as_ref(), key)?;
+            if entry.phase != OpenLeasePhase::Activated {
+                return Err(BackendError::Invalid);
+            }
+            let activated = entry.activated.ok_or(BackendError::CleanupIncomplete)?;
+            if (activated.prepared.path_id, activated.prepared.role)
+                != (commit.path_id, commit.role)
+            {
+                return Err(BackendError::Invalid);
+            }
+            activated
+        };
+        let generation = entry_generation(&self.state, key)?;
+        let request = worker_request(
+            worker_attempt_request_id(key, STAGE_PROBE_COMMIT, binding),
+            internal_worker_request::Operation::ProbeCommitLeases(ProbeCommitLeases {
+                route_context_id: key.context_id.to_vec(),
+                leases: vec![LeaseProbe {
+                    path_id: commit.path_id,
+                    role: commit.role,
+                    expected_peer_public_key: activated.peer_public_key.to_vec(),
+                    not_before_unix: activated_at_unix,
+                }],
+            }),
+        );
+        let execution = self
+            .coordinator
+            .execute_until(key.context_id, generation, request, deadline)
+            .await;
+        let proof = match execution {
+            Ok(execution) => match matches_probed(Some(&execution), activated, activated_at_unix) {
+                Some(proof) => proof,
+                None if InternalWorkerResult::try_from(execution.response.result)
+                    == Ok(InternalWorkerResult::Kernel) =>
+                {
+                    return Err(BackendError::Kernel);
+                }
+                None => {
+                    return Err(self
+                        .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                        .await);
+                }
+            },
+            Err(_) => {
+                return Err(self
+                    .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                    .await);
+            }
+        };
+
+        let phase_committed = {
+            let mut state = lock_state(&self.state);
+            exact_entry_mut(&mut state, key).is_ok_and(|entry| {
+                if entry.phase == OpenLeasePhase::Activated && entry.activated == Some(activated) {
+                    entry.phase = OpenLeasePhase::Committed;
+                    true
+                } else {
+                    false
+                }
+            })
+        };
+        if !phase_committed {
+            return Err(self
+                .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                .await);
+        }
+        match deadline.complete(vec![proof]) {
+            Ok(proofs) => Ok(proofs),
+            Err(_) => Err(self
+                .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
+                .await),
+        }
+    }
+
     async fn cleanup_after_failure(
         &self,
         key: OpenLineageKey,
@@ -493,6 +602,7 @@ impl FunctionalAlphaLeaseBackend {
                             | OpenLeasePhase::BirthMayExist
                             | OpenLeasePhase::Prepared
                             | OpenLeasePhase::Activated
+                            | OpenLeasePhase::Committed
                     )
             });
         if let (true, Some(generation)) = (should_destroy, generation) {
@@ -603,10 +713,11 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
 
     fn probe(
         self: Arc<Self>,
-        request: BackendRequest<volparossa_routing::CommitLeaseBatch>,
+        request: BackendRequest<BackendProbe>,
     ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
-        let (completion, _) = request.into_parts();
-        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move { completion.complete(self.probe_one(binding, value).await) })
     }
 
     fn destroy(
@@ -773,6 +884,64 @@ fn validate_activate_binding(
     Ok((OpenLineageKey::from(lineage), activation.clone()))
 }
 
+fn validate_probe_binding(
+    binding: BackendBinding,
+    value: &BackendProbe,
+) -> Result<(OpenLineageKey, volparossa_routing::LeaseCommit, u64), BackendError> {
+    let lineage = binding.lineage;
+    let context_id: [u8; 16] = value
+        .commit
+        .route_context_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| BackendError::Invalid)?;
+    let [commit] = value.commit.leases.as_slice() else {
+        return Err(BackendError::Unavailable);
+    };
+    if binding.action != BackendAction::Probe
+        || binding.phase != BackendPhase::Activated
+        || binding.operation_kind != OperationKind::Probe
+        || binding.prior_phase != Some(ContextPhase::Activated)
+        || binding.operation_sequence == 0
+        || binding.operation_generation == 0
+        || binding.request_id.iter().all(|byte| *byte == 0)
+        || binding.request_digest.iter().all(|byte| *byte == 0)
+        || lineage.helper_runtime_id.iter().all(|byte| *byte == 0)
+        || lineage.context_id.iter().all(|byte| *byte == 0)
+        || lineage.backend_generation == 0
+        || lineage.prepare_request_id.iter().all(|byte| *byte == 0)
+        || lineage
+            .prepare_operation_digest
+            .iter()
+            .all(|byte| *byte == 0)
+        || lineage.setup_expires_at_unix == 0
+        || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || context_id != lineage.context_id
+        || value.commit.context_handle.len() != HELPER_HANDLE_BYTES
+        || value.commit.context_handle.iter().all(|byte| *byte == 0)
+        || commit.lease_handle.len() != HELPER_HANDLE_BYTES
+        || commit.lease_handle.iter().all(|byte| *byte == 0)
+        || !(1..=8).contains(&commit.path_id)
+        || commit.role != WireguardRole::Client as i32
+        || value.activated_at_unix == 0
+        || value.activated_at_unix >= lineage.setup_expires_at_unix
+    {
+        return Err(BackendError::Invalid);
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| BackendError::Unavailable)?
+        .as_secs();
+    if value.activated_at_unix > now || now >= lineage.hard_expires_at_unix {
+        return Err(BackendError::Invalid);
+    }
+    Ok((
+        OpenLineageKey::from(lineage),
+        commit.clone(),
+        value.activated_at_unix,
+    ))
+}
+
 fn validate_destroy_binding(
     binding: BackendBinding,
     value: BackendDestroy,
@@ -876,6 +1045,23 @@ fn worker_request_id(key: OpenLineageKey, stage: u8) -> [u8; 16] {
     hasher.update(REQUEST_ID_DOMAIN);
     hasher.update(&[stage]);
     bind_lineage(&mut hasher, key);
+    let mut request_id = [0_u8; 16];
+    request_id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    if request_id.iter().all(|byte| *byte == 0) {
+        request_id[15] = stage.max(1);
+    }
+    request_id
+}
+
+fn worker_attempt_request_id(key: OpenLineageKey, stage: u8, binding: BackendBinding) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(REQUEST_ID_DOMAIN);
+    hasher.update(&[stage]);
+    bind_lineage(&mut hasher, key);
+    hasher.update(&binding.operation_sequence.to_be_bytes());
+    hasher.update(&binding.operation_generation.to_be_bytes());
+    hasher.update(&binding.request_id);
+    hasher.update(&binding.request_digest);
     let mut request_id = [0_u8; 16];
     request_id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
     if request_id.iter().all(|byte| *byte == 0) {
@@ -1159,6 +1345,42 @@ fn matches_activated(
     })
 }
 
+fn matches_probed(
+    execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
+    activated: ActivatedWorkerLease,
+    not_before_unix: u64,
+) -> Option<KernelCounters> {
+    let execution = execution?;
+    if execution.descriptor.is_some()
+        || execution.response.result != InternalWorkerResult::Ok as i32
+    {
+        return None;
+    }
+    let Some(internal_worker_response::Outcome::ProbedCommitted(probed)) =
+        execution.response.outcome.as_ref()
+    else {
+        return None;
+    };
+    let [lease] = probed.leases.as_slice() else {
+        return None;
+    };
+    if (lease.path_id, lease.role) != (activated.prepared.path_id, activated.prepared.role)
+        || lease.latest_handshake_unix < not_before_unix
+        || lease.latest_handshake_unix < activated.baseline.latest_handshake_unix
+        || lease.received_bytes <= activated.baseline.received_bytes
+        || lease.transmitted_bytes <= activated.baseline.transmitted_bytes
+    {
+        return None;
+    }
+    Some(KernelCounters {
+        path_id: lease.path_id,
+        role: lease.role,
+        latest_handshake_unix: lease.latest_handshake_unix,
+        received_bytes: lease.received_bytes,
+        transmitted_bytes: lease.transmitted_bytes,
+    })
+}
+
 fn response_error(
     result: Result<crate::worker_transport::CredentialedWorkerExecution, WorkerV3Error>,
 ) -> BackendError {
@@ -1381,6 +1603,7 @@ mod tests {
                 evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
             },
             prepared: None,
+            activated: None,
             phase: OpenLeasePhase::Reserved,
             birth_may_exist: false,
         }
@@ -1483,6 +1706,56 @@ mod tests {
             listen_port: 51_820,
         };
         (key, binding, value, prepared, route)
+    }
+
+    fn live_probe_fixture() -> (
+        OpenLineageKey,
+        BackendBinding,
+        BackendProbe,
+        ActivatedWorkerLease,
+    ) {
+        let (key, _, activation, prepared, _) = live_activate_fixture();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let mut binding = binding(
+            key,
+            OperationKind::Probe,
+            BackendPhase::Activated,
+            BackendAction::Probe,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        binding.prior_phase = Some(ContextPhase::Activated);
+        binding.operation_generation = key.backend_generation + 1;
+        let value = BackendProbe {
+            commit: volparossa_routing::CommitLeaseBatch {
+                route_context_id: key.context_id.to_vec(),
+                context_handle: activation.context_handle,
+                leases: vec![volparossa_routing::LeaseCommit {
+                    lease_handle: activation.leases[0].lease_handle.clone(),
+                    path_id: prepared.path_id,
+                    role: prepared.role,
+                }],
+            },
+            activated_at_unix: now,
+        };
+        let activated = ActivatedWorkerLease {
+            prepared,
+            peer_public_key: activation.leases[0]
+                .peer_public_key
+                .as_slice()
+                .try_into()
+                .expect("relay peer key"),
+            baseline: KernelCounters {
+                path_id: prepared.path_id,
+                role: prepared.role,
+                latest_handshake_unix: 0,
+                received_bytes: 10,
+                transmitted_bytes: 20,
+            },
+        };
+        (key, binding, value, activated)
     }
 
     fn decode_relay_reservation(encoded: &[u8]) -> RelayReservation {
@@ -1615,6 +1888,36 @@ mod tests {
             worker_request_id(key(), STAGE_ACTIVATE),
             worker_request_id(key(), STAGE_DESTROY)
         );
+        let (_, binding, _, _) = live_probe_fixture();
+        let probe_id = worker_attempt_request_id(key(), STAGE_PROBE_COMMIT, binding);
+        assert_ne!(probe_id, worker_request_id(key(), STAGE_DESTROY));
+        assert_eq!(
+            probe_id,
+            worker_attempt_request_id(key(), STAGE_PROBE_COMMIT, binding)
+        );
+        for changed in [
+            BackendBinding {
+                operation_sequence: binding.operation_sequence + 1,
+                ..binding
+            },
+            BackendBinding {
+                operation_generation: binding.operation_generation + 1,
+                ..binding
+            },
+            BackendBinding {
+                request_id: [0xa1; 16],
+                ..binding
+            },
+            BackendBinding {
+                request_digest: [0xa2; 32],
+                ..binding
+            },
+        ] {
+            assert_ne!(
+                probe_id,
+                worker_attempt_request_id(key(), STAGE_PROBE_COMMIT, changed)
+            );
+        }
         let mut changed = key();
         changed.backend_generation += 1;
         assert_ne!(marker, ownership_marker(changed, &lease));
@@ -1801,6 +2104,49 @@ mod tests {
             .address = vec![0; 4];
         assert_eq!(
             validate_activate_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+    }
+
+    #[test]
+    fn probe_validation_binds_engine_activation_threshold_and_exact_client_lease() {
+        let (_, binding, value, _) = live_probe_fixture();
+        assert!(validate_probe_binding(binding, &value).is_ok());
+
+        let mut wrong_binding = binding;
+        wrong_binding.operation_generation = 0;
+        assert_eq!(
+            validate_probe_binding(wrong_binding, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong_binding = binding;
+        wrong_binding.prior_phase = Some(ContextPhase::Prepared);
+        assert_eq!(
+            validate_probe_binding(wrong_binding, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = value.clone();
+        wrong.activated_at_unix = 0;
+        assert_eq!(
+            validate_probe_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = value.clone();
+        wrong.activated_at_unix = binding.lineage.setup_expires_at_unix;
+        assert_eq!(
+            validate_probe_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = value.clone();
+        wrong.commit.leases[0].path_id = 0;
+        assert_eq!(
+            validate_probe_binding(binding, &wrong).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut wrong = value;
+        wrong.commit.leases[0].role = WireguardRole::RelayClient as i32;
+        assert_eq!(
+            validate_probe_binding(binding, &wrong).unwrap_err(),
             BackendError::Invalid
         );
     }
@@ -2214,6 +2560,199 @@ mod tests {
         );
         assert!(matches_activated(Some(&execution(0, 1, 0, 0)), prepared).is_none());
         assert!(matches_activated(Some(&execution(0, 1_000_000_000, 0, 0)), prepared).is_none());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test keeps the divergent Probe response and exact cleanup in one audit unit"
+    )]
+    async fn semantically_invalid_successful_probe_is_destroyed_and_removed() {
+        let (key, mut binding, value, activated) = live_probe_fixture();
+        binding.call_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+        let (parent, peer) =
+            private_credential_worker_channel().expect("credentialed fake worker channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let mut process = WorkerProcess::fake(parent, std::process::id(), Arc::clone(&alive));
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let ownership = match coordinator.reserve_spawn_register_with_until(
+            key.context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xa5; 32]),
+                })
+            },
+        ) {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("fake worker registration rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("fake worker registration unresolved: {error}")
+            }
+        };
+        {
+            let mut registry = coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = registry
+                .records
+                .get_mut(&key.context_id)
+                .expect("registered fake worker");
+            assert_eq!(
+                record.generation,
+                ownership.coordinates.worker_generation.get()
+            );
+            record.stable_phase = StablePhase::Activated;
+        }
+
+        let mut entry = open_entry(key);
+        entry.worker = Some(ownership);
+        entry.prepared = Some(activated.prepared);
+        entry.activated = Some(activated);
+        entry.phase = OpenLeasePhase::Activated;
+        let backend = FunctionalAlphaLeaseBackend {
+            coordinator,
+            relay_replay: Mutex::new(functional_alpha_replay_cache()),
+            state: Mutex::new(Some(entry)),
+        };
+
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let probe = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Probe request");
+            assert!(matches!(
+                probe.request.operation,
+                Some(internal_worker_request::Operation::ProbeCommitLeases(_))
+            ));
+            let malformed = correlated_response(
+                &probe.request,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::ProbedCommitted(
+                    crate::internal_protocol::ProbedLeases {
+                        leases: vec![crate::internal_protocol::ProbedLease {
+                            path_id: activated.prepared.path_id,
+                            role: activated.prepared.role,
+                            latest_handshake_unix: value.activated_at_unix,
+                            received_bytes: activated.baseline.received_bytes,
+                            transmitted_bytes: activated.baseline.transmitted_bytes + 1,
+                        }],
+                    },
+                )),
+            )
+            .expect("correlated malformed Probe success");
+            send_credential_worker_response(&peer, &probe.request, &malformed, None)
+                .expect("send malformed Probe success");
+
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("cleanup Destroy request");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let destroyed = correlated_response(
+                &destroy.request,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::Destroyed(
+                    ContextDestroyed {},
+                )),
+            )
+            .expect("correlated Destroy success");
+            send_credential_worker_response(&peer, &destroy.request, &destroyed, None)
+                .expect("send Destroy success");
+        });
+
+        assert_eq!(
+            backend.probe_one(binding, value).await,
+            Err(BackendError::CleanupIncomplete)
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[test]
+    fn probed_response_requires_threshold_and_strict_bidirectional_growth() {
+        let (_, _, value, activated) = live_probe_fixture();
+        let execution = |handshake, received, transmitted| {
+            crate::worker_transport::CredentialedWorkerExecution {
+                response: crate::internal_protocol::InternalWorkerResponse {
+                    protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                    magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                    request_id: vec![7; 16],
+                    result: InternalWorkerResult::Ok as i32,
+                    request_digest: vec![8; 32],
+                    outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
+                        crate::internal_protocol::ProbedLeases {
+                            leases: vec![crate::internal_protocol::ProbedLease {
+                                path_id: activated.prepared.path_id,
+                                role: activated.prepared.role,
+                                latest_handshake_unix: handshake,
+                                received_bytes: received,
+                                transmitted_bytes: transmitted,
+                            }],
+                        },
+                    )),
+                },
+                descriptor: None,
+            }
+        };
+
+        assert_eq!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix, 11, 21)),
+                activated,
+                value.activated_at_unix,
+            ),
+            Some(KernelCounters {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                latest_handshake_unix: value.activated_at_unix,
+                received_bytes: 11,
+                transmitted_bytes: 21,
+            })
+        );
+        assert!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix - 1, 11, 21)),
+                activated,
+                value.activated_at_unix,
+            )
+            .is_none()
+        );
+        assert!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix, 10, 21)),
+                activated,
+                value.activated_at_unix,
+            )
+            .is_none()
+        );
+        assert!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix, 11, 20)),
+                activated,
+                value.activated_at_unix,
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]
