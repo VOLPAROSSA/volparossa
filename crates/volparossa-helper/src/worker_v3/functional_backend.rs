@@ -143,6 +143,9 @@ enum OpenLeasePhase {
     Reserved,
     DurableHandoffPending,
     Registered,
+    /// The exact Initialise cleanup fence is armed. This does not assert that dispatch occurred;
+    /// only exact staged Destroy settlement may advance cleanup from this phase.
+    InitialiseCleanupPending,
     Initialised,
     BirthMayExist,
     Prepared,
@@ -640,6 +643,17 @@ impl FunctionalAlphaLeaseBackend {
                 prepare: Some(prepare),
             }),
         );
+        {
+            let mut state = lock_state(&self.state);
+            let entry = exact_entry_mut(&mut state, key)?;
+            if entry.phase != OpenLeasePhase::Registered || entry.child_cleanup.is_some() {
+                return Err(BackendError::CleanupIncomplete);
+            }
+            // Linearize the possible child mutation before dispatch. Cancellation, a definite
+            // child error and response loss must all route through the same exact staged Destroy;
+            // the deterministic request tombstone prevents a blind Initialise replay.
+            entry.phase = OpenLeasePhase::InitialiseCleanupPending;
+        }
         let execution = self
             .coordinator
             .execute_until(key.context_id, generation, request, deadline)
@@ -1034,7 +1048,8 @@ impl FunctionalAlphaLeaseBackend {
                     && entry.child_cleanup.is_none()
                     && matches!(
                         entry.phase,
-                        OpenLeasePhase::Initialised
+                        OpenLeasePhase::InitialiseCleanupPending
+                            | OpenLeasePhase::Initialised
                             | OpenLeasePhase::BirthMayExist
                             | OpenLeasePhase::Prepared
                             | OpenLeasePhase::Activated
@@ -2930,7 +2945,8 @@ fn exact_child_cleanup_is_confirmed(
         (Some(InternalWorkerResult::Ok), Some(internal_worker_response::Outcome::Destroyed(_))) => {
             matches!(
                 phase,
-                OpenLeasePhase::Initialised
+                OpenLeasePhase::InitialiseCleanupPending
+                    | OpenLeasePhase::Initialised
                     | OpenLeasePhase::BirthMayExist
                     | OpenLeasePhase::Prepared
                     | OpenLeasePhase::Activated
@@ -2940,7 +2956,9 @@ fn exact_child_cleanup_is_confirmed(
         (Some(InternalWorkerResult::NotFound), None) => {
             matches!(
                 phase,
-                OpenLeasePhase::Initialised | OpenLeasePhase::BirthMayExist
+                OpenLeasePhase::InitialiseCleanupPending
+                    | OpenLeasePhase::Initialised
+                    | OpenLeasePhase::BirthMayExist
             ) && birth_may_exist.iter().all(|may_exist| !*may_exist)
         }
         _ => false,
@@ -3284,6 +3302,82 @@ mod tests {
         }
     }
 
+    fn registered_initialise_backend(
+        open_key: OpenLineageKey,
+    ) -> (
+        FunctionalAlphaLeaseBackend,
+        socket2::Socket,
+        Arc<AtomicBool>,
+    ) {
+        let (parent, peer) =
+            private_credential_worker_channel().expect("credentialed fake worker channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let mut process = WorkerProcess::fake(parent, std::process::id(), Arc::clone(&alive));
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let ownership = match coordinator.reserve_spawn_register_with_until(
+            open_key.context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xe5; 32]),
+                })
+            },
+        ) {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("fake worker registration rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("fake worker registration unresolved: {error}")
+            }
+        };
+        coordinator
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records
+            .get_mut(&open_key.context_id)
+            .expect("functional durable worker record")
+            .dispatch_fence = crate::worker_v3::WorkerDispatchFence::DurableStagedCleanupOpen;
+        let mut entry = open_entry(open_key);
+        entry.worker = Some(ownership);
+        entry.phase = OpenLeasePhase::Registered;
+        (
+            FunctionalAlphaLeaseBackend {
+                coordinator,
+                relay_replay: Mutex::new(functional_alpha_replay_cache()),
+                state: Mutex::new(Some(entry)),
+                durable_ownership: None,
+            },
+            peer,
+            alive,
+        )
+    }
+
+    fn initialise_value(open_key: OpenLineageKey) -> PrepareLeaseBatch {
+        PrepareLeaseBatch {
+            route_context_id: open_key.context_id.to_vec(),
+            role: ContextRole::Client as i32,
+            mptcp_accepted_addrs: 2,
+            mptcp_subflows: 2,
+            leases: vec![RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+            }],
+            setup_expires_at_unix: open_key.setup_expires_at_unix,
+            hard_expires_at_unix: open_key.hard_expires_at_unix,
+        }
+    }
+
     fn key() -> OpenLineageKey {
         OpenLineageKey {
             helper_runtime_id: [1; 32],
@@ -3553,6 +3647,10 @@ mod tests {
         entry.phase = OpenLeasePhase::Registered;
         assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_none());
 
+        entry.phase = OpenLeasePhase::InitialiseCleanupPending;
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&not_found)).is_some());
+
         entry.phase = OpenLeasePhase::Initialised;
         assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
 
@@ -3573,6 +3671,260 @@ mod tests {
         let mut wrong_key = open_key;
         wrong_key.context_id[0] ^= 1;
         assert!(classify_exact_child_cleanup(&entry, wrong_key, Some(&destroyed)).is_none());
+    }
+
+    #[tokio::test]
+    async fn definite_initialise_failure_dispatches_staged_destroy_before_reap() {
+        let open_key = key();
+        let (backend, peer, alive) = registered_initialise_backend(open_key);
+        let value = initialise_value(open_key);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let initialise = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Initialise request");
+            assert!(matches!(
+                initialise.request.operation,
+                Some(internal_worker_request::Operation::Initialise(_))
+            ));
+            let failed =
+                correlated_response(&initialise.request, InternalWorkerResult::Kernel, None)
+                    .expect("correlated definite Initialise failure");
+            send_credential_worker_response(&peer, &initialise.request, &failed, None)
+                .expect("send definite Initialise failure");
+
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("cleanup Destroy request");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let absent =
+                correlated_response(&destroy.request, InternalWorkerResult::NotFound, None)
+                    .expect("correlated pre-birth absence");
+            send_credential_worker_response(&peer, &destroy.request, &absent, None)
+                .expect("send pre-birth absence");
+        });
+
+        let initialise_error = backend
+            .initialise_child(
+                open_key,
+                &value,
+                HardDeadline::after(Duration::from_secs(1)).expect("Initialise deadline"),
+            )
+            .await
+            .expect_err("definite Initialise failure");
+        assert_eq!(initialise_error, BackendError::Kernel);
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::InitialiseCleanupPending)
+        );
+        assert_eq!(
+            backend
+                .coordinator
+                .phase(open_key.context_id, 1)
+                .expect("registered worker phase"),
+            super::super::VisiblePhase::Stable(StablePhase::Starting)
+        );
+        assert_eq!(
+            backend
+                .cleanup_after_failure(
+                    open_key,
+                    HardDeadline::after(Duration::from_secs(2)).expect("cleanup deadline"),
+                    initialise_error,
+                )
+                .await,
+            BackendError::Kernel
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[tokio::test]
+    async fn response_lost_initialise_is_preserved_only_for_exact_staged_destroy() {
+        let open_key = key();
+        let (backend, peer, alive) = registered_initialise_backend(open_key);
+        let value = initialise_value(open_key);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let initialise = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Initialise request");
+            assert!(matches!(
+                initialise.request.operation,
+                Some(internal_worker_request::Operation::Initialise(_))
+            ));
+            // The child accepted and staged Initialise, but its response is deliberately lost.
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("cleanup Destroy after lost response");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let destroyed = correlated_response(
+                &destroy.request,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::Destroyed(
+                    ContextDestroyed {},
+                )),
+            )
+            .expect("correlated staged Destroy success");
+            send_credential_worker_response(&peer, &destroy.request, &destroyed, None)
+                .expect("send staged Destroy success");
+        });
+
+        let initialise_error = backend
+            .initialise_child(
+                open_key,
+                &value,
+                HardDeadline::after(Duration::from_millis(80)).expect("response-loss deadline"),
+            )
+            .await
+            .expect_err("lost Initialise response");
+        assert_eq!(initialise_error, BackendError::Unavailable);
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::InitialiseCleanupPending)
+        );
+        {
+            let registry = backend
+                .coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = registry
+                .records
+                .get(&open_key.context_id)
+                .expect("cleanup-capable exact worker");
+            assert_eq!(
+                record.dispatch_fence,
+                crate::worker_v3::WorkerDispatchFence::DurableStagedCleanupOpen
+            );
+            assert_eq!(record.stable_phase, StablePhase::InitialiseCleanupPending);
+            assert!(record.in_flight.is_none());
+            assert!(!record.quarantined);
+            assert!(record.process.is_some());
+            assert_eq!(registry.tombstones.len(), 1);
+            assert!(registry.cache.is_empty());
+        }
+        assert!(alive.load(Ordering::SeqCst));
+
+        assert_eq!(
+            backend
+                .cleanup_after_failure(
+                    open_key,
+                    HardDeadline::after(Duration::from_secs(2)).expect("cleanup deadline"),
+                    initialise_error,
+                )
+                .await,
+            BackendError::Unavailable
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_initialise_plan_mints_no_dispatch_evidence() {
+        let open_key = key();
+        let (backend, peer, alive) = registered_initialise_backend(open_key);
+        let backend = Arc::new(backend);
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        backend
+            .coordinator
+            .set_before_plan_hook(crate::worker_v3::BeforePlanHook {
+                reached: Arc::clone(&reached),
+                release: Arc::clone(&release),
+            });
+
+        let executing = Arc::clone(&backend);
+        let task = tokio::spawn(async move {
+            executing
+                .initialise_child(
+                    open_key,
+                    &initialise_value(open_key),
+                    HardDeadline::after(Duration::from_secs(1))
+                        .expect("cancelled Initialise deadline"),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), reached.notified())
+            .await
+            .expect("Initialise reached pre-PLAN cancellation point");
+        task.abort();
+        let error = task.await.expect_err("Initialise task was cancelled");
+        assert!(error.is_cancelled());
+
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::InitialiseCleanupPending)
+        );
+        {
+            let registry = backend
+                .coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = registry
+                .records
+                .get(&open_key.context_id)
+                .expect("unchanged registered worker");
+            assert_eq!(
+                record.dispatch_fence,
+                crate::worker_v3::WorkerDispatchFence::DurableStagedCleanupOpen
+            );
+            assert_eq!(record.stable_phase, StablePhase::Starting);
+            assert!(record.in_flight.is_none());
+            assert!(!record.quarantined);
+            assert!(record.process.is_some());
+            assert!(registry.tombstones.is_empty());
+            assert!(registry.cache.is_empty());
+        }
+        assert!(alive.load(Ordering::SeqCst));
+
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("first channel request is cleanup Destroy");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let absent =
+                correlated_response(&destroy.request, InternalWorkerResult::NotFound, None)
+                    .expect("correlated never-dispatched absence");
+            send_credential_worker_response(&peer, &destroy.request, &absent, None)
+                .expect("send never-dispatched absence");
+        });
+        release.add_permits(1);
+        assert_eq!(
+            backend
+                .cleanup_after_failure(
+                    open_key,
+                    HardDeadline::after(Duration::from_secs(2)).expect("cleanup deadline"),
+                    BackendError::Unavailable,
+                )
+                .await,
+            BackendError::Unavailable
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
     }
 
     #[test]
@@ -3613,10 +3965,15 @@ mod tests {
         let encoded_plan = initialise_body
             .find("prepare: Some(prepare)")
             .expect("typed Initialise cleanup target");
+        let cleanup_fence = initialise_body
+            .find("entry.phase = OpenLeasePhase::InitialiseCleanupPending")
+            .expect("pre-dispatch cleanup fence");
         let dispatch = initialise_body
             .find(".execute_until(")
             .expect("Initialise dispatch");
-        assert!(staged_plan < encoded_plan && encoded_plan < dispatch);
+        assert!(
+            staged_plan < encoded_plan && encoded_plan < cleanup_fence && cleanup_fence < dispatch
+        );
     }
 
     #[test]
@@ -3826,6 +4183,7 @@ mod tests {
             )),
         );
         for phase in [
+            OpenLeasePhase::InitialiseCleanupPending,
             OpenLeasePhase::Initialised,
             OpenLeasePhase::BirthMayExist,
             OpenLeasePhase::Prepared,
@@ -3853,7 +4211,11 @@ mod tests {
         }
 
         let not_found = cleanup_execution(InternalWorkerResult::NotFound, None);
-        for phase in [OpenLeasePhase::Initialised, OpenLeasePhase::BirthMayExist] {
+        for phase in [
+            OpenLeasePhase::InitialiseCleanupPending,
+            OpenLeasePhase::Initialised,
+            OpenLeasePhase::BirthMayExist,
+        ] {
             assert!(exact_child_cleanup_is_confirmed(
                 Some(&not_found),
                 phase,

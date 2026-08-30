@@ -3958,6 +3958,10 @@ impl Drop for WorkerProcess {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StablePhase {
     Starting,
+    /// The exact Initialise call crossed PLAN, but its response was not observed. This is a
+    /// cleanup fence, not evidence that the child received the request. Preserve the worker so the
+    /// caller can issue only terminal Destroy against the possible staged resource set.
+    InitialiseCleanupPending,
     Initialised,
     Prepared,
     Activated,
@@ -4019,6 +4023,9 @@ struct FinishCommitHook {
 enum WorkerDispatchFence {
     Open,
     DurableHandoffPending,
+    /// Opened only by consuming the exact durable handoff fence. This record origin authorizes
+    /// retaining a response-lost Initialise worker solely for staged terminal Destroy.
+    DurableStagedCleanupOpen,
 }
 
 impl std::fmt::Debug for WorkerDispatchFence {
@@ -4026,6 +4033,7 @@ impl std::fmt::Debug for WorkerDispatchFence {
         match self {
             Self::Open => formatter.write_str("Open"),
             Self::DurableHandoffPending => formatter.write_str("DurableHandoffPending"),
+            Self::DurableStagedCleanupOpen => formatter.write_str("DurableStagedCleanupOpen"),
         }
     }
 }
@@ -5438,7 +5446,7 @@ impl WorkerRegistry {
         {
             return Err(WorkerV3Error::Conflict);
         }
-        record.dispatch_fence = WorkerDispatchFence::Open;
+        record.dispatch_fence = WorkerDispatchFence::DurableStagedCleanupOpen;
         Ok(())
     }
 
@@ -5824,6 +5832,45 @@ impl WorkerRegistry {
         };
         self.purge_cache_generation(token.context_id, token.generation);
         Ok(detached)
+    }
+
+    /// Convert one exact response-lost Initialise call into a cleanup-only stable phase.
+    ///
+    /// Unlike ordinary ambiguous calls, Initialise has not yet been followed by any parent birth
+    /// mutation and the child owns a canonical staged cleanup set if it accepted the request. The
+    /// worker must therefore remain live long enough to answer an exact terminal Destroy. The
+    /// original tombstone remains present, so Initialise itself cannot be blindly replayed.
+    fn retain_ambiguous_initialise_for_destroy(
+        &mut self,
+        token: PlanToken,
+        request: &InternalWorkerRequest,
+    ) -> Result<(), WorkerV3Error> {
+        if !matches!(
+            request.operation.as_ref(),
+            Some(internal_worker_request::Operation::Initialise(_))
+        ) || request_key(token.context_id, token.generation, request)? != token.in_flight.key
+            || token.in_flight.prior_phase != StablePhase::Starting
+            || token.in_flight.success_phase != StablePhase::Initialised
+            || token.in_flight.terminal
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        let record = self
+            .records
+            .get_mut(&token.context_id)
+            .ok_or(WorkerV3Error::Stale)?;
+        if record.generation != token.generation
+            || record.dispatch_fence != WorkerDispatchFence::DurableStagedCleanupOpen
+            || record.quarantined
+            || record.stable_phase != StablePhase::Starting
+            || record.in_flight != Some(token.in_flight)
+            || record.process.is_none()
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        record.in_flight = None;
+        record.stable_phase = StablePhase::InitialiseCleanupPending;
+        Ok(())
     }
 
     fn report_dead(
@@ -6794,7 +6841,9 @@ impl WorkerSupervisor {
         .await;
         let Ok(Ok((execution, worker_alive))) = result else {
             let deadline_elapsed = ensure_worker_deadline(deadline).is_err();
-            return self.finish_ambiguous(token, deadline_elapsed).await;
+            return self
+                .finish_ambiguous(token, &request, deadline_elapsed)
+                .await;
         };
         let outcome = lock_worker_registry(&self.registry).finish(
             token,
@@ -6809,8 +6858,19 @@ impl WorkerSupervisor {
     async fn finish_ambiguous(
         &self,
         token: PlanToken,
+        request: &InternalWorkerRequest,
         deadline_elapsed: bool,
     ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
+        if lock_worker_registry(&self.registry)
+            .retain_ambiguous_initialise_for_destroy(token, request)
+            .is_ok()
+        {
+            return Err(if deadline_elapsed {
+                WorkerV3Error::Deadline
+            } else {
+                WorkerV3Error::Ambiguous
+            });
+        }
         let detached = lock_worker_registry(&self.registry)
             .mark_ambiguous(token)
             .ok()
@@ -8654,7 +8714,10 @@ impl WorkerCoordinator {
                 .get(&ownership.coordinates.context_id)
                 .ok_or(WorkerV3Error::Dead)?;
             if record.generation != ownership.coordinates.worker_generation.get()
-                || record.dispatch_fence != WorkerDispatchFence::Open
+                || !matches!(
+                    record.dispatch_fence,
+                    WorkerDispatchFence::Open | WorkerDispatchFence::DurableStagedCleanupOpen
+                )
             {
                 return Err(WorkerV3Error::Stale);
             }
@@ -8691,7 +8754,10 @@ impl WorkerCoordinator {
                 .get(&ownership.coordinates.context_id)
                 .ok_or(WorkerV3Error::Dead)?;
             if record.generation != ownership.coordinates.worker_generation.get()
-                || record.dispatch_fence != WorkerDispatchFence::Open
+                || !matches!(
+                    record.dispatch_fence,
+                    WorkerDispatchFence::Open | WorkerDispatchFence::DurableStagedCleanupOpen
+                )
             {
                 return Err(WorkerV3Error::Stale);
             }
@@ -14077,7 +14143,10 @@ mod tests {
                 .records
                 .get(&context_id)
                 .expect("opened worker record");
-            assert_eq!(record.dispatch_fence, WorkerDispatchFence::Open);
+            assert_eq!(
+                record.dispatch_fence,
+                WorkerDispatchFence::DurableStagedCleanupOpen
+            );
             assert_eq!(record.stable_phase, StablePhase::Starting);
             assert!(record.in_flight.is_none());
             assert!(!record.quarantined);
@@ -16102,6 +16171,44 @@ mod tests {
                 < commit
                     .find("self.records.insert(")
                     .expect("atomic record insertion")
+        );
+
+        let open_start = source
+            .find("    fn open_durable_handoff_dispatch(")
+            .expect("exact durable dispatch-open transition");
+        let open_end = source[open_start..]
+            .find("\n    fn reject_pending_durable_handoff_dispatch(")
+            .map(|offset| open_start + offset)
+            .expect("durable dispatch-open boundary");
+        let open = &source[open_start..open_end];
+        let exact_fence_check = open
+            .find("self.confirm_durable_handoff_pending(coordinates, fence)?")
+            .expect("exact retained handoff fence check");
+        let cleanup_origin = open
+            .find("record.dispatch_fence = WorkerDispatchFence::DurableStagedCleanupOpen")
+            .expect("typed durable staged-cleanup origin");
+        assert!(exact_fence_check < cleanup_origin);
+
+        let production = &source[..source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("worker production boundary")];
+        assert_eq!(
+            production
+                .matches("record.dispatch_fence = WorkerDispatchFence::DurableStagedCleanupOpen",)
+                .count(),
+            1,
+            "only exact durable dispatch-open may mint the cleanup origin"
+        );
+        let retain_start = production
+            .find("    fn retain_ambiguous_initialise_for_destroy(")
+            .expect("response-lost Initialise retention");
+        let retain_end = production[retain_start..]
+            .find("\n    fn report_dead(")
+            .map(|offset| retain_start + offset)
+            .expect("response-lost Initialise retention boundary");
+        assert!(
+            production[retain_start..retain_end]
+                .contains("record.dispatch_fence != WorkerDispatchFence::DurableStagedCleanupOpen")
         );
     }
 
@@ -20369,6 +20476,33 @@ mod tests {
             coordinator.phase(context_id, generation),
             Err(WorkerV3Error::Stale)
         ));
+    }
+
+    #[test]
+    fn initialise_cleanup_pending_phase_allows_only_terminal_destroy() {
+        let context_id = [0x91; 16];
+        assert!(matches!(
+            transition(
+                StablePhase::InitialiseCleanupPending,
+                &initialise(context_id, 1),
+            ),
+            Err(WorkerV3Error::Conflict)
+        ));
+        assert!(matches!(
+            transition(
+                StablePhase::InitialiseCleanupPending,
+                &acquire(context_id, 2),
+            ),
+            Err(WorkerV3Error::Conflict)
+        ));
+        assert_eq!(
+            transition(
+                StablePhase::InitialiseCleanupPending,
+                &destroy(context_id, 3),
+            )
+            .expect("terminal Destroy transition"),
+            (StablePhase::InitialiseCleanupPending, true)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
