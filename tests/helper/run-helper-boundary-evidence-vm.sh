@@ -266,6 +266,26 @@ non_retained_driver_phase_is_safe() {
     esac
 }
 
+non_retained_final_checkpoint_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        host-state|\
+        structured-reporting|\
+        cleanup-summary|\
+        lifecycle-summary|\
+        artifact-integrity|\
+        source-integrity|\
+        report-times|\
+        report-generation|\
+        report-validation|\
+        publication-fence|\
+        stage-retirement)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 report_non_retained_proof_failure_reason() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -318,6 +338,31 @@ report_non_retained_driver_phase() {
     non_retained_driver_phase_is_safe "$non_retained_driver_phase" || return 1
     printf 'non-retained helper-boundary PR smoke driver phase: %s\n' \
         "$non_retained_driver_phase" >&2
+}
+
+report_non_retained_final_checkpoint() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_diagnostic=$1
+    [ -f "$non_retained_diagnostic" ] && [ ! -L "$non_retained_diagnostic" ] \
+        || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_diagnostic" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    non_retained_diagnostic_size=$(stat -Lc '%s' "$non_retained_diagnostic") \
+        || return 1
+    [ "$non_retained_diagnostic_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_diagnostic" || return 1
+    non_retained_checkpoint_prefix=VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=
+    [ "$(grep -Ec "^$non_retained_checkpoint_prefix" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_checkpoint_pattern='^VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|publication-fence|stage-retirement)$'
+    [ "$(grep -Ec "$non_retained_checkpoint_pattern" \
+        "$non_retained_diagnostic")" -eq 1 ] || return 1
+    non_retained_checkpoint=$(grep -E "$non_retained_checkpoint_pattern" \
+        "$non_retained_diagnostic") || return 1
+    non_retained_checkpoint=${non_retained_checkpoint#"$non_retained_checkpoint_prefix"}
+    non_retained_final_checkpoint_is_safe "$non_retained_checkpoint" || return 1
+    printf 'non-retained helper-boundary PR smoke final checkpoint: %s\n' \
+        "$non_retained_checkpoint" >&2
 }
 
 report_non_retained_worker_launch_diagnostic() {
@@ -1815,6 +1860,7 @@ if [ "$guest_status" -ne 0 ]; then
             printf '%s\n' \
                 'non-retained helper-boundary PR smoke failure category: unclassified' >&2
             report_non_retained_driver_phase "$proof_stderr_log" || true
+            report_non_retained_final_checkpoint "$proof_stderr_log" || true
         fi
     fi
     failed "the guest helper-boundary proof exited with status $guest_status"

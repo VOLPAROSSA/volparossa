@@ -72,13 +72,18 @@ if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$live_gate")" -ne 2 ] \
     exit 1
 fi
 if [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=' "$live_gate")" -ne 1 ] \
     || [ "$(grep -Ec '^[[:space:]]*driver_phase=(staging|worker-launch|worker-terminal-observation|worker-retirement|production-launch|production-observation|production-retirement|final-verification)$' \
         "$live_gate")" -ne 8 ] \
-    || [ "$(grep -Fc 'normal_final_reporting_reached=yes' "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Ec '^[[:space:]]*final_checkpoint=(host-state|structured-reporting|cleanup-summary|lifecycle-summary|artifact-integrity|source-integrity|report-times|report-generation|report-validation|publication-fence|stage-retirement)$' \
+        "$live_gate")" -ne 11 ] \
+    || [ "$(grep -Fc 'structured_failure_reported=yes' "$live_gate")" -ne 1 ] \
     || [ "$(grep -Fc 'report_unexpected_driver_phase "${driver_phase:-}" || :' \
+        "$live_gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'report_unexpected_final_checkpoint "${final_checkpoint:-}" || :' \
         "$live_gate")" -ne 1 ]; then
     printf '%s\n' \
-        'the VM payload does not preserve one fixed unexpected driver-phase record' >&2
+        'the VM payload does not preserve fixed unexpected driver and final-checkpoint records' >&2
     exit 1
 fi
 if [ "$(grep -Fxc '    identity_launch=' "$live_gate")" -ne 1 ] \
@@ -712,25 +717,38 @@ cmp -s "$console_log" "$published_console_log"
 test "$(find "$publication_output" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" \
     = vm-console.log
 
-# A failed non-retained proof may publish only one enumerated privacy-safe
-# category. Exercise the reviewed parser rather than a test-only copy.
+# A failed non-retained proof may publish only enumerated privacy-safe category
+# and progress records. Exercise the reviewed parsers rather than test-only copies.
 branch_failure_functions=$temporary_directory/branch-failure-functions.sh
 {
     sed -n '/^non_retained_proof_failure_reason_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_driver_phase_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_final_checkpoint_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^require_no_private_key_marker() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_proof_failure_reason() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_driver_phase() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_final_checkpoint() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_launch_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_worker_confinement_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_production_launch_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 10
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 12
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
+
+for non_retained_final_checkpoint in \
+    host-state structured-reporting cleanup-summary lifecycle-summary \
+    artifact-integrity source-integrity report-times report-generation \
+    report-validation publication-fence stage-retirement; do
+    non_retained_final_checkpoint_is_safe "$non_retained_final_checkpoint" || {
+        printf 'non-retained parser rejected fixed final checkpoint: %s\n' \
+            "$non_retained_final_checkpoint" >&2
+        exit 1
+    }
+done
 
 for non_retained_functional_phase in \
     plan connect bind prepare shutdown ready release reconnect destroy \
@@ -781,6 +799,34 @@ if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/de
     printf '%s\n' 'branch failure diagnostic exposed a non-allowlisted payload' >&2
     exit 1
 fi
+
+printf '%s\n%s\n' \
+    "$branch_failure_privacy_sentinel" \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=lifecycle-summary' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_final_checkpoint "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+grep -Fx \
+    'non-retained helper-boundary PR smoke final checkpoint: lifecycle-summary' \
+    "$last_stderr" >/dev/null
+test "$(wc -l <"$last_stderr")" -eq 1
+if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
+    printf '%s\n' 'final checkpoint exposed a non-allowlisted payload' >&2
+    exit 1
+fi
+
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=report-validation' \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=report-validation' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_final_checkpoint "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+printf '%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=secret-publication' \
+    >"$branch_failure_diagnostic"
+expect_status 1 report_non_retained_final_checkpoint "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
 printf '%s\n%s\n%s\n' \
     "$branch_failure_privacy_sentinel" \
@@ -1057,6 +1103,9 @@ grep -F \
     "$runner" >/dev/null
 grep -F \
     'report_non_retained_driver_phase "$proof_stderr_log" || true' \
+    "$runner" >/dev/null
+grep -F \
+    'report_non_retained_final_checkpoint "$proof_stderr_log" || true' \
     "$runner" >/dev/null
 grep -E \
     '^[[:space:]]+report_non_retained_worker_launch_diagnostic([[:space:]]|$)' \

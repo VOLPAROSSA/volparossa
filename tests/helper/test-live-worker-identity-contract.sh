@@ -121,17 +121,23 @@ expect_status() {
     fi
 }
 
-# Unexpected shell exits may disclose only one fixed, coarse phase from the
-# real EXIT cleanup. Exercise the exact helpers and the status-preserving trap.
+# Unexpected shell exits may disclose only fixed, coarse progress markers from
+# the real EXIT cleanup. Exercise the exact helpers and the status-preserving trap.
 driver_phase_functions=$temporary_directory/driver-phase-functions.sh
 {
     sed -n '/^driver_phase_is_safe() {$/,/^}$/p' "$gate"
     sed -n '/^report_unexpected_driver_phase() {$/,/^}$/p' "$gate"
+    sed -n '/^final_checkpoint_is_safe() {$/,/^}$/p' "$gate"
+    sed -n '/^report_unexpected_final_checkpoint() {$/,/^}$/p' "$gate"
 } >"$driver_phase_functions"
 if [ "$(grep -c '^driver_phase_is_safe() {$' "$driver_phase_functions")" -ne 1 ] \
     || [ "$(grep -c '^report_unexpected_driver_phase() {$' \
+        "$driver_phase_functions")" -ne 1 ] \
+    || [ "$(grep -c '^final_checkpoint_is_safe() {$' \
+        "$driver_phase_functions")" -ne 1 ] \
+    || [ "$(grep -c '^report_unexpected_final_checkpoint() {$' \
         "$driver_phase_functions")" -ne 1 ]; then
-    printf '%s\n' 'the unexpected driver-phase helpers are not uniquely extractable' >&2
+    printf '%s\n' 'the unexpected progress helpers are not uniquely extractable' >&2
     exit 1
 fi
 sh -n "$driver_phase_functions"
@@ -168,6 +174,40 @@ test ! -s "$last_stdout" && test ! -s "$last_stderr"
 expect_status 1 report_unexpected_driver_phase 'production-observation/private-record'
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
 
+expected_final_checkpoints=$temporary_directory/expected-final-checkpoints
+printf '%s\n' \
+    host-state \
+    structured-reporting \
+    cleanup-summary \
+    lifecycle-summary \
+    artifact-integrity \
+    source-integrity \
+    report-times \
+    report-generation \
+    report-validation \
+    publication-fence \
+    stage-retirement >"$expected_final_checkpoints"
+while IFS= read -r expected_final_checkpoint; do
+    final_checkpoint_is_safe "$expected_final_checkpoint" || {
+        printf 'final checkpoint is not allowlisted: %s\n' \
+            "$expected_final_checkpoint" >&2
+        exit 1
+    }
+    expect_status 0 report_unexpected_final_checkpoint "$expected_final_checkpoint"
+    if [ -s "$last_stdout" ] \
+        || [ "$(cat "$last_stderr")" \
+            != "VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=$expected_final_checkpoint" ] \
+        || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
+        printf 'final checkpoint did not emit one fixed record: %s\n' \
+            "$expected_final_checkpoint" >&2
+        exit 1
+    fi
+done <"$expected_final_checkpoints"
+expect_status 1 report_unexpected_final_checkpoint
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_unexpected_final_checkpoint 'report-validation/private-record'
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
 gate_cleanup_function=$temporary_directory/gate-cleanup-function.sh
 sed -n '/^cleanup() {$/,/^}$/p' "$gate" >"$gate_cleanup_function"
 # This is a literal gate-source contract; expansion here would defeat it.
@@ -181,46 +221,62 @@ fi
 sh -n "$gate_cleanup_function"
 exercise_gate_cleanup() (
     phase=$1
-    final_reporting=$2
-    requested_status=$3
-    retire_status=$4
-    removal_status=$5
+    checkpoint=$2
+    structured=$3
+    requested_status=$4
+    retire_status=$5
+    removal_status=$6
     # Invoked indirectly by the extracted EXIT cleanup.
     # shellcheck disable=SC2317
     retire_unit() { return "$retire_status"; }
     # shellcheck disable=SC2317
     remove_temporary_stage() { return "$removal_status"; }
     cleanup_error=no
-    normal_final_reporting_reached=$final_reporting
+    structured_failure_reported=$structured
     if [ "$phase" = missing ]; then
         unset driver_phase
     else
         driver_phase=$phase
     fi
-    : "$cleanup_error" "$normal_final_reporting_reached" "${driver_phase:-}"
+    if [ "$checkpoint" = missing ]; then
+        unset final_checkpoint
+    else
+        final_checkpoint=$checkpoint
+    fi
+    : "$cleanup_error" "$structured_failure_reported" \
+        "${driver_phase:-}" "${final_checkpoint:-}"
     # shellcheck disable=SC1090
     . "$gate_cleanup_function"
     trap cleanup EXIT
     exit "$requested_status"
 )
-expect_status 2 exercise_gate_cleanup worker-terminal-observation no 2 0 0
+expect_status 2 exercise_gate_cleanup worker-terminal-observation missing no 2 0 0
 test ! -s "$last_stdout"
 test "$(cat "$last_stderr")" \
     = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-terminal-observation'
-expect_status 2 exercise_gate_cleanup missing no 2 0 0
+expect_status 2 exercise_gate_cleanup missing missing no 2 0 0
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
-expect_status 2 exercise_gate_cleanup invalid-phase no 2 0 0
+expect_status 2 exercise_gate_cleanup invalid-phase missing no 2 0 0
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
-expect_status 2 exercise_gate_cleanup production-launch yes 2 0 0
+expect_status 2 exercise_gate_cleanup production-launch report-validation yes 2 0 0
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
-expect_status 1 exercise_gate_cleanup worker-retirement no 0 1 0
+expect_status 1 exercise_gate_cleanup worker-retirement missing no 0 1 0
 test ! -s "$last_stdout"
 test "$(cat "$last_stderr")" \
     = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement'
-expect_status 2 exercise_gate_cleanup production-retirement no 2 1 1
+expect_status 2 exercise_gate_cleanup production-retirement missing no 2 1 1
 test ! -s "$last_stdout"
 test "$(cat "$last_stderr")" \
     = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement'
+expect_status 2 exercise_gate_cleanup final-verification report-validation no 2 0 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" = \
+    'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=final-verification
+VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=report-validation'
+expect_status 2 exercise_gate_cleanup final-verification invalid-checkpoint no 2 0 0
+test ! -s "$last_stdout"
+test "$(cat "$last_stderr")" \
+    = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=final-verification'
 
 if ! awk '
     /^driver_phase=staging$/ { staging++; staging_line = NR }
@@ -239,12 +295,14 @@ if ! awk '
         production_retirement++; production_retirement_line = NR
     }
     /^driver_phase=final-verification$/ { final_verification++; final_verification_line = NR }
-    /^normal_final_reporting_reached=yes$/ { final_reporting++; final_reporting_line = NR }
+    /^final_checkpoint=structured-reporting$/ {
+        structured_checkpoint++; structured_checkpoint_line = NR
+    }
     END {
         valid = staging == 1 && worker_launch == 1 && worker_terminal == 1
         valid = valid && worker_retirement == 1 && production_launch == 1
         valid = valid && production_observation == 1 && production_retirement == 1
-        valid = valid && final_verification == 1 && final_reporting == 1
+        valid = valid && final_verification == 1 && structured_checkpoint == 1
         valid = valid && staging_line < worker_launch_line
         valid = valid && worker_launch_line < worker_terminal_line
         valid = valid && worker_terminal_line < worker_retirement_line
@@ -252,7 +310,7 @@ if ! awk '
         valid = valid && production_launch_line < production_observation_line
         valid = valid && production_observation_line < production_retirement_line
         valid = valid && production_retirement_line < final_verification_line
-        valid = valid && final_verification_line < final_reporting_line
+        valid = valid && final_verification_line < structured_checkpoint_line
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -421,7 +479,7 @@ fi
 if [ "$(grep -Fc 'report_proof_failure "$proof_failure_reason"' "$gate")" -ne 1 ] \
     || [ "$(grep -Ec '^[[:space:]]+report_worker_launch_diagnostic([[:space:]]|$)' \
         "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc 'failed "predicate rejected: $1"' \
+    || [ "$(grep -Fc "printf 'live worker-identity proof failed: predicate rejected: %s\\n' \"\$1\" >&2" \
         "$proof_failure_functions")" -ne 1 ]; then
     printf '%s\n' 'the final proof failure does not use the revalidating reporter once' >&2
     exit 1
@@ -1434,7 +1492,7 @@ report_worker_first_failure() (
 )
 expect_status 1 report_worker_first_failure
 if [ -s "$last_stdout" ] \
-    || ! grep -Fx 'diagnostic failure: predicate rejected: worker-launch-status' \
+    || ! grep -Fx 'live worker-identity proof failed: predicate rejected: worker-launch-status' \
         "$last_stderr" >/dev/null \
     || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
     printf '%s\n' 'the worker diagnostic did not retain only its first fixed reason' >&2
@@ -1509,7 +1567,7 @@ report_production_first_failure() (
 )
 expect_status 1 report_production_first_failure
 if [ -s "$last_stdout" ] \
-    || ! grep -Fx 'diagnostic failure: predicate rejected: production-running-state' \
+    || ! grep -Fx 'live worker-identity proof failed: predicate rejected: production-running-state' \
         "$last_stderr" >/dev/null \
     || [ "$(wc -l <"$last_stderr")" -ne 1 ]; then
     printf '%s\n' 'the production diagnostic did not retain only its first fixed reason' >&2

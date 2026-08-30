@@ -275,7 +275,9 @@ report_proof_failure() {
                 || failed 'internal proof failure state is inconsistent'
             ;;
     esac
-    failed "predicate rejected: $1"
+    printf 'live worker-identity proof failed: predicate rejected: %s\n' "$1" >&2
+    structured_failure_reported=yes
+    exit 1
 }
 
 report_worker_launch_diagnostic() {
@@ -532,6 +534,32 @@ report_unexpected_driver_phase() {
     [ "$#" -eq 1 ] || return 1
     driver_phase_is_safe "$1" || return 1
     printf 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=%s\n' "$1" >&2
+}
+
+final_checkpoint_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        host-state|\
+        structured-reporting|\
+        cleanup-summary|\
+        lifecycle-summary|\
+        artifact-integrity|\
+        source-integrity|\
+        report-times|\
+        report-generation|\
+        report-validation|\
+        publication-fence|\
+        stage-retirement)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+report_unexpected_final_checkpoint() {
+    [ "$#" -eq 1 ] || return 1
+    final_checkpoint_is_safe "$1" || return 1
+    printf 'VOLPAROSSA_HELPER_LIVE_FINAL_CHECKPOINT_V1=%s\n' "$1" >&2
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -1458,7 +1486,8 @@ worker_retired_load_state=
 production_fdstore_during_run=
 production_retired_load_state=
 driver_phase=staging
-normal_final_reporting_reached=no
+structured_failure_reported=no
+final_checkpoint=
 
 unit_name_is_safe() {
     case $unit_name in
@@ -1994,8 +2023,9 @@ cleanup() {
         saved_status=1
     fi
     if [ "$saved_status" -ne 0 ] \
-        && [ "${normal_final_reporting_reached:-no}" = no ]; then
+        && [ "${structured_failure_reported:-no}" = no ]; then
         report_unexpected_driver_phase "${driver_phase:-}" || :
+        report_unexpected_final_checkpoint "${final_checkpoint:-}" || :
     fi
     exit "$saved_status"
 }
@@ -3529,6 +3559,7 @@ if [ "$proof_ok" = yes ]; then
     fi
 fi
 driver_phase=final-verification
+final_checkpoint=host-state
 capture_host_state "$temporary_stage/after"
 after_digest=$(state_digest "$temporary_stage/after")
 changed_records=
@@ -3541,7 +3572,7 @@ if [ -n "$changed_records" ] || [ "$before_digest" != "$after_digest" ]; then
     printf 'Host state changed in:%s\n' "$changed_records" >&2
     failed 'privacy-safe before/after host-state digests differ'
 fi
-normal_final_reporting_reached=yes
+final_checkpoint=structured-reporting
 if [ "$proof_ok" != yes ]; then
     if [ "$proof_failure_reason" = worker-launch-status ]; then
         report_worker_launch_diagnostic \
@@ -3554,9 +3585,11 @@ if [ "$proof_ok" != yes ]; then
     fi
     report_proof_failure "$proof_failure_reason"
 fi
+final_checkpoint=cleanup-summary
 if [ "$cleanup_error" != no ]; then
     failed 'the staged proof recorded an earlier retirement or cleanup failure'
 fi
+final_checkpoint=lifecycle-summary
 if [ "$worker_fdstore_before_retirement" != 2 ] \
     || [ "$worker_retired_load_state" != not-found ] \
     || [ "$production_fdstore_during_run" != 0 ] \
@@ -3564,6 +3597,7 @@ if [ "$worker_fdstore_before_retirement" != 2 ] \
     failed 'the retained fdstore or exact-unit retirement observations are incomplete'
 fi
 
+final_checkpoint=artifact-integrity
 source_final=$(stat -Lc '%F:%d:%i:%u:%g:%a:%h:%s:%Y:%Z' "$helper_source") \
     || failed 'the helper source metadata could not be revalidated'
 source_digest_final=$(vp_capture_sha256_file "$helper_source") \
@@ -3595,6 +3629,7 @@ if [ "$source_before" != "$source_final" ] \
     || [ "$staged_ipc_hook_digest" != "$staged_ipc_hook_digest_final" ]; then
     failed 'a source or staged proof artifact changed during live execution'
 fi
+final_checkpoint=source-integrity
 final_repository_root=$(git -c safe.directory="$repository_directory" \
     -C "$repository_directory" rev-parse --show-toplevel 2>/dev/null) \
     || failed 'the repository root could not be revalidated'
@@ -3611,10 +3646,12 @@ if [ "$final_repository_root" != "$repository_directory" ] \
     failed 'the exact clean source revision changed during live execution'
 fi
 
+final_checkpoint=report-times
 finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
     || failed 'the execution finish time cannot be established'
 generated_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') \
     || failed 'the report generation time cannot be established'
+final_checkpoint=report-generation
 report_path=$temporary_stage/helper-boundary-evidence-v1.json
 jq -n -S -c \
     --arg source_commit "$source_commit" \
@@ -3704,6 +3741,7 @@ jq -n -S -c \
 chmod 0600 "$report_path" || failed 'the helper-boundary report mode could not be fixed'
 vp_capture_file_is_safe "$report_path" \
     || failed 'the helper-boundary report is not one validated private file'
+final_checkpoint=report-validation
 validator_stdout=$temporary_stage/report-validator.stdout
 validator_stderr=$temporary_stage/report-validator.stderr
 install -o root -g root -m 0600 /dev/null "$validator_stdout" "$validator_stderr" \
@@ -3724,6 +3762,7 @@ validated_report=$(cat "$report_path") \
 if [ -z "$validated_report" ] || [ "${#validated_report}" -gt 65535 ]; then
     failed 'the validated helper-boundary report has an invalid publication size'
 fi
+final_checkpoint=publication-fence
 publication_source_commit=$(git -c safe.directory="$repository_directory" \
     -C "$repository_directory" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || failed 'the source commit could not be publication-fenced'
@@ -3735,6 +3774,7 @@ if [ "$publication_source_commit" != "$source_commit" ] \
     || [ -n "$publication_source_status" ]; then
     failed 'the exact clean source revision changed before report publication'
 fi
+final_checkpoint=stage-retirement
 if ! remove_temporary_stage; then
     cleanup_error=yes
     failed 'the validated temporary proof stage could not be removed before publication'
