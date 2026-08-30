@@ -10,6 +10,7 @@ use std::{
 };
 
 use nix::poll::PollFlags;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::deadline::{HardDeadline, wait_for_fd};
@@ -354,10 +355,10 @@ impl DeviceAccumulator {
                     }
                 }
                 WGDEVICE_A_PRIVATE_KEY => {
-                    exact_key(value)?;
                     if self.private_key_seen {
                         return Err(KernelError::Malformed);
                     }
+                    exact_nonzero_private_key(value)?;
                     self.private_key_seen = true;
                 }
                 WGDEVICE_A_PUBLIC_KEY => {
@@ -424,10 +425,16 @@ impl DeviceAccumulator {
     fn finish(self, expected_interface: &str) -> Result<WireguardDeviceState, KernelError> {
         let ifindex = self.ifindex.ok_or(KernelError::Malformed)?;
         let interface_name = self.interface_name.ok_or(KernelError::Malformed)?;
-        let public_key = self.public_key.ok_or(KernelError::Malformed)?;
+        // Linux omits both device-key attributes until the WireGuard device has an identity.
+        // They are emitted as one pair once configured; a one-sided response is never canonical.
+        let public_key = match (self.private_key_seen, self.public_key) {
+            (false, None) => [0; 32],
+            (true, Some(key)) if key.iter().any(|byte| *byte != 0) => key,
+            _ => return Err(KernelError::Malformed),
+        };
         let listen_port = self.listen_port.ok_or(KernelError::Malformed)?;
         let firewall_mark = self.firewall_mark.ok_or(KernelError::Malformed)?;
-        if !self.private_key_seen || interface_name != expected_interface {
+        if interface_name != expected_interface {
             return Err(KernelError::Malformed);
         }
         let peers = self
@@ -444,6 +451,13 @@ impl DeviceAccumulator {
             peers,
         })
     }
+}
+
+fn exact_nonzero_private_key(value: &[u8]) -> Result<(), KernelError> {
+    if value.len() != 32 || bool::from(value.ct_eq(&[0_u8; 32])) {
+        return Err(KernelError::Malformed);
+    }
+    Ok(())
 }
 
 struct PeerFragment {
@@ -998,8 +1012,6 @@ mod tests {
         let mut fresh = Vec::new();
         push_attribute(&mut fresh, WGDEVICE_A_IFINDEX, &17_u32.to_ne_bytes()).expect("ifindex");
         push_string_attribute(&mut fresh, WGDEVICE_A_IFNAME, TEST_INTERFACE).expect("ifname");
-        push_attribute(&mut fresh, WGDEVICE_A_PRIVATE_KEY, &[0; 32]).expect("private key");
-        push_attribute(&mut fresh, WGDEVICE_A_PUBLIC_KEY, &[0; 32]).expect("public key");
         push_attribute(&mut fresh, WGDEVICE_A_LISTEN_PORT, &0_u16.to_ne_bytes())
             .expect("listen port");
         push_attribute(&mut fresh, WGDEVICE_A_FWMARK, &0_u32.to_ne_bytes()).expect("fwmark");
@@ -1156,8 +1168,6 @@ mod tests {
         let device = device_attributes(Some(&full_peer(&[(&[10, 0, 0, 0], 8)])));
         for missing in [
             WGDEVICE_A_IFINDEX,
-            WGDEVICE_A_PRIVATE_KEY,
-            WGDEVICE_A_PUBLIC_KEY,
             WGDEVICE_A_LISTEN_PORT,
             WGDEVICE_A_FWMARK,
         ] {
@@ -1172,6 +1182,55 @@ mod tests {
                 "attribute {missing} must be required"
             );
         }
+
+        for missing_key in [WGDEVICE_A_PRIVATE_KEY, WGDEVICE_A_PUBLIC_KEY] {
+            let mut one_sided = Vec::new();
+            for (kind, value) in attributes(&device).expect("attributes") {
+                if kind & NLA_TYPE_MASK != missing_key {
+                    push_attribute(&mut one_sided, kind, value).expect("copy");
+                }
+            }
+            assert!(
+                parse(&[data_frame(&one_sided), done_frame(0)]).is_err(),
+                "one-sided key attribute {missing_key} must fail closed"
+            );
+        }
+
+        let mut zero_public_key = Vec::new();
+        for (kind, value) in attributes(&device).expect("attributes") {
+            let value = if kind & NLA_TYPE_MASK == WGDEVICE_A_PUBLIC_KEY {
+                &[0; 32][..]
+            } else {
+                value
+            };
+            push_attribute(&mut zero_public_key, kind, value).expect("copy");
+        }
+        assert!(parse(&[data_frame(&zero_public_key), done_frame(0)]).is_err());
+
+        let mut zero_private_key = Vec::new();
+        for (kind, value) in attributes(&device).expect("attributes") {
+            let value = if kind & NLA_TYPE_MASK == WGDEVICE_A_PRIVATE_KEY {
+                &[0; 32][..]
+            } else {
+                value
+            };
+            push_attribute(&mut zero_private_key, kind, value).expect("copy");
+        }
+        assert!(parse(&[data_frame(&zero_private_key), done_frame(0)]).is_err());
+
+        let mut zero_key_pair = Vec::new();
+        for (kind, value) in attributes(&device).expect("attributes") {
+            let value = if matches!(
+                kind & NLA_TYPE_MASK,
+                WGDEVICE_A_PRIVATE_KEY | WGDEVICE_A_PUBLIC_KEY
+            ) {
+                &[0; 32][..]
+            } else {
+                value
+            };
+            push_attribute(&mut zero_key_pair, kind, value).expect("copy");
+        }
+        assert!(parse(&[data_frame(&zero_key_pair), done_frame(0)]).is_err());
 
         let state = parse(&[data_frame(&device_attributes(None)), done_frame(0)])
             .expect("peerless prepare proof");
