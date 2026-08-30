@@ -1269,7 +1269,7 @@ mod tests {
     use nix::unistd::{getegid, geteuid};
     use volparossa_protocol::{
         MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
-        SignedEnvelope, Transport, decode_canonical, sign_control_message,
+        SignedEnvelope, Transport, decode_canonical, generate_nonce, sign_control_message,
     };
     use volparossa_test_support::SignedRouteFixture;
 
@@ -2125,8 +2125,12 @@ mod tests {
         // the post-verification worker failure. The newly admitted outer nonce is rolled back.
         let mut fresh_outer = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
         let retained_exit_envelope = fresh_outer.exit_authorization.clone();
-        let fresh_relay_nonce = [0xc7; 32];
-        assert_ne!(fresh_outer.nonce.as_slice(), fresh_relay_nonce);
+        let fresh_relay_nonce = loop {
+            let candidate = generate_nonce();
+            if fresh_outer.nonce.as_slice() != candidate {
+                break candidate;
+            }
+        };
         fresh_outer.nonce = fresh_relay_nonce.to_vec();
         let mut nested_retry = value;
         nested_retry.leases[0].signed_relay_reservation = sign_control_message(
