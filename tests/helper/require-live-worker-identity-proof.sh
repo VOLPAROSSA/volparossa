@@ -1581,20 +1581,91 @@ unit_active_state() {
     esac
 }
 
-unit_job_is_absent() {
+# Capture every manager property used to decide retirement from one D-Bus
+# GetAll transaction. A CollectMode=inactive transient unit may disappear as
+# soon as its stop job and cgroup settle; separate `systemctl show` processes
+# would otherwise turn successful collection between two reads into a false
+# lineage failure.
+observe_unit_retirement_snapshot() {
     unit_name_is_safe || return 1
-    unit_job_value=$(systemctl show --property=Job --value "$unit_name" 2>/dev/null) \
-        || return 1
-    [ -z "$unit_job_value" ]
-}
-
-unit_fdstore_count() {
-    unit_name_is_safe || return 1
-    unit_fdstore_count_value=$(systemctl show --property=NFileDescriptorStore --value \
+    unit_retirement_properties=$(systemctl show --no-pager \
+        --property=LoadState \
+        --property=InvocationID \
+        --property=ActiveState \
+        --property=Job \
+        --property=NFileDescriptorStore \
         "$unit_name" 2>/dev/null) || return 1
-    case $unit_fdstore_count_value in
-        0|[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])
-            printf '%s\n' "$unit_fdstore_count_value"
+    unit_retirement_tuple=$(printf '%s\n' "$unit_retirement_properties" | /usr/bin/awk '
+        {
+            separator = index($0, "=")
+            if (separator == 0) {
+                invalid = 1
+                next
+            }
+            key = substr($0, 1, separator - 1)
+            value = substr($0, separator + 1)
+            if (key == "LoadState") {
+                if (++load_seen != 1) invalid = 1
+                load = value
+            } else if (key == "InvocationID") {
+                if (++invocation_seen != 1) invalid = 1
+                invocation = value
+            } else if (key == "ActiveState") {
+                if (++active_seen != 1) invalid = 1
+                active = value
+            } else if (key == "Job") {
+                if (++job_seen != 1) invalid = 1
+                job = value
+            } else if (key == "NFileDescriptorStore") {
+                if (++fdstore_seen != 1) invalid = 1
+                fdstore = value
+            } else {
+                invalid = 1
+            }
+        }
+        END {
+            if (invalid || NR != 5 || load_seen != 1 || invocation_seen != 1 \
+                    || active_seen != 1 || job_seen != 1 || fdstore_seen != 1) {
+                exit 1
+            }
+            printf "%s:%s:%s:%s:%s\n", load, \
+                invocation == "" ? "absent" : invocation, active, \
+                job == "" ? "absent" : "present", fdstore
+        }
+    ') || return 1
+
+    retire_load_state=${unit_retirement_tuple%%:*}
+    unit_retirement_remainder=${unit_retirement_tuple#*:}
+    [ "$unit_retirement_remainder" != "$unit_retirement_tuple" ] || return 1
+    retire_invocation_id=${unit_retirement_remainder%%:*}
+    unit_retirement_remainder=${unit_retirement_remainder#*:}
+    retire_active_state=${unit_retirement_remainder%%:*}
+    unit_retirement_remainder=${unit_retirement_remainder#*:}
+    retire_job_state=${unit_retirement_remainder%%:*}
+    retire_fdstore_count=${unit_retirement_remainder#*:}
+    case $retire_fdstore_count in
+        *:*) return 1 ;;
+    esac
+
+    case $retire_load_state in
+        not-found)
+            [ "$retire_invocation_id:$retire_active_state:$retire_job_state:$retire_fdstore_count" \
+                = absent:inactive:absent:0 ]
+            ;;
+        loaded)
+            unit_invocation_id_is_safe "$retire_invocation_id" || return 1
+            case $retire_active_state in
+                active|activating|deactivating|failed|inactive|reloading) ;;
+                *) return 1 ;;
+            esac
+            case $retire_job_state in
+                absent|present) ;;
+                *) return 1 ;;
+            esac
+            case $retire_fdstore_count in
+                0|[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8]) return 0 ;;
+                *) return 1 ;;
+            esac
             ;;
         *) return 1 ;;
     esac
@@ -1859,34 +1930,33 @@ retire_unit() {
     esac
     unit_name_is_safe || return 1
     unit_invocation_id_is_safe "$unit_invocation_id" || return 1
-    retire_load_state=$(unit_load_state) || return 1
+    observe_unit_retirement_snapshot || return 1
     if [ "$retire_load_state" = not-found ]; then
         forget_unit_ownership
         return 0
     fi
-    unit_invocation_is_current || return 1
+    [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
     if ! systemctl stop --no-block "$unit_name" >/dev/null 2>&1; then
-        retire_load_state=$(unit_load_state) || return 1
+        observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
             forget_unit_ownership
             return 0
         fi
-        unit_invocation_is_current || return 1
+        [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
         return 1
     fi
 
     retire_attempt=0
     while :; do
-        retire_load_state=$(unit_load_state) || return 1
+        observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
             forget_unit_ownership
             return 0
         fi
-        unit_invocation_is_current || return 1
-        retire_active_state=$(unit_active_state) || return 1
+        [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
         case $retire_active_state in
             inactive|failed)
-                if unit_job_is_absent; then
+                if [ "$retire_job_state" = absent ]; then
                     break
                 fi
                 ;;
@@ -1899,27 +1969,26 @@ retire_unit() {
     done
 
     if [ "$retire_active_state" = failed ]; then
-        unit_invocation_is_current || return 1
         if ! systemctl reset-failed "$unit_name" >/dev/null 2>&1; then
-            retire_load_state=$(unit_load_state) || return 1
+            observe_unit_retirement_snapshot || return 1
             if [ "$retire_load_state" = not-found ]; then
                 forget_unit_ownership
                 return 0
             fi
-            unit_invocation_is_current || return 1
+            [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
             return 1
         fi
 
         retire_attempt=0
         while :; do
-            retire_load_state=$(unit_load_state) || return 1
+            observe_unit_retirement_snapshot || return 1
             if [ "$retire_load_state" = not-found ]; then
                 forget_unit_ownership
                 return 0
             fi
-            unit_invocation_is_current || return 1
-            retire_active_state=$(unit_active_state) || return 1
-            if [ "$retire_active_state" = inactive ] && unit_job_is_absent; then
+            [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
+            if [ "$retire_active_state" = inactive ] \
+                && [ "$retire_job_state" = absent ]; then
                 break
             fi
             case $retire_active_state in
@@ -1933,49 +2002,45 @@ retire_unit() {
     fi
 
     [ "$retire_active_state" = inactive ] || return 1
-    unit_job_is_absent || return 1
-    unit_invocation_is_current || return 1
+    [ "$retire_job_state" = absent ] || return 1
+    [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
     if ! systemctl clean --what=fdstore "$unit_name" >/dev/null 2>&1; then
-        retire_load_state=$(unit_load_state) || return 1
+        observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
             forget_unit_ownership
             return 0
         fi
-        unit_invocation_is_current || return 1
+        [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
         return 1
     fi
-    retire_load_state=$(unit_load_state) || return 1
+    observe_unit_retirement_snapshot || return 1
     if [ "$retire_load_state" = not-found ]; then
         forget_unit_ownership
         return 0
     fi
-    unit_invocation_is_current || return 1
-    retire_fdstore_count=$(unit_fdstore_count) || return 1
+    [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
     [ "$retire_fdstore_count" -eq 0 ] || return 1
 
-    unit_invocation_is_current || return 1
     if ! systemctl reset-failed "$unit_name" >/dev/null 2>&1; then
-        retire_load_state=$(unit_load_state) || return 1
+        observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
             forget_unit_ownership
             return 0
         fi
-        unit_invocation_is_current || return 1
+        [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
         return 1
     fi
 
     retire_attempt=0
     while :; do
-        retire_load_state=$(unit_load_state) || return 1
+        observe_unit_retirement_snapshot || return 1
         if [ "$retire_load_state" = not-found ]; then
             forget_unit_ownership
             return 0
         fi
-        unit_invocation_is_current || return 1
-        retire_active_state=$(unit_active_state) || return 1
+        [ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1
         [ "$retire_active_state" = inactive ] || return 1
-        unit_job_is_absent || return 1
-        retire_fdstore_count=$(unit_fdstore_count) || return 1
+        [ "$retire_job_state" = absent ] || return 1
         [ "$retire_fdstore_count" -eq 0 ] || return 1
         retire_attempt=$((retire_attempt + 1))
         [ "$retire_attempt" -lt 1200 ] || return 1
