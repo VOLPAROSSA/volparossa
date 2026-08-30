@@ -395,6 +395,13 @@ production_start_failure_stage_is_safe() {
         protocol-root-peer|\
         protocol-bind-after|\
         functional-underlay|\
+        functional-underlay-link|\
+        functional-underlay-address|\
+        functional-underlay-route|\
+        functional-underlay-ifindex|\
+        functional-underlay-readback-link|\
+        functional-underlay-readback-address|\
+        functional-underlay-readback-route|\
         functional-probe-ready|\
         functional-worker-observation|\
         functional-probe-finish|\

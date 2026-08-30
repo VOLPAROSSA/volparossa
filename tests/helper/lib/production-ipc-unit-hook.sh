@@ -145,6 +145,13 @@ start_failure_stage_is_safe() {
         protocol-root-peer|\
         protocol-bind-after|\
         functional-underlay|\
+        functional-underlay-link|\
+        functional-underlay-address|\
+        functional-underlay-route|\
+        functional-underlay-ifindex|\
+        functional-underlay-readback-link|\
+        functional-underlay-readback-address|\
+        functional-underlay-readback-route|\
         functional-probe-ready|\
         functional-worker-observation|\
         functional-probe-finish|\
@@ -176,7 +183,14 @@ advance_start_failure_stage() {
         protocol-wrong-gid:protocol-root-peer|\
         protocol-root-peer:protocol-bind-after|\
         protocol-bind-after:functional-underlay|\
-        functional-underlay:functional-probe-ready|\
+        functional-underlay:functional-underlay-link|\
+        functional-underlay-link:functional-underlay-address|\
+        functional-underlay-address:functional-underlay-route|\
+        functional-underlay-route:functional-underlay-ifindex|\
+        functional-underlay-ifindex:functional-underlay-readback-link|\
+        functional-underlay-readback-link:functional-underlay-readback-address|\
+        functional-underlay-readback-address:functional-underlay-readback-route|\
+        functional-underlay-readback-route:functional-probe-ready|\
         functional-probe-ready:functional-worker-observation|\
         functional-worker-observation:functional-probe-finish|\
         functional-probe-finish:functional-cleanup|\
@@ -869,9 +883,18 @@ run_probe() {
 }
 
 functional_underlay_is_exact() {
-    [ "$#" -eq 1 ] || return 1
+    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 1
     hook_expected_ifindex=$1
+    hook_underlay_staged=${2:-no}
     number_is_safe "$hook_expected_ifindex" || return 1
+    case $hook_underlay_staged in
+        no) ;;
+        yes)
+            advance_start_failure_stage functional-underlay-readback-link \
+                || return 1
+            ;;
+        *) return 1 ;;
+    esac
     hook_underlay_link_json=$(
         /usr/sbin/ip -details -json link show dev "$functional_underlay" 2>/dev/null
     ) || return 1
@@ -889,6 +912,10 @@ functional_underlay_is_exact() {
           and (.[0].flags | index("UP")) != null
         ' >/dev/null 2>&1 \
         || return 1
+    if [ "$hook_underlay_staged" = yes ]; then
+        advance_start_failure_stage functional-underlay-readback-address \
+            || return 1
+    fi
     hook_underlay_address_json=$(
         /usr/sbin/ip -4 -json address show dev "$functional_underlay" 2>/dev/null
     ) || return 1
@@ -904,6 +931,10 @@ functional_underlay_is_exact() {
                     and .scope == "global")] | length) == 1
         ' >/dev/null 2>&1 \
         || return 1
+    if [ "$hook_underlay_staged" = yes ]; then
+        advance_start_failure_stage functional-underlay-readback-route \
+            || return 1
+    fi
     # Filtering by `dev` makes recent iproute2 omit that already-filtered field
     # from JSON. Query the main-table default set so the device remains part of
     # the independently checked kernel readback.
@@ -1522,17 +1553,21 @@ run_functional_client_lease_probe() {
     [ ! -e "/sys/class/net/$functional_underlay" ] \
         && [ ! -L "/sys/class/net/$functional_underlay" ] || return 1
 
+    advance_start_failure_stage functional-underlay-link || return 1
     /usr/sbin/ip link add name "$functional_underlay" type dummy || return 1
     /usr/sbin/ip link set dev "$functional_underlay" alias \
         "$functional_underlay_alias" || return 1
     /usr/sbin/ip link set dev "$functional_underlay" up || return 1
+    advance_start_failure_stage functional-underlay-address || return 1
     /usr/sbin/ip address add "$functional_underlay_address/24" \
         broadcast 0.0.0.0 dev "$functional_underlay" || return 1
+    advance_start_failure_stage functional-underlay-route || return 1
     /usr/sbin/ip route add default via "$functional_underlay_gateway" \
         dev "$functional_underlay" src "$functional_underlay_address" || return 1
+    advance_start_failure_stage functional-underlay-ifindex || return 1
     hook_functional_ifindex=$(cat "/sys/class/net/$functional_underlay/ifindex") \
         || return 1
-    functional_underlay_is_exact "$hook_functional_ifindex" || return 1
+    functional_underlay_is_exact "$hook_functional_ifindex" yes || return 1
 
     advance_start_failure_stage functional-probe-ready || return 1
 
