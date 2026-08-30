@@ -5,7 +5,9 @@
 //! no revision/CAS surface, and never reopens a store in the same process after its store-identity
 //! latch has been acquired. The installed restart executor remains a separate fail-closed refusal;
 //! only opaque functional-backend evidence joined to the affine live-Prepare settlement may
-//! request the private same-runtime proof echo.
+//! request the private same-runtime proof echo. Startup additionally accepts one opaque exact-set
+//! manager-absence owner only for records which were already durably `CleanupConfirmed`; it never
+//! supplies the installed executor with worker/kernel cleanup authority.
 //!
 //! A recovery executor cannot be forcefully cancelled safely. If it exceeds the bounded reply
 //! wait, admission becomes permanently ambiguous and the worker handle is detached instead of
@@ -42,6 +44,7 @@ use volparossa_routing::PrepareIntent;
 use crate::{
     deadline::HardDeadline,
     internal_protocol::PrepareLeases,
+    systemd_custody::CleanupConfirmedManagerAbsenceEvidence,
     worker_v3::{
         ExactNeverDispatchedPrepareProof, ExactSameRuntimeCleanupProof,
         ExactSameRuntimeManagerAbsenceProof, ExactUndispatchedDurableAuthority,
@@ -50,11 +53,12 @@ use crate::{
 };
 
 use super::{
-    CleanupExecutor, ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16,
-    JournalConfig, JournalEpochId, JournalError, JournalSnapshot, ManagerAbsenceExecutor,
-    NewOwnershipIntent, OwnershipId, OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1,
-    PrepareRecoveryEvidenceV1, RuntimeId, SameRuntimeCleanSettlement, SettlementAttemptError,
-    open_verified_parent, random_ownership_id,
+    CleanupExecutor, ClosedPlan, ConfirmedManagerAbsentProof, DurableCustodyDescriptorBinding,
+    DurableWireguardResource, Id16, JournalConfig, JournalEpochId, JournalError, JournalSnapshot,
+    ManagerAbsenceExecutor, ManagerAbsenceTarget, NewOwnershipIntent, OwnershipId,
+    OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1, PrepareRecoveryEvidenceV1,
+    RuntimeId, SameRuntimeCleanSettlement, SettlementAttemptError, open_verified_parent,
+    random_ownership_id,
 };
 #[cfg(test)]
 use super::{DurableCustodyDescriptorIdentity, DurableCustodyDescriptorIdentityParts};
@@ -1008,8 +1012,12 @@ enum Command {
 }
 
 enum StartupControl {
-    Revalidate { reply: ReplySender<()> },
-    Continue,
+    Revalidate {
+        reply: ReplySender<()>,
+    },
+    Continue {
+        manager_absence: Option<CleanupConfirmedManagerAbsenceEvidence>,
+    },
 }
 
 impl Operation {
@@ -1554,16 +1562,29 @@ impl DurableOwnershipStartup {
         if !self.targets.is_empty() {
             return Err(self.abort_with(DurableOwnershipError::RecoveryNotConfirmed, self.deadline));
         }
-        self.continue_existing()
+        self.continue_existing(None)
     }
 
-    fn continue_existing(mut self) -> Result<DurableOwnershipActor, DurableOwnershipError> {
+    pub(super) fn continue_cleanup_confirmed_absent(
+        mut self,
+        evidence: CleanupConfirmedManagerAbsenceEvidence,
+    ) -> Result<DurableOwnershipActor, DurableOwnershipError> {
+        if !evidence.matches_exact_targets(&self.targets) {
+            return Err(self.abort_with(DurableOwnershipError::RecoveryNotConfirmed, self.deadline));
+        }
+        self.continue_existing(Some(evidence))
+    }
+
+    fn continue_existing(
+        mut self,
+        manager_absence: Option<CleanupConfirmedManagerAbsenceEvidence>,
+    ) -> Result<DurableOwnershipActor, DurableOwnershipError> {
         self.revalidate_targets()?;
         let control = self
             .control
             .take()
             .ok_or(DurableOwnershipError::Unavailable)?;
-        match control.try_send(StartupControl::Continue) {
+        match control.try_send(StartupControl::Continue { manager_absence }) {
             Ok(()) => {}
             Err(TrySendError::Full(control)) => {
                 drop(control);
@@ -1747,7 +1768,7 @@ impl DurableOwnershipActor {
             executor_factory,
             deadline,
         )?
-        .continue_existing()
+        .continue_existing(None)
     }
 
     fn begin_inner<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
@@ -2205,33 +2226,12 @@ fn project_startup_custody_targets(
 ) -> Result<Box<[StartupCustodyTarget]>, DurableOwnershipError> {
     let mut targets = Vec::with_capacity(snapshot.records.len().min(MAX_STARTUP_CUSTODY_TARGETS));
     for record in snapshot.records.values() {
-        let phase = match record.phase {
-            OwnershipPhase::MayOwnCustody => StartupCustodyPhase::MayOwnCustody,
-            OwnershipPhase::MayOwnPrepare => StartupCustodyPhase::MayOwnPrepare,
-            OwnershipPhase::CleanupConfirmed => StartupCustodyPhase::CleanupConfirmed,
-            OwnershipPhase::Intent | OwnershipPhase::Absent => continue,
-        };
-        let Some(PrepareRecoveryEvidenceV1::CustodyBound { anchor, binding }) =
-            record.recovery_evidence
-        else {
-            // Legacy MayOwnPrepare is not correlated to descriptor-store custody and must never be
-            // interpreted as an absent or adoptable startup target.
-            return Err(DurableOwnershipError::RecoveryNotConfirmed);
+        let Some(target) = project_startup_custody_target(record)? else {
+            continue;
         };
         if targets.len() == MAX_STARTUP_CUSTODY_TARGETS {
             return Err(DurableOwnershipError::RecoveryNotConfirmed);
         }
-        let target = StartupCustodyTarget {
-            phase,
-            custody_name_digest: custody_name_digest_for_coordinates(OwnershipCoordinates {
-                journal_epoch_id: record.journal_epoch_id,
-                context_id: record.context_id,
-                ownership_id: record.ownership_id,
-                generation: record.generation,
-            }),
-            recovery_anchor: DurablePrepareAnchor(anchor),
-            durable_binding: DurableCustodyDescriptorBinding(binding),
-        };
         if targets.iter().any(|existing: &StartupCustodyTarget| {
             existing.custody_name_digest == target.custody_name_digest
                 || existing.durable_binding.overlaps(&target.durable_binding)
@@ -2244,10 +2244,67 @@ fn project_startup_custody_targets(
     Ok(targets.into_boxed_slice())
 }
 
+fn project_startup_custody_target(
+    record: &super::OwnershipRecord,
+) -> Result<Option<StartupCustodyTarget>, DurableOwnershipError> {
+    let phase = match record.phase {
+        OwnershipPhase::MayOwnCustody => StartupCustodyPhase::MayOwnCustody,
+        OwnershipPhase::MayOwnPrepare => StartupCustodyPhase::MayOwnPrepare,
+        OwnershipPhase::CleanupConfirmed => StartupCustodyPhase::CleanupConfirmed,
+        OwnershipPhase::Intent | OwnershipPhase::Absent => return Ok(None),
+    };
+    let Some(PrepareRecoveryEvidenceV1::CustodyBound { anchor, binding }) =
+        record.recovery_evidence
+    else {
+        // Legacy MayOwnPrepare is not correlated to descriptor-store custody and must never be
+        // interpreted as an absent or adoptable startup target.
+        return Err(DurableOwnershipError::RecoveryNotConfirmed);
+    };
+    Ok(Some(StartupCustodyTarget {
+        phase,
+        custody_name_digest: custody_name_digest_for_coordinates(OwnershipCoordinates {
+            journal_epoch_id: record.journal_epoch_id,
+            context_id: record.context_id,
+            ownership_id: record.ownership_id,
+            generation: record.generation,
+        }),
+        recovery_anchor: DurablePrepareAnchor(anchor),
+        durable_binding: DurableCustodyDescriptorBinding(binding),
+    }))
+}
+
 struct ActorCore<Executor> {
     journal: OwnershipJournal,
     executor: Executor,
+    startup_manager_absence: Option<CleanupConfirmedManagerAbsenceEvidence>,
     revision: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CleanupConfirmedManagerAbsenceMismatch;
+
+struct CleanupConfirmedManagerAbsenceExecutor<'a> {
+    evidence: &'a mut CleanupConfirmedManagerAbsenceEvidence,
+}
+
+impl ManagerAbsenceExecutor for CleanupConfirmedManagerAbsenceExecutor<'_> {
+    type Error = CleanupConfirmedManagerAbsenceMismatch;
+
+    fn confirm_manager_absent(
+        &mut self,
+        target: &ManagerAbsenceTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+        let candidate = project_startup_custody_target(&target.exact_record)
+            .ok()
+            .flatten()
+            .filter(|candidate| candidate.phase() == StartupCustodyPhase::CleanupConfirmed)
+            .ok_or(CleanupConfirmedManagerAbsenceMismatch)?;
+        if !self.evidence.consume_exact_target(&candidate) {
+            return Err(CleanupConfirmedManagerAbsenceMismatch);
+        }
+        Ok(target.confirmed_manager_absent())
+    }
 }
 
 impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
@@ -2259,6 +2316,7 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
         Ok(Self {
             journal,
             executor,
+            startup_manager_absence: None,
             revision,
         })
     }
@@ -2268,10 +2326,11 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(self.classify_journal_error(error)),
         };
-        // Settle custody-bearing records before retiring any Intent. Production cannot enter this
-        // sweep with such a record: its lock-holding startup guard allows only an empty projected
-        // set. The generic actor path exists for exact executor/crash tests and preserves the same
-        // two distinct proofs required by later production composition.
+        self.validate_startup_manager_absence(snapshot)?;
+        // Settle custody-bearing records before retiring any Intent. Production enters this sweep
+        // with non-empty custody only for a prevalidated all-CleanupConfirmed set and one-shot
+        // exact manager-absence evidence. The generic actor path preserves the distinct cleanup
+        // and manager proofs used by tests and same-runtime composition.
         let custody_pending = snapshot
             .records
             .values()
@@ -2309,16 +2368,18 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
                     Err(error) => return Err(self.classify_settlement_error(error)),
                 };
             }
-            self.revision = match self.journal.confirm_manager_absent(
-                self.revision,
-                ownership_id,
-                generation,
-                &mut self.executor,
-                deadline,
-            ) {
-                Ok(revision) => revision,
-                Err(error) => return Err(self.classify_settlement_error(error)),
-            };
+            self.revision =
+                self.settle_startup_manager_absent(ownership_id, generation, deadline)?;
+        }
+        if self
+            .startup_manager_absence
+            .as_ref()
+            .is_some_and(|evidence| !evidence.is_consumed())
+        {
+            return Err(FailureDisposition::Stop(
+                DurableOwnershipError::Ambiguous,
+                Lifecycle::Ambiguous,
+            ));
         }
         for (ownership_id, generation) in intents {
             if deadline.ensure_remaining().is_err() {
@@ -2346,6 +2407,56 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
             ));
         }
         Ok(())
+    }
+
+    fn validate_startup_manager_absence(
+        &self,
+        snapshot: &JournalSnapshot,
+    ) -> Result<(), FailureDisposition> {
+        let Some(evidence) = &self.startup_manager_absence else {
+            return Ok(());
+        };
+        let targets =
+            project_startup_custody_targets(snapshot).map_err(FailureDisposition::Continue)?;
+        // Validate the complete canonical set before the first per-record CAS. This prevents
+        // mixed, missing, duplicate or foreign evidence from partially settling the journal.
+        if evidence.matches_exact_targets(&targets) {
+            Ok(())
+        } else {
+            Err(FailureDisposition::Continue(
+                DurableOwnershipError::RecoveryNotConfirmed,
+            ))
+        }
+    }
+
+    fn settle_startup_manager_absent(
+        &mut self,
+        ownership_id: OwnershipId,
+        generation: NonZeroU64,
+        deadline: HardDeadline,
+    ) -> Result<u64, FailureDisposition> {
+        if let Some(evidence) = &mut self.startup_manager_absence {
+            let mut executor = CleanupConfirmedManagerAbsenceExecutor { evidence };
+            return self
+                .journal
+                .confirm_manager_absent(
+                    self.revision,
+                    ownership_id,
+                    generation,
+                    &mut executor,
+                    deadline,
+                )
+                .map_err(|error| self.classify_settlement_error(error));
+        }
+        self.journal
+            .confirm_manager_absent(
+                self.revision,
+                ownership_id,
+                generation,
+                &mut self.executor,
+                deadline,
+            )
+            .map_err(|error| self.classify_settlement_error(error))
     }
 
     fn register(&mut self, intent: DurablePrepareIntent) -> OperationOutcome<DurableOwnershipKey> {
@@ -2849,7 +2960,10 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
                     return;
                 }
             }
-            Ok(StartupControl::Continue) => break,
+            Ok(StartupControl::Continue { manager_absence }) => {
+                core.startup_manager_absence = manager_absence;
+                break;
+            }
             Err(_) => {
                 admission.fence_terminal(lifecycle, Lifecycle::Unavailable);
                 return;

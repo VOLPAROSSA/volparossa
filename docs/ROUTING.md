@@ -392,9 +392,11 @@ The production manager does not call that helper-backed transaction. A boot-scop
 canonical/CAS ownership actor starts before
 cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now
 reconstructs and registers tag 35's exact canonical intent before worker reservation, then carries
-its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. The
-refusing restart executor still leaves inherited `MayOwnPrepare` byte-identical and blocks startup;
-there is no inherited-custody recovery backend, restart reaper, or cross-runtime tag-28 proof.
+its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. A
+restart may retire only an already durable all-`CleanupConfirmed` set after fresh exact-empty
+manager evidence; the refusing cleanup executor still leaves inherited `MayOwnCustody` or
+`MayOwnPrepare` byte-identical and blocks startup. There is no inherited-custody recovery backend,
+restart reaper, or cross-runtime tag-28 proof.
 Journal absence is not cleanup proof. Client ingress is also
 blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
 helper's isolated endpoint-lifecycle path reaches Probe/Commit. Route-level end-to-end configuration and

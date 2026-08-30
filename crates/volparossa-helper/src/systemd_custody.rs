@@ -1,14 +1,15 @@
 //! Fail-closed systemd descriptor-store startup boundary.
 //!
 //! Debian 13 systemd may return descriptor-store entries to the service on restart. The current
-//! production recovery executor cannot consume those entries yet, so the executable bootstrap
+//! production recovery executor cannot consume stored custody yet, so the executable bootstrap
 //! transfers one affine snapshot of the exact inherited descriptor range before any thread or
 //! worker can be created. This module consumes that snapshot, canonicalises each pair into typed
 //! pidfd/network-namespace ownership, validates identity separation and the exact bounded naming
 //! shape, and classifies it against one lock-held durable-journal projection plus a barrier-ordered
-//! stable manager inventory. Every non-empty classification still refuses to publish the helper
-//! socket. This prevents inherited recovery capability from being silently ignored or leaked into
-//! a child without prematurely treating observation as adoption or cleanup authority.
+//! stable manager inventory. A non-empty set may continue only when every target was already
+//! durably `CleanupConfirmed`, both inherited and manager custody are empty, and a fresh barrier
+//! plus two stable exact-empty manager snapshots mint one-shot target evidence for the actor's
+//! existing manager-absence transition. Every other classification refuses socket publication.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -32,8 +33,8 @@ use volparossa_linux_uapi::{cgroup_v2_id, namespace_type};
 use crate::{
     deadline::{HardDeadline, wait_for_process_pidfd_exit},
     ownership_journal::{
-        DurableCustodyDescriptorBinding, ProductionOwnershipStartup, StartupCustodyPhase,
-        StartupCustodyTarget,
+        DurableCustodyDescriptorBinding, ProductionOwnershipRuntime, ProductionOwnershipStartup,
+        StartupCustodyPhase, StartupCustodyTarget,
     },
     systemd_fdstore::{
         BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName, FdStoreError,
@@ -136,6 +137,69 @@ pub(crate) struct StartupCustodyClassification {
 impl StartupCustodyClassification {
     pub(crate) fn is_empty(&self) -> bool {
         self.custody.is_empty() && self.classified.is_empty()
+    }
+
+    /// Whether this complete classification is the one narrow restart state which can already be
+    /// settled without worker, kernel or descriptor-store mutation.
+    pub(crate) fn is_cleanup_confirmed_no_stored_custody_only(&self) -> bool {
+        self.custody.is_empty()
+            && !self.classified.is_empty()
+            && self.classified.iter().all(|entry| {
+                entry.target.phase() == StartupCustodyPhase::CleanupConfirmed
+                    && entry.disposition
+                        == StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
+            })
+    }
+}
+
+/// One-shot exact-set manager-absence evidence for already durable `CleanupConfirmed` records.
+///
+/// Construction remains private to the fresh manager observation below. The ownership actor can
+/// compare and consume only opaque startup targets; this value exposes neither manager inventory,
+/// journal coordinates, descriptor identity nor cleanup authority. In particular it cannot prove
+/// worker or kernel cleanup for a `MayOwn` record.
+#[must_use = "restart manager-absence evidence must be consumed by the retained startup actor"]
+pub(crate) struct CleanupConfirmedManagerAbsenceEvidence {
+    remaining: Vec<StartupCustodyTarget>,
+}
+
+impl CleanupConfirmedManagerAbsenceEvidence {
+    pub(crate) fn matches_exact_targets(&self, targets: &[StartupCustodyTarget]) -> bool {
+        self.remaining == targets
+            && !targets.is_empty()
+            && targets
+                .iter()
+                .all(|target| target.phase() == StartupCustodyPhase::CleanupConfirmed)
+    }
+
+    pub(crate) fn consume_exact_target(&mut self, target: &StartupCustodyTarget) -> bool {
+        let Some(index) = self
+            .remaining
+            .iter()
+            .position(|candidate| candidate == target)
+        else {
+            return false;
+        };
+        self.remaining.remove(index);
+        true
+    }
+
+    pub(crate) fn is_consumed(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_targets_for_test(targets: Vec<StartupCustodyTarget>) -> Self {
+        Self { remaining: targets }
+    }
+}
+
+impl fmt::Debug for CleanupConfirmedManagerAbsenceEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CleanupConfirmedManagerAbsenceEvidence")
+            .field("remaining_target_count", &self.remaining.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -1827,6 +1891,131 @@ pub(crate) fn classify_startup_custody(
     })
 }
 
+trait CleanupConfirmedManagerSource {
+    fn reobserve<'a>(
+        &'a mut self,
+        baseline: &'a StableStartupInventory,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a;
+}
+
+struct LinuxCleanupConfirmedManagerSource;
+
+impl CleanupConfirmedManagerSource for LinuxCleanupConfirmedManagerSource {
+    fn reobserve<'a>(
+        &'a mut self,
+        baseline: &'a StableStartupInventory,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a {
+        baseline.observe_same_service_scope(deadline)
+    }
+}
+
+/// Settle only a complete non-empty set of durable `CleanupConfirmed` records whose inherited and
+/// manager custody were already empty and remain exactly empty after a fresh manager barrier plus
+/// two uncached stable snapshots.
+///
+/// The lock-held journal is revalidated before and after the asynchronous observation. Process-wide
+/// worker-spawn admission remains closed through actor continuation. The evidence authorizes only
+/// the existing `CleanupConfirmed -> Absent` manager-absence transition; the installed cleanup
+/// executor continues to refuse every `MayOwnCustody` and `MayOwnPrepare` recovery request.
+pub(crate) fn settle_cleanup_confirmed_restart_absence(
+    runtime: &Runtime,
+    mut ownership_startup: ProductionOwnershipStartup,
+    classification: StartupCustodyClassification,
+    deadline: HardDeadline,
+) -> Result<ProductionOwnershipRuntime, io::Error> {
+    if !classification.is_cleanup_confirmed_no_stored_custody_only() {
+        return Err(restart_settlement_incomplete());
+    }
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    let _spawn_admission = acquire_worker_spawn_admission_until(deadline)
+        .map_err(|_| restart_settlement_incomplete())?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+
+    let mut manager = LinuxCleanupConfirmedManagerSource;
+    let evidence = runtime
+        .block_on(observe_cleanup_confirmed_manager_absence_with(
+            &classification,
+            deadline,
+            &mut manager,
+        ))
+        .map_err(|_| restart_settlement_incomplete())?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())?;
+    drop(classification);
+
+    ownership_startup
+        .continue_cleanup_confirmed_absent(evidence)
+        .map_err(|_| restart_settlement_incomplete())
+}
+
+async fn observe_cleanup_confirmed_manager_absence_with<Manager: CleanupConfirmedManagerSource>(
+    classification: &StartupCustodyClassification,
+    deadline: HardDeadline,
+    manager: &mut Manager,
+) -> Result<CleanupConfirmedManagerAbsenceEvidence, io::Error> {
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())?;
+    if !classification.is_cleanup_confirmed_no_stored_custody_only() {
+        return Err(restart_settlement_incomplete());
+    }
+    let (manager_bindings, durable_bindings) = classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| restart_settlement_incomplete())?;
+    if !manager_bindings.is_empty() || !durable_bindings.is_empty() {
+        return Err(restart_settlement_incomplete());
+    }
+    classification
+        .manager_inventory
+        .verify_complete_exact_set(&manager_bindings)
+        .map_err(|_| restart_settlement_incomplete())?;
+
+    // This adapter sends a new manager barrier and takes two new uncached snapshots of the exact
+    // retained service object. Equality includes manager incarnation, object path, MainPID,
+    // service policy, complete empty inventory and the retained notify endpoint.
+    let fresh = manager
+        .reobserve(&classification.manager_inventory, deadline)
+        .await
+        .map_err(|_| restart_settlement_incomplete())?;
+    if fresh != classification.manager_inventory
+        || !classification
+            .manager_inventory
+            .matches_current_service_scope(&fresh)
+    {
+        return Err(restart_settlement_incomplete());
+    }
+    fresh
+        .verify_complete_exact_set(&manager_bindings)
+        .map_err(|_| restart_settlement_incomplete())?;
+    let (manager_after, durable_after) = classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| restart_settlement_incomplete())?;
+    if manager_after != manager_bindings || durable_after != durable_bindings {
+        return Err(restart_settlement_incomplete());
+    }
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())?;
+
+    Ok(CleanupConfirmedManagerAbsenceEvidence {
+        remaining: classification
+            .classified
+            .iter()
+            .map(|entry| entry.target)
+            .collect(),
+    })
+}
+
+fn restart_settlement_incomplete() -> io::Error {
+    invalid_data("cleanup-confirmed restart settlement remained incomplete")
+}
+
 fn classify_journal_targets(
     targets: &[StartupCustodyTarget],
     inherited: &BTreeMap<CustodyFdName, DurableCustodyDescriptorBinding>,
@@ -2138,6 +2327,8 @@ mod tests {
     };
     use volparossa_linux_uapi::duplicate_descriptor_cloexec;
 
+    const TEST_WAIT: Duration = Duration::from_secs(2);
+
     #[derive(Default)]
     struct FakeProcessPidfdExitObserver {
         calls: usize,
@@ -2335,6 +2526,28 @@ mod tests {
             custody,
             manager_inventory,
             classified,
+        }
+    }
+
+    struct FakeCleanupConfirmedManagerSource {
+        result: Option<Result<StableStartupInventory, FdStoreError>>,
+        deadlines: Vec<HardDeadline>,
+    }
+
+    impl CleanupConfirmedManagerSource for FakeCleanupConfirmedManagerSource {
+        fn reobserve<'a>(
+            &'a mut self,
+            _baseline: &'a StableStartupInventory,
+            deadline: HardDeadline,
+        ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a {
+            self.deadlines.push(deadline);
+            std::future::ready(
+                self.result
+                    .take()
+                    .unwrap_or(Err(FdStoreError::InvalidInventory(
+                        "scripted cleanup-confirmed sample is absent",
+                    ))),
+            )
         }
     }
 
@@ -2766,6 +2979,132 @@ mod tests {
             classified[0].disposition,
             StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fresh_exact_empty_manager_observation_mints_only_cleanup_confirmed_evidence() {
+        let targets = [
+            synthetic_startup_target(61, StartupCustodyPhase::CleanupConfirmed, 61),
+            synthetic_startup_target(62, StartupCustodyPhase::CleanupConfirmed, 62),
+        ];
+        let classification = startup_classification(
+            InheritedCustody {
+                bundles: BTreeMap::new(),
+            },
+            &targets,
+        );
+        assert!(classification.is_cleanup_confirmed_no_stored_custody_only());
+        let deadline = HardDeadline::after(TEST_WAIT).expect("fresh manager deadline");
+        let mut manager = FakeCleanupConfirmedManagerSource {
+            result: Some(Ok(classification.manager_inventory.clone())),
+            deadlines: Vec::new(),
+        };
+
+        let mut evidence =
+            observe_cleanup_confirmed_manager_absence_with(&classification, deadline, &mut manager)
+                .await
+                .expect("fresh exact-empty manager evidence");
+
+        assert_eq!(manager.deadlines, vec![deadline]);
+        assert!(evidence.matches_exact_targets(&targets));
+        assert!(evidence.consume_exact_target(&targets[1]));
+        assert!(!evidence.consume_exact_target(&targets[1]));
+        assert!(evidence.consume_exact_target(&targets[0]));
+        assert!(evidence.is_consumed());
+        assert_eq!(
+            format!("{evidence:?}"),
+            "CleanupConfirmedManagerAbsenceEvidence { remaining_target_count: 0, .. }"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mixed_present_may_own_drift_and_deadline_never_mint_restart_absence() {
+        let cleanup = synthetic_startup_target(63, StartupCustodyPhase::CleanupConfirmed, 63);
+        let may_own = synthetic_startup_target(64, StartupCustodyPhase::MayOwnCustody, 64);
+        let mixed = startup_classification(
+            InheritedCustody {
+                bundles: BTreeMap::new(),
+            },
+            &[cleanup, may_own],
+        );
+        let mut manager = FakeCleanupConfirmedManagerSource {
+            result: Some(Ok(mixed.manager_inventory.clone())),
+            deadlines: Vec::new(),
+        };
+        assert!(
+            observe_cleanup_confirmed_manager_absence_with(
+                &mixed,
+                HardDeadline::after(TEST_WAIT).expect("mixed deadline"),
+                &mut manager,
+            )
+            .await
+            .is_err()
+        );
+        assert!(manager.deadlines.is_empty());
+
+        let present_custody = captured_custody(65);
+        let present_target =
+            exact_target_for_custody(65, StartupCustodyPhase::CleanupConfirmed, &present_custody);
+        let present = startup_classification(present_custody, &[present_target]);
+        let mut manager = FakeCleanupConfirmedManagerSource {
+            result: Some(Ok(present.manager_inventory.clone())),
+            deadlines: Vec::new(),
+        };
+        assert!(
+            observe_cleanup_confirmed_manager_absence_with(
+                &present,
+                HardDeadline::after(TEST_WAIT).expect("present deadline"),
+                &mut manager,
+            )
+            .await
+            .is_err()
+        );
+        assert!(manager.deadlines.is_empty());
+
+        let cleanup_only = startup_classification(
+            InheritedCustody {
+                bundles: BTreeMap::new(),
+            },
+            &[cleanup],
+        );
+        let foreign_name = typed_custody_name(66);
+        let foreign_binding = CustodyDescriptorBinding::from_custody(
+            BorrowedCustodyPair::new(pidfd().as_fd(), network_namespace().as_fd())
+                .expect("foreign manager binding"),
+        )
+        .expect("foreign manager identity");
+        let mut manager = FakeCleanupConfirmedManagerSource {
+            result: Some(Ok(stable_startup_inventory_for_test(&BTreeMap::from([(
+                foreign_name,
+                foreign_binding,
+            )])))),
+            deadlines: Vec::new(),
+        };
+        assert!(
+            observe_cleanup_confirmed_manager_absence_with(
+                &cleanup_only,
+                HardDeadline::after(TEST_WAIT).expect("drift deadline"),
+                &mut manager,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(manager.deadlines.len(), 1);
+
+        let expired = HardDeadline::after(Duration::from_millis(1)).expect("short deadline");
+        while expired.ensure_remaining().is_ok() {
+            thread::yield_now();
+        }
+        let mut manager = FakeCleanupConfirmedManagerSource {
+            result: Some(Ok(cleanup_only.manager_inventory.clone())),
+            deadlines: Vec::new(),
+        };
+        assert!(
+            observe_cleanup_confirmed_manager_absence_with(&cleanup_only, expired, &mut manager,)
+                .await
+                .is_err()
+        );
+        assert!(manager.deadlines.is_empty());
     }
 
     #[test]
@@ -4007,6 +4346,67 @@ mod tests {
         assert!(observer.contains("ResolveFlags::BENEATH"));
         assert!(observer.contains("ResolveFlags::NO_XDEV"));
         assert!(observer.contains("OFlags::RDONLY"));
+    }
+
+    #[test]
+    fn cleanup_confirmed_restart_composition_is_exact_read_only_and_precedes_continuation() {
+        let source = include_str!("systemd_custody.rs");
+        let start = source
+            .find("pub(crate) fn settle_cleanup_confirmed_restart_absence")
+            .expect("cleanup-confirmed restart composition");
+        let end = source[start..]
+            .find("fn classify_journal_targets")
+            .map(|offset| start + offset)
+            .expect("cleanup-confirmed restart composition end");
+        let composition = &source[start..end];
+        let classification = composition
+            .find("is_cleanup_confirmed_no_stored_custody_only")
+            .expect("complete classification gate");
+        let initial_journal = composition
+            .find("verify_classification_against_locked_journal")
+            .expect("initial exact journal revalidation");
+        let admission = composition
+            .find("acquire_worker_spawn_admission_until")
+            .expect("closed worker-spawn admission");
+        let observe = composition
+            .find("block_on(observe_cleanup_confirmed_manager_absence_with")
+            .expect("non-cancellable fresh manager observation");
+        let final_journal = composition
+            .rfind("verify_classification_against_locked_journal")
+            .expect("final exact journal revalidation");
+        let continue_actor = composition
+            .find("continue_cleanup_confirmed_absent(evidence)")
+            .expect("one-shot actor continuation");
+        assert!(classification < initial_journal);
+        assert!(initial_journal < admission);
+        assert!(admission < observe);
+        assert!(observe < final_journal);
+        assert!(final_journal < continue_actor);
+        assert!(source.contains("baseline.observe_same_service_scope(deadline)"));
+        assert!(composition.contains("fresh != classification.manager_inventory"));
+        assert!(composition.contains("verify_complete_exact_set(&manager_bindings)"));
+        for forbidden in [
+            "confirm_cleanup(",
+            "FDSTOREREMOVE",
+            "READY=1",
+            "bind_production_socket",
+            "OFlags::WRONLY",
+            "OFlags::RDWR",
+            "worker_v3::",
+        ] {
+            assert!(
+                !composition.contains(forbidden),
+                "cleanup-confirmed restart composition unexpectedly contains {forbidden}"
+            );
+        }
+        let server = include_str!("server.rs");
+        let settlement = server
+            .find("settle_cleanup_confirmed_restart_absence(")
+            .expect("server settlement branch");
+        let socket = server
+            .find("bind_production_socket(prepared_runtime, ownership_runtime)")
+            .expect("server socket publication");
+        assert!(settlement < socket);
     }
 
     #[test]

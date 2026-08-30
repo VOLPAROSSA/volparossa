@@ -9,8 +9,9 @@
 //! [`HelperEngine::new`] constructor remains fail-closed with `Unavailable`, so only the production
 //! server selects the functional backend. Production owns the canonical durable journal actor as a
 //! startup/shutdown barrier but still refuses `MayOwnPrepare` recovery; it has no restart-stable
-//! pidfd/network-namespace custody or restart reaper. Leader retirement still does not own
-//! descendants.
+//! pidfd/network-namespace custody or restart reaper. It can only retire an already durable
+//! `CleanupConfirmed` restart record after a fresh exact-empty manager observation. Leader
+//! retirement still does not own descendants.
 
 #![cfg(target_os = "linux")]
 

@@ -34,6 +34,7 @@ use crate::{
     systemd_custody::{
         capture_inherited_custody, classify_startup_custody,
         observe_nonempty_restart_custody_for_refusal, observe_startup_custody_inventory,
+        settle_cleanup_confirmed_restart_absence,
     },
 };
 
@@ -96,7 +97,7 @@ pub enum ServerError {
     /// Durable ownership startup or shutdown did not reach a proven boundary.
     #[error("helper durable ownership lifecycle was incomplete")]
     OwnershipIncomplete,
-    /// PID 1 returned restart custody which this build cannot yet recover exactly.
+    /// Restart custody or its durable journal state could not be settled exactly.
     #[error("helper inherited restart custody is not recoverable")]
     InheritedCustody,
     /// The synchronous production owner cannot be nested in another Tokio runtime.
@@ -139,7 +140,20 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
     let classification =
         classify_startup_custody(inherited, targets, observed_inventory, ownership_deadline)
             .map_err(|_| ServerError::InheritedCustody)?;
-    if !classification.is_empty() {
+    let ownership_runtime = if classification.is_empty() {
+        drop(classification);
+        ownership_startup
+            .continue_empty()
+            .map_err(|_| ServerError::OwnershipIncomplete)?
+    } else if classification.is_cleanup_confirmed_no_stored_custody_only() {
+        settle_cleanup_confirmed_restart_absence(
+            &runtime,
+            ownership_startup,
+            classification,
+            ownership_deadline,
+        )
+        .map_err(|_| ServerError::InheritedCustody)?
+    } else {
         let _ = observe_nonempty_restart_custody_for_refusal(
             &runtime,
             ownership_startup,
@@ -147,11 +161,7 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
             ownership_deadline,
         );
         return Err(ServerError::InheritedCustody);
-    }
-    drop(classification);
-    let ownership_runtime = ownership_startup
-        .continue_empty()
-        .map_err(|_| ServerError::OwnershipIncomplete)?;
+    };
     let server = bind_production_socket(prepared_runtime, ownership_runtime)?;
     runtime.block_on(run_server(server))
 }
@@ -916,6 +926,9 @@ mod tests {
         let restart_refusal = entry
             .find("observe_nonempty_restart_custody_for_refusal(")
             .expect("nonempty restart observation before refusal");
+        let cleanup_confirmed_restart = entry
+            .find("settle_cleanup_confirmed_restart_absence(")
+            .expect("cleanup-confirmed restart settlement");
         let continue_empty = entry
             .find("continue_empty()")
             .expect("empty-only ownership startup continuation");
@@ -932,10 +945,12 @@ mod tests {
         assert!(runtime < inventory);
         assert!(inventory < revalidate);
         assert!(revalidate < classify);
-        assert!(classify < restart_refusal);
-        assert!(restart_refusal < continue_empty);
         assert!(classify < continue_empty);
+        assert!(classify < cleanup_confirmed_restart);
+        assert!(classify < restart_refusal);
         assert!(continue_empty < bind);
+        assert!(cleanup_confirmed_restart < bind);
+        assert!(restart_refusal < bind);
         assert!(bind < drive);
         assert!(source.contains("async fn run_server"));
         let public_future = ["pub async fn", " run_server"].concat();
