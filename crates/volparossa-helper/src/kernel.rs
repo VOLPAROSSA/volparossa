@@ -633,7 +633,16 @@ struct LinkDetails {
 
 struct NetlinkClient {
     socket: Socket,
+    local_port_id: u32,
     sequence: u32,
+}
+
+fn bound_unicast_port_id(address: SocketAddr) -> Result<u32, KernelError> {
+    let port_id = address.port_number();
+    if port_id == 0 || address.multicast_groups() != 0 {
+        return Err(KernelError::Malformed);
+    }
+    Ok(port_id)
 }
 
 impl NetlinkClient {
@@ -652,12 +661,13 @@ impl NetlinkClient {
             }
         }
         deadline.ensure_remaining()?;
-        socket.bind_auto()?;
+        let local_port_id = bound_unicast_port_id(socket.bind_auto()?)?;
         deadline.ensure_remaining()?;
         socket.connect(&SocketAddr::new(0, 0))?;
         deadline.ensure_remaining()?;
         Ok(Self {
             socket,
+            local_port_id,
             sequence: 1,
         })
     }
@@ -684,7 +694,7 @@ impl NetlinkClient {
         )?);
         self.send(&message, deadline)?;
         let response = self.receive(deadline)?;
-        let parsed = parse_ack(&response, sequence, message_type);
+        let parsed = parse_ack(&response, sequence, message_type, self.local_port_id);
         deadline.ensure_remaining()?;
         parsed
     }
@@ -864,10 +874,10 @@ impl NetlinkClient {
         }
         let frame = response_frames[0];
         if read_u16(frame, 4) == Some(NLMSG_ERROR) {
-            parse_ack(&response, sequence, RTM_GETLINK)?;
+            parse_ack(&response, sequence, RTM_GETLINK, self.local_port_id)?;
             return Err(KernelError::Malformed);
         }
-        validate_kernel_header(frame, sequence, RTM_NEWLINK)?;
+        validate_kernel_header(frame, sequence, RTM_NEWLINK, self.local_port_id)?;
         let details = parse_link_details_frame(frame)?;
         if details.name.as_deref() != Some(name) {
             return Err(KernelError::Malformed);
@@ -1154,7 +1164,7 @@ fn resolve_generic_family(
     payload.extend_from_slice(&0_u16.to_ne_bytes());
     payload.extend_from_slice(&family_attributes);
     let (response, sequence) = netlink.request_reply(GENL_ID_CTRL, &payload, deadline)?;
-    let family_id = parse_family_id(&response, sequence)?;
+    let family_id = parse_family_id(&response, sequence, netlink.local_port_id)?;
     deadline.ensure_remaining()?;
     Ok(family_id)
 }
@@ -1369,7 +1379,11 @@ fn attributes(mut bytes: &[u8]) -> Result<Vec<(u16, &[u8])>, KernelError> {
     Ok(result)
 }
 
-fn parse_family_id(reply: &NetlinkReply, expected_sequence: u32) -> Result<u16, KernelError> {
+fn parse_family_id(
+    reply: &NetlinkReply,
+    expected_sequence: u32,
+    local_port_id: u32,
+) -> Result<u16, KernelError> {
     validate_kernel_sender(&reply.sender)?;
     let response_frames = frames(&reply.message)?;
     if response_frames.len() != 1 {
@@ -1377,13 +1391,13 @@ fn parse_family_id(reply: &NetlinkReply, expected_sequence: u32) -> Result<u16, 
     }
     let frame = response_frames[0];
     if read_u16(frame, 4) == Some(NLMSG_ERROR) {
-        return match parse_ack(reply, expected_sequence, GENL_ID_CTRL) {
+        return match parse_ack(reply, expected_sequence, GENL_ID_CTRL, local_port_id) {
             Ok(()) => Err(KernelError::Unsupported),
             Err(error) if error.is_errno(libc::ENOENT) => Err(KernelError::Unsupported),
             Err(error) => Err(error),
         };
     }
-    validate_kernel_header(frame, expected_sequence, GENL_ID_CTRL)?;
+    validate_kernel_header(frame, expected_sequence, GENL_ID_CTRL, local_port_id)?;
     if frame.len() < NLMSG_HEADER_LEN + GENL_HEADER_LEN
         || frame[NLMSG_HEADER_LEN] != CTRL_CMD_NEWFAMILY
         || frame[NLMSG_HEADER_LEN + 1] != CTRL_VERSION
@@ -1410,6 +1424,7 @@ fn parse_ack(
     reply: &NetlinkReply,
     expected_sequence: u32,
     expected_request_type: u16,
+    local_port_id: u32,
 ) -> Result<(), KernelError> {
     validate_kernel_sender(&reply.sender)?;
     let response_frames = frames(&reply.message)?;
@@ -1417,7 +1432,7 @@ fn parse_ack(
         return Err(KernelError::Malformed);
     }
     let frame = response_frames[0];
-    validate_kernel_header(frame, expected_sequence, NLMSG_ERROR)?;
+    validate_kernel_header(frame, expected_sequence, NLMSG_ERROR, local_port_id)?;
     let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
     if frame.len() < embedded_offset + NLMSG_HEADER_LEN
         || read_u32(frame, embedded_offset)
@@ -1446,10 +1461,12 @@ fn validate_kernel_header(
     frame: &[u8],
     expected_sequence: u32,
     expected_type: u16,
+    local_port_id: u32,
 ) -> Result<(), KernelError> {
-    if read_u16(frame, 4) != Some(expected_type)
+    if local_port_id == 0
+        || read_u16(frame, 4) != Some(expected_type)
         || read_u32(frame, 8) != Some(expected_sequence)
-        || read_u32(frame, 12) != Some(0)
+        || read_u32(frame, 12) != Some(local_port_id)
     {
         return Err(KernelError::Malformed);
     }
@@ -1488,6 +1505,7 @@ mod tests {
     const TEST_SEQUENCE: u32 = 7;
     const TEST_REQUEST_TYPE: u16 = 0x42;
     const TEST_FAMILY_ID: u16 = 0x43;
+    const TEST_PORT_ID: u32 = 4_242;
 
     fn durable_resource(route_context_seed: u8, ownership_seed: u8) -> DurableWireguardResource {
         durable_wireguard_resource_for_test(
@@ -1506,6 +1524,7 @@ mod tests {
         message[0..4].copy_from_slice(&length.to_ne_bytes());
         message[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
         message[8..12].copy_from_slice(&TEST_SEQUENCE.to_ne_bytes());
+        message[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
         message[NLMSG_HEADER_LEN..NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN]
             .copy_from_slice(&errno.to_ne_bytes());
         let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
@@ -1535,11 +1554,11 @@ mod tests {
         .expect("family ID");
         let mut payload = vec![CTRL_CMD_NEWFAMILY, CTRL_VERSION, 0, 0];
         payload.extend_from_slice(&family_attributes);
+        let mut message = build_netlink_message(GENL_ID_CTRL, 0, TEST_SEQUENCE, &payload)
+            .expect("family response");
+        message[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
         NetlinkReply {
-            message: Zeroizing::new(
-                build_netlink_message(GENL_ID_CTRL, 0, TEST_SEQUENCE, &payload)
-                    .expect("family response"),
-            ),
+            message: Zeroizing::new(message),
             sender: SocketAddr::new(0, 0),
         }
     }
@@ -1554,7 +1573,10 @@ mod tests {
         push_bounded_string_attribute(&mut payload, IFLA_IFALIAS, alias, MAX_IFALIAS_BYTES)
             .expect("alias");
         push_attribute(&mut payload, IFLA_LINKINFO | NLA_F_NESTED, &link_info).expect("link info");
-        build_netlink_message(RTM_NEWLINK, 0, TEST_SEQUENCE, &payload).expect("link response")
+        let mut message =
+            build_netlink_message(RTM_NEWLINK, 0, TEST_SEQUENCE, &payload).expect("link response");
+        message[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
+        message
     }
 
     #[test]
@@ -1901,85 +1923,122 @@ mod tests {
     }
 
     #[test]
+    fn bound_address_requires_one_nonzero_unicast_port_id() {
+        assert_eq!(
+            bound_unicast_port_id(SocketAddr::new(TEST_PORT_ID, 0)).expect("unicast port"),
+            TEST_PORT_ID
+        );
+        for address in [
+            SocketAddr::new(0, 0),
+            SocketAddr::new(TEST_PORT_ID, 1),
+            SocketAddr::new(0, 1),
+        ] {
+            assert!(matches!(
+                bound_unicast_port_id(address),
+                Err(KernelError::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn acknowledgement_is_bound_to_kernel_sequence_type_and_original_request() {
-        assert!(parse_ack(&acknowledgement(0), TEST_SEQUENCE, TEST_REQUEST_TYPE).is_ok());
+        assert!(
+            parse_ack(
+                &acknowledgement(0),
+                TEST_SEQUENCE,
+                TEST_REQUEST_TYPE,
+                TEST_PORT_ID
+            )
+            .is_ok()
+        );
         assert!(matches!(
             parse_ack(
                 &acknowledgement(-libc::EPERM),
                 TEST_SEQUENCE,
-                TEST_REQUEST_TYPE
+                TEST_REQUEST_TYPE,
+                TEST_PORT_ID
             ),
             Err(KernelError::Errno(libc::EPERM))
         ));
 
         let mut wrong = acknowledgement(0);
         wrong.message[8..12].copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
 
-        wrong = acknowledgement(0);
-        wrong.message[12..16].copy_from_slice(&1_u32.to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        for wrong_port_id in [0, 1, TEST_PORT_ID + 1] {
+            wrong = acknowledgement(0);
+            wrong.message[12..16].copy_from_slice(&wrong_port_id.to_ne_bytes());
+            assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
+        }
+        assert!(parse_ack(&acknowledgement(0), TEST_SEQUENCE, TEST_REQUEST_TYPE, 0).is_err());
 
         let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
         wrong = acknowledgement(0);
         wrong.message[embedded_offset + 4..embedded_offset + 6]
             .copy_from_slice(&(TEST_REQUEST_TYPE + 1).to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.message[embedded_offset + 8..embedded_offset + 12]
             .copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.message[embedded_offset + 12..embedded_offset + 16]
             .copy_from_slice(&1_u32.to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.sender = SocketAddr::new(99, 0);
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.sender = SocketAddr::new(0, 1);
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         let second = wrong.message.clone();
         wrong.message.extend_from_slice(&second);
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
     }
 
     #[test]
     fn family_lookup_is_bound_to_kernel_ctrl_header_and_single_frame() {
         assert_eq!(
-            parse_family_id(&family_reply(), TEST_SEQUENCE).expect("family ID"),
+            parse_family_id(&family_reply(), TEST_SEQUENCE, TEST_PORT_ID).expect("family ID"),
             TEST_FAMILY_ID
         );
 
         let mut wrong = family_reply();
         wrong.message[8..12].copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
+
+        for wrong_port_id in [0, 1, TEST_PORT_ID + 1] {
+            wrong = family_reply();
+            wrong.message[12..16].copy_from_slice(&wrong_port_id.to_ne_bytes());
+            assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
+        }
+        assert!(parse_family_id(&family_reply(), TEST_SEQUENCE, 0).is_err());
 
         wrong = family_reply();
         wrong.message[4..6].copy_from_slice(&TEST_FAMILY_ID.to_ne_bytes());
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
 
         wrong = family_reply();
         wrong.message[NLMSG_HEADER_LEN] = CTRL_CMD_GETFAMILY;
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
 
         wrong = family_reply();
         wrong.message[NLMSG_HEADER_LEN + 1] = CTRL_VERSION + 1;
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
 
         wrong = family_reply();
         wrong.sender = SocketAddr::new(1, 0);
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
 
         wrong = family_reply();
         let second = wrong.message.clone();
         wrong.message.extend_from_slice(&second);
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
     }
 }

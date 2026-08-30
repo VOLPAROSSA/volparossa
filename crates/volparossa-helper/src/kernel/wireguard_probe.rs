@@ -137,7 +137,8 @@ impl NetlinkClient {
         )?);
         self.send(&request, deadline)?;
 
-        let mut parser = WireguardDumpParser::new(sequence, family_id, interface)?;
+        let mut parser =
+            WireguardDumpParser::new(sequence, family_id, interface, self.local_port_id)?;
         while !parser.done() {
             wait_for_fd(&self.socket, PollFlags::POLLIN, deadline)?;
             deadline.ensure_remaining()?;
@@ -170,6 +171,7 @@ struct WireguardDumpParser {
     expected_sequence: u32,
     expected_family: u16,
     expected_interface: String,
+    expected_local_port_id: u32,
     frame_count: usize,
     byte_count: usize,
     done: bool,
@@ -181,9 +183,11 @@ impl WireguardDumpParser {
         expected_sequence: u32,
         expected_family: u16,
         expected_interface: &str,
+        expected_local_port_id: u32,
     ) -> Result<Self, KernelError> {
         if expected_sequence == 0
             || expected_family == 0
+            || expected_local_port_id == 0
             || expected_interface.is_empty()
             || expected_interface.len() > libc::IFNAMSIZ.saturating_sub(1)
             || expected_interface.as_bytes().contains(&0)
@@ -194,6 +198,7 @@ impl WireguardDumpParser {
             expected_sequence,
             expected_family,
             expected_interface: expected_interface.to_owned(),
+            expected_local_port_id,
             frame_count: 0,
             byte_count: 0,
             done: false,
@@ -248,7 +253,9 @@ impl WireguardDumpParser {
     }
 
     fn ingest_frame(&mut self, frame: &[u8]) -> Result<(), KernelError> {
-        if read_u32(frame, 8) != Some(self.expected_sequence) || read_u32(frame, 12) != Some(0) {
+        if read_u32(frame, 8) != Some(self.expected_sequence)
+            || read_u32(frame, 12) != Some(self.expected_local_port_id)
+        {
             return Err(KernelError::Malformed);
         }
         if read_u16(frame, 6) != Some(NLM_F_MULTI) {
@@ -270,7 +277,12 @@ impl WireguardDumpParser {
                 Ok(())
             }
             Some(message_type) if message_type == self.expected_family => {
-                validate_kernel_header(frame, self.expected_sequence, self.expected_family)?;
+                validate_kernel_header(
+                    frame,
+                    self.expected_sequence,
+                    self.expected_family,
+                    self.expected_local_port_id,
+                )?;
                 if frame.len() < NLMSG_HEADER_LEN + GENL_HEADER_LEN
                     || frame[NLMSG_HEADER_LEN] != WG_CMD_GET_DEVICE
                     || frame[NLMSG_HEADER_LEN + 1] != WG_GENL_VERSION
@@ -791,6 +803,7 @@ mod tests {
 
     const TEST_SEQUENCE: u32 = 71;
     const TEST_FAMILY: u16 = 0x43;
+    const TEST_PORT_ID: u32 = 7_171;
     const TEST_INTERFACE: &str = "vpwg-test";
 
     fn requires_zeroizing(_: &Zeroizing<Vec<u8>>) {}
@@ -917,13 +930,18 @@ mod tests {
     fn data_frame(value: &[u8]) -> Vec<u8> {
         let mut payload = vec![WG_CMD_GET_DEVICE, WG_GENL_VERSION, 0, 0];
         payload.extend_from_slice(value);
-        build_netlink_message(TEST_FAMILY, NLM_F_MULTI, TEST_SEQUENCE, &payload)
-            .expect("data frame")
+        let mut frame = build_netlink_message(TEST_FAMILY, NLM_F_MULTI, TEST_SEQUENCE, &payload)
+            .expect("data frame");
+        frame[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
+        frame
     }
 
     fn done_frame(error: i32) -> Vec<u8> {
-        build_netlink_message(NLMSG_DONE, NLM_F_MULTI, TEST_SEQUENCE, &error.to_ne_bytes())
-            .expect("done frame")
+        let mut frame =
+            build_netlink_message(NLMSG_DONE, NLM_F_MULTI, TEST_SEQUENCE, &error.to_ne_bytes())
+                .expect("done frame");
+        frame[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
+        frame
     }
 
     fn reply(frames: &[Vec<u8>]) -> NetlinkReply {
@@ -939,7 +957,8 @@ mod tests {
     }
 
     fn parse(frames: &[Vec<u8>]) -> Result<WireguardDeviceState, KernelError> {
-        let mut parser = WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE)?;
+        let mut parser =
+            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)?;
         parser.ingest(&reply(frames))?;
         parser.finish()
     }
@@ -1027,8 +1046,9 @@ mod tests {
     #[test]
     fn header_is_bound_to_sender_sequence_pid_family_command_version_and_flags() {
         let reject = |response: NetlinkReply| {
-            let mut parser = WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE)
-                .expect("parser");
+            let mut parser =
+                WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)
+                    .expect("parser");
             assert!(parser.ingest(&response).is_err());
         };
         let mut response = reply(&valid_frames());
@@ -1040,7 +1060,6 @@ mod tests {
 
         for (offset, bytes) in [
             (8, (TEST_SEQUENCE + 1).to_ne_bytes().to_vec()),
-            (12, 1_u32.to_ne_bytes().to_vec()),
             (4, (TEST_FAMILY + 1).to_ne_bytes().to_vec()),
             (6, 0_u16.to_ne_bytes().to_vec()),
             (NLMSG_HEADER_LEN, vec![WG_CMD_GET_DEVICE + 1]),
@@ -1051,19 +1070,31 @@ mod tests {
             response.message[offset..offset + bytes.len()].copy_from_slice(&bytes);
             reject(response);
         }
+        for wrong_port_id in [0, 1, TEST_PORT_ID + 1] {
+            response = reply(&valid_frames());
+            response.message[12..16].copy_from_slice(&wrong_port_id.to_ne_bytes());
+            reject(response);
+
+            let mut frames = valid_frames();
+            frames[1][12..16].copy_from_slice(&wrong_port_id.to_ne_bytes());
+            reject(reply(&frames));
+        }
+        assert!(WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, 0).is_err());
     }
 
     #[test]
     fn dump_requires_clean_done_and_processes_done_error() {
         let frames = valid_frames();
         let mut parser =
-            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE).expect("parser");
+            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)
+                .expect("parser");
         parser.ingest(&reply(&frames[..1])).expect("data");
         assert!(parser.finish().is_err());
 
         for (error, expected_errno) in [(-libc::EPERM, true), (libc::EPERM, false)] {
-            let mut parser = WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE)
-                .expect("parser");
+            let mut parser =
+                WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)
+                    .expect("parser");
             let result = parser.ingest(&reply(&[frames[0].clone(), done_frame(error)]));
             if expected_errno {
                 assert!(matches!(result, Err(KernelError::Errno(libc::EPERM))));
@@ -1073,7 +1104,8 @@ mod tests {
         }
 
         let mut parser =
-            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE).expect("parser");
+            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)
+                .expect("parser");
         assert!(
             parser
                 .ingest(&reply(&[
@@ -1149,7 +1181,8 @@ mod tests {
     #[test]
     fn frame_and_byte_bounds_are_fail_closed() {
         let mut parser =
-            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE).expect("parser");
+            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)
+                .expect("parser");
         let mut name_only = Vec::new();
         push_string_attribute(&mut name_only, WGDEVICE_A_IFNAME, TEST_INTERFACE).expect("ifname");
         for _ in 0..MAX_WIREGUARD_DUMP_FRAMES {
@@ -1162,7 +1195,8 @@ mod tests {
         let mut oversized = reply(&[data_frame(&name_only)]);
         oversized.message.resize(MAX_WIREGUARD_DUMP_BYTES + 1, 0);
         let mut parser =
-            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE).expect("parser");
+            WireguardDumpParser::new(TEST_SEQUENCE, TEST_FAMILY, TEST_INTERFACE, TEST_PORT_ID)
+                .expect("parser");
         assert!(parser.ingest(&oversized).is_err());
     }
 }
