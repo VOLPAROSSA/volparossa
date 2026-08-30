@@ -723,15 +723,82 @@ pub(crate) fn receive_credential_worker_response_with_deadline<S: AsFd>(
     expected: ExpectedUnixCredentials,
     deadline: HardDeadline,
 ) -> Result<CredentialedWorkerExecution, WorkerTransportError> {
-    deadline.ensure_remaining()?;
-    let encoded = receive_credential_record_with_deadline(
+    receive_credential_worker_response_with_reconciliation(
+        channel, request, None, expected, deadline,
+    )
+}
+
+/// Receives one terminal Destroy response while reconciling at most one exact late Initialise
+/// response from the immediately preceding ambiguous call.
+///
+/// Both records are credential-only and are validated against their complete canonical requests.
+/// No other stale record, duplicate Initialise response, descriptor, operation pairing or context
+/// pairing is accepted. This deliberately narrow exception lets a durable staged-cleanup worker
+/// survive the race where Initialise completed in the child but its response crossed the parent's
+/// original deadline before a separately budgeted Destroy transaction began.
+pub(crate) fn receive_credential_worker_destroy_response_reconciling_initialise_with_deadline<
+    S: AsFd,
+>(
+    channel: &S,
+    destroy: &InternalWorkerRequest,
+    initialise: &InternalWorkerRequest,
+    expected: ExpectedUnixCredentials,
+    deadline: HardDeadline,
+) -> Result<CredentialedWorkerExecution, WorkerTransportError> {
+    let exact_pair = matches!(
+        (initialise.operation.as_ref(), destroy.operation.as_ref()),
+        (
+            Some(internal_worker_request::Operation::Initialise(initialise)),
+            Some(internal_worker_request::Operation::DestroyContext(destroy)),
+        ) if initialise.route_context_id == destroy.route_context_id
+    );
+    if !exact_pair
+        || initialise.request_id == destroy.request_id
+        || encode_request(initialise).is_err()
+        || encode_request(destroy).is_err()
+    {
+        return Err(WorkerTransportError::Invalid);
+    }
+    receive_credential_worker_response_with_reconciliation(
         channel,
-        MAX_INTERNAL_WORKER_FRAME,
+        destroy,
+        Some(initialise),
         expected,
         deadline,
-    )?;
-    let response = decode_response(&encoded).map_err(protocol_error)?;
-    validate_response_for_request(request, &response).map_err(protocol_error)?;
+    )
+}
+
+fn receive_credential_worker_response_with_reconciliation<S: AsFd>(
+    channel: &S,
+    request: &InternalWorkerRequest,
+    reconcile_once: Option<&InternalWorkerRequest>,
+    expected: ExpectedUnixCredentials,
+    deadline: HardDeadline,
+) -> Result<CredentialedWorkerExecution, WorkerTransportError> {
+    deadline.ensure_remaining()?;
+    let mut reconciled = false;
+    let response = loop {
+        let encoded = receive_credential_record_with_deadline(
+            channel,
+            MAX_INTERNAL_WORKER_FRAME,
+            expected,
+            deadline,
+        )?;
+        let response = decode_response(&encoded).map_err(protocol_error)?;
+        match validate_response_for_request(request, &response) {
+            Ok(()) => break response,
+            Err(current_error) => {
+                let is_exact_prior = !reconciled
+                    && reconcile_once.is_some_and(|prior| {
+                        validate_response_for_request(prior, &response).is_ok()
+                    });
+                if !is_exact_prior {
+                    return Err(protocol_error(current_error));
+                }
+                reconciled = true;
+            }
+        }
+    };
     let acquire = matches!(
         request.operation,
         Some(internal_worker_request::Operation::AcquireTransportSocket(
@@ -1303,7 +1370,9 @@ mod tests {
 
     use super::*;
     use crate::internal_protocol::{
-        INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, InternalSocketAddress,
+        ContextDestroyed, ContextInitialised, DestroyContext, INTERNAL_WORKER_MAGIC,
+        INTERNAL_WORKER_PROTOCOL_VERSION, InitialiseContext, InternalContextRole,
+        InternalEndpointRole, InternalIpPrefix, InternalSocketAddress, LeasePlan, PrepareLeases,
         TransportSocketReady, encode_request, internal_worker_response,
     };
     use crate::worker_sandbox::WorkerKernelPins;
@@ -1503,6 +1572,73 @@ mod tests {
         }
     }
 
+    fn initialise_and_destroy_requests(
+        context_id: [u8; 16],
+        initialise_request_id: u8,
+        destroy_request_id: u8,
+    ) -> (InternalWorkerRequest, InternalWorkerRequest) {
+        (
+            InternalWorkerRequest {
+                protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                request_id: vec![initialise_request_id; 16],
+                operation: Some(internal_worker_request::Operation::Initialise(
+                    InitialiseContext {
+                        route_context_id: context_id.to_vec(),
+                        role: InternalContextRole::Client as i32,
+                        mptcp_accepted_addrs: 2,
+                        mptcp_subflows: 4,
+                        prepare: Some(PrepareLeases {
+                            route_context_id: context_id.to_vec(),
+                            leases: vec![LeasePlan {
+                                path_id: 1,
+                                role: InternalEndpointRole::Client as i32,
+                                local_overlay_address: Some(InternalIpPrefix {
+                                    address: vec![
+                                        0xfd, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7,
+                                    ],
+                                    prefix_length: 128,
+                                }),
+                                setup_expires_at_unix: 100,
+                                hard_expires_at_unix: 200,
+                                ownership_alias: format!(
+                                    "{}vpc000000001:{}",
+                                    crate::lease_spec::DURABLE_WIREGUARD_ALIAS_PREFIX,
+                                    "ab".repeat(32)
+                                ),
+                            }],
+                        }),
+                    },
+                )),
+            },
+            InternalWorkerRequest {
+                protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                request_id: vec![destroy_request_id; 16],
+                operation: Some(internal_worker_request::Operation::DestroyContext(
+                    DestroyContext {
+                        route_context_id: context_id.to_vec(),
+                    },
+                )),
+            },
+        )
+    }
+
+    fn descriptorless_response(
+        request: &InternalWorkerRequest,
+        outcome: internal_worker_response::Outcome,
+    ) -> InternalWorkerResponse {
+        let encoded = encode_request(request).expect("valid descriptorless request");
+        InternalWorkerResponse {
+            protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+            magic: INTERNAL_WORKER_MAGIC.to_vec(),
+            request_id: request.request_id.clone(),
+            result: InternalWorkerResult::Ok as i32,
+            request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
+            outcome: Some(outcome),
+        }
+    }
+
     #[test]
     fn credentialed_typed_protocol_round_trips_success_and_failure() {
         let expected = current_expected_credentials();
@@ -1555,6 +1691,100 @@ mod tests {
 
         assert!(matches!(
             send_credential_worker_response(&worker, &request, &success, None),
+            Err(WorkerTransportError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn destroy_reconciliation_accepts_only_one_exact_prior_initialise_response() {
+        let expected = current_expected_credentials();
+        let context_id = [0xa1; 16];
+        let (initialise, destroy) = initialise_and_destroy_requests(context_id, 0x31, 0x32);
+        let initialised = descriptorless_response(
+            &initialise,
+            internal_worker_response::Outcome::Initialised(ContextInitialised {
+                route_context_id: context_id.to_vec(),
+            }),
+        );
+        let destroyed = descriptorless_response(
+            &destroy,
+            internal_worker_response::Outcome::Destroyed(ContextDestroyed {}),
+        );
+        let (parent, worker) =
+            private_credential_worker_channel().expect("credentialed private channel");
+        send_credential_worker_response(&worker, &initialise, &initialised, None)
+            .expect("late Initialise response");
+        send_credential_worker_response(&worker, &destroy, &destroyed, None)
+            .expect("Destroy response");
+
+        let execution =
+            receive_credential_worker_destroy_response_reconciling_initialise_with_deadline(
+                &parent,
+                &destroy,
+                &initialise,
+                expected,
+                HardDeadline::after(Duration::from_secs(1)).expect("reconciliation deadline"),
+            )
+            .expect("one exact prior response is reconciled");
+        assert_eq!(execution.response, destroyed);
+        assert!(execution.descriptor.is_none());
+
+        let (parent, worker) =
+            private_credential_worker_channel().expect("duplicate response channel");
+        send_credential_worker_response(&worker, &initialise, &initialised, None)
+            .expect("first late Initialise response");
+        send_credential_worker_response(&worker, &initialise, &initialised, None)
+            .expect("duplicate late Initialise response");
+        send_credential_worker_response(&worker, &destroy, &destroyed, None)
+            .expect("unreachable Destroy response");
+        assert!(matches!(
+            receive_credential_worker_destroy_response_reconciling_initialise_with_deadline(
+                &parent,
+                &destroy,
+                &initialise,
+                expected,
+                HardDeadline::after(Duration::from_secs(1)).expect("duplicate deadline"),
+            ),
+            Err(WorkerTransportError::Protocol)
+        ));
+    }
+
+    #[test]
+    fn destroy_reconciliation_rejects_foreign_response_and_context_pair() {
+        let expected = current_expected_credentials();
+        let context_id = [0xa2; 16];
+        let (initialise, destroy) = initialise_and_destroy_requests(context_id, 0x41, 0x42);
+        let (foreign_initialise, _) = initialise_and_destroy_requests(context_id, 0x43, 0x44);
+        let foreign_response = descriptorless_response(
+            &foreign_initialise,
+            internal_worker_response::Outcome::Initialised(ContextInitialised {
+                route_context_id: context_id.to_vec(),
+            }),
+        );
+        let (parent, worker) =
+            private_credential_worker_channel().expect("foreign response channel");
+        send_credential_worker_response(&worker, &foreign_initialise, &foreign_response, None)
+            .expect("foreign response send");
+        assert!(matches!(
+            receive_credential_worker_destroy_response_reconciling_initialise_with_deadline(
+                &parent,
+                &destroy,
+                &initialise,
+                expected,
+                HardDeadline::after(Duration::from_secs(1)).expect("foreign deadline"),
+            ),
+            Err(WorkerTransportError::Protocol)
+        ));
+
+        let (_, wrong_context_destroy) = initialise_and_destroy_requests([0xa3; 16], 0x45, 0x46);
+        assert!(matches!(
+            receive_credential_worker_destroy_response_reconciling_initialise_with_deadline(
+                &parent,
+                &wrong_context_destroy,
+                &initialise,
+                expected,
+                HardDeadline::after(Duration::from_secs(1)).expect("pair deadline"),
+            ),
             Err(WorkerTransportError::Invalid)
         ));
     }

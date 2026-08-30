@@ -80,9 +80,11 @@ use crate::{
     worker_transport::{
         CredentialedWorkerExecution, ExpectedUnixCredentials, WorkerTransportError,
         enable_passcred_receiver, private_credential_worker_channel, receive_credential_record,
-        receive_credential_record_with_deadline, receive_credential_worker_request,
-        receive_credential_worker_response_with_deadline, send_credential_record,
-        send_credential_record_with_deadline, send_credential_worker_request_with_deadline,
+        receive_credential_record_with_deadline,
+        receive_credential_worker_destroy_response_reconciling_initialise_with_deadline,
+        receive_credential_worker_request, receive_credential_worker_response_with_deadline,
+        send_credential_record, send_credential_record_with_deadline,
+        send_credential_worker_request_with_deadline,
         send_credential_worker_response_with_deadline, validate_adopted_transport_socket,
     },
 };
@@ -1544,12 +1546,40 @@ fn fixture_memory_child_loop(
             _ => (InternalWorkerResult::Invalid, None, false),
         };
         let response = correlated_response(&request, result, outcome)?;
-        send_credential_worker_response_with_deadline(
-            channel, &request, &response, None, deadline,
-        )?;
+        #[cfg(test)]
+        let deadline = fixture_initialise_response_deadline(operation, deadline)?;
+        if !send_child_response_preserving_initialise_cleanup(
+            channel, &request, &response, deadline,
+        )? {
+            continue;
+        }
         if exit {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+fn fixture_initialise_response_deadline(
+    operation: &internal_worker_request::Operation,
+    request_deadline: HardDeadline,
+) -> Result<HardDeadline, WorkerV3Error> {
+    if !matches!(operation, internal_worker_request::Operation::Initialise(_)) {
+        return Ok(request_deadline);
+    }
+    match std::env::var("VOLPAROSSA_TEST_WORKER_V3_CHILD")
+        .ok()
+        .as_deref()
+    {
+        Some("connect-expire-initialise-response") => {
+            thread::sleep(Duration::from_millis(75));
+            Ok(request_deadline)
+        }
+        Some("connect-late-initialise-response") => {
+            thread::sleep(Duration::from_millis(75));
+            HardDeadline::after(Duration::from_secs(1)).map_err(WorkerV3Error::Io)
+        }
+        _ => Ok(request_deadline),
     }
 }
 
@@ -3018,12 +3048,43 @@ fn child_loop(
             _ => (InternalWorkerResult::Invalid, None, false),
         };
         let response = correlated_response(&request, result, outcome)?;
-        send_credential_worker_response_with_deadline(
-            channel, &request, &response, None, deadline,
-        )?;
+        if !send_child_response_preserving_initialise_cleanup(
+            channel, &request, &response, deadline,
+        )? {
+            continue;
+        }
         if exit {
             return Ok(());
         }
+    }
+}
+
+/// Preserve the only authenticated cleanup executor when an Initialise response cannot be sent.
+///
+/// Initialise may already have staged the complete durable cleanup set before its response crosses
+/// the caller's deadline. Exiting here would strand PID-1 namespace custody with no process able to
+/// issue exact Destroy/NotFound evidence. No response is retried: a completed seqpacket send whose
+/// post-send deadline check failed may already be queued. The child instead returns to its request
+/// loop, where the parent can reconcile that one exact late response and issue Destroy under a new
+/// cleanup deadline. Every later operation keeps the ordinary fail-closed transport semantics.
+fn send_child_response_preserving_initialise_cleanup(
+    channel: &Socket,
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+    deadline: HardDeadline,
+) -> Result<bool, WorkerV3Error> {
+    match send_credential_worker_response_with_deadline(channel, request, response, None, deadline)
+    {
+        Ok(()) => Ok(true),
+        Err(_)
+            if matches!(
+                request.operation,
+                Some(internal_worker_request::Operation::Initialise(_))
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -4059,6 +4120,9 @@ struct WorkerRecord {
     generation: u64,
     dispatch_fence: WorkerDispatchFence,
     stable_phase: StablePhase,
+    /// Complete canonical request retained only while an ambiguous durable Initialise is fenced
+    /// for terminal cleanup. It authorises one exact late-response reconciliation before Destroy.
+    initialise_reconciliation: Option<InternalWorkerRequest>,
     in_flight: Option<InFlight>,
     quarantined: bool,
     expires_at: Instant,
@@ -4079,6 +4143,7 @@ struct PlannedCall {
     liveness: WorkerLiveness,
     expected_peer: ExpectedUnixCredentials,
     pinned_network_namespace: Option<crate::worker_sandbox::PinnedWorkerNetworkNamespace>,
+    initialise_reconciliation: Option<InternalWorkerRequest>,
 }
 
 struct CachedCall {
@@ -5207,6 +5272,7 @@ impl WorkerRegistry {
                 generation,
                 dispatch_fence,
                 stable_phase: StablePhase::Starting,
+                initialise_reconciliation: None,
                 in_flight: None,
                 quarantined: false,
                 expires_at,
@@ -5468,6 +5534,10 @@ impl WorkerRegistry {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "tombstone, phase, transport ownership and reconciliation planning are one atomic audit unit"
+    )]
     fn plan_until(
         &mut self,
         context_id: ContextId,
@@ -5493,7 +5563,7 @@ impl WorkerRegistry {
             request_id: key.request_id,
         };
 
-        let (phase, expires_at, liveness, expected_peer, in_flight) = {
+        let (phase, expires_at, liveness, expected_peer, in_flight, initialise_reconciliation) = {
             let record = self.records.get(&context_id).ok_or(WorkerV3Error::Dead)?;
             if record.generation != generation {
                 return Err(WorkerV3Error::Stale);
@@ -5508,6 +5578,7 @@ impl WorkerRegistry {
                 process.liveness(),
                 process.expected_peer,
                 record.in_flight,
+                record.initialise_reconciliation.clone(),
             )
         };
         if now >= expires_at {
@@ -5538,6 +5609,11 @@ impl WorkerRegistry {
         if in_flight.is_some() {
             return Err(WorkerV3Error::Busy);
         }
+        let initialise_reconciliation = planned_initialise_reconciliation(
+            phase,
+            request.operation.as_ref(),
+            initialise_reconciliation,
+        )?;
         if self.tombstones.len() >= self.maximum_cache_entries {
             return Err(WorkerV3Error::Capacity);
         }
@@ -5576,6 +5652,7 @@ impl WorkerRegistry {
             liveness,
             expected_peer,
             pinned_network_namespace,
+            initialise_reconciliation,
         }))
     }
 
@@ -5663,6 +5740,12 @@ impl WorkerRegistry {
                 Self::reject_finish(record, token, WorkerV3Error::Ambiguous)
             } else if let Ok(result) = InternalWorkerResult::try_from(response.result) {
                 record.in_flight = None;
+                if token.in_flight.terminal {
+                    // The exact terminal response has replaced the sole late-Initialise drain
+                    // authority. Cached replay, worker reap and durable settlement no longer need
+                    // to retain the complete Initialise request.
+                    record.initialise_reconciliation = None;
+                }
                 if result == InternalWorkerResult::Ok {
                     record.stable_phase = token.in_flight.success_phase;
                 }
@@ -5864,11 +5947,13 @@ impl WorkerRegistry {
             || record.quarantined
             || record.stable_phase != StablePhase::Starting
             || record.in_flight != Some(token.in_flight)
+            || record.initialise_reconciliation.is_some()
             || record.process.is_none()
         {
             return Err(WorkerV3Error::Stale);
         }
         record.in_flight = None;
+        record.initialise_reconciliation = Some(request.clone());
         record.stable_phase = StablePhase::InitialiseCleanupPending;
         Ok(())
     }
@@ -6208,6 +6293,24 @@ fn transition(
         ) => Ok((StablePhase::Committed, false)),
         (_, Some(Operation::DestroyContext(_))) => Ok((phase, true)),
         _ => Err(WorkerV3Error::Conflict),
+    }
+}
+
+fn planned_initialise_reconciliation(
+    phase: StablePhase,
+    operation: Option<&internal_worker_request::Operation>,
+    initialise: Option<InternalWorkerRequest>,
+) -> Result<Option<InternalWorkerRequest>, WorkerV3Error> {
+    match (phase, operation, initialise) {
+        (
+            StablePhase::InitialiseCleanupPending,
+            Some(internal_worker_request::Operation::DestroyContext(_)),
+            initialise,
+        ) => Ok(initialise),
+        (StablePhase::InitialiseCleanupPending, _, _) | (_, _, Some(_)) => {
+            Err(WorkerV3Error::Conflict)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -6792,17 +6895,28 @@ impl WorkerSupervisor {
             liveness,
             expected_peer,
             pinned_network_namespace,
+            initialise_reconciliation,
         } = call;
         let deadline = token.in_flight.deadline;
         let io_request = request.clone();
         let result = tokio::task::spawn_blocking(move || {
             send_credential_worker_request_with_deadline(&channel, &io_request, deadline)?;
-            let mut execution = receive_credential_worker_response_with_deadline(
-                &channel,
-                &io_request,
-                expected_peer,
-                deadline,
-            )?;
+            let mut execution = if let Some(initialise) = initialise_reconciliation.as_ref() {
+                receive_credential_worker_destroy_response_reconciling_initialise_with_deadline(
+                    &channel,
+                    &io_request,
+                    initialise,
+                    expected_peer,
+                    deadline,
+                )?
+            } else {
+                receive_credential_worker_response_with_deadline(
+                    &channel,
+                    &io_request,
+                    expected_peer,
+                    deadline,
+                )?
+            };
             let worker_alive = liveness.probe_alive_until(deadline)?;
             ensure_worker_deadline(deadline)?;
             if !worker_alive {
@@ -12650,7 +12764,11 @@ mod tests {
     #[test]
     fn child_process_entry_fixture() {
         let failed = match env::var(CHILD_FIXTURE_ENVIRONMENT).ok().as_deref() {
-            Some("connect") => {
+            Some(
+                "connect"
+                | "connect-expire-initialise-response"
+                | "connect-late-initialise-response",
+            ) => {
                 !hardened_child_environment()
                     || run_child_with_fixture_sandbox(
                         geteuid().as_raw(),
@@ -13298,6 +13416,7 @@ mod tests {
                             generation,
                             dispatch_fence: WorkerDispatchFence::Open,
                             stable_phase: StablePhase::Starting,
+                            initialise_reconciliation: None,
                             in_flight: None,
                             quarantined: true,
                             expires_at,
@@ -20502,6 +20621,265 @@ mod tests {
             )
             .expect("terminal Destroy transition"),
             (StablePhase::InitialiseCleanupPending, true)
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test proves retain, exact terminal clear, aligned retry and purge in one lineage"
+    )]
+    fn exact_terminal_response_clears_retained_initialise_before_reap_or_cache_replay() {
+        let context_id = [0x94; 16];
+        let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let reservation = registry
+            .reserve_generation(context_id, Duration::from_secs(5), Instant::now())
+            .expect("generation reservation");
+        process.binding = Some(reservation.binding());
+        let WorkerRegistrationCommit::DurableHandoffPending { generation, fence } = registry
+            .commit_reserved_with_dispatch(
+                reservation,
+                process,
+                Instant::now(),
+                WorkerDispatchRegistration::DurableHandoffPending,
+            )
+            .expect("durable registration")
+        else {
+            panic!("durable registration returned an open generation")
+        };
+        registry
+            .open_durable_handoff_dispatch(
+                WorkerGenerationCoordinates {
+                    context_id,
+                    worker_generation: NonZeroU64::new(generation).expect("non-zero generation"),
+                },
+                &fence,
+                HardDeadline::after(Duration::from_secs(1)).expect("dispatch-open deadline"),
+            )
+            .expect("open durable dispatch");
+        let initialise = initialise(context_id, 0xe1);
+        let initialise_call = call(
+            registry
+                .plan(context_id, generation, &initialise, Instant::now())
+                .expect("plan Initialise"),
+        );
+        registry
+            .retain_ambiguous_initialise_for_destroy(initialise_call.token, &initialise)
+            .expect("retain exact Initialise reconciliation");
+        assert_eq!(
+            registry
+                .records
+                .get(&context_id)
+                .and_then(|record| record.initialise_reconciliation.as_ref()),
+            Some(&initialise)
+        );
+
+        let destroy_request = destroy(context_id, 0xe2);
+        let destroy_call = call(
+            registry
+                .plan(context_id, generation, &destroy_request, Instant::now())
+                .expect("plan terminal Destroy"),
+        );
+        assert_eq!(
+            destroy_call.initialise_reconciliation.as_ref(),
+            Some(&initialise)
+        );
+        let absent = correlated_response(&destroy_request, InternalWorkerResult::NotFound, None)
+            .expect("exact terminal NotFound");
+        assert!(matches!(
+            registry.finish(
+                destroy_call.token,
+                &destroy_request,
+                &absent,
+                Instant::now(),
+                true,
+            ),
+            FinishOutcome::Committed
+        ));
+        let record = registry
+            .records
+            .get(&context_id)
+            .expect("live worker record");
+        assert!(record.initialise_reconciliation.is_none());
+        assert!(
+            registry
+                .cache
+                .values()
+                .any(|entry| entry.response == absent)
+        );
+
+        let aligned_retry = destroy(context_id, 0xe3);
+        let retry_call = call(
+            registry
+                .plan(context_id, generation, &aligned_retry, Instant::now())
+                .expect("plan aligned terminal retry"),
+        );
+        assert!(retry_call.initialise_reconciliation.is_none());
+        let retry_absent =
+            correlated_response(&aligned_retry, InternalWorkerResult::NotFound, None)
+                .expect("exact aligned retry NotFound");
+        assert!(matches!(
+            registry.finish(
+                retry_call.token,
+                &aligned_retry,
+                &retry_absent,
+                Instant::now(),
+                true,
+            ),
+            FinishOutcome::Committed
+        ));
+
+        let detached = registry
+            .report_dead(context_id, generation)
+            .expect("quarantine exact generation")
+            .expect("detach exact generation");
+        stop_and_purge(&mut registry, detached);
+        assert!(!registry.records.contains_key(&context_id));
+    }
+
+    async fn exercise_real_child_initialise_response_loss(mode: &str, context_id: ContextId) {
+        let authenticated = spawn_authenticated_fixture(mode, context_id, 1)
+            .expect("authenticated real child fixture");
+        let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+        let reservation = registry
+            .reserve_generation(context_id, Duration::from_secs(5), Instant::now())
+            .expect("generation reservation");
+        assert_eq!(reservation.generation, 1);
+        let WorkerRegistrationCommit::DurableHandoffPending { generation, fence } = registry
+            .commit_reserved_with_dispatch(
+                reservation,
+                authenticated.process,
+                Instant::now(),
+                WorkerDispatchRegistration::DurableHandoffPending,
+            )
+            .expect("durable worker registration")
+        else {
+            panic!("durable registration returned an open generation")
+        };
+        let coordinates = WorkerGenerationCoordinates {
+            context_id,
+            worker_generation: NonZeroU64::new(generation).expect("non-zero generation"),
+        };
+        registry
+            .open_durable_handoff_dispatch(
+                coordinates,
+                &fence,
+                HardDeadline::after(Duration::from_secs(1)).expect("dispatch-open deadline"),
+            )
+            .expect("open exact durable dispatch");
+        let coordinator = WorkerCoordinator::new(registry);
+
+        let initialise = initialise(context_id, 0xd1);
+        let initialise_deadline =
+            HardDeadline::after(Duration::from_millis(25)).expect("short Initialise deadline");
+        assert!(matches!(
+            coordinator
+                .execute_until(
+                    context_id,
+                    generation,
+                    initialise.clone(),
+                    initialise_deadline
+                )
+                .await,
+            Err(WorkerV3Error::Deadline)
+        ));
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            let record = registry.records.get(&context_id).expect("retained worker");
+            assert_eq!(record.stable_phase, StablePhase::InitialiseCleanupPending);
+            assert_eq!(record.initialise_reconciliation.as_ref(), Some(&initialise));
+            assert!(!record.quarantined);
+            assert!(record.process.is_some());
+        }
+
+        let destroy = destroy(context_id, 0xd2);
+        let execution = coordinator
+            .execute_until(
+                context_id,
+                generation,
+                destroy,
+                HardDeadline::after(Duration::from_secs(2)).expect("separate cleanup deadline"),
+            )
+            .await
+            .expect("exact staged Destroy after response loss");
+        assert!(execution.descriptor.is_none());
+        assert_eq!(execution.response.result, InternalWorkerResult::Ok as i32);
+        assert!(matches!(
+            execution.response.outcome,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {}
+            ))
+        ));
+        assert!(matches!(
+            coordinator.phase(context_id, generation),
+            Err(WorkerV3Error::Stale)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_child_survives_expired_initialise_response_for_separately_budgeted_destroy() {
+        exercise_real_child_initialise_response_loss(
+            "connect-expire-initialise-response",
+            [0x92; 16],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_child_late_initialise_response_is_reconciled_before_destroy_response() {
+        exercise_real_child_initialise_response_loss(
+            "connect-late-initialise-response",
+            [0x93; 16],
+        )
+        .await;
+    }
+
+    #[test]
+    fn production_and_fixture_child_loops_share_the_only_initialise_send_survival_seam() {
+        let source = include_str!("worker_v3.rs");
+        let fixture_start = source
+            .find("fn fixture_memory_child_loop(")
+            .expect("fixture child loop");
+        let fixture_end = source[fixture_start..]
+            .find("\nfn receive_deadline_bound_worker_request(")
+            .map(|offset| fixture_start + offset)
+            .expect("fixture child loop boundary");
+        let fixture = &source[fixture_start..fixture_end];
+        let production_start = source
+            .find("fn child_loop(")
+            .expect("production child loop");
+        let production_end = source[production_start..]
+            .find("\n/// Preserve the only authenticated cleanup executor")
+            .map(|offset| production_start + offset)
+            .expect("production child loop boundary");
+        let production = &source[production_start..production_end];
+        for operation_loop in [fixture, production] {
+            assert_eq!(
+                operation_loop
+                    .matches("send_child_response_preserving_initialise_cleanup(")
+                    .count(),
+                1,
+                "each child loop must use the shared response-loss survival seam exactly once"
+            );
+            assert!(
+                !operation_loop.contains("send_credential_worker_response_with_deadline("),
+                "a child loop bypassed Initialise cleanup survivability"
+            );
+        }
+        let helper_start = source
+            .find("fn send_child_response_preserving_initialise_cleanup(")
+            .expect("shared response-loss helper");
+        let helper_end = source[helper_start..]
+            .find("\nfn correlated_response(")
+            .map(|offset| helper_start + offset)
+            .expect("shared response-loss helper boundary");
+        assert_eq!(
+            source[helper_start..helper_end]
+                .matches("send_credential_worker_response_with_deadline(")
+                .count(),
+            1,
+            "all operation-loop response sends must remain behind the shared helper"
         );
     }
 
