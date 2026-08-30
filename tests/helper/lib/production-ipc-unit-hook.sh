@@ -16,6 +16,7 @@ journal=$runtime_directory/helper.ownership-v3
 journal_lock=$runtime_directory/helper.ownership-v3.lock
 journal_next=$runtime_directory/helper.ownership-v3.next
 proof_directory=/run/volparossa-helper-production-proof
+host_network_identity_record=/run/volparossa-helper-production-host-network.identity
 probe=/run/volparossa-helper-production-ipc-probe
 production_helper=/run/volparossa-helper-production
 functional_underlay=vpfu0
@@ -1454,11 +1455,16 @@ private_network_is_pristine() {
             ;;
         *) return 1 ;;
     esac
+    private_file_is_safe "$host_network_identity_record" || return 1
+    hook_host_namespace=$(cat "$host_network_identity_record") || return 1
+    kernel_object_identity_is_safe "$hook_host_namespace" || return 1
     hook_private_namespace=$(stat -Lc '%d:%i' /proc/self/ns/net 2>/dev/null) \
         || return 1
-    hook_pid1_namespace=$(stat -Lc '%d:%i' /proc/1/ns/net 2>/dev/null) \
+    kernel_object_identity_is_safe "$hook_private_namespace" || return 1
+    [ "$hook_private_namespace" != "$hook_host_namespace" ] || return 1
+    private_file_is_safe "$host_network_identity_record" || return 1
+    [ "$(cat "$host_network_identity_record")" = "$hook_host_namespace" ] \
         || return 1
-    [ "$hook_private_namespace" != "$hook_pid1_namespace" ] || return 1
     if [ "$hook_pristine_staged" = yes ]; then
         advance_start_failure_stage functional-underlay-pristine-link \
             || return 1

@@ -2824,6 +2824,36 @@ if [ "$proof_ok" = yes ]; then
     production_hook_bind="$temporary_stage/production-ipc-hook:/run/volparossa-helper-production-ipc-hook:norbind"
     production_runtime_bind="$temporary_stage/production-runtime:/run/volparossa:norbind"
     production_output_bind="$temporary_stage/production-output:/run/volparossa-helper-production-proof:norbind"
+    production_host_network_identity_file=$temporary_stage/production-host-network.identity
+    if [ -e "$production_host_network_identity_file" ] \
+        || [ -L "$production_host_network_identity_file" ]; then
+        failed 'production host network identity path is not initially absent'
+    fi
+    production_driver_network_identity=$(stat -Lc '%d:%i' /proc/self/ns/net) \
+        || failed 'production driver network identity could not be captured'
+    production_host_network_identity=$(stat -Lc '%d:%i' /proc/1/ns/net) \
+        || failed 'production host network identity could not be captured'
+    [ "$production_driver_network_identity" = "$production_host_network_identity" ] \
+        || failed 'production driver is not in PID 1 host network namespace'
+    production_host_network_device=${production_host_network_identity%%:*}
+    production_host_network_inode=${production_host_network_identity#*:}
+    [ "$production_host_network_identity" = \
+        "$production_host_network_device:$production_host_network_inode" ] \
+        || failed 'production host network identity is ambiguous'
+    for production_host_network_number in \
+        "$production_host_network_device" "$production_host_network_inode"; do
+        case $production_host_network_number in
+            ''|0|0*|*[!0-9]*)
+                failed 'production host network identity is non-canonical'
+                ;;
+        esac
+    done
+    vp_capture_run "$production_host_network_identity_file" \
+        printf '%s\n' "$production_host_network_identity" \
+        || failed 'production host network identity could not be published'
+    vp_capture_file_is_safe "$production_host_network_identity_file" \
+        || failed 'production host network identity record is unsafe'
+    production_host_network_identity_bind="$production_host_network_identity_file:/run/volparossa-helper-production-host-network.identity:norbind"
 
     unit_may_own=yes
     set +e
@@ -2874,7 +2904,7 @@ if [ "$proof_ok" = yes ]; then
         --property=SystemCallErrorNumber=EPERM \
         --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
         --property='TemporaryFileSystem=/run:rw,nodev,nosuid,noexec,mode=0755,size=16M' \
-        --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind $notify_socket_bind" \
+        --property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $production_host_network_identity_bind $account_binds $system_bus_bind $notify_socket_bind" \
         --property="BindPaths=$production_runtime_bind $production_output_bind" \
         --property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin' \
         --property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \

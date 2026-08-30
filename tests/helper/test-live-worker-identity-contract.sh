@@ -3639,12 +3639,21 @@ for required_contract in \
     '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-live-proof --internal-worker-v3-live-proof' \
     '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production' \
     '--property="BindReadOnlyPaths=$helper_bind $account_binds $system_bus_bind $notify_socket_bind"' \
-    '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $account_binds $system_bus_bind $notify_socket_bind"' \
+    '--property="BindReadOnlyPaths=$production_helper_bind $production_probe_bind $production_hook_bind $production_host_network_identity_bind $account_binds $system_bus_bind $notify_socket_bind"' \
     '--property="BindPaths=$production_runtime_bind $production_output_bind"' \
     "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" \
     '--property="ExecStartPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook start $unit_name $agent_uid $agent_gid $operator_gid $worker_uid $worker_gid"' \
     '--property="ExecStopPost=/usr/bin/setpriv --regid=$agent_gid --groups=$agent_gid -- /run/volparossa-helper-production-ipc-hook stop $unit_name $agent_gid"' \
     'install -d -o root -g root -m 2700 "$temporary_stage/production-output"' \
+    'production_host_network_identity_file=$temporary_stage/production-host-network.identity' \
+    'production_driver_network_identity=$(stat -Lc' \
+    '/proc/self/ns/net)' \
+    'production_host_network_identity=$(stat -Lc' \
+    '/proc/1/ns/net)' \
+    '[ "$production_driver_network_identity" = "$production_host_network_identity" ]' \
+    'production_host_network_identity_bind="$production_host_network_identity_file:/run/volparossa-helper-production-host-network.identity:norbind"' \
+    'vp_capture_run "$production_host_network_identity_file"' \
+    'vp_capture_file_is_safe "$production_host_network_identity_file"' \
     '--property=Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket' \
     'system_bus_socket=/run/dbus/system_bus_socket' \
     'notify_socket=/run/systemd/notify' \
@@ -4975,6 +4984,7 @@ fi
 # shellcheck disable=SC2016
 for required_hook_contract in \
     'runtime_directory=/run/volparossa' \
+    'host_network_identity_record=/run/volparossa-helper-production-host-network.identity' \
     'helper_socket=$runtime_directory/helper.sock' \
     'cleanup_token=$runtime_directory/helper.cleanup-token' \
     'probe=/run/volparossa-helper-production-ipc-probe' \
@@ -5099,7 +5109,11 @@ for required_hook_contract in \
     'command exec 8>&-' \
     'command exec 7>&-' \
     'private_network_is_pristine' \
-    '"$hook_private_namespace" != "$hook_pid1_namespace"' \
+    'private_file_is_safe "$host_network_identity_record"' \
+    'hook_host_namespace=$(cat "$host_network_identity_record")' \
+    'kernel_object_identity_is_safe "$hook_host_namespace"' \
+    '"$hook_private_namespace" != "$hook_host_namespace"' \
+    '[ "$(cat "$host_network_identity_record")" = "$hook_host_namespace" ]' \
     '/usr/sbin/ip -json route show default' \
     '/usr/sbin/ip -6 -json route show default' \
     'unit_fdstore_is_empty' \
@@ -5138,6 +5152,11 @@ do
         exit 1
     }
 done
+if grep -F '/proc/1/ns/net' "$ipc_hook" >/dev/null; then
+    printf '%s\n' \
+        'production hook regained ptrace-gated PID 1 namespace inspection' >&2
+    exit 1
+fi
 for worker_launch_anchor in \
     'crate::worker_sandbox::WorkerKernelPins::pin_process(child)' \
     'ExpectedUnixCredentials::new(child_pid, worker_identity.uid(), worker_identity.gid())' \
