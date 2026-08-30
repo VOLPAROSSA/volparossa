@@ -298,6 +298,8 @@ pub(crate) enum FdStoreError {
     RemovalNotPoisoned,
     #[error("descriptor-store removal target does not match the ambiguous attempt")]
     RemovalTargetMismatch,
+    #[error("the correlated removal retry already crossed its new send boundary")]
+    RemovalRetryAlreadySent,
     #[error("descriptor-store removal was ordered but the exact custody pair remains present")]
     RemovalStillPresent,
 }
@@ -799,10 +801,12 @@ impl ExactRemovalProof {
     }
 }
 
-/// Stable observation that an attempted exact removal left the complete baseline unchanged.
+/// Affine observation that an attempted exact removal left the complete baseline unchanged.
 ///
-/// This deliberately carries no retry method or mutation authority.
-#[must_use = "exact-still-present evidence never authorizes a blind removal retry"]
+/// The process-global manager gate remains poisoned for this exact attempt and target. Borrowing
+/// this evidence is the only authority which may open one fresh-preflight retry on a later call;
+/// dropping it never clears the gate or permits an uncorrelated manager mutation.
+#[must_use = "exact-still-present evidence is the sole authority for one correlated retry"]
 pub(crate) struct ExactStillPresentRemovalEvidence {
     attempt: PoisonedRemoval,
     stored_descriptors: u32,
@@ -814,8 +818,11 @@ impl fmt::Debug for ExactStillPresentRemovalEvidence {
     }
 }
 
-/// Observation-only reconciliation of one exact ambiguous removal attempt.
-#[must_use = "removal reconciliation does not authorize an implicit retry"]
+/// Reconciliation of one exact ambiguous removal attempt.
+///
+/// `ExactStillPresent` is affine retry authority, not an implicit retry: reconciliation itself
+/// performs no removal send and leaves the shared manager gate poisoned for the exact old target.
+#[must_use = "exact-still-present reconciliation must be retained for a later explicit retry"]
 pub(crate) enum RemovalInventoryReconciliation {
     ExactRemoved(ExactRemovalProof),
     ExactStillPresent(ExactStillPresentRemovalEvidence),
@@ -1348,6 +1355,10 @@ impl fmt::Debug for RemovalTarget {
 #[derive(Clone, Eq, PartialEq)]
 struct PoisonedRemoval {
     attempt_id: RemovalAttemptId,
+    /// The exact still-present attempt whose affine evidence opened this retry. Original removal
+    /// attempts carry `None`. Retaining one predecessor lets a cancelled caller recover the new
+    /// post-send attempt ID without authorizing another send from stale evidence.
+    retry_of: Option<RemovalAttemptId>,
     target: RemovalTarget,
 }
 
@@ -1371,8 +1382,9 @@ struct ManagerMutationGateState {
 /// Serializes every descriptor-store mutation from its fresh baseline observation through final
 /// attestation. Publication and removal draw typed IDs from one monotonic sequence and share one
 /// poison state. Dropping either attempt after its first send boundary blocks both mutation kinds.
-/// After an ambiguous attempt, publication reconciliation is observation-only; only exact-removed
-/// reconciliation of that removal may reopen this gate.
+/// After an ambiguous attempt, publication reconciliation is observation-only. Exact-removed
+/// reconciliation may reopen a removal poison directly; exact-still-present evidence may instead
+/// rotate that exact poison into one correlated retry whose own exact proof reopens the gate.
 struct ManagerMutationGate {
     state: tokio::sync::Mutex<ManagerMutationGateState>,
 }
@@ -1436,6 +1448,48 @@ impl ManagerMutationGate {
             return Err(FdStoreError::RemovalTargetMismatch);
         }
         Ok(PoisonedRemovalObservation { state, poisoned })
+    }
+
+    /// Retain the generically poisoned gate while validating one affine exact-still-present retry.
+    ///
+    /// The old poison is not cleared. If this evidence already crossed its retry send boundary,
+    /// return only that exact successor attempt ID so cancellation cannot cause a duplicate send.
+    async fn acquire_retry_removal(
+        &self,
+        evidence: &ExactStillPresentRemovalEvidence,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+        deadline: HardDeadline,
+    ) -> Result<RemovalRetryGate<'_>, FdStoreError> {
+        let state = self.lock_state(deadline).await?;
+        if evidence.attempt.target.custody_name != custody_name
+            || &evidence.attempt.target.binding != binding
+            || evidence.stored_descriptors
+                != u32::try_from(evidence.attempt.target.baseline.entries.len())
+                    .map_err(|_| invalid_inventory("retry descriptor count is invalid"))?
+        {
+            return Err(FdStoreError::RemovalTargetMismatch);
+        }
+        let current = match state.poisoned.clone() {
+            Some(PoisonedManagerMutation::Removal(poisoned)) => poisoned,
+            Some(PoisonedManagerMutation::Publication(_)) => {
+                return Err(FdStoreError::RemovalTargetMismatch);
+            }
+            None => return Err(FdStoreError::RemovalNotPoisoned),
+        };
+        if current == evidence.attempt {
+            return Ok(RemovalRetryGate::Ready(RemovalRetryAttempt {
+                state,
+                authority: evidence.attempt.clone(),
+                crossed: None,
+            }));
+        }
+        if current.retry_of == Some(evidence.attempt.attempt_id)
+            && current.target == evidence.attempt.target
+        {
+            return Ok(RemovalRetryGate::AlreadyCrossed(current.attempt_id));
+        }
+        Err(FdStoreError::RemovalTargetMismatch)
     }
 
     async fn acquire_publication(
@@ -1539,6 +1593,20 @@ struct RemovalAttempt<'a> {
     crossed: Option<PoisonedRemoval>,
 }
 
+enum RemovalRetryGate<'a> {
+    Ready(RemovalRetryAttempt<'a>),
+    AlreadyCrossed(RemovalAttemptId),
+}
+
+/// Gate-held affine authority for one byte-identical resend after exact-still-present evidence.
+/// Dropping before `mark_send_attempted` leaves the old poison and evidence valid; dropping after
+/// it preserves only the newly identified poison.
+struct RemovalRetryAttempt<'a> {
+    state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
+    authority: PoisonedRemoval,
+    crossed: Option<PoisonedRemoval>,
+}
+
 impl RemovalAttempt<'_> {
     /// Conservatively mark immediately before invoking the exact removal send.
     fn mark_send_attempted(
@@ -1556,7 +1624,57 @@ impl RemovalAttempt<'_> {
             .ok_or(FdStoreError::RemovalAttemptExhausted)?;
         let poisoned = PoisonedRemoval {
             attempt_id: RemovalAttemptId(next),
+            retry_of: None,
             target,
+        };
+        self.state.last_attempt_id = next.get();
+        self.state.poisoned = Some(PoisonedManagerMutation::Removal(poisoned.clone()));
+        self.crossed = Some(poisoned);
+        Ok(RemovalAttemptId(next))
+    }
+
+    fn complete_exact_removed(mut self, attempt_id: RemovalAttemptId) {
+        let exact = self.crossed.as_ref().is_some_and(|crossed| {
+            crossed.attempt_id == attempt_id
+                && matches!(
+                    self.state.poisoned.as_ref(),
+                    Some(PoisonedManagerMutation::Removal(poisoned)) if poisoned == crossed
+                )
+        });
+        if !exact {
+            std::process::abort();
+        }
+        self.state.poisoned = None;
+        self.crossed = None;
+    }
+}
+
+impl RemovalRetryAttempt<'_> {
+    fn target(&self) -> &RemovalTarget {
+        &self.authority.target
+    }
+
+    /// Atomically rotate the old exact poison into a new monotone attempt immediately before send.
+    fn mark_send_attempted(&mut self) -> Result<RemovalAttemptId, FdStoreError> {
+        if self.crossed.is_some()
+            || !matches!(
+                self.state.poisoned.as_ref(),
+                Some(PoisonedManagerMutation::Removal(poisoned))
+                    if poisoned == &self.authority
+            )
+        {
+            return Err(FdStoreError::RemovalTargetMismatch);
+        }
+        let next = self
+            .state
+            .last_attempt_id
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(FdStoreError::RemovalAttemptExhausted)?;
+        let poisoned = PoisonedRemoval {
+            attempt_id: RemovalAttemptId(next),
+            retry_of: Some(self.authority.attempt_id),
+            target: self.authority.target.clone(),
         };
         self.state.last_attempt_id = next.get();
         self.state.poisoned = Some(PoisonedManagerMutation::Removal(poisoned.clone()));
@@ -2167,9 +2285,9 @@ where
     Ok(proof)
 }
 
-/// Reobserve one exact ambiguous removal attempt. Exact-still-present evidence never authorizes a
-/// retry; exact-removed evidence only settles this process-local manager-mutation gate after that
-/// exact removal.
+/// Reobserve one exact ambiguous removal attempt. Exact-still-present evidence retains the poison
+/// and authorizes only a later explicit correlated retry; exact-removed evidence settles this
+/// process-local manager-mutation gate immediately.
 pub(crate) async fn reconcile_current_process_removal(
     attempt_id: RemovalAttemptId,
     custody_name: CustodyFdName,
@@ -2208,6 +2326,196 @@ pub(crate) async fn reconcile_current_process_removal(
         deadline,
     )
     .await
+}
+
+/// Retry one exact removal only from affine evidence that the prior attempt causally left its
+/// complete target baseline unchanged.
+///
+/// This borrows `evidence`: cancellation before the new send boundary therefore returns control
+/// to the caller with the same retry authority, while the manager gate remains poisoned. If
+/// cancellation occurs after the boundary, the gate's predecessor link lets a repeated call
+/// recover the exact new attempt ID without sending twice.
+pub(crate) async fn retry_current_process_removal(
+    evidence: &ExactStillPresentRemovalEvidence,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactRemovalProof, RemovalFailure> {
+    ensure_deadline(deadline).map_err(RemovalFailure::before_send)?;
+    if evidence.attempt.target.custody_name != custody_name
+        || evidence.attempt.target.binding != expected_binding
+    {
+        return Err(RemovalFailure::before_send(
+            FdStoreError::RemovalTargetMismatch,
+        ));
+    }
+    let source =
+        SystemdDescriptorStoreSource::for_scope(evidence.attempt.target.scope.clone(), deadline)
+            .await
+            .map_err(RemovalFailure::before_send)?;
+    retry_exact_still_present_and_attest(
+        &PRODUCTION_MANAGER_MUTATION_GATE,
+        &source,
+        evidence,
+        custody_name,
+        expected_binding,
+        custody,
+        deadline,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the exact retry transaction keeps affine evidence, target and deadline auditable"
+)]
+async fn retry_exact_still_present_and_attest<S>(
+    gate: &ManagerMutationGate,
+    source: &S,
+    evidence: &ExactStillPresentRemovalEvidence,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactRemovalProof, RemovalFailure>
+where
+    S: DescriptorStoreInventorySource,
+{
+    ensure_deadline(deadline).map_err(RemovalFailure::before_send)?;
+    let before =
+        CustodyDescriptorBinding::from_custody(custody).map_err(RemovalFailure::before_send)?;
+    if before != expected_binding
+        || evidence.attempt.target.custody_name != custody_name
+        || evidence.attempt.target.binding != expected_binding
+    {
+        return Err(RemovalFailure::before_send(
+            FdStoreError::RemovalTargetMismatch,
+        ));
+    }
+    let mut attempt = match gate
+        .acquire_retry_removal(evidence, custody_name, &expected_binding, deadline)
+        .await
+        .map_err(RemovalFailure::before_send)?
+    {
+        RemovalRetryGate::Ready(attempt) => attempt,
+        RemovalRetryGate::AlreadyCrossed(attempt_id) => {
+            return Err(RemovalFailure::manager_may_have_removed(
+                attempt_id,
+                FdStoreError::RemovalRetryAlreadySent,
+            ));
+        }
+    };
+    let target = attempt.target().clone();
+    if source.scope() != &target.scope
+        || target.custody_name != custody_name
+        || target.binding != expected_binding
+    {
+        return Err(RemovalFailure::before_send(
+            FdStoreError::RemovalTargetMismatch,
+        ));
+    }
+    target
+        .baseline
+        .validate_removal_target(source.scope(), custody_name, &expected_binding)
+        .map_err(RemovalFailure::before_send)?;
+    let preflight = within_deadline(deadline, source.snapshot(deadline))
+        .await
+        .map_err(RemovalFailure::before_send)?;
+    preflight
+        .validate_service_contract(source.scope())
+        .map_err(RemovalFailure::before_send)?;
+    if preflight != target.baseline {
+        return Err(RemovalFailure::before_send(invalid_inventory(
+            "retry baseline changed before the send boundary",
+        )));
+    }
+    let remeasured =
+        CustodyDescriptorBinding::from_custody(custody).map_err(RemovalFailure::before_send)?;
+    if remeasured != before || remeasured != target.binding {
+        return Err(RemovalFailure::before_send(invalid_inventory(
+            "local custody binding changed before removal retry",
+        )));
+    }
+    let sender = NotifySender::new(&target.notify_address).map_err(RemovalFailure::before_send)?;
+    let (barrier_read, barrier_write) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
+        .map_err(nix_io)
+        .map_err(RemovalFailure::before_send)?;
+    let barrier_read = AsyncFd::new(barrier_read)
+        .map_err(FdStoreError::Io)
+        .map_err(RemovalFailure::before_send)?;
+    let removal_message = fdstore_remove_message(target.custody_name);
+    ensure_deadline(deadline).map_err(RemovalFailure::before_send)?;
+
+    let attempt_id = attempt
+        .mark_send_attempted()
+        .map_err(RemovalFailure::before_send)?;
+    sender
+        .send_without_descriptors_once(&removal_message)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    ensure_deadline(deadline)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    sender
+        .send_once(BARRIER_MESSAGE, &[barrier_write.as_raw_fd()])
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    drop(barrier_write);
+    wait_for_barrier(&barrier_read, deadline)
+        .await
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let first = within_deadline(deadline, source.snapshot(deadline))
+        .await
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    first
+        .validate_service_contract(source.scope())
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let second = within_deadline(deadline, source.snapshot(deadline))
+        .await
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    second
+        .validate_service_contract(source.scope())
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    if first != second {
+        return Err(RemovalFailure::manager_may_have_removed(
+            attempt_id,
+            FdStoreError::UnstableInventory,
+        ));
+    }
+    let after = CustodyDescriptorBinding::from_custody(custody)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    if after != before || after != target.binding {
+        return Err(RemovalFailure::manager_may_have_removed(
+            attempt_id,
+            invalid_inventory("local custody binding changed during removal retry"),
+        ));
+    }
+    let projection = target
+        .baseline
+        .project_exact_removal(&first, target.custody_name, &target.binding)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let RemovalProjection::ExactRemoved {
+        snapshot,
+        stored_descriptors,
+    } = projection
+    else {
+        return Err(RemovalFailure::manager_may_have_removed(
+            attempt_id,
+            FdStoreError::RemovalStillPresent,
+        ));
+    };
+    ensure_deadline(deadline)
+        .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
+    let proof = ExactRemovalProof {
+        custody_name: target.custody_name,
+        binding: target.binding,
+        successor: StableStartupInventory {
+            snapshot,
+            notify_address: target.notify_address,
+        },
+        stored_descriptors,
+    };
+    attempt.complete_exact_removed(attempt_id);
+    Ok(proof)
 }
 
 async fn reconcile_poisoned_removal<S, B>(
@@ -3107,6 +3415,48 @@ mod tests {
             .await
             .expect("exact poisoned observation");
         reconcile_poisoned_observation(observation, source, custody, barrier, deadline).await
+    }
+
+    async fn exact_still_present_removal_evidence(
+        gate: &ManagerMutationGate,
+        notify_address: &NotifySocketAddress,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+        custody: BorrowedCustodyPair<'_>,
+    ) -> (RemovalAttemptId, ExactStillPresentRemovalEvidence) {
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(custody_name, binding)));
+        let deadline = HardDeadline::after(Duration::from_secs(2)).expect("evidence deadline");
+        let mut attempt = gate
+            .acquire_removal(deadline)
+            .await
+            .expect("open removal gate");
+        let attempt_id = attempt
+            .mark_send_attempted(RemovalTarget {
+                scope: fake_scope(42),
+                notify_address: notify_address.clone(),
+                custody_name,
+                binding: binding.clone(),
+                baseline: baseline.clone(),
+            })
+            .expect("poison exact removal");
+        drop(attempt);
+        let source = FakeInventorySource::new(42, vec![baseline.clone(), baseline]);
+        let observation = gate
+            .acquire_poisoned_removal(attempt_id, custody_name, binding, deadline)
+            .await
+            .expect("observe exact removal poison");
+        match reconcile_poisoned_removal(
+            observation,
+            &source,
+            std::future::ready(Ok(())),
+            custody,
+            deadline,
+        )
+        .await
+        {
+            RemovalInventoryReconciliation::ExactStillPresent(evidence) => (attempt_id, evidence),
+            other => panic!("unexpected still-present evidence result: {other:?}"),
+        }
     }
 
     fn descriptor_identity(seed: u32) -> DescriptorIdentity {
@@ -4392,6 +4742,483 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_still_present_evidence_opens_one_fresh_preflight_retry() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("exact-removal-retry.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let receiver_probe = receiver.try_clone().expect("clone fake notify socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact retry pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(87);
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let successor = snapshot(42, Vec::new());
+        let gate = ManagerMutationGate::new();
+        let (old_attempt_id, evidence) =
+            exact_still_present_removal_evidence(&gate, &address, target_name, &binding, custody)
+                .await;
+        let source =
+            FakeInventorySource::new(42, vec![baseline, successor.clone(), successor.clone()]);
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, fdstore_remove_message(target_name));
+            assert!(descriptors.is_empty(), "retry removal carried FDs");
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1, "retry barrier carried wrong FDs");
+            close_received(descriptors);
+        });
+
+        let proof = retry_exact_still_present_and_attest(
+            &gate,
+            &source,
+            &evidence,
+            target_name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("retry deadline"),
+        )
+        .await
+        .expect("exact correlated retry succeeds");
+        receiver_thread.join().expect("fake systemd receiver");
+
+        proof
+            .verify_exact_target(target_name, &binding)
+            .expect("exact retry proof target");
+        assert_eq!(proof.stored_descriptors, 0);
+        assert_eq!(proof.into_successor().snapshot, successor);
+        {
+            let state = gate.state.lock().await;
+            assert_eq!(state.last_attempt_id, old_attempt_id.0.get() + 1);
+            assert!(
+                state.poisoned.is_none(),
+                "exact proof must clear retry poison"
+            );
+        }
+
+        let stale_source = FakeInventorySource::new(42, Vec::new());
+        assert!(matches!(
+            retry_exact_still_present_and_attest(
+                &gate,
+                &stale_source,
+                &evidence,
+                target_name,
+                binding,
+                custody,
+                HardDeadline::after(Duration::from_secs(2)).expect("stale retry deadline"),
+            )
+            .await,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalNotPoisoned
+            })
+        ));
+        assert!(
+            stale_source
+                .snapshots
+                .lock()
+                .expect("stale retry snapshots")
+                .is_empty(),
+            "consumed evidence cannot trigger another preflight"
+        );
+        assert_no_datagram(&receiver_probe);
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test verifies every field of the exact retained retry target before send"
+    )]
+    #[tokio::test]
+    async fn removal_retry_rejects_wrong_target_and_preserves_old_poison_on_preflight_drift() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("wrong-removal-retry.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact retry pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(88);
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let gate = ManagerMutationGate::new();
+        let (old_attempt_id, evidence) =
+            exact_still_present_removal_evidence(&gate, &address, target_name, &binding, custody)
+                .await;
+
+        let wrong_name_source = FakeInventorySource::new(42, vec![baseline.clone()]);
+        assert!(matches!(
+            retry_exact_still_present_and_attest(
+                &gate,
+                &wrong_name_source,
+                &evidence,
+                custody_name(89),
+                binding.clone(),
+                custody,
+                HardDeadline::after(Duration::from_secs(2)).expect("wrong name deadline"),
+            )
+            .await,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalTargetMismatch
+            })
+        ));
+        assert_eq!(
+            wrong_name_source
+                .snapshots
+                .lock()
+                .expect("wrong-name snapshots")
+                .len(),
+            1
+        );
+
+        let wrong_binding = CustodyDescriptorBinding([binding.0[1].clone(), binding.0[0].clone()]);
+        let wrong_binding_source = FakeInventorySource::new(42, vec![baseline.clone()]);
+        assert!(matches!(
+            retry_exact_still_present_and_attest(
+                &gate,
+                &wrong_binding_source,
+                &evidence,
+                target_name,
+                wrong_binding,
+                custody,
+                HardDeadline::after(Duration::from_secs(2)).expect("wrong binding deadline"),
+            )
+            .await,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalTargetMismatch
+            })
+        ));
+        assert_eq!(
+            wrong_binding_source
+                .snapshots
+                .lock()
+                .expect("wrong-binding snapshots")
+                .len(),
+            1
+        );
+
+        let other_pidfd = tempfile().expect("other pidfd fixture");
+        let other_namespace = tempfile().expect("other namespace fixture");
+        let other_custody = BorrowedCustodyPair::new(other_pidfd.as_fd(), other_namespace.as_fd())
+            .expect("borrow wrong local pair");
+        let wrong_local_source = FakeInventorySource::new(42, vec![baseline.clone()]);
+        assert!(matches!(
+            retry_exact_still_present_and_attest(
+                &gate,
+                &wrong_local_source,
+                &evidence,
+                target_name,
+                binding.clone(),
+                other_custody,
+                HardDeadline::after(Duration::from_secs(2)).expect("wrong local FDs deadline"),
+            )
+            .await,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalTargetMismatch
+            })
+        ));
+        assert_eq!(
+            wrong_local_source
+                .snapshots
+                .lock()
+                .expect("wrong-local snapshots")
+                .len(),
+            1
+        );
+
+        let wrong_scope_source = FakeInventorySource::new(43, vec![baseline.clone()]);
+        assert!(matches!(
+            retry_exact_still_present_and_attest(
+                &gate,
+                &wrong_scope_source,
+                &evidence,
+                target_name,
+                binding.clone(),
+                custody,
+                HardDeadline::after(Duration::from_secs(2)).expect("wrong scope deadline"),
+            )
+            .await,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::RemovalTargetMismatch
+            })
+        ));
+        assert_eq!(
+            wrong_scope_source
+                .snapshots
+                .lock()
+                .expect("wrong-scope snapshots")
+                .len(),
+            1
+        );
+
+        let unrelated_name = custody_name(90);
+        let unrelated =
+            CustodyDescriptorBinding([descriptor_identity(1_100), descriptor_identity(1_110)]);
+        let mut drifted_entries = baseline.entries.clone();
+        drifted_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
+        let drifted_source = FakeInventorySource::new(42, vec![snapshot(42, drifted_entries)]);
+        assert!(matches!(
+            retry_exact_still_present_and_attest(
+                &gate,
+                &drifted_source,
+                &evidence,
+                target_name,
+                binding.clone(),
+                custody,
+                HardDeadline::after(Duration::from_secs(2)).expect("drift deadline"),
+            )
+            .await,
+            Err(RemovalFailure::BeforeSend {
+                error: FdStoreError::InvalidInventory(
+                    "retry baseline changed before the send boundary"
+                )
+            })
+        ));
+        assert!(
+            drifted_source
+                .snapshots
+                .lock()
+                .expect("drift snapshots")
+                .is_empty(),
+            "retry consumed exactly one fresh preflight"
+        );
+        let observation = gate
+            .acquire_poisoned_removal(
+                old_attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("retained poison deadline"),
+            )
+            .await
+            .expect("preflight drift retains the exact old poison");
+        assert_eq!(observation.poisoned, evidence.attempt);
+        drop(observation);
+        assert_no_datagram(&receiver);
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_retry_send_retains_exact_old_authority() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("cancel-before-retry.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact retry pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(91);
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let gate = ManagerMutationGate::new();
+        let (old_attempt_id, evidence) =
+            exact_still_present_removal_evidence(&gate, &address, target_name, &binding, custody)
+                .await;
+        let held = gate
+            .acquire_poisoned_removal(
+                old_attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("held poison deadline"),
+            )
+            .await
+            .expect("hold exact old poison");
+        let source = FakeInventorySource::new(42, vec![baseline]);
+        let mut retry = Box::pin(retry_exact_still_present_and_attest(
+            &gate,
+            &source,
+            &evidence,
+            target_name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("cancel-before deadline"),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut retry)
+                .await
+                .is_err(),
+            "retry must wait without preflighting while the old poison is observed"
+        );
+        drop(retry);
+        assert_eq!(
+            source
+                .snapshots
+                .lock()
+                .expect("cancel-before snapshots")
+                .len(),
+            1
+        );
+        drop(held);
+
+        match gate
+            .acquire_retry_removal(
+                &evidence,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("authority deadline"),
+            )
+            .await
+            .expect("cancellation retains retry authority")
+        {
+            RemovalRetryGate::Ready(_) => {}
+            RemovalRetryGate::AlreadyCrossed(_) => {
+                panic!("cancel-before must not rotate the attempt ID")
+            }
+        }
+        let observation = gate
+            .acquire_poisoned_removal(
+                old_attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("old poison deadline"),
+            )
+            .await
+            .expect("exact old poison remains after cancellation");
+        assert_eq!(observation.poisoned, evidence.attempt);
+        drop(observation);
+        assert_no_datagram(&receiver);
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the cancellation boundary and exact successor-ID recovery stay visible together"
+    )]
+    #[tokio::test]
+    async fn cancellation_after_retry_send_binds_ambiguity_to_only_the_new_attempt() {
+        let directory = tempdir().expect("notification directory");
+        let socket_path = directory.path().join("cancel-after-retry.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound receive timeout");
+        let receiver_probe = receiver.try_clone().expect("clone fake notify socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact retry pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(92);
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let successor = snapshot(42, Vec::new());
+        let gate = ManagerMutationGate::new();
+        let (old_attempt_id, evidence) =
+            exact_still_present_removal_evidence(&gate, &address, target_name, &binding, custody)
+                .await;
+        let source =
+            FakeInventorySource::new(42, vec![baseline.clone(), successor.clone(), successor]);
+        let (sent_sender, sent_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, fdstore_remove_message(target_name));
+            assert!(descriptors.is_empty(), "retry removal carried FDs");
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1, "retry barrier carried wrong FDs");
+            sent_sender
+                .send(())
+                .expect("signal retry crossed both manager sends");
+            release_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("retain retry barrier descriptor until cancellation");
+            close_received(descriptors);
+        });
+        let mut retry = Box::pin(retry_exact_still_present_and_attest(
+            &gate,
+            &source,
+            &evidence,
+            target_name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("cancel-after deadline"),
+        ));
+        tokio::select! {
+            result = &mut retry => panic!("retry completed before cancellation: {result:?}"),
+            observed = sent_receiver => observed.expect("manager observed retry send and barrier"),
+        }
+        drop(retry);
+
+        let new_attempt_id = {
+            let state = gate.state.lock().await;
+            let Some(PoisonedManagerMutation::Removal(poisoned)) = state.poisoned.as_ref() else {
+                panic!("cancel-after must retain the new removal poison");
+            };
+            assert_eq!(poisoned.retry_of, Some(old_attempt_id));
+            assert_eq!(poisoned.target, evidence.attempt.target);
+            assert_ne!(poisoned.attempt_id, old_attempt_id);
+            assert_eq!(poisoned.attempt_id.0.get(), old_attempt_id.0.get() + 1);
+            poisoned.attempt_id
+        };
+
+        let stale_source = FakeInventorySource::new(42, vec![baseline]);
+        assert!(matches!(
+            retry_exact_still_present_and_attest(
+                &gate,
+                &stale_source,
+                &evidence,
+                target_name,
+                binding.clone(),
+                custody,
+                HardDeadline::after(Duration::from_secs(2)).expect("recover new ID deadline"),
+            )
+            .await,
+            Err(RemovalFailure::ManagerMayHaveRemoved {
+                attempt_id,
+                error: FdStoreError::RemovalRetryAlreadySent,
+            }) if attempt_id == new_attempt_id
+        ));
+        assert_eq!(
+            stale_source
+                .snapshots
+                .lock()
+                .expect("stale evidence snapshots")
+                .len(),
+            1,
+            "stale evidence must recover the new ID without preflight or resend"
+        );
+        release_sender
+            .send(())
+            .expect("release retained retry barrier descriptor");
+        receiver_thread.join().expect("fake systemd receiver");
+        assert_no_datagram(&receiver_probe);
+
+        assert!(matches!(
+            gate.acquire_poisoned_removal(
+                old_attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("old attempt deadline"),
+            )
+            .await,
+            Err(FdStoreError::RemovalTargetMismatch)
+        ));
+        let observation = gate
+            .acquire_poisoned_removal(
+                new_attempt_id,
+                target_name,
+                &binding,
+                HardDeadline::after(Duration::from_secs(2)).expect("new attempt deadline"),
+            )
+            .await
+            .expect("only the new attempt identifies the ambiguous retry");
+        assert_eq!(observation.poisoned.attempt_id, new_attempt_id);
+        assert_eq!(observation.poisoned.retry_of, Some(old_attempt_id));
+        drop(observation);
+        assert!(matches!(
+            gate.acquire_publication(
+                HardDeadline::after(Duration::from_secs(2)).expect("cross-kind poison deadline")
+            )
+            .await,
+            Err(FdStoreError::PublicationPoisoned)
+        ));
+    }
+
+    #[tokio::test]
     async fn unstable_post_send_inventory_is_ambiguous_and_poisoned() {
         let directory = tempdir().expect("notification directory");
         let socket_path = directory.path().join("unstable-removal.sock");
@@ -4939,8 +5766,12 @@ mod tests {
         ));
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one source contract separates original removal, retry, and reconciliation paths"
+    )]
     #[test]
-    fn removal_source_has_one_payload_only_send_one_barrier_and_private_production_wiring() {
+    fn removal_source_has_one_send_per_attempt_and_private_production_wiring() {
         let name = custody_name(87);
         let message = fdstore_remove_message(name);
         let mut expected = FDSTORE_REMOVE_PREFIX.to_vec();
@@ -4963,9 +5794,17 @@ mod tests {
             .find("pub(crate) async fn reconcile_current_process_removal")
             .map(|offset| start + offset)
             .expect("removal reconcile source start");
-        let end = source[reconcile..]
-            .find("/// Publish through the production systemd manager interfaces")
+        let retry = source[reconcile..]
+            .find("pub(crate) async fn retry_current_process_removal")
             .map(|offset| reconcile + offset)
+            .expect("removal retry source start");
+        let reconciliation_core = source[retry..]
+            .find("async fn reconcile_poisoned_removal")
+            .map(|offset| retry + offset)
+            .expect("removal reconciliation core start");
+        let end = source[reconciliation_core..]
+            .find("/// Publish through the production systemd manager interfaces")
+            .map(|offset| reconciliation_core + offset)
             .expect("removal adapter source end");
         let transaction = &source[start..reconcile];
         assert_eq!(
@@ -4986,13 +5825,47 @@ mod tests {
                 "removal transaction must not contain {forbidden}"
             );
         }
-        let reconciliation = &source[reconcile..end];
-        assert_eq!(reconciliation.matches("synchronize_manager").count(), 1);
+        let reconciliation_wrapper = &source[reconcile..retry];
+        assert_eq!(
+            reconciliation_wrapper
+                .matches("synchronize_manager")
+                .count(),
+            1
+        );
+        assert_eq!(
+            reconciliation_wrapper
+                .matches("source.snapshot(deadline)")
+                .count(),
+            0
+        );
+        assert!(!reconciliation_wrapper.contains("send_without_descriptors_once"));
+        let retry_transaction = &source[retry..reconciliation_core];
+        assert_eq!(
+            retry_transaction
+                .matches("send_without_descriptors_once")
+                .count(),
+            1
+        );
+        assert_eq!(
+            retry_transaction
+                .matches("send_once(BARRIER_MESSAGE")
+                .count(),
+            1
+        );
+        assert_eq!(
+            retry_transaction
+                .matches("source.snapshot(deadline)")
+                .count(),
+            3
+        );
+        assert!(!retry_transaction.contains("synchronize_manager"));
+        let reconciliation = &source[reconciliation_core..end];
         assert_eq!(
             reconciliation.matches("source.snapshot(deadline)").count(),
             2
         );
         assert!(!reconciliation.contains("send_without_descriptors_once"));
+        assert!(!reconciliation.contains("synchronize_manager"));
         let manager_gate_declaration = ["static PRODUCTION_MANAGER_", "MUTATION_GATE:"].concat();
         assert_eq!(
             source.matches(&manager_gate_declaration).count(),
@@ -5008,6 +5881,7 @@ mod tests {
         for forbidden in [
             "remove_current_process_custody",
             "reconcile_current_process_removal",
+            "retry_current_process_removal",
         ] {
             assert!(
                 !server.contains(forbidden),

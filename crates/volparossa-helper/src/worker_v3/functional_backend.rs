@@ -209,6 +209,10 @@ enum DurableJournalSettlement {
         cleanup: DurableCleanupConfirmed,
         attempt_id: crate::systemd_fdstore::RemovalAttemptId,
     },
+    RemovalRetryAuthorized {
+        cleanup: DurableCleanupConfirmed,
+        evidence: Box<crate::systemd_fdstore::ExactStillPresentRemovalEvidence>,
+    },
     ManagerRemovalProven(ExactSameRuntimeManagerAbsenceProof),
 }
 
@@ -1292,8 +1296,17 @@ impl FunctionalAlphaLeaseBackend {
                         ),
                     )
                 }
-                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(_)
-                | crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved { .. } => {
+                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(
+                    evidence,
+                ) => {
+                    custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
+                        cleanup,
+                        evidence: Box::new(evidence),
+                    };
+                    self.restore_durable_cleanup(key, custody, recovery);
+                    return false;
+                }
+                crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved { .. } => {
                     custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
                         cleanup,
                         attempt_id,
@@ -1302,6 +1315,53 @@ impl FunctionalAlphaLeaseBackend {
                     return false;
                 }
             },
+            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence } => {
+                match crate::systemd_fdstore::retry_current_process_removal(
+                    &evidence,
+                    custody.custody_name,
+                    binding.clone(),
+                    pair,
+                    deadline,
+                )
+                .await
+                {
+                    Ok(proof) => {
+                        if proof
+                            .verify_exact_target(custody.custody_name, &binding)
+                            .is_err()
+                        {
+                            custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
+                                cleanup,
+                                evidence,
+                            };
+                            self.restore_durable_cleanup(key, custody, recovery);
+                            return false;
+                        }
+                        DurableJournalSettlement::ManagerRemovalProven(
+                            ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(
+                                cleanup, proof,
+                            ),
+                        )
+                    }
+                    Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
+                        custody.settlement =
+                            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence };
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                    Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
+                        attempt_id,
+                        ..
+                    }) => {
+                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                            cleanup,
+                            attempt_id,
+                        };
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                }
+            }
             settlement @ DurableJournalSettlement::ManagerRemovalProven(_) => settlement,
             DurableJournalSettlement::MayOwn(_) | DurableJournalSettlement::CleanupProven(_) => {
                 std::process::abort()
@@ -3056,7 +3116,8 @@ fn custody_context_id(custody: &DurableLeaseCustody) -> [u8; 16] {
         DurableJournalSettlement::MayOwn(settlement) => settlement.context_id(),
         DurableJournalSettlement::CleanupProven(proof) => proof.settlement().context_id(),
         DurableJournalSettlement::CleanupConfirmed(cleanup)
-        | DurableJournalSettlement::RemovalAmbiguous { cleanup, .. } => cleanup.context_id(),
+        | DurableJournalSettlement::RemovalAmbiguous { cleanup, .. }
+        | DurableJournalSettlement::RemovalRetryAuthorized { cleanup, .. } => cleanup.context_id(),
         DurableJournalSettlement::ManagerRemovalProven(proof) => proof.cleanup().context_id(),
     }
 }
@@ -3492,21 +3553,41 @@ mod tests {
         let fdstore_remove = cleanup
             .find("remove_current_process_custody(")
             .expect("exact FD-store removal");
-        let exact_removal_validation = cleanup
+        let direct_removal_validation = cleanup
             .find(".verify_exact_target(custody.custody_name, &binding)")
-            .expect("exact named-removal validation");
-        let manager_proof = cleanup
+            .expect("direct exact named-removal validation");
+        let direct_manager_proof = cleanup
             .find("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
-            .expect("opaque exact manager-absence proof mint");
+            .expect("direct opaque manager-absence proof mint");
+        let removal_reconcile = cleanup
+            .find("reconcile_current_process_removal(")
+            .expect("ambiguous removal reconciliation");
+        let retry_authority = cleanup
+            .find("DurableJournalSettlement::RemovalRetryAuthorized {")
+            .expect("exact-still-present retry authority");
+        let fdstore_retry = cleanup
+            .find("retry_current_process_removal(")
+            .expect("exact correlated FD-store retry");
+        let retry_removal_validation = cleanup
+            .rfind(".verify_exact_target(custody.custody_name, &binding)")
+            .expect("retry exact named-removal validation");
+        let retry_manager_proof = cleanup
+            .rfind("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
+            .expect("retry opaque manager-absence proof mint");
         let manager_absent = cleanup
             .find("handle.confirm_manager_absent_until(proof, deadline)")
             .expect("Absent transition");
         assert!(
             cleanup_proof < cleanup_confirmed
                 && cleanup_confirmed < fdstore_remove
-                && fdstore_remove < exact_removal_validation
-                && exact_removal_validation < manager_proof
-                && manager_proof < manager_absent
+                && fdstore_remove < direct_removal_validation
+                && direct_removal_validation < direct_manager_proof
+                && direct_manager_proof < removal_reconcile
+                && removal_reconcile < retry_authority
+                && retry_authority < fdstore_retry
+                && fdstore_retry < retry_removal_validation
+                && retry_removal_validation < retry_manager_proof
+                && retry_manager_proof < manager_absent
         );
     }
 
@@ -3557,8 +3638,8 @@ mod tests {
             production
                 .matches("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
                 .count(),
-            2,
-            "both direct and reconciled exact named removal have one proof mint"
+            3,
+            "direct, reconciled and correlated-retry removals each have one proof mint"
         );
 
         let cleanup_api = actor_source
