@@ -12,10 +12,11 @@ use std::{
     os::fd::OwnedFd,
     pin::Pin,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use rand_core::{OsRng, RngCore};
+use rustix::time::{ClockId, clock_gettime};
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -37,6 +38,7 @@ const MAX_CLOSED_PREPARE_IDENTITIES: usize = 16;
 const SETUP_TTL_SECONDS: u64 = 30;
 const HARD_TTL_SECONDS: u64 = 15 * 60;
 const RESPONSE_CACHE_SECONDS: u64 = 30;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAINTENANCE_REAP_DOMAIN: &[u8] = b"VOLPAROSSA helper-v3 maintenance reap v1";
 
@@ -79,7 +81,7 @@ enum PrepareReconciliationPhase {
     Absent,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PrepareReconciliationRecord {
     helper_runtime_id: [u8; 32],
     prepare_request_id: [u8; 16],
@@ -87,6 +89,8 @@ struct PrepareReconciliationRecord {
     backend_generation: u64,
     setup_expires_at_unix: u64,
     hard_expires_at_unix: u64,
+    setup_expires_at_boottime_ns: u64,
+    hard_expires_at_boottime_ns: u64,
     closed_plan: ClosedPreparePlanBinding,
     phase: PrepareReconciliationPhase,
     reconciliation_request_id: Option<[u8; 16]>,
@@ -228,6 +232,8 @@ pub(crate) struct BackendLineage {
     pub(crate) prepare_operation_digest: [u8; 32],
     pub(crate) setup_expires_at_unix: u64,
     pub(crate) hard_expires_at_unix: u64,
+    pub(crate) setup_expires_at_boottime_ns: u64,
+    pub(crate) hard_expires_at_boottime_ns: u64,
 }
 
 /// Affine engine-side authority for settling one exact planned operation.
@@ -445,6 +451,8 @@ struct ContextRecord {
     prepare_operation_digest: [u8; 32],
     setup_expires_at_unix: u64,
     hard_expires_at_unix: u64,
+    setup_expires_at_boottime_ns: u64,
+    hard_expires_at_boottime_ns: u64,
     phase: ContextPhase,
     activated_at_unix: Option<u64>,
     leases: BTreeMap<(u32, i32), LeaseRecord>,
@@ -616,16 +624,102 @@ impl HandleSource for OsHandleSource {
 
 trait Clock: Send + Sync {
     fn now_unix(&self) -> u64;
+
+    fn now_unix_nanos(&self) -> u64 {
+        self.now_unix()
+            .checked_mul(NANOSECONDS_PER_SECOND)
+            .unwrap_or(u64::MAX)
+    }
+
+    fn now_boottime_nanos(&self) -> u64;
 }
 
 struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_unix(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs())
+        self.now_unix_nanos() / NANOSECONDS_PER_SECOND
     }
+
+    fn now_unix_nanos(&self) -> u64 {
+        clock_nanos(ClockId::Realtime)
+    }
+
+    fn now_boottime_nanos(&self) -> u64 {
+        clock_nanos(ClockId::Boottime)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExpiryNow {
+    unix: u64,
+    boottime_ns: u64,
+}
+
+#[derive(Clone, Copy)]
+struct FrozenDeadlines {
+    setup_boottime_ns: u64,
+    hard_boottime_ns: u64,
+}
+
+fn expiry_now(clock: &dyn Clock) -> ExpiryNow {
+    // Sample the rollback-resistant clock first. The subsequently observed wall time can only
+    // shorten an expiry projection or independently expire it; sampling latency never extends it.
+    let boottime_ns = clock.now_boottime_nanos();
+    let unix = clock.now_unix();
+    ExpiryNow { unix, boottime_ns }
+}
+
+fn freeze_deadlines(
+    clock: &dyn Clock,
+    setup_expires_at_unix: u64,
+    hard_expires_at_unix: u64,
+) -> Option<FrozenDeadlines> {
+    // CLOCK_BOOTTIME advances across suspend. It is sampled before exact CLOCK_REALTIME so the
+    // time spent taking the second sample is removed from, rather than added to, both budgets.
+    let boottime_before_ns = clock.now_boottime_nanos();
+    let realtime_now_ns = clock.now_unix_nanos();
+    let wall_now_unix = realtime_now_ns / NANOSECONDS_PER_SECOND;
+    if setup_expires_at_unix <= wall_now_unix
+        || setup_expires_at_unix > wall_now_unix.saturating_add(SETUP_TTL_SECONDS)
+        || hard_expires_at_unix < setup_expires_at_unix
+        || hard_expires_at_unix > wall_now_unix.saturating_add(HARD_TTL_SECONDS)
+    {
+        return None;
+    }
+    let setup_remaining_ns = setup_expires_at_unix
+        .checked_mul(NANOSECONDS_PER_SECOND)?
+        .checked_sub(realtime_now_ns)
+        .filter(|remaining| *remaining != 0)?;
+    let hard_remaining_ns = hard_expires_at_unix
+        .checked_mul(NANOSECONDS_PER_SECOND)?
+        .checked_sub(realtime_now_ns)
+        .filter(|remaining| *remaining != 0)?;
+    Some(FrozenDeadlines {
+        setup_boottime_ns: boottime_before_ns.checked_add(setup_remaining_ns)?,
+        hard_boottime_ns: boottime_before_ns.checked_add(hard_remaining_ns)?,
+    })
+}
+
+const fn deadline_live(now: ExpiryNow, wall_expiry: u64, boottime_expiry_ns: u64) -> bool {
+    now.unix < wall_expiry && now.boottime_ns < boottime_expiry_ns
+}
+
+fn clock_nanos(clock: ClockId) -> u64 {
+    let now = clock_gettime(clock);
+    let Some(seconds) = u64::try_from(now.tv_sec).ok() else {
+        return u64::MAX;
+    };
+    let Some(nanoseconds) = u64::try_from(now.tv_nsec)
+        .ok()
+        .filter(|value| *value < NANOSECONDS_PER_SECOND)
+    else {
+        return u64::MAX;
+    };
+    seconds
+        .checked_mul(NANOSECONDS_PER_SECOND)
+        .and_then(|value| value.checked_add(nanoseconds))
+        .unwrap_or(u64::MAX)
 }
 
 enum BackendCall<T> {
@@ -906,9 +1000,9 @@ impl HelperEngine {
                 return Some(helper_runtime_execution(request, self.inner.runtime_id));
             }
             {
-                let now = self.inner.clock.now_unix();
                 let mut state = self.inner.state.lock().await;
-                prune_cache(&mut state, now);
+                let now = expiry_now(self.inner.clock.as_ref());
+                prune_cache(&mut state, now.unix);
                 prune_prepare_reconciliations(&mut state, now);
                 if let Some(cached) = state.cache.get(&request_id) {
                     let same_digest = cached.digest.ct_eq(&digest).unwrap_u8() == 1;
@@ -998,9 +1092,9 @@ impl HelperEngine {
         }
 
         {
-            let now = self.inner.clock.now_unix();
             let mut state = self.inner.state.lock().await;
-            prune_cache(&mut state, now);
+            let now = expiry_now(self.inner.clock.as_ref());
+            prune_cache(&mut state, now.unix);
             prune_prepare_reconciliations(&mut state, now);
             if let Some(cached) = state.cache.get(&request_id) {
                 return Some(if cached.digest.ct_eq(&digest).unwrap_u8() == 1 {
@@ -1400,17 +1494,6 @@ impl HelperEngine {
         let Some(intent) = value.prepare_intent.as_ref() else {
             return helper_runtime_execution(request, self.inner.runtime_id);
         };
-        let now = self.inner.clock.now_unix();
-        if intent.setup_expires_at_unix <= now
-            || intent.setup_expires_at_unix > now.saturating_add(SETUP_TTL_SECONDS)
-            || intent.hard_expires_at_unix < intent.setup_expires_at_unix
-            || intent.hard_expires_at_unix > now.saturating_add(HARD_TTL_SECONDS)
-        {
-            return execution(
-                response(request, HelperResult::Expired, "INTENT_TTL_INVALID", None),
-                None,
-            );
-        }
         let (Some(context_id), Some(prepare_request_id), Some(prepare_digest)) = (
             fixed::<16>(&intent.route_context_id),
             fixed::<16>(&intent.prepare_request_id),
@@ -1454,15 +1537,42 @@ impl HelperEngine {
             );
         }
         if let Some(record) = state.prepare_reconciliations.get(&context_id) {
-            let exact = record.helper_runtime_id == self.inner.runtime_id
+            let exact_identity = record.helper_runtime_id == self.inner.runtime_id
                 && record.prepare_request_id == prepare_request_id
                 && record.prepare_operation_digest == prepare_digest
                 && record.setup_expires_at_unix == intent.setup_expires_at_unix
                 && record.hard_expires_at_unix == intent.hard_expires_at_unix
-                && record.closed_plan == closed_plan
-                && record.phase == PrepareReconciliationPhase::Intent;
-            return if exact {
+                && record.closed_plan == closed_plan;
+            let now = expiry_now(self.inner.clock.as_ref());
+            let exact_live_intent = exact_identity
+                && record.phase == PrepareReconciliationPhase::Intent
+                && deadline_live(
+                    now,
+                    record.setup_expires_at_unix,
+                    record.setup_expires_at_boottime_ns,
+                )
+                && deadline_live(
+                    now,
+                    record.hard_expires_at_unix,
+                    record.hard_expires_at_boottime_ns,
+                );
+            return if exact_live_intent {
                 helper_runtime_execution(request, self.inner.runtime_id)
+            } else if exact_identity
+                && (!deadline_live(
+                    now,
+                    record.setup_expires_at_unix,
+                    record.setup_expires_at_boottime_ns,
+                ) || !deadline_live(
+                    now,
+                    record.hard_expires_at_unix,
+                    record.hard_expires_at_boottime_ns,
+                ))
+            {
+                execution(
+                    response(request, HelperResult::Expired, "INTENT_TTL_INVALID", None),
+                    None,
+                )
             } else {
                 execution(
                     response(
@@ -1475,6 +1585,16 @@ impl HelperEngine {
                 )
             };
         }
+        let Some(frozen_deadlines) = freeze_deadlines(
+            self.inner.clock.as_ref(),
+            intent.setup_expires_at_unix,
+            intent.hard_expires_at_unix,
+        ) else {
+            return execution(
+                response(request, HelperResult::Expired, "INTENT_TTL_INVALID", None),
+                None,
+            );
+        };
         if state.prepare_reconciliations.len() >= MAX_PREPARE_RECONCILIATIONS {
             return execution(
                 response(
@@ -1501,6 +1621,8 @@ impl HelperEngine {
                 backend_generation: generation,
                 setup_expires_at_unix: intent.setup_expires_at_unix,
                 hard_expires_at_unix: intent.hard_expires_at_unix,
+                setup_expires_at_boottime_ns: frozen_deadlines.setup_boottime_ns,
+                hard_expires_at_boottime_ns: frozen_deadlines.hard_boottime_ns,
                 closed_plan,
                 phase: PrepareReconciliationPhase::Intent,
                 reconciliation_request_id: None,
@@ -1522,18 +1644,7 @@ impl HelperEngine {
         value: &ReconcileExpiredPrepare,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
-        let now = self.inner.clock.now_unix();
-        if now < value.setup_expires_at_unix {
-            return Some(execution(
-                response(
-                    request,
-                    HelperResult::Expired,
-                    "RECONCILE_BEFORE_EXPIRY",
-                    None,
-                ),
-                None,
-            ));
-        }
+        let now = expiry_now(self.inner.clock.as_ref());
         let (Some(runtime_id), Some(context_id), Some(prepare_request_id), Some(prepare_digest)) = (
             fixed::<32>(&value.helper_runtime_id),
             fixed::<16>(&value.route_context_id),
@@ -1580,6 +1691,21 @@ impl HelperEngine {
                         request,
                         HelperResult::Unavailable,
                         "RECONCILIATION_EVIDENCE_UNAVAILABLE",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+            if deadline_live(
+                now,
+                record.setup_expires_at_unix,
+                record.setup_expires_at_boottime_ns,
+            ) {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::Expired,
+                        "RECONCILE_BEFORE_EXPIRY",
                         None,
                     ),
                     None,
@@ -1714,7 +1840,11 @@ impl HelperEngine {
                         && context.prepare_request_id == prepare_request_id
                         && context.prepare_operation_digest == prepare_digest
                         && context.setup_expires_at_unix == value.setup_expires_at_unix
-                        && context.hard_expires_at_unix == value.hard_expires_at_unix;
+                        && context.hard_expires_at_unix == value.hard_expires_at_unix
+                        && context.setup_expires_at_boottime_ns
+                            == record.setup_expires_at_boottime_ns
+                        && context.hard_expires_at_boottime_ns
+                            == record.hard_expires_at_boottime_ns;
                     if !exact_context
                         || !matches!(
                             context.phase,
@@ -1834,11 +1964,11 @@ impl HelperEngine {
         value: &PrepareLeaseBatch,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
-        let now = self.inner.clock.now_unix();
-        if value.setup_expires_at_unix <= now
-            || value.setup_expires_at_unix > now.saturating_add(SETUP_TTL_SECONDS)
+        let now = expiry_now(self.inner.clock.as_ref());
+        if value.setup_expires_at_unix <= now.unix
+            || value.setup_expires_at_unix > now.unix.saturating_add(SETUP_TTL_SECONDS)
             || value.hard_expires_at_unix < value.setup_expires_at_unix
-            || value.hard_expires_at_unix > now.saturating_add(HARD_TTL_SECONDS)
+            || value.hard_expires_at_unix > now.unix.saturating_add(HARD_TTL_SECONDS)
         {
             return Some(execution(
                 response(request, HelperResult::Expired, "LEASE_TTL_INVALID", None),
@@ -1891,16 +2021,41 @@ impl HelperEngine {
                     None,
                 ));
             };
-            if !reconciliation_record_matches(
+            let exact_intent = reconciliation_record_matches(
                 &intent,
                 self.inner.runtime_id,
                 request_id,
                 digest,
                 value.setup_expires_at_unix,
                 value.hard_expires_at_unix,
-            ) || intent.closed_plan != closed_plan
-                || intent.phase != PrepareReconciliationPhase::Intent
-            {
+            ) && intent.closed_plan == closed_plan;
+            if !exact_intent {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::AlreadyExists,
+                        "PREPARE_INTENT_CONFLICT",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+            let now = expiry_now(self.inner.clock.as_ref());
+            if !deadline_live(
+                now,
+                intent.setup_expires_at_unix,
+                intent.setup_expires_at_boottime_ns,
+            ) || !deadline_live(
+                now,
+                intent.hard_expires_at_unix,
+                intent.hard_expires_at_boottime_ns,
+            ) {
+                return Some(execution(
+                    response(request, HelperResult::Expired, "LEASE_TTL_INVALID", None),
+                    None,
+                ));
+            }
+            if intent.phase != PrepareReconciliationPhase::Intent {
                 return Some(execution(
                     response(
                         request,
@@ -2031,9 +2186,9 @@ impl HelperEngine {
         let operation = token.token();
 
         let proof_valid = prepared_matches(value, &prepared);
-        let commit_now = self.inner.clock.now_unix();
         let exact = {
             let state = self.inner.state.lock().await;
+            let commit_now = expiry_now(self.inner.clock.as_ref());
             state.in_flight == Some(operation)
                 && !state.contexts.contains_key(&context_id)
                 && state
@@ -2046,8 +2201,20 @@ impl HelperEngine {
                         record.backend_generation == operation.generation
                             && record.phase == PrepareReconciliationPhase::Pending
                     })
-                && commit_now < value.setup_expires_at_unix
-                && commit_now < value.hard_expires_at_unix
+                && state
+                    .prepare_reconciliations
+                    .get(&context_id)
+                    .is_some_and(|record| {
+                        deadline_live(
+                            commit_now,
+                            record.setup_expires_at_unix,
+                            record.setup_expires_at_boottime_ns,
+                        ) && deadline_live(
+                            commit_now,
+                            record.hard_expires_at_unix,
+                            record.hard_expires_at_boottime_ns,
+                        )
+                    })
         };
         if !proof_valid || !exact {
             let cleanup = self.rollback_context(token, request, sender).await;
@@ -2097,7 +2264,7 @@ impl HelperEngine {
         }
 
         let mut state = self.inner.state.lock().await;
-        let final_commit_now = self.inner.clock.now_unix();
+        let final_commit_now = expiry_now(self.inner.clock.as_ref());
         let still_exact = state.in_flight == Some(operation)
             && !state.contexts.contains_key(&context_id)
             && state
@@ -2110,8 +2277,20 @@ impl HelperEngine {
                     record.backend_generation == operation.generation
                         && record.phase == PrepareReconciliationPhase::Pending
                 })
-            && final_commit_now < value.setup_expires_at_unix
-            && final_commit_now < value.hard_expires_at_unix;
+            && state
+                .prepare_reconciliations
+                .get(&context_id)
+                .is_some_and(|record| {
+                    deadline_live(
+                        final_commit_now,
+                        record.setup_expires_at_unix,
+                        record.setup_expires_at_boottime_ns,
+                    ) && deadline_live(
+                        final_commit_now,
+                        record.hard_expires_at_unix,
+                        record.hard_expires_at_boottime_ns,
+                    )
+                });
         if !still_exact {
             drop(state);
             let cleanup = self.rollback_context(token, request, sender).await;
@@ -2139,6 +2318,8 @@ impl HelperEngine {
                 prepare_operation_digest: digest,
                 setup_expires_at_unix: value.setup_expires_at_unix,
                 hard_expires_at_unix: value.hard_expires_at_unix,
+                setup_expires_at_boottime_ns: token.lineage().setup_expires_at_boottime_ns,
+                hard_expires_at_boottime_ns: token.lineage().hard_expires_at_boottime_ns,
                 phase: ContextPhase::Prepared,
                 activated_at_unix: None,
                 leases: records,
@@ -2209,8 +2390,16 @@ impl HelperEngine {
                     None,
                 ));
             }
-            let now = self.inner.clock.now_unix();
-            if now >= context.setup_expires_at_unix || now >= context.hard_expires_at_unix {
+            let now = expiry_now(self.inner.clock.as_ref());
+            if !deadline_live(
+                now,
+                context.setup_expires_at_unix,
+                context.setup_expires_at_boottime_ns,
+            ) || !deadline_live(
+                now,
+                context.hard_expires_at_unix,
+                context.hard_expires_at_boottime_ns,
+            ) {
                 return Some(execution(
                     response(request, HelperResult::Expired, "CONTEXT_EXPIRED", None),
                     None,
@@ -2322,9 +2511,17 @@ impl HelperEngine {
                     && activation_matches(context, &value.leases)
                     && counters_match(context, &baselines)
             });
-        let now = self.inner.clock.now_unix();
+        let now = expiry_now(self.inner.clock.as_ref());
         let unexpired = state.contexts.get(&context_id).is_some_and(|context| {
-            now < context.setup_expires_at_unix && now < context.hard_expires_at_unix
+            deadline_live(
+                now,
+                context.setup_expires_at_unix,
+                context.setup_expires_at_boottime_ns,
+            ) && deadline_live(
+                now,
+                context.hard_expires_at_unix,
+                context.hard_expires_at_boottime_ns,
+            )
         });
         if !exact || !unexpired {
             drop(state);
@@ -2353,7 +2550,7 @@ impl HelperEngine {
         }
         context.generation = next_generation;
         context.phase = ContextPhase::Activated;
-        context.activated_at_unix = Some(now);
+        context.activated_at_unix = Some(now.unix);
         let context_handle = context.handle;
         let lease_handles = context
             .leases
@@ -2423,7 +2620,12 @@ impl HelperEngine {
                     None,
                 ));
             }
-            if self.inner.clock.now_unix() >= context.hard_expires_at_unix {
+            let now = expiry_now(self.inner.clock.as_ref());
+            if !deadline_live(
+                now,
+                context.hard_expires_at_unix,
+                context.hard_expires_at_boottime_ns,
+            ) {
                 return Some(execution(
                     response(request, HelperResult::Expired, "CONTEXT_EXPIRED", None),
                     None,
@@ -2568,9 +2770,13 @@ impl HelperEngine {
                 None,
             ));
         }
-        let now = self.inner.clock.now_unix();
+        let now = expiry_now(self.inner.clock.as_ref());
         let context = state.contexts.get(&context_id).expect("validated context");
-        if now >= context.hard_expires_at_unix {
+        if !deadline_live(
+            now,
+            context.hard_expires_at_unix,
+            context.hard_expires_at_boottime_ns,
+        ) {
             drop(state);
             let cleanup = self.rollback_context(token, request, sender).await;
             if cleanup.response_sent {
@@ -2731,7 +2937,12 @@ impl HelperEngine {
                     None,
                 ));
             }
-            if self.inner.clock.now_unix() >= context.hard_expires_at_unix {
+            let now = expiry_now(self.inner.clock.as_ref());
+            if !deadline_live(
+                now,
+                context.hard_expires_at_unix,
+                context.hard_expires_at_boottime_ns,
+            ) {
                 return Some(execution(
                     response(request, HelperResult::Expired, "CONTEXT_EXPIRED", None),
                     None,
@@ -2831,6 +3042,7 @@ impl HelperEngine {
         let operation = token.token();
 
         let mut state = self.inner.state.lock().await;
+        let now = expiry_now(self.inner.clock.as_ref());
         let exact = state.in_flight == Some(operation)
             && state.contexts.get(&context_id).is_some_and(|context| {
                 context.generation == operation.generation
@@ -2838,7 +3050,11 @@ impl HelperEngine {
                     && context.phase == ContextPhase::Committed
                     && matches_handle(&context.handle, &value.context_handle)
                     && context.leases.contains_key(&(value.path_id, value.role))
-                    && self.inner.clock.now_unix() < context.hard_expires_at_unix
+                    && deadline_live(
+                        now,
+                        context.hard_expires_at_unix,
+                        context.hard_expires_at_boottime_ns,
+                    )
             });
         if !exact {
             drop(state);
@@ -3117,8 +3333,8 @@ impl HelperEngine {
     ) -> ReapOutcome {
         loop {
             let token = {
-                let now = self.inner.clock.now_unix();
                 let mut state = self.inner.state.lock().await;
+                let now = expiry_now(self.inner.clock.as_ref());
                 let Some(target) = expired_reap_target(&state, now, false) else {
                     return ReapOutcome::Complete;
                 };
@@ -3335,8 +3551,8 @@ impl HelperEngine {
         let _operation_guard = self.inner.operation_gate.lock().await;
         loop {
             let token = {
-                let now = self.inner.clock.now_unix();
                 let mut state = self.inner.state.lock().await;
+                let now = expiry_now(self.inner.clock.as_ref());
                 let Some(target) = expired_reap_target(&state, now, true) else {
                     return true;
                 };
@@ -3596,7 +3812,7 @@ impl HelperEngine {
 
 fn expired_reap_target(
     state: &EngineState,
-    now: u64,
+    now: ExpiryNow,
     retry_quarantined: bool,
 ) -> Option<ReapTarget> {
     let context_target = |context_id: &[u8; 16], context: &ContextRecord| ReapTarget {
@@ -3618,10 +3834,18 @@ fn expired_reap_target(
         .flatten()
         .or_else(|| {
             state.contexts.iter().find_map(|(context_id, context)| {
-                let setup_expired =
-                    context.phase == ContextPhase::Prepared && now >= context.setup_expires_at_unix;
-                (context.phase != ContextPhase::Quarantined
-                    && (setup_expired || now >= context.hard_expires_at_unix))
+                let setup_expired = context.phase == ContextPhase::Prepared
+                    && !deadline_live(
+                        now,
+                        context.setup_expires_at_unix,
+                        context.setup_expires_at_boottime_ns,
+                    );
+                let hard_expired = !deadline_live(
+                    now,
+                    context.hard_expires_at_unix,
+                    context.hard_expires_at_boottime_ns,
+                );
+                (context.phase != ContextPhase::Quarantined && (setup_expired || hard_expired))
                     .then_some(context_target(context_id, context))
             })
         })
@@ -3632,11 +3856,14 @@ fn expired_reap_target(
                 .find_map(|(context_id, record)| {
                     (record.phase == PrepareReconciliationPhase::Pending
                         && !state.contexts.contains_key(context_id)
-                        && (now >= record.setup_expires_at_unix
-                            || (retry_quarantined
-                                && state
-                                    .cleanup_pending
-                                    .contains(&(*context_id, record.backend_generation)))))
+                        && (!deadline_live(
+                            now,
+                            record.setup_expires_at_unix,
+                            record.setup_expires_at_boottime_ns,
+                        ) || (retry_quarantined
+                            && state
+                                .cleanup_pending
+                                .contains(&(*context_id, record.backend_generation)))))
                     .then_some(ReapTarget {
                         context_id: *context_id,
                         generation: record.backend_generation,
@@ -3657,6 +3884,8 @@ fn maintenance_reap_correlation(lineage: BackendLineage) -> ([u8; 16], [u8; 32])
     hasher.update(&lineage.prepare_operation_digest);
     hasher.update(&lineage.setup_expires_at_unix.to_be_bytes());
     hasher.update(&lineage.hard_expires_at_unix.to_be_bytes());
+    hasher.update(&lineage.setup_expires_at_boottime_ns.to_be_bytes());
+    hasher.update(&lineage.hard_expires_at_boottime_ns.to_be_bytes());
     let mut digest = *hasher.finalize().as_bytes();
     if digest.iter().all(|byte| *byte == 0) {
         digest[31] = 1;
@@ -3694,6 +3923,8 @@ const fn context_backend_lineage(context_id: [u8; 16], context: &ContextRecord) 
         prepare_operation_digest: context.prepare_operation_digest,
         setup_expires_at_unix: context.setup_expires_at_unix,
         hard_expires_at_unix: context.hard_expires_at_unix,
+        setup_expires_at_boottime_ns: context.setup_expires_at_boottime_ns,
+        hard_expires_at_boottime_ns: context.hard_expires_at_boottime_ns,
     }
 }
 
@@ -3709,6 +3940,8 @@ const fn reconciliation_backend_lineage(
         prepare_operation_digest: record.prepare_operation_digest,
         setup_expires_at_unix: record.setup_expires_at_unix,
         hard_expires_at_unix: record.hard_expires_at_unix,
+        setup_expires_at_boottime_ns: record.setup_expires_at_boottime_ns,
+        hard_expires_at_boottime_ns: record.hard_expires_at_boottime_ns,
     }
 }
 
@@ -3963,13 +4196,17 @@ fn prune_cache(state: &mut EngineState, now: u64) {
         .retain(|request_id| state.cache.contains_key(request_id));
 }
 
-fn prune_prepare_reconciliations(state: &mut EngineState, now: u64) {
+fn prune_prepare_reconciliations(state: &mut EngineState, now: ExpiryNow) {
     let expired_intents = state
         .prepare_reconciliations
         .iter()
         .filter_map(|(context_id, record)| {
             (record.phase == PrepareReconciliationPhase::Intent
-                && now >= record.setup_expires_at_unix
+                && !deadline_live(
+                    now,
+                    record.setup_expires_at_unix,
+                    record.setup_expires_at_boottime_ns,
+                )
                 && !state.contexts.contains_key(context_id)
                 && !state
                     .cleanup_pending
@@ -4173,12 +4410,56 @@ mod tests {
         fn now_unix(&self) -> u64 {
             self.0.load(Ordering::Relaxed)
         }
+
+        fn now_boottime_nanos(&self) -> u64 {
+            self.now_unix_nanos()
+        }
+    }
+
+    struct AdjustableClock {
+        wall_ns: AtomicU64,
+        boottime_ns: Arc<AtomicU64>,
+    }
+
+    impl AdjustableClock {
+        fn new(wall_ns: u64, boottime_ns: u64) -> Self {
+            Self {
+                wall_ns: AtomicU64::new(wall_ns),
+                boottime_ns: Arc::new(AtomicU64::new(boottime_ns)),
+            }
+        }
+
+        fn set_wall_ns(&self, value: u64) {
+            self.wall_ns.store(value, Ordering::Release);
+        }
+
+        fn set_boottime_ns(&self, value: u64) {
+            self.boottime_ns.store(value, Ordering::Release);
+        }
+    }
+
+    impl Clock for AdjustableClock {
+        fn now_unix(&self) -> u64 {
+            self.now_unix_nanos() / NANOSECONDS_PER_SECOND
+        }
+
+        fn now_unix_nanos(&self) -> u64 {
+            self.wall_ns.load(Ordering::Acquire)
+        }
+
+        fn now_boottime_nanos(&self) -> u64 {
+            self.boottime_ns.load(Ordering::Acquire)
+        }
     }
 
     struct PanicClock;
 
     impl Clock for PanicClock {
         fn now_unix(&self) -> u64 {
+            panic!("test clock panic");
+        }
+
+        fn now_boottime_nanos(&self) -> u64 {
             panic!("test clock panic");
         }
     }
@@ -4221,6 +4502,9 @@ mod tests {
         substitute_prepare_generation: AtomicBool,
         substitute_prepare_deadline: AtomicBool,
         substitute_acquire_generation: AtomicBool,
+        completion_boottime_ns: StdMutex<Option<Arc<AtomicU64>>>,
+        activate_completion_boottime_ns: AtomicU64,
+        probe_completion_boottime_ns: AtomicU64,
         prepare_bindings: StdMutex<Vec<BackendBinding>>,
         probe_requests: StdMutex<Vec<(BackendBinding, BackendProbe)>>,
         destroy_calls: StdMutex<Vec<(BackendBinding, BackendDestroy)>>,
@@ -4326,6 +4610,16 @@ mod tests {
                         transmitted_bytes: 20,
                     })
                     .collect();
+                let completion_boottime_ns =
+                    self.activate_completion_boottime_ns.load(Ordering::Acquire);
+                if completion_boottime_ns != 0 {
+                    self.completion_boottime_ns
+                        .lock()
+                        .expect("completion boottime")
+                        .as_ref()
+                        .expect("configured completion clock")
+                        .store(completion_boottime_ns, Ordering::Release);
+                }
                 completion.complete(Ok(result))
             })
         }
@@ -4356,6 +4650,16 @@ mod tests {
                         transmitted_bytes: 20 + increment,
                     })
                     .collect();
+                let completion_boottime_ns =
+                    self.probe_completion_boottime_ns.load(Ordering::Acquire);
+                if completion_boottime_ns != 0 {
+                    self.completion_boottime_ns
+                        .lock()
+                        .expect("completion boottime")
+                        .as_ref()
+                        .expect("configured completion clock")
+                        .store(completion_boottime_ns, Ordering::Release);
+                }
                 completion.complete(Ok(result))
             })
         }
@@ -4580,6 +4884,72 @@ mod tests {
             panic!("prepared outcome");
         };
         value
+    }
+
+    fn activate_request_for(prepared: &PreparedLeaseBatch, id: u8) -> HelperRequest {
+        let lease = &prepared.leases[0];
+        request(
+            id,
+            helper_request::Operation::ActivateLeaseBatch(ActivateLeaseBatch {
+                route_context_id: vec![7; 16],
+                context_handle: prepared.context_handle.clone(),
+                leases: vec![LeaseActivation {
+                    lease_handle: lease.lease_handle.clone(),
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    peer_public_key: vec![8; 32],
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: vec![1, 1, 1, 1],
+                        port: 51_820,
+                    }),
+                    maximum_up_mbps: 0,
+                    maximum_down_mbps: 0,
+                    signed_relay_reservation: Vec::new(),
+                    signed_client_relay_request: Vec::new(),
+                }],
+            }),
+        )
+    }
+
+    fn commit_request_for(prepared: &PreparedLeaseBatch, id: u8) -> HelperRequest {
+        let lease = &prepared.leases[0];
+        request(
+            id,
+            helper_request::Operation::CommitLeaseBatch(CommitLeaseBatch {
+                route_context_id: vec![7; 16],
+                context_handle: prepared.context_handle.clone(),
+                leases: vec![LeaseCommit {
+                    lease_handle: lease.lease_handle.clone(),
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                }],
+            }),
+        )
+    }
+
+    fn acquire_request_for(prepared: &PreparedLeaseBatch, id: u8) -> HelperRequest {
+        request(
+            id,
+            helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                route_context_id: vec![7; 16],
+                context_handle: prepared.context_handle.clone(),
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener as i32,
+                expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                expected_remote: None,
+            }),
+        )
+    }
+
+    fn adjustable_engine(backend: Arc<FakeBackend>, clock: Arc<AdjustableClock>) -> HelperEngine {
+        HelperEngine::with_components(
+            [9; 32],
+            1_000,
+            backend,
+            Arc::new(FixedHandles(AtomicU64::new(0))),
+            clock,
+        )
     }
 
     async fn activate_client_context(engine: &HelperEngine) -> PreparedLeaseBatch {
@@ -5243,6 +5613,321 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frozen_boottime_deadlines_do_not_round_up_or_resample_on_bind_retry() {
+        let backend = Arc::new(FakeBackend::default());
+        let wall_ns = 100 * NANOSECONDS_PER_SECOND + 750_000_000;
+        let boottime_ns = 500 * NANOSECONDS_PER_SECOND + 125_000_000;
+        let clock = Arc::new(AdjustableClock::new(wall_ns, boottime_ns));
+        let engine = adjustable_engine(Arc::clone(&backend), Arc::clone(&clock));
+        let prepare = prepare_request(101);
+
+        assert_eq!(
+            engine.execute(bind_request_for(&prepare, 102)).await.result,
+            HelperResult::Ok as i32
+        );
+        let original = *engine
+            .inner
+            .state
+            .lock()
+            .await
+            .prepare_reconciliations
+            .get(&[7; 16])
+            .expect("frozen intent");
+        assert_eq!(
+            original.setup_expires_at_boottime_ns,
+            boottime_ns + (120 * NANOSECONDS_PER_SECOND - wall_ns)
+        );
+        assert_eq!(
+            original.hard_expires_at_boottime_ns,
+            boottime_ns + (900 * NANOSECONDS_PER_SECOND - wall_ns)
+        );
+
+        clock.set_wall_ns(wall_ns + 100_000_000);
+        clock.set_boottime_ns(boottime_ns + 100_000_000);
+        assert_eq!(
+            engine.execute(bind_request_for(&prepare, 103)).await.result,
+            HelperResult::Ok as i32
+        );
+        assert_eq!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .prepare_reconciliations
+                .get(&[7; 16])
+                .copied(),
+            Some(original),
+            "an exact Bind retry must reuse, not refresh, the first deadlines"
+        );
+
+        backend.block_prepare.store(true, Ordering::Release);
+        let preparing_engine = engine.clone();
+        let preparing = tokio::spawn(async move { preparing_engine.execute(prepare).await });
+        wait_for_prepare_entry(&backend).await;
+        clock.set_wall_ns(100 * NANOSECONDS_PER_SECOND);
+        clock.set_boottime_ns(original.setup_expires_at_boottime_ns);
+        backend.release_prepare();
+        let response = preparing.await.expect("Prepare task");
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(response.diagnostic_code, "STALE_BACKEND_RESULT");
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
+        assert_eq!(
+            backend.destroyed.lock().expect("destroyed").as_slice(),
+            &[[7; 16]],
+            "an expiry observed after backend Prepare must roll back exact ownership"
+        );
+    }
+
+    #[tokio::test]
+    async fn pruned_expired_intent_is_a_nonrefreshable_runtime_tombstone() {
+        let backend = Arc::new(FakeBackend::default());
+        let wall_ns = 100 * NANOSECONDS_PER_SECOND + 500_000_000;
+        let boottime_ns = 600 * NANOSECONDS_PER_SECOND;
+        let clock = Arc::new(AdjustableClock::new(wall_ns, boottime_ns));
+        let engine = adjustable_engine(Arc::clone(&backend), Arc::clone(&clock));
+        let prepare = prepare_request(104);
+        assert_eq!(
+            engine.execute(bind_request_for(&prepare, 105)).await.result,
+            HelperResult::Ok as i32
+        );
+        let original = *engine
+            .inner
+            .state
+            .lock()
+            .await
+            .prepare_reconciliations
+            .get(&[7; 16])
+            .expect("frozen intent");
+
+        clock.set_wall_ns(100 * NANOSECONDS_PER_SECOND);
+        clock.set_boottime_ns(original.setup_expires_at_boottime_ns);
+        let prune = request(
+            106,
+            helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                cleanup_token: vec![9; 32],
+            }),
+        );
+        assert_eq!(engine.execute(prune).await.result, HelperResult::Ok as i32);
+        assert_eq!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .prepare_reconciliations
+                .get(&[7; 16])
+                .map(|record| record.phase),
+            Some(PrepareReconciliationPhase::Absent)
+        );
+
+        let rebound = engine.execute(bind_request_for(&prepare, 107)).await;
+        assert_eq!(rebound.result, HelperResult::Expired as i32);
+        let retained = *engine
+            .inner
+            .state
+            .lock()
+            .await
+            .prepare_reconciliations
+            .get(&[7; 16])
+            .expect("retained tombstone");
+        assert_eq!(
+            retained,
+            PrepareReconciliationRecord {
+                phase: PrepareReconciliationPhase::Absent,
+                ..original
+            }
+        );
+        assert!(!backend.prepare_entered.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn wall_rollback_cannot_extend_activate_or_commit_backend_completion() {
+        let wall_ns = 100 * NANOSECONDS_PER_SECOND + 250_000_000;
+        let boottime_ns = 700 * NANOSECONDS_PER_SECOND;
+
+        let activate_backend = Arc::new(FakeBackend::default());
+        let activate_clock = Arc::new(AdjustableClock::new(wall_ns, boottime_ns));
+        let activate_engine =
+            adjustable_engine(Arc::clone(&activate_backend), Arc::clone(&activate_clock));
+        let activate_prepared =
+            prepared(&execute_prepare(&activate_engine, prepare_request(111)).await);
+        let setup_deadline = activate_engine
+            .inner
+            .state
+            .lock()
+            .await
+            .contexts
+            .get(&[7; 16])
+            .expect("Prepared context")
+            .setup_expires_at_boottime_ns;
+        *activate_backend
+            .completion_boottime_ns
+            .lock()
+            .expect("completion clock") = Some(Arc::clone(&activate_clock.boottime_ns));
+        activate_backend
+            .activate_completion_boottime_ns
+            .store(setup_deadline, Ordering::Release);
+        activate_clock.set_wall_ns(100 * NANOSECONDS_PER_SECOND);
+        let activated = activate_engine
+            .execute(activate_request_for(&activate_prepared, 112))
+            .await;
+        assert_eq!(activated.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(activated.diagnostic_code, "STALE_BACKEND_RESULT");
+        assert!(activate_engine.inner.state.lock().await.contexts.is_empty());
+        assert_eq!(
+            activate_backend
+                .destroyed
+                .lock()
+                .expect("destroyed")
+                .as_slice(),
+            &[[7; 16]]
+        );
+
+        let commit_backend = Arc::new(FakeBackend::default());
+        let commit_clock = Arc::new(AdjustableClock::new(wall_ns, boottime_ns));
+        let commit_engine =
+            adjustable_engine(Arc::clone(&commit_backend), Arc::clone(&commit_clock));
+        let commit_prepared =
+            prepared(&execute_prepare(&commit_engine, prepare_request(121)).await);
+        assert_eq!(
+            commit_engine
+                .execute(activate_request_for(&commit_prepared, 122))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+        let hard_deadline = commit_engine
+            .inner
+            .state
+            .lock()
+            .await
+            .contexts
+            .get(&[7; 16])
+            .expect("Activated context")
+            .hard_expires_at_boottime_ns;
+        commit_backend.proof_increment.store(1, Ordering::Release);
+        *commit_backend
+            .completion_boottime_ns
+            .lock()
+            .expect("completion clock") = Some(Arc::clone(&commit_clock.boottime_ns));
+        commit_backend
+            .probe_completion_boottime_ns
+            .store(hard_deadline, Ordering::Release);
+        commit_clock.set_wall_ns(100 * NANOSECONDS_PER_SECOND);
+        let committed = commit_engine
+            .execute(commit_request_for(&commit_prepared, 123))
+            .await;
+        assert_eq!(committed.result, HelperResult::Expired as i32);
+        assert_eq!(committed.diagnostic_code, "CONTEXT_EXPIRED");
+        assert!(commit_engine.inner.state.lock().await.contexts.is_empty());
+        assert_eq!(
+            commit_backend
+                .destroyed
+                .lock()
+                .expect("destroyed")
+                .as_slice(),
+            &[[7; 16]]
+        );
+    }
+
+    #[tokio::test]
+    async fn wall_rollback_cannot_extend_acquire_completion_or_periodic_reaping() {
+        let wall_ns = 100 * NANOSECONDS_PER_SECOND + 500_000_000;
+        let boottime_ns = 900 * NANOSECONDS_PER_SECOND;
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(AdjustableClock::new(wall_ns, boottime_ns));
+        let engine = adjustable_engine(Arc::clone(&backend), Arc::clone(&clock));
+        let prepared = commit_client_context(&engine, &backend).await;
+        let hard_deadline = engine
+            .inner
+            .state
+            .lock()
+            .await
+            .contexts
+            .get(&[7; 16])
+            .expect("Committed context")
+            .hard_expires_at_boottime_ns;
+
+        backend.block_acquire.store(true, Ordering::Release);
+        let acquiring_engine = engine.clone();
+        let acquiring = tokio::spawn(async move {
+            acquiring_engine
+                .execute(acquire_request_for(&prepared, 131))
+                .await
+        });
+        wait_for_acquire_entry(&backend).await;
+        clock.set_wall_ns(100 * NANOSECONDS_PER_SECOND);
+        clock.set_boottime_ns(hard_deadline);
+        backend.release_acquire();
+        let acquired = acquiring.await.expect("Acquire task");
+        assert_eq!(acquired.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(acquired.diagnostic_code, "STALE_BACKEND_RESULT");
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
+        assert_eq!(
+            backend.destroyed.lock().expect("destroyed").as_slice(),
+            &[[7; 16]]
+        );
+
+        let reap_backend = Arc::new(FakeBackend::default());
+        let reap_clock = Arc::new(AdjustableClock::new(wall_ns, boottime_ns));
+        let reap_engine = adjustable_engine(Arc::clone(&reap_backend), Arc::clone(&reap_clock));
+        assert_eq!(
+            execute_prepare(&reap_engine, prepare_request(141))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+        let setup_deadline = reap_engine
+            .inner
+            .state
+            .lock()
+            .await
+            .contexts
+            .get(&[7; 16])
+            .expect("Prepared context")
+            .setup_expires_at_boottime_ns;
+        reap_clock.set_wall_ns(100 * NANOSECONDS_PER_SECOND);
+        reap_clock.set_boottime_ns(setup_deadline);
+        assert!(reap_engine.reap_expired_cleanup().await);
+        assert!(reap_engine.inner.state.lock().await.contexts.is_empty());
+        let calls = reap_backend.destroy_calls.lock().expect("destroy calls");
+        let (binding, payload) = calls.last().expect("boottime maintenance Destroy");
+        assert_eq!(binding.operation_kind, OperationKind::Reap);
+        assert_eq!(binding.prior_phase, Some(ContextPhase::Prepared));
+        assert_eq!(payload.context_id, [7; 16]);
+    }
+
+    #[tokio::test]
+    async fn periodic_reaper_uses_hard_boottime_when_wall_time_is_still_live() {
+        let wall_ns = 100 * NANOSECONDS_PER_SECOND + 500_000_000;
+        let boottime_ns = 1_100 * NANOSECONDS_PER_SECOND;
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(AdjustableClock::new(wall_ns, boottime_ns));
+        let engine = adjustable_engine(Arc::clone(&backend), Arc::clone(&clock));
+        let _ = commit_client_context(&engine, &backend).await;
+        let hard_deadline = engine
+            .inner
+            .state
+            .lock()
+            .await
+            .contexts
+            .get(&[7; 16])
+            .expect("Committed context")
+            .hard_expires_at_boottime_ns;
+
+        clock.set_wall_ns(100 * NANOSECONDS_PER_SECOND);
+        clock.set_boottime_ns(hard_deadline);
+        assert!(engine.reap_expired_cleanup().await);
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
+        let calls = backend.destroy_calls.lock().expect("destroy calls");
+        let (binding, payload) = calls.last().expect("hard-expiry maintenance Destroy");
+        assert_eq!(binding.operation_kind, OperationKind::Reap);
+        assert_eq!(binding.prior_phase, Some(ContextPhase::Committed));
+        assert_eq!(payload.context_id, [7; 16]);
+    }
+
+    #[tokio::test]
     async fn expiry_reaps_and_request_id_collision_fails_closed() {
         let backend = Arc::new(FakeBackend::default());
         let clock = Arc::new(FixedClock(AtomicU64::new(100)));
@@ -5807,6 +6492,8 @@ mod tests {
                 prepare_operation_digest: [2; 32],
                 setup_expires_at_unix: 10,
                 hard_expires_at_unix: 20,
+                setup_expires_at_boottime_ns: 10 * NANOSECONDS_PER_SECOND,
+                hard_expires_at_boottime_ns: 20 * NANOSECONDS_PER_SECOND,
             },
             call_deadline: Instant::now() + Duration::from_secs(1),
             armed: true,

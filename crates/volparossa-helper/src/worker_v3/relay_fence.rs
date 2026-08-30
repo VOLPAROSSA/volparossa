@@ -5,16 +5,19 @@
 //! calling thread is still in the expected anonymous worker namespace and not
 //! in its parent namespace.  It can encode only one fixed `inet` table: two
 //! direction-specific `/128` forwarding rules between the exact `RelayClient`
-//! and `RelayExit` interfaces, followed by a terminal drop.  Each accept rule is
-//! bound to the authenticated reservation expiry and byte rate.  There is no
+//! and `RelayExit` interfaces, followed by a terminal drop. Each accept rule must
+//! additionally find one short-lived IPv6 key in a singleton nft set whose Linux
+//! jiffies timeout is immune to realtime-clock rollback. The existing realtime
+//! comparison remains an independent earlier cutoff. Each accept is also bound
+//! to the authenticated byte rate. There is no
 //! NAT, interface wildcard, prefix-wide forwarding, command, path, subprocess
 //! or caller-provided nftables byte stream.
 //!
 //! Baseline creation, rule activation, rule deactivation and baseline
 //! retirement are separate generation-pinned atomic batches.  Every
 //! acknowledged or possibly-sent mutation is reconciled through a fresh,
-//! bounded, generation-bracketed dump of tables, chains, rules, sets, objects
-//! and flowtables.  Before either link exists, the exact context-bound table
+//! bounded, generation-bracketed dump of tables, chains, rules, sets, set elements,
+//! objects and flowtables. Before either link exists, the exact context-bound table
 //! contains only an empty forward base chain with policy drop.  Activation
 //! accepts only the exact zero-counter rule set, deactivation restores that
 //! same restrictive baseline with stable table and chain handles, and
@@ -49,6 +52,11 @@ const TABLE_USERDATA_DOMAIN: &[u8] = b"VOLPAROSSA relay fence identity v2\0";
 const TABLE_NAME_PREFIX: &[u8] = b"vpr_";
 const FORWARD_CHAIN_NAME: &[u8] = b"forward";
 const FILTER_CHAIN_TYPE: &[u8] = b"filter";
+const LIVE_SET_NAME: &[u8] = b"lease_live";
+const LIVE_SET_TRANSACTION_ID: u32 = 1;
+const LIVE_SET_KEY: [u8; 1] = [NFPROTO_IPV6];
+/// Linux 6.12 permits HZ=100, 250, 300 or 1000; 10 ms is therefore one maximum jiffy.
+const MAX_KERNEL_JIFFY: Duration = Duration::from_millis(10);
 
 const MAX_DATAGRAM_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 512 * 1024;
@@ -59,7 +67,11 @@ const MAX_TABLE_ATTRIBUTES: usize = 7;
 const MAX_CHAIN_ATTRIBUTES: usize = 12;
 const MAX_HOOK_ATTRIBUTES: usize = 4;
 const MAX_RULE_ATTRIBUTES: usize = 11;
-const DIRECTION_RULE_EXPRESSIONS: usize = 20;
+const MAX_SET_ATTRIBUTES: usize = 18;
+const MAX_SET_DESCRIPTION_ATTRIBUTES: usize = 2;
+const MAX_SET_ELEMENT_LIST_ATTRIBUTES: usize = 4;
+const MAX_SET_ELEMENT_ATTRIBUTES: usize = 11;
+const DIRECTION_RULE_EXPRESSIONS: usize = 21;
 const TERMINAL_RULE_EXPRESSIONS: usize = 2;
 const MAX_RULE_EXPRESSIONS: usize = DIRECTION_RULE_EXPRESSIONS;
 const MAX_EXPRESSION_ATTRIBUTES: usize = 2;
@@ -76,6 +88,8 @@ const MAX_COUNTER_BYTES: usize = 64;
 const MAX_OBSERVED_TABLES: usize = 2;
 const MAX_OBSERVED_CHAINS: usize = 2;
 const MAX_OBSERVED_RULES: usize = 4;
+const MAX_OBSERVED_SETS: usize = 2;
+const MAX_OBSERVED_SET_ELEMENTS: usize = 2;
 const MAX_MUTATION_BATCH_BYTES: usize = 16 * 1024;
 const MAX_MUTATION_MESSAGES: usize = 7;
 const MAX_MUTATION_ACK_BYTES: usize = 4 * 1024;
@@ -114,6 +128,9 @@ const NFT_MSG_GETRULE: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 7;
 const NFT_MSG_DELRULE: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 8;
 const NFT_MSG_NEWSET: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 9;
 const NFT_MSG_GETSET: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 10;
+const NFT_MSG_DELSET: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 11;
+const NFT_MSG_NEWSETELEM: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 12;
+const NFT_MSG_GETSETELEM: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 13;
 const NFT_MSG_NEWGEN: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 15;
 const NFT_MSG_GETGEN: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 16;
 const NFT_MSG_NEWOBJ: u16 = (NFNL_SUBSYS_NFTABLES << 8) | 18;
@@ -151,6 +168,9 @@ const NFT_CMP_EQ: u32 = 0;
 const NFT_CMP_LT: u32 = 2;
 const NFT_BYTEORDER_HTON: u32 = 1;
 const NFT_LIMIT_PKT_BYTES: u32 = 1;
+const NFT_SET_TIMEOUT: u32 = 0x10;
+const NFT_SET_ALLOWED_FLAGS: u32 = NFT_SET_TIMEOUT;
+const NFT_DATA_VALUE: u32 = 0;
 const IPV6_SOURCE_OFFSET: u32 = 8;
 const IPV6_DESTINATION_OFFSET: u32 = 24;
 
@@ -197,12 +217,54 @@ const NFTA_RULE_ID: u16 = 9;
 const NFTA_RULE_POSITION_ID: u16 = 10;
 const NFTA_RULE_CHAIN_ID: u16 = 11;
 
+const NFTA_SET_TABLE: u16 = 1;
+const NFTA_SET_NAME: u16 = 2;
+const NFTA_SET_FLAGS: u16 = 3;
+const NFTA_SET_KEY_TYPE: u16 = 4;
+const NFTA_SET_KEY_LEN: u16 = 5;
+const NFTA_SET_DATA_TYPE: u16 = 6;
+const NFTA_SET_DATA_LEN: u16 = 7;
+const NFTA_SET_POLICY: u16 = 8;
+const NFTA_SET_DESC: u16 = 9;
+const NFTA_SET_ID: u16 = 10;
+const NFTA_SET_TIMEOUT: u16 = 11;
+const NFTA_SET_GC_INTERVAL: u16 = 12;
+const NFTA_SET_USERDATA: u16 = 13;
+const NFTA_SET_PAD: u16 = 14;
+const NFTA_SET_OBJ_TYPE: u16 = 15;
+const NFTA_SET_HANDLE: u16 = 16;
+const NFTA_SET_EXPR: u16 = 17;
+const NFTA_SET_EXPRESSIONS: u16 = 18;
+const NFTA_SET_DESC_SIZE: u16 = 1;
+const NFTA_SET_DESC_CONCAT: u16 = 2;
+
+const NFTA_SET_ELEM_KEY: u16 = 1;
+const NFTA_SET_ELEM_DATA: u16 = 2;
+const NFTA_SET_ELEM_FLAGS: u16 = 3;
+const NFTA_SET_ELEM_TIMEOUT: u16 = 4;
+const NFTA_SET_ELEM_EXPIRATION: u16 = 5;
+const NFTA_SET_ELEM_USERDATA: u16 = 6;
+const NFTA_SET_ELEM_EXPR: u16 = 7;
+const NFTA_SET_ELEM_PAD: u16 = 8;
+const NFTA_SET_ELEM_OBJREF: u16 = 9;
+const NFTA_SET_ELEM_KEY_END: u16 = 10;
+const NFTA_SET_ELEM_EXPRESSIONS: u16 = 11;
+const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;
+const NFTA_SET_ELEM_LIST_SET: u16 = 2;
+const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
+const NFTA_SET_ELEM_LIST_SET_ID: u16 = 4;
+
 const NFTA_LIST_ELEM: u16 = 1;
 const NFTA_EXPR_NAME: u16 = 1;
 const NFTA_EXPR_DATA: u16 = 2;
 const NFTA_META_DREG: u16 = 1;
 const NFTA_META_KEY: u16 = 2;
 const NFTA_META_SREG: u16 = 3;
+const NFTA_LOOKUP_SET: u16 = 1;
+const NFTA_LOOKUP_SREG: u16 = 2;
+const NFTA_LOOKUP_DREG: u16 = 3;
+const NFTA_LOOKUP_SET_ID: u16 = 4;
+const NFTA_LOOKUP_FLAGS: u16 = 5;
 const NFTA_CMP_SREG: u16 = 1;
 const NFTA_CMP_OP: u16 = 2;
 const NFTA_CMP_DATA: u16 = 3;
@@ -360,6 +422,7 @@ pub(super) struct RelayFenceSpec {
     client_address: Ipv6Addr,
     exit_address: Ipv6Addr,
     expires_at_unix_nanos: u64,
+    live_gate_timeout_milliseconds: u64,
     maximum_up_bytes_per_second: u64,
     maximum_down_bytes_per_second: u64,
 }
@@ -440,6 +503,7 @@ impl RelayFenceSpec {
             client_address,
             exit_address,
             expires_at_unix_nanos,
+            live_gate_timeout_milliseconds: 0,
             maximum_up_bytes_per_second: mbps_to_bytes(maximum_up_mbps),
             maximum_down_bytes_per_second: mbps_to_bytes(maximum_down_mbps),
         };
@@ -479,6 +543,11 @@ impl RelayFenceSpec {
         };
         interface_expressions(direction)
             .into_iter()
+            .chain([ObservedExpression::Lookup {
+                set: LIVE_SET_NAME.to_vec(),
+                source: NFT_REG_1,
+                flags: 0,
+            }])
             .chain(address_expressions(direction))
             .chain(expiry_expressions(self.expires_at_unix_nanos))
             .chain([
@@ -493,6 +562,30 @@ impl RelayFenceSpec {
                 ObservedExpression::ImmediateAccept,
             ])
             .collect()
+    }
+
+    fn bind_live_gate_timeout(
+        &mut self,
+        maximum_live_gate_timeout: Duration,
+    ) -> Result<(), RelayFenceError> {
+        if self.live_gate_timeout_milliseconds != 0
+            || maximum_live_gate_timeout > Duration::from_secs(MAX_FENCE_TTL_SECONDS)
+        {
+            return Err(RelayFenceError::Invalid);
+        }
+        let timeout = maximum_live_gate_timeout
+            .checked_sub(MAX_KERNEL_JIFFY)
+            .ok_or(RelayFenceError::Expired)?;
+        // Whole seconds round-trip exactly through all Linux 6.12 HZ choices. The additional
+        // truncation is fail-closed and prevents a jiffy-canonicalized dump from becoming an
+        // ambiguous policy proof.
+        let timeout_milliseconds = timeout
+            .as_secs()
+            .checked_mul(1_000)
+            .filter(|milliseconds| *milliseconds != 0)
+            .ok_or(RelayFenceError::Expired)?;
+        self.live_gate_timeout_milliseconds = timeout_milliseconds;
+        Ok(())
     }
 }
 
@@ -837,7 +930,8 @@ pub(super) fn create_relay_fence_baseline(
 /// Atomically add the two exact accepts and terminal drop to one restrictive baseline.
 pub(super) fn activate_relay_fence_rules(
     restricted: RestrictedPolicyDrop,
-    specification: RelayFenceSpec,
+    mut specification: RelayFenceSpec,
+    maximum_live_gate_timeout: Duration,
     deadline: HardDeadline,
 ) -> Result<ActiveRelayFence, RelayFenceLineageFailure<RelayFenceActivateAuthority>> {
     let RestrictedPolicyDrop { journal, namespace } = restricted;
@@ -868,6 +962,9 @@ pub(super) fn activate_relay_fence_rules(
             ));
         }
     };
+    if let Err(source) = specification.bind_live_gate_timeout(maximum_live_gate_timeout) {
+        return Err(activate_failure_restricted(source, journal, namespace));
+    }
     if let Err(source) = verify_restricted_journal(&journal, mutation_deadline) {
         if source_typestate_is_disproven(&source) {
             return Err(indeterminate(
@@ -1433,6 +1530,7 @@ struct BaselineHandles {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PolicyHandles {
     baseline: BaselineHandles,
+    live_set: u64,
     rules: [u64; 3],
 }
 
@@ -1481,6 +1579,11 @@ enum ObservedExpression {
     Meta {
         destination: u32,
         key: u32,
+    },
+    Lookup {
+        set: Vec<u8>,
+        source: u32,
+        flags: u32,
     },
     Compare {
         source: u32,
@@ -1554,11 +1657,40 @@ struct RuleRecord {
     pad: bool,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct SetRecord {
+    family: u8,
+    table: Vec<u8>,
+    name: Vec<u8>,
+    flags: u32,
+    key_type: u32,
+    key_length: u32,
+    policy: u32,
+    size: u32,
+    handle: u64,
+    timeout_milliseconds: Option<u64>,
+    gc_interval: Option<u32>,
+    userdata: Option<Vec<u8>>,
+    pad: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SetElementRecord {
+    family: u8,
+    table: Vec<u8>,
+    set: Vec<u8>,
+    key: Vec<u8>,
+    timeout_milliseconds: u64,
+    expiration_milliseconds: u64,
+}
+
 #[derive(Default)]
 struct RulesetSnapshot {
     tables: Vec<TableRecord>,
     chains: Vec<ChainRecord>,
     rules: Vec<RuleRecord>,
+    sets: Vec<SetRecord>,
+    set_elements: Vec<SetElementRecord>,
 }
 
 impl RulesetSnapshot {
@@ -1593,7 +1725,15 @@ impl RulesetSnapshot {
                     .push(parse_rule_payload(payload, expected_generation)?);
                 Ok(())
             }
-            ObjectKind::Set | ObjectKind::Object | ObjectKind::Flowtable => {
+            ObjectKind::Set => {
+                if self.sets.len() >= MAX_OBSERVED_SETS {
+                    return Err(RelayFenceError::Limit);
+                }
+                self.sets
+                    .push(parse_set_payload(payload, expected_generation)?);
+                Ok(())
+            }
+            ObjectKind::Object | ObjectKind::Flowtable => {
                 validate_unexpected_object_header(payload, expected_generation)?;
                 Err(RelayFenceError::UnexpectedPolicy)
             }
@@ -1601,18 +1741,22 @@ impl RulesetSnapshot {
     }
 
     fn is_empty(&self) -> bool {
-        self.tables.is_empty() && self.chains.is_empty() && self.rules.is_empty()
+        self.tables.is_empty()
+            && self.chains.is_empty()
+            && self.rules.is_empty()
+            && self.sets.is_empty()
+            && self.set_elements.is_empty()
     }
 
     fn exact_restricted_observation(
         &self,
         identity: &RelayFenceIdentity,
     ) -> Result<ExactRestrictedObservation, RelayFenceError> {
-        if !self.rules.is_empty() {
+        if !self.rules.is_empty() || !self.sets.is_empty() || !self.set_elements.is_empty() {
             return Err(RelayFenceError::UnexpectedPolicy);
         }
         Ok(ExactRestrictedObservation {
-            handles: self.exact_baseline_handles(identity, 0)?,
+            handles: self.exact_baseline_handles(identity, 1, 0)?,
         })
     }
 
@@ -1621,7 +1765,37 @@ impl RulesetSnapshot {
         specification: &RelayFenceSpec,
         require_zero: bool,
     ) -> Result<ExactPolicyObservation, RelayFenceError> {
-        let baseline = self.exact_baseline_handles(&specification.identity, 3)?;
+        let baseline = self.exact_baseline_handles(&specification.identity, 2, 3)?;
+        let [set] = self.sets.as_slice() else {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        };
+        let [element] = self.set_elements.as_slice() else {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        };
+        if specification.live_gate_timeout_milliseconds == 0
+            || set.family != NFPROTO_INET
+            || set.table != specification.identity.table_name
+            || set.name != LIVE_SET_NAME
+            || set.flags != NFT_SET_ALLOWED_FLAGS
+            || set.key_type != NFT_DATA_VALUE
+            || set.key_length != 1
+            || set.policy != 0
+            || set.size != 1
+            || set.handle == 0
+            || set.pad
+            || set.timeout_milliseconds.is_some()
+            || set.gc_interval.is_some()
+            || set.userdata.is_some()
+            || element.family != NFPROTO_INET
+            || element.table != specification.identity.table_name
+            || element.set != LIVE_SET_NAME
+            || element.key != LIVE_SET_KEY
+            || element.timeout_milliseconds != specification.live_gate_timeout_milliseconds
+            || element.expiration_milliseconds == 0
+            || element.expiration_milliseconds > element.timeout_milliseconds
+        {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        }
         let [up, down, terminal] = self.rules.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
@@ -1652,6 +1826,7 @@ impl RulesetSnapshot {
         Ok(ExactPolicyObservation {
             handles: PolicyHandles {
                 baseline,
+                live_set: set.handle,
                 rules: [up.handle, down.handle, terminal.handle],
             },
             counters: RelayFenceCounters(counters),
@@ -1661,6 +1836,7 @@ impl RulesetSnapshot {
     fn exact_baseline_handles(
         &self,
         identity: &RelayFenceIdentity,
+        expected_table_use: u32,
         expected_chain_use: u32,
     ) -> Result<BaselineHandles, RelayFenceError> {
         let [table] = self.tables.as_slice() else {
@@ -1669,7 +1845,7 @@ impl RulesetSnapshot {
         if table.family != NFPROTO_INET
             || table.name != identity.table_name
             || table.flags != 0
-            || table.use_count != 1
+            || table.use_count != expected_table_use
             || table.handle == 0
             || table.pad
             || table.userdata.as_deref() != Some(identity.canonical_userdata().as_slice())
@@ -1866,6 +2042,9 @@ fn encode_activate_rules_transaction(
     specification: &RelayFenceSpec,
     generation: u32,
 ) -> Result<MutationTransaction, RelayFenceError> {
+    if specification.live_gate_timeout_milliseconds == 0 {
+        return Err(RelayFenceError::Expired);
+    }
     let mut transaction = MutationTransaction::new();
     transaction.push(
         NFNL_MSG_BATCH_BEGIN,
@@ -1873,24 +2052,23 @@ fn encode_activate_rules_transaction(
         1,
         &encode_batch_boundary_payload(Some(generation))?,
     )?;
+    let set = encode_live_set(specification)?;
+    transaction.push(
+        NFT_MSG_NEWSET,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        2,
+        &set,
+    )?;
+    let set_element = encode_live_set_element(specification)?;
+    transaction.push(
+        NFT_MSG_NEWSETELEM,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        3,
+        &set_element,
+    )?;
 
-    for (sequence, rule_index) in [(2, 0), (3, 1), (4, 2)] {
-        let mut rule = encode_request_nfgen(NFPROTO_INET, 0);
-        encode_attribute(
-            &mut rule,
-            NFTA_RULE_TABLE,
-            &encode_nul_string(&specification.identity.table_name)?,
-        )?;
-        encode_attribute(
-            &mut rule,
-            NFTA_RULE_CHAIN,
-            &encode_nul_string(FORWARD_CHAIN_NAME)?,
-        )?;
-        encode_attribute(
-            &mut rule,
-            NFTA_RULE_EXPRESSIONS | NLA_F_NESTED,
-            &encode_policy_expressions(&specification.expected_rule_expressions(rule_index))?,
-        )?;
+    for (sequence, rule_index) in [(4, 0), (5, 1), (6, 2)] {
+        let rule = encode_relay_fence_rule(specification, rule_index)?;
         transaction.push(
             NFT_MSG_NEWRULE,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
@@ -1901,10 +2079,95 @@ fn encode_activate_rules_transaction(
     transaction.push(
         NFNL_MSG_BATCH_END,
         NLM_F_REQUEST,
-        5,
+        7,
         &encode_batch_boundary_payload(None)?,
     )?;
-    transaction.finish(5, 3)
+    transaction.finish(7, 5)
+}
+
+fn encode_live_set(specification: &RelayFenceSpec) -> Result<Vec<u8>, RelayFenceError> {
+    let mut description = Vec::new();
+    encode_attribute(&mut description, NFTA_SET_DESC_SIZE, &1_u32.to_be_bytes())?;
+    let mut set = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut set,
+        NFTA_SET_TABLE,
+        &encode_nul_string(&specification.identity.table_name)?,
+    )?;
+    encode_attribute(&mut set, NFTA_SET_NAME, &encode_nul_string(LIVE_SET_NAME)?)?;
+    encode_attribute(
+        &mut set,
+        NFTA_SET_FLAGS,
+        &NFT_SET_ALLOWED_FLAGS.to_be_bytes(),
+    )?;
+    encode_attribute(&mut set, NFTA_SET_KEY_TYPE, &NFT_DATA_VALUE.to_be_bytes())?;
+    encode_attribute(&mut set, NFTA_SET_KEY_LEN, &1_u32.to_be_bytes())?;
+    encode_attribute(&mut set, NFTA_SET_DESC | NLA_F_NESTED, &description)?;
+    encode_attribute(
+        &mut set,
+        NFTA_SET_ID,
+        &LIVE_SET_TRANSACTION_ID.to_be_bytes(),
+    )?;
+    Ok(set)
+}
+
+fn encode_live_set_element(specification: &RelayFenceSpec) -> Result<Vec<u8>, RelayFenceError> {
+    let mut key = Vec::new();
+    encode_attribute(&mut key, NFTA_DATA_VALUE, &LIVE_SET_KEY)?;
+    let mut element = Vec::new();
+    encode_attribute(&mut element, NFTA_SET_ELEM_KEY | NLA_F_NESTED, &key)?;
+    encode_attribute(
+        &mut element,
+        NFTA_SET_ELEM_TIMEOUT,
+        &specification.live_gate_timeout_milliseconds.to_be_bytes(),
+    )?;
+    let mut elements = Vec::new();
+    encode_attribute(&mut elements, NFTA_LIST_ELEM | NLA_F_NESTED, &element)?;
+    let mut request = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut request,
+        NFTA_SET_ELEM_LIST_TABLE,
+        &encode_nul_string(&specification.identity.table_name)?,
+    )?;
+    encode_attribute(
+        &mut request,
+        NFTA_SET_ELEM_LIST_SET,
+        &encode_nul_string(LIVE_SET_NAME)?,
+    )?;
+    encode_attribute(
+        &mut request,
+        NFTA_SET_ELEM_LIST_SET_ID,
+        &LIVE_SET_TRANSACTION_ID.to_be_bytes(),
+    )?;
+    encode_attribute(
+        &mut request,
+        NFTA_SET_ELEM_LIST_ELEMENTS | NLA_F_NESTED,
+        &elements,
+    )?;
+    Ok(request)
+}
+
+fn encode_relay_fence_rule(
+    specification: &RelayFenceSpec,
+    rule_index: usize,
+) -> Result<Vec<u8>, RelayFenceError> {
+    let mut rule = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut rule,
+        NFTA_RULE_TABLE,
+        &encode_nul_string(&specification.identity.table_name)?,
+    )?;
+    encode_attribute(
+        &mut rule,
+        NFTA_RULE_CHAIN,
+        &encode_nul_string(FORWARD_CHAIN_NAME)?,
+    )?;
+    encode_attribute(
+        &mut rule,
+        NFTA_RULE_EXPRESSIONS | NLA_F_NESTED,
+        &encode_policy_expressions(&specification.expected_rule_expressions(rule_index))?,
+    )?;
+    Ok(rule)
 }
 
 fn encode_deactivate_rules_transaction(
@@ -1945,13 +2208,25 @@ fn encode_deactivate_rules_transaction(
             &delete,
         )?;
     }
+    let mut delete_set = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut delete_set,
+        NFTA_SET_TABLE,
+        &encode_nul_string(&journal.specification.identity.table_name)?,
+    )?;
+    encode_attribute(
+        &mut delete_set,
+        NFTA_SET_HANDLE,
+        &journal.handles.live_set.to_be_bytes(),
+    )?;
+    transaction.push(NFT_MSG_DELSET, NLM_F_REQUEST | NLM_F_ACK, 5, &delete_set)?;
     transaction.push(
         NFNL_MSG_BATCH_END,
         NLM_F_REQUEST,
-        5,
+        6,
         &encode_batch_boundary_payload(None)?,
     )?;
-    transaction.finish(5, 3)
+    transaction.finish(6, 4)
 }
 
 fn encode_retire_baseline_transaction(
@@ -1986,6 +2261,7 @@ fn encode_retire_baseline_transaction(
 fn valid_policy_handles(handles: PolicyHandles) -> bool {
     handles.baseline.table != 0
         && handles.baseline.chain != 0
+        && handles.live_set != 0
         && handles.rules.iter().all(|handle| *handle != 0)
         && handles.rules[0] != handles.rules[1]
         && handles.rules[0] != handles.rules[2]
@@ -2021,6 +2297,20 @@ fn encode_policy_expression(
             encode_attribute(&mut data, NFTA_META_KEY, &key.to_be_bytes())?;
             encode_attribute(&mut data, NFTA_META_DREG, &destination.to_be_bytes())?;
             Ok((b"meta", data))
+        }
+        ObservedExpression::Lookup { set, source, flags } => {
+            if set.as_slice() != LIVE_SET_NAME || *source != NFT_REG_1 || *flags != 0 {
+                return Err(RelayFenceError::Malformed);
+            }
+            let mut data = Vec::new();
+            encode_attribute(&mut data, NFTA_LOOKUP_SET, &encode_nul_string(set)?)?;
+            encode_attribute(&mut data, NFTA_LOOKUP_SREG, &source.to_be_bytes())?;
+            encode_attribute(
+                &mut data,
+                NFTA_LOOKUP_SET_ID,
+                &LIVE_SET_TRANSACTION_ID.to_be_bytes(),
+            )?;
+            Ok((b"lookup", data))
         }
         ObservedExpression::Compare {
             source,
@@ -2573,6 +2863,17 @@ struct ObjectDumpState<'a> {
     done: bool,
 }
 
+struct SetElementDumpState<'a> {
+    sequence: u32,
+    local_port: u32,
+    expected_generation: u32,
+    expected_table: &'a [u8],
+    expected_set: &'a [u8],
+    request: &'a [u8],
+    snapshot: &'a mut RulesetSnapshot,
+    done: bool,
+}
+
 impl<'a> ObjectDumpState<'a> {
     const fn new(
         kind: ObjectKind,
@@ -2625,6 +2926,65 @@ impl<'a> ObjectDumpState<'a> {
             kind if kind == self.kind.reply_type() && flags == self.kind.reply_flags() => self
                 .snapshot
                 .ingest(self.kind, payload, self.expected_generation),
+            _ => Err(RelayFenceError::Malformed),
+        }
+    }
+
+    fn finish(self) -> Result<(), RelayFenceError> {
+        if self.done {
+            Ok(())
+        } else {
+            Err(RelayFenceError::Malformed)
+        }
+    }
+}
+
+impl SetElementDumpState<'_> {
+    fn ingest(
+        &mut self,
+        sender: SocketAddr,
+        bytes: &[u8],
+        budget: &mut CollectionBudget,
+    ) -> Result<(), RelayFenceError> {
+        if self.done || sender != SocketAddr::new(0, 0) {
+            return Err(RelayFenceError::Malformed);
+        }
+        walk_datagram(bytes, budget, |frame| self.ingest_frame(frame))
+    }
+
+    fn ingest_frame(&mut self, frame: &[u8]) -> Result<(), RelayFenceError> {
+        if self.done
+            || read_ne_u32(frame, 8)? != self.sequence
+            || read_ne_u32(frame, 12)? != self.local_port
+        {
+            return Err(RelayFenceError::Malformed);
+        }
+        let message_type = read_ne_u16(frame, 4)?;
+        let flags = read_ne_u16(frame, 6)?;
+        let payload = &frame[NLMSG_HEADER_LEN..];
+        match message_type {
+            NLMSG_DONE => {
+                parse_done(flags, payload)?;
+                self.done = true;
+                Ok(())
+            }
+            NLMSG_ERROR => Err(parse_request_error(flags, payload, self.request)?),
+            NFT_MSG_NEWSETELEM if flags == NLM_F_MULTI => {
+                let elements = parse_set_element_payload(payload, self.expected_generation)?;
+                if elements.iter().any(|element| {
+                    element.table != self.expected_table || element.set != self.expected_set
+                }) || self
+                    .snapshot
+                    .set_elements
+                    .len()
+                    .checked_add(elements.len())
+                    .is_none_or(|length| length > MAX_OBSERVED_SET_ELEMENTS)
+                {
+                    return Err(RelayFenceError::UnexpectedPolicy);
+                }
+                self.snapshot.set_elements.extend(elements);
+                Ok(())
+            }
             _ => Err(RelayFenceError::Malformed),
         }
     }
@@ -2705,6 +3065,36 @@ impl NetfilterCollector {
         state.finish()
     }
 
+    fn collect_set_element_dump(
+        &mut self,
+        expected_generation: u32,
+        table: &[u8],
+        set: &[u8],
+        snapshot: &mut RulesetSnapshot,
+        deadline: HardDeadline,
+        budget: &mut CollectionBudget,
+    ) -> Result<(), RelayFenceError> {
+        let sequence = self.next_sequence()?;
+        let request = encode_set_element_dump_request(sequence, table, set)?;
+        send_bounded(&self.socket, &request, deadline)?;
+        let mut state = SetElementDumpState {
+            sequence,
+            local_port: self.local_port,
+            expected_generation,
+            expected_table: table,
+            expected_set: set,
+            request: &request,
+            snapshot,
+            done: false,
+        };
+        while !state.done {
+            let (bytes, sender) = receive_bounded(&self.socket, deadline, budget)?;
+            state.ingest(sender, &bytes, budget)?;
+        }
+        deadline.ensure_remaining()?;
+        state.finish()
+    }
+
     fn collect_ruleset(
         &mut self,
         expected_generation: u32,
@@ -2714,6 +3104,21 @@ impl NetfilterCollector {
         let mut snapshot = RulesetSnapshot::default();
         for kind in ObjectKind::ALL {
             self.collect_object_dump(kind, expected_generation, &mut snapshot, deadline, budget)?;
+        }
+        let set_identities = snapshot
+            .sets
+            .iter()
+            .map(|set| (set.table.clone(), set.name.clone()))
+            .collect::<Vec<_>>();
+        for (table, set) in set_identities {
+            self.collect_set_element_dump(
+                expected_generation,
+                &table,
+                &set,
+                &mut snapshot,
+                deadline,
+                budget,
+            )?;
         }
         Ok(snapshot)
     }
@@ -2760,6 +3165,30 @@ fn encode_object_dump_request(
     sequence: u32,
 ) -> Result<[u8; REQUEST_LEN], RelayFenceError> {
     encode_fixed_request(kind.request_type(), NLM_F_REQUEST | NLM_F_DUMP, sequence)
+}
+
+fn encode_set_element_dump_request(
+    sequence: u32,
+    table: &[u8],
+    set: &[u8],
+) -> Result<Vec<u8>, RelayFenceError> {
+    let mut payload = encode_request_nfgen(NFPROTO_INET, 0);
+    encode_attribute(
+        &mut payload,
+        NFTA_SET_ELEM_LIST_TABLE,
+        &encode_nul_string(table)?,
+    )?;
+    encode_attribute(
+        &mut payload,
+        NFTA_SET_ELEM_LIST_SET,
+        &encode_nul_string(set)?,
+    )?;
+    encode_mutation_message(
+        NFT_MSG_GETSETELEM,
+        NLM_F_REQUEST | NLM_F_DUMP,
+        sequence,
+        &payload,
+    )
 }
 
 fn encode_fixed_request(
@@ -3071,6 +3500,204 @@ fn parse_rule_payload(
     })
 }
 
+fn parse_set_payload(
+    payload: &[u8],
+    expected_generation: u32,
+) -> Result<SetRecord, RelayFenceError> {
+    let (header, attributes) = split_nfgenmsg(payload)?;
+    validate_object_nfgen(header, expected_generation)?;
+    let attributes = parse_attributes(attributes, MAX_SET_ATTRIBUTES)?;
+    let mut table = None;
+    let mut name = None;
+    let mut flags = None;
+    let mut key_type = None;
+    let mut key_length = None;
+    let mut policy = None;
+    let mut size = None;
+    let mut handle = None;
+    let mut timeout_milliseconds = None;
+    let mut gc_interval = None;
+    let mut userdata = None;
+    let mut pad = None;
+    for attribute in attributes {
+        if attribute.flags != 0 {
+            return Err(RelayFenceError::Malformed);
+        }
+        match attribute.kind {
+            NFTA_SET_TABLE => set_once(
+                &mut table,
+                read_nul_string(attribute.payload, MAX_TABLE_NAME_BYTES)?,
+            )?,
+            NFTA_SET_NAME => set_once(
+                &mut name,
+                read_nul_string(attribute.payload, MAX_TABLE_NAME_BYTES)?,
+            )?,
+            NFTA_SET_FLAGS => {
+                let value = read_exact_be_u32(attribute.payload)?;
+                if value & !NFT_SET_ALLOWED_FLAGS != 0 {
+                    return Err(RelayFenceError::UnexpectedPolicy);
+                }
+                set_once(&mut flags, value)?;
+            }
+            NFTA_SET_KEY_TYPE => {
+                set_once(&mut key_type, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_SET_KEY_LEN => {
+                set_once(&mut key_length, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_SET_POLICY => {
+                set_once(&mut policy, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_SET_DESC => set_once(&mut size, parse_set_description(attribute.payload)?)?,
+            NFTA_SET_HANDLE => {
+                set_once(&mut handle, read_exact_be_u64(attribute.payload)?)?;
+            }
+            NFTA_SET_TIMEOUT => {
+                set_once(
+                    &mut timeout_milliseconds,
+                    read_exact_be_u64(attribute.payload)?,
+                )?;
+            }
+            NFTA_SET_GC_INTERVAL => {
+                set_once(&mut gc_interval, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_SET_USERDATA => {
+                if attribute.payload.len() > MAX_TABLE_USERDATA_BYTES {
+                    return Err(RelayFenceError::Limit);
+                }
+                set_once(&mut userdata, attribute.payload.to_vec())?;
+            }
+            NFTA_SET_PAD => {
+                if !attribute.payload.is_empty() {
+                    return Err(RelayFenceError::Malformed);
+                }
+                set_once(&mut pad, true)?;
+            }
+            NFTA_SET_DATA_TYPE | NFTA_SET_DATA_LEN | NFTA_SET_ID | NFTA_SET_OBJ_TYPE
+            | NFTA_SET_EXPR | NFTA_SET_EXPRESSIONS => {
+                return Err(RelayFenceError::UnexpectedPolicy);
+            }
+            _ => return Err(RelayFenceError::Malformed),
+        }
+    }
+    Ok(SetRecord {
+        family: header.family,
+        table: table.ok_or(RelayFenceError::Malformed)?,
+        name: name.ok_or(RelayFenceError::Malformed)?,
+        flags: flags.unwrap_or(0),
+        key_type: key_type.ok_or(RelayFenceError::Malformed)?,
+        key_length: key_length.ok_or(RelayFenceError::Malformed)?,
+        policy: policy.unwrap_or(0),
+        size: size.ok_or(RelayFenceError::Malformed)?,
+        handle: handle.ok_or(RelayFenceError::Malformed)?,
+        timeout_milliseconds,
+        gc_interval,
+        userdata,
+        pad: pad.unwrap_or(false),
+    })
+}
+
+fn parse_set_description(payload: &[u8]) -> Result<u32, RelayFenceError> {
+    let attributes = parse_attributes(payload, MAX_SET_DESCRIPTION_ATTRIBUTES)?;
+    let mut size = None;
+    for attribute in attributes {
+        if attribute.flags != 0 {
+            return Err(RelayFenceError::Malformed);
+        }
+        match attribute.kind {
+            NFTA_SET_DESC_SIZE => {
+                set_once(&mut size, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_SET_DESC_CONCAT => return Err(RelayFenceError::UnexpectedPolicy),
+            _ => return Err(RelayFenceError::Malformed),
+        }
+    }
+    size.ok_or(RelayFenceError::Malformed)
+}
+
+fn parse_set_element_payload(
+    payload: &[u8],
+    expected_generation: u32,
+) -> Result<Vec<SetElementRecord>, RelayFenceError> {
+    let (header, attributes) = split_nfgenmsg(payload)?;
+    validate_object_nfgen(header, expected_generation)?;
+    let attributes = parse_attributes(attributes, MAX_SET_ELEMENT_LIST_ATTRIBUTES)?;
+    let mut table = None;
+    let mut set = None;
+    let mut elements = None;
+    for attribute in attributes {
+        if attribute.flags != 0 {
+            return Err(RelayFenceError::Malformed);
+        }
+        match attribute.kind {
+            NFTA_SET_ELEM_LIST_TABLE => set_once(
+                &mut table,
+                read_nul_string(attribute.payload, MAX_TABLE_NAME_BYTES)?,
+            )?,
+            NFTA_SET_ELEM_LIST_SET => set_once(
+                &mut set,
+                read_nul_string(attribute.payload, MAX_TABLE_NAME_BYTES)?,
+            )?,
+            NFTA_SET_ELEM_LIST_ELEMENTS => {
+                set_once(&mut elements, parse_set_elements(attribute.payload)?)?;
+            }
+            NFTA_SET_ELEM_LIST_SET_ID => return Err(RelayFenceError::UnexpectedPolicy),
+            _ => return Err(RelayFenceError::Malformed),
+        }
+    }
+    let table = table.ok_or(RelayFenceError::Malformed)?;
+    let set = set.ok_or(RelayFenceError::Malformed)?;
+    let elements = elements.ok_or(RelayFenceError::Malformed)?;
+    Ok(elements
+        .into_iter()
+        .map(
+            |(key, timeout_milliseconds, expiration_milliseconds)| SetElementRecord {
+                family: header.family,
+                table: table.clone(),
+                set: set.clone(),
+                key,
+                timeout_milliseconds,
+                expiration_milliseconds,
+            },
+        )
+        .collect())
+}
+
+fn parse_set_elements(payload: &[u8]) -> Result<Vec<(Vec<u8>, u64, u64)>, RelayFenceError> {
+    let elements = parse_attributes(payload, MAX_OBSERVED_SET_ELEMENTS)?;
+    let mut parsed = Vec::with_capacity(elements.len());
+    for element in elements {
+        if element.kind != NFTA_LIST_ELEM || element.flags != 0 {
+            return Err(RelayFenceError::Malformed);
+        }
+        let attributes = parse_attributes(element.payload, MAX_SET_ELEMENT_ATTRIBUTES)?;
+        let mut index = 0;
+        let key = attributes.get(index).ok_or(RelayFenceError::Malformed)?;
+        if key.kind != NFTA_SET_ELEM_KEY || key.flags != 0 {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        }
+        let key = parse_value_data(key.payload)?;
+        index = index.checked_add(1).ok_or(RelayFenceError::Limit)?;
+        let timeout_milliseconds = parse_aligned_u64(
+            &attributes,
+            &mut index,
+            NFTA_SET_ELEM_TIMEOUT,
+            NFTA_SET_ELEM_PAD,
+        )?;
+        let expiration_milliseconds = parse_aligned_u64(
+            &attributes,
+            &mut index,
+            NFTA_SET_ELEM_EXPIRATION,
+            NFTA_SET_ELEM_PAD,
+        )?;
+        if index != attributes.len() {
+            return Err(RelayFenceError::UnexpectedPolicy);
+        }
+        parsed.push((key, timeout_milliseconds, expiration_milliseconds));
+    }
+    Ok(parsed)
+}
+
 fn parse_expressions(payload: &[u8]) -> Result<Vec<ObservedExpression>, RelayFenceError> {
     let elements = parse_attributes(payload, MAX_RULE_EXPRESSIONS)?;
     if !matches!(
@@ -3109,6 +3736,7 @@ fn parse_expression(payload: &[u8]) -> Result<ObservedExpression, RelayFenceErro
     let data = data.ok_or(RelayFenceError::Malformed)?;
     match name.as_deref().ok_or(RelayFenceError::Malformed)? {
         b"meta" => parse_meta_expression(data),
+        b"lookup" => parse_lookup_expression(data),
         b"cmp" => parse_compare_expression(data),
         b"payload" => parse_payload_expression(data),
         b"byteorder" => parse_byteorder_expression(data),
@@ -3117,6 +3745,39 @@ fn parse_expression(payload: &[u8]) -> Result<ObservedExpression, RelayFenceErro
         b"immediate" => parse_immediate_expression(data),
         _ => Err(RelayFenceError::UnexpectedPolicy),
     }
+}
+
+fn parse_lookup_expression(payload: &[u8]) -> Result<ObservedExpression, RelayFenceError> {
+    let attributes = parse_attributes(payload, MAX_EXPRESSION_DATA_ATTRIBUTES)?;
+    let mut set = None;
+    let mut source = None;
+    let mut flags = None;
+    for attribute in attributes {
+        if attribute.flags != 0 {
+            return Err(RelayFenceError::Malformed);
+        }
+        match attribute.kind {
+            NFTA_LOOKUP_SET => set_once(
+                &mut set,
+                read_nul_string(attribute.payload, MAX_TABLE_NAME_BYTES)?,
+            )?,
+            NFTA_LOOKUP_SREG => {
+                set_once(&mut source, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_LOOKUP_FLAGS => {
+                set_once(&mut flags, read_exact_be_u32(attribute.payload)?)?;
+            }
+            NFTA_LOOKUP_DREG | NFTA_LOOKUP_SET_ID => {
+                return Err(RelayFenceError::UnexpectedPolicy);
+            }
+            _ => return Err(RelayFenceError::Malformed),
+        }
+    }
+    Ok(ObservedExpression::Lookup {
+        set: set.ok_or(RelayFenceError::Malformed)?,
+        source: source.ok_or(RelayFenceError::Malformed)?,
+        flags: flags.unwrap_or(0),
+    })
 }
 
 fn parse_meta_expression(payload: &[u8]) -> Result<ObservedExpression, RelayFenceError> {
@@ -3529,7 +4190,7 @@ fn parse_done(flags: u16, payload: &[u8]) -> Result<(), RelayFenceError> {
 fn parse_request_error(
     flags: u16,
     payload: &[u8],
-    request: &[u8; REQUEST_LEN],
+    request: &[u8],
 ) -> Result<RelayFenceError, RelayFenceError> {
     if flags != 0 || payload.len() != 4 + request.len() {
         return Err(RelayFenceError::Malformed);
@@ -3724,6 +4385,7 @@ mod tests {
     };
     const POLICY_HANDLES: PolicyHandles = PolicyHandles {
         baseline: BASELINE_HANDLES,
+        live_set: 16,
         rules: [13, 14, 15],
     };
 
@@ -3732,7 +4394,7 @@ mod tests {
     }
 
     fn fixture_specification() -> RelayFenceSpec {
-        RelayFenceSpec::derive(
+        let mut specification = RelayFenceSpec::derive(
             &fixture_identity(),
             17,
             29,
@@ -3741,7 +4403,11 @@ mod tests {
             1_700_000_900,
             1_700_000_000,
         )
-        .expect("fixed active Relay fence")
+        .expect("fixed active Relay fence");
+        specification
+            .bind_live_gate_timeout(Duration::from_secs(899))
+            .expect("fixed monotonic live gate");
+        specification
     }
 
     fn fixture_restricted_snapshot(identity: &RelayFenceIdentity) -> RulesetSnapshot {
@@ -3763,7 +4429,32 @@ mod tests {
                 pad: false,
             })
             .collect();
-        fixture_snapshot(&specification.identity, 3, rules)
+        let mut snapshot = fixture_snapshot(&specification.identity, 3, rules);
+        snapshot.tables[0].use_count = 2;
+        snapshot.sets.push(SetRecord {
+            family: NFPROTO_INET,
+            table: specification.identity.table_name.clone(),
+            name: LIVE_SET_NAME.to_vec(),
+            flags: NFT_SET_ALLOWED_FLAGS,
+            key_type: NFT_DATA_VALUE,
+            key_length: 1,
+            policy: 0,
+            size: 1,
+            handle: POLICY_HANDLES.live_set,
+            timeout_milliseconds: None,
+            gc_interval: None,
+            userdata: None,
+            pad: false,
+        });
+        snapshot.set_elements.push(SetElementRecord {
+            family: NFPROTO_INET,
+            table: specification.identity.table_name.clone(),
+            set: LIVE_SET_NAME.to_vec(),
+            key: LIVE_SET_KEY.to_vec(),
+            timeout_milliseconds: specification.live_gate_timeout_milliseconds,
+            expiration_milliseconds: specification.live_gate_timeout_milliseconds - 1,
+        });
+        snapshot
     }
 
     fn fixture_snapshot(
@@ -3799,6 +4490,8 @@ mod tests {
                 userdata: None,
             }],
             rules,
+            sets: Vec::new(),
+            set_elements: Vec::new(),
         }
     }
 
@@ -3978,6 +4671,49 @@ mod tests {
     }
 
     #[test]
+    fn live_gate_timeout_is_single_bind_bounded_and_conservatively_canonical() {
+        let derive = || {
+            RelayFenceSpec::derive(
+                &fixture_identity(),
+                17,
+                29,
+                80,
+                40,
+                1_700_000_900,
+                1_700_000_000,
+            )
+            .expect("fresh active Relay fence")
+        };
+
+        let mut maximum = derive();
+        maximum
+            .bind_live_gate_timeout(Duration::from_secs(MAX_FENCE_TTL_SECONDS))
+            .expect("bounded maximum timeout");
+        assert_eq!(maximum.live_gate_timeout_milliseconds, 899_000);
+        assert!(matches!(
+            maximum.bind_live_gate_timeout(Duration::from_secs(2)),
+            Err(RelayFenceError::Invalid)
+        ));
+
+        let mut fractional = derive();
+        fractional
+            .bind_live_gate_timeout(Duration::from_millis(2_999))
+            .expect("fractional timeout with conservative slack");
+        assert_eq!(fractional.live_gate_timeout_milliseconds, 2_000);
+
+        let mut too_short = derive();
+        assert!(matches!(
+            too_short.bind_live_gate_timeout(Duration::from_millis(1_009)),
+            Err(RelayFenceError::Expired)
+        ));
+        let mut too_long = derive();
+        assert!(matches!(
+            too_long.bind_live_gate_timeout(Duration::from_secs(MAX_FENCE_TTL_SECONDS + 1)),
+            Err(RelayFenceError::Invalid)
+        ));
+    }
+
+    #[test]
     fn direction_rules_bind_both_interfaces_exact_hosts_expiry_and_rates() {
         let specification = fixture_specification();
         assert_eq!(NFT_BYTEORDER_HTON, 1);
@@ -3996,17 +4732,22 @@ mod tests {
                 if value == &specification.relay_exit_ifindex.to_ne_bytes()
         ));
         assert!(matches!(
-            &up[11],
+            &up[10],
+            ObservedExpression::Lookup { set, source, flags }
+                if set == LIVE_SET_NAME && *source == NFT_REG_1 && *flags == 0
+        ));
+        assert!(matches!(
+            &up[12],
             ObservedExpression::Compare { value, .. }
                 if value == &specification.client_address.octets()
         ));
         assert!(matches!(
-            &up[13],
+            &up[14],
             ObservedExpression::Compare { value, .. }
                 if value == &specification.exit_address.octets()
         ));
         assert!(matches!(
-            &up[15],
+            &up[16],
             ObservedExpression::Byteorder {
                 operation: NFT_BYTEORDER_HTON,
                 length: 8,
@@ -4015,7 +4756,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &up[16],
+            &up[17],
             ObservedExpression::Compare {
                 operation: NFT_CMP_LT,
                 value,
@@ -4023,13 +4764,13 @@ mod tests {
             } if value == &specification.expires_at_unix_nanos.to_be_bytes()
         ));
         assert!(matches!(
-            &up[17],
+            &up[18],
             ObservedExpression::Limit { rate, kind, .. }
                 if *rate == specification.maximum_up_bytes_per_second
                     && *kind == NFT_LIMIT_PKT_BYTES
         ));
         assert!(matches!(
-            &down[17],
+            &down[18],
             ObservedExpression::Limit { rate, .. }
                 if *rate == specification.maximum_down_bytes_per_second
         ));
@@ -4059,12 +4800,14 @@ mod tests {
                     .expect("activate rules transaction"),
                 vec![
                     NFNL_MSG_BATCH_BEGIN,
+                    NFT_MSG_NEWSET,
+                    NFT_MSG_NEWSETELEM,
                     NFT_MSG_NEWRULE,
                     NFT_MSG_NEWRULE,
                     NFT_MSG_NEWRULE,
                     NFNL_MSG_BATCH_END,
                 ],
-                3,
+                5,
                 TEST_GENERATION + 1,
             ),
             (
@@ -4074,9 +4817,10 @@ mod tests {
                     NFT_MSG_DELRULE,
                     NFT_MSG_DELRULE,
                     NFT_MSG_DELRULE,
+                    NFT_MSG_DELSET,
                     NFNL_MSG_BATCH_END,
                 ],
-                3,
+                4,
                 TEST_GENERATION + 2,
             ),
             (
@@ -4100,14 +4844,230 @@ mod tests {
             );
             assert_generation_pin(&transaction, generation);
             assert!(transaction.bytes.len() < MAX_MUTATION_BATCH_BYTES);
-            assert!(
-                !transaction
-                    .requests
-                    .iter()
-                    .any(|request| read_ne_u16(&request.header, 4).ok() == Some(NFT_MSG_NEWSET))
-            );
             assert!(!transaction.bytes.windows(3).any(|window| window == b"nat"));
         }
+    }
+
+    #[test]
+    fn activation_encodes_one_timed_set_and_element() {
+        let specification = fixture_specification();
+        let transaction =
+            encode_activate_rules_transaction(&specification, TEST_GENERATION).expect("activation");
+        let frames = transaction_frames(&transaction);
+
+        let set = frame_of_type(&frames, NFT_MSG_NEWSET);
+        assert_eq!(
+            read_ne_u16(set, 6).expect("set flags"),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+        );
+        let (_, set_payload) = split_nfgenmsg(&set[NLMSG_HEADER_LEN..]).expect("set request nfgen");
+        let set_attributes =
+            parse_attributes(set_payload, MAX_SET_ATTRIBUTES).expect("set request attributes");
+        assert_eq!(
+            be_u32_attribute(&set_attributes, NFTA_SET_FLAGS),
+            NFT_SET_TIMEOUT
+        );
+        assert_eq!(
+            be_u32_attribute(&set_attributes, NFTA_SET_KEY_TYPE),
+            NFT_DATA_VALUE
+        );
+        assert_eq!(be_u32_attribute(&set_attributes, NFTA_SET_KEY_LEN), 1);
+        assert_eq!(
+            be_u32_attribute(&set_attributes, NFTA_SET_ID),
+            LIVE_SET_TRANSACTION_ID
+        );
+        let descriptions = attributes_of_kind(&set_attributes, NFTA_SET_DESC);
+        let [description] = descriptions.as_slice() else {
+            panic!("one set description")
+        };
+        assert_eq!(description.flags, NLA_F_NESTED);
+        assert_eq!(
+            be_u32_attribute(
+                &parse_attributes(description.payload, MAX_SET_DESCRIPTION_ATTRIBUTES)
+                    .expect("set description"),
+                NFTA_SET_DESC_SIZE,
+            ),
+            1
+        );
+
+        let element = frame_of_type(&frames, NFT_MSG_NEWSETELEM);
+        assert_eq!(
+            read_ne_u16(element, 6).expect("element flags"),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+        );
+        let (_, element_payload) =
+            split_nfgenmsg(&element[NLMSG_HEADER_LEN..]).expect("element request nfgen");
+        let element_list = parse_attributes(element_payload, MAX_SET_ELEMENT_LIST_ATTRIBUTES)
+            .expect("element list attributes");
+        assert_eq!(
+            be_u32_attribute(&element_list, NFTA_SET_ELEM_LIST_SET_ID),
+            LIVE_SET_TRANSACTION_ID
+        );
+        let element_lists = attributes_of_kind(&element_list, NFTA_SET_ELEM_LIST_ELEMENTS);
+        let [elements] = element_lists.as_slice() else {
+            panic!("one elements list")
+        };
+        assert_eq!(elements.flags, NLA_F_NESTED);
+        let nested_elements =
+            parse_attributes(elements.payload, 1).expect("singleton element list");
+        let [nested_element] = nested_elements.as_slice() else {
+            panic!("one live element")
+        };
+        assert_eq!(nested_element.kind, NFTA_LIST_ELEM);
+        assert_eq!(nested_element.flags, NLA_F_NESTED);
+        let element_attributes =
+            parse_attributes(nested_element.payload, MAX_SET_ELEMENT_ATTRIBUTES)
+                .expect("live element attributes");
+        let keys = attributes_of_kind(&element_attributes, NFTA_SET_ELEM_KEY);
+        let [key] = keys.as_slice() else {
+            panic!("one live key")
+        };
+        assert_eq!(key.flags, NLA_F_NESTED);
+        assert_eq!(
+            parse_value_data(key.payload).expect("live key"),
+            LIVE_SET_KEY
+        );
+        assert_eq!(
+            be_u64_attribute(&element_attributes, NFTA_SET_ELEM_TIMEOUT),
+            specification.live_gate_timeout_milliseconds
+        );
+        assert!(attributes_of_kind(&element_attributes, NFTA_SET_ELEM_EXPIRATION).is_empty());
+    }
+
+    #[test]
+    fn activation_binds_both_accept_lookups_to_the_transaction_set_id() {
+        let transaction =
+            encode_activate_rules_transaction(&fixture_specification(), TEST_GENERATION)
+                .expect("activation");
+        let frames = transaction_frames(&transaction);
+        let rules = frames
+            .iter()
+            .copied()
+            .filter(|frame| read_ne_u16(frame, 4).ok() == Some(NFT_MSG_NEWRULE))
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 3);
+        for rule in &rules[..2] {
+            let (_, payload) =
+                split_nfgenmsg(&rule[NLMSG_HEADER_LEN..]).expect("rule request nfgen");
+            let attributes =
+                parse_attributes(payload, MAX_RULE_ATTRIBUTES).expect("rule attributes");
+            let expression_lists = attributes_of_kind(&attributes, NFTA_RULE_EXPRESSIONS);
+            let [expressions] = expression_lists.as_slice() else {
+                panic!("one expression list")
+            };
+            let expression_list = parse_attributes(expressions.payload, MAX_RULE_EXPRESSIONS)
+                .expect("expression list");
+            let lookup = expression_list
+                .iter()
+                .find_map(|element| {
+                    let attributes =
+                        parse_attributes(element.payload, MAX_EXPRESSION_ATTRIBUTES).ok()?;
+                    let name = attributes_of_kind(&attributes, NFTA_EXPR_NAME);
+                    (name.as_slice().first()?.payload == b"lookup\0").then_some(attributes)
+                })
+                .expect("one lookup expression");
+            let lookup_data_attributes = attributes_of_kind(&lookup, NFTA_EXPR_DATA);
+            let [lookup_data] = lookup_data_attributes.as_slice() else {
+                panic!("one lookup data attribute")
+            };
+            let lookup_attributes =
+                parse_attributes(lookup_data.payload, MAX_EXPRESSION_DATA_ATTRIBUTES)
+                    .expect("lookup data");
+            assert_eq!(
+                be_u32_attribute(&lookup_attributes, NFTA_LOOKUP_SET_ID),
+                LIVE_SET_TRANSACTION_ID
+            );
+        }
+    }
+
+    #[test]
+    fn kernel_set_dumps_are_exact_bounded_and_request_correlated() {
+        let specification = fixture_specification();
+        let set_payload = kernel_set_dump_payload(&specification);
+        assert_eq!(
+            parse_set_payload(&set_payload, TEST_GENERATION).expect("canonical set dump"),
+            SetRecord {
+                family: NFPROTO_INET,
+                table: specification.identity.table_name.clone(),
+                name: LIVE_SET_NAME.to_vec(),
+                flags: NFT_SET_TIMEOUT,
+                key_type: NFT_DATA_VALUE,
+                key_length: 1,
+                policy: 0,
+                size: 1,
+                handle: POLICY_HANDLES.live_set,
+                timeout_milliseconds: None,
+                gc_interval: None,
+                userdata: None,
+                pad: false,
+            }
+        );
+
+        let expiration = specification.live_gate_timeout_milliseconds - 1_000;
+        let element_payload = kernel_set_element_dump_payload(&specification, expiration);
+        let expected_element = SetElementRecord {
+            family: NFPROTO_INET,
+            table: specification.identity.table_name.clone(),
+            set: LIVE_SET_NAME.to_vec(),
+            key: LIVE_SET_KEY.to_vec(),
+            timeout_milliseconds: specification.live_gate_timeout_milliseconds,
+            expiration_milliseconds: expiration,
+        };
+        assert_eq!(
+            parse_set_element_payload(&element_payload, TEST_GENERATION)
+                .expect("canonical element dump"),
+            vec![expected_element]
+        );
+
+        let request = encode_set_element_dump_request(
+            TEST_GENERATION,
+            &specification.identity.table_name,
+            LIVE_SET_NAME,
+        )
+        .expect("targeted dump request");
+        let reply = netlink_frame(
+            NFT_MSG_NEWSETELEM,
+            NLM_F_MULTI,
+            TEST_GENERATION,
+            TEST_PORT,
+            &element_payload,
+        );
+        let done = netlink_frame(NLMSG_DONE, NLM_F_MULTI, TEST_GENERATION, TEST_PORT, &[]);
+        let mut snapshot = RulesetSnapshot::default();
+        let mut state = SetElementDumpState {
+            sequence: TEST_GENERATION,
+            local_port: TEST_PORT,
+            expected_generation: TEST_GENERATION,
+            expected_table: &specification.identity.table_name,
+            expected_set: LIVE_SET_NAME,
+            request: &request,
+            snapshot: &mut snapshot,
+            done: false,
+        };
+        state
+            .ingest_frame(&reply)
+            .expect("correlated element reply");
+        state
+            .ingest_frame(&done)
+            .expect("correlated dump completion");
+        state.finish().expect("complete targeted dump");
+        assert_eq!(snapshot.set_elements.len(), 1);
+
+        let mut wrong_snapshot = RulesetSnapshot::default();
+        let mut wrong_sequence = SetElementDumpState {
+            sequence: TEST_GENERATION + 1,
+            local_port: TEST_PORT,
+            expected_generation: TEST_GENERATION,
+            expected_table: &specification.identity.table_name,
+            expected_set: LIVE_SET_NAME,
+            request: &request,
+            snapshot: &mut wrong_snapshot,
+            done: false,
+        };
+        assert!(matches!(
+            wrong_sequence.ingest_frame(&reply),
+            Err(RelayFenceError::Malformed)
+        ));
     }
 
     #[test]
@@ -4118,6 +5078,10 @@ mod tests {
         assert_eq!(
             delete_handles(&deactivation, NFT_MSG_DELRULE, NFTA_RULE_HANDLE),
             vec![15, 14, 13]
+        );
+        assert_eq!(
+            delete_handles(&deactivation, NFT_MSG_DELSET, NFTA_SET_HANDLE),
+            vec![POLICY_HANDLES.live_set]
         );
 
         let restricted = restricted_journal(TEST_GENERATION + 3);
@@ -4175,13 +5139,13 @@ mod tests {
         }
 
         let mut changed_address = fixture_active_snapshot(&specification);
-        changed_address.rules[0].expressions[11] = ObservedExpression::Compare {
+        changed_address.rules[0].expressions[12] = ObservedExpression::Compare {
             source: NFT_REG_1,
             operation: NFT_CMP_EQ,
             value: Ipv6Addr::LOCALHOST.octets().to_vec(),
         };
         let mut changed_expiry = fixture_active_snapshot(&specification);
-        changed_expiry.rules[1].expressions[16] = ObservedExpression::Compare {
+        changed_expiry.rules[1].expressions[17] = ObservedExpression::Compare {
             source: NFT_REG_1,
             operation: NFT_CMP_LT,
             value: 1_u64.to_be_bytes().to_vec(),
@@ -4192,6 +5156,37 @@ mod tests {
         duplicate.position = Some(15);
         extra_rule.rules.push(duplicate);
         for substituted in [changed_address, changed_expiry, extra_rule] {
+            assert!(
+                substituted
+                    .exact_active_observation(&specification, false)
+                    .is_err()
+            );
+        }
+
+        let mut missing_set = fixture_active_snapshot(&specification);
+        missing_set.sets.clear();
+        let mut missing_element = fixture_active_snapshot(&specification);
+        missing_element.set_elements.clear();
+        let mut expired_element = fixture_active_snapshot(&specification);
+        expired_element.set_elements[0].expiration_milliseconds = 0;
+        let mut changed_key = fixture_active_snapshot(&specification);
+        changed_key.set_elements[0].key = vec![NFPROTO_IPV4];
+        let mut changed_timeout = fixture_active_snapshot(&specification);
+        changed_timeout.set_elements[0].timeout_milliseconds += 1_000;
+        let mut missing_lookup = fixture_active_snapshot(&specification);
+        missing_lookup.rules[0].expressions[10] = ObservedExpression::Compare {
+            source: NFT_REG_1,
+            operation: NFT_CMP_EQ,
+            value: vec![NFPROTO_IPV6],
+        };
+        for substituted in [
+            missing_set,
+            missing_element,
+            expired_element,
+            changed_key,
+            changed_timeout,
+            missing_lookup,
+        ] {
             assert!(
                 substituted
                     .exact_active_observation(&specification, false)
@@ -4471,6 +5466,136 @@ mod tests {
         reordered.extend(encoded_attribute(NFTA_LIMIT_PAD, &[]));
         reordered.extend(canonical_limit.into_iter().skip(16));
         assert!(parse_limit_expression(&reordered).is_err());
+    }
+
+    fn kernel_set_dump_payload(specification: &RelayFenceSpec) -> Vec<u8> {
+        let mut description = Vec::new();
+        encode_attribute(&mut description, NFTA_SET_DESC_SIZE, &1_u32.to_be_bytes())
+            .expect("set description size");
+        let mut payload =
+            encode_request_nfgen(NFPROTO_INET, generation_resource_id(TEST_GENERATION));
+        for (kind, value) in [
+            (
+                NFTA_SET_TABLE,
+                encode_nul_string(&specification.identity.table_name).expect("table name"),
+            ),
+            (
+                NFTA_SET_NAME,
+                encode_nul_string(LIVE_SET_NAME).expect("set name"),
+            ),
+            (
+                NFTA_SET_HANDLE,
+                POLICY_HANDLES.live_set.to_be_bytes().to_vec(),
+            ),
+            (NFTA_SET_FLAGS, NFT_SET_TIMEOUT.to_be_bytes().to_vec()),
+            (NFTA_SET_KEY_TYPE, NFT_DATA_VALUE.to_be_bytes().to_vec()),
+            (NFTA_SET_KEY_LEN, 1_u32.to_be_bytes().to_vec()),
+            (NFTA_SET_DESC, description),
+        ] {
+            encode_attribute(&mut payload, kind, &value).expect("set dump attribute");
+        }
+        payload
+    }
+
+    fn kernel_set_element_dump_payload(
+        specification: &RelayFenceSpec,
+        expiration_milliseconds: u64,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        encode_attribute(&mut data, NFTA_DATA_VALUE, &LIVE_SET_KEY).expect("element key data");
+        let mut element = Vec::new();
+        encode_attribute(&mut element, NFTA_SET_ELEM_KEY, &data).expect("element key");
+        encode_attribute(&mut element, NFTA_SET_ELEM_PAD, &[]).expect("timeout alignment");
+        encode_attribute(
+            &mut element,
+            NFTA_SET_ELEM_TIMEOUT,
+            &specification.live_gate_timeout_milliseconds.to_be_bytes(),
+        )
+        .expect("element timeout");
+        encode_attribute(&mut element, NFTA_SET_ELEM_PAD, &[]).expect("expiration alignment");
+        encode_attribute(
+            &mut element,
+            NFTA_SET_ELEM_EXPIRATION,
+            &expiration_milliseconds.to_be_bytes(),
+        )
+        .expect("element expiration");
+        let mut elements = Vec::new();
+        encode_attribute(&mut elements, NFTA_LIST_ELEM, &element).expect("element list item");
+        let mut payload =
+            encode_request_nfgen(NFPROTO_INET, generation_resource_id(TEST_GENERATION));
+        encode_attribute(
+            &mut payload,
+            NFTA_SET_ELEM_LIST_TABLE,
+            &encode_nul_string(&specification.identity.table_name).expect("table name"),
+        )
+        .expect("element table");
+        encode_attribute(
+            &mut payload,
+            NFTA_SET_ELEM_LIST_SET,
+            &encode_nul_string(LIVE_SET_NAME).expect("set name"),
+        )
+        .expect("element set");
+        encode_attribute(&mut payload, NFTA_SET_ELEM_LIST_ELEMENTS, &elements)
+            .expect("elements list");
+        payload
+    }
+
+    fn netlink_frame(
+        message_type: u16,
+        flags: u16,
+        sequence: u32,
+        port: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let length = NLMSG_HEADER_LEN + payload.len();
+        let mut frame = Vec::with_capacity(length);
+        frame.extend(u32::try_from(length).expect("frame length").to_ne_bytes());
+        frame.extend(message_type.to_ne_bytes());
+        frame.extend(flags.to_ne_bytes());
+        frame.extend(sequence.to_ne_bytes());
+        frame.extend(port.to_ne_bytes());
+        frame.extend(payload);
+        frame
+    }
+
+    fn frame_of_type<'a>(frames: &[&'a [u8]], expected_type: u16) -> &'a [u8] {
+        let matching = frames
+            .iter()
+            .copied()
+            .filter(|frame| read_ne_u16(frame, 4).ok() == Some(expected_type))
+            .collect::<Vec<_>>();
+        let [frame] = matching.as_slice() else {
+            panic!("one transaction frame of type {expected_type}")
+        };
+        frame
+    }
+
+    fn attributes_of_kind<'attributes, 'payload>(
+        attributes: &'attributes [Attribute<'payload>],
+        expected_kind: u16,
+    ) -> Vec<&'attributes Attribute<'payload>> {
+        attributes
+            .iter()
+            .filter(|attribute| attribute.kind == expected_kind)
+            .collect()
+    }
+
+    fn be_u32_attribute(attributes: &[Attribute<'_>], expected_kind: u16) -> u32 {
+        let matching = attributes_of_kind(attributes, expected_kind);
+        let [attribute] = matching.as_slice() else {
+            panic!("one u32 attribute of kind {expected_kind}")
+        };
+        assert_eq!(attribute.flags, 0);
+        read_exact_be_u32(attribute.payload).expect("u32 attribute value")
+    }
+
+    fn be_u64_attribute(attributes: &[Attribute<'_>], expected_kind: u16) -> u64 {
+        let matching = attributes_of_kind(attributes, expected_kind);
+        let [attribute] = matching.as_slice() else {
+            panic!("one u64 attribute of kind {expected_kind}")
+        };
+        assert_eq!(attribute.flags, 0);
+        read_exact_be_u64(attribute.payload).expect("u64 attribute value")
     }
 
     fn message_types(transaction: &MutationTransaction) -> Vec<u16> {

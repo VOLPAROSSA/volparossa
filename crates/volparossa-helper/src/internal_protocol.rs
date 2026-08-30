@@ -213,6 +213,9 @@ pub(crate) struct ActivateLeases {
     pub(crate) route_context_id: Vec<u8>,
     #[prost(message, repeated, tag = "2")]
     pub(crate) leases: Vec<LeaseActivation>,
+    /// Parent-frozen Linux `CLOCK_BOOTTIME` hard expiry for this exact route context.
+    #[prost(uint64, tag = "3")]
+    pub(crate) hard_expires_at_boottime_ns: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -732,6 +735,9 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
         }
         Operation::ActivateLeases(operation) => {
             route_id(&operation.route_context_id)?;
+            if operation.hard_expires_at_boottime_ns == 0 {
+                return Err(InternalProtocolError::Invalid);
+            }
             validate_lease_batch(&operation.leases, |lease| {
                 path_role(lease.path_id, lease.role)?;
                 let role = InternalEndpointRole::try_from(lease.role)
@@ -1145,6 +1151,7 @@ mod tests {
             }),
             internal_worker_request::Operation::ActivateLeases(ActivateLeases {
                 route_context_id: vec![1; 16],
+                hard_expires_at_boottime_ns: 1,
                 leases: vec![LeaseActivation {
                     path_id: 1,
                     role: InternalEndpointRole::Client as i32,
@@ -1294,6 +1301,7 @@ mod tests {
             request(internal_worker_request::Operation::ActivateLeases(
                 ActivateLeases {
                     route_context_id: vec![1; 16],
+                    hard_expires_at_boottime_ns: 1,
                     leases: vec![lease],
                 },
             ))
@@ -1318,6 +1326,16 @@ mod tests {
             missing_expiry.hard_expires_at_unix = 0;
             rejected(missing_expiry);
         }
+
+        let mut missing_boot_expiry = make(activation_with_role(InternalEndpointRole::Client));
+        let Some(internal_worker_request::Operation::ActivateLeases(operation)) =
+            missing_boot_expiry.operation.as_mut()
+        else {
+            panic!("activation fixture");
+        };
+        operation.hard_expires_at_boottime_ns = 0;
+        assert!(encode_request(&missing_boot_expiry).is_err());
+        assert!(decode_request(&missing_boot_expiry.encode_to_vec()).is_err());
 
         for role in [InternalEndpointRole::Client, InternalEndpointRole::Exit] {
             let mut rated = activation_with_role(role);
@@ -1370,6 +1388,7 @@ mod tests {
             request(internal_worker_request::Operation::ActivateLeases(
                 ActivateLeases {
                     route_context_id: vec![1; 16],
+                    hard_expires_at_boottime_ns: 1,
                     leases: relay_activations(&plans),
                 },
             )),

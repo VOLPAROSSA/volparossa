@@ -47,6 +47,7 @@ use nix::{
 };
 use rand_core::{OsRng, RngCore};
 use rustix::io::fcntl_dupfd_cloexec;
+use rustix::time::{ClockId, clock_gettime};
 use socket2::{Domain, Socket};
 use thiserror::Error;
 use tokio::{
@@ -2084,22 +2085,32 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
             return RelayFenceActivationOutcome::Recoverable;
         };
-        let active =
-            match relay_fence::activate_relay_fence_rules(restricted, specification, deadline) {
-                Ok(active) => active,
-                Err(failure) => {
-                    return match failure.authority {
-                        relay_fence::RelayFenceActivateAuthority::Restricted(restricted) => {
-                            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
-                            RelayFenceActivationOutcome::Recoverable
-                        }
-                        relay_fence::RelayFenceActivateAuthority::Indeterminate(_) => {
-                            self.relay_fence = None;
-                            RelayFenceActivationOutcome::Terminate
-                        }
-                    };
-                }
-            };
+        let Some(maximum_live_gate_timeout) =
+            relay_gate_timeout(operation.hard_expires_at_boottime_ns, deadline)
+        else {
+            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+            return RelayFenceActivationOutcome::Recoverable;
+        };
+        let active = match relay_fence::activate_relay_fence_rules(
+            restricted,
+            specification,
+            maximum_live_gate_timeout,
+            deadline,
+        ) {
+            Ok(active) => active,
+            Err(failure) => {
+                return match failure.authority {
+                    relay_fence::RelayFenceActivateAuthority::Restricted(restricted) => {
+                        self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                        RelayFenceActivationOutcome::Recoverable
+                    }
+                    relay_fence::RelayFenceActivateAuthority::Indeterminate(_) => {
+                        self.relay_fence = None;
+                        RelayFenceActivationOutcome::Terminate
+                    }
+                };
+            }
+        };
         let activation_baseline = relay_fence::verify_active_relay_fence(&active, deadline).ok();
         self.relay_fence = Some(WorkerRelayFence::Active {
             authority: Box::new(active),
@@ -2615,6 +2626,42 @@ fn current_unix_seconds() -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|age| age.as_secs())
+}
+
+fn relay_gate_timeout(
+    hard_expires_at_boottime_ns: u64,
+    deadline: HardDeadline,
+) -> Option<Duration> {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    const MAXIMUM_LIFETIME: Duration = Duration::from_secs(15 * 60);
+
+    // Reserve the complete remaining worker-operation budget before sampling BOOTTIME. A timeout
+    // installed at any successful commit point can therefore never outlive the frozen boundary.
+    let operation_budget = deadline.remaining().ok()?;
+    let now = clock_gettime(ClockId::Boottime);
+    let seconds = u64::try_from(now.tv_sec).ok()?;
+    let nanoseconds = u64::try_from(now.tv_nsec).ok()?;
+    if nanoseconds >= NANOS_PER_SECOND {
+        return None;
+    }
+    let now_nanos = seconds
+        .checked_mul(NANOS_PER_SECOND)?
+        .checked_add(nanoseconds)?;
+    let remaining_nanos = hard_expires_at_boottime_ns.checked_sub(now_nanos)?;
+    let maximum_live = Duration::from_nanos(remaining_nanos).checked_sub(operation_budget)?;
+    (!maximum_live.is_zero() && maximum_live <= MAXIMUM_LIFETIME).then_some(maximum_live)
+}
+
+#[cfg(test)]
+fn test_boottime_expiry() -> u64 {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    let now = clock_gettime(ClockId::Boottime);
+    u64::try_from(now.tv_sec)
+        .expect("nonnegative test boottime")
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|value| value.checked_add(u64::try_from(now.tv_nsec).ok()?))
+        .and_then(|value| value.checked_add(60 * NANOS_PER_SECOND))
+        .expect("bounded test boottime expiry")
 }
 
 fn prove_relay_ipv6_forwarding(
@@ -9235,6 +9282,7 @@ mod tests {
         .expect("client worker specification");
         ActivateLeases {
             route_context_id: route_context_id.to_vec(),
+            hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases: vec![crate::internal_protocol::LeaseActivation {
                 path_id: 1,
                 role: InternalEndpointRole::Client as i32,
@@ -9306,6 +9354,7 @@ mod tests {
         .expect("exit worker specification");
         ActivateLeases {
             route_context_id: route_context_id.to_vec(),
+            hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases: vec![crate::internal_protocol::LeaseActivation {
                 path_id: 1,
                 role: InternalEndpointRole::Exit as i32,
@@ -9434,6 +9483,7 @@ mod tests {
             .collect();
         ActivateLeases {
             route_context_id: route_context_id.to_vec(),
+            hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases,
         }
     }
@@ -9821,6 +9871,19 @@ mod tests {
             ));
             assert_eq!(context.kernel.calls, before);
         }
+    }
+
+    #[test]
+    fn relay_gate_timeout_is_bounded_by_frozen_boottime_and_operation_budget() {
+        let hard_expiry = test_boottime_expiry();
+        let timeout = relay_gate_timeout(
+            hard_expiry,
+            HardDeadline::after(Duration::from_secs(1)).expect("operation deadline"),
+        )
+        .expect("conservative live-gate timeout");
+        assert!(timeout > Duration::from_secs(58));
+        assert!(timeout < Duration::from_secs(60));
+        assert!(relay_gate_timeout(1, worker_deadline()).is_none());
     }
 
     #[test]

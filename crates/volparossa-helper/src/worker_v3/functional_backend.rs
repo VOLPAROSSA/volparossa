@@ -19,6 +19,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use rustix::time::{ClockId, clock_gettime};
 use volparossa_protocol::{
     ClientSessionCapability, ExitReservation, ProtocolError, RelayAuthorization, RelayReservation,
     RelayReservationRequest, ReplayCache, TimePolicy, VerifiedControlMessage, WireguardEndpoint,
@@ -104,6 +105,8 @@ struct OpenLineageKey {
     prepare_operation_digest: [u8; 32],
     setup_expires_at_unix: u64,
     hard_expires_at_unix: u64,
+    setup_expires_at_boottime_ns: u64,
+    hard_expires_at_boottime_ns: u64,
 }
 
 impl From<BackendLineage> for OpenLineageKey {
@@ -116,6 +119,8 @@ impl From<BackendLineage> for OpenLineageKey {
             prepare_operation_digest: value.prepare_operation_digest,
             setup_expires_at_unix: value.setup_expires_at_unix,
             hard_expires_at_unix: value.hard_expires_at_unix,
+            setup_expires_at_boottime_ns: value.setup_expires_at_boottime_ns,
+            hard_expires_at_boottime_ns: value.hard_expires_at_boottime_ns,
         }
     }
 }
@@ -931,6 +936,44 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
     }
 }
 
+fn current_boottime_nanos() -> Result<u64, BackendError> {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    let now = clock_gettime(ClockId::Boottime);
+    let seconds = u64::try_from(now.tv_sec).map_err(|_| BackendError::Unavailable)?;
+    let nanoseconds = u64::try_from(now.tv_nsec).map_err(|_| BackendError::Unavailable)?;
+    if nanoseconds >= NANOS_PER_SECOND {
+        return Err(BackendError::Unavailable);
+    }
+    seconds
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|value| value.checked_add(nanoseconds))
+        .ok_or(BackendError::Unavailable)
+}
+
+const fn boottime_lineage_is_well_formed(lineage: BackendLineage) -> bool {
+    lineage.setup_expires_at_boottime_ns != 0
+        && lineage.hard_expires_at_boottime_ns >= lineage.setup_expires_at_boottime_ns
+}
+
+const fn boottime_setup_and_hard_are_live(lineage: BackendLineage, now_ns: u64) -> bool {
+    now_ns < lineage.setup_expires_at_boottime_ns && now_ns < lineage.hard_expires_at_boottime_ns
+}
+
+fn ensure_setup_and_hard_are_live(lineage: BackendLineage) -> Result<(), BackendError> {
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| BackendError::Unavailable)?
+        .as_secs();
+    let now_boottime_ns = current_boottime_nanos()?;
+    if now_unix >= lineage.setup_expires_at_unix
+        || now_unix >= lineage.hard_expires_at_unix
+        || !boottime_setup_and_hard_are_live(lineage, now_boottime_ns)
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(())
+}
+
 fn validate_prepare_batch_binding(
     binding: BackendBinding,
     value: &PrepareLeaseBatch,
@@ -958,6 +1001,7 @@ fn validate_prepare_batch_binding(
         || value.setup_expires_at_unix != lineage.setup_expires_at_unix
         || value.hard_expires_at_unix != lineage.hard_expires_at_unix
         || value.hard_expires_at_unix < value.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
     {
         return Err(BackendError::Invalid);
     }
@@ -965,19 +1009,24 @@ fn validate_prepare_batch_binding(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| BackendError::Unavailable)?
         .as_secs();
-    let ttl_seconds = value
-        .hard_expires_at_unix
-        .checked_sub(now)
-        .filter(|ttl| *ttl != 0 && *ttl <= DEFAULT_MAX_TTL.as_secs())
+    let boottime_now_ns = current_boottime_nanos()?;
+    let ttl_ns = lineage
+        .hard_expires_at_boottime_ns
+        .checked_sub(boottime_now_ns)
+        .filter(|ttl| *ttl != 0)
         .ok_or(BackendError::Invalid)?;
-    if value.setup_expires_at_unix <= now {
+    let context_ttl = Duration::from_nanos(ttl_ns);
+    if value.setup_expires_at_unix <= now
+        || lineage.setup_expires_at_boottime_ns <= boottime_now_ns
+        || context_ttl > DEFAULT_MAX_TTL
+    {
         return Err(BackendError::Invalid);
     }
     Ok((
         OpenLineageKey::from(lineage),
         context_role,
         value.leases.clone(),
-        Duration::from_secs(ttl_seconds),
+        context_ttl,
     ))
 }
 
@@ -1024,6 +1073,7 @@ fn validate_activate_batch_binding(
             .all(|byte| *byte == 0)
         || lineage.setup_expires_at_unix == 0
         || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
         || context_id != lineage.context_id
         || value.context_handle.len() != HELPER_HANDLE_BYTES
         || value.context_handle.iter().all(|byte| *byte == 0)
@@ -1073,13 +1123,7 @@ fn validate_activate_batch_binding(
         }
         ContextRole::Unspecified => return Err(BackendError::Invalid),
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| BackendError::Unavailable)?
-        .as_secs();
-    if now >= lineage.setup_expires_at_unix || now >= lineage.hard_expires_at_unix {
-        return Err(BackendError::Invalid);
-    }
+    ensure_setup_and_hard_are_live(lineage)?;
     Ok((OpenLineageKey::from(lineage), value.leases.clone()))
 }
 
@@ -1129,6 +1173,7 @@ fn validate_probe_batch_binding(
             .all(|byte| *byte == 0)
         || lineage.setup_expires_at_unix == 0
         || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
         || context_id != lineage.context_id
         || value.commit.context_handle.len() != HELPER_HANDLE_BYTES
         || value.commit.context_handle.iter().all(|byte| *byte == 0)
@@ -1156,7 +1201,10 @@ fn validate_probe_batch_binding(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| BackendError::Unavailable)?
         .as_secs();
-    if value.activated_at_unix > now || now >= lineage.hard_expires_at_unix {
+    if value.activated_at_unix > now
+        || now >= lineage.hard_expires_at_unix
+        || current_boottime_nanos()? >= lineage.hard_expires_at_boottime_ns
+    {
         return Err(BackendError::Invalid);
     }
     Ok((
@@ -1238,6 +1286,7 @@ fn validate_destroy_binding(
             .all(|byte| *byte == 0)
         || lineage.setup_expires_at_unix == 0
         || lineage.hard_expires_at_unix < lineage.setup_expires_at_unix
+        || !boottime_lineage_is_well_formed(lineage)
         || value.context_id != lineage.context_id
         || value.backend_generation != lineage.backend_generation
     {
@@ -1428,6 +1477,8 @@ fn bind_lineage(hasher: &mut blake3::Hasher, key: OpenLineageKey) {
     hasher.update(&key.prepare_operation_digest);
     hasher.update(&key.setup_expires_at_unix.to_be_bytes());
     hasher.update(&key.hard_expires_at_unix.to_be_bytes());
+    hasher.update(&key.setup_expires_at_boottime_ns.to_be_bytes());
+    hasher.update(&key.hard_expires_at_boottime_ns.to_be_bytes());
 }
 
 fn internal_prepare_batch_plan(
@@ -1952,6 +2003,7 @@ fn project_internal_activation_batch(
     }
     Ok(ActivateLeases {
         route_context_id: key.context_id.to_vec(),
+        hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
         leases,
     })
 }
@@ -2050,6 +2102,7 @@ fn verified_internal_activate_plan(
         }
         Ok(ActivateLeases {
             route_context_id: key.context_id.to_vec(),
+            hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
             leases: vec![internal_lease_activation(
                 resource,
                 activation.path_id,
@@ -2495,6 +2548,8 @@ mod tests {
             prepare_operation_digest: [5; 32],
             setup_expires_at_unix: 6,
             hard_expires_at_unix: 7,
+            setup_expires_at_boottime_ns: 6,
+            hard_expires_at_boottime_ns: 7,
         }
     }
 
@@ -2507,6 +2562,21 @@ mod tests {
             prepare_operation_digest: key.prepare_operation_digest,
             setup_expires_at_unix: key.setup_expires_at_unix,
             hard_expires_at_unix: key.hard_expires_at_unix,
+            setup_expires_at_boottime_ns: key.setup_expires_at_boottime_ns,
+            hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
+        }
+    }
+
+    fn live_key(context_id: [u8; 16], now_unix: u64) -> OpenLineageKey {
+        const NANOS_PER_SECOND: u64 = 1_000_000_000;
+        let now_boottime = current_boottime_nanos().expect("fixture boottime");
+        OpenLineageKey {
+            context_id,
+            setup_expires_at_unix: now_unix + 20,
+            hard_expires_at_unix: now_unix + 120,
+            setup_expires_at_boottime_ns: now_boottime + 20 * NANOS_PER_SECOND,
+            hard_expires_at_boottime_ns: now_boottime + 120 * NANOS_PER_SECOND,
+            ..key()
         }
     }
 
@@ -2621,11 +2691,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("fixture time")
             .as_secs();
-        let key = OpenLineageKey {
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(key().context_id, now);
         let mut binding = binding(
             key,
             OperationKind::Prepare,
@@ -2694,12 +2760,7 @@ mod tests {
             .relay_client_wireguard_endpoint
             .as_ref()
             .expect("relay-client endpoint");
-        let key = OpenLineageKey {
-            context_id: *route.route_context_id(),
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(*route.route_context_id(), now);
         let mut binding = binding(
             key,
             OperationKind::Activate,
@@ -2816,12 +2877,7 @@ mod tests {
             .as_ref()
             .expect("exit endpoint");
         let verified_exit = verified_wireguard_endpoint(exit).expect("verified exit endpoint");
-        let key = OpenLineageKey {
-            context_id: *route.route_context_id(),
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(*route.route_context_id(), now);
         let mut binding = binding(
             key,
             OperationKind::Activate,
@@ -2947,12 +3003,7 @@ mod tests {
             .and_then(verified_wireguard_endpoint)
             .expect("exit peer endpoint");
         assert_eq!(relay_client.address, relay_exit.address);
-        let key = OpenLineageKey {
-            context_id: *route.route_context_id(),
-            setup_expires_at_unix: now + 20,
-            hard_expires_at_unix: now + 120,
-            ..key()
-        };
+        let key = live_key(*route.route_context_id(), now);
         let mut binding = binding(
             key,
             OperationKind::Activate,
@@ -3909,6 +3960,14 @@ mod tests {
         let (binding, value) = live_prepare_fixture();
         assert!(validate_prepare_binding(binding, &value).is_ok());
 
+        let mut expired = binding;
+        expired.lineage.setup_expires_at_boottime_ns = 1;
+        expired.lineage.hard_expires_at_boottime_ns = 1;
+        assert_eq!(
+            validate_prepare_binding(expired, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+
         let mut wrong = binding;
         wrong.phase = BackendPhase::Prepared;
         assert_eq!(
@@ -3978,6 +4037,10 @@ mod tests {
         .expect("verified internal activation plan");
         assert_eq!(lock_replay_cache(&replay).len(), 2);
         assert_eq!(plan.route_context_id, key.context_id);
+        assert_eq!(
+            plan.hard_expires_at_boottime_ns,
+            key.hard_expires_at_boottime_ns
+        );
         let [lease] = plan.leases.as_slice() else {
             panic!("one internal activation")
         };
@@ -4015,6 +4078,13 @@ mod tests {
         wrong.prior_phase = None;
         assert_eq!(
             validate_activate_binding(wrong, &value).unwrap_err(),
+            BackendError::Invalid
+        );
+        let mut expired = binding;
+        expired.lineage.setup_expires_at_boottime_ns = 1;
+        expired.lineage.hard_expires_at_boottime_ns = 1;
+        assert_eq!(
+            validate_activate_binding(expired, &value).unwrap_err(),
             BackendError::Invalid
         );
         let mut wrong = binding;
@@ -4081,6 +4151,14 @@ mod tests {
     fn probe_validation_binds_engine_activation_threshold_and_exact_client_lease() {
         let (_, binding, value, _) = live_probe_fixture();
         assert!(validate_probe_binding(binding, &value).is_ok());
+
+        let mut expired = binding;
+        expired.lineage.setup_expires_at_boottime_ns = 1;
+        expired.lineage.hard_expires_at_boottime_ns = 1;
+        assert_eq!(
+            validate_probe_binding(expired, &value).unwrap_err(),
+            BackendError::Invalid
+        );
 
         let mut wrong_binding = binding;
         wrong_binding.operation_generation = 0;
