@@ -554,6 +554,7 @@ message RelayReservation {
   bytes control_relay_node_id = 27;
   bytes control_relay_peer_id = 28;
   bytes exit_peer_id = 29;
+  bytes signed_client_relay_request_sha256 = 30;
 }
 
 message ExitReservationConfirmation {

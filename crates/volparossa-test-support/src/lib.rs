@@ -39,7 +39,7 @@ use volparossa_protocol::{
     ClientSessionCapability, ExitReservation, NativeRouteIdentity, OpenTcp, ProtocolError,
     RelayAuthorization, RelayReservation, RelayReservationRequest, TimePolicy, Transport,
     UdpFlowAuthorization, WireguardEndpoint, finalized_reservation_bundle_hash, generate_nonce,
-    node_id_from_public_key, sign_control_message,
+    node_id_from_public_key, relay_reservation_request_sha256, sign_control_message,
 };
 use volparossa_wireguard::WireGuardPublicKey;
 
@@ -421,14 +421,17 @@ impl SignedRouteFixture {
                 client_session_capability: client_session_capability.clone(),
                 exit_reservation: exit_reservation.clone(),
             };
-            relay_requests.push(sign_control_message(
+            let signed_relay_request = sign_control_message(
                 &request,
                 &client_session_key,
                 now_ms,
                 request_expires_at_ms,
                 request_nonce,
                 time_policy,
-            )?);
+            )?;
+            let signed_client_relay_request_sha256 =
+                relay_reservation_request_sha256(&signed_relay_request)?;
+            relay_requests.push(signed_relay_request);
 
             let path_seed = u8::try_from(authorization.path_id)
                 .map_err(|_| ProtocolError::InvalidField("test path id"))?;
@@ -477,6 +480,7 @@ impl SignedRouteFixture {
                 control_relay_node_id: authorization.control_relay_node_id.clone(),
                 control_relay_peer_id: authorization.control_relay_peer_id.clone(),
                 exit_peer_id: authorization.exit_peer_id.clone(),
+                signed_client_relay_request_sha256: signed_client_relay_request_sha256.to_vec(),
             };
             relay_reservations.push(sign_control_message(
                 &relay,

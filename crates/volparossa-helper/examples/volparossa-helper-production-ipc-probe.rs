@@ -3,10 +3,10 @@
 //! This example accepts no socket path, request bytes or privileged operation from its caller. It
 //! requires one exact expected production PID/GID pair and connects only to the fixed production
 //! socket. Its closed modes exercise read-only runtime binding, bounded fail-closed framing, or one
-//! exact functional Client-lease cycle through Commit followed by one exact functional Exit-lease
-//! cycle through Commit. The functional mode publishes a fixed role-specific READY record only
-//! after each exact Activated receipt, accepts one fixed release byte for each cycle on standard
-//! input, and never prints handles or endpoint material.
+//! exact functional Client-lease cycle through Commit, one exact functional Exit-lease cycle, and
+//! one atomic RelayClient+RelayExit pair cycle through Commit. The functional mode publishes a
+//! fixed role-specific READY record only after each exact Activated receipt, accepts one fixed
+//! release byte for each cycle on standard input, and never prints handles or endpoint material.
 
 use std::{
     cell::Cell,
@@ -30,8 +30,10 @@ use tokio::{
 };
 use volparossa_helper::SOCKET_PATH;
 use volparossa_protocol::{
-    RelayAuthorization, RelayReservation, TimePolicy, Transport, WireguardEndpoint, generate_nonce,
-    node_id_from_public_key, sign_control_message,
+    ClientSessionCapability, ExitReservation, NativeRouteIdentity, RelayAuthorization,
+    RelayReservation, RelayReservationRequest, TimePolicy, Transport, WireguardEndpoint,
+    generate_nonce, node_id_from_public_key, relay_reservation_request_sha256,
+    sign_control_message,
 };
 use volparossa_routing::{
     ActivateLeaseBatch, ActivatedLeaseBatch, BindHelperRuntime, ClosedPreparePlan,
@@ -44,7 +46,7 @@ use volparossa_routing::{
 use zeroize::Zeroizing;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const FUNCTIONAL_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+const FUNCTIONAL_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_MODE_ARGUMENT_BYTES: usize = "expect-unauthorised-peer".len();
 const MAX_DECIMAL_U32_BYTES: usize = 10;
 const ROOT_UID: u32 = 0;
@@ -91,6 +93,10 @@ const FUNCTIONAL_RELEASE_BYTE: u8 = b'G';
 const FUNCTIONAL_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready";
 const FUNCTIONAL_EXIT_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=ready";
 const FUNCTIONAL_EXIT_PASS_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass";
+const FUNCTIONAL_RELAY_PAIR_READY_RECORD: &str =
+    "VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=ready";
+const FUNCTIONAL_RELAY_PAIR_PASS_RECORD: &str =
+    "VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass";
 const FUNCTIONAL_FAILURE_RECORD_PREFIX: &str =
     "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=";
 
@@ -196,6 +202,17 @@ enum FunctionalPhase {
     SecondCycleReconnect,
     SecondCycleCommit,
     SecondCycleDestroy,
+    RelayPairPlan,
+    RelayPairBind,
+    RelayPairPrepare,
+    RelayPairActivate,
+    RelayPairReuse,
+    RelayPairShutdown,
+    RelayPairReady,
+    RelayPairRelease,
+    RelayPairReconnect,
+    RelayPairCommit,
+    RelayPairDestroy,
     FinalShutdown,
 }
 
@@ -224,6 +241,17 @@ impl FunctionalPhase {
             Self::SecondCycleReconnect => "second-cycle-reconnect",
             Self::SecondCycleCommit => "second-cycle-commit",
             Self::SecondCycleDestroy => "second-cycle-destroy",
+            Self::RelayPairPlan => "relay-pair-plan",
+            Self::RelayPairBind => "relay-pair-bind",
+            Self::RelayPairPrepare => "relay-pair-prepare",
+            Self::RelayPairActivate => "relay-pair-activate",
+            Self::RelayPairReuse => "relay-pair-reuse",
+            Self::RelayPairShutdown => "relay-pair-shutdown",
+            Self::RelayPairReady => "relay-pair-ready",
+            Self::RelayPairRelease => "relay-pair-release",
+            Self::RelayPairReconnect => "relay-pair-reconnect",
+            Self::RelayPairCommit => "relay-pair-commit",
+            Self::RelayPairDestroy => "relay-pair-destroy",
             Self::FinalShutdown => "final-shutdown",
         }
     }
@@ -495,6 +523,117 @@ impl FunctionalCyclePlan {
     }
 }
 
+struct FunctionalRelayPairPlan {
+    ids: FunctionalCycleIds,
+    bind: FunctionalRequestExchange,
+    prepare: FunctionalRequestExchange,
+    hard_expires_at_unix: u64,
+}
+
+impl FunctionalRelayPairPlan {
+    fn random(
+        excluded_contexts: &[[u8; 16]],
+        excluded_request_ids: &[[u8; 16]],
+    ) -> Result<Self, ProbeError> {
+        let context_id = random_unique_id(excluded_contexts)?;
+        let mut request_ids = excluded_request_ids.to_vec();
+        let bind_request_id = random_unique_id(&request_ids)?;
+        request_ids.push(bind_request_id);
+        let prepare_request_id = random_unique_id(&request_ids)?;
+        request_ids.push(prepare_request_id);
+        let activate_request_id = random_unique_id(&request_ids)?;
+        request_ids.push(activate_request_id);
+        let commit_request_id = random_unique_id(&request_ids)?;
+        request_ids.push(commit_request_id);
+        let destroy_present_request_id = random_unique_id(&request_ids)?;
+        request_ids.push(destroy_present_request_id);
+        let destroy_absent_request_id = random_unique_id(&request_ids)?;
+        Self::from_ids(
+            FunctionalCycleIds {
+                context: context_id,
+                bind_request: bind_request_id,
+                prepare_request: prepare_request_id,
+                activate_request: activate_request_id,
+                commit_request: commit_request_id,
+                destroy_present_request: destroy_present_request_id,
+                destroy_absent_request: destroy_absent_request_id,
+            },
+            unix_now()?,
+        )
+    }
+
+    fn from_ids(ids: FunctionalCycleIds, now: u64) -> Result<Self, ProbeError> {
+        if ids.context.iter().all(|byte| *byte == 0) {
+            return Err(ProbeError::Protocol);
+        }
+        let request_ids = ids.request_ids();
+        for (position, request_id) in request_ids.iter().enumerate() {
+            if request_id.iter().all(|byte| *byte == 0)
+                || request_ids[..position].contains(request_id)
+            {
+                return Err(ProbeError::Protocol);
+            }
+        }
+        let setup_expires_at_unix = now
+            .checked_add(FUNCTIONAL_SETUP_TTL_SECONDS)
+            .ok_or(ProbeError::Protocol)?;
+        let hard_expires_at_unix = now
+            .checked_add(FUNCTIONAL_HARD_TTL_SECONDS)
+            .ok_or(ProbeError::Protocol)?;
+        let leases = vec![
+            LeasePlan {
+                path_id: FUNCTIONAL_PATH_ID,
+                role: WireguardRole::RelayClient as i32,
+            },
+            LeasePlan {
+                path_id: FUNCTIONAL_PATH_ID,
+                role: WireguardRole::RelayExit as i32,
+            },
+        ];
+        let prepare_value = PrepareLeaseBatch {
+            route_context_id: ids.context.to_vec(),
+            role: ContextRole::Relay as i32,
+            mptcp_accepted_addrs: FUNCTIONAL_MPTCP_LIMIT,
+            mptcp_subflows: FUNCTIONAL_MPTCP_LIMIT,
+            leases: leases.clone(),
+            setup_expires_at_unix,
+            hard_expires_at_unix,
+        };
+        let prepare_request = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: ids.prepare_request.to_vec(),
+            operation: Some(helper_request::Operation::PrepareLeaseBatch(prepare_value)),
+        };
+        let prepare = FunctionalRequestExchange::from_request(&prepare_request)?;
+        let bind_request = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: ids.bind_request.to_vec(),
+            operation: Some(helper_request::Operation::BindHelperRuntime(
+                BindHelperRuntime {
+                    prepare_intent: Some(PrepareIntent {
+                        route_context_id: ids.context.to_vec(),
+                        prepare_request_id: ids.prepare_request.to_vec(),
+                        prepare_operation_digest: prepare.operation_digest.to_vec(),
+                        setup_expires_at_unix,
+                        hard_expires_at_unix,
+                        closed_plan: Some(ClosedPreparePlan {
+                            context_role: ContextRole::Relay as i32,
+                            leases,
+                        }),
+                    }),
+                },
+            )),
+        };
+        let bind = FunctionalRequestExchange::from_request(&bind_request)?;
+        Ok(Self {
+            ids,
+            bind,
+            prepare,
+            hard_expires_at_unix,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct FunctionalPreparedReceipt {
     context_id: [u8; 16],
@@ -507,6 +646,33 @@ struct FunctionalPreparedReceipt {
 struct FunctionalCycleResult {
     helper_runtime_id: [u8; 32],
     prepared: FunctionalPreparedReceipt,
+}
+
+#[derive(Clone)]
+struct FunctionalRelayPairLeaseReceipt {
+    lease_handle: [u8; 32],
+    public_key: [u8; 32],
+    listen_port: u16,
+}
+
+#[derive(Clone)]
+struct FunctionalRelayPairPreparedReceipt {
+    context_id: [u8; 16],
+    context_handle: [u8; 32],
+    relay_client: FunctionalRelayPairLeaseReceipt,
+    relay_exit: FunctionalRelayPairLeaseReceipt,
+}
+
+struct FunctionalRelayPairResult {
+    helper_runtime_id: [u8; 32],
+    prepared: FunctionalRelayPairPreparedReceipt,
+}
+
+struct FunctionalRelayPairAuthority {
+    signed_relay_reservation: Vec<u8>,
+    signed_client_relay_request: Vec<u8>,
+    maximum_up_mbps: u32,
+    maximum_down_mbps: u32,
 }
 
 struct FunctionalResponseReceipt {
@@ -645,6 +811,10 @@ async fn run_bind_runtime(expected_peer: ExpectedPeer) -> Result<(), ProbeError>
     .map_err(|_| ProbeError::Timeout)?
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the explicit three-cycle lifecycle keeps every phase transition and fixed record ordered"
+)]
 async fn run_functional_client_lease(
     expected_peer: ExpectedPeer,
 ) -> Result<(), FunctionalProbeFailure> {
@@ -694,6 +864,8 @@ async fn run_functional_client_lease(
             FunctionalLeaseRole::Exit,
         )
         .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        let second_context_id = second_plan.ids.context;
+        let second_request_ids = second_plan.ids.request_ids();
         let second = activate_functional_cycle(
             &mut stream,
             &second_plan,
@@ -732,6 +904,46 @@ async fn run_functional_client_lease(
             .await
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
         publish_fixed_record(FUNCTIONAL_EXIT_PASS_RECORD)
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+
+        phase.set(FunctionalPhase::RelayPairPlan);
+        let mut prior_request_ids = first_request_ids.to_vec();
+        prior_request_ids.extend(second_request_ids);
+        let pair_plan = FunctionalRelayPairPlan::random(
+            &[first_context_id, second_context_id],
+            &prior_request_ids,
+        )
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        let pair = activate_functional_relay_pair(&mut stream, &pair_plan, &phase).await?;
+        phase.set(FunctionalPhase::RelayPairReuse);
+        if first.helper_runtime_id != pair.helper_runtime_id {
+            return Err(FunctionalProbeFailure::new(
+                phase.get(),
+                ProbeError::Correlation,
+            ));
+        }
+        validate_functional_relay_pair_reuse(&first.prepared, &second.prepared, &pair.prepared)
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        let mut stream = functional_barrier_and_reconnect(
+            stream,
+            expected_peer,
+            &phase,
+            FunctionalPhase::RelayPairShutdown,
+            FunctionalPhase::RelayPairReady,
+            FunctionalPhase::RelayPairRelease,
+            FunctionalPhase::RelayPairReconnect,
+            FUNCTIONAL_RELAY_PAIR_READY_RECORD,
+        )
+        .await?;
+        phase.set(FunctionalPhase::RelayPairCommit);
+        commit_functional_relay_pair(&mut stream, &pair_plan, &pair.prepared)
+            .await
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::RelayPairDestroy);
+        destroy_functional_relay_pair(&mut stream, &pair_plan, &pair.prepared)
+            .await
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        publish_fixed_record(FUNCTIONAL_RELAY_PAIR_PASS_RECORD)
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
         phase.set(FunctionalPhase::FinalShutdown);
         stream
@@ -814,6 +1026,151 @@ async fn activate_functional_cycle(
     })
 }
 
+async fn activate_functional_relay_pair(
+    stream: &mut UnixStream,
+    plan: &FunctionalRelayPairPlan,
+    phase: &Cell<FunctionalPhase>,
+) -> Result<FunctionalRelayPairResult, FunctionalProbeFailure> {
+    phase.set(FunctionalPhase::RelayPairBind);
+    let runtime_outcome = exchange_functional(stream, &plan.bind, HELPER_RUNTIME_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let helper_runtime_id = validate_runtime_outcome(runtime_outcome)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    phase.set(FunctionalPhase::RelayPairPrepare);
+    let prepared_outcome = exchange_functional(stream, &plan.prepare, LEASES_PREPARED_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let prepared = validate_relay_pair_prepared_outcome(prepared_outcome, plan.ids.context)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    phase.set(FunctionalPhase::RelayPairActivate);
+    let activate = functional_relay_pair_activation_exchange(plan, &prepared)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let activated_outcome = exchange_functional(stream, &activate, LEASES_ACTIVATED_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    validate_relay_pair_activated_outcome(activated_outcome, &prepared)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    let retried_outcome = exchange_functional(stream, &activate, LEASES_ACTIVATED_DIAGNOSTIC)
+        .await
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    validate_relay_pair_activated_outcome(retried_outcome, &prepared)
+        .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+    Ok(FunctionalRelayPairResult {
+        helper_runtime_id,
+        prepared,
+    })
+}
+
+async fn commit_functional_relay_pair(
+    stream: &mut UnixStream,
+    plan: &FunctionalRelayPairPlan,
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<(), ProbeError> {
+    let commit = functional_relay_pair_commit_exchange(plan, prepared)?;
+    let committed =
+        exchange_functional_receipt(stream, &commit, LEASES_COMMITTED_DIAGNOSTIC).await?;
+    let retried = exchange_functional_receipt(stream, &commit, LEASES_COMMITTED_DIAGNOSTIC).await?;
+    validate_relay_pair_committed_retry(
+        &committed.outcome,
+        &retried.outcome,
+        &committed.canonical_frame,
+        &retried.canonical_frame,
+        prepared,
+    )
+}
+
+fn functional_relay_pair_commit_exchange(
+    plan: &FunctionalRelayPairPlan,
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<FunctionalRequestExchange, ProbeError> {
+    if prepared.context_id != plan.ids.context {
+        return Err(ProbeError::Correlation);
+    }
+    FunctionalRequestExchange::from_request(&HelperRequest {
+        protocol_version: HELPER_PROTOCOL_VERSION,
+        request_id: plan.ids.commit_request.to_vec(),
+        operation: Some(helper_request::Operation::CommitLeaseBatch(
+            CommitLeaseBatch {
+                route_context_id: prepared.context_id.to_vec(),
+                context_handle: prepared.context_handle.to_vec(),
+                leases: vec![
+                    LeaseCommit {
+                        lease_handle: prepared.relay_client.lease_handle.to_vec(),
+                        path_id: FUNCTIONAL_PATH_ID,
+                        role: WireguardRole::RelayClient as i32,
+                    },
+                    LeaseCommit {
+                        lease_handle: prepared.relay_exit.lease_handle.to_vec(),
+                        path_id: FUNCTIONAL_PATH_ID,
+                        role: WireguardRole::RelayExit as i32,
+                    },
+                ],
+            },
+        )),
+    })
+}
+
+fn functional_relay_pair_activation_exchange(
+    plan: &FunctionalRelayPairPlan,
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<FunctionalRequestExchange, ProbeError> {
+    let client = &prepared.relay_client;
+    let exit = &prepared.relay_exit;
+    if prepared.context_id != plan.ids.context
+        || client.public_key == exit.public_key
+        || client.listen_port == exit.listen_port
+        || [client.public_key, exit.public_key].iter().any(|key| {
+            *key == FUNCTIONAL_PEER_PUBLIC_KEY || *key == FUNCTIONAL_EXIT_PEER_PUBLIC_KEY
+        })
+        || [client.listen_port, exit.listen_port].contains(&FUNCTIONAL_PEER_PORT)
+        || [client.listen_port, exit.listen_port].contains(&FUNCTIONAL_EXIT_PEER_PORT)
+    {
+        return Err(ProbeError::Correlation);
+    }
+    let authority = functional_signed_relay_pair_authority(plan, prepared)?;
+    FunctionalRequestExchange::from_request(&HelperRequest {
+        protocol_version: HELPER_PROTOCOL_VERSION,
+        request_id: plan.ids.activate_request.to_vec(),
+        operation: Some(helper_request::Operation::ActivateLeaseBatch(
+            ActivateLeaseBatch {
+                route_context_id: prepared.context_id.to_vec(),
+                context_handle: prepared.context_handle.to_vec(),
+                leases: vec![
+                    LeaseActivation {
+                        lease_handle: client.lease_handle.to_vec(),
+                        path_id: FUNCTIONAL_PATH_ID,
+                        role: WireguardRole::RelayClient as i32,
+                        peer_public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+                        peer_endpoint: Some(PublicUdpEndpoint {
+                            address: FUNCTIONAL_PEER_IPV4.to_vec(),
+                            port: u32::from(FUNCTIONAL_PEER_PORT),
+                        }),
+                        maximum_up_mbps: authority.maximum_up_mbps,
+                        maximum_down_mbps: authority.maximum_down_mbps,
+                        signed_relay_reservation: authority.signed_relay_reservation.clone(),
+                        signed_client_relay_request: authority.signed_client_relay_request,
+                    },
+                    LeaseActivation {
+                        lease_handle: exit.lease_handle.to_vec(),
+                        path_id: FUNCTIONAL_PATH_ID,
+                        role: WireguardRole::RelayExit as i32,
+                        peer_public_key: FUNCTIONAL_EXIT_PEER_PUBLIC_KEY.to_vec(),
+                        peer_endpoint: Some(PublicUdpEndpoint {
+                            address: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
+                            port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),
+                        }),
+                        maximum_up_mbps: authority.maximum_up_mbps,
+                        maximum_down_mbps: authority.maximum_down_mbps,
+                        signed_relay_reservation: authority.signed_relay_reservation,
+                        signed_client_relay_request: Vec::new(),
+                    },
+                ],
+            },
+        )),
+    })
+}
+
 async fn commit_functional_cycle(
     stream: &mut UnixStream,
     plan: &FunctionalCyclePlan,
@@ -890,6 +1247,7 @@ fn functional_activation_exchange(
                     maximum_up_mbps: 0,
                     maximum_down_mbps: 0,
                     signed_relay_reservation,
+                    signed_client_relay_request: Vec::new(),
                 }],
             },
         )),
@@ -912,6 +1270,10 @@ fn functional_signed_relay_reservation(
     let expires_at_ms = plan
         .hard_expires_at_unix
         .checked_mul(1_000)
+        .ok_or(ProbeError::Protocol)?;
+    let request_expires_at_ms = created_at_ms
+        .checked_add(20_000)
+        .filter(|request_expiry| *request_expiry <= expires_at_ms)
         .ok_or(ProbeError::Protocol)?;
     let relay_key = ephemeral_signing_key()?;
     let exit_key = ephemeral_signing_key()?;
@@ -988,6 +1350,114 @@ fn functional_signed_relay_reservation(
         TimePolicy::default(),
     )
     .map_err(|_| ProbeError::Protocol)?;
+    let client_endpoint = if plan.role == FunctionalLeaseRole::Client {
+        WireguardEndpoint {
+            public_key: prepared.public_key.to_vec(),
+            underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
+            listen_port: u32::from(prepared.listen_port),
+        }
+    } else {
+        WireguardEndpoint {
+            public_key: FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY.to_vec(),
+            underlay_ip: FUNCTIONAL_RELAY_EXIT_IPV4.to_vec(),
+            listen_port: u32::from(FUNCTIONAL_RELAY_EXIT_PORT),
+        }
+    };
+    let capability_nonce = generate_nonce();
+    let capability = ClientSessionCapability {
+        capability_id: capability_id.to_vec(),
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id: control_relay_peer_id.clone(),
+        policy_hash: policy_hash.to_vec(),
+        allowed_transports: vec![Transport::TcpMptcp as i32],
+        reserved_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        reserved_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_paths: 1,
+        created_at_ms,
+        expires_at_ms,
+        nonce: capability_nonce.to_vec(),
+        exit_peer_id: exit_peer_id.clone(),
+        probe_permit_limit: 1,
+    };
+    let signed_capability = sign_control_message(
+        &capability,
+        &exit_key,
+        created_at_ms,
+        expires_at_ms,
+        capability_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+    let exit_reservation_nonce = generate_nonce();
+    let exit_reservation = ExitReservation {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports: vec![Transport::TcpMptcp as i32],
+        reserved_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        reserved_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_paths: 1,
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: exit_reservation_nonce.to_vec(),
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id: control_relay_peer_id.clone(),
+        exit_peer_id: exit_peer_id.clone(),
+        native_route_identity: Some(NativeRouteIdentity {
+            auth_commitment: random_nonzero_32()?.to_vec(),
+            certificate_sha256: random_nonzero_32()?.to_vec(),
+            spki_sha256: random_nonzero_32()?.to_vec(),
+            tls_server_name: "exit.volparossa.test".to_owned(),
+            masque_context_id: 1,
+            client_native_instance_id: random_nonzero_32()?.to_vec(),
+            exit_native_instance_id: random_nonzero_32()?.to_vec(),
+        }),
+    };
+    let signed_exit_reservation = sign_control_message(
+        &exit_reservation,
+        &exit_key,
+        created_at_ms,
+        expires_at_ms,
+        exit_reservation_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+    let request_nonce = generate_nonce();
+    let request = RelayReservationRequest {
+        client_session_id: client_session_id.to_vec(),
+        exit_authorization: exit_authorization.clone(),
+        created_at_ms,
+        expires_at_ms: request_expires_at_ms,
+        nonce: request_nonce.to_vec(),
+        client_wireguard_endpoint: Some(client_endpoint),
+        client_session_capability: signed_capability,
+        exit_reservation: signed_exit_reservation,
+    };
+    let signed_client_relay_request = sign_control_message(
+        &request,
+        &client_session_key,
+        created_at_ms,
+        request_expires_at_ms,
+        request_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+    let signed_client_relay_request_sha256 =
+        relay_reservation_request_sha256(&signed_client_relay_request)
+            .map_err(|_| ProbeError::Protocol)?;
     let relay = RelayReservation {
         reservation_id: reservation_id.to_vec(),
         route_context_id: prepared.context_id.to_vec(),
@@ -1036,6 +1506,7 @@ fn functional_signed_relay_reservation(
         control_relay_node_id: control_relay_node_id.to_vec(),
         control_relay_peer_id,
         exit_peer_id,
+        signed_client_relay_request_sha256: signed_client_relay_request_sha256.to_vec(),
     };
     sign_control_message(
         &relay,
@@ -1046,6 +1517,259 @@ fn functional_signed_relay_reservation(
         TimePolicy::default(),
     )
     .map_err(|_| ProbeError::Protocol)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one closed probe builder creates the complete client, exit, and relay authority graph"
+)]
+fn functional_signed_relay_pair_authority(
+    plan: &FunctionalRelayPairPlan,
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<FunctionalRelayPairAuthority, ProbeError> {
+    if prepared.context_id != plan.ids.context {
+        return Err(ProbeError::Correlation);
+    }
+    let created_at_ms = plan
+        .hard_expires_at_unix
+        .checked_sub(FUNCTIONAL_HARD_TTL_SECONDS)
+        .and_then(|created| created.checked_mul(1_000))
+        .ok_or(ProbeError::Protocol)?;
+    let expires_at_ms = plan
+        .hard_expires_at_unix
+        .checked_mul(1_000)
+        .ok_or(ProbeError::Protocol)?;
+    let request_expires_at_ms = created_at_ms
+        .checked_add(20_000)
+        .filter(|request_expiry| *request_expiry <= expires_at_ms)
+        .ok_or(ProbeError::Protocol)?;
+    let relay_key = ephemeral_signing_key()?;
+    let exit_key = ephemeral_signing_key()?;
+    let client_session_key = ephemeral_signing_key()?;
+    let control_relay_key = ephemeral_signing_key()?;
+    let relay_public_key = relay_key.verifying_key().to_bytes();
+    let exit_public_key = exit_key.verifying_key().to_bytes();
+    let client_session_public_key = client_session_key.verifying_key().to_bytes();
+    let control_relay_public_key = control_relay_key.verifying_key().to_bytes();
+    let relay_node_id = node_id_from_public_key(&relay_public_key);
+    let exit_node_id = node_id_from_public_key(&exit_public_key);
+    let client_session_id = node_id_from_public_key(&client_session_public_key);
+    let control_relay_node_id = node_id_from_public_key(&control_relay_public_key);
+    let relay_peer_id = peer_id_from_ed25519(&relay_public_key)?;
+    let exit_peer_id = peer_id_from_ed25519(&exit_public_key)?;
+    let control_relay_peer_id = peer_id_from_ed25519(&control_relay_public_key)?;
+    let reservation_id = random_unique_id(&[])?;
+    let capability_id = random_unique_id(&[reservation_id])?;
+    let exit_boot_id = random_unique_id(&[reservation_id, capability_id])?;
+    let hold_id = random_unique_id(&[reservation_id, capability_id, exit_boot_id])?;
+    let finalize_id = random_unique_id(&[reservation_id, capability_id, exit_boot_id, hold_id])?;
+    let policy_hash = random_nonzero_32()?;
+    let allowed_transports = vec![Transport::TcpMptcp as i32];
+    let exit_endpoint = WireguardEndpoint {
+        public_key: FUNCTIONAL_EXIT_PEER_PUBLIC_KEY.to_vec(),
+        underlay_ip: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
+        listen_port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),
+    };
+
+    let capability_nonce = generate_nonce();
+    let capability = ClientSessionCapability {
+        capability_id: capability_id.to_vec(),
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id: control_relay_peer_id.clone(),
+        policy_hash: policy_hash.to_vec(),
+        allowed_transports: allowed_transports.clone(),
+        reserved_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        reserved_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_paths: 1,
+        created_at_ms,
+        expires_at_ms,
+        nonce: capability_nonce.to_vec(),
+        exit_peer_id: exit_peer_id.clone(),
+        probe_permit_limit: 1,
+    };
+    let signed_capability = sign_control_message(
+        &capability,
+        &exit_key,
+        created_at_ms,
+        expires_at_ms,
+        capability_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+
+    let exit_reservation_nonce = generate_nonce();
+    let exit_reservation = ExitReservation {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports: allowed_transports.clone(),
+        reserved_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        reserved_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_paths: 1,
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: exit_reservation_nonce.to_vec(),
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id: control_relay_peer_id.clone(),
+        exit_peer_id: exit_peer_id.clone(),
+        native_route_identity: Some(NativeRouteIdentity {
+            auth_commitment: random_nonzero_32()?.to_vec(),
+            certificate_sha256: random_nonzero_32()?.to_vec(),
+            spki_sha256: random_nonzero_32()?.to_vec(),
+            tls_server_name: "exit.volparossa.test".to_owned(),
+            masque_context_id: 1,
+            client_native_instance_id: random_nonzero_32()?.to_vec(),
+            exit_native_instance_id: random_nonzero_32()?.to_vec(),
+        }),
+    };
+    let signed_exit_reservation = sign_control_message(
+        &exit_reservation,
+        &exit_key,
+        created_at_ms,
+        expires_at_ms,
+        exit_reservation_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+
+    let authorization_nonce = generate_nonce();
+    let authorization = RelayAuthorization {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        path_id: FUNCTIONAL_PATH_ID,
+        relay_node_id: relay_node_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports: allowed_transports.clone(),
+        maximum_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        client_wireguard_public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+        exit_wireguard_endpoint: Some(exit_endpoint.clone()),
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: authorization_nonce.to_vec(),
+        relay_peer_id: relay_peer_id.clone(),
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id: control_relay_peer_id.clone(),
+        exit_peer_id: exit_peer_id.clone(),
+    };
+    let signed_authorization = sign_control_message(
+        &authorization,
+        &exit_key,
+        created_at_ms,
+        expires_at_ms,
+        authorization_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+
+    let request_nonce = generate_nonce();
+    let request = RelayReservationRequest {
+        client_session_id: client_session_id.to_vec(),
+        exit_authorization: signed_authorization.clone(),
+        created_at_ms,
+        expires_at_ms: request_expires_at_ms,
+        nonce: request_nonce.to_vec(),
+        client_wireguard_endpoint: Some(WireguardEndpoint {
+            public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+            underlay_ip: FUNCTIONAL_PEER_IPV4.to_vec(),
+            listen_port: u32::from(FUNCTIONAL_PEER_PORT),
+        }),
+        client_session_capability: signed_capability,
+        exit_reservation: signed_exit_reservation,
+    };
+    let signed_client_relay_request = sign_control_message(
+        &request,
+        &client_session_key,
+        created_at_ms,
+        request_expires_at_ms,
+        request_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+    let signed_client_relay_request_sha256 =
+        relay_reservation_request_sha256(&signed_client_relay_request)
+            .map_err(|_| ProbeError::Protocol)?;
+
+    let relay_nonce = generate_nonce();
+    let relay = RelayReservation {
+        reservation_id: reservation_id.to_vec(),
+        route_context_id: prepared.context_id.to_vec(),
+        path_id: FUNCTIONAL_PATH_ID,
+        relay_node_id: relay_node_id.to_vec(),
+        exit_node_id: exit_node_id.to_vec(),
+        client_session_id: client_session_id.to_vec(),
+        allowed_transports,
+        maximum_up_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        maximum_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
+        client_wireguard_public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+        relay_client_wireguard_endpoint: Some(WireguardEndpoint {
+            public_key: prepared.relay_client.public_key.to_vec(),
+            underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
+            listen_port: u32::from(prepared.relay_client.listen_port),
+        }),
+        relay_exit_wireguard_endpoint: Some(WireguardEndpoint {
+            public_key: prepared.relay_exit.public_key.to_vec(),
+            underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
+            listen_port: u32::from(prepared.relay_exit.listen_port),
+        }),
+        exit_wireguard_endpoint: Some(exit_endpoint),
+        policy_hash: policy_hash.to_vec(),
+        created_at_ms,
+        expires_at_ms,
+        nonce: relay_nonce.to_vec(),
+        exit_authorization: signed_authorization,
+        relay_peer_id,
+        capability_id: capability_id.to_vec(),
+        client_session_public_key: client_session_public_key.to_vec(),
+        exit_boot_id: exit_boot_id.to_vec(),
+        hold_id: hold_id.to_vec(),
+        finalize_id: finalize_id.to_vec(),
+        control_relay_node_id: control_relay_node_id.to_vec(),
+        control_relay_peer_id,
+        exit_peer_id,
+        signed_client_relay_request_sha256: signed_client_relay_request_sha256.to_vec(),
+    };
+    let maximum_up_mbps = u32::try_from(relay.maximum_up_mbps).map_err(|_| ProbeError::Protocol)?;
+    let maximum_down_mbps =
+        u32::try_from(relay.maximum_down_mbps).map_err(|_| ProbeError::Protocol)?;
+    if maximum_up_mbps == 0 || maximum_down_mbps == 0 {
+        return Err(ProbeError::Protocol);
+    }
+    let signed_relay_reservation = sign_control_message(
+        &relay,
+        &relay_key,
+        created_at_ms,
+        expires_at_ms,
+        relay_nonce,
+        TimePolicy::default(),
+    )
+    .map_err(|_| ProbeError::Protocol)?;
+    Ok(FunctionalRelayPairAuthority {
+        signed_relay_reservation,
+        signed_client_relay_request,
+        maximum_up_mbps,
+        maximum_down_mbps,
+    })
 }
 
 fn ephemeral_signing_key() -> Result<SigningKey, ProbeError> {
@@ -1105,6 +1829,36 @@ async fn destroy_functional_cycle(
         operation: Some(helper_request::Operation::DestroyContext(value)),
     };
     let absent = FunctionalRequestExchange::from_request(&absent_request)?;
+    let absent_outcome = exchange_functional(stream, &absent, CONTEXT_ABSENT_DIAGNOSTIC).await?;
+    validate_destroyed_outcome(absent_outcome, false)
+}
+
+async fn destroy_functional_relay_pair(
+    stream: &mut UnixStream,
+    plan: &FunctionalRelayPairPlan,
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<(), ProbeError> {
+    if prepared.context_id != plan.ids.context {
+        return Err(ProbeError::Correlation);
+    }
+    let value = DestroyContext {
+        route_context_id: prepared.context_id.to_vec(),
+        context_handle: prepared.context_handle.to_vec(),
+    };
+    let present = FunctionalRequestExchange::from_request(&HelperRequest {
+        protocol_version: HELPER_PROTOCOL_VERSION,
+        request_id: plan.ids.destroy_present_request.to_vec(),
+        operation: Some(helper_request::Operation::DestroyContext(value.clone())),
+    })?;
+    let present_outcome =
+        exchange_functional(stream, &present, CONTEXT_DESTROYED_DIAGNOSTIC).await?;
+    validate_destroyed_outcome(present_outcome, true)?;
+
+    let absent = FunctionalRequestExchange::from_request(&HelperRequest {
+        protocol_version: HELPER_PROTOCOL_VERSION,
+        request_id: plan.ids.destroy_absent_request.to_vec(),
+        operation: Some(helper_request::Operation::DestroyContext(value)),
+    })?;
     let absent_outcome = exchange_functional(stream, &absent, CONTEXT_ABSENT_DIAGNOSTIC).await?;
     validate_destroyed_outcome(absent_outcome, false)
 }
@@ -1232,6 +1986,82 @@ fn validate_prepared_outcome(
     })
 }
 
+fn relay_pair_lease_receipt(
+    lease: &volparossa_routing::PreparedLease,
+    role: WireguardRole,
+) -> Result<FunctionalRelayPairLeaseReceipt, ProbeError> {
+    let lease_handle: [u8; 32] = lease
+        .lease_handle
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProbeError::Correlation)?;
+    let public_key: [u8; 32] = lease
+        .public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProbeError::Correlation)?;
+    let endpoint = lease
+        .public_endpoint
+        .as_ref()
+        .ok_or(ProbeError::Correlation)?;
+    let listen_port = u16::try_from(endpoint.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(ProbeError::Correlation)?;
+    if lease_handle.iter().all(|byte| *byte == 0)
+        || public_key.iter().all(|byte| *byte == 0)
+        || lease.path_id != FUNCTIONAL_PATH_ID
+        || lease.role != role as i32
+        || endpoint.address.as_slice() != FUNCTIONAL_PUBLIC_IPV4
+        || UnderlayEvidence::try_from(lease.underlay_evidence)
+            != Ok(UnderlayEvidence::DirectAssigned)
+    {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(FunctionalRelayPairLeaseReceipt {
+        lease_handle,
+        public_key,
+        listen_port,
+    })
+}
+
+fn validate_relay_pair_prepared_outcome(
+    outcome: helper_response::Outcome,
+    context_id: [u8; 16],
+) -> Result<FunctionalRelayPairPreparedReceipt, ProbeError> {
+    let helper_response::Outcome::PreparedLeaseBatch(PreparedLeaseBatch {
+        context_handle,
+        leases,
+    }) = outcome
+    else {
+        return Err(ProbeError::Correlation);
+    };
+    let context_handle: [u8; 32] = context_handle
+        .try_into()
+        .map_err(|_| ProbeError::Correlation)?;
+    let [client, exit] = leases.as_slice() else {
+        return Err(ProbeError::Correlation);
+    };
+    let relay_client = relay_pair_lease_receipt(client, WireguardRole::RelayClient)?;
+    let relay_exit = relay_pair_lease_receipt(exit, WireguardRole::RelayExit)?;
+    if context_id.iter().all(|byte| *byte == 0)
+        || context_handle.iter().all(|byte| *byte == 0)
+        || relay_client.lease_handle == context_handle
+        || relay_exit.lease_handle == context_handle
+        || relay_client.lease_handle == relay_exit.lease_handle
+        || relay_client.public_key == relay_exit.public_key
+        || relay_client.listen_port == relay_exit.listen_port
+    {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(FunctionalRelayPairPreparedReceipt {
+        context_id,
+        context_handle,
+        relay_client,
+        relay_exit,
+    })
+}
+
 fn validate_activated_outcome(
     outcome: helper_response::Outcome,
     prepared: &FunctionalPreparedReceipt,
@@ -1248,6 +2078,29 @@ fn validate_activated_outcome(
     };
     if context_handle.as_slice() != prepared.context_handle
         || lease_handle.as_slice() != prepared.lease_handle
+    {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(())
+}
+
+fn validate_relay_pair_activated_outcome(
+    outcome: helper_response::Outcome,
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<(), ProbeError> {
+    let helper_response::Outcome::ActivatedLeaseBatch(ActivatedLeaseBatch {
+        context_handle,
+        lease_handles,
+    }) = outcome
+    else {
+        return Err(ProbeError::Correlation);
+    };
+    let [client, exit] = lease_handles.as_slice() else {
+        return Err(ProbeError::Correlation);
+    };
+    if context_handle.as_slice() != prepared.context_handle
+        || client.as_slice() != prepared.relay_client.lease_handle
+        || exit.as_slice() != prepared.relay_exit.lease_handle
     {
         return Err(ProbeError::Correlation);
     }
@@ -1294,6 +2147,49 @@ fn validate_committed_retry(
     Ok(())
 }
 
+fn validate_relay_pair_committed_outcome(
+    outcome: &helper_response::Outcome,
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<(), ProbeError> {
+    let helper_response::Outcome::CommittedLeaseBatch(CommittedLeaseBatch {
+        context_handle,
+        leases,
+    }) = outcome
+    else {
+        return Err(ProbeError::Correlation);
+    };
+    let [client, exit] = leases.as_slice() else {
+        return Err(ProbeError::Correlation);
+    };
+    if context_handle.as_slice() != prepared.context_handle
+        || client.lease_handle.as_slice() != prepared.relay_client.lease_handle
+        || exit.lease_handle.as_slice() != prepared.relay_exit.lease_handle
+        || [client, exit].iter().any(|lease| {
+            lease.latest_handshake_unix == 0
+                || lease.received_bytes == 0
+                || lease.transmitted_bytes == 0
+        })
+    {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(())
+}
+
+fn validate_relay_pair_committed_retry(
+    committed: &helper_response::Outcome,
+    retried: &helper_response::Outcome,
+    committed_frame: &[u8],
+    retried_frame: &[u8],
+    prepared: &FunctionalRelayPairPreparedReceipt,
+) -> Result<(), ProbeError> {
+    validate_relay_pair_committed_outcome(committed, prepared)?;
+    validate_relay_pair_committed_outcome(retried, prepared)?;
+    if committed != retried || committed_frame != retried_frame {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(())
+}
+
 fn validate_destroyed_outcome(
     outcome: helper_response::Outcome,
     expected_existed: bool,
@@ -1320,6 +2216,49 @@ fn validate_functional_reuse(
         return Err(ProbeError::Correlation);
     }
     Ok(())
+}
+
+fn validate_functional_relay_pair_reuse(
+    first: &FunctionalPreparedReceipt,
+    second: &FunctionalPreparedReceipt,
+    pair: &FunctionalRelayPairPreparedReceipt,
+) -> Result<(), ProbeError> {
+    let context_ids = [first.context_id, second.context_id, pair.context_id];
+    let context_handles = [
+        first.context_handle,
+        second.context_handle,
+        pair.context_handle,
+    ];
+    let lease_handles = [
+        first.lease_handle,
+        second.lease_handle,
+        pair.relay_client.lease_handle,
+        pair.relay_exit.lease_handle,
+    ];
+    let public_keys = [
+        first.public_key,
+        second.public_key,
+        pair.relay_client.public_key,
+        pair.relay_exit.public_key,
+    ];
+    if !fixed_values_are_distinct(&context_ids)
+        || !fixed_values_are_distinct(&context_handles)
+        || !fixed_values_are_distinct(&lease_handles)
+        || !fixed_values_are_distinct(&public_keys)
+        || pair.relay_client.listen_port == 0
+        || pair.relay_exit.listen_port == 0
+        || pair.relay_client.listen_port == pair.relay_exit.listen_port
+    {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(())
+}
+
+fn fixed_values_are_distinct<const WIDTH: usize>(values: &[[u8; WIDTH]]) -> bool {
+    !values
+        .iter()
+        .enumerate()
+        .any(|(index, value)| values[index + 1..].contains(value))
 }
 
 fn publish_fixed_record(record: &str) -> Result<(), ProbeError> {
@@ -1558,6 +2497,40 @@ mod tests {
         })
     }
 
+    fn valid_relay_pair_prepared_outcome(
+        seed: u8,
+        client_port: u32,
+        exit_port: u32,
+    ) -> helper_response::Outcome {
+        helper_response::Outcome::PreparedLeaseBatch(PreparedLeaseBatch {
+            context_handle: vec![seed; 32],
+            leases: vec![
+                PreparedLease {
+                    lease_handle: vec![seed.wrapping_add(1); 32],
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::RelayClient as i32,
+                    public_key: vec![seed.wrapping_add(2); 32],
+                    public_endpoint: Some(PublicUdpEndpoint {
+                        address: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
+                        port: client_port,
+                    }),
+                    underlay_evidence: UnderlayEvidence::DirectAssigned as i32,
+                },
+                PreparedLease {
+                    lease_handle: vec![seed.wrapping_add(3); 32],
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::RelayExit as i32,
+                    public_key: vec![seed.wrapping_add(4); 32],
+                    public_endpoint: Some(PublicUdpEndpoint {
+                        address: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
+                        port: exit_port,
+                    }),
+                    underlay_evidence: UnderlayEvidence::DirectAssigned as i32,
+                },
+            ],
+        })
+    }
+
     fn valid_activated_outcome(prepared: &FunctionalPreparedReceipt) -> helper_response::Outcome {
         helper_response::Outcome::ActivatedLeaseBatch(ActivatedLeaseBatch {
             context_handle: prepared.context_handle.to_vec(),
@@ -1574,6 +2547,40 @@ mod tests {
                 received_bytes: 56,
                 transmitted_bytes: 78,
             }],
+        })
+    }
+
+    fn valid_relay_pair_activated_outcome(
+        prepared: &FunctionalRelayPairPreparedReceipt,
+    ) -> helper_response::Outcome {
+        helper_response::Outcome::ActivatedLeaseBatch(ActivatedLeaseBatch {
+            context_handle: prepared.context_handle.to_vec(),
+            lease_handles: vec![
+                prepared.relay_client.lease_handle.to_vec(),
+                prepared.relay_exit.lease_handle.to_vec(),
+            ],
+        })
+    }
+
+    fn valid_relay_pair_committed_outcome(
+        prepared: &FunctionalRelayPairPreparedReceipt,
+    ) -> helper_response::Outcome {
+        helper_response::Outcome::CommittedLeaseBatch(CommittedLeaseBatch {
+            context_handle: prepared.context_handle.to_vec(),
+            leases: vec![
+                CommittedLease {
+                    lease_handle: prepared.relay_client.lease_handle.to_vec(),
+                    latest_handshake_unix: 1_234,
+                    received_bytes: 56,
+                    transmitted_bytes: 78,
+                },
+                CommittedLease {
+                    lease_handle: prepared.relay_exit.lease_handle.to_vec(),
+                    latest_handshake_unix: 1_235,
+                    received_bytes: 65,
+                    transmitted_bytes: 87,
+                },
+            ],
         })
     }
 
@@ -1687,6 +2694,14 @@ mod tests {
             "VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass"
         );
         assert_eq!(
+            FUNCTIONAL_RELAY_PAIR_READY_RECORD,
+            "VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=ready"
+        );
+        assert_eq!(
+            FUNCTIONAL_RELAY_PAIR_PASS_RECORD,
+            "VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass"
+        );
+        assert_eq!(
             Mode::RejectFrameBounds.success_record(),
             "VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass"
         );
@@ -1721,6 +2736,8 @@ mod tests {
                 assert!(!FUNCTIONAL_READY_RECORD.contains(forbidden));
                 assert!(!FUNCTIONAL_EXIT_READY_RECORD.contains(forbidden));
                 assert!(!FUNCTIONAL_EXIT_PASS_RECORD.contains(forbidden));
+                assert!(!FUNCTIONAL_RELAY_PAIR_READY_RECORD.contains(forbidden));
+                assert!(!FUNCTIONAL_RELAY_PAIR_PASS_RECORD.contains(forbidden));
             }
         }
         assert_eq!(FUNCTIONAL_RELEASE_BYTE, b'G');
@@ -1771,6 +2788,17 @@ mod tests {
             FunctionalPhase::SecondCycleReconnect,
             FunctionalPhase::SecondCycleCommit,
             FunctionalPhase::SecondCycleDestroy,
+            FunctionalPhase::RelayPairPlan,
+            FunctionalPhase::RelayPairBind,
+            FunctionalPhase::RelayPairPrepare,
+            FunctionalPhase::RelayPairActivate,
+            FunctionalPhase::RelayPairReuse,
+            FunctionalPhase::RelayPairShutdown,
+            FunctionalPhase::RelayPairReady,
+            FunctionalPhase::RelayPairRelease,
+            FunctionalPhase::RelayPairReconnect,
+            FunctionalPhase::RelayPairCommit,
+            FunctionalPhase::RelayPairDestroy,
             FunctionalPhase::FinalShutdown,
         ];
         let errors = [
@@ -2138,6 +3166,195 @@ mod tests {
     }
 
     #[test]
+    fn functional_relay_pair_cycle_binds_both_legs_to_one_signed_grant() {
+        let ids = fixed_cycle_ids(0x3d);
+        let plan =
+            FunctionalRelayPairPlan::from_ids(ids, 1_000).expect("functional Relay pair cycle");
+        let prepare = decode_request(&plan.prepare.frame[4..]).expect("canonical pair Prepare");
+        let Some(helper_request::Operation::PrepareLeaseBatch(prepare_batch)) =
+            prepare.operation.as_ref()
+        else {
+            panic!("PrepareLeaseBatch");
+        };
+        assert_eq!(prepare_batch.role, ContextRole::Relay as i32);
+        assert_eq!(
+            prepare_batch.leases,
+            [
+                LeasePlan {
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::RelayClient as i32,
+                },
+                LeasePlan {
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::RelayExit as i32,
+                },
+            ]
+        );
+        let bind = decode_request(&plan.bind.frame[4..]).expect("canonical pair Bind");
+        let Some(helper_request::Operation::BindHelperRuntime(BindHelperRuntime {
+            prepare_intent: Some(intent),
+        })) = bind.operation.as_ref()
+        else {
+            panic!("BindHelperRuntime(Some)");
+        };
+        assert_eq!(
+            intent.closed_plan.as_ref().map(|value| value.context_role),
+            Some(ContextRole::Relay as i32)
+        );
+        assert_eq!(
+            intent.closed_plan.as_ref().map(|value| &value.leases),
+            Some(&prepare_batch.leases)
+        );
+
+        let prepared = validate_relay_pair_prepared_outcome(
+            valid_relay_pair_prepared_outcome(0xa1, 41_236, 41_237),
+            ids.context,
+        )
+        .expect("pair prepared receipt");
+        let activation_exchange = functional_relay_pair_activation_exchange(&plan, &prepared)
+            .expect("pair activation exchange");
+        let activation_request =
+            decode_request(&activation_exchange.frame[4..]).expect("canonical pair Activate");
+        let Some(helper_request::Operation::ActivateLeaseBatch(activation_batch)) =
+            activation_request.operation.as_ref()
+        else {
+            panic!("ActivateLeaseBatch");
+        };
+        let [client, exit_activation] = activation_batch.leases.as_slice() else {
+            panic!("RelayClient and RelayExit activation");
+        };
+        assert_eq!(client.role, WireguardRole::RelayClient as i32);
+        assert_eq!(exit_activation.role, WireguardRole::RelayExit as i32);
+        assert_eq!(client.path_id, FUNCTIONAL_PATH_ID);
+        assert_eq!(exit_activation.path_id, FUNCTIONAL_PATH_ID);
+        assert_eq!(client.peer_public_key, FUNCTIONAL_PEER_PUBLIC_KEY);
+        assert_eq!(
+            exit_activation.peer_public_key,
+            FUNCTIONAL_EXIT_PEER_PUBLIC_KEY
+        );
+        assert_eq!(
+            client.peer_endpoint,
+            Some(PublicUdpEndpoint {
+                address: FUNCTIONAL_PEER_IPV4.to_vec(),
+                port: u32::from(FUNCTIONAL_PEER_PORT),
+            })
+        );
+        assert_eq!(
+            exit_activation.peer_endpoint,
+            Some(PublicUdpEndpoint {
+                address: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
+                port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),
+            })
+        );
+        assert!(client.maximum_up_mbps > 0);
+        assert!(client.maximum_down_mbps > 0);
+        assert_eq!(client.maximum_up_mbps, exit_activation.maximum_up_mbps);
+        assert_eq!(client.maximum_down_mbps, exit_activation.maximum_down_mbps);
+        assert_eq!(
+            client.signed_relay_reservation,
+            exit_activation.signed_relay_reservation
+        );
+        assert!(!client.signed_client_relay_request.is_empty());
+        assert!(exit_activation.signed_client_relay_request.is_empty());
+
+        let mut grant_replay =
+            volparossa_protocol::ReplayCache::new(8).expect("pair grant replay verifier");
+        let (relay, exit) = volparossa_protocol::verify_relay_reservation(
+            &client.signed_relay_reservation,
+            1_000_000,
+            TimePolicy::default(),
+            &mut grant_replay,
+        )
+        .expect("cryptographically valid pair grant");
+        let mut request_replay =
+            volparossa_protocol::ReplayCache::new(8).expect("pair request replay verifier");
+        let request = volparossa_protocol::verify_control_message::<RelayReservationRequest>(
+            &client.signed_client_relay_request,
+            1_000_000,
+            TimePolicy::default(),
+            &mut request_replay,
+        )
+        .expect("cryptographically valid client relay request");
+        assert_eq!(
+            client.maximum_up_mbps,
+            u32::try_from(relay.message().maximum_up_mbps).expect("bounded signed rate")
+        );
+        assert_eq!(
+            client.maximum_down_mbps,
+            u32::try_from(relay.message().maximum_down_mbps).expect("bounded signed rate")
+        );
+        assert_eq!(
+            relay.message().signed_client_relay_request_sha256,
+            relay_reservation_request_sha256(&client.signed_client_relay_request)
+                .expect("canonical request hash")
+        );
+        assert_eq!(
+            request.sender_public_key().as_slice(),
+            relay.message().client_session_public_key.as_slice()
+        );
+        assert_eq!(
+            request.message().exit_authorization,
+            relay.message().exit_authorization
+        );
+        assert_eq!(
+            request.message().client_wireguard_endpoint,
+            Some(WireguardEndpoint {
+                public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
+                underlay_ip: FUNCTIONAL_PEER_IPV4.to_vec(),
+                listen_port: u32::from(FUNCTIONAL_PEER_PORT),
+            })
+        );
+        assert_eq!(
+            relay.message().relay_client_wireguard_endpoint,
+            Some(WireguardEndpoint {
+                public_key: prepared.relay_client.public_key.to_vec(),
+                underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
+                listen_port: u32::from(prepared.relay_client.listen_port),
+            })
+        );
+        assert_eq!(
+            relay.message().relay_exit_wireguard_endpoint,
+            Some(WireguardEndpoint {
+                public_key: prepared.relay_exit.public_key.to_vec(),
+                underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
+                listen_port: u32::from(prepared.relay_exit.listen_port),
+            })
+        );
+        assert_eq!(
+            exit.message().exit_wireguard_endpoint,
+            Some(WireguardEndpoint {
+                public_key: FUNCTIONAL_EXIT_PEER_PUBLIC_KEY.to_vec(),
+                underlay_ip: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
+                listen_port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),
+            })
+        );
+
+        let commit_exchange =
+            functional_relay_pair_commit_exchange(&plan, &prepared).expect("pair Commit exchange");
+        let commit = decode_request(&commit_exchange.frame[4..]).expect("canonical pair Commit");
+        let Some(helper_request::Operation::CommitLeaseBatch(commit_batch)) =
+            commit.operation.as_ref()
+        else {
+            panic!("CommitLeaseBatch");
+        };
+        assert_eq!(
+            commit_batch.leases,
+            [
+                LeaseCommit {
+                    lease_handle: prepared.relay_client.lease_handle.to_vec(),
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::RelayClient as i32,
+                },
+                LeaseCommit {
+                    lease_handle: prepared.relay_exit.lease_handle.to_vec(),
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::RelayExit as i32,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn functional_response_requires_exact_correlation_diagnostic_and_runtime() {
         let plan = FunctionalCyclePlan::from_ids(
             fixed_cycle_ids(0x41),
@@ -2373,6 +3590,118 @@ mod tests {
         for outcome in substitutions {
             assert!(validate_activated_outcome(outcome, &prepared).is_err());
         }
+    }
+
+    #[test]
+    fn functional_relay_pair_receipts_fail_closed_on_partial_or_reordered_state() {
+        let context_id = [0xb1; 16];
+        let valid_prepared = valid_relay_pair_prepared_outcome(0xb2, 41_236, 41_237);
+        let prepared = validate_relay_pair_prepared_outcome(valid_prepared.clone(), context_id)
+            .expect("pair prepared receipt");
+
+        let mut prepared_substitutions = Vec::new();
+        let mut reordered = valid_prepared.clone();
+        let helper_response::Outcome::PreparedLeaseBatch(batch) = &mut reordered else {
+            unreachable!();
+        };
+        batch.leases.swap(0, 1);
+        prepared_substitutions.push(reordered);
+        let mut duplicate_handle = valid_prepared.clone();
+        let helper_response::Outcome::PreparedLeaseBatch(batch) = &mut duplicate_handle else {
+            unreachable!();
+        };
+        batch.leases[1].lease_handle = batch.leases[0].lease_handle.clone();
+        prepared_substitutions.push(duplicate_handle);
+        let mut duplicate_key = valid_prepared.clone();
+        let helper_response::Outcome::PreparedLeaseBatch(batch) = &mut duplicate_key else {
+            unreachable!();
+        };
+        batch.leases[1].public_key = batch.leases[0].public_key.clone();
+        prepared_substitutions.push(duplicate_key);
+        let mut duplicate_port = valid_prepared.clone();
+        let helper_response::Outcome::PreparedLeaseBatch(batch) = &mut duplicate_port else {
+            unreachable!();
+        };
+        let client_port = batch.leases[0]
+            .public_endpoint
+            .as_ref()
+            .expect("client endpoint")
+            .port;
+        batch.leases[1]
+            .public_endpoint
+            .as_mut()
+            .expect("exit endpoint")
+            .port = client_port;
+        prepared_substitutions.push(duplicate_port);
+        let mut absent = valid_prepared.clone();
+        let helper_response::Outcome::PreparedLeaseBatch(batch) = &mut absent else {
+            unreachable!();
+        };
+        batch.leases.pop();
+        prepared_substitutions.push(absent);
+        let mut extra = valid_prepared;
+        let helper_response::Outcome::PreparedLeaseBatch(batch) = &mut extra else {
+            unreachable!();
+        };
+        batch.leases.push(batch.leases[1].clone());
+        prepared_substitutions.push(extra);
+        for outcome in prepared_substitutions {
+            assert!(validate_relay_pair_prepared_outcome(outcome, context_id).is_err());
+        }
+
+        let activated = valid_relay_pair_activated_outcome(&prepared);
+        validate_relay_pair_activated_outcome(activated.clone(), &prepared)
+            .expect("exact pair Activated receipt");
+        let mut reordered_activation = activated.clone();
+        let helper_response::Outcome::ActivatedLeaseBatch(batch) = &mut reordered_activation else {
+            unreachable!();
+        };
+        batch.lease_handles.swap(0, 1);
+        assert!(validate_relay_pair_activated_outcome(reordered_activation, &prepared).is_err());
+        let mut partial_activation = activated;
+        let helper_response::Outcome::ActivatedLeaseBatch(batch) = &mut partial_activation else {
+            unreachable!();
+        };
+        batch.lease_handles.pop();
+        assert!(validate_relay_pair_activated_outcome(partial_activation, &prepared).is_err());
+
+        let committed = valid_relay_pair_committed_outcome(&prepared);
+        let frame = [0_u8, 0, 0, 1, 0x55];
+        validate_relay_pair_committed_retry(&committed, &committed, &frame, &frame, &prepared)
+            .expect("byte-identical pair Commit retry");
+        let mut partial_commit = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut partial_commit else {
+            unreachable!();
+        };
+        batch.leases.pop();
+        assert!(validate_relay_pair_committed_outcome(&partial_commit, &prepared).is_err());
+        let mut zero_second_counter = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut zero_second_counter else {
+            unreachable!();
+        };
+        batch.leases[1].received_bytes = 0;
+        assert!(validate_relay_pair_committed_outcome(&zero_second_counter, &prepared).is_err());
+        let mut reordered_commit = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut reordered_commit else {
+            unreachable!();
+        };
+        batch.leases.swap(0, 1);
+        assert!(validate_relay_pair_committed_outcome(&reordered_commit, &prepared).is_err());
+        let mut changed_retry = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut changed_retry else {
+            unreachable!();
+        };
+        batch.leases[1].transmitted_bytes += 1;
+        assert!(
+            validate_relay_pair_committed_retry(
+                &committed,
+                &changed_retry,
+                &frame,
+                &frame,
+                &prepared,
+            )
+            .is_err()
+        );
     }
 
     #[test]

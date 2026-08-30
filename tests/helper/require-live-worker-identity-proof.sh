@@ -58,9 +58,9 @@ print_plan() {
         '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
         '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
         '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
-        '  hold sequential singleton Client and Exit leases at fixed root-owned FIFO READY barriers;' \
-        '  externally prove each child PID, executable, identity, distinct netns, and live WireGuard;' \
-        '  drive bounded ICMPv6 over derived ::1/::2 and ::3/::4 peers, then require exact Commit;' \
+        '  hold sequential singleton Client and Exit leases, then one simultaneous Relay pair at fixed FIFO READY barriers;' \
+        '  externally prove every child PID, executable, identity, distinct netns, and live WireGuard;' \
+        '  drive bounded ICMPv6 over both pair legs ::1/::2 and ::3/::4, then require exact Commit;' \
         '  require byte-identical Commit retries, exact fixture cleanup, Destroy, and worker retirement;' \
         '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
         '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
@@ -70,7 +70,7 @@ print_plan() {
         '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
         'This stages the helper identity and production IPC boundary. It creates no host account,' \
         'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or production VPN datapath.' \
-        'One dummy underlay and sequential ephemeral WireGuard leases exist only in private namespaces.' \
+        'One dummy underlay and ephemeral Client, Exit, and simultaneous Relay-pair WireGuard leases exist only in private namespaces.' \
         'It is not package-install, restart-recovery, CleanupOwned, production datapath, or A01-A15 evidence.'
 }
 
@@ -428,6 +428,13 @@ production_start_failure_stage_is_safe() {
         functional-exit-relay-fixture|\
         functional-exit-relay-traffic|\
         functional-exit-relay-cleanup|\
+        functional-exit-release|\
+        functional-exit-cleanup|\
+        functional-relay-pair-ready|\
+        functional-relay-pair-worker-observation|\
+        functional-relay-pair-fixtures|\
+        functional-relay-pair-traffic|\
+        functional-relay-pair-cleanup|\
         functional-probe-finish|\
         functional-cleanup|\
         publication)
@@ -450,7 +457,10 @@ production_functional_probe_failure_value_is_safe() {
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|\
         second-cycle-release|second-cycle-reconnect|second-cycle-commit|\
-        second-cycle-destroy|final-shutdown)
+        second-cycle-destroy|relay-pair-plan|relay-pair-bind|relay-pair-prepare|\
+        relay-pair-activate|relay-pair-reuse|relay-pair-shutdown|relay-pair-ready|\
+        relay-pair-release|relay-pair-reconnect|relay-pair-commit|\
+        relay-pair-destroy|final-shutdown)
             ;;
         *) return 1 ;;
     esac
@@ -489,7 +499,8 @@ report_production_launch_diagnostic() {
     if [ -e "$production_functional_failure_file" ] \
         || [ -L "$production_functional_failure_file" ]; then
         case $production_start_failure_stage in
-            functional-probe-wait|functional-client-release|functional-probe-finish) ;;
+            functional-probe-wait|functional-client-release|functional-exit-release|\
+            functional-probe-finish) ;;
             *) return 1 ;;
         esac
         vp_capture_file_is_safe "$production_functional_failure_file" || return 1
@@ -3531,6 +3542,11 @@ if [ "$proof_ok" = yes ]; then
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_COMMITTED_KERNEL_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=ready' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_ACTIVATED_KERNEL_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_COMMITTED_KERNEL_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_EXTERNAL_CLEANUP_V1=pass' \
         >"$temporary_stage/expected-production-start.pass"
     if ! vp_capture_file_is_safe "$temporary_stage/production-output/start.pass" \
         || ! cmp -s "$temporary_stage/expected-production-start.pass" \
@@ -3867,6 +3883,6 @@ if ! remove_temporary_stage; then
 fi
 
 printf '%s\n' \
-    'PASS: staged helper identity, exact two-FD custody, production IPC, sequential reusable Client and singleton Exit leases with exact Commit retries, clean stop, confinement, and pin release were proved.' \
-    'SCOPE: helper boundary only; no CleanupOwned, production datapath, or A01-A15 result is claimed.' >&2
+    'PASS: staged helper identity, exact two-FD custody, production IPC, sequential Client and Exit leases plus one simultaneous RelayClient/RelayExit pair with exact Commit retries, clean stop, confinement, and pin release were proved.' \
+    'SCOPE: helper boundary only; the pair proves two live local WireGuard legs, not relay forwarding, CleanupOwned, a production datapath, or an A01-A15 result.' >&2
 printf '%s\n' "$validated_report"

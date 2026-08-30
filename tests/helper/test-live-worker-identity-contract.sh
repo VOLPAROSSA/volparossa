@@ -499,6 +499,24 @@ while IFS= read -r proof_failure_reason_under_test; do
     }
 done <"$expected_proof_failure_reasons"
 
+# A retired worker's numeric PID and nsfs inode may be reused after the final
+# live pin closes. Cross-generation numeric inequalities are therefore not
+# identity proofs; every active generation is bound through current custody.
+# shellcheck disable=SC2016
+for forbidden_stale_identity_comparison in \
+    '[ "$hook_functional_exit_worker_pid" != "$hook_functional_worker_pid" ]' \
+    '[ "$hook_functional_pair_worker_pid" != "$hook_functional_worker_pid" ]' \
+    '[ "$hook_functional_pair_worker_pid" != "$hook_functional_exit_worker_pid" ]' \
+    '[ "$hook_functional_exit_worker_namespace" !=' \
+    '[ "$hook_functional_pair_worker_namespace" !='
+do
+    if grep -F "$forbidden_stale_identity_comparison" "$ipc_hook" >/dev/null; then
+        printf 'production hook treats a reusable numeric identity as authority: %s\n' \
+            "$forbidden_stale_identity_comparison" >&2
+        exit 1
+    fi
+done
+
 expected_production_start_stages=$temporary_directory/expected-production-start-stages
 printf '%s\n' \
     preflight-runtime \
@@ -550,6 +568,13 @@ printf '%s\n' \
     functional-exit-relay-fixture \
     functional-exit-relay-traffic \
     functional-exit-relay-cleanup \
+    functional-exit-release \
+    functional-exit-cleanup \
+    functional-relay-pair-ready \
+    functional-relay-pair-worker-observation \
+    functional-relay-pair-fixtures \
+    functional-relay-pair-traffic \
+    functional-relay-pair-cleanup \
     functional-probe-finish \
     functional-cleanup \
     publication >"$expected_production_start_stages"
@@ -589,6 +614,17 @@ printf '%s\n' \
     second-cycle-reconnect \
     second-cycle-commit \
     second-cycle-destroy \
+    relay-pair-plan \
+    relay-pair-bind \
+    relay-pair-prepare \
+    relay-pair-activate \
+    relay-pair-reuse \
+    relay-pair-shutdown \
+    relay-pair-ready \
+    relay-pair-release \
+    relay-pair-reconnect \
+    relay-pair-commit \
+    relay-pair-destroy \
     final-shutdown >"$expected_functional_failure_phases"
 expected_functional_failure_classes=$temporary_directory/expected-functional-failure-classes
 printf '%s\n' \
@@ -676,6 +712,17 @@ printf '%s\n%s\n' \
     'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=second-cycle-ready,timeout' \
     >"$temporary_directory/expected-functional-exit-ready-diagnostic"
 cmp -s "$temporary_directory/expected-functional-exit-ready-diagnostic" "$last_stderr"
+expect_status 0 exercise_production_functional_probe_diagnostic \
+    pair-ready functional-exit-release relay-pair-ready,timeout
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-exit-release' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=relay-pair-ready,timeout' \
+    >"$temporary_directory/expected-functional-pair-ready-diagnostic"
+cmp -s "$temporary_directory/expected-functional-pair-ready-diagnostic" "$last_stderr"
+expect_status 0 exercise_production_functional_probe_diagnostic \
+    pair-commit functional-probe-finish relay-pair-commit,correlation
+test ! -s "$last_stdout"
 while read -r production_functional_mutant_name production_functional_mutant; do
     expect_status 1 exercise_production_functional_probe_diagnostic \
         "$production_functional_mutant_name" functional-probe-wait \
@@ -3814,9 +3861,9 @@ printf '%s\n' \
     '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
     '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
     '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
-    '  hold sequential singleton Client and Exit leases at fixed root-owned FIFO READY barriers;' \
-    '  externally prove each child PID, executable, identity, distinct netns, and live WireGuard;' \
-    '  drive bounded ICMPv6 over derived ::1/::2 and ::3/::4 peers, then require exact Commit;' \
+    '  hold sequential singleton Client and Exit leases, then one simultaneous Relay pair at fixed FIFO READY barriers;' \
+    '  externally prove every child PID, executable, identity, distinct netns, and live WireGuard;' \
+    '  drive bounded ICMPv6 over both pair legs ::1/::2 and ::3/::4, then require exact Commit;' \
     '  require byte-identical Commit retries, exact fixture cleanup, Destroy, and worker retirement;' \
     '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
     '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
@@ -3826,7 +3873,7 @@ printf '%s\n' \
     '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
     'This stages the helper identity and production IPC boundary. It creates no host account,' \
     'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or production VPN datapath.' \
-    'One dummy underlay and sequential ephemeral WireGuard leases exist only in private namespaces.' \
+    'One dummy underlay and ephemeral Client, Exit, and simultaneous Relay-pair WireGuard leases exist only in private namespaces.' \
     'It is not package-install, restart-recovery, CleanupOwned, production datapath, or A01-A15 evidence.' \
     'PREVIEW ONLY: no file, account, service, or network state was changed.' \
     >"$expected_preview"
@@ -5379,7 +5426,7 @@ done
 if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
-        "$ipc_hook")" -ne 15 ] \
+        "$ipc_hook")" -ne 19 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
@@ -5414,6 +5461,7 @@ start_failure_record=$1
 start_failure_stage=functional-probe-ready
 start_failure_armed=yes
 start_failure_published=no
+functional_fixture_shape=single
 functional_relay_state=marked
 functional_exit_relay_state=absent
 functional_cleanup_observed=$3
@@ -5919,6 +5967,203 @@ exercise_functional_exit_relay_lifecycle_edges || {
     exit 1
 }
 
+# The paired wrapper must treat the two external peers as one transaction:
+# a second-leg creation failure rolls the first leg back, and teardown always
+# proves/removes RelayExit before it can target RelayClient.
+hook_relay_pair_lifecycle_functions=$temporary_directory/hook-relay-pair-lifecycle-functions.sh
+{
+    sed -n '/^create_functional_relay_pair_fixtures() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^remove_functional_relay_pair_fixtures() {$/,/^}$/p' "$ipc_hook"
+} >"$hook_relay_pair_lifecycle_functions"
+test "$(grep -c '^[_a-z].*() {$' "$hook_relay_pair_lifecycle_functions")" -eq 2
+sh -n "$hook_relay_pair_lifecycle_functions"
+# shellcheck disable=SC2034,SC2317
+exercise_functional_relay_pair_lifecycle_edges() (
+    # shellcheck disable=SC1090
+    . "$hook_relay_pair_lifecycle_functions"
+
+    pair_reset() {
+        pair_failure=$1
+        pair_events=
+        pair_client_present=no
+        pair_exit_present=no
+        functional_fixture_shape=single
+        functional_relay_ifindex=41
+    }
+    pair_event() {
+        if [ -n "$pair_events" ]; then
+            pair_events=$pair_events,$1
+        else
+            pair_events=$1
+        fi
+    }
+    create_functional_relay_fixture() {
+        pair_event client-create
+        [ "$pair_failure" != client-create ] || return 1
+        pair_client_present=yes
+    }
+    create_functional_exit_relay_fixture() {
+        pair_event exit-create
+        [ "$pair_client_present" = yes ] || return 1
+        [ "$functional_fixture_shape" = pair ] || return 1
+        [ "$pair_failure" != exit-create ] || return 1
+        pair_exit_present=yes
+    }
+    functional_relay_fixture_is_exact() {
+        pair_event client-exact
+        [ "$#" -eq 5 ] && [ "$pair_client_present" = yes ] \
+            && [ "$pair_exit_present" = yes ] \
+            && [ "$functional_fixture_shape" = pair ] \
+            && [ "$functional_relay_ifindex" = "$1" ] \
+            && [ "$pair_failure" != client-exact ]
+    }
+    remove_functional_exit_relay_fixture() {
+        pair_event exit-remove
+        [ "$pair_failure" != exit-remove ] || return 1
+        pair_exit_present=no
+    }
+    remove_functional_relay_fixture() {
+        pair_event client-remove
+        [ "$pair_failure" != client-remove ] || return 1
+        pair_client_present=no
+    }
+    pair_create() {
+        create_functional_relay_pair_fixtures \
+            client-key 10002 client-local client-peer \
+            exit-key 10003 exit-local exit-peer
+    }
+
+    pair_reset none
+    pair_create || return 1
+    [ "$pair_events" = client-create,exit-create,client-exact ] \
+        && [ "$pair_client_present" = yes ] \
+        && [ "$pair_exit_present" = yes ] \
+        && [ "$functional_fixture_shape" = pair ] || return 1
+    pair_events=
+    remove_functional_relay_pair_fixtures || return 1
+    [ "$pair_events" = exit-remove,client-remove ] \
+        && [ "$pair_client_present" = no ] \
+        && [ "$pair_exit_present" = no ] \
+        && [ "$functional_fixture_shape" = single ] || return 1
+
+    pair_reset client-create
+    ! pair_create || return 1
+    [ "$pair_events" = client-create,client-remove ] \
+        && [ "$pair_client_present" = no ] \
+        && [ "$pair_exit_present" = no ] \
+        && [ "$functional_fixture_shape" = single ] || return 1
+
+    pair_reset exit-create
+    ! pair_create || return 1
+    [ "$pair_events" = client-create,exit-create,exit-remove,client-remove ] \
+        && [ "$pair_client_present" = no ] \
+        && [ "$pair_exit_present" = no ] \
+        && [ "$functional_fixture_shape" = single ] || return 1
+
+    pair_reset client-exact
+    ! pair_create || return 1
+    [ "$pair_events" = \
+        client-create,exit-create,client-exact,exit-remove,client-remove ] \
+        && [ "$pair_client_present" = no ] \
+        && [ "$pair_exit_present" = no ] \
+        && [ "$functional_fixture_shape" = single ] || return 1
+
+    pair_reset none
+    pair_create || return 1
+    pair_events=
+    pair_failure=exit-remove
+    ! remove_functional_relay_pair_fixtures || return 1
+    [ "$pair_events" = exit-remove ] \
+        && [ "$pair_client_present" = yes ] \
+        && [ "$pair_exit_present" = yes ] \
+        && [ "$functional_fixture_shape" = pair ] || return 1
+    pair_failure=none
+    pair_events=
+    remove_functional_relay_pair_fixtures || return 1
+    [ "$pair_events" = exit-remove,client-remove ] \
+        && [ "$pair_client_present" = no ] \
+        && [ "$pair_exit_present" = no ] \
+        && [ "$functional_fixture_shape" = single ]
+)
+exercise_functional_relay_pair_lifecycle_edges || {
+    printf '%s\n' \
+        'production Relay-pair fixture is not atomic across failure and exact reverse cleanup' >&2
+    exit 1
+}
+
+# The real EXIT trap must preserve the paired wrapper's reverse-atomic edge:
+# failure to prove/remove RelayExit may not target RelayClient. Singleton cleanup
+# remains role-specific outside a paired fixture lifecycle.
+hook_start_failure_exit_function=$temporary_directory/hook-start-failure-exit-function.sh
+sed -n '/^start_failure_exit() {$/,/^}$/p' "$ipc_hook" \
+    >"$hook_start_failure_exit_function"
+test "$(grep -c '^start_failure_exit() {$' "$hook_start_failure_exit_function")" -eq 1
+sh -n "$hook_start_failure_exit_function"
+# shellcheck disable=SC2034,SC2317
+exercise_start_failure_exit_edges() (
+    # shellcheck disable=SC1090
+    . "$hook_start_failure_exit_function"
+
+    trap_event() {
+        printf '%s\n' "$1" >>"$trap_event_file"
+    }
+    remove_functional_relay_pair_fixtures() {
+        trap_event pair-remove
+        [ "$trap_failure" != pair-remove ] || return 1
+        functional_exit_relay_state=absent
+        functional_relay_state=absent
+        functional_fixture_shape=single
+    }
+    remove_functional_exit_relay_fixture() {
+        trap_event exit-remove
+        [ "$trap_failure" != exit-remove ] || return 1
+        functional_exit_relay_state=absent
+    }
+    remove_functional_relay_fixture() {
+        trap_event client-remove
+        [ "$trap_failure" != client-remove ] || return 1
+        functional_relay_state=absent
+    }
+
+    run_trap_case() (
+        trap_event_file=$1
+        functional_fixture_shape=$2
+        functional_exit_relay_state=$3
+        functional_relay_state=$4
+        trap_failure=$5
+        start_failure_armed=no
+        start_failure_published=no
+        : >"$trap_event_file"
+        trap start_failure_exit EXIT
+        exit 7
+    )
+
+    trap_pair_failure=$temporary_directory/trap-pair-failure.events
+    expect_status 1 run_trap_case \
+        "$trap_pair_failure" pair marked marked pair-remove
+    [ "$(cat "$trap_pair_failure")" = pair-remove ] || return 1
+
+    trap_pair_success=$temporary_directory/trap-pair-success.events
+    expect_status 7 run_trap_case \
+        "$trap_pair_success" pair marked marked none
+    [ "$(cat "$trap_pair_success")" = pair-remove ] || return 1
+
+    trap_exit_singleton=$temporary_directory/trap-exit-singleton.events
+    expect_status 7 run_trap_case \
+        "$trap_exit_singleton" single marked absent none
+    [ "$(cat "$trap_exit_singleton")" = exit-remove ] || return 1
+
+    trap_client_singleton=$temporary_directory/trap-client-singleton.events
+    expect_status 7 run_trap_case \
+        "$trap_client_singleton" single absent marked none
+    [ "$(cat "$trap_client_singleton")" = client-remove ]
+)
+exercise_start_failure_exit_edges || {
+    printf '%s\n' \
+        'production EXIT trap breaks Relay-pair reverse atomicity or singleton cleanup' >&2
+    exit 1
+}
+
 # The hook may retain a failed functional child only after observing its exact
 # exit status with wait and validating one bounded, fully enumerated record.
 hook_functional_failure_functions=$temporary_directory/hook-functional-failure-functions.sh
@@ -6044,7 +6289,7 @@ test ! -s "$last_stdout" && test ! -s "$last_stderr"
 # shellcheck disable=SC2016
 if [ "$(grep -Fc 'wait "$hook_functional_failure_pid"' "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc 'wait "$hook_functional_failure_pid"; then' "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 3 ]; then
+    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 4 ]; then
     printf '%s\n' 'functional probe failures are not observed through exact child waits' >&2
     exit 1
 fi
@@ -6183,6 +6428,12 @@ for required_hook_contract in \
     'functional_exit_committed_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_COMMITTED_KERNEL_V1=pass' \
     'functional_exit_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass' \
     'functional_exit_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+    'functional_relay_pair_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=ready' \
+    'functional_relay_pair_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_ACTIVATED_KERNEL_V1=pass' \
+    'functional_relay_pair_committed_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_COMMITTED_KERNEL_V1=pass' \
+    'functional_relay_pair_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass' \
+    'functional_relay_pair_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+    'functional_fixture_shape=single' \
     'functional_peer_public_key=$functional_relay_public_key' \
     'functional_peer_endpoint=$functional_underlay_address:$functional_relay_listen_port' \
     'functional_peer_keepalive=25' \
@@ -6229,6 +6480,9 @@ for required_hook_contract in \
     'derive_client_local_address() {' \
     'derive_exit_peer_address() {' \
     'derive_exit_local_address() {' \
+    'worker_relay_pair_interfaces() {' \
+    'derive_relay_pair_address() {' \
+    'worker_relay_pair_address() {' \
     'wireguard_counter_line_is_exact() {' \
     'wireguard_snapshot_from_lines() {' \
     'wireguard_snapshot_has_growth() {' \
@@ -6250,6 +6504,8 @@ for required_hook_contract in \
     'functional_exit_relay_fixture_is_exact' \
     '/usr/bin/ping -6 -n -I "$functional_exit_relay"' \
     'remove_functional_exit_relay_fixture' \
+    'create_functional_relay_pair_fixtures' \
+    'remove_functional_relay_pair_fixtures' \
     'printf '"'"'%s'"'"' "$functional_release_byte" >&6' \
     'wait "$hook_functional_probe_pid"' \
     'functional_probe_output_is_exact "$hook_functional_stdout"' \
@@ -6289,6 +6545,11 @@ for required_hook_contract in \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_COMMITTED_KERNEL_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=ready' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_ACTIVATED_KERNEL_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_COMMITTED_KERNEL_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_EXTERNAL_CLEANUP_V1=pass' \
     '[ "${SERVICE_RESULT:-}" = success ]' \
     '[ "${EXIT_CODE:-}" = exited ]' \
     '[ "${EXIT_STATUS:-}" = 0 ]' \
@@ -6344,6 +6605,7 @@ for activated_parser_function in \
     derive_client_local_address \
     derive_exit_peer_address \
     derive_exit_local_address \
+    derive_relay_pair_address \
     wireguard_counter_line_is_exact \
     wireguard_snapshot_from_lines \
     wireguard_snapshot_has_growth \
@@ -6463,6 +6725,51 @@ if printf '%s\n%s\n' "$valid_exit_address" "$valid_exit_address" \
     || printf '%s\n' "$valid_exit_address" \
         | derive_client_local_address "$functional_interface" >/dev/null 2>&1; then
     printf '%s\n' 'duplicate or cross-role topology addresses were accepted' >&2
+    exit 1
+fi
+
+relay_client_interface=vpr1deadbeef
+relay_exit_interface=vps1deadbeef
+valid_relay_client_address='fd766f6c70611234567800019abc0002 02 80 00 80 vpr1deadbeef'
+valid_relay_exit_address='fd766f6c70611234567800019abc0003 03 80 00 80 vps1deadbeef'
+relay_pair_client_peer=$(printf '%s\n' "$valid_relay_client_address" \
+    | derive_relay_pair_address "$relay_client_interface" 0002 0001) || exit 1
+relay_pair_client_local=$(printf '%s\n' "$valid_relay_client_address" \
+    | derive_relay_pair_address "$relay_client_interface" 0002 0002) || exit 1
+relay_pair_exit_local=$(printf '%s\n' "$valid_relay_exit_address" \
+    | derive_relay_pair_address "$relay_exit_interface" 0003 0003) || exit 1
+relay_pair_exit_peer=$(printf '%s\n' "$valid_relay_exit_address" \
+    | derive_relay_pair_address "$relay_exit_interface" 0003 0004) || exit 1
+if [ "$relay_pair_client_peer" != \
+        fd76:6f6c:7061:1234:5678:0001:9abc:0001 ] \
+    || [ "$relay_pair_client_local" != \
+        fd76:6f6c:7061:1234:5678:0001:9abc:0002 ] \
+    || [ "$relay_pair_exit_local" != \
+        fd76:6f6c:7061:1234:5678:0001:9abc:0003 ] \
+    || [ "$relay_pair_exit_peer" != \
+        fd76:6f6c:7061:1234:5678:0001:9abc:0004 ]; then
+    printf '%s\n' 'Relay-pair parser did not preserve exact ::1/::2/::3/::4 roles' >&2
+    exit 1
+fi
+if printf '%s\n' "$valid_relay_client_address" \
+        | derive_relay_pair_address "$relay_client_interface" 0002 0004 \
+            >/dev/null 2>&1 \
+    || printf '%s\n' "$valid_relay_exit_address" \
+        | derive_relay_pair_address "$relay_exit_interface" 0003 0001 \
+            >/dev/null 2>&1 \
+    || printf '%s\n' "$valid_relay_client_address" \
+        | derive_relay_pair_address "$relay_exit_interface" 0002 0001 \
+            >/dev/null 2>&1 \
+    || printf '%s\n%s\n' \
+        "$valid_relay_client_address" "$valid_relay_client_address" \
+        | derive_relay_pair_address "$relay_client_interface" 0002 0001 \
+            >/dev/null 2>&1 \
+    || printf '%s\n' \
+        'fd766f6c70611234567800029abc0002 02 80 00 80 vpr1deadbeef' \
+        | derive_relay_pair_address "$relay_client_interface" 0002 0001 \
+            >/dev/null 2>&1; then
+    printf '%s\n' \
+        'Relay-pair parser accepted a role, interface, duplicate, or path substitution' >&2
     exit 1
 fi
 
@@ -6607,6 +6914,18 @@ if [ "$(grep -Fc \
     printf '%s\n' 'KVM harness does not require one committed-kernel record' >&2
     exit 1
 fi
+for required_role_kernel_record in \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_ACTIVATED_KERNEL_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_COMMITTED_KERNEL_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_ACTIVATED_KERNEL_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_COMMITTED_KERNEL_V1=pass'
+do
+    if [ "$(grep -Fc "$required_role_kernel_record" "$gate")" -ne 1 ]; then
+        printf 'KVM harness does not require one role kernel record: %s\n' \
+            "$required_role_kernel_record" >&2
+        exit 1
+    fi
+done
 
 hook_process_contract_source_is_exact() {
     [ "$#" -eq 1 ] || return 1
@@ -6878,6 +7197,15 @@ if ! awk '
     /"\$functional_exit_committed_kernel_record"/ { marker_exit_committed = NR }
     /"\$functional_exit_pass_record"/ { marker_exit_pass = NR }
     /"\$functional_exit_cleanup_record"/ { marker_exit_cleanup = NR }
+    /"\$functional_relay_pair_ready_record"/ { marker_pair_ready = NR }
+    /"\$functional_relay_pair_activated_kernel_record"/ {
+        marker_pair_activated = NR
+    }
+    /"\$functional_relay_pair_committed_kernel_record"/ {
+        marker_pair_committed = NR
+    }
+    /"\$functional_relay_pair_pass_record"/ { marker_pair_pass = NR }
+    /"\$functional_relay_pair_cleanup_record"/ { marker_pair_cleanup = NR }
     END {
         probes = bind_before < frame && frame < wire && wire < wrong_uid
         probes = probes && wrong_uid < wrong_gid && wrong_gid < root_peer
@@ -6897,6 +7225,11 @@ if ! awk '
         markers = markers && marker_exit_activated < marker_exit_committed
         markers = markers && marker_exit_committed < marker_exit_pass
         markers = markers && marker_exit_pass < marker_exit_cleanup
+        markers = markers && marker_exit_cleanup < marker_pair_ready
+        markers = markers && marker_pair_ready < marker_pair_activated
+        markers = markers && marker_pair_activated < marker_pair_committed
+        markers = markers && marker_pair_committed < marker_pair_pass
+        markers = markers && marker_pair_pass < marker_pair_cleanup
         if (!(probes && markers)) exit 1
     }
 ' "$ipc_hook"; then
@@ -6921,12 +7254,16 @@ if ! awk '
         ready_wait_count++
         if (ready_wait_count == 1) client_ready = NR
         if (ready_wait_count == 2) exit_ready_wait = NR
+        if (ready_wait_count == 3) pair_ready_wait = NR
     }
     in_functional && /hook_functional_worker_pid=\$\(direct_helper_child/ {
         client_child = NR
     }
     in_functional && /hook_functional_exit_worker_pid=\$\(direct_helper_child/ {
         exit_child = NR
+    }
+    in_functional && /hook_functional_pair_worker_pid=\$\(direct_helper_child/ {
+        pair_child = NR
     }
     in_functional && /capture_parent_worker_custody/ { custody_count++ }
     in_functional && /command exec 7<"\$hook_functional_parent_namespace_path"/ {
@@ -6941,6 +7278,12 @@ if ! awk '
     in_functional && /command exec 8<"\$hook_functional_exit_parent_process_path"/ {
         exit_process_pin = NR
     }
+    in_functional && /command exec 7<"\$hook_functional_pair_parent_namespace_path"/ {
+        pair_namespace_pin = NR
+    }
+    in_functional && /command exec 8<"\$hook_functional_pair_parent_process_path"/ {
+        pair_process_pin = NR
+    }
     in_functional && /worker_identity_from_process_fd/ { identity_count++ }
     in_functional && /worker_activated_wireguard_is_exact/ { activated_count++ }
     in_functional && /hook_functional_baseline=\$\(worker_wireguard_snapshot/ {
@@ -6951,12 +7294,16 @@ if ! awk '
     }
     in_functional && /^    create_functional_relay_fixture/ { client_relay_create = NR }
     in_functional && /\/usr\/bin\/ping -6 -n -I "\$functional_relay"/ {
-        client_traffic = NR
+        relay_ping_count++
+        if (relay_ping_count == 1) client_traffic = NR
+        if (relay_ping_count == 2) pair_client_traffic = NR
     }
     in_functional && /^    remove_functional_relay_fixture/ { client_relay_remove = NR }
     in_functional && /^    create_functional_exit_relay_fixture/ { exit_relay_create = NR }
     in_functional && /\/usr\/bin\/ping -6 -n -I "\$functional_exit_relay"/ {
-        exit_traffic = NR
+        exit_relay_ping_count++
+        if (exit_relay_ping_count == 1) exit_traffic = NR
+        if (exit_relay_ping_count == 2) pair_exit_traffic = NR
     }
     in_functional && /^    remove_functional_exit_relay_fixture/ { exit_relay_remove = NR }
     in_functional && /wireguard_snapshot_has_growth/ { growth_count++ }
@@ -6981,6 +7328,35 @@ if ! awk '
     in_functional && /hook_functional_exit_retained=\$\(worker_wireguard_snapshot/ {
         exit_retained = NR
     }
+    in_functional && /advance_start_failure_stage functional-exit-release/ {
+        exit_release_stage = NR
+    }
+    in_functional && /advance_start_failure_stage functional-exit-cleanup/ {
+        exit_cleanup_stage = NR
+    }
+    in_functional && /advance_start_failure_stage functional-relay-pair-ready/ {
+        pair_ready_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-relay-pair-worker-observation/ {
+        pair_worker_stage = NR
+    }
+    in_functional \
+        && /advance_start_failure_stage functional-relay-pair-fixtures/ {
+        pair_fixture_stage = NR
+    }
+    in_functional && /^    create_functional_relay_pair_fixtures/ {
+        pair_fixtures_create = NR
+    }
+    in_functional && /advance_start_failure_stage functional-relay-pair-traffic/ {
+        pair_traffic_stage = NR
+    }
+    in_functional && /advance_start_failure_stage functional-relay-pair-cleanup/ {
+        pair_fixture_cleanup_stage = NR
+    }
+    in_functional && /^    remove_functional_relay_pair_fixtures/ {
+        pair_fixtures_remove = NR
+    }
     in_functional && /advance_start_failure_stage functional-probe-finish/ {
         finish_stage = NR
     }
@@ -6992,6 +7368,7 @@ if ! awk '
         release_count++
         if (release_count == 1) client_release = NR
         if (release_count == 2) exit_release = NR
+        if (release_count == 3) pair_release = NR
     }
     in_functional && /exec 6>&-/ { release_close = NR }
     in_functional && /wait "\$hook_functional_probe_pid"/ { waited = NR }
@@ -7001,23 +7378,26 @@ if ! awk '
         retired_count++
         if (retired_count == 1) client_retired = NR
         if (retired_count == 2) exit_retired = NR
+        if (retired_count == 3) pair_retired = NR
     }
     in_functional && /helper_holds_no_worker_custody/ { custody_absent = NR }
-    in_functional && /worker_wireguard_is_absent 7/ {
+    in_functional && /worker_wireguard_is_absent/ {
         wireguard_absent_count++
         if (wireguard_absent_count == 1) client_wireguard_absent = NR
         if (wireguard_absent_count == 2) exit_wireguard_absent = NR
+        if (wireguard_absent_count == 3) pair_client_wireguard_absent = NR
+        if (wireguard_absent_count == 4) pair_exit_wireguard_absent = NR
     }
     in_functional && /command exec 8>&-/ { process_release_count++ }
     in_functional && /command exec 7>&-/ { namespace_release_count++ }
     in_functional && /remove_functional_underlay/ { underlay_remove = NR }
     END {
-        valid = pristine_count == 2 && ready_wait_count == 2
-        valid = valid && custody_count == 6 && identity_count == 4
-        valid = valid && activated_count == 4 && growth_count == 6
-        valid = valid && release_count == 2 && retired_count == 2
-        valid = valid && wireguard_absent_count == 2
-        valid = valid && process_release_count == 2 && namespace_release_count == 2
+        valid = pristine_count == 2 && ready_wait_count == 3
+        valid = valid && custody_count == 9 && identity_count == 6
+        valid = valid && activated_count == 10 && growth_count == 12
+        valid = valid && release_count == 3 && retired_count == 3
+        valid = valid && wireguard_absent_count == 4
+        valid = valid && process_release_count == 3 && namespace_release_count == 3
         valid = valid && pristine_before < underlay && underlay < fifo
         valid = valid && fifo < fifo_open && fifo_open < probe && probe < client_ready
         valid = valid && client_ready < client_child
@@ -7045,14 +7425,34 @@ if ! awk '
         valid = valid && exit_traffic < exit_fixture_cleanup_stage
         valid = valid && exit_fixture_cleanup_stage < exit_relay_remove
         valid = valid && exit_relay_remove < exit_retained
-        valid = valid && exit_retained < finish_stage
-        valid = valid && finish_stage < fifo_unlink && fifo_unlink < exit_release
-        valid = valid && exit_release < release_close && release_close < waited
+        valid = valid && exit_retained < exit_release_stage
+        valid = valid && exit_release_stage < exit_release
+        valid = valid && exit_release < pair_ready_wait
+        valid = valid && pair_ready_wait < exit_cleanup_stage
+        valid = valid && exit_cleanup_stage < exit_retired
+        valid = valid && exit_retired < exit_wireguard_absent
+        valid = valid && exit_wireguard_absent < pair_ready_stage
+        valid = valid && pair_ready_stage < pair_worker_stage
+        valid = valid && pair_worker_stage < pair_child
+        valid = valid && pair_child < pair_namespace_pin
+        valid = valid && pair_namespace_pin < pair_process_pin
+        valid = valid && pair_process_pin < pair_fixture_stage
+        valid = valid && pair_fixture_stage < pair_fixtures_create
+        valid = valid && pair_fixtures_create < pair_traffic_stage
+        valid = valid && pair_traffic_stage < pair_client_traffic
+        valid = valid && pair_traffic_stage < pair_exit_traffic
+        valid = valid && pair_client_traffic < pair_fixture_cleanup_stage
+        valid = valid && pair_exit_traffic < pair_fixture_cleanup_stage
+        valid = valid && pair_fixture_cleanup_stage < pair_fixtures_remove
+        valid = valid && pair_fixtures_remove < finish_stage
+        valid = valid && finish_stage < fifo_unlink && fifo_unlink < pair_release
+        valid = valid && pair_release < release_close && release_close < waited
         valid = valid && waited < final_output && final_output < cleanup_stage
-        valid = valid && cleanup_stage < no_children && no_children < exit_retired
-        valid = valid && exit_retired < custody_absent
-        valid = valid && custody_absent < exit_wireguard_absent
-        valid = valid && exit_wireguard_absent < underlay_remove
+        valid = valid && cleanup_stage < no_children && no_children < pair_retired
+        valid = valid && pair_retired < custody_absent
+        valid = valid && custody_absent < pair_client_wireguard_absent
+        valid = valid && pair_client_wireguard_absent < pair_exit_wireguard_absent
+        valid = valid && pair_exit_wireguard_absent < underlay_remove
         valid = valid && underlay_remove < pristine_after
         if (!valid) exit 1
     }
@@ -7168,4 +7568,4 @@ if grep -Ei 'capabilit(y|ies)[_-]?state|state[_-]?capabilit(y|ies)' "$ipc_hook" 
 fi
 
 printf '%s\n' \
-    'PASS: live helper identity/fdstore and production IPC plus sequential reusable Client and singleton Exit kernel readback, Commit retry, retirement, root refusal, confinement, and no-host-mutation contracts are exact.'
+    'PASS: live helper identity/fdstore and production IPC plus sequential Client/Exit and simultaneous Relay-pair kernel readback, four-sided traffic growth, Commit retry, retirement, root refusal, confinement, and no-host-mutation contracts are exact; forwarding is not claimed.'

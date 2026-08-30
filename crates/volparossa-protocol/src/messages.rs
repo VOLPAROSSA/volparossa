@@ -424,6 +424,9 @@ pub struct RelayReservation {
     pub control_relay_peer_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "29")]
     pub exit_peer_id: Vec<u8>,
+    /// SHA-256 of the exact canonical client-session-signed relay request accepted by this relay.
+    #[prost(bytes = "vec", tag = "30")]
+    pub signed_client_relay_request_sha256: Vec<u8>,
 }
 
 /// Client-session-signed return of one verified relay grant to the selected exit.
@@ -832,6 +835,10 @@ impl ControlPayload for RelayReservation {
         if relay_client.listen_port == relay_exit.listen_port {
             return Err(ProtocolError::InvalidField("relay unique listen ports"));
         }
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.signed_client_relay_request_sha256,
+            "relay signed client request SHA-256",
+        )?;
         let nested: SignedEnvelope =
             decode_canonical(&self.exit_authorization, MAX_CONTROL_MESSAGE_SIZE)?;
         if nested.message_type != ControlMessageType::RelayAuthorization as i32 {
@@ -1123,6 +1130,29 @@ pub fn exit_confirmation_envelope_hash(
     hasher.update(CONFIRMATION_ENVELOPE_DOMAIN);
     hash_bundle_member(&mut hasher, signed_confirmation)?;
     Ok(hasher.finalize().into())
+}
+
+/// Hash one exact canonical client-session-signed relay-request envelope.
+///
+/// The digest is SHA-256 over the complete canonical `SignedEnvelope` bytes, including the
+/// ephemeral sender key, timestamps, nonce, payload hash and signature. Signature verification
+/// remains the caller's mandatory preceding step.
+///
+/// # Errors
+///
+/// Returns an error for non-canonical, wrong-version, or wrong-type input.
+pub fn relay_reservation_request_sha256(
+    signed_request: &[u8],
+) -> Result<[u8; HASH_LENGTH], ProtocolError> {
+    let envelope: SignedEnvelope = decode_canonical(signed_request, MAX_CONTROL_MESSAGE_SIZE)?;
+    if envelope.protocol_version != PROTOCOL_VERSION
+        || envelope.message_type != ControlMessageType::RelayReservationRequest as i32
+    {
+        return Err(ProtocolError::InvalidField(
+            "relay reservation request SHA-256",
+        ));
+    }
+    Ok(Sha256::digest(signed_request).into())
 }
 
 /// Hash one canonical finalized exit grant and its exact ordered authorization set.
