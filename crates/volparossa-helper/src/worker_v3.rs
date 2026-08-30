@@ -73,7 +73,8 @@ use crate::{
         DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyOutcome,
         DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare,
         DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey,
-        DurableRegistrationOutcome, DurableWireguardResource,
+        DurableOwnershipPrepareHandle, DurablePrepareSettlement, DurableRegistrationOutcome,
+        DurableWireguardResource,
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
@@ -4339,7 +4340,29 @@ impl std::fmt::Debug for DurableWorkerMayOwnPrepare {
     }
 }
 
-/// Affine result of the dormant durable-Intent-to-passive-worker handoff.
+/// Production-ready owner after the durable dispatch fence has opened exactly once.
+///
+/// The worker is now eligible for authenticated child requests, but the affine journal
+/// settlement and exact systemd custody evidence remain joined to the worker recovery pins until
+/// same-runtime cleanup reaches durable `Absent`.
+#[must_use = "an opened durable worker must remain joined to cleanup and manager custody"]
+struct DurableFunctionalWorkerOwnership {
+    settlement: DurablePrepareSettlement,
+    resources: Vec<DurableWireguardResource>,
+    prepare: PrepareLeases,
+    worker: WorkerGenerationOwnership,
+    source: WorkerRecoveryIdentitySource,
+    custody_name: crate::systemd_fdstore::CustodyFdName,
+    attestation: crate::systemd_fdstore::InventoryAttestation,
+}
+
+impl std::fmt::Debug for DurableFunctionalWorkerOwnership {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableFunctionalWorkerOwnership(<redacted>)")
+    }
+}
+
+/// Affine result of the durable-Intent-to-passive-worker handoff.
 ///
 /// Every failure variant returns every owner which exists at that point. A rejected worker
 /// admission can prove that no worker owner exists, while an ambiguous admission necessarily
@@ -4374,6 +4397,20 @@ enum DurableWorkerPrepareOutcome {
     },
 }
 
+/// Affine terminal retained when production durable Prepare cannot reach dispatch-open.
+#[must_use = "failed durable Prepare authority must remain retained"]
+enum DurableWorkerPrepareTerminal {
+    Handoff(Box<DurableWorkerPrepareOutcome>),
+    PublicationStart {
+        error: WorkerV3Error,
+        publication: Box<DurableWorkerCustodyPublicationOwner>,
+    },
+    DispatchOpen {
+        error: WorkerV3Error,
+        may_own: Box<DurableWorkerMayOwnPrepare>,
+    },
+}
+
 impl std::fmt::Debug for DurableWorkerPrepareOutcome {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -4403,6 +4440,58 @@ impl std::fmt::Debug for DurableWorkerPrepareOutcome {
                 .field("error", error)
                 .finish_non_exhaustive(),
         }
+    }
+}
+
+fn durable_prepare_outcome_error(outcome: &DurableWorkerPrepareOutcome) -> WorkerV3Error {
+    match outcome {
+        DurableWorkerPrepareOutcome::CustodyPublication(_) => WorkerV3Error::Ambiguous,
+        DurableWorkerPrepareOutcome::RegistrationRetained { error, .. }
+        | DurableWorkerPrepareOutcome::CustodyFenceRetained { error, .. } => {
+            durable_ownership_worker_error(*error)
+        }
+        DurableWorkerPrepareOutcome::KeyRetained { error, .. }
+        | DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, .. }
+        | DurableWorkerPrepareOutcome::RegisteredWorkerRetained { error, .. }
+        | DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, .. } => {
+            worker_error_class(error)
+        }
+    }
+}
+
+fn worker_error_class(error: &WorkerV3Error) -> WorkerV3Error {
+    match error {
+        WorkerV3Error::Authentication => WorkerV3Error::Authentication,
+        WorkerV3Error::Invalid => WorkerV3Error::Invalid,
+        WorkerV3Error::Conflict => WorkerV3Error::Conflict,
+        WorkerV3Error::Capacity => WorkerV3Error::Capacity,
+        WorkerV3Error::Dead => WorkerV3Error::Dead,
+        WorkerV3Error::Quarantined => WorkerV3Error::Quarantined,
+        WorkerV3Error::Ambiguous => WorkerV3Error::Ambiguous,
+        WorkerV3Error::Stale => WorkerV3Error::Stale,
+        WorkerV3Error::Busy => WorkerV3Error::Busy,
+        WorkerV3Error::ShuttingDown => WorkerV3Error::ShuttingDown,
+        WorkerV3Error::RuntimeUnavailable
+        | WorkerV3Error::Io(_)
+        | WorkerV3Error::Transport(_)
+        | WorkerV3Error::Sandbox(_)
+        | WorkerV3Error::SystemdCustodyInput(_)
+        | WorkerV3Error::SystemdCustodyPublication(_)
+        | WorkerV3Error::Ipv6ForwardingBootstrap(_)
+        | WorkerV3Error::RelayFence(_) => WorkerV3Error::RuntimeUnavailable,
+        WorkerV3Error::Deadline => WorkerV3Error::Deadline,
+    }
+}
+
+fn durable_ownership_worker_error(error: DurableOwnershipError) -> WorkerV3Error {
+    match error {
+        DurableOwnershipError::DeadlineElapsed => WorkerV3Error::Deadline,
+        DurableOwnershipError::Capacity => WorkerV3Error::Capacity,
+        DurableOwnershipError::Rejected => WorkerV3Error::Invalid,
+        DurableOwnershipError::Ambiguous => WorkerV3Error::Ambiguous,
+        DurableOwnershipError::RecoveryNotConfirmed
+        | DurableOwnershipError::Unavailable
+        | DurableOwnershipError::AlreadyStarted => WorkerV3Error::RuntimeUnavailable,
     }
 }
 
@@ -4459,9 +4548,10 @@ enum DurableCustodyPublicationBoundary {
 /// Coordinator-owned terminal authority from one non-cancellable custody publication supervisor.
 ///
 /// Every variant retains the exact affine owner which exists at that terminal boundary. These
-/// values are intentionally dormant: no production consumer, retry, reconciliation or dispatch
-/// path exists yet.
+/// values remain coordinator-owned. Production consumes only the exact successful `MayOwn`
+/// terminal; every other terminal stays retained and keeps shutdown fail-closed.
 #[must_use = "terminal custody publication authority must remain coordinator-owned"]
+#[allow(clippy::large_enum_variant)] // Every variant retains its exact affine owner unboxed.
 enum DurableWorkerCustodyPublicationTerminal {
     MayOwn(DurableWorkerMayOwnPrepare),
     PublicationUnresolved {
@@ -4489,6 +4579,32 @@ impl std::fmt::Debug for DurableWorkerCustodyPublicationTerminal {
                 .field(outcome)
                 .finish(),
             Self::SupervisorDropped(_) => formatter.write_str("SupervisorDropped(<redacted>)"),
+        }
+    }
+}
+
+fn durable_publication_terminal_error(
+    terminal: &DurableWorkerCustodyPublicationTerminal,
+) -> WorkerV3Error {
+    match terminal {
+        DurableWorkerCustodyPublicationTerminal::MayOwn(_)
+        | DurableWorkerCustodyPublicationTerminal::SupervisorDropped(_) => WorkerV3Error::Ambiguous,
+        DurableWorkerCustodyPublicationTerminal::PublicationUnresolved { error, .. } => {
+            worker_error_class(error)
+        }
+        DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved(outcome) => {
+            match outcome {
+                DurableWorkerPostAttestationOutcome::MayOwn(_)
+                | DurableWorkerPostAttestationOutcome::ContextMismatch(_) => {
+                    WorkerV3Error::Conflict
+                }
+                DurableWorkerPostAttestationOutcome::PublicationUnresolved { error, .. } => {
+                    worker_error_class(error)
+                }
+                DurableWorkerPostAttestationOutcome::ArmRetained { error, .. } => {
+                    durable_ownership_worker_error(*error)
+                }
+            }
         }
     }
 }
@@ -5049,6 +5165,36 @@ impl WorkerRegistry {
         {
             return Err(WorkerV3Error::Conflict);
         }
+        Ok(())
+    }
+
+    /// Atomically consume the exact in-memory dispatch fence after durable `MayOwnPrepare`.
+    ///
+    /// Every fallible validation, including the hard deadline, precedes the single assignment.
+    /// After the assignment the caller only updates its co-owned affine token; no child request is
+    /// issued while the registry lock is held.
+    fn open_durable_handoff_dispatch(
+        &mut self,
+        coordinates: WorkerGenerationCoordinates,
+        fence: &DurableHandoffFenceOwner,
+        deadline: HardDeadline,
+    ) -> Result<(), WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        self.confirm_durable_handoff_pending(coordinates, fence)?;
+        ensure_worker_deadline(deadline)?;
+        let record = self
+            .records
+            .get_mut(&coordinates.context_id)
+            .ok_or(WorkerV3Error::Dead)?;
+        if record.generation != coordinates.worker_generation.get()
+            || record.dispatch_fence != WorkerDispatchFence::DurableHandoffPending
+            || record.stable_phase != StablePhase::Starting
+            || record.quarantined
+            || record.in_flight.is_some()
+        {
+            return Err(WorkerV3Error::Conflict);
+        }
+        record.dispatch_fence = WorkerDispatchFence::Open;
         Ok(())
     }
 
@@ -5821,6 +5967,7 @@ fn ensure_worker_deadline(deadline: HardDeadline) -> Result<(), WorkerV3Error> {
 
 struct SupervisorSettlements {
     shutdown_owners: Vec<DetachedWorker>,
+    durable_prepare_terminals: Vec<DurableWorkerPrepareTerminal>,
     custody_publication_terminals: Vec<DurableWorkerCustodyPublicationTerminal>,
     reserved_custody_publication_terminals: usize,
     unresolved: bool,
@@ -5836,6 +5983,7 @@ impl SupervisorSettlements {
     fn new() -> Self {
         Self {
             shutdown_owners: Vec::with_capacity(MAX_PROCESS_OWNERS),
+            durable_prepare_terminals: Vec::with_capacity(MAX_PROCESS_OWNERS),
             custody_publication_terminals: Vec::with_capacity(MAX_CUSTODY_PUBLICATION_TERMINALS),
             reserved_custody_publication_terminals: 0,
             unresolved: false,
@@ -5905,9 +6053,28 @@ impl SupervisorSettlements {
         self.custody_publication_terminals.push(terminal);
     }
 
+    fn store_durable_prepare_terminal(&mut self, terminal: DurableWorkerPrepareTerminal) {
+        if self.durable_prepare_terminals.len() >= MAX_PROCESS_OWNERS {
+            std::process::abort();
+        }
+        self.durable_prepare_terminals.push(terminal);
+    }
+
+    fn take_exact_custody_publication_terminal(
+        &mut self,
+    ) -> Option<DurableWorkerCustodyPublicationTerminal> {
+        if self.reserved_custody_publication_terminals != 0
+            || self.custody_publication_terminals.len() != 1
+        {
+            return None;
+        }
+        self.custody_publication_terminals.pop()
+    }
+
     fn take_for_shutdown(&mut self) -> (Vec<DetachedWorker>, bool) {
         let custody_settled = self.custody_publication_terminals.is_empty()
-            && self.reserved_custody_publication_terminals == 0;
+            && self.reserved_custody_publication_terminals == 0
+            && self.durable_prepare_terminals.is_empty();
         (
             std::mem::take(&mut self.shutdown_owners),
             !self.unresolved && custody_settled,
@@ -6891,8 +7058,7 @@ impl WorkerCoordinator {
         }
     }
 
-    /// Dormant production handoff from one unique durable Prepare intent to one authenticated,
-    /// passive worker generation.
+    /// Actor-owning test wrapper around the production durable Prepare handoff.
     ///
     /// The caller's absolute deadline is carried unchanged through journal registration, worker
     /// admission and recovery-anchor derivation/revalidation into the affine custody-publication
@@ -6900,7 +7066,7 @@ impl WorkerCoordinator {
     /// may arm under that same deadline. It sends no child protocol request and performs no
     /// `WireGuard` link/address, route, firewall or dataplane configuration; worker launch still
     /// creates the deliberately isolated process and anonymous NEWNET.
-    #[allow(dead_code)] // Connected only after the durable production coordinator is installed.
+    #[allow(dead_code)] // Production uses the narrower cloneable Prepare handle variant.
     fn durable_passive_prepare_handoff_until(
         &self,
         actor: &DurableOwnershipActor,
@@ -6931,10 +7097,42 @@ impl WorkerCoordinator {
             HardDeadline,
         ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
     {
+        let handle = match actor.prepare_handle() {
+            Ok(handle) => handle,
+            Err(error) => {
+                return DurableWorkerPrepareOutcome::RegistrationRetained {
+                    error,
+                    registration,
+                };
+            }
+        };
+        self.durable_passive_prepare_handoff_with_handle_until(
+            &handle,
+            registration,
+            worker_ttl,
+            deadline,
+            spawn,
+        )
+    }
+
+    fn durable_passive_prepare_handoff_with_handle_until<Spawn>(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        registration: DurableIntentRegistration,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+        spawn: Spawn,
+    ) -> DurableWorkerPrepareOutcome
+    where
+        Spawn: FnOnce(
+            GenerationReservation,
+            HardDeadline,
+        ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
+    {
         // Crossing the durable Intent boundary must precede even a local generation reservation,
         // so cancellation can never leave an unjournalled authenticated worker generation.
         let context_id = registration.context_id();
-        let key = match actor.register_until(registration, deadline) {
+        let key = match handle.register_until(registration, deadline) {
             DurableRegistrationOutcome::Registered(key) => key,
             DurableRegistrationOutcome::Retained {
                 error,
@@ -6962,8 +7160,34 @@ impl WorkerCoordinator {
                 };
             }
         };
-        self.finish_durable_registered_worker_handoff_until(
-            actor, context_id, key, worker, deadline,
+        self.finish_durable_registered_worker_handoff_with_handle_until(
+            handle, context_id, key, worker, deadline,
+        )
+    }
+
+    fn durable_passive_prepare_handoff_for_context_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        registration: DurableIntentRegistration,
+        context_role: RoutingContextRole,
+        path_id: u8,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+    ) -> DurableWorkerPrepareOutcome {
+        if context_role == RoutingContextRole::Unspecified || !(1..=8).contains(&path_id) {
+            return DurableWorkerPrepareOutcome::RegistrationRetained {
+                error: DurableOwnershipError::Rejected,
+                registration,
+            };
+        }
+        self.durable_passive_prepare_handoff_with_handle_until(
+            handle,
+            registration,
+            worker_ttl,
+            deadline,
+            move |reservation, deadline| {
+                spawn_worker_v3_for_context_until(reservation, context_role, path_id, deadline)
+            },
         )
     }
 
@@ -6971,6 +7195,30 @@ impl WorkerCoordinator {
     fn finish_durable_registered_worker_handoff_until(
         &self,
         actor: &DurableOwnershipActor,
+        context_id: ContextId,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> DurableWorkerPrepareOutcome {
+        let handle = match actor.prepare_handle() {
+            Ok(handle) => handle,
+            Err(_error) => {
+                return DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                    error: WorkerV3Error::RuntimeUnavailable,
+                    key,
+                    worker,
+                };
+            }
+        };
+        self.finish_durable_registered_worker_handoff_with_handle_until(
+            &handle, context_id, key, worker, deadline,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the complete ordered custody-publication fence auditable.
+    fn finish_durable_registered_worker_handoff_with_handle_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
         context_id: ContextId,
         key: DurableOwnershipKey,
         worker: WorkerGenerationOwnership,
@@ -7062,7 +7310,7 @@ impl WorkerCoordinator {
         let anchor = handoff.source.durable_prepare_anchor();
         let DurableWorkerPrepareHandoff { registered, source } = handoff;
         let DurableRegisteredStartingWorker { key, worker } = registered;
-        match actor.mark_custody_until(key, anchor, binding, deadline) {
+        match handle.mark_custody_until(key, anchor, binding, deadline) {
             DurableCustodyOutcome::Marked(durable) => {
                 let custody_name = crate::systemd_fdstore::CustodyFdName::from_durable_digest(
                     durable.custody_name_digest(),
@@ -7089,13 +7337,13 @@ impl WorkerCoordinator {
         }
     }
 
-    /// Dormant synchronous transition from exact systemd inventory evidence to durable arming.
+    /// Actor-owning test wrapper for the synchronous systemd-attestation arming transition.
     ///
     /// The publication owner supplies its original absolute deadline. This seam performs no
     /// publication, retry, reconciliation, child request or kernel mutation; it accepts only an
     /// opaque attestation produced by the descriptor-store adapter and retains every affine owner
     /// plus that evidence on every failure.
-    #[allow(dead_code)] // Connected only after a non-cancellable publication supervisor exists.
+    #[allow(dead_code)] // Production uses the narrower cloneable arm handle variant.
     fn arm_attested_durable_worker(
         &self,
         actor: &DurableOwnershipActor,
@@ -7205,6 +7453,155 @@ impl WorkerCoordinator {
                 }
             }
         }
+    }
+
+    /// Complete the cancellation-safe durable Prepare handoff and return only after the exact
+    /// worker dispatch fence has opened from attested `MayOwnPrepare` authority.
+    ///
+    /// Every non-success outcome is retained inside the coordinator and permanently blocks its
+    /// confirmed shutdown. The caller therefore receives no ownerless partial authority and must
+    /// not issue any child or kernel operation on error.
+    async fn durable_functional_prepare_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        registration: DurableIntentRegistration,
+        context_role: RoutingContextRole,
+        path_id: u8,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+    ) -> Result<DurableFunctionalWorkerOwnership, WorkerV3Error> {
+        let handoff = self.durable_passive_prepare_handoff_for_context_until(
+            handle,
+            registration,
+            context_role,
+            path_id,
+            worker_ttl,
+            deadline,
+        );
+        let publication = match handoff {
+            DurableWorkerPrepareOutcome::CustodyPublication(publication) => publication,
+            retained => {
+                let error = durable_prepare_outcome_error(&retained);
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(
+                        Box::new(retained),
+                    ));
+                return Err(error);
+            }
+        };
+
+        let arm = handle.custody_arm_handle();
+        let completion = match self.start_durable_custody_publication(arm, publication) {
+            DurableCustodyPublicationStartOutcome::Started(completion) => completion,
+            DurableCustodyPublicationStartOutcome::Retained { error, publication } => {
+                let returned_error = worker_error_class(&error);
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_durable_prepare_terminal(
+                        DurableWorkerPrepareTerminal::PublicationStart {
+                            error,
+                            publication: Box::new(publication),
+                        },
+                    );
+                return Err(returned_error);
+            }
+        };
+        if !completion.wait().await {
+            return Err(WorkerV3Error::Ambiguous);
+        }
+        let terminal = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_custody_publication_terminal()
+            .ok_or(WorkerV3Error::Ambiguous)?;
+        let may_own = match terminal {
+            DurableWorkerCustodyPublicationTerminal::MayOwn(may_own) => may_own,
+            retained => {
+                let error = durable_publication_terminal_error(&retained);
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_custody_publication_terminal(retained);
+                return Err(error);
+            }
+        };
+        match self.open_durable_functional_worker_until(may_own, deadline) {
+            Ok(ownership) => Ok(ownership),
+            Err((error, may_own)) => {
+                let returned_error = worker_error_class(&error);
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::DispatchOpen {
+                        error,
+                        may_own: Box::new(may_own),
+                    });
+                Err(returned_error)
+            }
+        }
+    }
+
+    fn open_durable_functional_worker_until(
+        &self,
+        mut may_own: DurableWorkerMayOwnPrepare,
+        deadline: HardDeadline,
+    ) -> Result<DurableFunctionalWorkerOwnership, (WorkerV3Error, DurableWorkerMayOwnPrepare)> {
+        let Ok(prepare) = may_own.durable.prepare_leases_v3() else {
+            return Err((WorkerV3Error::Conflict, may_own));
+        };
+        if may_own.durable.context_id() != may_own.worker.coordinates.context_id
+            || may_own.source.pending.coordinates != may_own.worker.coordinates
+            || prepare.route_context_id.as_slice()
+                != may_own.worker.coordinates.context_id.as_slice()
+            || prepare.leases.is_empty()
+            || may_own.attestation.removal_baseline().is_none()
+        {
+            return Err((WorkerV3Error::Conflict, may_own));
+        }
+        if let Err(error) = self.revalidate_durable_recovery_identity_until(
+            &may_own.worker,
+            &may_own.source,
+            deadline,
+        ) {
+            return Err((error, may_own));
+        }
+        let Some(fence) = may_own.worker.handoff_fence.as_ref() else {
+            return Err((WorkerV3Error::Stale, may_own));
+        };
+        let mut registry = match lock_worker_registry_until(&self.registry, deadline) {
+            Ok(registry) => registry,
+            Err(error) => return Err((error, may_own)),
+        };
+        if let Err(error) =
+            registry.open_durable_handoff_dispatch(may_own.worker.coordinates, fence, deadline)
+        {
+            drop(registry);
+            return Err((error, may_own));
+        }
+        drop(registry);
+        may_own.worker.dispatch_registration = WorkerDispatchRegistration::Open;
+        let _consumed_fence = may_own.worker.handoff_fence.take();
+        let DurableWorkerMayOwnPrepare {
+            durable,
+            worker,
+            source,
+            custody_name,
+            attestation,
+        } = may_own;
+        let (settlement, resources) = durable.into_dispatch_parts();
+        Ok(DurableFunctionalWorkerOwnership {
+            settlement,
+            resources,
+            prepare,
+            worker,
+            source,
+            custody_name,
+            attestation,
+        })
     }
 
     /// Open process-owned seam: reserves a coordinator-local worker generation, authenticates one
@@ -7963,11 +8360,10 @@ impl WorkerCoordinator {
         })
     }
 
-    /// Dormant cancellation-safe custody-publication supervisor entry point.
+    /// Production cancellation-safe custody-publication supervisor entry point.
     ///
     /// This synchronous call consumes `publication` before any spawned future can be polled. The
-    /// production publisher remains private and disconnected from every server/request path.
-    #[allow(dead_code)] // Enabled only with the future production custody coordinator.
+    /// The publisher remains private and is reachable only from durable functional Prepare.
     fn start_durable_custody_publication(
         &self,
         arm: DurableCustodyArmHandle,
@@ -12717,7 +13113,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One end-to-end dormant Intent-to-MayOwn custody proof.
+    #[allow(clippy::too_many_lines)] // One end-to-end passive Intent-to-MayOwn custody proof.
     fn durable_passive_handoff_journals_before_spawn_and_sends_zero_request_bytes() {
         let context_id = [90; 16];
         let directory = tempdir().expect("durable handoff directory");
@@ -12833,7 +13229,11 @@ mod tests {
     }
 
     #[test]
-    fn durable_dispatch_fence_blocks_execute_before_arm_and_after_may_own() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end test retains and settles every exact durable worker owner"
+    )]
+    fn durable_dispatch_fence_blocks_until_the_exact_post_may_own_open() {
         let context_id = [97; 16];
         let fixture = fenced_durable_handoff_fixture(
             context_id,
@@ -12895,17 +13295,61 @@ mod tests {
         assert_no_worker_request_bytes(&fixture.peer);
         assert_durable_handoff_registry_pristine(&fixture.coordinator, context_id, 1);
 
-        let DurableWorkerMayOwnPrepare {
-            durable,
+        let opened = fixture
+            .coordinator
+            .open_durable_functional_worker_until(
+                may_own,
+                HardDeadline::after(Duration::from_secs(1)).expect("dispatch-open deadline"),
+            )
+            .unwrap_or_else(|(error, may_own)| {
+                drop(may_own);
+                panic!("exact durable dispatch-open failed: {error}")
+            });
+        assert_eq!(opened.settlement.context_id(), context_id);
+        assert_eq!(opened.resources.len(), 1);
+        assert_eq!(opened.prepare.route_context_id, context_id);
+        assert_eq!(
+            opened.worker.dispatch_registration,
+            WorkerDispatchRegistration::Open
+        );
+        assert!(opened.worker.handoff_fence.is_none());
+        {
+            let registry = lock_worker_registry(&fixture.coordinator.registry);
+            let record = registry
+                .records
+                .get(&context_id)
+                .expect("opened worker record");
+            assert_eq!(record.dispatch_fence, WorkerDispatchFence::Open);
+            assert_eq!(record.stable_phase, StablePhase::Starting);
+            assert!(record.in_flight.is_none());
+            assert!(!record.quarantined);
+        }
+        assert_no_worker_request_bytes(&fixture.peer);
+
+        let DurableFunctionalWorkerOwnership {
+            settlement,
+            resources,
+            prepare,
             worker,
             source,
             custody_name: _,
             attestation,
-        } = may_own;
-        drop(durable);
+        } = opened;
+        drop(settlement);
+        drop(resources);
+        drop(prepare);
         drop(source);
         drop(attestation);
-        reap_durable_handoff_worker(&fixture.coordinator, worker);
+        match fixture.coordinator.terminate_generation_until(
+            worker,
+            HardDeadline::after(Duration::from_secs(1)).expect("opened worker cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("opened worker cleanup remained unresolved: {error}")
+            }
+        }
         drop(fixture.actor);
         drop(fixture.directory);
     }
@@ -14256,7 +14700,7 @@ mod tests {
             .expect("post-attestation arm implementation");
         let prepare = &source[start..arm_start];
         let register = prepare
-            .find("actor.register_until(registration, deadline)")
+            .find("handle.register_until(registration, deadline)")
             .expect("durable Intent registration");
         let worker = prepare
             .find("self.reserve_spawn_register_durable_handoff_with_until")
@@ -14279,7 +14723,7 @@ mod tests {
             .map(|offset| durable_binding + offset)
             .expect("post-measurement absolute deadline fence");
         let durable_mark = prepare
-            .find("actor.mark_custody_until(key, anchor, binding, deadline)")
+            .find("handle.mark_custody_until(key, anchor, binding, deadline)")
             .expect("durable MayOwnCustody mark");
         let custody_name = prepare
             .find("durable.custody_name_digest()")
@@ -14302,7 +14746,7 @@ mod tests {
         assert!(!prepare.contains("publish_current_process_custody("));
 
         let arm_end = source[arm_start..]
-            .find("\n    /// Open process-owned seam: reserves")
+            .find("\n    /// Complete the cancellation-safe durable Prepare handoff")
             .map(|offset| arm_start + offset)
             .expect("post-attestation arm implementation boundary");
         let arm = &source[arm_start..arm_end];

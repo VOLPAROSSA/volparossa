@@ -176,6 +176,10 @@ fn bind_production_socket(
     prepared_runtime: PreparedProductionRuntime,
     ownership_runtime: ProductionOwnershipRuntime,
 ) -> Result<ProductionServer, ServerError> {
+    let Ok(durable_ownership) = ownership_runtime.prepare_handle() else {
+        let _ = shutdown_production_ownership(ownership_runtime);
+        return Err(ServerError::OwnershipIncomplete);
+    };
     let runtime = match prepared_runtime.publish_cleanup_token() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -219,7 +223,7 @@ fn bind_production_socket(
         engine: HelperEngine::new_with_backend(
             runtime.cleanup_token,
             trusted_uid,
-            crate::worker_v3::functional_alpha_lease_backend(),
+            crate::worker_v3::functional_alpha_lease_backend(durable_ownership),
         ),
         allowed_peer: AllowedPeer {
             uid: trusted_uid,
@@ -957,7 +961,10 @@ mod tests {
             .expect("private server loop");
         let bind = &source[bind_start..bind_end];
         assert!(bind.contains("HelperEngine::new_with_backend("));
-        assert!(bind.contains("crate::worker_v3::functional_alpha_lease_backend()"));
+        assert!(
+            bind.contains("crate::worker_v3::functional_alpha_lease_backend(durable_ownership)")
+        );
+        assert!(bind.contains("ownership_runtime.prepare_handle()"));
         assert!(!bind.contains("HelperEngine::new_with_protected_cleanup_token("));
 
         let run_end = source[bind_end..]

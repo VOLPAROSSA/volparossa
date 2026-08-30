@@ -1,8 +1,6 @@
-//! Fail-closed systemd descriptor-store observation and dormant publication adapter.
+//! Fail-closed systemd descriptor-store observation, publication and exact removal.
 //!
-//! Its publication adapter is reachable from the private live-proof selector and a private dormant
-//! supervisor publisher, but neither is connected to the production server, engine, or request
-//! path. It can publish one exact borrowed
+//! The production durable Prepare supervisor can publish one exact borrowed
 //! pidfd/network-namespace pair to the current service's systemd descriptor store, wait for a
 //! separate barrier acknowledgement, and attest the resulting manager inventory over D-Bus. The
 //! caller retains both local owners throughout. Once the first `sendmsg(2)` is attempted, every
@@ -10,10 +8,10 @@
 //! exact poisoned in-process attempt as present, absent, or unresolved, but never clears the
 //! poison or authorizes a resend. A read-only startup observer uses one manager barrier and two
 //! uncached exact-service snapshots, then exposes only an opaque exact-set comparison against
-//! inherited custody bindings. That observer never publishes descriptors. A separate dormant
-//! removal adapter can remove one already-proven exact custody name, orders that notification with
-//! a barrier, and accepts success only for the stable complete baseline-minus-pair inventory. It
-//! has no production caller. This slice never sends `READY=1`.
+//! inherited custody bindings. That observer never publishes descriptors. Same-runtime clean
+//! teardown can remove one already-proven exact custody name, orders that notification with a
+//! barrier, and accepts success only for the stable complete baseline-minus-pair inventory.
+//! Restart adoption/recovery remains absent, and this slice never sends `READY=1`.
 
 use std::{
     collections::BTreeMap,
@@ -85,7 +83,7 @@ static PRODUCTION_MANAGER_MUTATION_GATE: ManagerMutationGate = ManagerMutationGa
 
 /// One opaque, fixed-shape systemd descriptor-store name.
 ///
-/// Construction is fixed from the typed durable digest, and the dormant worker binds that name to
+/// Construction is fixed from the typed durable digest, and the durable worker binds that name to
 /// its journal authority. Production publication/recovery composition remains later work. This type
 /// intentionally exposes neither a `String` nor path authority.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -205,6 +203,11 @@ impl<'a> BorrowedCustodyPair<'a> {
         DurableCustodyDescriptorBinding::try_from_role_ordered(pidfd, network_namespace)
             .ok_or_else(|| invalid_inventory("durable custody descriptor binding is invalid"))
     }
+
+    /// Re-measure the exact role-ordered local pair for a same-runtime removal transaction.
+    pub(crate) fn descriptor_binding(self) -> Result<CustodyDescriptorBinding, FdStoreError> {
+        CustodyDescriptorBinding::from_custody(self)
+    }
 }
 
 /// Whether the first descriptor-store send was ever attempted.
@@ -319,6 +322,7 @@ pub(crate) struct InventoryAttestation {
     custody_name: CustodyFdName,
     identities: [DescriptorIdentity; DESCRIPTORS_PER_CUSTODY],
     stored_descriptors: u32,
+    removal_baseline: Option<Box<StableStartupInventory>>,
 }
 
 impl fmt::Debug for InventoryAttestation {
@@ -343,16 +347,32 @@ impl InventoryAttestation {
         Ok(())
     }
 
+    /// Return the exact stable post-publication inventory needed for a later named removal.
+    /// Test-only synthetic attestations carry the same bounded shape; an attestation without this
+    /// causal inventory can arm diagnostic/unit seams but may never open production dispatch.
+    pub(crate) fn removal_baseline(&self) -> Option<StableStartupInventory> {
+        self.removal_baseline.as_deref().cloned()
+    }
+
+    fn with_removal_baseline(mut self, baseline: StableStartupInventory) -> Self {
+        self.removal_baseline = Some(Box::new(baseline));
+        self
+    }
+
     /// Construct exact test evidence without exposing attestation fields or production authority.
     #[cfg(test)]
     pub(crate) fn for_test_exact_custody(
         custody_name: CustodyFdName,
         custody: BorrowedCustodyPair<'_>,
     ) -> Result<Self, FdStoreError> {
+        let binding = CustodyDescriptorBinding::from_custody(custody)?;
+        let removal_baseline =
+            stable_startup_inventory_for_test(&BTreeMap::from([(custody_name, binding)]));
         Ok(Self {
             custody_name,
             identities: exact_custody_identities(custody)?,
             stored_descriptors: 2,
+            removal_baseline: Some(Box::new(removal_baseline)),
         })
     }
 }
@@ -531,6 +551,7 @@ struct DescriptorStoreSnapshot {
 /// Descriptor identities and manager snapshot fields remain private. The only supported use is
 /// an exact-set comparison against the affine descriptor bindings already inherited by this
 /// process.
+#[derive(Clone, Eq, PartialEq)]
 #[must_use = "startup inventory evidence must be checked against the inherited custody set"]
 pub(crate) struct StableStartupInventory {
     snapshot: DescriptorStoreSnapshot,
@@ -975,6 +996,7 @@ impl DescriptorStoreSnapshot {
             custody_name,
             identities,
             stored_descriptors,
+            removal_baseline: None,
         })
     }
 
@@ -1977,13 +1999,11 @@ where
     Ok(StableServiceCgroupIsolation { snapshot: first })
 }
 
-/// Dormant exact named-removal adapter. No production server, engine, or request-path caller
-/// exists yet.
+/// Exact named-removal adapter used only by same-runtime clean durable Destroy.
 ///
 /// `custody` retains the exact affine owners across the operation and is remeasured before the send
 /// boundary and after the stable post-removal inventory. The adapter performs at most one removal
 /// send.
-#[allow(dead_code)]
 pub(crate) async fn remove_current_process_custody(
     baseline: StableStartupInventory,
     custody_name: CustodyFdName,
@@ -2150,7 +2170,6 @@ where
 /// Reobserve one exact ambiguous removal attempt. Exact-still-present evidence never authorizes a
 /// retry; exact-removed evidence only settles this process-local manager-mutation gate after that
 /// exact removal.
-#[allow(dead_code)]
 pub(crate) async fn reconcile_current_process_removal(
     attempt_id: RemovalAttemptId,
     custody_name: CustodyFdName,
@@ -2353,7 +2372,10 @@ async fn publish_and_attest<S: DescriptorStoreInventorySource>(
     ensure_deadline(deadline)
         .map_err(|error| PublicationFailure::manager_may_own(attempt_id, error))?;
     attempt.complete_success(attempt_id);
-    Ok(attestation)
+    Ok(attestation.with_removal_baseline(StableStartupInventory {
+        snapshot: post,
+        notify_address: address.clone(),
+    }))
 }
 
 /// Observation-only evidence that one poisoned in-process publication is present in the exact
@@ -3635,7 +3657,7 @@ mod tests {
             .find("pub(crate) async fn observe_current_process_startup_inventory")
             .expect("startup observer source start");
         let end = source[start..]
-            .find("/// Dormant exact named-removal adapter")
+            .find("/// Exact named-removal adapter")
             .map(|offset| start + offset)
             .expect("startup observer source end");
         let observer = &source[start..end];
@@ -4916,7 +4938,7 @@ mod tests {
     }
 
     #[test]
-    fn removal_source_has_one_payload_only_send_one_barrier_and_no_production_caller() {
+    fn removal_source_has_one_payload_only_send_one_barrier_and_private_production_wiring() {
         let name = custody_name(87);
         let message = fdstore_remove_message(name);
         let mut expected = FDSTORE_REMOVE_PREFIX.to_vec();
@@ -4987,7 +5009,7 @@ mod tests {
         ] {
             assert!(
                 !server.contains(forbidden),
-                "production server must not wire dormant {forbidden}"
+                "production server must not directly wire private {forbidden}"
             );
         }
     }

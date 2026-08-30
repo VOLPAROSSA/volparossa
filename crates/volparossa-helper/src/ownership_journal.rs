@@ -4,21 +4,23 @@
 //! production startup stops and an operator must inspect the host explicitly. Production now opens
 //! the v3 store through one canonical locked actor before publishing its cleanup token or socket.
 //! Startup projects custody-bound `MayOwnCustody`, `MayOwnPrepare` and `CleanupConfirmed` records
-//! without mutation. The installed production executor deliberately refuses both the trusted
+//! without mutation. The installed restart executor deliberately refuses both the trusted
 //! worker-plus-kernel cleanup proof and the distinct stable manager-absence proof, so only an empty
-//! projection may continue to settle never-dispatched `Intent` records until composition is wired.
+//! startup projection may continue. A separate affine production handle admits live Prepare and
+//! can settle only its same-runtime owner after the backend has completed the two exact proofs.
 
-#![allow(dead_code)] // The production actor is live; mutation APIs remain private until wiring.
+#![allow(dead_code)] // The production actor is live; restart-recovery APIs remain private.
 
 mod actor;
 
-// This affine surface and its opaque, non-authoritative custody digest are intentionally exported
-// before their production composition is installed.
+// This affine surface and its opaque, non-authoritative custody digest remain crate-private.
 #[allow(unused_imports)]
 pub(crate) use actor::{
-    DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyNameDigest, DurableCustodyOutcome,
-    DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor,
-    DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
+    DurableArmOutcome, DurableCleanupConfirmed, DurableCleanupOutcome, DurableCustodyArmHandle,
+    DurableCustodyNameDigest, DurableCustodyOutcome, DurableIntentRegistration,
+    DurableManagerAbsentOutcome, DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor,
+    DurableOwnershipError, DurableOwnershipKey, DurableOwnershipPrepareHandle,
+    DurablePrepareAnchor, DurablePrepareAnchorParts, DurablePrepareSettlement,
     DurableRegistrationOutcome, StartupCustodyPhase, StartupCustodyTarget,
 };
 
@@ -55,7 +57,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 
-/// Starts the dormant actor against a caller-owned temporary directory for cross-module tests.
+/// Starts the actor against a caller-owned temporary directory for cross-module tests.
 ///
 /// The fixture never opens production paths and deliberately accepts one absolute outer deadline.
 /// Its recovery executor is a typed exact echo suitable only for deterministic unit tests.
@@ -127,11 +129,10 @@ impl ManagerAbsenceExecutor for ExactTestRecoveryExecutor {
     }
 }
 
-/// Production ownership lifecycle with one separately cloneable arm-only authority.
+/// Production ownership lifecycle with a separately cloneable typed Prepare authority.
 ///
-/// The wrapper remains the sole owner of actor shutdown and thread settlement. It cannot register,
-/// mark, retire or recover ownership; future custody publication may receive only the narrow handle
-/// needed to arm an already durable custody token.
+/// The wrapper remains the sole owner of actor startup, shutdown, recovery and thread settlement.
+/// Its handle can admit and cleanly settle only affine same-runtime Prepare ownership.
 pub(crate) struct ProductionOwnershipRuntime {
     actor: DurableOwnershipActor,
 }
@@ -212,6 +213,14 @@ impl ProductionOwnershipRuntime {
         self.actor.custody_arm_handle()
     }
 
+    /// Issue the typed production admission/settlement authority while retaining sole actor
+    /// startup, recovery and shutdown ownership in this runtime.
+    pub(crate) fn prepare_handle(
+        &self,
+    ) -> Result<DurableOwnershipPrepareHandle, DurableOwnershipError> {
+        self.actor.prepare_handle()
+    }
+
     /// Fence admission, prove that every record is Absent and join the actor thread.
     pub(crate) fn shutdown_until(
         mut self,
@@ -226,6 +235,35 @@ struct RefuseMayOwnRecovery;
 
 #[derive(Debug, Eq, PartialEq)]
 struct MayOwnRecoveryUnavailable;
+
+/// Typed echo used only after the live production backend has independently completed the exact
+/// same-runtime worker/kernel or manager-custody operation. This is deliberately distinct from
+/// the installed restart executor, which continues to refuse every recovery proof.
+struct SameRuntimeCleanSettlement;
+
+impl CleanupExecutor for SameRuntimeCleanSettlement {
+    type Error = std::convert::Infallible;
+
+    fn confirm_cleanup(
+        &mut self,
+        target: &CleanupTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedCleanupProof, Self::Error> {
+        Ok(target.confirmed_cleanup())
+    }
+}
+
+impl ManagerAbsenceExecutor for SameRuntimeCleanSettlement {
+    type Error = std::convert::Infallible;
+
+    fn confirm_manager_absent(
+        &mut self,
+        target: &ManagerAbsenceTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+        Ok(target.confirmed_manager_absent())
+    }
+}
 
 impl CleanupExecutor for RefuseMayOwnRecovery {
     type Error = MayOwnRecoveryUnavailable;
@@ -1788,7 +1826,8 @@ impl CleanupTarget {
 
     /// Constructs only a typed echo, not cryptographic or kernel evidence. A trusted executor may
     /// call this only after both trusted-worker teardown and exact kernel cleanup have completed.
-    /// This dormant slice deliberately provides no production executor.
+    /// Restart recovery deliberately provides no accepting production executor; same-runtime clean
+    /// settlement reaches this echo only through its separate affine actor operation.
     fn confirmed_cleanup(&self) -> ConfirmedCleanupProof {
         ConfirmedCleanupProof {
             exact_record: self.exact_record.clone(),
