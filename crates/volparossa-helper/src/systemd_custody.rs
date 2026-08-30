@@ -1,15 +1,16 @@
 //! Fail-closed systemd descriptor-store startup boundary.
 //!
 //! Debian 13 systemd may return descriptor-store entries to the service on restart. The current
-//! production recovery executor cannot consume stored custody yet, so the executable bootstrap
+//! production recovery executor cannot consume `MayOwn` custody, so the executable bootstrap
 //! transfers one affine snapshot of the exact inherited descriptor range before any thread or
 //! worker can be created. This module consumes that snapshot, canonicalises each pair into typed
 //! pidfd/network-namespace ownership, validates identity separation and the exact bounded naming
 //! shape, and classifies it against one lock-held durable-journal projection plus a barrier-ordered
 //! stable manager inventory. A non-empty set may continue only when every target was already
-//! durably `CleanupConfirmed`, both inherited and manager custody are empty, and a fresh barrier
-//! plus two stable exact-empty manager snapshots mint one-shot target evidence for the actor's
-//! existing manager-absence transition. Every other classification refuses socket publication.
+//! durably `CleanupConfirmed`. Exact-present pairs are removed canonically through distinct affine
+//! restart proofs; already-absent pairs are skipped. A final fresh barrier plus two stable
+//! exact-empty manager snapshots mint one-shot full-set evidence for the actor's existing
+//! manager-absence transition. Every other classification refuses socket publication.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -37,9 +38,9 @@ use crate::{
         StartupCustodyPhase, StartupCustodyTarget,
     },
     systemd_fdstore::{
-        BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName, FdStoreError,
-        StableServiceCgroupIsolation, StableStartupInventory,
-        observe_current_process_startup_inventory,
+        BorrowedCustodyPair, CustodyDescriptorBinding, CustodyFdName, ExactRestartRemovalProof,
+        FdStoreError, RestartRemovalError, StableServiceCgroupIsolation, StableStartupInventory,
+        observe_current_process_startup_inventory, remove_restart_custody,
     },
     worker_v3::acquire_worker_spawn_admission_until,
 };
@@ -148,6 +149,25 @@ impl StartupCustodyClassification {
                 entry.target.phase() == StartupCustodyPhase::CleanupConfirmed
                     && entry.disposition
                         == StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
+            })
+    }
+
+    /// Whether this complete set contains only already durable `CleanupConfirmed` records and at
+    /// least one exact manager/inherited pair which must be removed before absence settlement.
+    pub(crate) fn is_cleanup_confirmed_with_exact_present(&self) -> bool {
+        !self.custody.is_empty()
+            && !self.classified.is_empty()
+            && self
+                .classified
+                .iter()
+                .any(|entry| entry.disposition == StartupCustodyDisposition::ExactPresent)
+            && self.classified.iter().all(|entry| {
+                entry.target.phase() == StartupCustodyPhase::CleanupConfirmed
+                    && matches!(
+                        entry.disposition,
+                        StartupCustodyDisposition::ExactPresent
+                            | StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
+                    )
             })
     }
 }
@@ -1911,6 +1931,58 @@ impl CleanupConfirmedManagerSource for LinuxCleanupConfirmedManagerSource {
     }
 }
 
+trait CleanupConfirmedRestartRemovalSource {
+    fn remove<'a>(
+        &'a mut self,
+        baseline: StableStartupInventory,
+        custody_name: CustodyFdName,
+        binding: CustodyDescriptorBinding,
+        custody: BorrowedCustodyPair<'a>,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<ExactRestartRemovalProof, RestartRemovalError>> + 'a;
+
+    fn reobserve<'a>(
+        &'a mut self,
+        baseline: &'a StableStartupInventory,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a;
+}
+
+struct LinuxCleanupConfirmedRestartRemovalSource;
+
+impl CleanupConfirmedRestartRemovalSource for LinuxCleanupConfirmedRestartRemovalSource {
+    fn remove<'a>(
+        &'a mut self,
+        baseline: StableStartupInventory,
+        custody_name: CustodyFdName,
+        binding: CustodyDescriptorBinding,
+        custody: BorrowedCustodyPair<'a>,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<ExactRestartRemovalProof, RestartRemovalError>> + 'a {
+        remove_restart_custody(baseline, custody_name, binding, custody, deadline)
+    }
+
+    fn reobserve<'a>(
+        &'a mut self,
+        baseline: &'a StableStartupInventory,
+        deadline: HardDeadline,
+    ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a {
+        baseline.observe_same_service_scope(deadline)
+    }
+}
+
+struct CleanupConfirmedRestartRemovalTarget {
+    custody_name: CustodyFdName,
+    target: StartupCustodyTarget,
+    binding: CustodyDescriptorBinding,
+}
+
+struct ValidatedCleanupConfirmedRestartRemoval {
+    targets: Vec<CleanupConfirmedRestartRemovalTarget>,
+    manager_bindings: BTreeMap<CustodyFdName, CustodyDescriptorBinding>,
+    durable_bindings: BTreeMap<CustodyFdName, DurableCustodyDescriptorBinding>,
+}
+
 /// Settle only a complete non-empty set of durable `CleanupConfirmed` records whose inherited and
 /// manager custody were already empty and remain exactly empty after a fresh manager barrier plus
 /// two uncached stable snapshots.
@@ -1950,6 +2022,304 @@ pub(crate) fn settle_cleanup_confirmed_restart_absence(
     ownership_startup
         .continue_cleanup_confirmed_absent(evidence)
         .map_err(|_| restart_settlement_incomplete())
+}
+
+/// Remove every exact-present pair from an all-`CleanupConfirmed` restart set, then retire the
+/// complete durable set only after one fresh stable exact-empty manager observation.
+///
+/// The inherited affine descriptors, journal startup owner and process-wide worker-spawn
+/// admission remain retained across every descriptorless removal and every final journal/manager
+/// revalidation. The inherited owners are released only after the full-set actor evidence exists.
+pub(crate) fn settle_cleanup_confirmed_restart_present(
+    runtime: &Runtime,
+    mut ownership_startup: ProductionOwnershipStartup,
+    classification: StartupCustodyClassification,
+    deadline: HardDeadline,
+) -> Result<ProductionOwnershipRuntime, io::Error> {
+    if !classification.is_cleanup_confirmed_with_exact_present() {
+        return Err(restart_settlement_incomplete());
+    }
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    let _spawn_admission = acquire_worker_spawn_admission_until(deadline)
+        .map_err(|_| restart_settlement_incomplete())?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+
+    let mut manager = LinuxCleanupConfirmedRestartRemovalSource;
+    let successor = runtime
+        .block_on(remove_cleanup_confirmed_restart_present_with(
+            &classification,
+            deadline,
+            &mut manager,
+        ))
+        .map_err(|_| restart_settlement_incomplete())?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    runtime
+        .block_on(confirm_cleanup_confirmed_restart_empty_with(
+            &classification,
+            &successor,
+            deadline,
+            &mut manager,
+        ))
+        .map_err(|_| restart_settlement_incomplete())?;
+    verify_classification_against_locked_journal(&mut ownership_startup, &classification)?;
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())?;
+    let evidence = cleanup_confirmed_manager_absence_evidence(&classification)?;
+    drop(classification);
+
+    ownership_startup
+        .continue_cleanup_confirmed_absent(evidence)
+        .map_err(|_| restart_settlement_incomplete())
+}
+
+async fn remove_cleanup_confirmed_restart_present_with<
+    Manager: CleanupConfirmedRestartRemovalSource,
+>(
+    classification: &StartupCustodyClassification,
+    deadline: HardDeadline,
+    manager: &mut Manager,
+) -> Result<StableStartupInventory, io::Error> {
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())?;
+    let validated = validate_cleanup_confirmed_restart_removal(classification)?;
+    let mut successor = classification.manager_inventory.clone();
+    if !successor.matches_current_service_scope(&successor) {
+        return Err(restart_settlement_incomplete());
+    }
+    let mut remaining = validated.manager_bindings.clone();
+
+    for target in &validated.targets {
+        deadline
+            .ensure_remaining()
+            .map_err(|_| restart_settlement_incomplete())?;
+        let (manager_before, durable_before) = classification
+            .custody
+            .verify_retained_bindings()
+            .map_err(|_| restart_settlement_incomplete())?;
+        if manager_before != validated.manager_bindings
+            || durable_before != validated.durable_bindings
+        {
+            return Err(restart_settlement_incomplete());
+        }
+        let bundle = classification
+            .custody
+            .bundles
+            .get(&target.custody_name)
+            .ok_or_else(restart_settlement_incomplete)?;
+        bundle.verify_exact_target(&target.target)?;
+        let custody =
+            BorrowedCustodyPair::new(bundle.pidfd.as_fd(), bundle.network_namespace.as_fd())
+                .map_err(|_| restart_settlement_incomplete())?;
+        let proof = manager
+            .remove(
+                successor,
+                target.custody_name,
+                target.binding.clone(),
+                custody,
+                deadline,
+            )
+            .await
+            .map_err(|_| restart_settlement_incomplete())?;
+        deadline
+            .ensure_remaining()
+            .map_err(|_| restart_settlement_incomplete())?;
+        successor = proof
+            .into_verified_successor(target.custody_name, &target.binding)
+            .map_err(|_| restart_settlement_incomplete())?;
+        if remaining.remove(&target.custody_name).is_none() {
+            return Err(restart_settlement_incomplete());
+        }
+        if !remaining.is_empty() {
+            successor
+                .verify_complete_exact_set(&remaining)
+                .map_err(|_| restart_settlement_incomplete())?;
+        }
+        let (manager_after, durable_after) = classification
+            .custody
+            .verify_retained_bindings()
+            .map_err(|_| restart_settlement_incomplete())?;
+        if manager_after != validated.manager_bindings
+            || durable_after != validated.durable_bindings
+        {
+            return Err(restart_settlement_incomplete());
+        }
+    }
+
+    if !remaining.is_empty() {
+        return Err(restart_settlement_incomplete());
+    }
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())?;
+    Ok(successor)
+}
+
+async fn confirm_cleanup_confirmed_restart_empty_with<
+    Manager: CleanupConfirmedRestartRemovalSource,
+>(
+    classification: &StartupCustodyClassification,
+    successor: &StableStartupInventory,
+    deadline: HardDeadline,
+    manager: &mut Manager,
+) -> Result<(), io::Error> {
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())?;
+    let validated = validate_cleanup_confirmed_restart_removal(classification)?;
+    successor
+        .verify_complete_exact_set(&BTreeMap::new())
+        .map_err(|_| restart_settlement_incomplete())?;
+    let (manager_after_removal, durable_after_removal) = classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| restart_settlement_incomplete())?;
+    if manager_after_removal != validated.manager_bindings
+        || durable_after_removal != validated.durable_bindings
+    {
+        return Err(restart_settlement_incomplete());
+    }
+
+    // One new barrier and two uncached snapshots must preserve the exact chained empty successor.
+    let fresh = manager
+        .reobserve(successor, deadline)
+        .await
+        .map_err(|_| restart_settlement_incomplete())?;
+    if &fresh != successor || !successor.matches_current_service_scope(&fresh) {
+        return Err(restart_settlement_incomplete());
+    }
+    fresh
+        .verify_complete_exact_set(&BTreeMap::new())
+        .map_err(|_| restart_settlement_incomplete())?;
+    let (manager_final, durable_final) = classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| restart_settlement_incomplete())?;
+    if manager_final != validated.manager_bindings || durable_final != validated.durable_bindings {
+        return Err(restart_settlement_incomplete());
+    }
+    deadline
+        .ensure_remaining()
+        .map_err(|_| restart_settlement_incomplete())
+}
+
+fn validate_cleanup_confirmed_restart_removal(
+    classification: &StartupCustodyClassification,
+) -> Result<ValidatedCleanupConfirmedRestartRemoval, io::Error> {
+    if !classification.is_cleanup_confirmed_with_exact_present() {
+        return Err(restart_settlement_incomplete());
+    }
+    let (manager_bindings, durable_bindings) = classification
+        .custody
+        .verify_retained_bindings()
+        .map_err(|_| restart_settlement_incomplete())?;
+    classification
+        .manager_inventory
+        .verify_complete_exact_set(&manager_bindings)
+        .map_err(|_| restart_settlement_incomplete())?;
+
+    let mut names = BTreeSet::new();
+    let mut prior = Vec::<StartupCustodyTarget>::with_capacity(classification.classified.len());
+    let mut targets = BTreeMap::<CustodyFdName, CleanupConfirmedRestartRemovalTarget>::new();
+    for entry in &classification.classified {
+        if entry.target.phase() != StartupCustodyPhase::CleanupConfirmed
+            || !entry.target.has_valid_recovery_binding()
+        {
+            return Err(restart_settlement_incomplete());
+        }
+        let custody_name = CustodyFdName::from_durable_digest(entry.target.custody_name_digest());
+        if !names.insert(custody_name)
+            || prior
+                .iter()
+                .any(|candidate| candidate.overlaps_binding(&entry.target.durable_binding()))
+        {
+            return Err(restart_settlement_incomplete());
+        }
+        prior.push(entry.target);
+
+        match entry.disposition {
+            StartupCustodyDisposition::ExactPresent => {
+                let bundle = classification
+                    .custody
+                    .bundles
+                    .get(&custody_name)
+                    .ok_or_else(restart_settlement_incomplete)?;
+                bundle.verify_exact_target(&entry.target)?;
+                let binding = manager_bindings
+                    .get(&custody_name)
+                    .ok_or_else(restart_settlement_incomplete)?;
+                let durable = durable_bindings
+                    .get(&custody_name)
+                    .ok_or_else(restart_settlement_incomplete)?;
+                if &bundle.binding != binding || !entry.target.matches_binding(durable) {
+                    return Err(restart_settlement_incomplete());
+                }
+                if targets
+                    .insert(
+                        custody_name,
+                        CleanupConfirmedRestartRemovalTarget {
+                            custody_name,
+                            target: entry.target,
+                            binding: binding.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(restart_settlement_incomplete());
+                }
+            }
+            StartupCustodyDisposition::CleanupConfirmedNoStoredCustody => {
+                if classification.custody.bundles.contains_key(&custody_name)
+                    || manager_bindings.contains_key(&custody_name)
+                    || durable_bindings.contains_key(&custody_name)
+                {
+                    return Err(restart_settlement_incomplete());
+                }
+            }
+            StartupCustodyDisposition::ExactNoStoredCustody => {
+                return Err(restart_settlement_incomplete());
+            }
+        }
+    }
+    if targets.is_empty()
+        || targets.len() != classification.custody.bundles.len()
+        || targets.len() != manager_bindings.len()
+        || targets.len() != durable_bindings.len()
+        || classification
+            .custody
+            .bundles
+            .keys()
+            .any(|name| !targets.contains_key(name))
+    {
+        return Err(restart_settlement_incomplete());
+    }
+
+    Ok(ValidatedCleanupConfirmedRestartRemoval {
+        targets: targets.into_values().collect(),
+        manager_bindings,
+        durable_bindings,
+    })
+}
+
+fn cleanup_confirmed_manager_absence_evidence(
+    classification: &StartupCustodyClassification,
+) -> Result<CleanupConfirmedManagerAbsenceEvidence, io::Error> {
+    if classification.classified.is_empty()
+        || classification
+            .classified
+            .iter()
+            .any(|entry| entry.target.phase() != StartupCustodyPhase::CleanupConfirmed)
+    {
+        return Err(restart_settlement_incomplete());
+    }
+    Ok(CleanupConfirmedManagerAbsenceEvidence {
+        remaining: classification
+            .classified
+            .iter()
+            .map(|entry| entry.target)
+            .collect(),
+    })
 }
 
 async fn observe_cleanup_confirmed_manager_absence_with<Manager: CleanupConfirmedManagerSource>(
@@ -2003,13 +2373,7 @@ async fn observe_cleanup_confirmed_manager_absence_with<Manager: CleanupConfirme
         .ensure_remaining()
         .map_err(|_| restart_settlement_incomplete())?;
 
-    Ok(CleanupConfirmedManagerAbsenceEvidence {
-        remaining: classification
-            .classified
-            .iter()
-            .map(|entry| entry.target)
-            .collect(),
-    })
+    cleanup_confirmed_manager_absence_evidence(classification)
 }
 
 fn restart_settlement_incomplete() -> io::Error {
@@ -2548,6 +2912,224 @@ mod tests {
                         "scripted cleanup-confirmed sample is absent",
                     ))),
             )
+        }
+    }
+
+    struct ScriptedRestartRemoval {
+        baseline: StableStartupInventory,
+        custody_name: CustodyFdName,
+        binding: CustodyDescriptorBinding,
+        proof_name: CustodyFdName,
+        proof_binding: CustodyDescriptorBinding,
+        successor: StableStartupInventory,
+        fail: bool,
+    }
+
+    struct FakeCleanupConfirmedRestartRemovalSource {
+        removals: VecDeque<ScriptedRestartRemoval>,
+        calls: Vec<CustodyFdName>,
+        baselines: Vec<StableStartupInventory>,
+        deadlines: Vec<HardDeadline>,
+        fresh: Option<Result<StableStartupInventory, FdStoreError>>,
+        reobserve_baselines: Vec<StableStartupInventory>,
+        reobserve_deadlines: Vec<HardDeadline>,
+        mutate_after_call: Option<OwnedFd>,
+        delay_after_call: Duration,
+    }
+
+    impl CleanupConfirmedRestartRemovalSource for FakeCleanupConfirmedRestartRemovalSource {
+        fn remove<'a>(
+            &'a mut self,
+            baseline: StableStartupInventory,
+            custody_name: CustodyFdName,
+            binding: CustodyDescriptorBinding,
+            custody: BorrowedCustodyPair<'a>,
+            deadline: HardDeadline,
+        ) -> impl Future<Output = Result<ExactRestartRemovalProof, RestartRemovalError>> + 'a
+        {
+            self.calls.push(custody_name);
+            self.baselines.push(baseline.clone());
+            self.deadlines.push(deadline);
+            let result = (|| {
+                let script = self.removals.pop_front().ok_or(RestartRemovalError)?;
+                let observed = CustodyDescriptorBinding::from_custody(custody)
+                    .map_err(|_| RestartRemovalError)?;
+                if baseline != script.baseline
+                    || custody_name != script.custody_name
+                    || binding != script.binding
+                    || observed != binding
+                    || script.fail
+                {
+                    return Err(RestartRemovalError);
+                }
+                if let Some(alias) = self.mutate_after_call.take() {
+                    let flags = OFlag::from_bits_truncate(
+                        fcntl(&alias, FcntlArg::F_GETFL)
+                            .expect("read scripted retained status flags"),
+                    );
+                    fcntl(&alias, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
+                        .expect("mutate scripted retained status flags");
+                }
+                if !self.delay_after_call.is_zero() {
+                    thread::sleep(self.delay_after_call);
+                }
+                Ok(ExactRestartRemovalProof::for_test(
+                    script.proof_name,
+                    script.proof_binding,
+                    script.successor,
+                ))
+            })();
+            std::future::ready(result)
+        }
+
+        fn reobserve<'a>(
+            &'a mut self,
+            baseline: &'a StableStartupInventory,
+            deadline: HardDeadline,
+        ) -> impl Future<Output = Result<StableStartupInventory, FdStoreError>> + 'a {
+            self.reobserve_baselines.push(baseline.clone());
+            self.reobserve_deadlines.push(deadline);
+            std::future::ready(
+                self.fresh
+                    .take()
+                    .unwrap_or(Err(FdStoreError::InvalidInventory(
+                        "scripted restart final sample is absent",
+                    ))),
+            )
+        }
+    }
+
+    fn synthetic_restart_removal_classification(
+        present_seeds: &[u8],
+        absent_seeds: &[u8],
+        target_order: &[u8],
+    ) -> (StartupCustodyClassification, Vec<StartupCustodyTarget>) {
+        let mut bundles = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        for seed in present_seeds {
+            let pidfd = tempfile().expect("synthetic restart pidfd").into();
+            let network_namespace = tempfile().expect("synthetic restart namespace").into();
+            let custody =
+                BorrowedCustodyPair::new(AsFd::as_fd(&pidfd), AsFd::as_fd(&network_namespace))
+                    .expect("synthetic restart pair");
+            let binding = CustodyDescriptorBinding::from_custody(custody)
+                .expect("synthetic restart manager binding");
+            let durable = custody
+                .durable_binding()
+                .expect("synthetic restart durable binding");
+            let namespace_status = fstat(&network_namespace).expect("stat synthetic namespace");
+            let target = startup_target_with_anchor(
+                *seed,
+                StartupCustodyPhase::CleanupConfirmed,
+                durable_anchor(*seed, namespace_status.st_dev, namespace_status.st_ino),
+                durable,
+            );
+            assert!(
+                bundles
+                    .insert(
+                        typed_custody_name(*seed),
+                        InheritedCustodyBundle {
+                            pidfd,
+                            network_namespace,
+                            binding,
+                        },
+                    )
+                    .is_none()
+            );
+            assert!(targets.insert(*seed, target).is_none());
+        }
+        for seed in absent_seeds {
+            assert!(
+                targets
+                    .insert(
+                        *seed,
+                        synthetic_startup_target(
+                            *seed,
+                            StartupCustodyPhase::CleanupConfirmed,
+                            10_000 + u32::from(*seed),
+                        ),
+                    )
+                    .is_none()
+            );
+        }
+        let custody = InheritedCustody { bundles };
+        let (manager_bindings, _) = custody
+            .verify_retained_bindings()
+            .expect("synthetic restart retained bindings");
+        let manager_inventory = stable_startup_inventory_for_test(&manager_bindings);
+        let ordered_targets = target_order
+            .iter()
+            .map(|seed| *targets.get(seed).expect("ordered restart target exists"))
+            .collect::<Vec<_>>();
+        assert_eq!(ordered_targets.len(), targets.len());
+        let classified = target_order
+            .iter()
+            .map(|seed| ClassifiedStartupCustodyTarget {
+                target: *targets.get(seed).expect("classified restart target exists"),
+                disposition: if present_seeds.contains(seed) {
+                    StartupCustodyDisposition::ExactPresent
+                } else {
+                    StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
+                },
+            })
+            .collect();
+        (
+            StartupCustodyClassification {
+                custody,
+                manager_inventory,
+                classified,
+            },
+            ordered_targets,
+        )
+    }
+
+    fn successful_restart_removal_source(
+        classification: &StartupCustodyClassification,
+    ) -> FakeCleanupConfirmedRestartRemovalSource {
+        let (mut remaining, _) = classification
+            .custody
+            .verify_retained_bindings()
+            .expect("successful restart source bindings");
+        let mut baseline = classification.manager_inventory.clone();
+        let mut removals = VecDeque::new();
+        for (custody_name, binding) in remaining.clone() {
+            assert!(remaining.remove(&custody_name).is_some());
+            let successor = stable_startup_inventory_for_test(&remaining);
+            removals.push_back(ScriptedRestartRemoval {
+                baseline: baseline.clone(),
+                custody_name,
+                binding: binding.clone(),
+                proof_name: custody_name,
+                proof_binding: binding,
+                successor: successor.clone(),
+                fail: false,
+            });
+            baseline = successor;
+        }
+        FakeCleanupConfirmedRestartRemovalSource {
+            removals,
+            calls: Vec::new(),
+            baselines: Vec::new(),
+            deadlines: Vec::new(),
+            fresh: Some(Ok(baseline)),
+            reobserve_baselines: Vec::new(),
+            reobserve_deadlines: Vec::new(),
+            mutate_after_call: None,
+            delay_after_call: Duration::ZERO,
+        }
+    }
+
+    fn empty_restart_removal_source() -> FakeCleanupConfirmedRestartRemovalSource {
+        FakeCleanupConfirmedRestartRemovalSource {
+            removals: VecDeque::new(),
+            calls: Vec::new(),
+            baselines: Vec::new(),
+            deadlines: Vec::new(),
+            fresh: None,
+            reobserve_baselines: Vec::new(),
+            reobserve_deadlines: Vec::new(),
+            mutate_after_call: None,
+            delay_after_call: Duration::ZERO,
         }
     }
 
@@ -3105,6 +3687,344 @@ mod tests {
                 .is_err()
         );
         assert!(manager.deadlines.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_removal_settles_singleton_and_present_no_store_mix_exactly() {
+        for (present, absent, order) in [
+            (vec![70], Vec::new(), vec![70]),
+            (vec![71], vec![72], vec![72, 71]),
+        ] {
+            let (classification, targets) =
+                synthetic_restart_removal_classification(&present, &absent, &order);
+            assert!(classification.is_cleanup_confirmed_with_exact_present());
+            let deadline = HardDeadline::after(TEST_WAIT).expect("restart removal deadline");
+            let mut manager = successful_restart_removal_source(&classification);
+
+            let successor = remove_cleanup_confirmed_restart_present_with(
+                &classification,
+                deadline,
+                &mut manager,
+            )
+            .await
+            .expect("remove exact restart custody");
+            confirm_cleanup_confirmed_restart_empty_with(
+                &classification,
+                &successor,
+                deadline,
+                &mut manager,
+            )
+            .await
+            .expect("fresh exact-empty restart confirmation");
+            let evidence = cleanup_confirmed_manager_absence_evidence(&classification)
+                .expect("complete cleanup-confirmed evidence");
+
+            assert!(evidence.matches_exact_targets(&targets));
+            assert_eq!(manager.calls.len(), present.len());
+            assert_eq!(manager.reobserve_baselines, vec![successor]);
+            assert_eq!(manager.reobserve_deadlines, vec![deadline]);
+            assert!(
+                manager
+                    .deadlines
+                    .iter()
+                    .all(|observed| *observed == deadline)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn two_present_restart_removals_chain_successors_in_canonical_name_order() {
+        // Actor/evidence order is intentionally the reverse of descriptor-name order.
+        let (classification, targets) =
+            synthetic_restart_removal_classification(&[74, 73], &[], &[74, 73]);
+        let initial = classification.manager_inventory.clone();
+        let deadline = HardDeadline::after(TEST_WAIT).expect("two-removal deadline");
+        let mut manager = successful_restart_removal_source(&classification);
+
+        let successor =
+            remove_cleanup_confirmed_restart_present_with(&classification, deadline, &mut manager)
+                .await
+                .expect("chain two restart removals");
+        confirm_cleanup_confirmed_restart_empty_with(
+            &classification,
+            &successor,
+            deadline,
+            &mut manager,
+        )
+        .await
+        .expect("confirm chained exact-empty successor");
+
+        assert_eq!(
+            manager.calls,
+            vec![typed_custody_name(73), typed_custody_name(74)]
+        );
+        assert_eq!(manager.baselines.first(), Some(&initial));
+        let (mut after_first, _) = classification
+            .custody
+            .verify_retained_bindings()
+            .expect("two-removal retained bindings");
+        assert!(after_first.remove(&typed_custody_name(73)).is_some());
+        let intermediate = stable_startup_inventory_for_test(&after_first);
+        assert_eq!(manager.baselines.get(1), Some(&intermediate));
+        assert_eq!(manager.reobserve_baselines, vec![successor]);
+        assert!(
+            cleanup_confirmed_manager_absence_evidence(&classification)
+                .expect("two-target actor evidence")
+                .matches_exact_targets(&targets),
+            "removal ordering must not reorder actor evidence"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_removal_rejects_nonexact_plans_and_expired_deadline_before_first_send() {
+        let may_own_custody = captured_custody(75);
+        let may_own_target =
+            exact_target_for_custody(75, StartupCustodyPhase::MayOwnCustody, &may_own_custody);
+        let may_own = startup_classification(may_own_custody, &[may_own_target]);
+
+        let (mut exact_no_store, _) = synthetic_restart_removal_classification(&[76], &[], &[76]);
+        exact_no_store.classified[0].disposition = StartupCustodyDisposition::ExactNoStoredCustody;
+
+        let (mut duplicate, _) = synthetic_restart_removal_classification(&[77], &[], &[77]);
+        duplicate.classified.push(duplicate.classified[0]);
+
+        let (mut missing_bundle, _) =
+            synthetic_restart_removal_classification(&[78, 79], &[], &[78, 79]);
+        missing_bundle
+            .custody
+            .bundles
+            .remove(&typed_custody_name(78));
+
+        let (mut extra_manager, _) = synthetic_restart_removal_classification(&[80], &[], &[80]);
+        let (mut extra_bindings, _) = extra_manager
+            .custody
+            .verify_retained_bindings()
+            .expect("extra-manager local bindings");
+        let foreign_pidfd = tempfile().expect("foreign pidfd");
+        let foreign_namespace = tempfile().expect("foreign namespace");
+        let foreign_binding = CustodyDescriptorBinding::from_custody(
+            BorrowedCustodyPair::new(foreign_pidfd.as_fd(), foreign_namespace.as_fd())
+                .expect("foreign pair"),
+        )
+        .expect("foreign binding");
+        extra_bindings.insert(typed_custody_name(81), foreign_binding);
+        extra_manager.manager_inventory = stable_startup_inventory_for_test(&extra_bindings);
+
+        let (mut wrong_binding, _) = synthetic_restart_removal_classification(&[82], &[], &[82]);
+        let wrong_pidfd = tempfile().expect("wrong pidfd");
+        let wrong_namespace = tempfile().expect("wrong namespace");
+        wrong_binding
+            .custody
+            .bundles
+            .get_mut(&typed_custody_name(82))
+            .expect("wrong-binding bundle")
+            .binding = CustodyDescriptorBinding::from_custody(
+            BorrowedCustodyPair::new(wrong_pidfd.as_fd(), wrong_namespace.as_fd())
+                .expect("wrong pair"),
+        )
+        .expect("wrong manager binding");
+
+        for classification in [
+            may_own,
+            exact_no_store,
+            duplicate,
+            missing_bundle,
+            extra_manager,
+            wrong_binding,
+        ] {
+            let mut manager = empty_restart_removal_source();
+            assert!(
+                remove_cleanup_confirmed_restart_present_with(
+                    &classification,
+                    HardDeadline::after(TEST_WAIT).expect("rejection deadline"),
+                    &mut manager,
+                )
+                .await
+                .is_err()
+            );
+            assert!(manager.calls.is_empty());
+            assert!(manager.reobserve_baselines.is_empty());
+        }
+
+        let (classification, _) = synthetic_restart_removal_classification(&[83], &[], &[83]);
+        let mut manager = successful_restart_removal_source(&classification);
+        let expired = HardDeadline::after(Duration::from_millis(1)).expect("expired deadline");
+        while expired.ensure_remaining().is_ok() {
+            thread::yield_now();
+        }
+        assert!(
+            remove_cleanup_confirmed_restart_present_with(&classification, expired, &mut manager,)
+                .await
+                .is_err()
+        );
+        assert!(manager.calls.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_removal_proof_binding_local_drift_final_drift_and_deadline_fail_closed() {
+        let (classification, _) = synthetic_restart_removal_classification(&[84], &[], &[84]);
+        let mut mismatch = successful_restart_removal_source(&classification);
+        mismatch
+            .removals
+            .front_mut()
+            .expect("mismatch script")
+            .proof_name = typed_custody_name(85);
+        assert!(
+            remove_cleanup_confirmed_restart_present_with(
+                &classification,
+                HardDeadline::after(TEST_WAIT).expect("mismatch deadline"),
+                &mut mismatch,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(mismatch.calls.len(), 1);
+        assert!(mismatch.reobserve_baselines.is_empty());
+
+        let (classification, _) = synthetic_restart_removal_classification(&[86], &[], &[86]);
+        let alias = nix::unistd::dup(
+            classification
+                .custody
+                .bundles
+                .get(&typed_custody_name(86))
+                .expect("drift bundle")
+                .pidfd
+                .as_fd(),
+        )
+        .expect("duplicate retained drift descriptor");
+        let mut local_drift = successful_restart_removal_source(&classification);
+        local_drift.mutate_after_call = Some(alias);
+        assert!(
+            remove_cleanup_confirmed_restart_present_with(
+                &classification,
+                HardDeadline::after(TEST_WAIT).expect("local drift deadline"),
+                &mut local_drift,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(local_drift.calls.len(), 1);
+
+        let (classification, _) = synthetic_restart_removal_classification(&[87], &[], &[87]);
+        let mut final_drift = successful_restart_removal_source(&classification);
+        let successor = remove_cleanup_confirmed_restart_present_with(
+            &classification,
+            HardDeadline::after(TEST_WAIT).expect("final drift removal deadline"),
+            &mut final_drift,
+        )
+        .await
+        .expect("removal precedes final drift");
+        final_drift.fresh = Some(Ok(classification.manager_inventory.clone()));
+        assert!(
+            confirm_cleanup_confirmed_restart_empty_with(
+                &classification,
+                &successor,
+                HardDeadline::after(TEST_WAIT).expect("final drift deadline"),
+                &mut final_drift,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(final_drift.reobserve_baselines, vec![successor]);
+
+        let (classification, _) = synthetic_restart_removal_classification(&[88], &[], &[88]);
+        let mut late = successful_restart_removal_source(&classification);
+        late.delay_after_call = Duration::from_millis(20);
+        assert!(
+            remove_cleanup_confirmed_restart_present_with(
+                &classification,
+                HardDeadline::after(Duration::from_millis(5)).expect("late removal deadline"),
+                &mut late,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(late.calls.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removal_crash_windows_retry_as_no_store_or_canonical_mixed_state() {
+        let (classification, targets) = synthetic_restart_removal_classification(&[89], &[], &[89]);
+        let mut manager = successful_restart_removal_source(&classification);
+        let successor = remove_cleanup_confirmed_restart_present_with(
+            &classification,
+            HardDeadline::after(TEST_WAIT).expect("pre-crash removal deadline"),
+            &mut manager,
+        )
+        .await
+        .expect("remove before simulated crash");
+        successor
+            .verify_complete_exact_set(&BTreeMap::new())
+            .expect("removed-before-journal state is manager-empty");
+        drop(classification);
+
+        let no_store = startup_classification(
+            InheritedCustody {
+                bundles: BTreeMap::new(),
+            },
+            &targets,
+        );
+        let mut no_store_manager = FakeCleanupConfirmedManagerSource {
+            result: Some(Ok(no_store.manager_inventory.clone())),
+            deadlines: Vec::new(),
+        };
+        assert!(
+            observe_cleanup_confirmed_manager_absence_with(
+                &no_store,
+                HardDeadline::after(TEST_WAIT).expect("no-store retry deadline"),
+                &mut no_store_manager,
+            )
+            .await
+            .expect("restart after removal before journal")
+            .matches_exact_targets(&targets)
+        );
+
+        let (mut mixed, mixed_targets) =
+            synthetic_restart_removal_classification(&[90, 91], &[], &[91, 90]);
+        let removed_name = typed_custody_name(90);
+        drop(
+            mixed
+                .custody
+                .bundles
+                .remove(&removed_name)
+                .expect("drop first removed bundle at simulated crash"),
+        );
+        mixed
+            .classified
+            .iter_mut()
+            .find(|entry| {
+                CustodyFdName::from_durable_digest(entry.target.custody_name_digest())
+                    == removed_name
+            })
+            .expect("first removed classified target")
+            .disposition = StartupCustodyDisposition::CleanupConfirmedNoStoredCustody;
+        let (remaining_bindings, _) = mixed
+            .custody
+            .verify_retained_bindings()
+            .expect("mixed retry retained bindings");
+        mixed.manager_inventory = stable_startup_inventory_for_test(&remaining_bindings);
+        let mut mixed_manager = successful_restart_removal_source(&mixed);
+        let mixed_successor = remove_cleanup_confirmed_restart_present_with(
+            &mixed,
+            HardDeadline::after(TEST_WAIT).expect("mixed retry removal deadline"),
+            &mut mixed_manager,
+        )
+        .await
+        .expect("retry remaining mixed target");
+        confirm_cleanup_confirmed_restart_empty_with(
+            &mixed,
+            &mixed_successor,
+            HardDeadline::after(TEST_WAIT).expect("mixed retry final deadline"),
+            &mut mixed_manager,
+        )
+        .await
+        .expect("mixed retry final exact-empty proof");
+        assert_eq!(mixed_manager.calls, vec![typed_custody_name(91)]);
+        assert!(
+            cleanup_confirmed_manager_absence_evidence(&mixed)
+                .expect("mixed retry actor evidence")
+                .matches_exact_targets(&mixed_targets)
+        );
     }
 
     #[test]
@@ -4355,7 +5275,7 @@ mod tests {
             .find("pub(crate) fn settle_cleanup_confirmed_restart_absence")
             .expect("cleanup-confirmed restart composition");
         let end = source[start..]
-            .find("fn classify_journal_targets")
+            .find("/// Remove every exact-present pair")
             .map(|offset| start + offset)
             .expect("cleanup-confirmed restart composition end");
         let composition = &source[start..end];
@@ -4383,8 +5303,16 @@ mod tests {
         assert!(observe < final_journal);
         assert!(final_journal < continue_actor);
         assert!(source.contains("baseline.observe_same_service_scope(deadline)"));
-        assert!(composition.contains("fresh != classification.manager_inventory"));
-        assert!(composition.contains("verify_complete_exact_set(&manager_bindings)"));
+        let observer_start = source
+            .find("async fn observe_cleanup_confirmed_manager_absence_with")
+            .expect("cleanup-confirmed manager absence observer");
+        let observer_end = source[observer_start..]
+            .find("fn restart_settlement_incomplete")
+            .map(|offset| observer_start + offset)
+            .expect("cleanup-confirmed manager absence observer end");
+        let observer = &source[observer_start..observer_end];
+        assert!(observer.contains("fresh != classification.manager_inventory"));
+        assert!(observer.contains("verify_complete_exact_set(&manager_bindings)"));
         for forbidden in [
             "confirm_cleanup(",
             "FDSTOREREMOVE",
@@ -4407,6 +5335,92 @@ mod tests {
             .find("bind_production_socket(prepared_runtime, ownership_runtime)")
             .expect("server socket publication");
         assert!(settlement < socket);
+    }
+
+    #[test]
+    fn exact_present_restart_composition_orders_removal_fresh_empty_and_actor_evidence() {
+        let source = include_str!("systemd_custody.rs");
+        let start = source
+            .find("pub(crate) fn settle_cleanup_confirmed_restart_present")
+            .expect("exact-present restart composition");
+        let end = source[start..]
+            .find("async fn observe_cleanup_confirmed_manager_absence_with")
+            .map(|offset| start + offset)
+            .expect("exact-present restart composition end");
+        let composition = &source[start..end];
+        let classification = composition
+            .find("is_cleanup_confirmed_with_exact_present")
+            .expect("all-CleanupConfirmed ExactPresent gate");
+        let journals = composition
+            .match_indices("verify_classification_against_locked_journal")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert_eq!(journals.len(), 4);
+        let admission = composition
+            .find("acquire_worker_spawn_admission_until")
+            .expect("retained worker-spawn admission");
+        let removals = composition
+            .find("block_on(remove_cleanup_confirmed_restart_present_with")
+            .expect("non-cancellable canonical removals");
+        let fresh_empty = composition
+            .find("block_on(confirm_cleanup_confirmed_restart_empty_with")
+            .expect("fresh stable empty observation");
+        let evidence = composition
+            .find("cleanup_confirmed_manager_absence_evidence(&classification)")
+            .expect("full actor evidence mint");
+        let release = composition
+            .find("drop(classification)")
+            .expect("affine inherited-owner release");
+        let actor = composition
+            .find("continue_cleanup_confirmed_absent(evidence)")
+            .expect("existing actor consumer");
+        assert!(classification < journals[0]);
+        assert!(journals[0] < admission);
+        assert!(admission < journals[1]);
+        assert!(journals[1] < removals);
+        assert!(removals < journals[2]);
+        assert!(journals[2] < fresh_empty);
+        assert!(fresh_empty < journals[3]);
+        assert!(journals[3] < evidence);
+        assert!(evidence < release);
+        assert!(release < actor);
+        assert!(composition.contains("BTreeMap::<CustodyFdName"));
+        assert!(composition.contains("targets.into_values().collect()"));
+        assert!(source.contains("remove_restart_custody("));
+        assert!(composition.contains(".remove("));
+        assert!(composition.contains("into_verified_successor"));
+        assert!(composition.contains("verify_complete_exact_set(&BTreeMap::new())"));
+        for forbidden in [
+            "confirm_cleanup(",
+            "into_same_runtime_manager_proof",
+            "reconcile_current_process_removal",
+            "retry_current_process_removal",
+            "NamespaceKernel",
+            "setns(",
+            "unshare(",
+            "READY=1",
+            "bind_production_socket",
+            "worker_v3::",
+        ] {
+            assert!(
+                !composition.contains(forbidden),
+                "exact-present restart composition unexpectedly contains {forbidden}"
+            );
+        }
+
+        let server = include_str!("server.rs");
+        let settlement = server
+            .find("settle_cleanup_confirmed_restart_present(")
+            .expect("server exact-present settlement branch");
+        let refusal = server
+            .find("observe_nonempty_restart_custody_for_refusal(")
+            .expect("server fallback refusal");
+        let socket = server
+            .find("bind_production_socket(prepared_runtime, ownership_runtime)")
+            .expect("server socket publication");
+        assert!(settlement < refusal);
+        assert!(refusal < socket);
+        assert!(!server.contains("remove_restart_custody"));
     }
 
     #[test]

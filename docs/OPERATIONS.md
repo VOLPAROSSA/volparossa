@@ -222,8 +222,11 @@ The current helper v3 does not yet provide complete crash recovery or restart cl
 Before rotating its cleanup token or touching its socket, it rejects every object at the retired
 `/run/volparossa/helper.ownership-v1` path and starts the canonical v3 journal actor. That actor may
 durably settle a never-dispatched `Intent`. It may also retire a complete set of already durable
-`CleanupConfirmed` records only when inherited custody is empty and a revalidated fresh manager
-barrier plus two stable snapshots prove the complete descriptor store remains exactly empty. A
+`CleanupConfirmed` records. Exact-present pairs are removed one name at a time in canonical order;
+each descriptorless removal must prove a stable complete inventory equal to its predecessor minus
+only that pair. Mixed already-absent/present state resumes after a crash. A final revalidated fresh
+manager barrier plus two stable snapshots must prove the complete descriptor store remains exactly
+empty before any journal transition. A
 `MayOwnCustody` or `MayOwnPrepare` remains byte-identical and blocks startup because production has
 no worker/kernel absence-proving recovery executor. Never remove a journal object
 merely to bypass this interlock: stop and inspect until a supported reaper exists.
@@ -231,8 +234,9 @@ merely to bypass this interlock: stop and inspect until a supported reaper exist
 The boot-scoped v3 module has a canonical, bounded, secret-free codec/CAS store with
 file-sync/rename/directory-sync ordering and failpoint tests. Production owns its startup/shutdown
 actor but exposes no complete absence-proving recovery backend, restart reaper, or cross-runtime
-tag-28 proof. Journal absence is not cleanup evidence; the narrow manager proof applies only after
-durable `CleanupConfirmed`. The current `doctor`
+tag-28 proof. A restart removal error is terminal for that process and permits no blind retry;
+journal absence is not cleanup evidence, and the bounded manager proof applies only after durable
+`CleanupConfirmed`. The current `doctor`
 also has no helper-v3 crash-ownership readiness check, so other passing checks do not make cleanup
 ready.
 

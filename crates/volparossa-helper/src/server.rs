@@ -34,7 +34,7 @@ use crate::{
     systemd_custody::{
         capture_inherited_custody, classify_startup_custody,
         observe_nonempty_restart_custody_for_refusal, observe_startup_custody_inventory,
-        settle_cleanup_confirmed_restart_absence,
+        settle_cleanup_confirmed_restart_absence, settle_cleanup_confirmed_restart_present,
     },
 };
 
@@ -147,6 +147,14 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
             .map_err(|_| ServerError::OwnershipIncomplete)?
     } else if classification.is_cleanup_confirmed_no_stored_custody_only() {
         settle_cleanup_confirmed_restart_absence(
+            &runtime,
+            ownership_startup,
+            classification,
+            ownership_deadline,
+        )
+        .map_err(|_| ServerError::InheritedCustody)?
+    } else if classification.is_cleanup_confirmed_with_exact_present() {
+        settle_cleanup_confirmed_restart_present(
             &runtime,
             ownership_startup,
             classification,
@@ -929,6 +937,9 @@ mod tests {
         let cleanup_confirmed_restart = entry
             .find("settle_cleanup_confirmed_restart_absence(")
             .expect("cleanup-confirmed restart settlement");
+        let cleanup_confirmed_present = entry
+            .find("settle_cleanup_confirmed_restart_present(")
+            .expect("cleanup-confirmed exact-present removal");
         let continue_empty = entry
             .find("continue_empty()")
             .expect("empty-only ownership startup continuation");
@@ -947,9 +958,12 @@ mod tests {
         assert!(revalidate < classify);
         assert!(classify < continue_empty);
         assert!(classify < cleanup_confirmed_restart);
+        assert!(cleanup_confirmed_restart < cleanup_confirmed_present);
+        assert!(cleanup_confirmed_present < restart_refusal);
         assert!(classify < restart_refusal);
         assert!(continue_empty < bind);
         assert!(cleanup_confirmed_restart < bind);
+        assert!(cleanup_confirmed_present < bind);
         assert!(restart_refusal < bind);
         assert!(bind < drive);
         assert!(source.contains("async fn run_server"));

@@ -15,7 +15,8 @@
 //! inherited custody bindings. That observer never publishes descriptors. Same-runtime clean
 //! teardown can remove one already-proven exact custody name, orders that notification with a
 //! barrier, and accepts success only for the stable complete baseline-minus-pair inventory.
-//! Restart adoption/recovery remains absent, and this slice never sends `READY=1`.
+//! Startup may reuse only the private exact-removal core through a distinct fixed-error proof type;
+//! restart adoption and worker/kernel reaping remain absent, and this slice never sends `READY=1`.
 
 use std::{
     collections::BTreeMap,
@@ -267,6 +268,14 @@ impl RemovalFailure {
         Self::ManagerMayHaveRemoved { attempt_id, error }
     }
 }
+
+/// Fixed restart-removal failure which deliberately erases the process-local removal attempt ID.
+///
+/// A post-send failure leaves the manager-mutation gate poisoned. Startup therefore stops the
+/// process and cannot obtain either reconciliation authority or permission for a blind resend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("restart descriptor-store removal did not complete exactly")]
+pub(crate) struct RestartRemovalError;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FdStoreError {
@@ -776,6 +785,78 @@ pub(crate) struct ExactRemovalProof {
     binding: CustodyDescriptorBinding,
     successor: StableStartupInventory,
     stored_descriptors: u32,
+}
+
+/// Exact stable proof for one startup-only descriptor-store removal.
+///
+/// This type is deliberately disjoint from [`ExactRemovalProof`] and
+/// [`SameRuntimeManagerProof`]. It can only advance the opaque startup inventory baseline; it
+/// carries no same-runtime manager-proof conversion and no journal transition authority.
+#[must_use = "restart removal evidence must advance the retained startup inventory"]
+pub(crate) struct ExactRestartRemovalProof {
+    custody_name: CustodyFdName,
+    binding: CustodyDescriptorBinding,
+    successor: StableStartupInventory,
+}
+
+impl fmt::Debug for ExactRestartRemovalProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExactRestartRemovalProof(<redacted>)")
+    }
+}
+
+impl ExactRestartRemovalProof {
+    /// Consume this affine proof only when it matches the exact startup target, then advance the
+    /// canonical sequence to its stable successor inventory.
+    pub(crate) fn into_verified_successor(
+        self,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+    ) -> Result<StableStartupInventory, RestartRemovalError> {
+        if self.custody_name != custody_name || &self.binding != binding {
+            return Err(RestartRemovalError);
+        }
+        Ok(self.successor)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        custody_name: CustodyFdName,
+        binding: CustodyDescriptorBinding,
+        successor: StableStartupInventory,
+    ) -> Self {
+        Self {
+            custody_name,
+            binding,
+            successor,
+        }
+    }
+}
+
+struct ExactRemovedInventory {
+    custody_name: CustodyFdName,
+    binding: CustodyDescriptorBinding,
+    successor: StableStartupInventory,
+    stored_descriptors: u32,
+}
+
+impl ExactRemovedInventory {
+    fn into_same_runtime_proof(self) -> ExactRemovalProof {
+        ExactRemovalProof {
+            custody_name: self.custody_name,
+            binding: self.binding,
+            successor: self.successor,
+            stored_descriptors: self.stored_descriptors,
+        }
+    }
+
+    fn into_restart_proof(self) -> ExactRestartRemovalProof {
+        ExactRestartRemovalProof {
+            custody_name: self.custody_name,
+            binding: self.binding,
+            successor: self.successor,
+        }
+    }
 }
 
 impl fmt::Debug for ExactRemovalProof {
@@ -2311,6 +2392,35 @@ pub(crate) async fn remove_current_process_custody(
     .await
 }
 
+/// Startup-only exact named-removal adapter.
+///
+/// The returned proof can advance only the restart inventory chain. Every failure is intentionally
+/// collapsed so a post-send [`RemovalAttemptId`] can never escape into startup retry authority.
+pub(crate) async fn remove_restart_custody(
+    baseline: StableStartupInventory,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactRestartRemovalProof, RestartRemovalError> {
+    ensure_deadline(deadline).map_err(|_| RestartRemovalError)?;
+    let source = SystemdDescriptorStoreSource::for_scope(baseline.snapshot.scope.clone(), deadline)
+        .await
+        .map_err(|_| RestartRemovalError)?;
+    let sender = NotifySender::new(&baseline.notify_address).map_err(|_| RestartRemovalError)?;
+    remove_restart_and_attest(
+        &PRODUCTION_MANAGER_MUTATION_GATE,
+        &source,
+        &sender,
+        baseline,
+        custody_name,
+        expected_binding,
+        custody,
+        deadline,
+    )
+    .await
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -2326,6 +2436,70 @@ async fn remove_and_attest<S>(
     custody: BorrowedCustodyPair<'_>,
     deadline: HardDeadline,
 ) -> Result<ExactRemovalProof, RemovalFailure>
+where
+    S: DescriptorStoreInventorySource,
+{
+    remove_and_attest_core(
+        gate,
+        source,
+        sender,
+        baseline,
+        custody_name,
+        expected_binding,
+        custody,
+        deadline,
+    )
+    .await
+    .map(ExactRemovedInventory::into_same_runtime_proof)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the restart adapter preserves every exact target and deadline input"
+)]
+async fn remove_restart_and_attest<S>(
+    gate: &ManagerMutationGate,
+    source: &S,
+    sender: &NotifySender,
+    baseline: StableStartupInventory,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactRestartRemovalProof, RestartRemovalError>
+where
+    S: DescriptorStoreInventorySource,
+{
+    remove_and_attest_core(
+        gate,
+        source,
+        sender,
+        baseline,
+        custody_name,
+        expected_binding,
+        custody,
+        deadline,
+    )
+    .await
+    .map(ExactRemovedInventory::into_restart_proof)
+    .map_err(|_| RestartRemovalError)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the removal transaction keeps every authority and deadline input explicit"
+)]
+async fn remove_and_attest_core<S>(
+    gate: &ManagerMutationGate,
+    source: &S,
+    sender: &NotifySender,
+    baseline: StableStartupInventory,
+    custody_name: CustodyFdName,
+    expected_binding: CustodyDescriptorBinding,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactRemovedInventory, RemovalFailure>
 where
     S: DescriptorStoreInventorySource,
 {
@@ -2435,7 +2609,7 @@ where
     };
     ensure_deadline(deadline)
         .map_err(|error| RemovalFailure::manager_may_have_removed(attempt_id, error))?;
-    let proof = ExactRemovalProof {
+    let proof = ExactRemovedInventory {
         custody_name,
         binding: expected_binding,
         successor: StableStartupInventory {
@@ -4466,6 +4640,173 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn restart_removal_has_distinct_affine_proof_and_exact_successor() {
+        let directory = tempdir().expect("restart notification directory");
+        let socket_path = directory.path().join("restart-remove.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind restart notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("restart receive timeout");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("restart removal sender");
+        let pidfd = tempfile().expect("restart pidfd fixture");
+        let mut network_namespace = tempfile().expect("restart namespace fixture");
+        network_namespace
+            .write_all(b"distinct restart descriptor")
+            .expect("make restart fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow restart pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(74);
+        let unrelated_name = custody_name(75);
+        let unrelated_binding =
+            CustodyDescriptorBinding([descriptor_identity(840), descriptor_identity(850)]);
+        let mut baseline_entries = Vec::from(exact_pair_entries(target_name, &binding));
+        baseline_entries.extend(exact_pair_entries(unrelated_name, &unrelated_binding));
+        let baseline_snapshot = snapshot(42, baseline_entries);
+        let successor_snapshot = snapshot(
+            42,
+            Vec::from(exact_pair_entries(unrelated_name, &unrelated_binding)),
+        );
+        let source = FakeInventorySource::new(
+            42,
+            vec![
+                baseline_snapshot.clone(),
+                successor_snapshot.clone(),
+                successor_snapshot,
+            ],
+        );
+        let gate = ManagerMutationGate::new();
+        let expected_removal = fdstore_remove_message(target_name);
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, expected_removal);
+            assert!(descriptors.is_empty(), "restart removal carried FDs");
+            let (message, descriptors) = receive_message(&receiver);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1);
+            close_received(descriptors);
+        });
+        let deadline = HardDeadline::after(Duration::from_secs(2)).expect("restart deadline");
+
+        let proof = remove_restart_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot, address),
+            target_name,
+            binding.clone(),
+            custody,
+            deadline,
+        )
+        .await
+        .expect("exact restart removal");
+
+        receiver_thread.join().expect("restart manager receiver");
+        assert_eq!(format!("{proof:?}"), "ExactRestartRemovalProof(<redacted>)");
+        let successor = proof
+            .into_verified_successor(target_name, &binding)
+            .expect("consume exact restart proof");
+        successor
+            .verify_complete_exact_set(&BTreeMap::from([(unrelated_name, unrelated_binding)]))
+            .expect("restart successor preserves only unrelated custody");
+        DescriptorIdentity::from_descriptor(pidfd.as_fd()).expect("restart pidfd owner retained");
+        DescriptorIdentity::from_descriptor(network_namespace.as_fd())
+            .expect("restart namespace owner retained");
+        drop(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("restart gate deadline"),
+            )
+            .await
+            .expect("exact restart success clears the manager gate"),
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_post_send_failure_erases_attempt_and_permanently_blocks_resend() {
+        let directory = tempdir().expect("restart poison directory");
+        let socket_path = directory.path().join("restart-poison.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind restart poison socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("restart poison receive timeout");
+        let observer = receiver.try_clone().expect("clone restart poison socket");
+        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+        let sender = NotifySender::new(&address).expect("restart poison sender");
+        let pidfd = tempfile().expect("restart poison pidfd");
+        let network_namespace = tempfile().expect("restart poison namespace");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow restart poison pair");
+        let binding = custody_binding(custody);
+        let target_name = custody_name(76);
+        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        let source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
+        let gate = ManagerMutationGate::new();
+        let expected_removal = fdstore_remove_message(target_name);
+        let receiver_thread = thread::spawn(move || {
+            let (message, descriptors) = receive_message(&observer);
+            assert_eq!(message, expected_removal);
+            assert!(descriptors.is_empty());
+            let (message, descriptors) = receive_message(&observer);
+            assert_eq!(message, BARRIER_MESSAGE);
+            assert_eq!(descriptors.len(), 1);
+            // Closing the barrier writer without acknowledging it forces a post-send ambiguity.
+            close_received(descriptors);
+        });
+
+        let error = remove_restart_and_attest(
+            &gate,
+            &source,
+            &sender,
+            stable_inventory(baseline_snapshot.clone(), address.clone()),
+            target_name,
+            binding.clone(),
+            custody,
+            HardDeadline::after(Duration::from_secs(2)).expect("restart poison deadline"),
+        )
+        .await
+        .expect_err("closed barrier is an ambiguous restart removal");
+        receiver_thread.join().expect("restart poison receiver");
+        assert_eq!(error, RestartRemovalError);
+        assert_eq!(
+            error.to_string(),
+            "restart descriptor-store removal did not complete exactly"
+        );
+
+        let retry_source = FakeInventorySource::new(42, vec![baseline_snapshot.clone()]);
+        let retry = remove_restart_and_attest(
+            &gate,
+            &retry_source,
+            &sender,
+            stable_inventory(baseline_snapshot, address),
+            target_name,
+            binding,
+            custody,
+            HardDeadline::after(Duration::from_secs(1)).expect("blocked restart deadline"),
+        )
+        .await
+        .expect_err("restart poison must reject a blind resend");
+        assert_eq!(retry, RestartRemovalError);
+        assert_eq!(
+            retry_source
+                .snapshots
+                .lock()
+                .expect("retry snapshots")
+                .len(),
+            1,
+            "poison rejection must precede even the retry preflight"
+        );
+        assert_no_datagram(&receiver);
+        assert!(matches!(
+            gate.acquire_publication(
+                HardDeadline::after(Duration::from_secs(1)).expect("cross-poison deadline")
+            )
+            .await,
+            Err(FdStoreError::PublicationPoisoned)
+        ));
+    }
+
     #[test]
     fn removal_baseline_requires_fixed_complete_unaliased_pairs_and_exact_target_binding() {
         let target_name = custody_name(72);
@@ -6155,6 +6496,7 @@ mod tests {
         let server = include_str!("server.rs");
         for forbidden in [
             "remove_current_process_custody",
+            "remove_restart_custody",
             "reconcile_current_process_removal",
             "retry_current_process_removal",
         ] {
@@ -6163,6 +6505,69 @@ mod tests {
                 "production server must not directly wire private {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn restart_removal_boundary_is_distinct_fixed_and_has_no_retry_authority() {
+        let source = include_str!("systemd_fdstore.rs");
+        let proof_start = source
+            .find("pub(crate) struct ExactRestartRemovalProof")
+            .expect("restart proof start");
+        let proof_end = source[proof_start..]
+            .find("struct ExactRemovedInventory")
+            .map(|offset| proof_start + offset)
+            .expect("restart proof end");
+        let proof = &source[proof_start..proof_end];
+        assert!(proof.contains("into_verified_successor"));
+        for forbidden in [
+            "into_successor(self)",
+            "into_same_runtime_manager_proof",
+            "SameRuntimeManagerProofKind",
+            "RemovalAttemptId",
+            "Clone",
+        ] {
+            assert!(
+                !proof.contains(forbidden),
+                "restart proof unexpectedly exposes {forbidden}"
+            );
+        }
+
+        let adapter_start = source
+            .find("pub(crate) async fn remove_restart_custody")
+            .expect("restart adapter start");
+        let adapter_end = source[adapter_start..]
+            .find("async fn remove_and_attest<S>")
+            .map(|offset| adapter_start + offset)
+            .expect("restart adapter end");
+        let adapter = &source[adapter_start..adapter_end];
+        assert!(adapter.contains("PRODUCTION_MANAGER_MUTATION_GATE"));
+        assert!(adapter.contains("Result<ExactRestartRemovalProof, RestartRemovalError>"));
+        assert!(adapter.contains("remove_restart_and_attest("));
+        for forbidden in [
+            "reconcile_current_process_removal",
+            "retry_current_process_removal",
+            "into_same_runtime_manager_proof",
+            "SameRuntimeManagerProof",
+            "READY=1",
+        ] {
+            assert!(
+                !adapter.contains(forbidden),
+                "restart adapter unexpectedly exposes {forbidden}"
+            );
+        }
+
+        let wrapper_start = source
+            .find("async fn remove_restart_and_attest<S>")
+            .expect("restart wrapper start");
+        let wrapper_end = source[wrapper_start..]
+            .find("async fn remove_and_attest_core<S>")
+            .map(|offset| wrapper_start + offset)
+            .expect("restart wrapper end");
+        let wrapper = &source[wrapper_start..wrapper_end];
+        assert!(wrapper.contains("remove_and_attest_core("));
+        assert!(wrapper.contains("map_err(|_| RestartRemovalError)"));
+        assert!(!wrapper.contains("ExactRemovalProof"));
+        assert!(!wrapper.contains("RemovalAttemptId"));
     }
 
     #[tokio::test]

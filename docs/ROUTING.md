@@ -393,8 +393,9 @@ canonical/CAS ownership actor starts before
 cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now
 reconstructs and registers tag 35's exact canonical intent before worker reservation, then carries
 its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. A
-restart may retire only an already durable all-`CleanupConfirmed` set after fresh exact-empty
-manager evidence; the refusing cleanup executor still leaves inherited `MayOwnCustody` or
+restart may retire only an already durable all-`CleanupConfirmed` set: exact-present pairs first
+chain canonical descriptorless baseline-minus-pair removals, then a fresh stable exact-empty manager
+observation supplies full-set actor evidence. The refusing cleanup executor still leaves inherited `MayOwnCustody` or
 `MayOwnPrepare` byte-identical and blocks startup. There is no inherited-custody recovery backend,
 restart reaper, or cross-runtime tag-28 proof.
 Journal absence is not cleanup proof. Client ingress is also

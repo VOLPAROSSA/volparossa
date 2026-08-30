@@ -575,13 +575,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   inventory-attested pidfd/network-namespace publication caller and live clean-Destroy settlement;
   no inherited-custody cleanup executor, restart reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live-root production lifecycle proof exists.
-  One narrower startup case is now production-wired: a complete non-empty set consisting only of
-  already durable `CleanupConfirmedNoStoredCustody` targets is revalidated, reobserved after a fresh
-  manager barrier and two stable exact-empty snapshots, and consumed as one-shot exact-target
-  manager-absence evidence by the existing actor sweep. The cleanup executor is never invoked.
-  Full-set validation occurs before the first CAS; exact partial progress after a crash is safely
-  retryable from the remaining `CleanupConfirmed` targets. This retires confirmed journal custody,
-  but does not reap a worker, destroy a namespace, clean kernel state or adopt inherited custody.
+  One bounded startup case is now production-wired: a complete non-empty set consisting only of
+  already durable `CleanupConfirmed` targets. Already-absent members take the prior fresh-empty
+  path. Each exact-present member is prevalidated as a full set, removed once in canonical name
+  order with no ancillary descriptors, and must yield two stable snapshots equal to the opaque
+  predecessor minus exactly that pair. A distinct affine restart proof advances the successor; it
+  cannot enter the same-runtime proof type. Mixed present/no-store state resumes partial removal.
+  The final exact-empty successor, another fresh barrier/two-snapshot empty observation and locked
+  journal revalidation mint one-shot full-set manager-absence evidence for the existing actor sweep.
+  The cleanup executor is never invoked. Full-set validation occurs before the first CAS; partial
+  CAS progress is safely retryable from the remaining `CleanupConfirmed` targets. This retires
+  confirmed journal custody, but does not reap a worker, destroy a namespace, clean kernel state or
+  adopt inherited custody.
   The production non-empty restart-refusal path now owns the outer composition. It retains and
   revalidates the exact startup journal guard, holds the same opaque process-wide admission guard
   used by every worker spawn, drives the borrowing async sampler non-cancellably, and performs the
@@ -742,9 +747,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   record-transition-free, lock-held exact-set
   classification of durable journal targets, affinely inherited custody and a barrier-ordered
   stable manager inventory before any `Intent` mutation. There remains no inherited adoption,
-  restart reaper, or inherited namespace/kernel cleanup executor. Only an all-
-  `CleanupConfirmedNoStoredCustody` set can consume the narrow fresh manager-absence proof described
-  above; every other non-empty classification continues to block startup. Its production refusal observer waits
+  restart reaper, or inherited namespace/kernel cleanup executor. Only an all-`CleanupConfirmed`
+  set can consume the bounded removal/fresh-absence proof described above; every other non-empty
+  classification continues to block startup. Its production refusal observer waits
   for exact inherited process-pidfd `POLLIN` under one hard deadline, permits `POLLHUP` only with
   `POLLIN`, remeasures the exact descriptor binding before and after each wait, and remeasures the
   complete pending set once more before constructing evidence. Process/thread-group interpretation
@@ -926,12 +931,15 @@ single clean-build A01--A15 run; the score is not a release claim.
   `MayOwnCustody` becomes only `ExactNoStoredCustody`; an absent `CleanupConfirmed` receives the
   distinct `CleanupConfirmedNoStoredCustody` disposition. Neither initial disposition is an
   `Absent` proof or mutation authority, and the former cannot substitute for either durable
-  settlement proof. An all-cleanup-confirmed set is revalidated once more, then requires a fresh
-  manager barrier and two new stable exact-empty snapshots before one-shot exact-target manager-
-  absence evidence reaches the existing actor sweep. Full-set validation precedes the first per-
-  record CAS; a crash after partial exact progress leaves retryable `Absent + CleanupConfirmed`
-  state. Every mixed, present, `MayOwn`, changed, missing, duplicate, deadline or observation-
-  failure case still refuses startup before cleanup token or socket publication. Dropping a refused set closes the exact process-local source
+  settlement proof. An all-cleanup-confirmed set is revalidated as a whole. Exact-present pairs are
+  removed canonically through one descriptorless send and exact predecessor-minus-pair successor;
+  present+no-store mixtures resume partial removal. A final fresh manager barrier and two new stable
+  exact-empty snapshots precede one-shot exact-target manager-absence evidence for the existing
+  actor sweep. Full-set validation precedes both the first removal send and the first per-record
+  CAS; a crash after partial exact progress leaves retryable present+no-store or
+  `Absent + CleanupConfirmed` state. Every `MayOwn`, wrong-phase, changed, missing, duplicate,
+  overlapping, deadline or observation-failure case still refuses startup before cleanup token or
+  socket publication. Dropping a refused set closes the exact process-local source
   slots; source ownership and the read-only exact-set join are no longer positive-adoption
   blockers, but a custody-capable production restart cleanup/reaper remains absent. The
   production durable-Prepare publisher sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape

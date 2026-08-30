@@ -266,9 +266,10 @@ That handle can register a validated wire intent, bind exact worker custody, arm
 resulting affine token through the two ordered same-runtime settlement phases. It exposes no raw
 revision, coordinates, startup recovery, or lifecycle authority. The installed restart cleanup
 executor still refuses every `MayOwnCustody`/`MayOwnPrepare` proof request, so those phases remain
-byte-identical and block startup. Only an already durable `CleanupConfirmed` set with no stored
-custody can be retired through the fresh manager-absence join above. There is no inherited-custody
-adoption, restart reaper, supported on-disk migration, or live-root proof. Every non-test actor
+byte-identical and block startup. An all-`CleanupConfirmed` set may retire when custody is already
+absent, or after every exact-present pair is removed and the resulting manager inventory is freshly
+proved stably empty. There is no inherited-custody adoption, restart reaper, supported on-disk
+migration, or live-root proof. Every non-test actor
 entry point requires one caller-supplied absolute hard deadline. That same value is carried through
 admission, the queued command, actor-thread execution, reply handling and thread settlement. Each
 settlement operation additionally receives its exact supplied deadline and rechecks it before
@@ -367,10 +368,13 @@ pair remains stored, but manager absence receives the distinct
 `CleanupConfirmedNoStoredCustody` disposition. Neither initial no-store disposition alone proves
 old-worker death, kernel cleanup, or authority for a journal transition. In particular,
 `ExactNoStoredCustody` cannot substitute for either settlement proof. Only a complete set consisting
-solely of the cleanup-confirmed disposition is revalidated against the locked journal and upgraded
-by a fresh barrier plus two new exact-empty manager snapshots into one-shot affine manager-absence
-evidence. Every partial, mixed, one-sided, wrong-name, wrong-binding, changed or unstable case
-remains unresolved and reaches no journal transition or socket publication.
+solely of `CleanupConfirmed` records proceeds. Already-absent targets need the fresh exact-empty
+join. Exact-present targets are first removed in canonical name order through distinct affine
+restart proofs, each preserving every unrelated entry; mixed present/already-absent state is valid
+for crash resumption. A final fresh barrier plus two new exact-empty manager snapshots then mints
+one-shot exact-set manager-absence evidence. Every `MayOwn`, partial, one-sided, wrong-name,
+wrong-binding, changed or unstable case remains unresolved and reaches no journal transition or
+socket publication.
 
 A refusal-only observation seam can consume the complete affine classification and wait for exact
 inherited process-pidfd exit. Before its first wait, every pending `MayOwnCustody` or
@@ -456,14 +460,14 @@ inherited before startup. This refusal sampler therefore proves no network-names
 kernel-resource cleanup, manager removal or authority for a `MayOwn` journal transition. It leaves
 AV1-10 Open and the fixed alpha score at 11/100 (11%).
 
-This remains the refusal boundary for every present, mixed or `MayOwn` journal target set. Such a
-set blocks startup after read-only classification and drops its exact source-slot owners without
+This remains the refusal boundary for every `MayOwn` set and every set not consisting entirely of
+exactly classified `CleanupConfirmed` targets. Such a set blocks startup after read-only classification and drops its exact source-slot owners without
 publishing a cleanup token or helper socket. The takeover creates no additional process-local
 source alias; dropping the refused set closes every captured source slot while PID 1 retains any
 manager copies. This classification invokes no descriptor-store removal, journal transition,
 worker adoption, reaper or cleanup. The sole exception is the separately revalidated all-
-`CleanupConfirmedNoStoredCustody` manager-absence settlement described above; the same-runtime
-removal path below grants no broader restart authority.
+`CleanupConfirmed` absence/removal settlement described above; it grants no broader restart
+authority.
 
 ### Production systemd descriptor-store mutation boundary
 
@@ -530,6 +534,14 @@ separate `BARRIER=1` notification carries exactly one pipe descriptor. After the
 uncached complete inventory snapshots must be equal, the service contract and local binding must
 remain exact, and the result must be precisely the original baseline minus the named two-descriptor
 pair with every unrelated entry unchanged. Only that result yields exact removal evidence.
+
+Restart uses a separate typed adapter over that private transaction core and the same process-wide
+manager-mutation gate. Its non-`Clone` `ExactRestartRemovalProof` can only be consumed together with
+the exact target name and binding to yield the opaque successor inventory; it cannot become the
+same-runtime manager proof. Every restart error erases the removal attempt ID. A post-send error
+therefore leaves the gate poisoned and terminates startup without reconciliation, retry, fallback
+mutation or socket publication. On a later process start, the complete manager/journal join
+reclassifies the truth as present, mixed or already absent.
 
 Every error from immediately before the removal `sendmsg(2)` onward is
 `ManagerMayHaveRemoved`; the retained opaque attempt stays poisoned and the adapter never retries
@@ -1554,13 +1566,15 @@ so no blind resend occurs. Exact manager absence then advances the record to `Ab
 recovery descriptors are released. Cancellation, mismatch, deadline or ambiguous evidence
 preserves the complete affine terminal under its exact selector for a fresh-deadline retry.
 
-Production startup still performs the separate read-only complete-set classification described
-above before retiring any `Intent`. Every non-empty classification blocks except an all-
-`CleanupConfirmedNoStoredCustody` set which passes the fresh exact-empty manager join; that narrow
-case consumes only manager-absence evidence through the existing actor sweep. A crash after one
-per-record CAS leaves exact `Absent` tombstones plus remaining `CleanupConfirmed` records, which a
-later restart reclassifies and retries. Inherited custody is never adopted, the installed restart
-cleanup executor still refuses both `MayOwn` phases, and no restart reaper exists.
+Production startup still performs the separate complete-set classification described above before
+retiring any `Intent`. Every non-empty classification blocks except an all-`CleanupConfirmed` set.
+For exact-present pairs, one descriptorless removal plus barrier and exact baseline-minus-pair proof
+is chained per canonical name; already-absent members are skipped. The final successor and one new
+barrier/two-snapshot observation must both be exactly empty before the existing actor sweep receives
+full-set evidence. A crash after any removal resumes from present+no-store state; a crash after one
+per-record CAS leaves exact `Absent` tombstones plus remaining `CleanupConfirmed` records for the
+no-store path. Inherited custody is never adopted, the installed restart cleanup executor still
+refuses both `MayOwn` phases, and no restart reaper exists.
 
 Remaining durable/runtime blockers are explicit:
 
