@@ -405,6 +405,7 @@ for exact_runner_text in \
     'sudo -n -- ./tests/helper/require-live-worker-identity-proof.sh --execute --yes' \
     'cargo fetch --locked' \
     'cargo build --locked --offline' \
+    'run only the fixed sequential Client/Exit helper-boundary proof as guest root;' \
     'proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"}' \
     'post_image_sha512=$(sha512sum "$image_path"' \
     '[ "$safe_to_remove" = yes ] && [ "$proof_mode" = retained-main ]' \
@@ -752,7 +753,11 @@ done
 
 for non_retained_production_stage in \
     functional-worker-observation functional-relay-fixture \
-    functional-relay-traffic functional-relay-cleanup functional-probe-finish; do
+    functional-relay-traffic functional-relay-cleanup \
+    functional-client-release functional-client-cleanup functional-exit-ready \
+    functional-exit-worker-observation functional-exit-relay-fixture \
+    functional-exit-relay-traffic functional-exit-relay-cleanup \
+    functional-probe-finish; do
     non_retained_production_launch_stage_is_safe \
         "$non_retained_production_stage" || {
             printf 'non-retained parser rejected production stage: %s\n' \
@@ -764,7 +769,8 @@ done
 for non_retained_functional_phase in \
     plan connect bind prepare activate shutdown ready release reconnect commit destroy \
     second-cycle-plan second-cycle-bind second-cycle-prepare \
-    second-cycle-activate reuse \
+    second-cycle-activate reuse second-cycle-shutdown second-cycle-ready \
+    second-cycle-release second-cycle-reconnect second-cycle-commit \
     second-cycle-destroy final-shutdown; do
     for non_retained_functional_class in \
         random protocol io timeout untrusted correlation unexpected-response; do
@@ -871,13 +877,29 @@ expect_status 0 report_non_retained_production_launch_diagnostic \
 test ! -s "$last_stdout"
 printf '%s\n%s\n' \
     'non-retained helper-boundary PR smoke production launch diagnostic: functional-probe-wait' \
-    'non-retained helper-boundary PR smoke functional client lease diagnostic: prepare,unexpected-response' \
+    'non-retained helper-boundary PR smoke sequential Client/Exit lease diagnostic: prepare,unexpected-response' \
     >"$temporary_directory/expected-branch-functional-diagnostic"
 cmp -s "$temporary_directory/expected-branch-functional-diagnostic" "$last_stderr"
 if grep -F "$branch_failure_privacy_sentinel" "$last_stdout" "$last_stderr" >/dev/null; then
     printf '%s\n' 'functional probe diagnostic exposed a private payload' >&2
     exit 1
 fi
+
+printf '%s\n%s\n%s\n' \
+    'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-client-release' \
+    'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=second-cycle-ready,timeout' \
+    'live worker-identity proof failed: predicate rejected: production-launch-status' \
+    >"$branch_failure_diagnostic"
+expect_status 0 report_non_retained_production_launch_diagnostic \
+    "$branch_failure_diagnostic"
+test ! -s "$last_stdout"
+printf '%s\n%s\n' \
+    'non-retained helper-boundary PR smoke production launch diagnostic: functional-client-release' \
+    'non-retained helper-boundary PR smoke sequential Client/Exit lease diagnostic: second-cycle-ready,timeout' \
+    >"$temporary_directory/expected-branch-functional-exit-ready-diagnostic"
+cmp -s \
+    "$temporary_directory/expected-branch-functional-exit-ready-diagnostic" \
+    "$last_stderr"
 
 while read -r functional_mutant_name functional_mutant_stage \
     functional_mutant_value; do

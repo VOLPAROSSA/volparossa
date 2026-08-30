@@ -58,10 +58,10 @@ print_plan() {
         '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
         '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
         '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
-        '  hold the first functional Client Prepare at a fixed root-owned FIFO READY barrier;' \
-        '  externally prove its child PID, executable, identity, distinct netns, and live WireGuard;' \
-        '  release exactly one byte, require Destroy plus a second capacity-reuse Prepare/Destroy;' \
-        '  prove the old worker and WireGuard absent, release its netns pin, and remove the fixture;' \
+        '  hold sequential singleton Client and Exit leases at fixed root-owned FIFO READY barriers;' \
+        '  externally prove each child PID, executable, identity, distinct netns, and live WireGuard;' \
+        '  drive bounded ICMPv6 over derived ::1/::2 and ::3/::4 peers, then require exact Commit;' \
+        '  require byte-identical Commit retries, exact fixture cleanup, Destroy, and worker retirement;' \
         '  preserve one MainPID and InvocationID throughout those checks, then require clean' \
         '    SIGTERM, an unchanged journal, one held-then-unlocked lock inode, and removed socket;' \
         '  collect that exact second invocation and remove the validated temporary stage;' \
@@ -69,9 +69,9 @@ print_plan() {
         '    and network digests;' \
         '  validate one bounded canonical evidence-v1 report before publishing only that JSON.' \
         'This stages the helper identity and production IPC boundary. It creates no host account,' \
-        'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or VPN datapath.' \
-        'One dummy underlay and ephemeral WireGuard lease exist only inside private namespaces.' \
-        'It is not package-install, restart-recovery, CleanupOwned, datapath, or A01-A15 evidence.'
+        'host link, route, firewall rule, WireGuard device, DNS change, sysctl change, or production VPN datapath.' \
+        'One dummy underlay and sequential ephemeral WireGuard leases exist only in private namespaces.' \
+        'It is not package-install, restart-recovery, CleanupOwned, production datapath, or A01-A15 evidence.'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -421,6 +421,13 @@ production_start_failure_stage_is_safe() {
         functional-relay-fixture|\
         functional-relay-traffic|\
         functional-relay-cleanup|\
+        functional-client-release|\
+        functional-client-cleanup|\
+        functional-exit-ready|\
+        functional-exit-worker-observation|\
+        functional-exit-relay-fixture|\
+        functional-exit-relay-traffic|\
+        functional-exit-relay-cleanup|\
         functional-probe-finish|\
         functional-cleanup|\
         publication)
@@ -441,7 +448,8 @@ production_functional_probe_failure_value_is_safe() {
     case $production_functional_failure_phase in
         plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|\
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
-        second-cycle-activate|reuse|\
+        second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|\
+        second-cycle-release|second-cycle-reconnect|second-cycle-commit|\
         second-cycle-destroy|final-shutdown)
             ;;
         *) return 1 ;;
@@ -481,7 +489,7 @@ report_production_launch_diagnostic() {
     if [ -e "$production_functional_failure_file" ] \
         || [ -L "$production_functional_failure_file" ]; then
         case $production_start_failure_stage in
-            functional-probe-wait|functional-probe-finish) ;;
+            functional-probe-wait|functional-client-release|functional-probe-finish) ;;
             *) return 1 ;;
         esac
         vp_capture_file_is_safe "$production_functional_failure_file" || return 1
@@ -3518,6 +3526,11 @@ if [ "$proof_ok" = yes ]; then
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_COMMITTED_KERNEL_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
         'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=ready' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_ACTIVATED_KERNEL_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_COMMITTED_KERNEL_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass' \
+        'VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_EXTERNAL_CLEANUP_V1=pass' \
         >"$temporary_stage/expected-production-start.pass"
     if ! vp_capture_file_is_safe "$temporary_stage/production-output/start.pass" \
         || ! cmp -s "$temporary_stage/expected-production-start.pass" \
@@ -3854,6 +3867,6 @@ if ! remove_temporary_stage; then
 fi
 
 printf '%s\n' \
-    'PASS: staged helper identity, exact two-FD custody, production IPC, a live reusable Client lease, clean stop, confinement, and pin release were proved.' \
-    'SCOPE: helper boundary only; no CleanupOwned, datapath, or A01-A15 result is claimed.' >&2
+    'PASS: staged helper identity, exact two-FD custody, production IPC, sequential reusable Client and singleton Exit leases with exact Commit retries, clean stop, confinement, and pin release were proved.' \
+    'SCOPE: helper boundary only; no CleanupOwned, production datapath, or A01-A15 result is claimed.' >&2
 printf '%s\n' "$validated_report"
