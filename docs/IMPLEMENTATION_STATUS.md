@@ -502,7 +502,16 @@ single clean-build A01--A15 run; the score is not a release claim.
   journal has an exact fallible conversion to its existing `ClosedPlan`. The production backend now
   reconstructs the byte-equivalent `PrepareIntent` from immutable lineage plus the correlated batch,
   durably registers it before worker reservation, and retains every non-success handoff terminal in
-  the coordinator. Runtime
+  the coordinator. A bounded opaque selector now lets a later exact functional Destroy retrieve only
+  its own unpublished terminal. A non-ambiguous registration rejection is pre-mutation and owns no
+  durable key; key retention proves definite worker-admission rejection and needs no reap. Worker
+  admission, registered-worker, recovery-handoff and definite custody-fence failures instead require
+  exact termination, reap and complete purge of that generation before retiring the exact `Intent`
+  as `Absent(NeverDispatched)`. Deadline or actor failure preserves the same affine proof for a fresh
+  retry; selector/context/ownership mismatch takes nothing, and genuinely ambiguous admission or
+  actor state remains retained. This path cannot publish systemd custody, open dispatch, send an
+  internal worker request, or mutate network resources; exact process retirement and reap are its
+  only worker-side actions. Runtime
   mismatch and missing evidence quarantine, target-only cleanup never removes
   Activated/Committed state, and exact retries re-evaluate a capped 1024-entry runtime-lifetime
   `Absent` ledger. There is no tombstone ACK; tag 28 retries exact Pending/Owned cleanup, while tag 29
@@ -656,12 +665,19 @@ single clean-build A01--A15 run; the score is not a release claim.
   uncached complete post-barrier snapshots must be equal and exactly the baseline minus the named
   pair, with service identity, local binding, and every unrelated entry unchanged. Any post-boundary
   error is `ManagerMayHaveRemoved` and never authorizes a blind retry. A same-attempt reconciler may
-  clear the removal poison only after that exact removed projection; an exact unchanged baseline
-  still leaves the gate poisoned and grants no retry. Both transaction kinds and both reconcilers
+  clear the removal poison only after that exact removed projection. An exact unchanged baseline
+  instead yields affine still-present evidence for one byte-identical removal retry bound to the
+  exact predecessor, target, baseline and descriptor binding. A fresh uncached preflight must still
+  equal that baseline. Immediately before its send the gate rotates to a fresh monotone attempt ID
+  carrying `retry_of`. Cancellation before that boundary retains the predecessor evidence;
+  cancellation after it can recover only that exact successor ID and cannot resend. The retry must
+  itself prove exact removal or remain poisoned for exact reconciliation. Both
+  transaction kinds and both reconcilers
   hold one process-global gate from their fresh baseline/preflight read through final attestation;
   cross-kind in-flight work is serialized, either poison blocks both mutations, and wrong-kind or
   wrong-target reconciliation fails before observation. Publication reconciliation never clears
-  poison. Same-runtime clean Destroy uses the removal APIs only between durable
+  poison. Same-runtime clean Destroy uses the original, reconciliation and single correlated-retry
+  removal APIs only between durable
   `CleanupConfirmed` and `Absent`; this does not provide restart recovery. Ambiguous spawn remains
   permanently fail-closed. `SupervisorDropped` without a returned normal-failure attempt identity
   is deliberately not reconcilable in this slice.
@@ -695,8 +711,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   implementation itself orders authoritative terminal storage before the completion send. The
   functional backend consumes only an exact successful terminal, revalidates the worker once more,
   atomically opens that generation's pending fence, and derives all live link owners from the
-  durable token before issuing a child or kernel mutation. Every other terminal remains retained and
-  prevents falsely confirmed shutdown.
+  durable token before issuing a child or kernel mutation. Definitive unpublished handoff failures
+  have the separate exact later-Destroy settlement described above. `PublicationStart`, unresolved
+  publication/post-attestation, `SupervisorDropped`, and `DispatchOpen` terminals remain retained
+  and prevent falsely confirmed shutdown.
 
   Production publication and clean same-runtime removal are connected only through the functional
   backend. Startup separately performs a record-transition-free, lock-held exact-set
@@ -746,8 +764,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   Probe/Commit re-proves every exact peer and route, requires every handshake to be no older than
   activation plus strict RX and TX growth and, for Relay, requires both forwarding counters to grow.
   Only then does it commit the complete singleton or pair. Relay Destroy restores policy-drop and
-  proves fence absence before link deletion and baseline retirement. Destroy without an
-  adopted lease returns `NotFound`, not kernel-absence evidence. Successful internal Prepare,
+  proves fence absence before link deletion and baseline retirement. Internal worker protocol v4
+  makes the canonical role-complete `PrepareLeases` plan mandatory at `Initialise` and stages its
+  exact derived resources before namespace-kernel access or any parent birth-link mutation. Destroy
+  without an adopted lease deletes and proves that complete staged set absent inside the pinned
+  child namespace before Relay baseline retirement; partial cleanup stays retryable, and only a
+  pre-birth context-level `NotFound` with every birth flag false can count as cleanup evidence.
+  Successful internal Prepare,
   Activate, Probe and MPTCP endpoint responses must preserve exact request order and identity;
   each credentialed request now carries the parent's fixed absolute Linux `CLOCK_MONOTONIC`
   expiry in a canonical envelope, and the child reuses a no-later projection through mutation and
@@ -819,8 +842,18 @@ single clean-build A01--A15 run; the score is not a release claim.
   retained no artifact. Exact-main run 33309109220 at
   `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced that scoped proof and retained artifact
   9731470248; its explicit scope is helper-boundary only, not a production route or acceptance
-  result. Durable
-  pidfd/network-namespace recovery and the separate Add/Remove MPTCP endpoint seam remain required;
+  result. The next exact-head helper-boundary contract now requires each Client, Exit and Relay
+  lifecycle to expose exactly one role-complete staged plan, an active systemd FD-store pair with
+  counts `[2, 2, 2]`, byte-exact pidfd/network-namespace identities including normalized status
+  flags, settled counts `[0, 0, 0]`, and exactly three stable `Absent(RecoveredMayOwn)` journal
+  tombstones with no recovery or reconciliation evidence: Client path 1 `[Client]`, Relay path 1
+  ordered `[RelayClient, RelayExit]`, and Exit path 1 `[Exit]`. Two canonical journal reads must be
+  byte-identical and `.next` absent. This is an 18-check contract; historical retained run
+  33309109220 proved only its older 16-check form. Unit, schema, PASS-fixture and shell checks pass,
+  but the fixture is validation data and no privileged KVM run or retained artifact has yet proved
+  the expanded contract, so it contributes no score or acceptance evidence. Restart-persistent
+  durable recovery and the separate Add/Remove
+  MPTCP endpoint seam remain required;
   AV1-09, AV1-10 and AV1-11, the **11/100 (11%)** score, and every datapath or A01--A15 acceptance
   checkbox remain unchanged.
 - [ ] Root-owned Unix socket permissions and peer credential checks are enforced.
@@ -870,10 +903,14 @@ single clean-build A01--A15 run; the score is not a release claim.
   the local pair, then sends exact-name `FDSTOREREMOVE=1` with zero ancillary FDs and orders it with
   a separate one-FD barrier. It accepts only two equal fresh uncached snapshots proving the exact
   baseline-minus-pair result with unrelated entries unchanged. That same gate is poisoned
-  immediately before the send; any later failure is manager-may-have-removed, no blind retry is
-  authorized, and exact-still-present reconciliation retains the poison. Publication and removal
+  immediately before the send; any later failure is manager-may-have-removed and no blind retry is
+  authorized. Exact-still-present reconciliation retains the poison but yields affine authority for
+  exactly one byte-identical retry bound to the predecessor, target, baseline and descriptor
+  binding. A fresh uncached preflight must equal that baseline before the gate can rotate to one
+  correlated successor attempt; cancellation cannot turn either ID into a second send. Publication
+  and removal
   use distinct typed attempt IDs from one monotone sequence, cross-kind work and poison block before
-  inventory I/O, and only exact-removed same-attempt removal reconciliation reopens ambiguous
+  inventory I/O, and only exact-removed original- or retry-attempt reconciliation reopens ambiguous
   removal poison.
   Publication is reachable only from the private live-proof selector and production durable-Prepare
   supervisor; the publication-poison observer remains callerless. Exact removal and same-attempt
@@ -891,7 +928,7 @@ single clean-build A01--A15 run; the score is not a release claim.
   and the disposable production-server gate covers normal exact Destroy, worker reap/purge and
   namespace/link release. Forced helper crash/termination cleanup and restart recovery remain
   without live evidence.
-- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v3 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. The still-disconnected Acquire path duplicates the already attested worker namespace pin affinely before this request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. Production still returns `Unavailable` for Acquire before socket work; committed child Acquire dispatch, datapath adoption and live route proof remain.
+- [ ] Namespace-local MPTCP/QUIC sockets use typed tag-27 `AcquireTransportSocket` and exactly-one CLOEXEC `SCM_RIGHTS` framing; canonical binding, retry, correlation, close-on-reject and consuming credentialed-FD-to-`OwnedFd` adoption tests pass, including audited minimum-3 `F_DUPFD_CLOEXEC`, CLOEXEC readback and original closure. Internal protocol v4 consumes and drops the worker source before an exact credentialed release record, while missing/wrong/late release closes the adopted FD. The still-disconnected Acquire path duplicates the already attested worker namespace pin affinely before this request's tombstone/in-flight mutation, retains it across concurrent retirement without probing a process under the registry lock, and the consuming parent validator independently verifies both the complete socket shape and exact `SIOCGSKNS` nsfs device/inode identity before registry COMMIT. Post-PLAN mismatch, validation failure or expiry closes the descriptor and quarantines the generation. Production still returns `Unavailable` for Acquire before socket work; committed child Acquire dispatch, datapath adoption and live route proof remain.
 - [ ] Native MPQUIC API v6 preflights an exact role/process lifetime, targets every later operation to that instance, requires nonce plus canonical-request digest response correlation, and consumes exactly one operation-bound UDP descriptor for `AddPath` or `StartExitSession` and zero otherwise. Start requests bind reservation/finalize IDs derived from the signed scope, bearer commitment, certificate digest, and both process instances; Rust and C share exact request/descriptor hash vectors and independently reject bearer/commitment mismatch. Native samples BOOTTIME before REALTIME, maintains a monotone wall floor, converts accepted wall expiry once to a BOOTTIME deadline, and fails closed on clock failure, regression, or overflow. A fixed 128-record process-local ledger has no live eviction, rejects exact pair replay and half-key scope reuse, permits only byte-identical live client retries, and tombstones stop, expiry, and valid exit attempts before the dormant backend boundary. Rust and two independent C boundaries enforce server `10.76.0.1/32`, client `10.76.0.2/32` through `10.76.0.254/32`, optional client `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`, and MTU 1280--1420. The native client deep-copies one assignment, permits only an identical active duplicate, exposes it only after `ESTABLISHED`, enforces outbound source and reverse-destination ownership, and wipes it on fatal transport failure. Focused tests cover these clock/replay/capacity and assignment-state rules, exact current-path projection with retired closed records only, typed terminal reverse-queue overflow, distinct framed exit nonces, stale-instance without hidden retry, response/assignment shape, socket tuple/flag checks, binding and ownership behavior, digest-failure FD cleanup, stream fragmentation with exactly-one ancillary transfer, incomplete/late/extra descriptors, timeout cleanup, and the dormant exit runtime closing its listener before `exit_listener_orchestration_unavailable`. The clean full-graph API-v6 ASan+UBSan gate passes. Peer-control v4 retains separate zeroizing, non-cloneable one-shot client/exit authorizations. Isolated native foundations now model one bounded, externally serialized exit session and validate the leaf identity in a bounded PEM certificate chain against its private key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval, canonical complete-leaf DER digest, and DER SPKI digest. They have no runtime caller and do not perform trust-chain validation. Native still does not verify the signed bundle, cache general request nonces, or retain ledger state across restart; production also lacks a preverified affine handoff through the agent, separate role service identities/sockets, exact helper-derived millisecond-to-trusted-interval conversion, a fixed independent Rust/C DER-SPKI vector, parser fuzzing, server-side pool allocation/uniqueness/lifetime binding plus exact-namespace assigned-address proof, disposable-topology evidence, trusted helper provenance, and the actual exit backend, so route setup and the launcher remain blocked.
 - [ ] Pre-route client ingress uses typed tags 31–34, exactly eight kind/family identities, one-shot agent acquisition, cross-unique handles/receipts, canonical exactly-one-FD binding, error-preserving RAII capabilities and retryable destroy; pure/socketpair tests pass, but production deliberately returns `Unavailable` before state/network until the namespace listener, privileged transfer cache, atomic TPROXY/DNS/kill-switch transaction, rollback and live proof exist.
 

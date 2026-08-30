@@ -542,7 +542,7 @@ cross-category unique. The agent locally permits only one acquisition attempt pe
 activation failure returns the prepared cleanup authority and all eight descriptors, and destroy
 borrows authority so ambiguous failure remains retryable.
 
-The independent internal worker protocol v3 reserves exact tag 17 for the corresponding
+The independent internal worker protocol v4 reserves exact tag 17 for the corresponding
 route-context/path/role/kind/tuple request. Its tested private `SOCK_SEQPACKET` building block uses
 canonical records, a separately bound zero-or-one-FD completion record, fixed deadlines and
 close-on-reject semantics. On success the consuming worker send API drops its source descriptor and
@@ -569,8 +569,18 @@ Destroy operations; the socket
 factories remain disconnected, so their socketpair/fake-kernel
 tests do not prove a production namespace socket or datapath.
 
+Internal worker protocol v4 makes the canonical, role-complete `PrepareLeases` plan mandatory in
+`InitialiseContext`. Its route context and exact ordered resources are validated before
+`NamespaceKernel` access and before the parent may create or move a birth link. The child retains
+that staged set while its namespace remains pinned. If no lease lifecycle was adopted,
+`DestroyContext` deletes those exact resources in reverse canonical order, proves every resource
+absent inside the child namespace, and only then retires the restricted Relay baseline. Missing or
+substituted staged state is invalid and partial absence proof remains `CleanupIncomplete`; a
+context-level `NotFound` counts as cleanup evidence only before every parent birth flag remained
+false.
+
 The production functional-alpha backend connects the bounded rtnetlink `DirectAssigned` collector
-and the v3 parent/worker kernel transaction for exactly one live context containing either one
+and the v4 parent/worker kernel transaction for exactly one live context containing either one
 matching-role Client/Exit WireGuard lease or the ordered `RelayClient` + `RelayExit` pair. A
 successful `PrepareLeaseBatch` reports only the child's correlated
 kernel-proven public key/listen port plus the selected direct-underlay address; it is not evidence of an activated
@@ -633,6 +643,16 @@ SHA-256 is identically
 `acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`; it is not live
 product-route or A01--A15 evidence. The fixed alpha score remains **11/100 (11%)**.
 
+The current exact-head report contract has 18 checks and is not proved by that historical 16-check
+artifact. It requires an initially empty production FD store, exact active Client/Exit/Relay custody
+counts `[2, 2, 2]` joined to each cycle's pidfd and network-namespace identities including normalized
+status flags, and settled counts `[0, 0, 0]`. The journal must finish as exactly three stable
+`Absent(RecoveredMayOwn)` tombstones with no recovery or reconciliation evidence: Client path 1
+`[Client]`, Relay path 1 ordered `[RelayClient, RelayExit]`, and Exit path 1 `[Exit]`. Two canonical
+reads must agree byte-for-byte and `.next` must remain absent. Unit, schema, fixture and shell checks
+cover this expanded contract, but no privileged Debian 13 KVM run or retained artifact does yet; the
+committed PASS fixture is validation data rather than run evidence.
+
 Tags 35 and 28 still provide only same-process ambiguity containment to the agent. The
 functional-alpha request path reconstructs the original canonical Prepare intent from tag 35's
 immutable lineage plus the correlated batch, commits it before worker reservation, and carries its
@@ -645,6 +665,15 @@ byte-identical and blocks the internal socket-publication boundary. No inherited
 backend, restart reaper, or cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
 authority remains quarantined rather than being misreported as absent; an absent journal is not
 cleanup evidence.
+
+An ordinary failure before descriptor-store publication is retained as an unpublished Handoff
+terminal under a fresh serial, exact context and optional durable ownership selector. A later exact
+functional Destroy may retrieve only that terminal. Definitive no-worker outcomes retire their
+exact Intent directly; worker-bearing outcomes first require exact generation reap and complete
+registry purge. Deadline or actor failure restores the same selector and affine proof for a fresh
+attempt, while selector mismatch takes nothing and genuinely ambiguous admission remains retained.
+`PublicationStart`, publication/post-attestation, `SupervisorDropped`, and `DispatchOpen` terminals
+are outside this settlement path and remain fail-closed.
 
 All four client-ingress operations return `Unavailable/CLIENT_INGRESS_UNAVAILABLE` before clock,
 cache, state, backend or network access. The Linux UAPI has pure/socketpair-tested socket

@@ -113,7 +113,7 @@ A successful `PrepareLeaseBatch` response is required to contain:
 - a non-zero UDP port obtained from an exact acknowledged WireGuard `SET` followed by a bounded,
   correlated WireGuard `GET` that also matches the expected public key.
 
-The internal v3 worker protocol, underlay evidence policy, secret-free link derivation, exact
+The internal v4 worker protocol, underlay evidence policy, secret-free link derivation, exact
 WireGuard `SET` encoders, and bounded `GET` proof parser have pure tests. The authenticated child
 now executes `Prepare`, signed-grant-bound `Activate`, correlated `ProbeCommitLeases`, and `Destroy`
 for one Client/Exit singleton or one ordered `RelayClient` + `RelayExit` pair. Prepare
@@ -129,18 +129,23 @@ the local public key,
 `DirectAssigned` underlay IP and listen port are also matched exactly to the dual-signed exit
 endpoint. Failed Prepare deletes the
 exact resource and returns a normal kernel failure only after proving absence; otherwise it retains
-the resource/key state and returns `CleanupIncomplete` for a later exact Destroy. Destroy without
-an adopted lease returns `NotFound`, never false kernel-absence evidence. Successful internal
+the resource/key state and returns `CleanupIncomplete` for a later exact Destroy. Internal v4
+`Initialise` now requires the same canonical role-complete `PrepareLeases` plan and stages its exact
+derived resource set before the child opens its namespace kernel and before the parent may create or
+move a birth link. Destroy without an adopted lease deletes and proves that complete staged set
+absent inside the still-pinned child namespace before retiring a Relay policy-drop fence; partial
+cleanup remains `CleanupIncomplete`, while a missing or substituted staged plan is invalid. A
+context-level `NotFound` can prove cleanup only before any birth flag was set. Successful internal
 Prepare, Activate, Probe and MPTCP endpoint responses are bound to the request's exact identity
 order; the external engine
 also rejects duplicate public keys and public endpoints before pairing affine handles.
 Each credentialed worker request carries one canonical envelope with the parent's fixed absolute
 Linux `CLOCK_MONOTONIC` expiry. The child projects a no-later local deadline and reuses it for the
 operation and response, so transport delay cannot create a fresh five-second mutation budget. The
-affine `MayOwnPrepare` owner can canonically project its ordered durable resources into internal-v3
+affine `MayOwnPrepare` owner can canonically project its ordered durable resources into internal-v4
 lease descriptors; call sites supply none of the path, role, `/128`, expiry or ownership alias.
-`NamespaceKernel` contains v3 prepare, peer-activation, and probe primitives plus a complete-batch
-preflight that requires exact name, current ownership alias,
+`NamespaceKernel` contains the functional-alpha Prepare, peer-activation, and probe primitives plus
+a complete-batch preflight that requires exact name, current ownership alias,
 WireGuard kind and fresh DOWN/key-zero/port-zero/fwmark-zero/peerless state before mutation. Its
 exact-owned delete re-proves absence. For Relay, the worker preflights and prepares the complete
 canonical pair, rolls back both resources after any partial Prepare or Activate failure, requires
@@ -516,15 +521,22 @@ Every error from immediately before the removal `sendmsg(2)` onward is
 `ManagerMayHaveRemoved`; the retained opaque attempt stays poisoned and the adapter never retries
 blindly. Its observation-only reconciler uses the same exact attempt, a new barrier, two equal
 uncached complete snapshots, and local-binding remeasurement. Exact baseline-minus-pair may settle
-the shared gate, while exact unchanged-baseline evidence still authorizes no retry and leaves the
-gate poisoned; every other outcome remains unresolved. Publication, removal and their reconciler
+the shared gate. Exact unchanged-baseline evidence leaves the gate poisoned but carries affine
+authority for one byte-identical retry bound to that exact predecessor, target, baseline and
+descriptor binding. A fresh uncached preflight must still equal the baseline. Immediately before
+the retry send, the gate rotates the predecessor into one fresh monotone attempt ID carrying
+`retry_of`: cancellation before that boundary keeps the predecessor evidence, while cancellation
+after it can recover only the successor ID and cannot resend. The retry must itself prove exact
+removal or remain poisoned for exact reconciliation; every other outcome remains unresolved.
+Publication, removal and their reconciler
 observations hold that one gate from the fresh baseline/preflight read through terminal
 attestation. An ambiguous attempt of either kind blocks both mutation kinds, and a reconciler with
 the wrong typed attempt kind or exact target binding fails before barrier or inventory I/O.
-Publication reconciliation never clears poison; only exact-removed evidence for the same removal
-attempt reopens a gate poisoned by that removal. The production same-runtime Destroy path calls the
-removal adapter and reconciler only after exact child/worker/kernel cleanup; neither component proves
-that cleanup or advances the ownership journal by itself.
+Publication reconciliation never clears poison; only exact-removed evidence for the original or
+correlated retry attempt reopens a gate poisoned by that removal. The production same-runtime
+Destroy path calls the removal adapter, reconciler and at most one correlated retry only after exact
+child/worker/kernel cleanup; none of those components proves that cleanup or advances the ownership
+journal by itself.
 
 Only the durably confirmed `MayOwnCustody` token can derive an opaque, domain-separated fixed
 custody name from its exact journal epoch, context, ownership ID and generation without exposing
@@ -584,7 +596,7 @@ blocking `AF_UNIX SOCK_SEQPACKET` socketpair has bounded read/write deadlines an
 request/response records. `SO_PASSCRED` is enabled on both receivers before either endpoint is
 exposed. Every received record must contain exactly one kernel-selected `SCM_CREDENTIALS` value
 matching the expected PID, UID and GID; missing, duplicate, wrong or truncated credentials and all
-unexpected ancillary data fail closed. Internal protocol v3 follows an Acquire response with a
+unexpected ancillary data fail closed. Internal protocol v4 follows an Acquire response with a
 domain-separated 32-byte completion record. Success requires exactly one `MSG_CMSG_CLOEXEC`
 descriptor in that record, transfers ownership into the consuming send API, drops the worker's
 source owner, and then emits a distinct credentialed, descriptor-free source-release binding as a
@@ -968,21 +980,30 @@ enumerated-host-state SHA-256
 exact-main helper-boundary evidence, not installed-package, restart, route-manager, transport,
 ingress, usable-VPN or A01--A15 evidence.
 
-After all three cycles, the hook requires zero helper children and no helper FD retaining a
-worker namespace or any foreign worker network namespace. Each retired process pin must be terminal
-and each pinned worker namespace must be WireGuard-empty before that cycle's observer closes. The
-descriptor store must be empty, followed by the fixed exact-one-loopback/no-default-route cleanup
-predicate after the dummy underlay is removed. Only after all probe output and the unchanged manager
-launch tuple, bound helper image metadata, process starttime, `MainPID` and `InvocationID` have been
-checked does the hook publish its fixed ordered proof records. PID 1 bounds the second unit to three
-minutes even if the runner disappears, and each transient unit independently receives a 1 MiB
-hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are attested as `null`, so structured helper
-rejection logs cannot grow host files. The start hook proves that the same captured lock inode is
-exclusively contended while the exact helper process runs. Normal `SIGTERM` must produce exit status
-zero, remove the socket, preserve the initially absent-or-exact ownership journal, prove that inode
-is then unlocked, keep the descriptor store empty, and leave no old process or cgroup. Host
-`/run/volparossa` must be absent at both host-state fences; the private runtime bind never targets the
-host path.
+The current 18-check report contract is stricter than retained run 33309109220's historical
+16-check artifact. Before the functional cycles the production FD store must be empty. At the
+Client, Exit and Relay active barriers it must expose counts `[2, 2, 2]`, with each pair joined
+exactly to that cycle's pidfd and network-namespace identity, including normalized status flags.
+After each clean Destroy and durable settlement the counts must be `[0, 0, 0]`.
+
+The journal must then contain exactly three stable canonical `Absent(RecoveredMayOwn)` tombstones,
+with no recovery or reconciliation evidence: Client path 1 `[Client]`, Relay path 1 ordered
+`[RelayClient, RelayExit]`, and Exit path 1 `[Exit]`. Two canonical reads must be byte-identical and
+the temporary `.next` entry must remain absent. Shutdown revalidates that settled snapshot before
+proving lock release and socket absence. The hook also requires zero helper children and no helper
+FD retaining a worker namespace or any foreign worker network namespace. Each retired process pin
+must be terminal and each pinned worker namespace must be WireGuard-empty before that cycle's
+observer closes. The private namespace must retain exactly loopback and no default route after the
+dummy underlay is removed.
+
+At this branch boundary the expanded contract has unit, schema, fixture and shell-contract coverage
+only. No privileged Debian 13 KVM run or retained artifact has exercised it; the committed PASS
+fixture is validation data, not run evidence. The older retained artifact remains valid only for its
+historical helper-boundary scope. PID 1 bounds the transient unit to three minutes even if the runner
+disappears, and the unit receives a 1 MiB hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are
+attested as `null`, so structured helper rejection logs cannot grow host files. Host
+`/run/volparossa` must be absent at both host-state fences; the private runtime bind never targets
+the host path.
 
 The Client-only predecessor has retained, host-revalidated exact-main evidence from
 [run 33294974441](https://github.com/VOLPAROSSA/volparossa/actions/runs/33294974441) at
@@ -1455,16 +1476,32 @@ shutdown. A queued abort stores the phase-4 owner without polling the publisher.
 consumes only the exact successful `MayOwnPrepare` terminal, revalidates the worker and recovery
 identity once more, atomically opens that generation's `DurableHandoffPending` dispatch fence, and
 converts only the journal-derived resources into live kernel owners. No child request or WireGuard
-mutation precedes that open. Every failed handoff, publication, or open terminal remains
-coordinator-owned and prevents a falsely confirmed shutdown.
+mutation precedes that open. Publication-start, post-publication and dispatch-open failures remain
+coordinator-owned and prevent a falsely confirmed shutdown.
 
-On an exact same-runtime Destroy, the backend requires a correlated child `Destroyed` response for
-a previously adopted complete lease set, confirms worker-generation reap and parent birth-link
-absence, and only then consumes the affine settlement owner into durable `CleanupConfirmed`. It
-removes the exact attested systemd custody name against the retained post-publication inventory;
-an ambiguous send is observation-reconciled and never blindly retried. Exact manager absence then
-advances the record to `Absent` before the local recovery descriptors are released. Missing child,
-kernel, manager, or journal proof retains all available owners and fails closed.
+Definitive failures before publication have a narrower exact settlement path. The coordinator
+stores each terminal under a fresh non-zero serial plus its context and, where one exists, exact
+durable ownership selector. A later functional Destroy can take only a byte-for-byte matching
+selector. A non-ambiguous `RegistrationRetained` result is pre-mutation and owns no durable key;
+`KeyRetained` proves definite worker-admission rejection and needs no reap. `WorkerAdmissionRetained`,
+`RegisteredWorkerRetained`, `HandoffWorkerRetained`, and a definite `CustodyFenceRetained` must
+instead terminate, reap, and completely purge their exact generation. Only the resulting opaque,
+affine
+`ExactNeverDispatchedPrepareProof` can retire its exact `Intent` as `Absent(NeverDispatched)`.
+Deadline or actor failure returns the same proof and selector for a fresh settlement attempt;
+mismatch takes nothing, while ambiguous admission or actor state remains retained. This path cannot
+publish systemd custody, open dispatch, send an internal worker request, or mutate network resources;
+exact process retirement and reap are its only worker-side actions.
+
+For a published same-runtime Prepare, exact Destroy requires a correlated child `Destroyed`
+response for the complete adopted or staged lease set, confirms worker-generation reap and parent
+birth-link absence, and only then consumes the affine settlement owner into durable
+`CleanupConfirmed`. It removes the exact attested systemd custody name against the retained
+post-publication inventory; an ambiguous send is observation-reconciled and never blindly retried.
+Exact-still-present evidence permits only the single predecessor-bound retry described above. Exact
+manager absence then advances the record to `Absent` before the local recovery descriptors are
+released. Missing child, kernel, manager, or journal proof retains all available owners and fails
+closed.
 
 Production startup still performs the separate read-only complete-set classification described
 above before retiring any `Intent`, and every non-empty classification still blocks. This is
