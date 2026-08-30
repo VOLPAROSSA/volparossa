@@ -226,26 +226,38 @@ private key to be generated and retained only inside the route namespace worker;
 agent receives an opaque lease handle plus the kernel-proven public key and public UDP endpoint.
 Interface names are derived, bounded to Linux's 15-character limit, and never accepted from the
 agent. The production functional-alpha backend now runs Prepare, Activate, Probe/Commit and Destroy
-for exactly one process-owned Client-or-Exit singleton lease. It verifies the exact nested
-relay/exit grant and binds it to helper-owned context/path/role/expiry. Client binds its generated
+for exactly one process-owned Client/Exit singleton or one ordered `RelayClient` + `RelayExit`
+endpoint pair. It verifies the exact nested relay/exit grant and binds it to helper-owned
+context/path/role/expiry. For Relay it additionally verifies the exact client-session-signed request,
+its embedded signed ClientSessionCapability and ExitReservation, and the relay grant's SHA-256
+commitment to those request bytes. All five signed request/capability/reservation/grant/authorization
+records form one rollback-capable replay transaction with complete capability, exit, session,
+policy, transport, rate, path and lifetime scope binding. Client binds its generated
 key and installs only the signed relay-client peer. Exit binds its complete generated
 key/public-underlay/listen-port tuple to the dual-signed exit endpoint and installs only the
-relay-signed relay-exit peer. Both roles use only the helper-derived `/128` route and retain the
-activation counter baseline. Commit re-proves the exact lease and requires a handshake no older than
-activation plus strict RX/TX growth before entering Committed. Multi-path routing and every usable
-datapath remain unavailable.
+relay-signed relay-exit peer. Relay atomically binds both prepared local tuples to the relay-signed
+endpoints, installs only the client-request peer and nested exit-signed peer on their respective
+roles, and rolls back the complete pair on failure. Every lease uses only its helper-derived `/128`
+route and retains the activation counter baseline. Commit re-proves the complete lease set and
+requires a handshake no older than activation plus strict RX/TX growth for every lease before
+entering Committed; neither Relay leg commits alone. Destroy likewise releases ownership only after
+the complete pair is absent. Multi-path routing, Relay forwarding and every usable datapath remain
+unavailable.
 
 The disposable helper-boundary gate exercises these singleton roles sequentially in private
 namespaces. The Client cycle creates a temporary relay-side peer, carries bounded ICMPv6 across the
 client-to-relay leg, proves the recent handshake and strict bidirectional growth, removes that
 fixture exactly, requires an identical cached Commit retry and destroys the context. Exact-main run
-33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` retained that scoped Client evidence. The
-expanded branch starts Exit in a fresh worker/namespace and repeats the proof over a distinct
-`vpre0` relay-to-exit leg before Exit Commit retry and Destroy; that addition remains non-retained
-until merged and followed by an exact-main PASS. These sequential legs prove no trusted
-selection/policy authority, simultaneous two-leg route, Relay forwarding, transport descriptor,
-ingress, usable VPN/datapath or crash recovery. Keys are never persisted and are destroyed with the
-worker context; the fixed alpha score remains **11/100 (11%)**.
+33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` retained that scoped Client evidence. Exit
+exact-main [run 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained the fresh worker/namespace proof as artifact
+[9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271),
+over a distinct `vpre0` relay-to-exit leg before Exit Commit retry and Destroy. These sequential legs
+prove no trusted selection/policy authority, simultaneous two-leg
+route, Relay forwarding, transport descriptor, ingress, usable VPN/datapath or crash recovery. The
+unit-tested Relay endpoint pair has no retained KVM/CI proof yet. Its cryptographically bound
+request/response authority is not an independent discovery/connection trust anchor. Keys are never
+persisted and are destroyed with the worker context; the fixed alpha score remains **11/100 (11%)**.
 
 ## Privileged helper boundary
 
@@ -312,9 +324,10 @@ The v4 wire types, service state machines, forwarding codecs, helper plan/call/c
 authorization binding have unprivileged tests. They are not proof of a live route. The production
 two-leg probe producer does not exist. The actor-linearized candidate snapshot and staged preflight
 described above are dormant and report no production-usable candidates. The no-argument production
-helper can now execute the exact Client-or-Exit singleton Bind/Prepare/Activate/Probe-Commit/Destroy
-subset, and the expanded non-retained branch gate exercises both roles sequentially in private
-namespaces. The production manager does not call
+helper can now execute the exact Client/Exit-singleton-or-Relay-pair
+Bind/Prepare/Activate/Probe-Commit/Destroy subset. The retained gate exercises Client and Exit
+sequentially in private namespaces; the Relay-pair KVM/CI proof remains pending. The production
+manager does not call
 that helper-backed transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
 cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
 never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
@@ -323,12 +336,14 @@ recovery backend, restart reaper, or cross-runtime tag-28 proof. Tag 35 carries 
 closed Prepare plan needed by that store, but production does not yet issue it; journal absence is
 not cleanup proof. Client ingress is also
 blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
-helper's isolated single-lease probe reaches Probe/Commit. Route-level end-to-end configuration and
+helper's isolated endpoint-lifecycle path reaches Probe/Commit. Route-level end-to-end configuration and
 Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. Retained run 33294974441
-proves the Client-only client-to-relay leg. The expanded non-retained branch gate separately proves
-an Exit relay-to-exit leg; both cover bounded ICMPv6, recent handshake, strict RX/TX growth, cached
-Commit retry, normal process-owned Destroy and sequential capacity reuse. They have no trusted
-selection/policy authority, simultaneous two-leg route, Relay forwarding, transport descriptor,
-ingress, usable VPN/datapath or crash/restart recovery. The Exit expansion is not retained exact-main
-evidence, and neither result closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
+proves the Client-only client-to-relay leg. Retained run 33296892632 at
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017`, artifact 9727739271, separately proves the Exit
+relay-to-exit leg; both cover
+bounded ICMPv6, recent handshake, strict RX/TX growth, cached Commit retry, normal process-owned
+Destroy and sequential capacity reuse. They have no trusted selection/policy authority,
+simultaneous two-leg route, Relay forwarding, transport descriptor, ingress, usable VPN/datapath or
+crash/restart recovery. Relay pair unit tests are not retained live-kernel evidence. None of these
+results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).

@@ -364,15 +364,18 @@ capacity ledger tunnel-established. Real helper-owned endpoint preparation, read
 activation, handshake/counter proof, route supervision, and cleanup remain required before a
 production datapath can be claimed.
 
-The helper's disposable fixture proves two sequential singleton lifecycles, not one simultaneous
-route. Its retained Client-only predecessor carries bounded ICMPv6 over a client-to-relay WireGuard
-leg. The expanded branch starts a fresh Exit worker and namespace and carries bounded ICMPv6 over a
-separate relay-to-exit WireGuard leg. Each fixture is removed exactly before its
+The helper's retained disposable evidence proves two sequential singleton lifecycles, not one
+simultaneous route. Its Client cycle carries bounded ICMPv6 over a client-to-relay WireGuard leg;
+its later Exit cycle starts a fresh worker and namespace and carries bounded ICMPv6 over a separate
+relay-to-exit WireGuard leg. Each fixture is removed exactly before its
 `CommitLeaseBatch`, so Commit proves the retained recent role-specific handshake and strict-counter
 result, not a currently live peer. There is no simultaneous Client/Relay/Exit topology, Relay
 context, forwarding or `RelayProbeResult`, and the self-contained identities are not trusted
-selection or policy authority. These independent leg proofs therefore do not change the production
-two-leg `ProbeEvidenceUnavailable` boundary.
+selection or policy authority. A unit-tested production helper slice can now atomically manage the
+ordered `RelayClient` + `RelayExit` endpoint pair and requires both endpoint proofs before Commit,
+but it installs no cross-leg forwarding and has no retained KVM/CI proof yet. These independent
+endpoint-lifecycle facts therefore do not change the production two-leg
+`ProbeEvidenceUnavailable` boundary.
 
 Unprivileged endpoint leases contain only helper-returned public endpoints and opaque non-secret
 handles. `VerifiedRelayProbe` projects immutable typed leg metrics, transport/family, and the
@@ -405,8 +408,8 @@ rejected before dispatch.
 | Operation | Typed effect |
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
-| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production Client-or-Exit singleton backend requires and verifies that grant before deriving privileged state |
-| `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; the production functional-alpha backend implements this for its exact one Client-or-Exit singleton lease |
+| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one Client/Exit singleton or the exact ordered Relay pair and verifies all applicable signed authority before deriving privileged state |
+| `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; the production functional-alpha backend commits a Relay pair only after both lease proofs pass |
 | `DestroyContext` | idempotently remove one context and all contained state |
 | `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
 | `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
@@ -429,20 +432,34 @@ The active v3 agent API has no private-key field and cannot select an interface 
 address, allowed prefix, listen port, nftables expression, sysctl, command, filesystem path, or free-form
 diagnostic.
 The tag-8 `signed_relay_reservation` bytes in each activation lease are preserved exactly by the
-canonical wire and committed by the request digest. Generic decoding retains an empty-compatible
-field, but the production functional Client-or-Exit singleton backend requires it, canonically
-verifies the relay and nested exit envelopes and signatures, applies bounded in-memory replay
-protection, checks each signer-derived libp2p Peer ID, and binds context, path, role-specific helper
-proof and hard expiry. For Client, the helper-generated key must equal the signed client key and the
+canonical wire and committed by the request digest. For Relay, tag 9 on `RelayClient` preserves the
+exact canonical client-session-signed `RelayReservationRequest`; `RelayExit` must carry no tag-9
+bytes and both leases must carry byte-identical tag-8 bytes. Generic decoding retains
+empty-compatible fields, but the production functional Client/Exit-singleton-or-Relay-pair backend
+requires the applicable bytes. Relay activation canonically verifies five signed envelopes as one
+rollback-capable replay transaction: the outer client `RelayReservationRequest`, its embedded
+`ClientSessionCapability` and `ExitReservation`, the relay `RelayReservation`, and its nested
+`RelayAuthorization`. It checks every signer, TTL and full capability/exit/authorization scope,
+including the capability, reservation, route, client session/key, exit/control-relay identities,
+policy, transport, rate, path/permit and creation/expiry bindings. The relay-signed tag-30 SHA-256
+commitment must equal the exact tag-9 signed-request bytes. Client/Exit singleton activation still
+verifies the applicable relay and nested authorization envelopes. For Client, the helper-generated
+key must equal the signed client key and the
 privileged peer derives exclusively from `relay_client_wireguard_endpoint`. For Exit, the
 helper-prepared key, `DirectAssigned` public underlay IP and kernel-selected listen port must equal
 the nested exit-signed `exit_wireguard_endpoint`; `same_relay_grant` also requires its outer
 relay-signed copy to be exactly equal, and the privileged peer derives exclusively from the
-relay-signed `relay_exit_wireguard_endpoint`. The untrusted activation tuples are correlation copies
-and must equal those role-specific signed values. Each item and aggregate remain capped by the 128
-KiB helper frame ceiling. The grant is
-still self-contained and does not yet carry a separately trusted helper-side selected-operator or
-policy authority; replay memory also does not survive helper restart.
+relay-signed `relay_exit_wireguard_endpoint`. For Relay, the prepared relay-client and relay-exit
+local tuples must equal their two relay-signed endpoints; the client-facing peer comes only from the
+client-signed request and the exit-facing peer only from the nested exit-signed endpoint. The client
+key is also matched to its relay-signed copy, all local/peer keys and socket tuples are distinct,
+and the request/grant session, route, path, expiry and rate scope is exact. The untrusted activation
+tuples are correlation copies and must equal those role-specific signed values. Each item and
+aggregate remain capped by the 128 KiB helper frame ceiling. The five-record transaction
+cryptographically binds the complete Relay request and response authority, but the self-contained
+authority universe is not an independent
+discovery/connection trust anchor and does not yet carry a separately trusted helper-side
+selected-operator or policy authority; replay memory also does not survive helper restart.
 Responses echo the request identity, return a stable result, a bounded diagnostic code, the BLAKE3
 digest of the canonical request, and an operation-specific success value. Failure responses cannot
 contain a success value.
@@ -526,26 +543,32 @@ housekeeping may precede pinning but carries no socket or namespace authority. P
 validation failure or expiry closes the descriptor and quarantines the generation. Closed worker-side
 factories create and revalidate connected MPTCP, listening MPTCP and unconnected UDP sockets,
 including genuine `MPTCP_INFO` negotiation evidence for a connected stream. The production
-functional-alpha path uses the coordinator only for one Client-or-Exit singleton lease's Initialise,
-Prepare, signed-grant-bound Activate, correlated Probe/Commit and Destroy operations; the socket
+functional-alpha path uses the coordinator only for one Client/Exit singleton or one exact Relay
+endpoint pair's Initialise, Prepare, signed-authority-bound Activate, correlated Probe/Commit and
+Destroy operations; the socket
 factories remain disconnected, so their socketpair/fake-kernel
 tests do not prove a production namespace socket or datapath.
 
 The production functional-alpha backend connects the bounded rtnetlink `DirectAssigned` collector
-and the v3 parent/worker kernel transaction for exactly one live Client-or-Exit context with one
-matching-role WireGuard lease. A successful `PrepareLeaseBatch` reports only the child's correlated
+and the v3 parent/worker kernel transaction for exactly one live context containing either one
+matching-role Client/Exit WireGuard lease or the ordered `RelayClient` + `RelayExit` pair. A
+successful `PrepareLeaseBatch` reports only the child's correlated
 kernel-proven public key/listen port plus the selected direct-underlay address; it is not evidence of an activated
 tunnel. A server-owned expiry driver schedules cancellation-safe exact cleanup once per second
 without waiting for another agent request, serializes it behind earlier operations, retries
 quarantined lineages, and is joined before backend shutdown. Client `ActivateLeaseBatch` installs
 and reads back only the verified relay-client peer. Exit first binds its complete helper-prepared
 local tuple to the dual-signed exit endpoint and then installs and reads back only the verified
-relay-exit peer. Both roles install their helper-derived `/128` route and retain that readback as the
-activation counter baseline. `CommitLeaseBatch` sends
-one correlated internal Probe/Commit, requires a handshake no older than activation and strict RX/TX
-growth, independently revalidates the proof, transitions the exact context to Committed and caches
+relay-exit peer. Relay binds both prepared local tuples to the relay grant, installs only the
+client-request peer and nested exit-signed peer on their respective leases, and rolls back the
+complete pair on any partial failure. Every lease installs its helper-derived `/128` route and
+retains that readback as the activation counter baseline. `CommitLeaseBatch` sends one correlated
+internal Probe/Commit, requires every handshake to be no older than activation and strict RX/TX
+growth for every lease, independently revalidates the complete proof, transitions only the exact
+singleton or pair to Committed and caches
 the successful receipt for an identical retry. `AcquireTransportSocket` remains `Unavailable`, and
-no datapath is connected. The exact proof contract and remaining live-kernel
+no datapath is connected. Relay pair activation installs no forwarding or relay fence, and no
+production route manager calls this backend. The exact proof contract and remaining live-kernel
 work are recorded in [Privileged helper protocol v3](HELPER_V3.md).
 
 The disposable production-IPC producer exercises that implemented subset sequentially. Its first
@@ -557,7 +580,7 @@ proves recent handshake plus strict RX/TX growth before exact removal, Commit wi
 retry and Destroy. Exact-main run 33294974441 at
 `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` retained that Client-only proof.
 
-The expanded branch then starts an Exit singleton in a different child PID and network namespace.
+The second cycle starts an Exit singleton in a different child PID and network namespace.
 It verifies the dual-signed local exit tuple and relay-signed relay-exit peer at a separate READY
 barrier. A distinct `vpre0` peer with a second deterministic key and UDP port 10001 carries bounded
 ICMPv6 over a real, separate relay-to-exit WireGuard leg and proves recent handshake plus strict
@@ -566,10 +589,12 @@ byte-identical retry and Destroy. This proves sequential capacity reuse, not a s
 route, Relay context or forwarding. Successful cleanup leaves the private namespace with exactly
 loopback and no default route before retirement. The self-contained fixture identities prove no
 trusted selection/policy authority, transport descriptor, ingress, usable VPN/datapath or crash
-recovery. The Exit expansion
-is non-retained branch evidence; its workflow uploads neither branch PASS artifacts nor branch
-failure diagnostics. It is not retained protocol or A01--A15 acceptance evidence until merged and
-followed by a host-revalidated exact-main PASS. The fixed alpha score remains **11/100 (11%)**.
+recovery. Exact-main [run
+33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained this Exit proof as artifact
+[9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
+The branch Relay-pair KVM/CI proof remains pending and non-retained; unit tests alone are not
+live-kernel or A01--A15 evidence. The fixed alpha score remains **11/100 (11%)**.
 
 Tags 35 and 28 provide only same-process ambiguity containment. The functional-alpha request path
 consumes tag 35's closed plan, which is directly convertible to the journal's canonical

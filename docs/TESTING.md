@@ -52,11 +52,19 @@ removal of permanent client Peer ID fields. Test-only exact evidence verifiers d
 probe producer.
 
 The production agent route state machine is not yet proven end to end. The no-argument production
-helper can execute at most one live Client-or-Exit context at a time, containing exactly one
-matching-role WireGuard lease, through Bind, Prepare, signed-grant-bound Activate, correlated
-Probe/Commit and Destroy. Commit requires a handshake no older than activation plus strict RX and TX
-growth and caches the exact successful receipt for an identical retry. Transport acquisition, real two-leg
-probing, client ingress, and live relay/exit publication remain fail closed. The unprivileged tests above
+helper can execute at most one live context at a time, containing either one matching-role
+Client/Exit WireGuard lease or the exact ordered `RelayClient` + `RelayExit` pair, through Bind,
+Prepare, signed-authority-bound Activate, correlated Probe/Commit and Destroy. Unit and
+failure-injection tests prove complete-batch preflight, rollback after partial Prepare/Activate,
+rejection of role/path/peer substitution before mutation, no partial pair Commit, and complete-pair
+Destroy retry. Commit requires a handshake no older than activation plus strict RX and TX growth for
+every lease and caches the exact successful receipt for an identical retry. Transport acquisition,
+Relay forwarding, real end-to-end two-leg probing, client ingress, and live relay/exit publication
+remain fail closed. Relay authority tests verify one five-record replay transaction comprising the
+outer client-signed request, its embedded signed ClientSessionCapability and ExitReservation, the
+relay-signed response commitment and exact nested RelayAuthorization. They reject signer, TTL,
+replay, capability/exit/authorization scope and endpoint substitution before mutation, but do not
+provide an independent discovery/connection trust anchor. The unprivileged tests above
 create no WireGuard device or host route; the separate disposable gate below confines its network
 fixtures to private namespaces and does not satisfy an acceptance case without retained exact-main
 evidence.
@@ -89,7 +97,7 @@ the gate also does not infer that a pre-existing binary was built from the obser
 evidence must therefore include the trusted disposable-VM job which first builds both binaries as
 an unprivileged user from that clean checkout and then runs the fixed producer without changing it.
 
-The production phase runs sequential closed Client and Exit singleton probes as the staged agent.
+The retained production phase runs sequential closed Client and Exit singleton probes as the staged agent.
 The root hook creates one fixed dummy underlay only inside the transient unit's `PrivateNetwork`
 namespace. The first cycle registers an exact tag-35 Client intent, prepares one Client-role lease,
 creates an ephemeral self-contained nested relay/exit grant bound to the returned helper key and
@@ -128,7 +136,7 @@ After one fixed release byte, the probe reconnects and sends the exact same Clie
 twice. It requires an exactly correlated `CommittedLeaseBatch` and byte-identical cached retry before
 exact Destroy followed by an idempotent `existed=false` Destroy.
 
-The expanded branch then starts an Exit singleton with a distinct context, handles and public key in
+The second cycle starts an Exit singleton with a distinct context, handles and public key in
 a fresh direct child PID and fresh child network namespace. Exit activation requires the complete
 helper-prepared key, `DirectAssigned` underlay and kernel-selected listen port to equal the nested
 exit-signed endpoint and its exact outer relay-signed copy; its peer derives only from the
@@ -150,6 +158,13 @@ discovery selection or policy authority, a simultaneous two-leg route, a Relay c
 forwarding, a transport descriptor, ingress, a usable end-to-end VPN/datapath, crash/restart cleanup
 or package behavior. The self-contained probe signers are fixture identities, not evidence that
 discovery-selected or policy-authorized operators were used.
+
+The current branch additionally defines a third separate worker/namespace cycle for the exact
+ordered Relay endpoint pair. It is intended to keep both worker-local Relay leases and both
+temporary external peers live together, prove the handshake and strict RX/TX growth for both leases,
+then require one pair Commit, byte-identical retry, complete Destroy and custody cleanup. Packets
+terminate independently at the two Relay interfaces; no forwarding is installed. This Relay cycle
+has no accepted or retained disposable-KVM/CI result yet and therefore is not live-kernel evidence.
 
 The guest does not wrap that complete root producer in one 1 MiB file-size limit: the reviewed
 helper and IPC-probe binaries are legitimately larger. Instead, each source must be one non-empty,
@@ -199,9 +214,13 @@ forwarding, transport descriptor handoff, ingress, package behavior, restart rec
 [run 33294974441](https://github.com/VOLPAROSSA/volparossa/actions/runs/33294974441) at
 `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` succeeded and retained the Client-only report as artifact
 [9727163813](https://github.com/VOLPAROSSA/volparossa/actions/runs/33294974441/artifacts/9727163813).
-That result predates the Exit cycle; the expanded Exit proof remains branch-only until merged and
-followed by a retained exact-main run. Neither result automatically closes AV1-09 or any acceptance
-checkbox, and the fixed alpha score remains **11/100 (11%)**.
+Exact-main [run
+33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017` subsequently succeeded and retained the Exit-expanded
+report as artifact
+[9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
+The Relay-pair KVM/CI proof remains pending and non-retained. Neither retained result automatically
+closes AV1-09 or any acceptance checkbox, and the fixed alpha score remains **11/100 (11%)**.
 
 ### Manual non-retained branch smoke and retained main-branch VM evidence
 
@@ -217,10 +236,11 @@ automatic `pull_request` trigger and not support for `refs/pull/*`. Only a retai
 can be considered as AV1-09 evidence; it remains subject to the complete milestone criteria and
 does not automatically change the alpha score.
 
-The Client-only Probe/Commit plus ICMPv6 fixture described above has the retained exact-main evidence
-identified above. The added Exit worker/namespace, `vpre0` relay-to-exit leg and Exit Commit remain
-branch work and must not be called retained-main KVM evidence unless that exact implementation is
-merged and a retained host-revalidated `retained-main` run succeeds.
+The Client and Exit Probe/Commit plus ICMPv6 fixtures described above have the separate retained
+exact-main evidence identified above. The Relay endpoint-pair worker/namespace and its two
+simultaneous endpoint fixtures remain branch work and must not be called retained-main KVM evidence
+unless that exact implementation is merged and a retained host-revalidated `retained-main` run
+succeeds.
 
 If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
 category (or `unclassified`) to job stderr. For `worker-launch-status` only, it may additionally emit
