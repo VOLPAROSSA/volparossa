@@ -7554,7 +7554,7 @@ do
     }
 done
 for worker_kernel_anchor in \
-    'let pidfd = pidfd_open(pid, PidfdFlags::empty())' \
+    'pidfd_open(Pid::from_child(child), PidfdFlags::empty())' \
     'process_directory = open(' \
     'pin_network_namespace_before_identity_drop('
 do

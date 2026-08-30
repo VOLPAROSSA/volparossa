@@ -20,7 +20,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     deadline::{HardDeadline, wait_for_fd},
-    ownership_journal::DurableWireguardResource,
+    lease_spec::WireguardLeaseSpec,
+    ownership_journal::{DurableWireguardResource, RestartNetworkPlan},
 };
 
 #[allow(dead_code)] // GET_DEVICE is wired into the v3 lease state machine in phase 2.
@@ -780,6 +781,20 @@ pub struct NamespaceKernel {
     wireguard: Option<GenericNetlinkClient>,
 }
 
+fn restart_wireguard_roles(
+    context_role: volparossa_routing::ContextRole,
+) -> Result<&'static [volparossa_routing::WireguardRole], KernelError> {
+    match context_role {
+        volparossa_routing::ContextRole::Client => Ok(&[volparossa_routing::WireguardRole::Client]),
+        volparossa_routing::ContextRole::Relay => Ok(&[
+            volparossa_routing::WireguardRole::RelayClient,
+            volparossa_routing::WireguardRole::RelayExit,
+        ]),
+        volparossa_routing::ContextRole::Exit => Ok(&[volparossa_routing::WireguardRole::Exit]),
+        volparossa_routing::ContextRole::Unspecified => Err(KernelError::Invalid),
+    }
+}
+
 impl NamespaceKernel {
     /// Opens namespace-local route and `WireGuard` netlink sockets.
     pub fn connect(deadline: HardDeadline) -> Result<Self, KernelError> {
@@ -797,6 +812,44 @@ impl NamespaceKernel {
     pub fn activate_loopback(&mut self, deadline: HardDeadline) -> Result<(), KernelError> {
         let index = self.route.link_index("lo", deadline)?;
         self.route.set_link_state(index, true, deadline)
+    }
+
+    /// Prove the exact pre-dispatch link facts committed by one startup journal target.
+    ///
+    /// Custody is durably marked before dispatch can create a birth link or activate loopback.
+    /// This read-only check re-derives every role-specific interface name internally, requires all
+    /// of them absent, and requires the sole bootstrap loopback identity to remain down and
+    /// unlabelled. It accepts no caller-provided interface name.
+    pub(crate) fn prove_restart_pre_dispatch_links_absent(
+        &mut self,
+        plan: RestartNetworkPlan,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let roles = restart_wireguard_roles(plan.context_role())?;
+        if plan.path_id() == 0 {
+            return Err(KernelError::Invalid);
+        }
+        for role in roles {
+            let specification = WireguardLeaseSpec::derive(
+                plan.context_id(),
+                plan.context_role(),
+                u32::from(plan.path_id()),
+                *role as i32,
+            )
+            .map_err(|_| KernelError::Invalid)?;
+            self.route
+                .prove_link_absent(specification.interface(), deadline)?;
+        }
+        let loopback = self.route.link_details_full("lo", deadline)?;
+        let up = u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)?;
+        if loopback.name.as_deref() != Some("lo")
+            || loopback.alias.is_some()
+            || loopback.flags & up != 0
+        {
+            return Err(KernelError::Invalid);
+        }
+        deadline.ensure_remaining()?;
+        Ok(())
     }
 
     /// Read back one helper-derived `WireGuard` device through a bounded `GET_DEVICE` dump.
@@ -3512,6 +3565,49 @@ mod tests {
             classify_mutation_acknowledgement(Err(KernelError::Malformed), true),
             ObservedMutationAcknowledgement::Ambiguous(KernelError::Malformed)
         ));
+    }
+
+    #[test]
+    fn restart_pre_dispatch_role_shape_is_exact_and_never_broader_than_one_path() {
+        assert_eq!(
+            restart_wireguard_roles(ContextRole::Client).expect("client roles"),
+            &[WireguardRole::Client]
+        );
+        assert_eq!(
+            restart_wireguard_roles(ContextRole::Relay).expect("relay roles"),
+            &[WireguardRole::RelayClient, WireguardRole::RelayExit,]
+        );
+        assert_eq!(
+            restart_wireguard_roles(ContextRole::Exit).expect("exit roles"),
+            &[WireguardRole::Exit]
+        );
+        assert!(restart_wireguard_roles(ContextRole::Unspecified).is_err());
+
+        let source = include_str!("kernel.rs");
+        let start = source
+            .find("pub(crate) fn prove_restart_pre_dispatch_links_absent")
+            .expect("restart absence proof");
+        let end = source[start..]
+            .find("/// Read back one helper-derived")
+            .map(|offset| start + offset)
+            .expect("restart absence proof end");
+        let proof = &source[start..end];
+        assert!(proof.contains("WireguardLeaseSpec::derive("));
+        assert!(proof.contains("prove_link_absent"));
+        assert!(proof.contains("link_details_full(\"lo\""));
+        assert!(proof.contains("loopback.flags & up != 0"));
+        for forbidden in [
+            "delete",
+            "remove",
+            "set_link_up",
+            "set_link_down",
+            "Command::",
+        ] {
+            assert!(
+                !proof.contains(forbidden),
+                "unexpected mutation: {forbidden}"
+            );
+        }
     }
 
     #[test]

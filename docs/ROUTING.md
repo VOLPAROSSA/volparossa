@@ -395,11 +395,22 @@ canonical/CAS ownership actor starts before
 cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now
 reconstructs and registers tag 35's exact canonical intent before worker reservation, then carries
 its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. A
-restart may retire only an already durable all-`CleanupConfirmed` set: exact-present pairs first
-chain canonical descriptorless baseline-minus-pair removals, then a fresh stable exact-empty manager
-observation supplies full-set actor evidence. The refusing cleanup executor still leaves inherited `MayOwnCustody` or
-`MayOwnPrepare` byte-identical and blocks startup. There is no inherited-custody recovery backend,
-restart reaper, or cross-runtime tag-28 proof.
+restart may retire an already durable all-`CleanupConfirmed` set: exact-present pairs first chain
+canonical descriptorless baseline-minus-pair removals, then a fresh stable exact-empty manager
+observation supplies full-set actor evidence. It may also reap one exact-present, same-boot,
+same-helper-image, single-path pre-dispatch `MayOwnCustody` namespace. The fixed authenticated child
+accepts only role-specific baseline state and the exact restricted Relay fence; it never deletes a
+WireGuard link or changes forwarding. After exact child reap, the startup actor crosses only that
+record to `CleanupConfirmed`, then reuses the existing removal/absence chain. The general cleanup
+executor still leaves `MayOwnPrepare`, no-store, multi-target and multi-path cases byte-identical and
+blocks startup. There is no broad inherited-custody recovery backend or cross-runtime tag-28 proof.
+The parent requires waitable default `SIGCHLD`, default lifecycle-signal dispositions, and a pidfd
+for the normal transcript. A bounded reserve-FD
+retry covers descriptor exhaustion; if pinning still fails, no cleanup record is sent and only
+normal direct-child EOF/reap may return an error. A stopped or stuck unpinned child invokes fixed
+non-coredumping `exit_group(70)` under the attested exact systemd
+`simple/no/main/control-group/SIGKILL/45s/terminate` retirement contract, publishes no socket and
+authorizes no journal transition. No numeric-PID signal is used.
 Journal absence is not cleanup proof. Client ingress is also
 blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
 helper's isolated endpoint-lifecycle path reaches Probe/Commit. Route-level end-to-end configuration and

@@ -44,7 +44,7 @@ use volparossa_routing::PrepareIntent;
 use crate::{
     deadline::HardDeadline,
     internal_protocol::PrepareLeases,
-    systemd_custody::CleanupConfirmedManagerAbsenceEvidence,
+    systemd_custody::{CleanupConfirmedManagerAbsenceEvidence, RestartMayOwnCleanupEvidence},
     worker_v3::{
         ExactNeverDispatchedPrepareProof, ExactSameRuntimeCleanupProof,
         ExactSameRuntimeManagerAbsenceProof, ExactUndispatchedDurableAuthority,
@@ -391,6 +391,118 @@ pub(crate) struct StartupCustodyTarget {
     custody_name_digest: DurableCustodyNameDigest,
     recovery_anchor: DurablePrepareAnchor,
     durable_binding: DurableCustodyDescriptorBinding,
+    restart_plan: Option<StartupRestartPlan>,
+}
+
+/// Secret-free, journal-derived identity of the worker bootstrap which preceded custody.
+///
+/// This is observation input only. It carries no journal key, kernel mutation authority or raw
+/// descriptor. A zero `path_id` means that the durable plan contains more than one path and is
+/// deliberately outside the first restart-reaper slice.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct StartupRestartPlan {
+    network: RestartNetworkPlan,
+    boot_id: [u8; 16],
+    network_namespace_device: NonZeroU64,
+    network_namespace_inode: NonZeroU64,
+    executable_device: NonZeroU64,
+    executable_inode: NonZeroU64,
+}
+
+/// Fixed operational subset transferred to the authenticated reaper child.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RestartNetworkPlan {
+    context_id: [u8; 16],
+    context_role: volparossa_routing::ContextRole,
+    path_id: u8,
+}
+
+impl RestartNetworkPlan {
+    pub(crate) fn from_authenticated_reaper(
+        context_id: [u8; 16],
+        context_role: volparossa_routing::ContextRole,
+        path_id: u8,
+    ) -> Option<Self> {
+        (!context_id.iter().all(|byte| *byte == 0)
+            && context_role != volparossa_routing::ContextRole::Unspecified
+            && (1..=8).contains(&path_id))
+        .then_some(Self {
+            context_id,
+            context_role,
+            path_id,
+        })
+    }
+
+    pub(crate) const fn context_id(self) -> [u8; 16] {
+        self.context_id
+    }
+
+    pub(crate) const fn context_role(self) -> volparossa_routing::ContextRole {
+        self.context_role
+    }
+
+    pub(crate) const fn path_id(self) -> u8 {
+        self.path_id
+    }
+}
+
+impl StartupRestartPlan {
+    pub(crate) const fn context_id(self) -> [u8; 16] {
+        self.network.context_id()
+    }
+
+    pub(crate) const fn context_role(self) -> volparossa_routing::ContextRole {
+        self.network.context_role()
+    }
+
+    pub(crate) const fn path_id(self) -> u8 {
+        self.network.path_id()
+    }
+
+    pub(crate) const fn network_plan(self) -> RestartNetworkPlan {
+        self.network
+    }
+
+    pub(crate) const fn boot_id(self) -> [u8; 16] {
+        self.boot_id
+    }
+
+    pub(crate) const fn network_namespace_identity(self) -> (NonZeroU64, NonZeroU64) {
+        (self.network_namespace_device, self.network_namespace_inode)
+    }
+
+    pub(crate) const fn executable_identity(self) -> (NonZeroU64, NonZeroU64) {
+        (self.executable_device, self.executable_inode)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        context_id: [u8; 16],
+        context_role: volparossa_routing::ContextRole,
+        path_id: u8,
+        boot_id: [u8; 16],
+        network_namespace_identity: (NonZeroU64, NonZeroU64),
+        executable_identity: (NonZeroU64, NonZeroU64),
+    ) -> Self {
+        Self {
+            network: RestartNetworkPlan {
+                context_id,
+                context_role,
+                path_id,
+            },
+            boot_id,
+            network_namespace_device: network_namespace_identity.0,
+            network_namespace_inode: network_namespace_identity.1,
+            executable_device: executable_identity.0,
+            executable_inode: executable_identity.1,
+        }
+    }
+}
+
+impl fmt::Debug for StartupRestartPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StartupRestartPlan(<redacted>)")
+    }
 }
 
 impl StartupCustodyTarget {
@@ -404,6 +516,17 @@ impl StartupCustodyTarget {
 
     pub(crate) const fn durable_binding(&self) -> DurableCustodyDescriptorBinding {
         self.durable_binding
+    }
+
+    pub(crate) const fn restart_plan(&self) -> Option<StartupRestartPlan> {
+        self.restart_plan
+    }
+
+    pub(crate) fn same_identity_except_phase(&self, other: &Self) -> bool {
+        self.custody_name_digest == other.custody_name_digest
+            && self.recovery_anchor == other.recovery_anchor
+            && self.durable_binding == other.durable_binding
+            && self.restart_plan == other.restart_plan
     }
 
     /// Compare one opaque complete worker anchor without exposing any of its numeric coordinates.
@@ -453,7 +576,20 @@ impl StartupCustodyTarget {
             custody_name_digest,
             recovery_anchor,
             durable_binding,
+            restart_plan: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_restart_plan_for_test(mut self, plan: StartupRestartPlan) -> Self {
+        self.restart_plan = Some(plan);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_phase_for_test(mut self, phase: StartupCustodyPhase) -> Self {
+        self.phase = phase;
+        self
     }
 }
 
@@ -1015,6 +1151,10 @@ enum StartupControl {
     Revalidate {
         reply: ReplySender<()>,
     },
+    ConfirmRestartCleanup {
+        evidence: Box<RestartMayOwnCleanupEvidence>,
+        reply: ReplySender<Box<[StartupCustodyTarget]>>,
+    },
     Continue {
         manager_absence: Option<CleanupConfirmedManagerAbsenceEvidence>,
     },
@@ -1554,6 +1694,52 @@ impl DurableOwnershipStartup {
                 drop(control);
                 return Err(self.lifecycle.disconnected_error());
             }
+        }
+        Ok(&self.targets)
+    }
+
+    /// Consume one exact restart-reaper proof and durably cross only
+    /// `MayOwnCustody -> CleanupConfirmed` while the actor remains startup-locked.
+    pub(super) fn confirm_single_restart_cleanup(
+        &mut self,
+        evidence: RestartMayOwnCleanupEvidence,
+    ) -> Result<&[StartupCustodyTarget], DurableOwnershipError> {
+        if !evidence.matches_exact_target_set(&self.targets) {
+            return Err(DurableOwnershipError::RecoveryNotConfirmed);
+        }
+        self.revalidate_targets()?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?;
+        let (reply, pending) = reply_pair(&self.lifecycle, &client.admission, self.deadline);
+        match self
+            .control
+            .as_ref()
+            .ok_or(DurableOwnershipError::Unavailable)?
+            .try_send(StartupControl::ConfirmRestartCleanup {
+                evidence: Box::new(evidence),
+                reply,
+            }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(control)) => {
+                drop(control);
+                client
+                    .admission
+                    .fence_terminal(&self.lifecycle, Lifecycle::Ambiguous);
+                return Err(DurableOwnershipError::Ambiguous);
+            }
+            Err(TrySendError::Disconnected(control)) => {
+                drop(control);
+                return Err(self.lifecycle.disconnected_error());
+            }
+        }
+        self.targets = pending.wait()?;
+        if self.targets.len() != 1
+            || self.targets[0].phase() != StartupCustodyPhase::CleanupConfirmed
+        {
+            self.lifecycle.mark_ambiguous();
+            return Err(DurableOwnershipError::Ambiguous);
         }
         Ok(&self.targets)
     }
@@ -2260,6 +2446,23 @@ fn project_startup_custody_target(
         // interpreted as an absent or adoptable startup target.
         return Err(DurableOwnershipError::RecoveryNotConfirmed);
     };
+    let first_path_id = record
+        .plan
+        .paths
+        .first()
+        .map(|path| path.path_id)
+        .ok_or(DurableOwnershipError::RecoveryNotConfirmed)?;
+    let path_id = if record
+        .plan
+        .paths
+        .iter()
+        .all(|path| path.path_id == first_path_id)
+    {
+        first_path_id
+    } else {
+        0
+    };
+    let context_role = super::routing_context_role(record.plan.context_role);
     Ok(Some(StartupCustodyTarget {
         phase,
         custody_name_digest: custody_name_digest_for_coordinates(OwnershipCoordinates {
@@ -2270,6 +2473,18 @@ fn project_startup_custody_target(
         }),
         recovery_anchor: DurablePrepareAnchor(anchor),
         durable_binding: DurableCustodyDescriptorBinding(binding),
+        restart_plan: Some(StartupRestartPlan {
+            network: RestartNetworkPlan {
+                context_id: record.context_id.0,
+                context_role,
+                path_id,
+            },
+            boot_id: anchor.boot_id.0,
+            network_namespace_device: anchor.network_namespace_device,
+            network_namespace_inode: anchor.network_namespace_inode,
+            executable_device: anchor.executable_device,
+            executable_inode: anchor.executable_inode,
+        }),
     }))
 }
 
@@ -2285,6 +2500,33 @@ struct CleanupConfirmedManagerAbsenceMismatch;
 
 struct CleanupConfirmedManagerAbsenceExecutor<'a> {
     evidence: &'a mut CleanupConfirmedManagerAbsenceEvidence,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RestartMayOwnCleanupMismatch;
+
+struct RestartMayOwnCleanupExecutor<'a> {
+    evidence: &'a mut RestartMayOwnCleanupEvidence,
+}
+
+impl CleanupExecutor for RestartMayOwnCleanupExecutor<'_> {
+    type Error = RestartMayOwnCleanupMismatch;
+
+    fn confirm_cleanup(
+        &mut self,
+        target: &super::CleanupTarget,
+        _deadline: HardDeadline,
+    ) -> Result<super::ConfirmedCleanupProof, Self::Error> {
+        let candidate = project_startup_custody_target(&target.exact_record)
+            .ok()
+            .flatten()
+            .filter(|candidate| candidate.phase() == StartupCustodyPhase::MayOwnCustody)
+            .ok_or(RestartMayOwnCleanupMismatch)?;
+        if !self.evidence.consume_exact_target(&candidate) {
+            return Err(RestartMayOwnCleanupMismatch);
+        }
+        Ok(target.confirmed_cleanup())
+    }
 }
 
 impl ManagerAbsenceExecutor for CleanupConfirmedManagerAbsenceExecutor<'_> {
@@ -2407,6 +2649,71 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
             ));
         }
         Ok(())
+    }
+
+    fn confirm_single_restart_cleanup(
+        &mut self,
+        mut evidence: RestartMayOwnCleanupEvidence,
+        deadline: HardDeadline,
+    ) -> Result<Box<[StartupCustodyTarget]>, FailureDisposition> {
+        let snapshot = match self.journal.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(self.classify_journal_error(error)),
+        };
+        let targets =
+            project_startup_custody_targets(snapshot).map_err(FailureDisposition::Continue)?;
+        if !evidence.matches_exact_target_set(&targets) {
+            return Err(FailureDisposition::Continue(
+                DurableOwnershipError::RecoveryNotConfirmed,
+            ));
+        }
+        let record_snapshot = match self.journal.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(self.classify_journal_error(error)),
+        };
+        let record = record_snapshot
+            .records
+            .values()
+            .find(|record| record.phase == OwnershipPhase::MayOwnCustody)
+            .cloned()
+            .ok_or(FailureDisposition::Continue(
+                DurableOwnershipError::RecoveryNotConfirmed,
+            ))?;
+        let mut executor = RestartMayOwnCleanupExecutor {
+            evidence: &mut evidence,
+        };
+        self.revision = self
+            .journal
+            .confirm_cleanup(
+                self.revision,
+                record.ownership_id,
+                record.generation,
+                &mut executor,
+                deadline,
+            )
+            .map_err(|error| self.classify_settlement_error(error))?;
+        if !evidence.is_consumed() {
+            return Err(FailureDisposition::Stop(
+                DurableOwnershipError::Ambiguous,
+                Lifecycle::Ambiguous,
+            ));
+        }
+        self.confirm_complete_boundary().map_err(|_| {
+            FailureDisposition::Stop(DurableOwnershipError::Ambiguous, Lifecycle::Ambiguous)
+        })?;
+        let snapshot = match self.journal.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(self.classify_journal_error(error)),
+        };
+        let targets =
+            project_startup_custody_targets(snapshot).map_err(FailureDisposition::Continue)?;
+        if targets.len() != 1 || targets[0].phase() != StartupCustodyPhase::CleanupConfirmed {
+            return Err(FailureDisposition::Stop(
+                DurableOwnershipError::Ambiguous,
+                Lifecycle::Ambiguous,
+            ));
+        }
+        Ok(targets)
     }
 
     fn validate_startup_manager_absence(
@@ -2955,6 +3262,30 @@ fn actor_thread<PreStartupHook, StartupHook, ExecutorFactory, Executor>(
                     return;
                 }
                 reply.complete(Ok(()));
+                if lifecycle.load() != Lifecycle::Starting {
+                    retain_startup_lock_until_owner_drop(control_receiver);
+                    return;
+                }
+            }
+            Ok(StartupControl::ConfirmRestartCleanup {
+                evidence,
+                mut reply,
+            }) => {
+                reply.arm();
+                if deadline.ensure_remaining().is_err() {
+                    reply.complete_unstarted_deadline();
+                    continue;
+                }
+                match core.confirm_single_restart_cleanup(*evidence, deadline) {
+                    Ok(targets) => reply.complete(Ok(targets)),
+                    Err(failure) => {
+                        let (error, terminal) = terminal_start_failure(failure);
+                        admission.fence_terminal(lifecycle, terminal);
+                        reply.complete(Err(error));
+                        retain_startup_lock_until_owner_drop(control_receiver);
+                        return;
+                    }
+                }
                 if lifecycle.load() != Lifecycle::Starting {
                     retain_startup_lock_until_owner_drop(control_receiver);
                     return;

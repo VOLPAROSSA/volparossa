@@ -102,6 +102,7 @@ mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
 mod relay_fence;
+mod restart_reaper;
 pub(crate) use functional_backend::{
     ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof,
     functional_alpha_lease_backend,
@@ -109,6 +110,11 @@ pub(crate) use functional_backend::{
 #[cfg(test)]
 pub(crate) use functional_backend::{
     exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
+};
+pub(crate) use restart_reaper::{
+    ExactRestartReaperCleanupProof, INTERNAL_RESTART_REAPER_ARGUMENT,
+    INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT, execute_single_restart_reaper,
+    run_internal_restart_reaper_entry, run_internal_restart_reaper_fail_stop_live_proof,
 };
 
 #[cfg(test)]
