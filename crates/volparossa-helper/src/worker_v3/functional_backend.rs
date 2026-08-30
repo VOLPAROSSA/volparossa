@@ -1264,6 +1264,9 @@ fn parse_public_udp_endpoint(value: Option<&PublicUdpEndpoint>) -> Option<(IpAdd
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use nix::unistd::{getegid, geteuid};
     use volparossa_protocol::{
         MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
         SignedEnvelope, Transport, decode_canonical, sign_control_message,
@@ -1271,6 +1274,16 @@ mod tests {
     use volparossa_test_support::SignedRouteFixture;
 
     use super::*;
+    use crate::{
+        internal_protocol::ContextDestroyed,
+        worker_transport::{
+            ExpectedUnixCredentials, private_credential_worker_channel,
+            receive_credential_worker_request, send_credential_worker_response,
+        },
+        worker_v3::{
+            BootstrapChallenge, SpawnedWorker, StablePhase, WorkerProcess, correlated_response,
+        },
+    };
 
     fn backend_with_state(state: Option<OpenLeaseEntry>) -> FunctionalAlphaLeaseBackend {
         FunctionalAlphaLeaseBackend {
@@ -1978,6 +1991,171 @@ mod tests {
             assert!(lock_replay_cache(&replay).is_empty());
             assert!(verify_fixture_plan(&replay, key, prepared, &value, now_ms).is_ok());
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test keeps post-verification dispatch, cleanup and both replay identities in one auditable transaction"
+    )]
+    async fn post_verification_worker_failure_retains_both_replay_records() {
+        let (key, mut binding, value, prepared, route) = live_activate_fixture();
+        binding.call_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+        let (parent, peer) =
+            private_credential_worker_channel().expect("credentialed fake worker channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let mut process = WorkerProcess::fake(parent, std::process::id(), Arc::clone(&alive));
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let ownership = match coordinator.reserve_spawn_register_with_until(
+            key.context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xa5; 32]),
+                })
+            },
+        ) {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("fake worker registration rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("fake worker registration unresolved: {error}")
+            }
+        };
+        {
+            let mut registry = coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = registry
+                .records
+                .get_mut(&key.context_id)
+                .expect("registered fake worker");
+            assert_eq!(
+                record.generation,
+                ownership.coordinates.worker_generation.get()
+            );
+            record.stable_phase = StablePhase::Prepared;
+        }
+
+        let mut entry = open_entry(key);
+        entry.worker = Some(ownership);
+        entry.prepared = Some(prepared);
+        entry.phase = OpenLeasePhase::Prepared;
+        let backend = FunctionalAlphaLeaseBackend {
+            coordinator,
+            relay_replay: Mutex::new(functional_alpha_replay_cache()),
+            state: Mutex::new(Some(entry)),
+        };
+
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let activate = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Activate request");
+            assert!(matches!(
+                activate.request.operation,
+                Some(internal_worker_request::Operation::ActivateLeases(_))
+            ));
+            let failed = correlated_response(&activate.request, InternalWorkerResult::Kernel, None)
+                .expect("correlated Activate failure");
+            send_credential_worker_response(&peer, &activate.request, &failed, None)
+                .expect("send Activate failure");
+
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("cleanup Destroy request");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let destroyed = correlated_response(
+                &destroy.request,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::Destroyed(
+                    ContextDestroyed {},
+                )),
+            )
+            .expect("correlated Destroy success");
+            send_credential_worker_response(&peer, &destroy.request, &destroyed, None)
+                .expect("send Destroy success");
+        });
+
+        assert_eq!(
+            backend.activate_one(binding, value.clone()).await,
+            Err(BackendError::Kernel)
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+        assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
+
+        let mut retry_entry = open_entry(key);
+        retry_entry.prepared = Some(prepared);
+        retry_entry.phase = OpenLeasePhase::Prepared;
+        *lock_state(&backend.state) = Some(retry_entry);
+
+        let mut exact_retry = binding;
+        exact_retry.operation_sequence += 1;
+        exact_retry.request_id = [0xb1; 16];
+        exact_retry.request_digest = [0xb2; 32];
+        exact_retry.call_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            backend.activate_one(exact_retry, value.clone()).await,
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
+
+        // A fresh outer relay nonce gets as far as the unchanged nested exit envelope. Its replay
+        // rejection, plus the exact-grant rejection above, proves both original records survived
+        // the post-verification worker failure. The newly admitted outer nonce is rolled back.
+        let mut fresh_outer = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
+        let retained_exit_envelope = fresh_outer.exit_authorization.clone();
+        let fresh_relay_nonce = [0xc7; 32];
+        assert_ne!(fresh_outer.nonce.as_slice(), fresh_relay_nonce);
+        fresh_outer.nonce = fresh_relay_nonce.to_vec();
+        let mut nested_retry = value;
+        nested_retry.leases[0].signed_relay_reservation = sign_control_message(
+            &fresh_outer,
+            route.relay_key(0).expect("relay signing key"),
+            fresh_outer.created_at_ms,
+            fresh_outer.expires_at_ms,
+            fresh_relay_nonce,
+            TimePolicy::default(),
+        )
+        .expect("fresh outer envelope around retained exit envelope");
+        assert_eq!(
+            decode_relay_reservation(&nested_retry.leases[0].signed_relay_reservation)
+                .exit_authorization,
+            retained_exit_envelope
+        );
+        let mut nested_replay_request = exact_retry;
+        nested_replay_request.operation_sequence += 1;
+        nested_replay_request.request_id = [0xc1; 16];
+        nested_replay_request.request_digest = [0xc2; 32];
+        nested_replay_request.call_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            backend
+                .activate_one(nested_replay_request, nested_retry)
+                .await,
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
+        drop(lock_state(&backend.state).take());
     }
 
     #[test]
