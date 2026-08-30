@@ -749,8 +749,10 @@ host-revalidated exact-main PASS in run 33294974441 at
 `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`. The subsequent Exit expansion produced its retained
 exact-main PASS in run 33296892632 at `1ca51fe0d2a2be855adb182e85c229d1d12bc017`. Relay-pair
 exact-main run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` retained artifact
-9729172274. None of these scoped results is installed-package,
-restart, forwarding, usable-datapath or acceptance evidence.
+9729172274. Relay-forwarding exact-main run 33309109220 at
+`1f3cee798787ed4673a3ba28d88931947800ca22` retained artifact 9731470248. None of these scoped
+results is installed-package, restart, usable-datapath or acceptance evidence; forwarding is proven
+only inside the isolated single-path Relay worker.
 
 The helper unit deliberately sets `RestrictSUIDSGID=no`, unlike the agent and native MPQUIC units,
 which retain `yes`. In systemd v257.13 that setting installs a separate seccomp filter which returns
@@ -951,8 +953,20 @@ Non-retained exact-head
 `8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently exercised the production helper's exact
 Relay pair with one cross-leg `::1` to `::4` ICMPv6 round trip. It required strict growth of both
 nftables forwarding counters and all four WireGuard peer views, pair Commit plus retry, exact
-fixture/context cleanup and unchanged enumerated host state. The non-main workflow retained no PASS
-artifact; this is not retained exact-main, installed-package, restart, route-manager, transport,
+fixture/context cleanup and unchanged enumerated host state. That non-main workflow retained no PASS
+artifact. Exact-main
+[run 33309109220](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220) at
+`1f3cee798787ed4673a3ba28d88931947800ca22` then reproduced the current Relay-forwarding proof and
+retained 39,915-byte artifact
+[9731470248](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220/artifacts/9731470248),
+named `helper-boundary-evidence-1f3cee798787ed4673a3ba28d88931947800ca22` and expiring
+`2026-11-28T11:30:49Z`. Its streamed report records overall `PASS`, exact clean source SHA,
+Debian 13 amd64 (`x86_64`) with systemd 257, all 16 checks `PASS`, and equal before/after
+enumerated-host-state SHA-256
+`2209ca5e63388fe23b8bf54c072cd2be5aa289e7e68293841150bce93ff59698`. Its scope remains explicitly
+`helper_boundary_only=true`, `datapath=false`, `restart_recovery=false`,
+`acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`. This is retained
+exact-main helper-boundary evidence, not installed-package, restart, route-manager, transport,
 ingress, usable-VPN or A01--A15 evidence.
 
 After all three cycles, the hook requires zero helper children and no helper FD retaining a
@@ -979,9 +993,9 @@ The subsequent Exit cycle has retained, host-revalidated exact-main evidence fro
 [run 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017`, artifact
 [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
-All three retained cycles use self-contained fixture signers, not trusted selection or policy
+All four retained cycles use self-contained fixture signers, not trusted selection or policy
 authority. The older retained Relay pair proves two simultaneous endpoint leases but no forwarding;
-the newer non-retained run proves forwarding only inside that isolated worker. Neither proves a
+the newer retained exact-main run proves forwarding only inside that isolated worker. None proves a
 production Client/Relay/Exit route, transport descriptor, ingress, usable VPN/datapath,
 crash/restart recovery, A01--A15 acceptance result or alpha-score increase; the fixed score remains
 **11/100 (11%)**.
@@ -1023,8 +1037,9 @@ diagnostic unit is reset to inactive before its descriptor store is cleaned. Ret
 that unit's `fdstore`, requires either
 `NFileDescriptorStore=0` or `LoadState=not-found`, resets it when still present and waits boundedly
 for collection; any ambiguous observation fails the gate. The driver has produced the scoped
-retained exact-main PASSes identified below; none is package, restart, forwarding, datapath or
-acceptance evidence. A non-main branch run may exercise and validate the same disposable proof, but
+retained exact-main PASSes identified below; none is package, restart, production-datapath or
+acceptance evidence, while the current result covers forwarding only inside the isolated Relay
+worker. A non-main branch run may exercise and validate the same disposable proof, but
 on PASS `non-retained-pr-smoke` deliberately discards its report, hash, environment, console and
 proof diagnostics and requires an empty output directory. Its workflow never uploads branch PASS
 artifacts or failure diagnostics; a failed smoke exposes only one fixed allowlisted category (or
@@ -1122,11 +1137,13 @@ correction were not PASS evidence. The subsequent Client-only exact-main run 332
 `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` succeeded and retained artifact 9727163813. Exit exact-main
 run 33296892632 at `1ca51fe0d2a2be855adb182e85c229d1d12bc017` subsequently succeeded and retained
 artifact 9727739271. Relay-pair exact-main run 33301595311 at
-`0095b113e450a0ab29da853fafa53b2b130f05fc` retained artifact 9729172274. The alpha score remains
+`0095b113e450a0ab29da853fafa53b2b130f05fc` retained artifact 9729172274. Relay-forwarding
+exact-main run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` retained artifact
+9731470248. The alpha score remains
 **11/100**.
 The second phase exercises the production server entry point, but not an installed package, the
 shipped unit file, restart policy, or inherited-descriptor adoption/recovery. The retained Client,
-Exit and Relay-pair results are not package, datapath, A14 or A15 evidence.
+Exit, Relay-pair and Relay-forwarding results are not package, datapath, A14 or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
@@ -1653,8 +1670,10 @@ restart or acceptance evidence. Non-retained branch smoke [run
 `8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently proved bounded `::1` to `::4` ICMPv6
 cross-leg forwarding through the exact two WireGuard interfaces, growth of all four WireGuard peer
 counter views and both nftables forwarding counters, Commit plus identical retry, complete teardown,
-and the enumerated unchanged-host-state fence. That branch smoke deliberately retained no artifact,
-does not join a production route manager, transport or ingress, and does not change the alpha score.
+and the enumerated unchanged-host-state fence. That branch smoke deliberately retained no artifact.
+Exact-main run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced the scoped
+forwarding proof and retained artifact 9731470248. It does not join a production route manager,
+transport or ingress, and does not change the alpha score.
 
 - validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local

@@ -231,9 +231,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   9727163813. Exit exact-main run 33296892632 at
   `1ca51fe0d2a2be855adb182e85c229d1d12bc017` succeeded and retained artifact 9727739271. Relay-pair
   exact-main run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` succeeded and retained
-  artifact 9729172274. These self-contained fixture identities do not validate trusted
+  artifact 9729172274. Relay-forwarding exact-main run 33309109220 at
+  `1f3cee798787ed4673a3ba28d88931947800ca22` succeeded and retained artifact 9731470248. These
+  self-contained fixture identities do not validate trusted
   selection/policy authority or provide an independent discovery/connection trust anchor, a
-  simultaneous two-leg route or Relay forwarding, transport descriptor, ingress, usable VPN
+  production simultaneous two-leg route, transport descriptor, ingress, usable VPN
   datapath, crash recovery, installed package or shipped-unit restart behavior. A non-retained
   branch PASS closes no A01--A15 checkbox or scorecard row. The score remains
   **11/100 (11%)**.
@@ -453,23 +455,34 @@ single clean-build A01--A15 run; the score is not a release claim.
   [Exact-main run 33301595311](https://github.com/VOLPAROSSA/volparossa/actions/runs/33301595311)
   at `0095b113e450a0ab29da853fafa53b2b130f05fc` subsequently retained the Relay-pair artifact
   [9729172274](https://github.com/VOLPAROSSA/volparossa/actions/runs/33301595311/artifacts/9729172274).
-  None of these results establishes installed-package, restart, trusted-selection, forwarding or
-  usable-datapath readiness, and none raises the **11/100**
+  These three earlier results establish no forwarding, installed-package, restart,
+  trusted-selection or usable-datapath readiness, and none raises the **11/100**
   score or closes AV1-09.
   Non-retained exact-head
   [run 33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
   `8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently exercised the production Relay pair with
   one cross-leg ICMPv6 round trip, strict growth of both nftables forwarding counters and all four
-  WireGuard peer views, Commit plus retry, exact cleanup and unchanged enumerated host state. The
-  non-main workflow retained no PASS artifact. This is not retained exact-main, installed-package,
-  restart, route-manager, transport, ingress, usable-VPN or A01--A15 evidence and does not change
-  the **11/100 (11%)** score.
+  WireGuard peer views, Commit plus retry, exact cleanup and unchanged enumerated host state. That
+  non-main workflow retained no PASS artifact. Exact-main
+  [run 33309109220](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220) at
+  `1f3cee798787ed4673a3ba28d88931947800ca22` then reproduced this current Relay-forwarding proof and
+  retained 39,915-byte artifact
+  [9731470248](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220/artifacts/9731470248),
+  named `helper-boundary-evidence-1f3cee798787ed4673a3ba28d88931947800ca22` and expiring
+  `2026-11-28T11:30:49Z`. Its streamed report records overall `PASS`, exact clean source SHA,
+  Debian 13 amd64 (`x86_64`) with systemd 257, all 16 checks `PASS`, and identical before/after
+  enumerated-host-state SHA-256
+  `2209ca5e63388fe23b8bf54c072cd2be5aa289e7e68293841150bce93ff59698`. Its scope remains explicitly
+  `helper_boundary_only=true`, `datapath=false`, `restart_recovery=false`,
+  `acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`. It is retained
+  exact-main helper-boundary evidence, not installed-package, restart, route-manager, transport,
+  ingress, usable-VPN or A01--A15 evidence, and does not change the **11/100 (11%)** score.
 - [ ] Agent-helper protocol is versioned, typed, length-bounded, protected by socket ownership/mode
   plus exact peer credentials, and accepts no shell/free-text/filesystem-path operations; v3 parser
   tests reject v1/v2/future versions, unknown/noncanonical input and retired v2 operations, while
   retained exact-main live-root integration evidence exists separately for the scoped Client,
-  Exit and pre-forwarding Relay-pair cycles. Cross-leg forwarding has the non-retained exact-head
-  proof above, but not retained exact-main or complete production-integration evidence.
+  Exit and pre-forwarding Relay-pair cycles. Cross-leg forwarding now has the retained exact-main
+  helper-boundary proof above, but not complete production-integration evidence.
 - [ ] Dormant helper tags 35/28 register one exact runtime-global Prepare intent and reconcile only
   an expired same-runtime lineage. HelperClient uses one authenticated stream and one absolute
   five-second budget for each Bind-plus-operation sequence; post-Prepare-write failures transfer
@@ -803,7 +816,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   artifact 9729172274. That retained result is not a cross-leg route or Relay-forwarding proof.
   Non-retained run 33306523739 at `8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently proved
   the current isolated cross-leg fence, traffic, correlated counters, Commit retry and cleanup, but
-  retained no artifact and is not a production route or acceptance result. Durable
+  retained no artifact. Exact-main run 33309109220 at
+  `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced that scoped proof and retained artifact
+  9731470248; its explicit scope is helper-boundary only, not a production route or acceptance
+  result. Durable
   pidfd/network-namespace recovery and the separate Add/Remove MPTCP endpoint seam remain required;
   AV1-09, AV1-10 and AV1-11, the **11/100 (11%)** score, and every datapath or A01--A15 acceptance
   checkbox remain unchanged.
@@ -1143,7 +1159,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   cleanup, exact Commit plus byte-identical retry and exact Destroy as artifact 9727739271. The
   Relay-pair exact-main run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc`
   retained the complete-pair worker proof as artifact 9729172274. Non-retained exact-head run
-  33306523739 added the scoped cross-leg forwarding proof described above. The public
+  33306523739 first added the scoped cross-leg forwarding proof described above; exact-main run
+  33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced it and retained artifact
+  9731470248. The public
   `HelperEngine::new` remains `Unavailable`, and no production route-manager caller reaches this
   helper-internal single-path seam.
 - [ ] Typed/pure/fake helper boundaries prove exact public handles, cardinality, TTL, idempotency,
@@ -1153,8 +1171,8 @@ single clean-build A01--A15 run; the score is not a release claim.
   one live client-to-relay WireGuard leg, and retained Exit run 33296892632 separately proves one
   relay-to-exit WireGuard leg; both include ICMPv6, recent handshake, strict RX/TX growth, Commit
   retry and normal process-owned cleanup. The older retained Relay-pair proof establishes two
-  simultaneous endpoint leases, not forwarding between them; non-retained run 33306523739 now
-  proves forwarding only inside that isolated helper worker. These results still do not prove
+  simultaneous endpoint leases, not forwarding between them; retained exact-main run 33309109220
+  now proves forwarding only inside that isolated helper worker. These results still do not prove
   trusted selection/policy authority, a production Client/Relay/Exit route, transport descriptor,
   ingress, a usable end-to-end VPN/datapath, crash recovery, A01--A15 acceptance, or any increase
   from the **11/100 (11%)** alpha score.

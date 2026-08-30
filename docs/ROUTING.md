@@ -257,15 +257,24 @@ exact-main [run 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/ru
 [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271),
 over a distinct `vpre0` relay-to-exit leg before Exit Commit retry and Destroy. Retained exact-main
 run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` separately proves one simultaneous
-Relay endpoint pair, before forwarding was implemented. Current non-retained branch smoke [run
+Relay endpoint pair, before forwarding was implemented. Non-retained branch smoke [run
 33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
 `8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves bounded `::1` to `::4` traffic through both live
 WireGuard legs, growth of all four peer counter views and both nftables forwarding counters, Commit
-retry, teardown and unchanged host state. It retains no artifact and proves no trusted
-selection/policy authority, production simultaneous route, transport descriptor, ingress, usable
-VPN/datapath or crash recovery. Its cryptographically bound request/response authority is not an
-independent discovery/connection trust anchor. Keys are never persisted and are destroyed with the
-worker context; the fixed alpha score remains **11/100 (11%)**.
+retry, teardown and unchanged host state, but retains no artifact. Exact-main
+[run 33309109220](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220) at
+`1f3cee798787ed4673a3ba28d88931947800ca22` reproduced that proof and retained the 39,915-byte
+[artifact 9731470248](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220/artifacts/9731470248),
+named `helper-boundary-evidence-1f3cee798787ed4673a3ba28d88931947800ca22` and expiring
+`2026-11-28T11:30:49Z`. Its streamed report is overall `PASS` from the exact clean source SHA on
+Debian 13 amd64 (`x86_64`) with systemd 257, with all 16 checks `PASS` and identical before/after
+host-state SHA-256 `2209ca5e63388fe23b8bf54c072cd2be5aa289e7e68293841150bce93ff59698`. Its scope is explicitly
+`helper_boundary_only=true`, `datapath=false`, `restart_recovery=false`,
+`acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`. It proves no
+trusted selection/policy authority, production simultaneous route, transport descriptor, ingress,
+usable VPN/datapath or crash recovery. Its cryptographically bound request/response authority is not
+an independent discovery/connection trust anchor. Keys are never persisted and are destroyed with
+the worker context; the fixed alpha score remains **11/100 (11%)**.
 
 ## Privileged helper boundary
 
@@ -349,8 +358,10 @@ described above are dormant and report no production-usable candidates. The no-a
 helper can now execute the exact Client/Exit-singleton-or-Relay-pair
 Bind/Prepare/Activate/Probe-Commit/Destroy subset. The retained gate exercises Client and Exit
 sequentially in private namespaces and retained run 33301595311 proves the simultaneous Relay pair
-before forwarding. Non-retained run 33306523739 proves the current exact single-path cross-leg fence,
-traffic, counter evidence, teardown and host-state boundary. The production manager does not call
+before forwarding. Non-retained run 33306523739 first proved the current exact single-path
+cross-leg fence, traffic, counter evidence, teardown and host-state boundary; retained exact-main
+run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced it as artifact 9731470248.
+The production manager does not call
 that helper-backed transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
 cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
 never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
@@ -367,6 +378,6 @@ relay-to-exit leg; both cover
 bounded ICMPv6, recent handshake, strict RX/TX growth, cached Commit retry, normal process-owned
 Destroy and sequential capacity reuse. They have no trusted selection/policy authority, production
 simultaneous route, transport descriptor, ingress, usable VPN/datapath or crash/restart recovery. The
-forwarding proof is non-retained branch smoke, not retained exact-main or acceptance evidence. None
-of these results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
+forwarding proof is retained exact-main helper-boundary evidence, not acceptance evidence. None of
+these results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
