@@ -17,12 +17,17 @@ The v3 route-context lifecycle is:
 2. `ActivateLeaseBatch` presents the exact public key and public UDP endpoint of every peer,
    correlated by opaque helper-issued context and lease handles. Relay rate limits are bounded. A
    tag-8 byte string additionally preserves one signed relay reservation per lease. Empty remains
-   wire-compatible for generic decoding, but the production functional Client backend requires a
-   non-empty value and verifies the exact canonical relay envelope plus its nested exit envelope,
-   both Ed25519 signatures, expiry, replay, signer-to-libp2p-Peer-ID bindings, route context, path,
-   helper-generated client WireGuard key and helper hard expiry before worker dispatch. The copied
-   peer tuple must equal the signed relay-client endpoint, and only that verified endpoint is used
-   to build privileged state. The bytes and complete frame remain bounded by the 128 KiB ceiling.
+   wire-compatible for generic decoding, but the production functional Client-or-Exit singleton
+   backend requires a non-empty value and verifies the exact canonical relay envelope plus its
+   nested exit envelope, both Ed25519 signatures, expiry, replay, signer-to-libp2p-Peer-ID bindings,
+   route context, path and helper hard expiry before worker dispatch. For a Client lease, the
+   helper-generated local key must equal the signed client WireGuard key and the copied peer tuple
+   must equal the relay-signed `relay_client_wireguard_endpoint`. For an Exit lease, the complete
+   helper-prepared local tuple (key, `DirectAssigned` public underlay IP and kernel-selected listen
+   port) must equal `exit_wireguard_endpoint`, whose outer relay-signed copy must equal the nested
+   exit-signed value; the copied peer tuple must equal the relay-signed
+   `relay_exit_wireguard_endpoint`. Only that role-specific verified endpoint is projected into
+   privileged state. The bytes and complete frame remain bounded by the 128 KiB ceiling.
 3. `CommitLeaseBatch` presents the same opaque handles and identities. Success is permitted only
    after a correlated kernel probe proves a recent handshake and strict growth of both RX and TX
    counters relative to the activation baseline.
@@ -86,7 +91,9 @@ ownership alias, generates and retains the ephemeral X25519 private key in worke
 containers that zeroize on drop, and returns only the public key and port from the correlated
 kernel proof. Activate verifies the exact canonical relay reservation and its nested exit grant,
 binds their identities and route data to the helper-owned prepared lease, and configures only the
-signed relay-client endpoint. Failed Prepare deletes the
+role-specific signed relay-client or relay-exit endpoint. For Exit, the local public key,
+`DirectAssigned` underlay IP and listen port are also matched exactly to the dual-signed exit
+endpoint. Failed Prepare deletes the
 exact resource and returns a normal kernel failure only after proving absence; otherwise it retains
 the resource/key state and returns `CleanupIncomplete` for a later exact Destroy. Destroy without
 an adopted lease returns `NotFound`, never false kernel-absence evidence. Successful internal
@@ -110,8 +117,9 @@ The underlay parser independently accepts only the exact helper grammar and inte
 rejecting malformed, legacy, or mismatched helper aliases. The marker is evidence, not current
 journal-phase or cleanup authority. The child transaction is not connected to the production
 durable-journal path; transaction-wide crash/restart rollback is still absent. The production
-server now selects a crate-private functional-alpha backend for exactly one Client context with
-exactly one `WireguardRole::Client` lease. It obtains a consistent read-only direct-underlay
+server now selects a crate-private functional-alpha backend for exactly one live Client-or-Exit
+context with exactly one matching `WireguardRole::Client` or `WireguardRole::Exit` lease. It
+obtains a consistent read-only direct-underlay
 snapshot before mutation, opens a process-owned worker coordinator, initializes the authenticated
 child, exclusively creates the helper-derived WireGuard birth link at one deterministic high
 ifindex in the parent, proves its provisional DOWN name/kind identity, sets the exact ownership
@@ -123,9 +131,11 @@ child's correlated kernel proof supplies the
 public key and UDP port; the response combines that proof with the selected direct-underlay IP.
 Activate first performs the signed-grant checks above with one bounded process-lifetime replay
 cache. Pure local binding failures roll back both admitted nonces; admission is committed before
-worker dispatch and is never rolled back after mutation may have begun. The child then installs and
-reads back exactly the signed relay-client peer plus the helper-derived main-table IPv6 `/128` link
-route and retains that readback as the activation counter baseline. `CommitLeaseBatch` projects the
+worker dispatch and is never rolled back after mutation may have begun. Client activation installs
+and reads back exactly the signed relay-client peer; Exit activation first requires its complete
+prepared local tuple to equal the dual-signed exit tuple and then installs and reads back exactly
+the relay-signed relay-exit peer. Both roles use only the helper-derived main-table IPv6 `/128`
+link route and retain that readback as the activation counter baseline. `CommitLeaseBatch` projects the
 engine's exact activated-at time into one internal `ProbeCommitLeases` request. The child re-proves
 the exact lease and peer, requires a handshake no older than activation, requires both RX and TX to
 have grown strictly beyond that baseline, and advances its lease to Committed. The backend and
@@ -538,8 +548,9 @@ PID.
 ### Authenticated worker-v3 lifecycle foundation
 
 The separate fixed `--internal-worker-v3` child entry has a tested parent launcher. The production
-server's narrow functional-alpha backend now uses that launcher for one Client lease; the public
-`HelperEngine::new` constructor still returns `Unavailable` before spawn or network work. The
+server's narrow functional-alpha backend now uses that launcher for one Client-or-Exit singleton
+lease; the public `HelperEngine::new` constructor still returns `Unavailable` before spawn or
+network work. The
 launcher reopens the exact running Linux image through `/proc/self/exe`, creates a
 private credential-enabled Unix seqpacket socketpair and generates a 256-bit OS-CSPRNG challenge. It
 maps only the child endpoint to stdin, clears the environment, selects `/` as the working directory
@@ -564,8 +575,8 @@ constructs an armed retirement owner with its permit and empty child slot. The s
 that slot and moves a successfully returned `Child` into it before returning, so no allocation,
 deadline check or other fallible post-spawn step can observe an unowned child. Late setup or
 handshake failure therefore retires that exact child boundedly or transfers the same owner to the
-escalation reaper. Production reuses this bound only for its single functional-alpha Client lease;
-it is not route setup, a datapath, crash recovery, or acceptance evidence.
+escalation reaper. Production reuses this bound only for its single functional-alpha Client-or-Exit
+lease; it is not route setup, a datapath, crash recovery, or acceptance evidence.
 
 After exec, the child closes raw descriptor 3 if present, atomically duplicates stdin with
 `fcntl_dupfd_cloexec` using minimum 3, requires the returned descriptor to be exactly 3 and closes
@@ -681,8 +692,10 @@ access through the root:`volparossa` runtime-directory mode. The functional-alph
 the launcher. The committed disposable driver now exercises the account transition, pre-filter task
 state, path access denials and parent-signal denial first through its diagnostic selector and then
 observes the functional worker created by the no-argument production server. This remains an
-implemented gate rather than earned acceptance evidence until the exact merged `main` revision
-produces a retained, host-revalidated PASS; it is not installed-package or restart evidence.
+implemented helper-boundary gate. Its Client-only predecessor produced a retained,
+host-revalidated exact-main PASS in run 33294974441 at
+`77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`; the Exit expansion remains branch-only. Neither result
+is installed-package, restart, datapath or acceptance evidence.
 
 The helper unit deliberately sets `RestrictSUIDSGID=no`, unlike the agent and native MPQUIC units,
 which retain `yes`. In systemd v257.13 that setting installs a separate seccomp filter which returns
@@ -838,52 +851,64 @@ primary GID to equal the unit's exact `MainPID` and staged agent GID, while the 
 socket inode.
 
 The hook then creates one fixed dummy underlay only inside that production unit's
-`PrivateNetwork` namespace. The staged-agent probe registers an exact tag-35 intent, prepares one
-Client-role lease, sends an exact cached Activate retry, closes its first stream and publishes a
-fixed READY record. While it waits on a root-owned FIFO, the hook requires one direct child of the
-unchanged helper `MainPID`, stable process starttime and dedicated UID/GID, a network namespace
-distinct from the helper, and exactly one live WireGuard interface beside loopback. That interface
-must be UP, carry the exact ownership-marker prefix and one global `/128`, expose a non-zero public
-key/listen port, contain exactly the signed relay-client peer and helper-derived `/128` route, and
-have no firewall mark. The probe validates the exact correlated response and `DirectAssigned`
+`PrivateNetwork` namespace. The staged-agent probe first registers an exact tag-35 Client intent,
+prepares one Client-role lease, sends an exact cached Activate retry, closes its first stream and
+publishes the Client READY record. While it waits on a root-owned FIFO, the hook requires one direct
+child of the unchanged helper `MainPID`, stable process starttime and dedicated UID/GID, a network
+namespace distinct from the helper, and exactly one live WireGuard interface beside loopback. That
+interface must be UP, carry the exact ownership-marker prefix and one global `/128`, expose a non-zero
+public key/listen port, contain exactly the signed relay-client peer and helper-derived `/128` route,
+and have no firewall mark. The probe validates the exact correlated response and `DirectAssigned`
 fixture endpoint without printing handles, keys, ports or runtime IDs; the external hook deliberately
 does not claim an independent byte-for-byte join to those response values.
 
-The expanded branch fixture then creates one temporary relay-side WireGuard peer on fixed test-only
-UDP port 10000 in that same transient `PrivateNetwork`, with the opposite helper-derived IPv6 `/128`
-and no default route. One bounded ICMPv6 echo crosses the one client-to-relay WireGuard leg. The hook
-requires the reply, a non-zero handshake and strict RX/TX growth on both peer views; the later helper
-Commit independently requires its handshake to be no older than activation and its worker-side RX
-and TX counters to have grown beyond the retained activation baseline. Before releasing the probe,
-the hook removes the temporary relay interface and its route, proves their exact absence, and proves
-that the worker-side activated object and grown counters remain unchanged.
+The Client fixture creates one temporary relay-side WireGuard peer on fixed test-only UDP port 10000
+in that same transient `PrivateNetwork`, with the opposite helper-derived IPv6 `/128` and no default
+route. One bounded ICMPv6 echo crosses the client-to-relay WireGuard leg. The hook requires the reply,
+a non-zero handshake and strict RX/TX growth on both peer views; the later helper Commit independently
+requires its handshake to be no older than activation and its worker-side RX and TX counters to have
+grown beyond the retained activation baseline. Before releasing the probe, the hook removes the
+temporary relay interface and its route, proves their exact absence, and proves that the worker-side
+activated object and grown counters remain unchanged. One fixed release byte then permits exact
+Commit plus a byte-identical cached retry, exact Destroy and its idempotent `existed=false` retry.
 
-One fixed release byte lets the probe reconnect and send the exact same `CommitLeaseBatch` request
-twice. It requires one exactly correlated committed receipt and byte-identical cached retry, then
-performs exact Destroy followed by the idempotent `existed=false` retry. A second distinct context
-still performs only Prepare/Activate/Destroy under the same helper runtime; distinct context and
-lease handles plus a distinct public key prove capacity reuse. After both cycles, the hook requires
-zero helper children, no WireGuard object in its retained first-worker namespace pin, no helper FD
-retaining that namespace or any foreign worker network namespace, an empty descriptor store and the
-fixed exact-one-loopback/no-default-route cleanup predicate after the dummy underlay is removed.
-Only after all probe output and the unchanged manager launch tuple, bound helper image metadata,
-process starttime, `MainPID` and `InvocationID` have been checked does the hook publish twelve
-distinct fixed proof records: the seven read-only/negative IPC records followed by READY,
-activated-kernel PASS, committed-kernel PASS, functional PASS and external-cleanup PASS. PID 1 bounds the
-second unit to three minutes even if the runner disappears, and each transient unit independently
-receives a 1 MiB hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are attested as `null`, so structured
-helper rejection logs cannot grow host files. The start hook proves that the same captured lock inode
-is exclusively contended while the exact helper process runs. Normal `SIGTERM` must produce exit
-status zero, remove the socket, preserve the initially absent-or-exact ownership journal, prove that
-inode is then unlocked, keep the descriptor store empty, and leave no old process or cgroup.
-Host `/run/volparossa` must be absent at both host-state fences; the private runtime bind never
-targets the host path.
+The expanded branch then starts a fresh singleton Exit context in a different direct child PID and
+different child network namespace. It prepares and activates one Exit-role lease, binding the
+helper-proven local key, `DirectAssigned` public underlay and listen port to the dual-signed exit
+tuple and installing only the relay-signed relay-exit peer. At the separate Exit READY barrier, the
+hook pins and checks that new process and namespace, the Exit local/peer overlay roles (`::4`/`::3`),
+and the exact peer/route readback. A distinct temporary `vpre0` WireGuard fixture uses a second
+deterministic test-only key and UDP port 10001. One bounded ICMPv6 echo from relay-exit `::3` to Exit
+`::4` proves a real, separate relay-to-exit WireGuard leg with a recent handshake and strict RX/TX
+growth at both peer views. The hook deletes `vpre0` by its retained alias, ifindex and WireGuard-kind
+lineage, proves its route and link absent while the worker state remains unchanged, and only then
+releases the probe for Exit Commit plus byte-identical retry and exact Destroy.
 
-This expanded one-leg branch slice is not retained exact-main KVM evidence until it is merged and a
-successful exact-main report is retained. Its self-contained fixture signers are not trusted
-selection or policy authority. It provides no relay-to-exit leg, transport descriptor, ingress,
-usable VPN/datapath, crash/restart recovery, A01--A15 acceptance result or alpha-score increase; the
-fixed score remains **11/100 (11%)**.
+After both sequential cycles, the hook requires zero helper children and no helper FD retaining a
+worker namespace or any foreign worker network namespace. Each retired process pin must be terminal
+and each pinned worker namespace must be WireGuard-empty before that cycle's observer closes. The
+descriptor store must be empty, followed by the fixed exact-one-loopback/no-default-route cleanup
+predicate after the dummy underlay is removed. Only after all probe output and the unchanged manager
+launch tuple, bound helper image metadata, process starttime, `MainPID` and `InvocationID` have been
+checked does the hook publish its fixed ordered proof records. PID 1 bounds the second unit to three
+minutes even if the runner disappears, and each transient unit independently receives a 1 MiB
+hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are attested as `null`, so structured helper
+rejection logs cannot grow host files. The start hook proves that the same captured lock inode is
+exclusively contended while the exact helper process runs. Normal `SIGTERM` must produce exit status
+zero, remove the socket, preserve the initially absent-or-exact ownership journal, prove that inode
+is then unlocked, keep the descriptor store empty, and leave no old process or cgroup. Host
+`/run/volparossa` must be absent at both host-state fences; the private runtime bind never targets the
+host path.
+
+The Client-only predecessor has retained, host-revalidated exact-main evidence from
+[run 33294974441](https://github.com/VOLPAROSSA/volparossa/actions/runs/33294974441) at
+`77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`, artifact
+[9727163813](https://github.com/VOLPAROSSA/volparossa/actions/runs/33294974441/artifacts/9727163813).
+The added Exit cycle remains non-retained branch evidence until it is merged and its own exact-main
+report is retained. Both use self-contained fixture signers, not trusted selection or policy
+authority. The sequential legs do not prove a simultaneous two-leg route, a Relay context or
+forwarding, transport descriptor, ingress, usable VPN/datapath, crash/restart recovery, A01--A15
+acceptance result or alpha-score increase; the fixed score remains **11/100 (11%)**.
 
 The first transient proof unit intentionally differs from the shipped production unit in every
 following respect:
@@ -959,7 +984,8 @@ EXIT cleanup emits exactly one of eight value-free monotonic driver phases only 
 before normal final reporting; it never changes the original or cleanup-derived exit status. A
 non-retained runner exposes that single phase only beside `unclassified`, rejecting missing,
 duplicate, malformed, mixed, private-key-bearing or non-allowlisted records. This failed run is not
-PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains Open. Follow-up branch
+PASS evidence; at that revision the fixed alpha score remained **11/100** and AV1-09 remained Open.
+Follow-up branch
 [run 33275945986](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986) at
 `38ee44a81991f660168a76342584416d04a6ef5d` ran the disposable VM in
 [job 99162565524](https://github.com/VOLPAROSSA/volparossa/actions/runs/33275945986/job/99162565524)
@@ -974,8 +1000,8 @@ including the background probe handoff, so redirection errors return through the
 path. The gate accepts one exact canonical record only when the first recorded predicate is
 `production-launch-status`; the non-retained runner exposes that fixed stage only paired with the
 same exact category and rejects missing, duplicate, invalid, mixed and privacy-unsafe input. This
-failed run remains non-PASS evidence; the fixed alpha score remains **11/100** and AV1-09 remains
-Open. Exact branch
+failed run remains non-PASS evidence; at that revision the fixed alpha score remained **11/100** and
+AV1-09 remained Open. Exact branch
 [run 33278664815](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815) at
 `b050fe576ebd2e77cc4d3c871dad22f9d91e267b` ran the disposable VM in
 [job 99169908991](https://github.com/VOLPAROSSA/volparossa/actions/runs/33278664815/job/99169908991)
@@ -1015,13 +1041,12 @@ before and after the namespace readback. After Destroy, FD 8 must expose no proc
 helper must retain no pidfd, proc-directory or foreign-netns worker custody, and FD 7 must show no
 WireGuard object before both observer pins close. The root-owned setgid mode-2700 proof directory
 keeps hook-created artifacts root:root mode 0600 despite the agent GID. This failed run and the
-correction are not PASS evidence; a
-fresh exact-main KVM remains required and the alpha score remains **11/100**. The second phase
-exercises the production server entry point, but not an installed package,
-the shipped unit
-file, restart policy, or inherited-descriptor adoption/recovery. Until a successful exact-main run
-is durably tied to the same clean commit and retained, the gate is not earned package, datapath, A14
-or A15 evidence.
+correction were not PASS evidence. The subsequent Client-only exact-main run 33294974441 at
+`77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` succeeded and retained artifact 9727163813; the later
+Exit expansion still requires its own post-merge retained run. The alpha score remains **11/100**.
+The second phase exercises the production server entry point, but not an installed package, the
+shipped unit file, restart policy, or inherited-descriptor adoption/recovery. The retained Client
+result is not package, datapath, A14 or A15 evidence.
 
 Before the blocking start call, the driver atomically supplies a `Description` containing a
 SHA-256 ownership marker derived from the validated random unit name and temporary-stage inode
@@ -1040,11 +1065,13 @@ The child opens its worker-local netlink sockets, activates loopback, and implem
 single-lease WireGuard `Prepare`, signed-grant-bound `Activate`, correlated `ProbeCommitLeases`, and
 `Destroy`. The no-argument
 production server dispatches it through the crate-private functional-alpha backend: for at most one
-live Client context at a time, containing exactly one Client-role lease, the parent exclusively
-creates and provisionally proves the helper-derived birth link at a deterministic retained ifindex,
-sets and re-proves its exact durable alias, and moves it without renumbering into the pinned child
-`NEWNET` before Prepare. Activate installs exactly one verified relay-client peer and its
-helper-derived `/128` link route and retains the activation counters. Commit now requires a recent
+live Client-or-Exit context at a time, containing exactly one matching role lease, the parent
+exclusively creates and provisionally proves the helper-derived birth link at a deterministic
+retained ifindex, sets and re-proves its exact durable alias, and moves it without renumbering into
+the pinned child `NEWNET` before Prepare. Client activation installs only the verified relay-client
+peer. Exit activation additionally matches its helper-prepared key, public underlay and listen port
+to the dual-signed exit endpoint and installs only the verified relay-exit peer. Both roles install
+their helper-derived `/128` link route and retain the activation counters. Commit requires a recent
 handshake plus strict RX/TX growth for that exact peer before both child and engine enter Committed.
 Nftables, sysctl, socket-factory operations and every usable datapath remain rejected. The public `HelperEngine::new`
 constructor remains unavailable and does not select this backend.
@@ -1206,7 +1233,8 @@ registry mutation, no-runtime polling before admission or PLAN, mutex-poison own
 around PLAN, generation ABA, late/dead commit rejection, descriptor closure, tombstone bounds and
 registry-lock availability.
 
-The production server's functional-alpha backend now calls this worker path for one Client lease;
+The production server's functional-alpha backend now calls this worker path for one Client-or-Exit
+singleton lease;
 no production route manager calls it. The production engine supervises cancellation-safe
 PLAN -> CALL -> COMMIT/rollback transactions: it
 reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
@@ -1336,10 +1364,10 @@ two settlement proofs remain required before those phases can progress.
 
 Full durable production wiring remains a separate audited change with these explicit blockers:
 
-- The functional-alpha adapter maps `BackendLineage`/`OperationBinding` to one process-owned Client
-  worker generation and carries the engine deadline into the worker call. A separate non-cloneable
-  live owner distinguishes same-runtime create/delete authority from its public WireGuard marker
-  metadata. It does not bind that
+- The functional-alpha adapter maps `BackendLineage`/`OperationBinding` to one process-owned
+  Client-or-Exit singleton worker generation and carries the engine deadline into the worker call. A
+  separate non-cloneable live owner distinguishes same-runtime create/delete authority from its
+  public WireGuard marker metadata. It does not bind that
   lineage to a durable ownership key or carry an owner from journal Intent through authenticated
   anchor, durable MayOwn, child dispatch and exact settlement. It does not obtain a phase-authorized
   per-link resource after durable `MayOwnPrepare`; its typed resource deliberately proves neither
@@ -1401,9 +1429,10 @@ the request-path issuance/arming writer, restart reaper, trusted worker/kernel-c
 exact manager-absence composition, and cross-runtime proof needed to settle that case do not.
 
 This same-runtime reconciliation path remains containment rather than crash recovery. The
-functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one Client
-lease, but no production route-manager caller drives it and there is no transport descriptor,
-second relay-to-exit leg, ingress or usable VPN datapath.
+functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one
+Client-or-Exit singleton lease, but no production route-manager caller drives it and there is no
+transport descriptor, simultaneous two-leg route, Relay forwarding, ingress or usable VPN
+datapath.
 
 ## Namespace-local transport descriptor
 
@@ -1524,28 +1553,22 @@ No development-host network configuration is mutated or authorized for this slic
 its fixed dummy underlay and ephemeral WireGuard leases to a transient `PrivateNetwork` and child
 network namespaces inside the disposable VM. Before `Prepare`, `Activate`, `Commit`, transport
 acquisition, client ingress, or datapath operation can be called complete, all of the following
-remain:
+remain. The Client-only predecessor's dedicated worker transition, Client lifecycle and equal
+enumerated host-state fences do have retained exact-main evidence from run 33294974441 at
+`77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`; that scoped result is not staged-package, Exit,
+simultaneous-route, restart or acceptance evidence.
 
-- obtain one retained exact-main PASS from the committed disposable Debian 13 driver for the complete
-  dedicated `volparossa-worker` UID/GID transition, exact post-drop credentials/groups/capabilities,
-  parent-signal denial, runtime token/socket path denial, pre-filter single-task state, namespace-pin
-  lifetime and equal enumerated host-state fences; a non-retained branch smoke, portable tests and
-  package inspection do not substitute for this gate;
 - validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
   the final worker must retain only `CAP_NET_ADMIN`;
-- obtain one retained exact-main PASS for the already wired functional-alpha proof: read-only direct
-  underlay selection, independently observed sandbox identity, parent birth-link creation and move,
-  child WireGuard Prepare, cryptographically bound Activate, exact peer/route readback, cached exact
-  Activate retry, temporary relay-side WireGuard fixture, bounded ICMPv6, recent-handshake and strict
-  bidirectional counter proof, exact fixture removal, correlated Commit with a byte-identical cached
-  retry, exact/idempotent Destroy, worker reap/purge, second-cycle capacity reuse and equal
-  enumerated host-state fences; a non-retained
-  branch smoke does not close this evidence gate, and the one-Client/one-lease capacity must then be
-  extended without weakening atomic rollback;
-- extend the asynchronous `HelperEngine` backend beyond the current single-Client
+- merge the Exit expansion and obtain its retained exact-main PASS for the second fresh worker and
+  namespace, dual-signed local tuple, relay-signed relay-exit peer, separate `vpre0` relay-to-exit
+  WireGuard leg, bounded ICMPv6, recent-handshake and strict bidirectional counter proof, exact
+  fixture removal, correlated Commit with byte-identical retry, exact Destroy and complete custody
+  cleanup. Its current non-retained branch smoke does not close this evidence gate;
+- extend the asynchronous `HelperEngine` backend beyond the current Client-or-Exit singleton
   Prepare/Activate/Probe-Commit/Destroy path: descriptor acquisition, cached-descriptor cleanup and
   complete shutdown need the same plan/call/commit discipline and exact
   context/generation/phase/handle revalidation;
@@ -1555,11 +1578,13 @@ remain:
 - extend the bounded `DirectAssigned` parent snapshot from the current one direct underlay to the
   exact multi-path evidence required by complete route setup, retaining rejection of multipath,
   duplicate, truncated or ambiguous dumps;
-- extend the one-lease activation and cleanup path to every role/path while preserving the exact
-  no-peer/key, link-UP, port-zero `SET`, and correlated public-key/port `GET` ordering;
+- extend the singleton activation and cleanup path to RelayClient/RelayExit roles and every selected
+  path while preserving the exact no-peer/key, link-UP, port-zero `SET`, and correlated
+  public-key/port `GET` ordering;
 - derive and apply the exact overlay, peer, route, relay-fence, and interception state in activation;
-- extend the single client-to-relay activation baseline and correlated handshake/RX/TX Commit proof
-  to the second relay-to-exit leg and every selected path;
+- join the separately proven Client and Exit singleton baselines into one simultaneous
+  client-to-relay-to-exit route with the Relay context, forwarding fence and correlated
+  handshake/RX/TX Commit proof for every selected path;
 - connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact
   old-worker death, and a real namespace/kernel cleanup backend can prove the transition to
   `CleanupConfirmed`; then authority-order the dormant exact-name manager removal and its stable
