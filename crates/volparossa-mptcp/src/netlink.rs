@@ -49,7 +49,18 @@ struct NetlinkReply {
 pub struct MptcpNetlinkClient {
     socket: Socket,
     family_id: u16,
+    local_port_id: u32,
     sequence: u32,
+}
+
+fn bound_unicast_port_id(address: SocketAddr) -> Result<u32, MptcpError> {
+    let port_id = address.port_number();
+    if port_id == 0 || address.multicast_groups() != 0 {
+        return Err(MptcpError::Netlink(
+            "generic-netlink socket did not bind one unicast port id".into(),
+        ));
+    }
+    Ok(port_id)
 }
 
 impl MptcpNetlinkClient {
@@ -61,11 +72,12 @@ impl MptcpNetlinkClient {
     /// invalid family response.
     pub fn connect() -> Result<Self, MptcpError> {
         let mut socket = Socket::new(NETLINK_GENERIC)?;
-        socket.bind_auto()?;
+        let local_port_id = bound_unicast_port_id(socket.bind_auto()?)?;
         socket.connect(&SocketAddr::new(0, 0))?;
         let mut client = Self {
             socket,
             family_id: 0,
+            local_port_id,
             sequence: 1,
         };
         client.family_id = client.resolve_family("mptcp_pm")?;
@@ -140,7 +152,7 @@ impl MptcpNetlinkClient {
         )?;
         self.send_all(&message)?;
         let response = self.receive_bounded()?;
-        parse_family_id(&response, sequence)
+        parse_family_id(&response, sequence, self.local_port_id)
     }
 
     fn request_ack(&mut self, command: u8, payload: &[u8]) -> Result<(), MptcpError> {
@@ -155,7 +167,7 @@ impl MptcpNetlinkClient {
         )?;
         self.send_all(&message)?;
         let response = self.receive_bounded()?;
-        parse_ack(&response, sequence, self.family_id)
+        parse_ack(&response, sequence, self.family_id, self.local_port_id)
     }
 
     fn next_sequence(&mut self) -> u32 {
@@ -271,7 +283,11 @@ fn push_attr_unchecked(buffer: &mut Vec<u8>, kind: u16, payload: &[u8]) {
     push_attr(buffer, kind, payload).expect("fixed-size MPTCP endpoint attribute");
 }
 
-fn parse_family_id(reply: &NetlinkReply, expected_sequence: u32) -> Result<u16, MptcpError> {
+fn parse_family_id(
+    reply: &NetlinkReply,
+    expected_sequence: u32,
+    local_port_id: u32,
+) -> Result<u16, MptcpError> {
     validate_kernel_sender(&reply.sender)?;
     let frames = netlink_frames(&reply.message)?;
     if frames.len() != 1 {
@@ -281,11 +297,13 @@ fn parse_family_id(reply: &NetlinkReply, expected_sequence: u32) -> Result<u16, 
     }
     let frame = frames[0];
     if read_u16(frame, 4)? == NLMSG_ERROR {
-        return parse_ack(reply, expected_sequence, GENL_ID_CTRL).and(Err(MptcpError::Netlink(
-            "family lookup returned an acknowledgement without a family".into(),
-        )));
+        return parse_ack(reply, expected_sequence, GENL_ID_CTRL, local_port_id).and(Err(
+            MptcpError::Netlink(
+                "family lookup returned an acknowledgement without a family".into(),
+            ),
+        ));
     }
-    validate_kernel_header(frame, expected_sequence, GENL_ID_CTRL)?;
+    validate_kernel_header(frame, expected_sequence, GENL_ID_CTRL, local_port_id)?;
     if frame.len() < NLMSG_HEADER_LEN + GENL_HEADER_LEN
         || frame[NLMSG_HEADER_LEN] != CTRL_CMD_NEWFAMILY
         || frame[NLMSG_HEADER_LEN + 1] != CTRL_VERSION
@@ -308,6 +326,7 @@ fn parse_ack(
     reply: &NetlinkReply,
     expected_sequence: u32,
     expected_family: u16,
+    local_port_id: u32,
 ) -> Result<(), MptcpError> {
     validate_kernel_sender(&reply.sender)?;
     let frames = netlink_frames(&reply.message)?;
@@ -317,7 +336,7 @@ fn parse_ack(
         ));
     }
     let frame = frames[0];
-    validate_kernel_header(frame, expected_sequence, NLMSG_ERROR)?;
+    validate_kernel_header(frame, expected_sequence, NLMSG_ERROR, local_port_id)?;
     let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
     if frame.len() < embedded_offset + NLMSG_HEADER_LEN
         || read_u32(frame, embedded_offset)? < u32::try_from(NLMSG_HEADER_LEN).expect("constant")
@@ -356,10 +375,12 @@ fn validate_kernel_header(
     frame: &[u8],
     expected_sequence: u32,
     expected_type: u16,
+    local_port_id: u32,
 ) -> Result<(), MptcpError> {
-    if read_u16(frame, 4)? != expected_type
+    if local_port_id == 0
+        || read_u16(frame, 4)? != expected_type
         || read_u32(frame, 8)? != expected_sequence
-        || read_u32(frame, 12)? != 0
+        || read_u32(frame, 12)? != local_port_id
     {
         return Err(MptcpError::Netlink(
             "netlink response header is not correlated to the request".into(),
@@ -439,6 +460,7 @@ mod tests {
 
     const TEST_SEQUENCE: u32 = 7;
     const TEST_FAMILY: u16 = 0x42;
+    const TEST_PORT_ID: u32 = 4_242;
 
     fn acknowledgement(errno: i32) -> NetlinkReply {
         let mut message = vec![0_u8; NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN + NLMSG_HEADER_LEN];
@@ -446,6 +468,7 @@ mod tests {
         message[0..4].copy_from_slice(&length.to_ne_bytes());
         message[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
         message[8..12].copy_from_slice(&TEST_SEQUENCE.to_ne_bytes());
+        message[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
         message[16..20].copy_from_slice(&errno.to_ne_bytes());
         let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
         let request_length =
@@ -468,16 +491,18 @@ mod tests {
         let mut attrs = Vec::new();
         push_attr(&mut attrs, CTRL_ATTR_FAMILY_ID, &TEST_FAMILY.to_ne_bytes())
             .expect("family id attribute");
+        let mut message = build_message(
+            GENL_ID_CTRL,
+            0,
+            TEST_SEQUENCE,
+            CTRL_CMD_NEWFAMILY,
+            CTRL_VERSION,
+            &attrs,
+        )
+        .expect("family response");
+        message[12..16].copy_from_slice(&TEST_PORT_ID.to_ne_bytes());
         NetlinkReply {
-            message: build_message(
-                GENL_ID_CTRL,
-                0,
-                TEST_SEQUENCE,
-                CTRL_CMD_NEWFAMILY,
-                CTRL_VERSION,
-                &attrs,
-            )
-            .expect("family response"),
+            message,
             sender: SocketAddr::new(0, 0),
         }
     }
@@ -527,9 +552,22 @@ mod tests {
 
     #[test]
     fn zero_and_negative_ack_are_distinguished() {
-        assert!(parse_ack(&acknowledgement(0), TEST_SEQUENCE, TEST_FAMILY).is_ok());
-        let failure = parse_ack(&acknowledgement(-libc::EPERM), TEST_SEQUENCE, TEST_FAMILY)
-            .expect_err("negative acknowledgement");
+        assert!(
+            parse_ack(
+                &acknowledgement(0),
+                TEST_SEQUENCE,
+                TEST_FAMILY,
+                TEST_PORT_ID
+            )
+            .is_ok()
+        );
+        let failure = parse_ack(
+            &acknowledgement(-libc::EPERM),
+            TEST_SEQUENCE,
+            TEST_FAMILY,
+            TEST_PORT_ID,
+        )
+        .expect_err("negative acknowledgement");
         assert!(matches!(
             failure,
             MptcpError::Io(error) if error.raw_os_error() == Some(libc::EPERM)
@@ -540,68 +578,96 @@ mod tests {
     fn acknowledgement_is_bound_to_sequence_family_type_and_kernel_sender() {
         let mut wrong = acknowledgement(0);
         wrong.message[4..6].copy_from_slice(&TEST_FAMILY.to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.message[8..12].copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
 
-        wrong = acknowledgement(0);
-        wrong.message[12..16].copy_from_slice(&1_u32.to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        for wrong_port_id in [0, 1, TEST_PORT_ID + 1] {
+            wrong = acknowledgement(0);
+            wrong.message[12..16].copy_from_slice(&wrong_port_id.to_ne_bytes());
+            assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
+        }
+        assert!(parse_ack(&acknowledgement(0), TEST_SEQUENCE, TEST_FAMILY, 0).is_err());
 
         wrong = acknowledgement(0);
         let embedded_offset = NLMSG_HEADER_LEN + NLMSG_ERROR_CODE_LEN;
         wrong.message[embedded_offset + 4..embedded_offset + 6]
             .copy_from_slice(&(TEST_FAMILY + 1).to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.message[embedded_offset + 8..embedded_offset + 12]
             .copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.message[embedded_offset + 12..embedded_offset + 16]
             .copy_from_slice(&1_u32.to_ne_bytes());
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.sender = SocketAddr::new(99, 0);
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         wrong.sender = SocketAddr::new(0, 1);
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
 
         wrong = acknowledgement(0);
         let second = wrong.message.clone();
         wrong.message.extend_from_slice(&second);
-        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY).is_err());
+        assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_FAMILY, TEST_PORT_ID).is_err());
     }
 
     #[test]
     fn family_lookup_is_bound_to_ctrl_sequence_type_and_kernel_sender() {
         assert_eq!(
-            parse_family_id(&family_reply(), TEST_SEQUENCE).expect("family"),
+            parse_family_id(&family_reply(), TEST_SEQUENCE, TEST_PORT_ID).expect("family"),
             TEST_FAMILY
         );
 
         let mut wrong = family_reply();
         wrong.message[8..12].copy_from_slice(&(TEST_SEQUENCE + 1).to_ne_bytes());
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
+
+        for wrong_port_id in [0, 1, TEST_PORT_ID + 1] {
+            wrong = family_reply();
+            wrong.message[12..16].copy_from_slice(&wrong_port_id.to_ne_bytes());
+            assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
+        }
+        assert!(parse_family_id(&family_reply(), TEST_SEQUENCE, 0).is_err());
 
         wrong = family_reply();
         wrong.message[4..6].copy_from_slice(&TEST_FAMILY.to_ne_bytes());
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
 
         wrong = family_reply();
         wrong.message[16] = CTRL_CMD_GETFAMILY;
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
 
         wrong = family_reply();
         wrong.sender = SocketAddr::new(1, 0);
-        assert!(parse_family_id(&wrong, TEST_SEQUENCE).is_err());
+        assert!(parse_family_id(&wrong, TEST_SEQUENCE, TEST_PORT_ID).is_err());
+    }
+
+    #[test]
+    fn bound_address_requires_one_nonzero_unicast_port_id() {
+        assert_eq!(
+            bound_unicast_port_id(SocketAddr::new(TEST_PORT_ID, 0)).expect("unicast port"),
+            TEST_PORT_ID
+        );
+        for address in [
+            SocketAddr::new(0, 0),
+            SocketAddr::new(TEST_PORT_ID, 1),
+            SocketAddr::new(0, 1),
+        ] {
+            assert!(matches!(
+                bound_unicast_port_id(address),
+                Err(MptcpError::Netlink(_))
+            ));
+        }
     }
 
     #[test]
