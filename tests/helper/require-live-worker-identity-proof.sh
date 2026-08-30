@@ -395,6 +395,12 @@ production_start_failure_stage_is_safe() {
         protocol-root-peer|\
         protocol-bind-after|\
         functional-underlay|\
+        functional-underlay-parent-contract|\
+        functional-underlay-pristine-namespace|\
+        functional-underlay-pristine-link|\
+        functional-underlay-pristine-ipv-four|\
+        functional-underlay-pristine-ipv-six|\
+        functional-underlay-absent|\
         functional-underlay-link|\
         functional-underlay-address|\
         functional-underlay-route|\

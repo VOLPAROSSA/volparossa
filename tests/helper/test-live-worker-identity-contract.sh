@@ -458,6 +458,12 @@ printf '%s\n' \
     protocol-root-peer \
     protocol-bind-after \
     functional-underlay \
+    functional-underlay-parent-contract \
+    functional-underlay-pristine-namespace \
+    functional-underlay-pristine-link \
+    functional-underlay-pristine-ipv-four \
+    functional-underlay-pristine-ipv-six \
+    functional-underlay-absent \
     functional-underlay-link \
     functional-underlay-address \
     functional-underlay-route \
@@ -4519,6 +4525,38 @@ done
 # line. Keep the underlay readback as three checked producer captures followed
 # by separate jq validation, and query the complete main-table default set so
 # the output still carries the device that the proof compares.
+# The preceding pristine-network inventory uses the same producer/consumer
+# boundary: a partial `ip` result must never become trusted through POSIX
+# pipeline status masking.
+# These patterns deliberately name literal hook variables.
+# shellcheck disable=SC2016
+private_network_source_is_exact() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$(grep -Fxc \
+        '    hook_private_links=$(' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fxc \
+        '        /usr/sbin/ip -details -json link show 2>/dev/null' \
+        "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fxc '    ) || return 1' "$1")" -eq 1 ] || return 1
+    [ "$(grep -Fc -- \
+        '--argjson observed "$hook_private_links"' "$1")" -eq 1 ] \
+        || return 1
+}
+private_network_body=$temporary_directory/private-network.body
+private_network_mutant=$temporary_directory/private-network.pipeline-mutant
+sed -n '/^private_network_is_pristine() {$/,/^}$/p' \
+    "$ipc_hook" >"$private_network_body"
+private_network_source_is_exact "$private_network_body" || {
+    printf '%s\n' 'private-network inventory masks producer failure' >&2
+    exit 1
+}
+sed '0,/ip -details -json link show/s/$/ | \/usr\/bin\/jq -e ./' \
+    "$private_network_body" >"$private_network_mutant"
+if private_network_source_is_exact "$private_network_mutant"; then
+    printf '%s\n' 'private-network inventory accepted a producer-pipeline mutant' >&2
+    exit 1
+fi
+
 # These patterns deliberately name literal hook variables.
 # shellcheck disable=SC2016
 functional_underlay_source_is_exact() {

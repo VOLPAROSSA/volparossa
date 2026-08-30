@@ -145,6 +145,12 @@ start_failure_stage_is_safe() {
         protocol-root-peer|\
         protocol-bind-after|\
         functional-underlay|\
+        functional-underlay-parent-contract|\
+        functional-underlay-pristine-namespace|\
+        functional-underlay-pristine-link|\
+        functional-underlay-pristine-ipv-four|\
+        functional-underlay-pristine-ipv-six|\
+        functional-underlay-absent|\
         functional-underlay-link|\
         functional-underlay-address|\
         functional-underlay-route|\
@@ -183,7 +189,13 @@ advance_start_failure_stage() {
         protocol-wrong-gid:protocol-root-peer|\
         protocol-root-peer:protocol-bind-after|\
         protocol-bind-after:functional-underlay|\
-        functional-underlay:functional-underlay-link|\
+        functional-underlay:functional-underlay-parent-contract|\
+        functional-underlay-parent-contract:functional-underlay-pristine-namespace|\
+        functional-underlay-pristine-namespace:functional-underlay-pristine-link|\
+        functional-underlay-pristine-link:functional-underlay-pristine-ipv-four|\
+        functional-underlay-pristine-ipv-four:functional-underlay-pristine-ipv-six|\
+        functional-underlay-pristine-ipv-six:functional-underlay-absent|\
+        functional-underlay-absent:functional-underlay-link|\
         functional-underlay-link:functional-underlay-address|\
         functional-underlay-address:functional-underlay-route|\
         functional-underlay-route:functional-underlay-ifindex|\
@@ -1432,24 +1444,49 @@ worker_wireguard_is_absent() {
 }
 
 private_network_is_pristine() {
+    [ "$#" -le 1 ] || return 1
+    hook_pristine_staged=${1:-no}
+    case $hook_pristine_staged in
+        no) ;;
+        yes)
+            advance_start_failure_stage functional-underlay-pristine-namespace \
+                || return 1
+            ;;
+        *) return 1 ;;
+    esac
     hook_private_namespace=$(stat -Lc '%d:%i' /proc/self/ns/net 2>/dev/null) \
         || return 1
     hook_pid1_namespace=$(stat -Lc '%d:%i' /proc/1/ns/net 2>/dev/null) \
         || return 1
     [ "$hook_private_namespace" != "$hook_pid1_namespace" ] || return 1
-    /usr/sbin/ip -details -json link show 2>/dev/null \
-        | /usr/bin/jq -e '
-              type == "array" and length == 1
-              and .[0].ifname == "lo"
-              and all(.[].linkinfo.info_kind?; . != "wireguard")
-              and all(.[].ifalias?;
-                    (type != "string")
-                    or (startswith("volparossa:wireguard:ownership-v1:") | not))
-            ' >/dev/null 2>&1 \
+    if [ "$hook_pristine_staged" = yes ]; then
+        advance_start_failure_stage functional-underlay-pristine-link \
+            || return 1
+    fi
+    hook_private_links=$(
+        /usr/sbin/ip -details -json link show 2>/dev/null
+    ) || return 1
+    /usr/bin/jq -en --argjson observed "$hook_private_links" '
+          $observed
+          | type == "array" and length == 1
+          and .[0].ifname == "lo"
+          and all(.[].linkinfo.info_kind?; . != "wireguard")
+          and all(.[].ifalias?;
+                (type != "string")
+                or (startswith("volparossa:wireguard:ownership-v1:") | not))
+        ' >/dev/null 2>&1 \
         || return 1
+    if [ "$hook_pristine_staged" = yes ]; then
+        advance_start_failure_stage functional-underlay-pristine-ipv-four \
+            || return 1
+    fi
     hook_private_ipv4_defaults=$(/usr/sbin/ip -json route show default 2>/dev/null) \
         || return 1
     [ "$hook_private_ipv4_defaults" = '[]' ] || return 1
+    if [ "$hook_pristine_staged" = yes ]; then
+        advance_start_failure_stage functional-underlay-pristine-ipv-six \
+            || return 1
+    fi
     hook_private_ipv6_defaults=$(/usr/sbin/ip -6 -json route show default 2>/dev/null) \
         || return 1
     [ "$hook_private_ipv6_defaults" = '[]' ]
@@ -1545,11 +1582,13 @@ run_functional_client_lease_probe() {
         "$hook_functional_worker_gid"; do
         number_is_safe "$hook_functional_number" || return 1
     done
+    advance_start_failure_stage functional-underlay-parent-contract || return 1
     hook_functional_parent_contract=$(sed -n '6p' \
         "$proof_directory/unit.identity") || return 1
     hook_functional_parent_filters=$(process_contract_filter_count \
         "$hook_functional_parent_contract" "$hook_functional_agent_gid") || return 1
-    private_network_is_pristine || return 1
+    private_network_is_pristine yes || return 1
+    advance_start_failure_stage functional-underlay-absent || return 1
     [ ! -e "/sys/class/net/$functional_underlay" ] \
         && [ ! -L "/sys/class/net/$functional_underlay" ] || return 1
 
