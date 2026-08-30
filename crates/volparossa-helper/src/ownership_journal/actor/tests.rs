@@ -19,9 +19,13 @@ use volparossa_routing::{
     WireguardRole as WireRole,
 };
 
+use crate::worker_v3::{
+    exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
+};
+
 use super::super::{
     AbsentOrigin, CleanupTarget, ConfirmedCleanupProof, ConfirmedManagerAbsentProof,
-    JournalSnapshot, ManagerAbsenceTarget, PrepareRecoveryEvidenceV1,
+    JournalSnapshot, ManagerAbsenceTarget, PrepareRecoveryEvidenceV1, RefuseMayOwnRecovery,
 };
 use super::*;
 
@@ -1708,6 +1712,144 @@ fn actor_exposes_only_ordered_distinct_cleanup_and_manager_absence_transitions()
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "both opaque settlement phases and retained-error retries form one actor transaction"
+)]
+fn production_prepare_handle_preserves_affinity_through_both_clean_settlement_phases() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let actor =
+        DurableOwnershipActor::spawn_with_executor_factory(config.clone(), || RefuseMayOwnRecovery)
+            .expect("start production-executor actor");
+    let handle = actor.prepare_handle().expect("production prepare handle");
+    let registration = DurableIntentRegistration::try_from_wire([0x71; 32], &wire_intent(17))
+        .expect("validated wire registration");
+    let key = match handle.register_until(registration, io_deadline()) {
+        DurableRegistrationOutcome::Registered(key) => key,
+        DurableRegistrationOutcome::Retained { error, .. } => {
+            panic!("registration retained unexpectedly: {error}")
+        }
+    };
+    let coordinates = key.coordinates;
+    let anchor = durable_anchor(17);
+    let custody = match handle.mark_custody_until(
+        key,
+        anchor,
+        custody_binding_for_test(anchor).expect("exact custody binding"),
+        io_deadline(),
+    ) {
+        DurableCustodyOutcome::Marked(custody) => custody,
+        DurableCustodyOutcome::Retained { error, .. } => {
+            panic!("custody mark retained unexpectedly: {error}")
+        }
+    };
+    let may_own = match handle
+        .custody_arm_handle()
+        .arm_custody_until(custody, io_deadline())
+    {
+        DurableArmOutcome::Armed(may_own) => may_own,
+        DurableArmOutcome::Retained { error, .. } => {
+            panic!("custody arm retained unexpectedly: {error}")
+        }
+    };
+    assert_eq!(
+        actor
+            .client
+            .as_ref()
+            .expect("actor client")
+            .confirm_cleanup_pending_until(coordinates, io_deadline())
+            .expect("ordinary recovery admission")
+            .wait(),
+        Err(DurableOwnershipError::RecoveryNotConfirmed),
+        "the installed restart executor must remain fail-closed"
+    );
+    let expected_plan = may_own
+        .prepare_leases_v3()
+        .expect("durable worker projection");
+    let (settlement, resources) = may_own.into_dispatch_parts();
+    assert_eq!(
+        settlement.context_id().as_slice(),
+        expected_plan.route_context_id.as_slice()
+    );
+    assert_eq!(resources.len(), expected_plan.leases.len());
+    drop(resources);
+    let proof = exact_same_runtime_cleanup_proof_for_test(settlement);
+    assert_eq!(
+        format!("{proof:?}"),
+        "ExactSameRuntimeCleanupProof(<redacted>)"
+    );
+    let proof = match handle.confirm_cleanup_until(proof, expired_deadline()) {
+        DurableCleanupOutcome::Retained { error, proof } => {
+            assert_eq!(error, DurableOwnershipError::DeadlineElapsed);
+            proof
+        }
+        DurableCleanupOutcome::Confirmed(_) => {
+            panic!("expired cleanup proof unexpectedly settled")
+        }
+    };
+    assert_eq!(
+        JournalSnapshot::decode(&fs::read(&config.journal_path).expect("retained cleanup bytes"))
+            .expect("retained cleanup snapshot")
+            .records
+            .values()
+            .next()
+            .expect("retained cleanup record")
+            .phase,
+        OwnershipPhase::MayOwnPrepare
+    );
+    let cleanup = match handle.confirm_cleanup_until(proof, io_deadline()) {
+        DurableCleanupOutcome::Confirmed(cleanup) => cleanup,
+        DurableCleanupOutcome::Retained { error, .. } => {
+            panic!("cleanup confirmation retained unexpectedly: {error}")
+        }
+    };
+    assert_eq!(
+        cleanup.context_id().as_slice(),
+        expected_plan.route_context_id.as_slice()
+    );
+    assert_eq!(
+        JournalSnapshot::decode(&fs::read(&config.journal_path).expect("cleanup bytes"))
+            .expect("cleanup snapshot")
+            .records
+            .values()
+            .next()
+            .expect("cleanup record")
+            .phase,
+        OwnershipPhase::CleanupConfirmed
+    );
+    let proof = exact_same_runtime_manager_absence_proof_for_test(cleanup);
+    assert_eq!(
+        format!("{proof:?}"),
+        "ExactSameRuntimeManagerAbsenceProof(<redacted>)"
+    );
+    let proof = match handle.confirm_manager_absent_until(proof, expired_deadline()) {
+        DurableManagerAbsentOutcome::Retained { error, proof } => {
+            assert_eq!(error, DurableOwnershipError::DeadlineElapsed);
+            proof
+        }
+        DurableManagerAbsentOutcome::Absent => {
+            panic!("expired manager-absence proof unexpectedly settled")
+        }
+    };
+    assert_eq!(
+        JournalSnapshot::decode(&fs::read(&config.journal_path).expect("retained manager bytes"))
+            .expect("retained manager snapshot")
+            .records
+            .values()
+            .next()
+            .expect("retained manager record")
+            .phase,
+        OwnershipPhase::CleanupConfirmed
+    );
+    assert!(matches!(
+        handle.confirm_manager_absent_until(proof, io_deadline()),
+        DurableManagerAbsentOutcome::Absent
+    ));
+    actor.shutdown().expect("clean actor shutdown");
+}
+
+#[test]
 fn late_recovery_after_caller_drop_fences_admission_without_publishing_absent() {
     let directory = tempdir().expect("temporary directory");
     let config = test_config(directory.path());
@@ -2738,7 +2880,7 @@ fn custody_arm_handle_surface_cannot_register_retire_recover_or_own_lifecycle() 
         .split("impl DurableCustodyArmHandle {")
         .nth(1)
         .expect("custody arm handle implementation")
-        .split("pub(super) struct DurableOwnershipStartup")
+        .split("/// Cloneable, typed production admission and settlement authority.")
         .next()
         .expect("bounded custody arm handle implementation");
     assert_eq!(surface.matches("pub(crate) fn").count(), 1);
@@ -2797,10 +2939,11 @@ fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
         .split("impl fmt::Debug for DurableMayOwnPrepare")
         .next()
         .expect("bounded MayOwn implementation");
-    assert_eq!(may_own_surface.matches("pub(crate)").count(), 3);
+    assert_eq!(may_own_surface.matches("pub(crate)").count(), 4);
     assert!(may_own_surface.contains("context_id(&self)"));
     assert!(may_own_surface.contains("resources(&self) -> &[DurableWireguardResource]"));
     assert!(may_own_surface.contains("prepare_leases_v3(&self)"));
+    assert!(may_own_surface.contains("into_dispatch_parts("));
 
     assert!(!actor_source.contains("impl DurableOwnershipKey {"));
     let custody_surface = actor_source

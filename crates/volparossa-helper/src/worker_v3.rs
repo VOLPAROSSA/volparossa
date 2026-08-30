@@ -72,16 +72,19 @@ use crate::{
     ownership_journal::{
         DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyOutcome,
         DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare,
-        DurableOwnershipActor, DurableOwnershipError, DurableOwnershipKey,
-        DurableRegistrationOutcome, DurableWireguardResource,
+        DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
+        DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
+        DurablePrepareSettlement, DurableRegistrationOutcome, DurableWireguardResource,
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
         CredentialedWorkerExecution, ExpectedUnixCredentials, WorkerTransportError,
         enable_passcred_receiver, private_credential_worker_channel, receive_credential_record,
-        receive_credential_record_with_deadline, receive_credential_worker_request,
-        receive_credential_worker_response_with_deadline, send_credential_record,
-        send_credential_record_with_deadline, send_credential_worker_request_with_deadline,
+        receive_credential_record_with_deadline,
+        receive_credential_worker_destroy_response_reconciling_initialise_with_deadline,
+        receive_credential_worker_request, receive_credential_worker_response_with_deadline,
+        send_credential_record, send_credential_record_with_deadline,
+        send_credential_worker_request_with_deadline,
         send_credential_worker_response_with_deadline, validate_adopted_transport_socket,
     },
 };
@@ -94,7 +97,14 @@ mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
 mod relay_fence;
-pub(crate) use functional_backend::functional_alpha_lease_backend;
+pub(crate) use functional_backend::{
+    ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof,
+    functional_alpha_lease_backend,
+};
+#[cfg(test)]
+pub(crate) use functional_backend::{
+    exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
+};
 
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
 pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-worker-v3-live-proof";
@@ -1536,12 +1546,40 @@ fn fixture_memory_child_loop(
             _ => (InternalWorkerResult::Invalid, None, false),
         };
         let response = correlated_response(&request, result, outcome)?;
-        send_credential_worker_response_with_deadline(
-            channel, &request, &response, None, deadline,
-        )?;
+        #[cfg(test)]
+        let deadline = fixture_initialise_response_deadline(operation, deadline)?;
+        if !send_child_response_preserving_initialise_cleanup(
+            channel, &request, &response, deadline,
+        )? {
+            continue;
+        }
         if exit {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+fn fixture_initialise_response_deadline(
+    operation: &internal_worker_request::Operation,
+    request_deadline: HardDeadline,
+) -> Result<HardDeadline, WorkerV3Error> {
+    if !matches!(operation, internal_worker_request::Operation::Initialise(_)) {
+        return Ok(request_deadline);
+    }
+    match std::env::var("VOLPAROSSA_TEST_WORKER_V3_CHILD")
+        .ok()
+        .as_deref()
+    {
+        Some("connect-expire-initialise-response") => {
+            thread::sleep(Duration::from_millis(75));
+            Ok(request_deadline)
+        }
+        Some("connect-late-initialise-response") => {
+            thread::sleep(Duration::from_millis(75));
+            HardDeadline::after(Duration::from_secs(1)).map_err(WorkerV3Error::Io)
+        }
+        _ => Ok(request_deadline),
     }
 }
 
@@ -1742,6 +1780,9 @@ struct WorkerContext<Kernel> {
     bound_path_id: Option<u8>,
     relay_fence: Option<WorkerRelayFence>,
     kernel: Kernel,
+    /// Canonical public resource evidence staged by authenticated Initialise before the parent
+    /// moves any birth link. This is not durable authority, but it bounds same-runtime cleanup.
+    staged_resources: Option<Vec<DurableWireguardResource>>,
     lease: Option<WorkerLeaseLifecycle>,
 }
 
@@ -1795,7 +1836,7 @@ enum RelayForwardingGrowth {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerDestroyOutcome {
     Destroyed,
-    NoAdoptedLease,
+    Invalid,
     CleanupIncomplete,
     Terminate,
 }
@@ -1813,6 +1854,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 WorkerRelayFence::NonRelay
             }),
             kernel,
+            staged_resources: None,
             lease: None,
         }
     }
@@ -1823,6 +1865,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         path_id: u8,
         bootstrap: WorkerNetworkBootstrap,
         kernel: Kernel,
+        staged_resources: Vec<DurableWireguardResource>,
     ) -> Option<Self> {
         let relay_fence = match (role, bootstrap) {
             (
@@ -1842,8 +1885,18 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             bound_path_id: Some(path_id),
             relay_fence: Some(relay_fence),
             kernel,
+            staged_resources: Some(staged_resources),
             lease: None,
         })
+    }
+
+    fn accepts_prepare_resources(&self, resources: &[DurableWireguardResource]) -> bool {
+        self.staged_resources
+            .as_ref()
+            .is_none_or(|staged| staged == resources)
+            && self
+                .bound_path_id
+                .is_none_or(|path_id| resources.iter().all(|resource| resource.key().0 == path_id))
     }
 
     fn prepare(
@@ -1859,10 +1912,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         else {
             return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
         };
-        if self
-            .bound_path_id
-            .is_some_and(|path_id| resources.iter().any(|resource| resource.key().0 != path_id))
-        {
+        if !self.accepts_prepare_resources(&resources) {
             return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
         }
         if self
@@ -2283,18 +2333,37 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     }
 
     fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
-        let Some(lifecycle) = self.lease.take() else {
-            // A parent may already have moved a birth link into this namespace, so no adopted
-            // lease is not link-absence evidence. A production Relay therefore keeps its policy-
-            // drop baseline installed and exits successfully; confirmed process/namespace death
-            // performs the only safe cleanup without opening an unfenced forwarding window.
-            return match self.relay_fence.as_ref() {
-                Some(WorkerRelayFence::Restricted(_)) => WorkerDestroyOutcome::Destroyed,
-                Some(WorkerRelayFence::NonRelay) => WorkerDestroyOutcome::NoAdoptedLease,
-                #[cfg(test)]
-                Some(WorkerRelayFence::Fixture) => WorkerDestroyOutcome::NoAdoptedLease,
-                Some(WorkerRelayFence::Active { .. }) | None => WorkerDestroyOutcome::Terminate,
+        let Some(lifecycle) = self.lease.as_ref() else {
+            // Birth links are moved before Prepare adopts them. The exact authenticated cleanup
+            // resource set therefore remains necessary even when no lifecycle exists in this
+            // child. Delete and prove that set absent while the namespace is still live and
+            // systemd-pinned; only then may Relay policy-drop custody be retired.
+            let Some(cleanup) = self.staged_resources.as_deref() else {
+                return WorkerDestroyOutcome::Invalid;
             };
+            if !cleanup_unadopted_worker_resources(&mut self.kernel, cleanup, deadline) {
+                return WorkerDestroyOutcome::CleanupIncomplete;
+            }
+            return self.retire_relay_forwarding_fence(deadline);
+        };
+        let adopted = match lifecycle {
+            WorkerLeaseLifecycle::Prepared(ownerships)
+            | WorkerLeaseLifecycle::Activated(ownerships)
+            | WorkerLeaseLifecycle::Committed(ownerships)
+            | WorkerLeaseLifecycle::CleanupRequired(ownerships) => ownerships,
+        };
+        if let Some(cleanup) = self.staged_resources.as_deref() {
+            if adopted.len() != cleanup.len()
+                || adopted
+                    .iter()
+                    .zip(cleanup)
+                    .any(|(ownership, cleanup)| ownership.resource != *cleanup)
+            {
+                return WorkerDestroyOutcome::Invalid;
+            }
+        }
+        let Some(lifecycle) = self.lease.take() else {
+            std::process::abort();
         };
         let ownerships = match lifecycle {
             WorkerLeaseLifecycle::Prepared(ownerships)
@@ -2325,7 +2394,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
                 WorkerDestroyOutcome::CleanupIncomplete
             }
-            WorkerDestroyOutcome::Terminate | WorkerDestroyOutcome::NoAdoptedLease => {
+            WorkerDestroyOutcome::Terminate | WorkerDestroyOutcome::Invalid => {
                 WorkerDestroyOutcome::Terminate
             }
         }
@@ -2725,6 +2794,23 @@ fn cleanup_worker_resources(
     all_absent
 }
 
+fn cleanup_unadopted_worker_resources(
+    kernel: &mut impl WorkerNamespaceKernel,
+    resources: &[DurableWireguardResource],
+    deadline: HardDeadline,
+) -> bool {
+    if resources.is_empty() {
+        return false;
+    }
+    for resource in resources.iter().rev() {
+        let _ = kernel.delete_exact_owned_wireguard(resource, deadline);
+    }
+    resources
+        .iter()
+        .rev()
+        .all(|resource| kernel.prove_wireguard_absent(resource, deadline).is_ok())
+}
+
 fn routing_context_role(role: i32) -> Option<RoutingContextRole> {
     match InternalContextRole::try_from(role).ok()? {
         InternalContextRole::Client => Some(RoutingContextRole::Client),
@@ -2773,6 +2859,18 @@ fn initialise_child_context(
     if context.is_some() || route_context_id != bound_context {
         return Ok((InternalWorkerResult::Conflict, None, false));
     }
+    let Some(staged_resources) = initialise
+        .prepare
+        .as_ref()
+        .and_then(|prepare| validate_worker_prepare(prepare, route_context_id, role))
+        .filter(|resources| {
+            resources
+                .iter()
+                .all(|resource| resource.key().0 == bound_path_id)
+        })
+    else {
+        return Ok((InternalWorkerResult::Invalid, None, false));
+    };
     match NamespaceKernel::connect(deadline).and_then(|mut kernel| {
         kernel.activate_loopback(deadline)?;
         Ok(kernel)
@@ -2781,9 +2879,15 @@ fn initialise_child_context(
             let bootstrap = network_bootstrap
                 .take()
                 .ok_or(WorkerV3Error::Authentication)?;
-            let worker_context =
-                WorkerContext::new_bound(route_context_id, role, bound_path_id, bootstrap, kernel)
-                    .ok_or(WorkerV3Error::Authentication)?;
+            let worker_context = WorkerContext::new_bound(
+                route_context_id,
+                role,
+                bound_path_id,
+                bootstrap,
+                kernel,
+                staged_resources,
+            )
+            .ok_or(WorkerV3Error::Authentication)?;
             *context = Some(worker_context);
             Ok((
                 InternalWorkerResult::Ok,
@@ -2897,7 +3001,7 @@ fn destroy_child_context(
                 true,
             )
         }
-        WorkerDestroyOutcome::NoAdoptedLease => (InternalWorkerResult::NotFound, None, false),
+        WorkerDestroyOutcome::Invalid => (InternalWorkerResult::Invalid, None, false),
         WorkerDestroyOutcome::CleanupIncomplete => {
             (InternalWorkerResult::CleanupIncomplete, None, false)
         }
@@ -2944,12 +3048,43 @@ fn child_loop(
             _ => (InternalWorkerResult::Invalid, None, false),
         };
         let response = correlated_response(&request, result, outcome)?;
-        send_credential_worker_response_with_deadline(
-            channel, &request, &response, None, deadline,
-        )?;
+        if !send_child_response_preserving_initialise_cleanup(
+            channel, &request, &response, deadline,
+        )? {
+            continue;
+        }
         if exit {
             return Ok(());
         }
+    }
+}
+
+/// Preserve the only authenticated cleanup executor when an Initialise response cannot be sent.
+///
+/// Initialise may already have staged the complete durable cleanup set before its response crosses
+/// the caller's deadline. Exiting here would strand PID-1 namespace custody with no process able to
+/// issue exact Destroy/NotFound evidence. No response is retried: a completed seqpacket send whose
+/// post-send deadline check failed may already be queued. The child instead returns to its request
+/// loop, where the parent can reconcile that one exact late response and issue Destroy under a new
+/// cleanup deadline. Every later operation keeps the ordinary fail-closed transport semantics.
+fn send_child_response_preserving_initialise_cleanup(
+    channel: &Socket,
+    request: &InternalWorkerRequest,
+    response: &InternalWorkerResponse,
+    deadline: HardDeadline,
+) -> Result<bool, WorkerV3Error> {
+    match send_credential_worker_response_with_deadline(channel, request, response, None, deadline)
+    {
+        Ok(()) => Ok(true),
+        Err(_)
+            if matches!(
+                request.operation,
+                Some(internal_worker_request::Operation::Initialise(_))
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -3884,6 +4019,10 @@ impl Drop for WorkerProcess {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StablePhase {
     Starting,
+    /// The exact Initialise call crossed PLAN, but its response was not observed. This is a
+    /// cleanup fence, not evidence that the child received the request. Preserve the worker so the
+    /// caller can issue only terminal Destroy against the possible staged resource set.
+    InitialiseCleanupPending,
     Initialised,
     Prepared,
     Activated,
@@ -3945,6 +4084,9 @@ struct FinishCommitHook {
 enum WorkerDispatchFence {
     Open,
     DurableHandoffPending,
+    /// Opened only by consuming the exact durable handoff fence. This record origin authorizes
+    /// retaining a response-lost Initialise worker solely for staged terminal Destroy.
+    DurableStagedCleanupOpen,
 }
 
 impl std::fmt::Debug for WorkerDispatchFence {
@@ -3952,6 +4094,7 @@ impl std::fmt::Debug for WorkerDispatchFence {
         match self {
             Self::Open => formatter.write_str("Open"),
             Self::DurableHandoffPending => formatter.write_str("DurableHandoffPending"),
+            Self::DurableStagedCleanupOpen => formatter.write_str("DurableStagedCleanupOpen"),
         }
     }
 }
@@ -3977,6 +4120,9 @@ struct WorkerRecord {
     generation: u64,
     dispatch_fence: WorkerDispatchFence,
     stable_phase: StablePhase,
+    /// Complete canonical request retained only while an ambiguous durable Initialise is fenced
+    /// for terminal cleanup. It authorises one exact late-response reconciliation before Destroy.
+    initialise_reconciliation: Option<InternalWorkerRequest>,
     in_flight: Option<InFlight>,
     quarantined: bool,
     expires_at: Instant,
@@ -3997,6 +4143,7 @@ struct PlannedCall {
     liveness: WorkerLiveness,
     expected_peer: ExpectedUnixCredentials,
     pinned_network_namespace: Option<crate::worker_sandbox::PinnedWorkerNetworkNamespace>,
+    initialise_reconciliation: Option<InternalWorkerRequest>,
 }
 
 struct CachedCall {
@@ -4339,7 +4486,29 @@ impl std::fmt::Debug for DurableWorkerMayOwnPrepare {
     }
 }
 
-/// Affine result of the dormant durable-Intent-to-passive-worker handoff.
+/// Production-ready owner after the durable dispatch fence has opened exactly once.
+///
+/// The worker is now eligible for authenticated child requests, but the affine journal
+/// settlement and exact systemd custody evidence remain joined to the worker recovery pins until
+/// same-runtime cleanup reaches durable `Absent`.
+#[must_use = "an opened durable worker must remain joined to cleanup and manager custody"]
+struct DurableFunctionalWorkerOwnership {
+    settlement: DurablePrepareSettlement,
+    resources: Vec<DurableWireguardResource>,
+    prepare: PrepareLeases,
+    worker: WorkerGenerationOwnership,
+    source: WorkerRecoveryIdentitySource,
+    custody_name: crate::systemd_fdstore::CustodyFdName,
+    attestation: crate::systemd_fdstore::InventoryAttestation,
+}
+
+impl std::fmt::Debug for DurableFunctionalWorkerOwnership {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableFunctionalWorkerOwnership(<redacted>)")
+    }
+}
+
+/// Affine result of the durable-Intent-to-passive-worker handoff.
 ///
 /// Every failure variant returns every owner which exists at that point. A rejected worker
 /// admission can prove that no worker owner exists, while an ambiguous admission necessarily
@@ -4372,6 +4541,186 @@ enum DurableWorkerPrepareOutcome {
         error: DurableOwnershipError,
         handoff: DurableWorkerPrepareHandoff,
     },
+    NeverDispatchedRetained {
+        error: DurableOwnershipError,
+        proof: ExactNeverDispatchedPrepareProof,
+    },
+}
+
+enum ExactNeverDispatchedEvidence {
+    AdmissionRejected,
+    WorkerAbsent(Box<ExactNeverDispatchedWorkerEvidence>),
+}
+
+struct ExactNeverDispatchedWorkerEvidence {
+    _worker: ConfirmedWorkerGenerationAbsent,
+    _source: Option<WorkerRecoveryIdentitySource>,
+}
+
+/// Opaque affine authority that one durable Intent never crossed worker dispatch or systemd
+/// publication. Only the worker coordinator can mint it after a definite admission rejection or
+/// exact worker-generation reap; the actor can only consume or return it unchanged.
+#[must_use = "never-dispatched evidence must retire its exact Intent or remain retained"]
+pub(crate) struct ExactNeverDispatchedPrepareProof {
+    key: DurableOwnershipKey,
+    _evidence: ExactNeverDispatchedEvidence,
+}
+
+impl ExactNeverDispatchedPrepareProof {
+    fn after_definite_worker_admission_rejection(key: DurableOwnershipKey) -> Self {
+        Self {
+            key,
+            _evidence: ExactNeverDispatchedEvidence::AdmissionRejected,
+        }
+    }
+
+    fn after_exact_worker_absence(
+        key: DurableOwnershipKey,
+        worker: ConfirmedWorkerGenerationAbsent,
+        source: Option<WorkerRecoveryIdentitySource>,
+    ) -> Self {
+        if DurableOwnershipSelector::from_key(&key).context_id() != worker.coordinates.context_id
+            || source.as_ref().is_some_and(|source| {
+                source.pending.coordinates != worker.coordinates
+                    || source.pending.coordinates.context_id
+                        != DurableOwnershipSelector::from_key(&key).context_id()
+            })
+        {
+            std::process::abort();
+        }
+        Self {
+            key,
+            _evidence: ExactNeverDispatchedEvidence::WorkerAbsent(Box::new(
+                ExactNeverDispatchedWorkerEvidence {
+                    _worker: worker,
+                    _source: source,
+                },
+            )),
+        }
+    }
+
+    pub(crate) const fn key(&self) -> &DurableOwnershipKey {
+        &self.key
+    }
+
+    fn selector(&self) -> DurableOwnershipSelector {
+        DurableOwnershipSelector::from_key(&self.key)
+    }
+}
+
+impl std::fmt::Debug for ExactNeverDispatchedPrepareProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ExactNeverDispatchedPrepareProof(<redacted>)")
+    }
+}
+
+/// Affine terminal retained when production durable Prepare cannot reach dispatch-open.
+#[must_use = "failed durable Prepare authority must remain retained"]
+enum DurableWorkerPrepareTerminal {
+    Handoff(Box<DurableWorkerPrepareOutcome>),
+    PublicationStart {
+        error: WorkerV3Error,
+        publication: Box<DurableWorkerCustodyPublicationOwner>,
+    },
+    DispatchOpen {
+        error: WorkerV3Error,
+        may_own: Box<DurableWorkerMayOwnPrepare>,
+    },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct DurableHandoffTerminalIdentity {
+    serial: NonZeroU64,
+    context_id: ContextId,
+    ownership: Option<DurableOwnershipSelector>,
+}
+
+#[must_use = "a retained handoff selector must be settled or kept for an exact retry"]
+struct DurableHandoffTerminalSelector {
+    identity: DurableHandoffTerminalIdentity,
+}
+
+impl DurableHandoffTerminalSelector {
+    const fn context_id(&self) -> ContextId {
+        self.identity.context_id
+    }
+}
+
+impl std::fmt::Debug for DurableHandoffTerminalSelector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DurableHandoffTerminalSelector(<redacted>)")
+    }
+}
+
+struct StoredDurableWorkerPrepareTerminal {
+    serial: NonZeroU64,
+    terminal: DurableWorkerPrepareTerminal,
+}
+
+struct DurableHandoffPrepareFailure {
+    error: WorkerV3Error,
+    selector: DurableHandoffTerminalSelector,
+}
+
+enum DurableFunctionalPrepareFailure {
+    Handoff(DurableHandoffPrepareFailure),
+    Later(WorkerV3Error),
+}
+
+#[must_use = "handoff settlement either proves durable absence or returns the exact selector"]
+enum DurableHandoffTerminalSettlement {
+    Absent,
+    Retained {
+        error: WorkerV3Error,
+        selector: DurableHandoffTerminalSelector,
+    },
+}
+
+enum NeverDispatchedWorkerSettlement {
+    Proven(ExactNeverDispatchedPrepareProof),
+    Retained {
+        error: WorkerV3Error,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+        source: Box<Option<WorkerRecoveryIdentitySource>>,
+    },
+}
+
+fn durable_handoff_outcome_identity(
+    outcome: &DurableWorkerPrepareOutcome,
+) -> Option<(ContextId, Option<DurableOwnershipSelector>)> {
+    match outcome {
+        DurableWorkerPrepareOutcome::CustodyPublication(_) => None,
+        DurableWorkerPrepareOutcome::RegistrationRetained { registration, .. } => {
+            Some((registration.context_id(), None))
+        }
+        DurableWorkerPrepareOutcome::KeyRetained { key, .. } => {
+            let selector = DurableOwnershipSelector::from_key(key);
+            Some((selector.context_id(), Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { key, worker, .. } => {
+            let selector = DurableOwnershipSelector::from_key(key);
+            (selector.context_id() == worker.coordinates.context_id)
+                .then_some((selector.context_id(), Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::RegisteredWorkerRetained { registered, .. } => {
+            let selector = DurableOwnershipSelector::from_key(&registered.key);
+            (selector.context_id() == registered.worker.coordinates.context_id)
+                .then_some((selector.context_id(), Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. }
+        | DurableWorkerPrepareOutcome::CustodyFenceRetained { handoff, .. } => {
+            let selector = DurableOwnershipSelector::from_key(&handoff.registered.key);
+            let context_id = selector.context_id();
+            (context_id == handoff.registered.worker.coordinates.context_id
+                && context_id == handoff.source.pending.coordinates.context_id
+                && handoff.registered.worker.coordinates == handoff.source.pending.coordinates)
+                .then_some((context_id, Some(selector)))
+        }
+        DurableWorkerPrepareOutcome::NeverDispatchedRetained { proof, .. } => {
+            Some((proof.selector().context_id(), Some(proof.selector())))
+        }
+    }
 }
 
 impl std::fmt::Debug for DurableWorkerPrepareOutcome {
@@ -4402,7 +4751,64 @@ impl std::fmt::Debug for DurableWorkerPrepareOutcome {
                 .debug_struct("CustodyFenceRetained")
                 .field("error", error)
                 .finish_non_exhaustive(),
+            Self::NeverDispatchedRetained { error, .. } => formatter
+                .debug_struct("NeverDispatchedRetained")
+                .field("error", error)
+                .finish_non_exhaustive(),
         }
+    }
+}
+
+fn durable_prepare_outcome_error(outcome: &DurableWorkerPrepareOutcome) -> WorkerV3Error {
+    match outcome {
+        DurableWorkerPrepareOutcome::CustodyPublication(_) => WorkerV3Error::Ambiguous,
+        DurableWorkerPrepareOutcome::RegistrationRetained { error, .. }
+        | DurableWorkerPrepareOutcome::CustodyFenceRetained { error, .. }
+        | DurableWorkerPrepareOutcome::NeverDispatchedRetained { error, .. } => {
+            durable_ownership_worker_error(*error)
+        }
+        DurableWorkerPrepareOutcome::KeyRetained { error, .. }
+        | DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, .. }
+        | DurableWorkerPrepareOutcome::RegisteredWorkerRetained { error, .. }
+        | DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, .. } => {
+            worker_error_class(error)
+        }
+    }
+}
+
+fn worker_error_class(error: &WorkerV3Error) -> WorkerV3Error {
+    match error {
+        WorkerV3Error::Authentication => WorkerV3Error::Authentication,
+        WorkerV3Error::Invalid => WorkerV3Error::Invalid,
+        WorkerV3Error::Conflict => WorkerV3Error::Conflict,
+        WorkerV3Error::Capacity => WorkerV3Error::Capacity,
+        WorkerV3Error::Dead => WorkerV3Error::Dead,
+        WorkerV3Error::Quarantined => WorkerV3Error::Quarantined,
+        WorkerV3Error::Ambiguous => WorkerV3Error::Ambiguous,
+        WorkerV3Error::Stale => WorkerV3Error::Stale,
+        WorkerV3Error::Busy => WorkerV3Error::Busy,
+        WorkerV3Error::ShuttingDown => WorkerV3Error::ShuttingDown,
+        WorkerV3Error::RuntimeUnavailable
+        | WorkerV3Error::Io(_)
+        | WorkerV3Error::Transport(_)
+        | WorkerV3Error::Sandbox(_)
+        | WorkerV3Error::SystemdCustodyInput(_)
+        | WorkerV3Error::SystemdCustodyPublication(_)
+        | WorkerV3Error::Ipv6ForwardingBootstrap(_)
+        | WorkerV3Error::RelayFence(_) => WorkerV3Error::RuntimeUnavailable,
+        WorkerV3Error::Deadline => WorkerV3Error::Deadline,
+    }
+}
+
+fn durable_ownership_worker_error(error: DurableOwnershipError) -> WorkerV3Error {
+    match error {
+        DurableOwnershipError::DeadlineElapsed => WorkerV3Error::Deadline,
+        DurableOwnershipError::Capacity => WorkerV3Error::Capacity,
+        DurableOwnershipError::Rejected => WorkerV3Error::Invalid,
+        DurableOwnershipError::Ambiguous => WorkerV3Error::Ambiguous,
+        DurableOwnershipError::RecoveryNotConfirmed
+        | DurableOwnershipError::Unavailable
+        | DurableOwnershipError::AlreadyStarted => WorkerV3Error::RuntimeUnavailable,
     }
 }
 
@@ -4459,9 +4865,10 @@ enum DurableCustodyPublicationBoundary {
 /// Coordinator-owned terminal authority from one non-cancellable custody publication supervisor.
 ///
 /// Every variant retains the exact affine owner which exists at that terminal boundary. These
-/// values are intentionally dormant: no production consumer, retry, reconciliation or dispatch
-/// path exists yet.
+/// values remain coordinator-owned. Production consumes only the exact successful `MayOwn`
+/// terminal; every other terminal stays retained and keeps shutdown fail-closed.
 #[must_use = "terminal custody publication authority must remain coordinator-owned"]
+#[allow(clippy::large_enum_variant)] // Every variant retains its exact affine owner unboxed.
 enum DurableWorkerCustodyPublicationTerminal {
     MayOwn(DurableWorkerMayOwnPrepare),
     PublicationUnresolved {
@@ -4489,6 +4896,32 @@ impl std::fmt::Debug for DurableWorkerCustodyPublicationTerminal {
                 .field(outcome)
                 .finish(),
             Self::SupervisorDropped(_) => formatter.write_str("SupervisorDropped(<redacted>)"),
+        }
+    }
+}
+
+fn durable_publication_terminal_error(
+    terminal: &DurableWorkerCustodyPublicationTerminal,
+) -> WorkerV3Error {
+    match terminal {
+        DurableWorkerCustodyPublicationTerminal::MayOwn(_)
+        | DurableWorkerCustodyPublicationTerminal::SupervisorDropped(_) => WorkerV3Error::Ambiguous,
+        DurableWorkerCustodyPublicationTerminal::PublicationUnresolved { error, .. } => {
+            worker_error_class(error)
+        }
+        DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved(outcome) => {
+            match outcome {
+                DurableWorkerPostAttestationOutcome::MayOwn(_)
+                | DurableWorkerPostAttestationOutcome::ContextMismatch(_) => {
+                    WorkerV3Error::Conflict
+                }
+                DurableWorkerPostAttestationOutcome::PublicationUnresolved { error, .. } => {
+                    worker_error_class(error)
+                }
+                DurableWorkerPostAttestationOutcome::ArmRetained { error, .. } => {
+                    durable_ownership_worker_error(*error)
+                }
+            }
         }
     }
 }
@@ -4839,6 +5272,7 @@ impl WorkerRegistry {
                 generation,
                 dispatch_fence,
                 stable_phase: StablePhase::Starting,
+                initialise_reconciliation: None,
                 in_flight: None,
                 quarantined: false,
                 expires_at,
@@ -5052,6 +5486,36 @@ impl WorkerRegistry {
         Ok(())
     }
 
+    /// Atomically consume the exact in-memory dispatch fence after durable `MayOwnPrepare`.
+    ///
+    /// Every fallible validation, including the hard deadline, precedes the single assignment.
+    /// After the assignment the caller only updates its co-owned affine token; no child request is
+    /// issued while the registry lock is held.
+    fn open_durable_handoff_dispatch(
+        &mut self,
+        coordinates: WorkerGenerationCoordinates,
+        fence: &DurableHandoffFenceOwner,
+        deadline: HardDeadline,
+    ) -> Result<(), WorkerV3Error> {
+        ensure_worker_deadline(deadline)?;
+        self.confirm_durable_handoff_pending(coordinates, fence)?;
+        ensure_worker_deadline(deadline)?;
+        let record = self
+            .records
+            .get_mut(&coordinates.context_id)
+            .ok_or(WorkerV3Error::Dead)?;
+        if record.generation != coordinates.worker_generation.get()
+            || record.dispatch_fence != WorkerDispatchFence::DurableHandoffPending
+            || record.stable_phase != StablePhase::Starting
+            || record.quarantined
+            || record.in_flight.is_some()
+        {
+            return Err(WorkerV3Error::Conflict);
+        }
+        record.dispatch_fence = WorkerDispatchFence::DurableStagedCleanupOpen;
+        Ok(())
+    }
+
     fn reject_pending_durable_handoff_dispatch(
         &self,
         context_id: ContextId,
@@ -5070,6 +5534,10 @@ impl WorkerRegistry {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "tombstone, phase, transport ownership and reconciliation planning are one atomic audit unit"
+    )]
     fn plan_until(
         &mut self,
         context_id: ContextId,
@@ -5095,7 +5563,7 @@ impl WorkerRegistry {
             request_id: key.request_id,
         };
 
-        let (phase, expires_at, liveness, expected_peer, in_flight) = {
+        let (phase, expires_at, liveness, expected_peer, in_flight, initialise_reconciliation) = {
             let record = self.records.get(&context_id).ok_or(WorkerV3Error::Dead)?;
             if record.generation != generation {
                 return Err(WorkerV3Error::Stale);
@@ -5110,6 +5578,7 @@ impl WorkerRegistry {
                 process.liveness(),
                 process.expected_peer,
                 record.in_flight,
+                record.initialise_reconciliation.clone(),
             )
         };
         if now >= expires_at {
@@ -5140,6 +5609,11 @@ impl WorkerRegistry {
         if in_flight.is_some() {
             return Err(WorkerV3Error::Busy);
         }
+        let initialise_reconciliation = planned_initialise_reconciliation(
+            phase,
+            request.operation.as_ref(),
+            initialise_reconciliation,
+        )?;
         if self.tombstones.len() >= self.maximum_cache_entries {
             return Err(WorkerV3Error::Capacity);
         }
@@ -5178,6 +5652,7 @@ impl WorkerRegistry {
             liveness,
             expected_peer,
             pinned_network_namespace,
+            initialise_reconciliation,
         }))
     }
 
@@ -5265,6 +5740,12 @@ impl WorkerRegistry {
                 Self::reject_finish(record, token, WorkerV3Error::Ambiguous)
             } else if let Ok(result) = InternalWorkerResult::try_from(response.result) {
                 record.in_flight = None;
+                if token.in_flight.terminal {
+                    // The exact terminal response has replaced the sole late-Initialise drain
+                    // authority. Cached replay, worker reap and durable settlement no longer need
+                    // to retain the complete Initialise request.
+                    record.initialise_reconciliation = None;
+                }
                 if result == InternalWorkerResult::Ok {
                     record.stable_phase = token.in_flight.success_phase;
                 }
@@ -5434,6 +5915,47 @@ impl WorkerRegistry {
         };
         self.purge_cache_generation(token.context_id, token.generation);
         Ok(detached)
+    }
+
+    /// Convert one exact response-lost Initialise call into a cleanup-only stable phase.
+    ///
+    /// Unlike ordinary ambiguous calls, Initialise has not yet been followed by any parent birth
+    /// mutation and the child owns a canonical staged cleanup set if it accepted the request. The
+    /// worker must therefore remain live long enough to answer an exact terminal Destroy. The
+    /// original tombstone remains present, so Initialise itself cannot be blindly replayed.
+    fn retain_ambiguous_initialise_for_destroy(
+        &mut self,
+        token: PlanToken,
+        request: &InternalWorkerRequest,
+    ) -> Result<(), WorkerV3Error> {
+        if !matches!(
+            request.operation.as_ref(),
+            Some(internal_worker_request::Operation::Initialise(_))
+        ) || request_key(token.context_id, token.generation, request)? != token.in_flight.key
+            || token.in_flight.prior_phase != StablePhase::Starting
+            || token.in_flight.success_phase != StablePhase::Initialised
+            || token.in_flight.terminal
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        let record = self
+            .records
+            .get_mut(&token.context_id)
+            .ok_or(WorkerV3Error::Stale)?;
+        if record.generation != token.generation
+            || record.dispatch_fence != WorkerDispatchFence::DurableStagedCleanupOpen
+            || record.quarantined
+            || record.stable_phase != StablePhase::Starting
+            || record.in_flight != Some(token.in_flight)
+            || record.initialise_reconciliation.is_some()
+            || record.process.is_none()
+        {
+            return Err(WorkerV3Error::Stale);
+        }
+        record.in_flight = None;
+        record.initialise_reconciliation = Some(request.clone());
+        record.stable_phase = StablePhase::InitialiseCleanupPending;
+        Ok(())
     }
 
     fn report_dead(
@@ -5774,6 +6296,24 @@ fn transition(
     }
 }
 
+fn planned_initialise_reconciliation(
+    phase: StablePhase,
+    operation: Option<&internal_worker_request::Operation>,
+    initialise: Option<InternalWorkerRequest>,
+) -> Result<Option<InternalWorkerRequest>, WorkerV3Error> {
+    match (phase, operation, initialise) {
+        (
+            StablePhase::InitialiseCleanupPending,
+            Some(internal_worker_request::Operation::DestroyContext(_)),
+            initialise,
+        ) => Ok(initialise),
+        (StablePhase::InitialiseCleanupPending, _, _) | (_, _, Some(_)) => {
+            Err(WorkerV3Error::Conflict)
+        }
+        _ => Ok(None),
+    }
+}
+
 fn lock_worker_registry(
     registry: &Mutex<WorkerRegistry>,
 ) -> std::sync::MutexGuard<'_, WorkerRegistry> {
@@ -5821,6 +6361,9 @@ fn ensure_worker_deadline(deadline: HardDeadline) -> Result<(), WorkerV3Error> {
 
 struct SupervisorSettlements {
     shutdown_owners: Vec<DetachedWorker>,
+    durable_prepare_terminals: Vec<StoredDurableWorkerPrepareTerminal>,
+    active_durable_handoff_settlements: usize,
+    next_durable_prepare_terminal_serial: u64,
     custody_publication_terminals: Vec<DurableWorkerCustodyPublicationTerminal>,
     reserved_custody_publication_terminals: usize,
     unresolved: bool,
@@ -5836,6 +6379,9 @@ impl SupervisorSettlements {
     fn new() -> Self {
         Self {
             shutdown_owners: Vec::with_capacity(MAX_PROCESS_OWNERS),
+            durable_prepare_terminals: Vec::with_capacity(MAX_PROCESS_OWNERS),
+            active_durable_handoff_settlements: 0,
+            next_durable_prepare_terminal_serial: 0,
             custody_publication_terminals: Vec::with_capacity(MAX_CUSTODY_PUBLICATION_TERMINALS),
             reserved_custody_publication_terminals: 0,
             unresolved: false,
@@ -5905,9 +6451,127 @@ impl SupervisorSettlements {
         self.custody_publication_terminals.push(terminal);
     }
 
+    fn store_durable_prepare_terminal(
+        &mut self,
+        terminal: DurableWorkerPrepareTerminal,
+    ) -> Option<DurableHandoffTerminalSelector> {
+        if self
+            .durable_prepare_terminals
+            .len()
+            .checked_add(self.active_durable_handoff_settlements)
+            .is_none_or(|occupied| occupied >= MAX_PROCESS_OWNERS)
+        {
+            std::process::abort();
+        }
+        let Some(next_serial) = self.next_durable_prepare_terminal_serial.checked_add(1) else {
+            std::process::abort();
+        };
+        let Some(serial) = NonZeroU64::new(next_serial) else {
+            std::process::abort();
+        };
+        self.next_durable_prepare_terminal_serial = next_serial;
+        let selector = match &terminal {
+            DurableWorkerPrepareTerminal::Handoff(outcome) => {
+                let Some((context_id, ownership)) = durable_handoff_outcome_identity(outcome)
+                else {
+                    std::process::abort();
+                };
+                Some(DurableHandoffTerminalSelector {
+                    identity: DurableHandoffTerminalIdentity {
+                        serial,
+                        context_id,
+                        ownership,
+                    },
+                })
+            }
+            DurableWorkerPrepareTerminal::PublicationStart { .. }
+            | DurableWorkerPrepareTerminal::DispatchOpen { .. } => None,
+        };
+        self.durable_prepare_terminals
+            .push(StoredDurableWorkerPrepareTerminal { serial, terminal });
+        selector
+    }
+
+    fn take_exact_durable_handoff_terminal(
+        &mut self,
+        selector: &DurableHandoffTerminalSelector,
+    ) -> Option<DurableWorkerPrepareOutcome> {
+        let index = self
+            .durable_prepare_terminals
+            .iter()
+            .position(|stored| stored.serial == selector.identity.serial)?;
+        let DurableWorkerPrepareTerminal::Handoff(outcome) =
+            &self.durable_prepare_terminals[index].terminal
+        else {
+            return None;
+        };
+        let Some((context_id, ownership)) = durable_handoff_outcome_identity(outcome) else {
+            std::process::abort();
+        };
+        if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership) {
+            return None;
+        }
+        let stored = self.durable_prepare_terminals.swap_remove(index);
+        let Some(active) = self.active_durable_handoff_settlements.checked_add(1) else {
+            std::process::abort();
+        };
+        if active > MAX_PROCESS_OWNERS {
+            std::process::abort();
+        }
+        self.active_durable_handoff_settlements = active;
+        let DurableWorkerPrepareTerminal::Handoff(outcome) = stored.terminal else {
+            std::process::abort();
+        };
+        Some(*outcome)
+    }
+
+    fn restore_exact_durable_handoff_terminal(
+        &mut self,
+        selector: &DurableHandoffTerminalSelector,
+        outcome: DurableWorkerPrepareOutcome,
+    ) {
+        let Some((context_id, ownership)) = durable_handoff_outcome_identity(&outcome) else {
+            std::process::abort();
+        };
+        if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership)
+            || self
+                .durable_prepare_terminals
+                .iter()
+                .any(|stored| stored.serial == selector.identity.serial)
+        {
+            std::process::abort();
+        }
+        self.finish_durable_handoff_settlement_reservation();
+        self.durable_prepare_terminals
+            .push(StoredDurableWorkerPrepareTerminal {
+                serial: selector.identity.serial,
+                terminal: DurableWorkerPrepareTerminal::Handoff(Box::new(outcome)),
+            });
+    }
+
+    fn finish_durable_handoff_settlement_reservation(&mut self) {
+        let Some(active) = self.active_durable_handoff_settlements.checked_sub(1) else {
+            std::process::abort();
+        };
+        self.active_durable_handoff_settlements = active;
+    }
+
+    fn take_exact_custody_publication_terminal(
+        &mut self,
+    ) -> Option<DurableWorkerCustodyPublicationTerminal> {
+        if self.reserved_custody_publication_terminals != 0
+            || self.custody_publication_terminals.len() != 1
+        {
+            return None;
+        }
+        self.custody_publication_terminals.pop()
+    }
+
     fn take_for_shutdown(&mut self) -> (Vec<DetachedWorker>, bool) {
         let custody_settled = self.custody_publication_terminals.is_empty()
-            && self.reserved_custody_publication_terminals == 0;
+            && self.reserved_custody_publication_terminals == 0
+            && self.durable_prepare_terminals.is_empty()
+            && self.active_durable_handoff_settlements == 0;
         (
             std::mem::take(&mut self.shutdown_owners),
             !self.unresolved && custody_settled,
@@ -6231,17 +6895,28 @@ impl WorkerSupervisor {
             liveness,
             expected_peer,
             pinned_network_namespace,
+            initialise_reconciliation,
         } = call;
         let deadline = token.in_flight.deadline;
         let io_request = request.clone();
         let result = tokio::task::spawn_blocking(move || {
             send_credential_worker_request_with_deadline(&channel, &io_request, deadline)?;
-            let mut execution = receive_credential_worker_response_with_deadline(
-                &channel,
-                &io_request,
-                expected_peer,
-                deadline,
-            )?;
+            let mut execution = if let Some(initialise) = initialise_reconciliation.as_ref() {
+                receive_credential_worker_destroy_response_reconciling_initialise_with_deadline(
+                    &channel,
+                    &io_request,
+                    initialise,
+                    expected_peer,
+                    deadline,
+                )?
+            } else {
+                receive_credential_worker_response_with_deadline(
+                    &channel,
+                    &io_request,
+                    expected_peer,
+                    deadline,
+                )?
+            };
             let worker_alive = liveness.probe_alive_until(deadline)?;
             ensure_worker_deadline(deadline)?;
             if !worker_alive {
@@ -6280,7 +6955,9 @@ impl WorkerSupervisor {
         .await;
         let Ok(Ok((execution, worker_alive))) = result else {
             let deadline_elapsed = ensure_worker_deadline(deadline).is_err();
-            return self.finish_ambiguous(token, deadline_elapsed).await;
+            return self
+                .finish_ambiguous(token, &request, deadline_elapsed)
+                .await;
         };
         let outcome = lock_worker_registry(&self.registry).finish(
             token,
@@ -6295,8 +6972,19 @@ impl WorkerSupervisor {
     async fn finish_ambiguous(
         &self,
         token: PlanToken,
+        request: &InternalWorkerRequest,
         deadline_elapsed: bool,
     ) -> Result<CredentialedWorkerExecution, WorkerV3Error> {
+        if lock_worker_registry(&self.registry)
+            .retain_ambiguous_initialise_for_destroy(token, request)
+            .is_ok()
+        {
+            return Err(if deadline_elapsed {
+                WorkerV3Error::Deadline
+            } else {
+                WorkerV3Error::Ambiguous
+            });
+        }
         let detached = lock_worker_registry(&self.registry)
             .mark_ambiguous(token)
             .ok()
@@ -6891,8 +7579,7 @@ impl WorkerCoordinator {
         }
     }
 
-    /// Dormant production handoff from one unique durable Prepare intent to one authenticated,
-    /// passive worker generation.
+    /// Actor-owning test wrapper around the production durable Prepare handoff.
     ///
     /// The caller's absolute deadline is carried unchanged through journal registration, worker
     /// admission and recovery-anchor derivation/revalidation into the affine custody-publication
@@ -6900,7 +7587,7 @@ impl WorkerCoordinator {
     /// may arm under that same deadline. It sends no child protocol request and performs no
     /// `WireGuard` link/address, route, firewall or dataplane configuration; worker launch still
     /// creates the deliberately isolated process and anonymous NEWNET.
-    #[allow(dead_code)] // Connected only after the durable production coordinator is installed.
+    #[allow(dead_code)] // Production uses the narrower cloneable Prepare handle variant.
     fn durable_passive_prepare_handoff_until(
         &self,
         actor: &DurableOwnershipActor,
@@ -6931,10 +7618,42 @@ impl WorkerCoordinator {
             HardDeadline,
         ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
     {
+        let handle = match actor.prepare_handle() {
+            Ok(handle) => handle,
+            Err(error) => {
+                return DurableWorkerPrepareOutcome::RegistrationRetained {
+                    error,
+                    registration,
+                };
+            }
+        };
+        self.durable_passive_prepare_handoff_with_handle_until(
+            &handle,
+            registration,
+            worker_ttl,
+            deadline,
+            spawn,
+        )
+    }
+
+    fn durable_passive_prepare_handoff_with_handle_until<Spawn>(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        registration: DurableIntentRegistration,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+        spawn: Spawn,
+    ) -> DurableWorkerPrepareOutcome
+    where
+        Spawn: FnOnce(
+            GenerationReservation,
+            HardDeadline,
+        ) -> Result<SpawnedWorker, WorkerSpawnFailure>,
+    {
         // Crossing the durable Intent boundary must precede even a local generation reservation,
         // so cancellation can never leave an unjournalled authenticated worker generation.
         let context_id = registration.context_id();
-        let key = match actor.register_until(registration, deadline) {
+        let key = match handle.register_until(registration, deadline) {
             DurableRegistrationOutcome::Registered(key) => key,
             DurableRegistrationOutcome::Retained {
                 error,
@@ -6962,8 +7681,34 @@ impl WorkerCoordinator {
                 };
             }
         };
-        self.finish_durable_registered_worker_handoff_until(
-            actor, context_id, key, worker, deadline,
+        self.finish_durable_registered_worker_handoff_with_handle_until(
+            handle, context_id, key, worker, deadline,
+        )
+    }
+
+    fn durable_passive_prepare_handoff_for_context_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        registration: DurableIntentRegistration,
+        context_role: RoutingContextRole,
+        path_id: u8,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+    ) -> DurableWorkerPrepareOutcome {
+        if context_role == RoutingContextRole::Unspecified || !(1..=8).contains(&path_id) {
+            return DurableWorkerPrepareOutcome::RegistrationRetained {
+                error: DurableOwnershipError::Rejected,
+                registration,
+            };
+        }
+        self.durable_passive_prepare_handoff_with_handle_until(
+            handle,
+            registration,
+            worker_ttl,
+            deadline,
+            move |reservation, deadline| {
+                spawn_worker_v3_for_context_until(reservation, context_role, path_id, deadline)
+            },
         )
     }
 
@@ -6971,6 +7716,30 @@ impl WorkerCoordinator {
     fn finish_durable_registered_worker_handoff_until(
         &self,
         actor: &DurableOwnershipActor,
+        context_id: ContextId,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+        deadline: HardDeadline,
+    ) -> DurableWorkerPrepareOutcome {
+        let handle = match actor.prepare_handle() {
+            Ok(handle) => handle,
+            Err(_error) => {
+                return DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                    error: WorkerV3Error::RuntimeUnavailable,
+                    key,
+                    worker,
+                };
+            }
+        };
+        self.finish_durable_registered_worker_handoff_with_handle_until(
+            &handle, context_id, key, worker, deadline,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the complete ordered custody-publication fence auditable.
+    fn finish_durable_registered_worker_handoff_with_handle_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
         context_id: ContextId,
         key: DurableOwnershipKey,
         worker: WorkerGenerationOwnership,
@@ -7062,7 +7831,7 @@ impl WorkerCoordinator {
         let anchor = handoff.source.durable_prepare_anchor();
         let DurableWorkerPrepareHandoff { registered, source } = handoff;
         let DurableRegisteredStartingWorker { key, worker } = registered;
-        match actor.mark_custody_until(key, anchor, binding, deadline) {
+        match handle.mark_custody_until(key, anchor, binding, deadline) {
             DurableCustodyOutcome::Marked(durable) => {
                 let custody_name = crate::systemd_fdstore::CustodyFdName::from_durable_digest(
                     durable.custody_name_digest(),
@@ -7089,13 +7858,13 @@ impl WorkerCoordinator {
         }
     }
 
-    /// Dormant synchronous transition from exact systemd inventory evidence to durable arming.
+    /// Actor-owning test wrapper for the synchronous systemd-attestation arming transition.
     ///
     /// The publication owner supplies its original absolute deadline. This seam performs no
     /// publication, retry, reconciliation, child request or kernel mutation; it accepts only an
     /// opaque attestation produced by the descriptor-store adapter and retains every affine owner
     /// plus that evidence on every failure.
-    #[allow(dead_code)] // Connected only after a non-cancellable publication supervisor exists.
+    #[allow(dead_code)] // Production uses the narrower cloneable arm handle variant.
     fn arm_attested_durable_worker(
         &self,
         actor: &DurableOwnershipActor,
@@ -7205,6 +7974,401 @@ impl WorkerCoordinator {
                 }
             }
         }
+    }
+
+    fn settle_never_dispatched_worker_until(
+        &self,
+        key: DurableOwnershipKey,
+        worker: WorkerGenerationOwnership,
+        source: Option<WorkerRecoveryIdentitySource>,
+        deadline: HardDeadline,
+    ) -> NeverDispatchedWorkerSettlement {
+        match self.settle_and_terminate_lifecycle_until(worker, deadline) {
+            WorkerGenerationReap::Confirmed(worker) => NeverDispatchedWorkerSettlement::Proven(
+                ExactNeverDispatchedPrepareProof::after_exact_worker_absence(key, worker, source),
+            ),
+            WorkerGenerationReap::Retained { error, ownership } => {
+                NeverDispatchedWorkerSettlement::Retained {
+                    error,
+                    key,
+                    worker: *ownership,
+                    source: Box::new(source),
+                }
+            }
+        }
+    }
+
+    fn retire_exact_never_dispatched_until(
+        handle: &DurableOwnershipPrepareHandle,
+        proof: ExactNeverDispatchedPrepareProof,
+        deadline: HardDeadline,
+    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+        match handle.retire_never_dispatched_until(proof, deadline) {
+            DurableNeverDispatchedOutcome::Absent => Ok(()),
+            DurableNeverDispatchedOutcome::Retained { error, proof } => Err((
+                durable_ownership_worker_error(error),
+                DurableWorkerPrepareOutcome::NeverDispatchedRetained { error, proof },
+            )),
+        }
+    }
+
+    fn settle_retained_handoff_worker_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        handoff: DurableWorkerPrepareHandoff,
+        custody_error: Option<DurableOwnershipError>,
+        deadline: HardDeadline,
+    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+        let DurableWorkerPrepareHandoff { registered, source } = handoff;
+        let DurableRegisteredStartingWorker { key, worker } = registered;
+        match self.settle_never_dispatched_worker_until(key, worker, Some(source), deadline) {
+            NeverDispatchedWorkerSettlement::Proven(proof) => {
+                Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+            }
+            NeverDispatchedWorkerSettlement::Retained {
+                error,
+                key,
+                worker,
+                source,
+            } => {
+                let Some(source) = *source else {
+                    std::process::abort();
+                };
+                let handoff = DurableWorkerPrepareHandoff {
+                    registered: DurableRegisteredStartingWorker { key, worker },
+                    source,
+                };
+                let returned_error = worker_error_class(&error);
+                let retained = match custody_error {
+                    Some(error) => {
+                        DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff }
+                    }
+                    None => DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff },
+                };
+                Err((returned_error, retained))
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every unpublished affine handoff variant has one explicit fail-closed settlement"
+    )]
+    fn settle_durable_handoff_outcome_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        outcome: DurableWorkerPrepareOutcome,
+        deadline: HardDeadline,
+    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+        match outcome {
+            DurableWorkerPrepareOutcome::CustodyPublication(publication) => {
+                drop(publication);
+                std::process::abort();
+            }
+            DurableWorkerPrepareOutcome::RegistrationRetained {
+                error,
+                registration,
+            } => {
+                if error == DurableOwnershipError::Ambiguous {
+                    return Err((
+                        WorkerV3Error::Ambiguous,
+                        DurableWorkerPrepareOutcome::RegistrationRetained {
+                            error,
+                            registration,
+                        },
+                    ));
+                }
+                if let Err(error) = ensure_worker_deadline(deadline) {
+                    return Err((
+                        error,
+                        DurableWorkerPrepareOutcome::RegistrationRetained {
+                            error: DurableOwnershipError::DeadlineElapsed,
+                            registration,
+                        },
+                    ));
+                }
+                // Every non-ambiguous retained registration result is pre-mutation or a
+                // retry-safe, health-checked failure. No key exists and no journal retirement is
+                // therefore required.
+                drop(registration);
+                Ok(())
+            }
+            DurableWorkerPrepareOutcome::KeyRetained { key, .. } => {
+                let proof =
+                    ExactNeverDispatchedPrepareProof::after_definite_worker_admission_rejection(
+                        key,
+                    );
+                Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+            }
+            DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker } => {
+                if matches!(error, WorkerV3Error::Ambiguous) {
+                    return Err((
+                        WorkerV3Error::Ambiguous,
+                        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker },
+                    ));
+                }
+                match self.settle_never_dispatched_worker_until(key, worker, None, deadline) {
+                    NeverDispatchedWorkerSettlement::Proven(proof) => {
+                        Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+                    }
+                    NeverDispatchedWorkerSettlement::Retained {
+                        error, key, worker, ..
+                    } => Err((
+                        worker_error_class(&error),
+                        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker },
+                    )),
+                }
+            }
+            DurableWorkerPrepareOutcome::RegisteredWorkerRetained { registered, .. } => {
+                let DurableRegisteredStartingWorker { key, worker } = registered;
+                match self.settle_never_dispatched_worker_until(key, worker, None, deadline) {
+                    NeverDispatchedWorkerSettlement::Proven(proof) => {
+                        Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+                    }
+                    NeverDispatchedWorkerSettlement::Retained {
+                        error,
+                        key,
+                        worker,
+                        source,
+                    } => {
+                        if source.is_some() {
+                            std::process::abort();
+                        }
+                        Err((
+                            worker_error_class(&error),
+                            DurableWorkerPrepareOutcome::RegisteredWorkerRetained {
+                                error,
+                                registered: DurableRegisteredStartingWorker { key, worker },
+                            },
+                        ))
+                    }
+                }
+            }
+            DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. } => {
+                self.settle_retained_handoff_worker_until(handle, handoff, None, deadline)
+            }
+            DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff } => {
+                if error == DurableOwnershipError::Ambiguous {
+                    return Err((
+                        WorkerV3Error::Ambiguous,
+                        DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff },
+                    ));
+                }
+                self.settle_retained_handoff_worker_until(handle, handoff, Some(error), deadline)
+            }
+            DurableWorkerPrepareOutcome::NeverDispatchedRetained { proof, .. } => {
+                Self::retire_exact_never_dispatched_until(handle, proof, deadline)
+            }
+        }
+    }
+
+    fn settle_durable_handoff_terminal_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        selector: DurableHandoffTerminalSelector,
+        expected_context_id: ContextId,
+        deadline: HardDeadline,
+    ) -> DurableHandoffTerminalSettlement {
+        if selector.identity.context_id != expected_context_id
+            || selector
+                .identity
+                .ownership
+                .is_some_and(|ownership| ownership.context_id() != expected_context_id)
+        {
+            return DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Conflict,
+                selector,
+            };
+        }
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            return DurableHandoffTerminalSettlement::Retained { error, selector };
+        }
+        let outcome = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_handoff_terminal(&selector);
+        let Some(outcome) = outcome else {
+            return DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Ambiguous,
+                selector,
+            };
+        };
+        match self.settle_durable_handoff_outcome_until(handle, outcome, deadline) {
+            Ok(()) => {
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .finish_durable_handoff_settlement_reservation();
+                DurableHandoffTerminalSettlement::Absent
+            }
+            Err((error, outcome)) => {
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .restore_exact_durable_handoff_terminal(&selector, outcome);
+                DurableHandoffTerminalSettlement::Retained { error, selector }
+            }
+        }
+    }
+
+    /// Complete the cancellation-safe durable Prepare handoff and return only after the exact
+    /// worker dispatch fence has opened from attested `MayOwnPrepare` authority.
+    ///
+    /// Every non-success outcome is retained inside the coordinator and permanently blocks its
+    /// confirmed shutdown. The caller therefore receives no ownerless partial authority and must
+    /// not issue any child or kernel operation on error.
+    async fn durable_functional_prepare_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        registration: DurableIntentRegistration,
+        context_role: RoutingContextRole,
+        path_id: u8,
+        worker_ttl: Duration,
+        deadline: HardDeadline,
+    ) -> Result<DurableFunctionalWorkerOwnership, DurableFunctionalPrepareFailure> {
+        let handoff = self.durable_passive_prepare_handoff_for_context_until(
+            handle,
+            registration,
+            context_role,
+            path_id,
+            worker_ttl,
+            deadline,
+        );
+        let publication = match handoff {
+            DurableWorkerPrepareOutcome::CustodyPublication(publication) => publication,
+            retained => {
+                let error = durable_prepare_outcome_error(&retained);
+                let selector = self
+                    .settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(
+                        Box::new(retained),
+                    ))
+                    .unwrap_or_else(|| std::process::abort());
+                return Err(DurableFunctionalPrepareFailure::Handoff(
+                    DurableHandoffPrepareFailure { error, selector },
+                ));
+            }
+        };
+
+        let arm = handle.custody_arm_handle();
+        let completion = match self.start_durable_custody_publication(arm, publication) {
+            DurableCustodyPublicationStartOutcome::Started(completion) => completion,
+            DurableCustodyPublicationStartOutcome::Retained { error, publication } => {
+                let returned_error = worker_error_class(&error);
+                let _ = self
+                    .settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_durable_prepare_terminal(
+                        DurableWorkerPrepareTerminal::PublicationStart {
+                            error,
+                            publication: Box::new(publication),
+                        },
+                    );
+                return Err(DurableFunctionalPrepareFailure::Later(returned_error));
+            }
+        };
+        if !completion.wait().await {
+            return Err(DurableFunctionalPrepareFailure::Later(
+                WorkerV3Error::Ambiguous,
+            ));
+        }
+        let terminal = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_custody_publication_terminal()
+            .ok_or(DurableFunctionalPrepareFailure::Later(
+                WorkerV3Error::Ambiguous,
+            ))?;
+        let may_own = match terminal {
+            DurableWorkerCustodyPublicationTerminal::MayOwn(may_own) => may_own,
+            retained => {
+                let error = durable_publication_terminal_error(&retained);
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_custody_publication_terminal(retained);
+                return Err(DurableFunctionalPrepareFailure::Later(error));
+            }
+        };
+        match self.open_durable_functional_worker_until(may_own, deadline) {
+            Ok(ownership) => Ok(ownership),
+            Err((error, may_own)) => {
+                let returned_error = worker_error_class(&error);
+                let _ = self
+                    .settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::DispatchOpen {
+                        error,
+                        may_own: Box::new(may_own),
+                    });
+                Err(DurableFunctionalPrepareFailure::Later(returned_error))
+            }
+        }
+    }
+
+    fn open_durable_functional_worker_until(
+        &self,
+        mut may_own: DurableWorkerMayOwnPrepare,
+        deadline: HardDeadline,
+    ) -> Result<DurableFunctionalWorkerOwnership, (WorkerV3Error, DurableWorkerMayOwnPrepare)> {
+        let Ok(prepare) = may_own.durable.prepare_leases_v3() else {
+            return Err((WorkerV3Error::Conflict, may_own));
+        };
+        if may_own.durable.context_id() != may_own.worker.coordinates.context_id
+            || may_own.source.pending.coordinates != may_own.worker.coordinates
+            || prepare.route_context_id.as_slice()
+                != may_own.worker.coordinates.context_id.as_slice()
+            || prepare.leases.is_empty()
+            || may_own.attestation.removal_baseline().is_none()
+        {
+            return Err((WorkerV3Error::Conflict, may_own));
+        }
+        if let Err(error) = self.revalidate_durable_recovery_identity_until(
+            &may_own.worker,
+            &may_own.source,
+            deadline,
+        ) {
+            return Err((error, may_own));
+        }
+        let Some(fence) = may_own.worker.handoff_fence.as_ref() else {
+            return Err((WorkerV3Error::Stale, may_own));
+        };
+        let mut registry = match lock_worker_registry_until(&self.registry, deadline) {
+            Ok(registry) => registry,
+            Err(error) => return Err((error, may_own)),
+        };
+        if let Err(error) =
+            registry.open_durable_handoff_dispatch(may_own.worker.coordinates, fence, deadline)
+        {
+            drop(registry);
+            return Err((error, may_own));
+        }
+        drop(registry);
+        may_own.worker.dispatch_registration = WorkerDispatchRegistration::Open;
+        let _consumed_fence = may_own.worker.handoff_fence.take();
+        let DurableWorkerMayOwnPrepare {
+            durable,
+            worker,
+            source,
+            custody_name,
+            attestation,
+        } = may_own;
+        let (settlement, resources) = durable.into_dispatch_parts();
+        Ok(DurableFunctionalWorkerOwnership {
+            settlement,
+            resources,
+            prepare,
+            worker,
+            source,
+            custody_name,
+            attestation,
+        })
     }
 
     /// Open process-owned seam: reserves a coordinator-local worker generation, authenticates one
@@ -7664,7 +8828,10 @@ impl WorkerCoordinator {
                 .get(&ownership.coordinates.context_id)
                 .ok_or(WorkerV3Error::Dead)?;
             if record.generation != ownership.coordinates.worker_generation.get()
-                || record.dispatch_fence != WorkerDispatchFence::Open
+                || !matches!(
+                    record.dispatch_fence,
+                    WorkerDispatchFence::Open | WorkerDispatchFence::DurableStagedCleanupOpen
+                )
             {
                 return Err(WorkerV3Error::Stale);
             }
@@ -7701,7 +8868,10 @@ impl WorkerCoordinator {
                 .get(&ownership.coordinates.context_id)
                 .ok_or(WorkerV3Error::Dead)?;
             if record.generation != ownership.coordinates.worker_generation.get()
-                || record.dispatch_fence != WorkerDispatchFence::Open
+                || !matches!(
+                    record.dispatch_fence,
+                    WorkerDispatchFence::Open | WorkerDispatchFence::DurableStagedCleanupOpen
+                )
             {
                 return Err(WorkerV3Error::Stale);
             }
@@ -7963,11 +9133,10 @@ impl WorkerCoordinator {
         })
     }
 
-    /// Dormant cancellation-safe custody-publication supervisor entry point.
+    /// Production cancellation-safe custody-publication supervisor entry point.
     ///
     /// This synchronous call consumes `publication` before any spawned future can be polled. The
-    /// production publisher remains private and disconnected from every server/request path.
-    #[allow(dead_code)] // Enabled only with the future production custody coordinator.
+    /// The publisher remains private and is reachable only from durable functional Prepare.
     fn start_durable_custody_publication(
         &self,
         arm: DurableCustodyArmHandle,
@@ -8984,6 +10153,73 @@ mod tests {
             .expect("valid durable worker registration")
     }
 
+    fn registered_durable_key(
+        actor: &DurableOwnershipActor,
+        context_id: ContextId,
+        seed: u8,
+    ) -> DurableOwnershipKey {
+        let handle = actor.prepare_handle().expect("durable Prepare handle");
+        match handle.register_until(
+            durable_worker_registration(context_id, seed),
+            HardDeadline::after(Duration::from_secs(1)).expect("durable registration deadline"),
+        ) {
+            DurableRegistrationOutcome::Registered(key) => key,
+            DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            } => {
+                drop(registration);
+                panic!("durable registration remained retained: {error}")
+            }
+        }
+    }
+
+    fn store_handoff_terminal(
+        coordinator: &WorkerCoordinator,
+        outcome: DurableWorkerPrepareOutcome,
+    ) -> DurableHandoffTerminalSelector {
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(Box::new(
+                outcome,
+            )))
+            .expect("ordinary handoff terminal selector")
+    }
+
+    fn handoff_terminal_count(coordinator: &WorkerCoordinator) -> usize {
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .durable_prepare_terminals
+            .iter()
+            .filter(|stored| matches!(stored.terminal, DurableWorkerPrepareTerminal::Handoff(_)))
+            .count()
+    }
+
+    fn durable_actor_fixture() -> (tempfile::TempDir, DurableOwnershipActor) {
+        let directory = tempdir().expect("durable ownership directory");
+        let actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(5)).expect("actor fixture deadline"),
+        )
+        .expect("durable ownership actor fixture");
+        (directory, actor)
+    }
+
+    fn settle_handoff_terminal(
+        coordinator: &WorkerCoordinator,
+        actor: &DurableOwnershipActor,
+        selector: DurableHandoffTerminalSelector,
+        context_id: ContextId,
+        deadline: HardDeadline,
+    ) -> DurableHandoffTerminalSettlement {
+        let handle = actor.prepare_handle().expect("durable Prepare handle");
+        coordinator.settle_durable_handoff_terminal_until(&handle, selector, context_id, deadline)
+    }
+
     fn request(
         request_id: u8,
         operation: internal_worker_request::Operation,
@@ -9004,6 +10240,7 @@ mod tests {
                 role: InternalContextRole::Client as i32,
                 mptcp_accepted_addrs: 4,
                 mptcp_subflows: 4,
+                prepare: Some(worker_prepare(context_id, 0x51)),
             }),
         )
     }
@@ -10851,18 +12088,115 @@ mod tests {
     }
 
     #[test]
-    fn worker_destroy_without_an_adopted_lease_is_not_absence_proof() {
+    fn unadopted_relay_pair_destroy_requires_exact_staged_absence_before_success() {
+        let route_context_id = [0x37; 16];
+        let prepare = worker_relay_prepare(route_context_id, 0x57);
+        let staged = validate_worker_prepare(&prepare, route_context_id, RoutingContextRole::Relay)
+            .expect("exact staged Relay resources");
         let mut context = WorkerContext::new(
-            [0x37; 16],
-            RoutingContextRole::Client,
-            FakeWorkerKernel::default(),
+            route_context_id,
+            RoutingContextRole::Relay,
+            FakeWorkerKernel {
+                failures: vec![FakeWorkerKernelFailure::AbsenceAt(1)],
+                ..FakeWorkerKernel::default()
+            },
         );
+        context.staged_resources = Some(staged);
 
         assert_eq!(
             context.destroy(worker_deadline()),
-            WorkerDestroyOutcome::NoAdoptedLease
+            WorkerDestroyOutcome::CleanupIncomplete
         );
+        assert!(context.lease.is_none());
+        assert!(context.staged_resources.is_some());
+        assert_eq!(
+            context.destroy(worker_deadline()),
+            WorkerDestroyOutcome::Destroyed
+        );
+        assert_eq!(
+            context.kernel.cleanup_calls,
+            [
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+            ]
+        );
+
+        let source = include_str!("worker_v3.rs");
+        let initialise = source
+            .split_once("fn initialise_child_context(")
+            .and_then(|(_, tail)| tail.split_once("\nfn prepare_child_context("))
+            .map(|(body, _)| body)
+            .expect("bounded Initialise implementation");
+        let staged_validation = initialise
+            .find("validate_worker_prepare(prepare, route_context_id, role)")
+            .expect("typed staged plan validation");
+        let first_kernel_mutation = initialise
+            .find("NamespaceKernel::connect(deadline)")
+            .expect("first namespace-kernel access");
+        assert!(staged_validation < first_kernel_mutation);
+    }
+
+    #[test]
+    fn staged_initialise_plan_rejects_prepare_substitution_before_kernel_access() {
+        let route_context_id = [0x38; 16];
+        let exact = worker_prepare(route_context_id, 0x58);
+        let staged = validate_worker_prepare(&exact, route_context_id, RoutingContextRole::Client)
+            .expect("exact staged Client resource");
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Client,
+            FakeWorkerKernel::default(),
+        );
+        context.staged_resources = Some(staged);
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([0x48; 32]),
+        };
+
+        assert!(matches!(
+            context.prepare(
+                &worker_prepare(route_context_id, 0x59),
+                &mut keys,
+                worker_deadline(),
+            ),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
+        ));
         assert!(context.kernel.calls.is_empty());
+        assert!(context.lease.is_none());
+        assert!(context.staged_resources.is_some());
+        assert!(matches!(
+            context.prepare(&exact, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Prepared(_)
+        ));
     }
 
     #[test]
@@ -11430,7 +12764,11 @@ mod tests {
     #[test]
     fn child_process_entry_fixture() {
         let failed = match env::var(CHILD_FIXTURE_ENVIRONMENT).ok().as_deref() {
-            Some("connect") => {
+            Some(
+                "connect"
+                | "connect-expire-initialise-response"
+                | "connect-late-initialise-response",
+            ) => {
                 !hardened_child_environment()
                     || run_child_with_fixture_sandbox(
                         geteuid().as_raw(),
@@ -12078,6 +13416,7 @@ mod tests {
                             generation,
                             dispatch_fence: WorkerDispatchFence::Open,
                             stable_phase: StablePhase::Starting,
+                            initialise_reconciliation: None,
                             in_flight: None,
                             quarantined: true,
                             expires_at,
@@ -12717,7 +14056,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One end-to-end dormant Intent-to-MayOwn custody proof.
+    #[allow(clippy::too_many_lines)] // One end-to-end passive Intent-to-MayOwn custody proof.
     fn durable_passive_handoff_journals_before_spawn_and_sends_zero_request_bytes() {
         let context_id = [90; 16];
         let directory = tempdir().expect("durable handoff directory");
@@ -12833,7 +14172,11 @@ mod tests {
     }
 
     #[test]
-    fn durable_dispatch_fence_blocks_execute_before_arm_and_after_may_own() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end test retains and settles every exact durable worker owner"
+    )]
+    fn durable_dispatch_fence_blocks_until_the_exact_post_may_own_open() {
         let context_id = [97; 16];
         let fixture = fenced_durable_handoff_fixture(
             context_id,
@@ -12895,17 +14238,64 @@ mod tests {
         assert_no_worker_request_bytes(&fixture.peer);
         assert_durable_handoff_registry_pristine(&fixture.coordinator, context_id, 1);
 
-        let DurableWorkerMayOwnPrepare {
-            durable,
+        let opened = fixture
+            .coordinator
+            .open_durable_functional_worker_until(
+                may_own,
+                HardDeadline::after(Duration::from_secs(1)).expect("dispatch-open deadline"),
+            )
+            .unwrap_or_else(|(error, may_own)| {
+                drop(may_own);
+                panic!("exact durable dispatch-open failed: {error}")
+            });
+        assert_eq!(opened.settlement.context_id(), context_id);
+        assert_eq!(opened.resources.len(), 1);
+        assert_eq!(opened.prepare.route_context_id, context_id);
+        assert_eq!(
+            opened.worker.dispatch_registration,
+            WorkerDispatchRegistration::Open
+        );
+        assert!(opened.worker.handoff_fence.is_none());
+        {
+            let registry = lock_worker_registry(&fixture.coordinator.registry);
+            let record = registry
+                .records
+                .get(&context_id)
+                .expect("opened worker record");
+            assert_eq!(
+                record.dispatch_fence,
+                WorkerDispatchFence::DurableStagedCleanupOpen
+            );
+            assert_eq!(record.stable_phase, StablePhase::Starting);
+            assert!(record.in_flight.is_none());
+            assert!(!record.quarantined);
+        }
+        assert_no_worker_request_bytes(&fixture.peer);
+
+        let DurableFunctionalWorkerOwnership {
+            settlement,
+            resources,
+            prepare,
             worker,
             source,
             custody_name: _,
             attestation,
-        } = may_own;
-        drop(durable);
+        } = opened;
+        drop(settlement);
+        drop(resources);
+        drop(prepare);
         drop(source);
         drop(attestation);
-        reap_durable_handoff_worker(&fixture.coordinator, worker);
+        match fixture.coordinator.terminate_generation_until(
+            worker,
+            HardDeadline::after(Duration::from_secs(1)).expect("opened worker cleanup deadline"),
+        ) {
+            WorkerGenerationReap::Confirmed(_) => {}
+            WorkerGenerationReap::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("opened worker cleanup remained unresolved: {error}")
+            }
+        }
         drop(fixture.actor);
         drop(fixture.directory);
     }
@@ -13967,6 +15357,493 @@ mod tests {
         drop(fixture.directory);
     }
 
+    #[tokio::test]
+    async fn definitive_registration_terminal_is_mutation_free_and_shutdown_unblocks() {
+        let context_id = [109; 16];
+        let (_directory, mut actor) = durable_actor_fixture();
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let deadline =
+            HardDeadline::after(Duration::from_millis(10)).expect("expired registration deadline");
+        wait_until_deadline_elapsed(deadline);
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            durable_worker_registration(context_id, 109),
+            Duration::from_secs(5),
+            deadline,
+            |_reservation, _deadline| panic!("definite registration failure cannot spawn"),
+        );
+        assert!(matches!(
+            outcome,
+            DurableWorkerPrepareOutcome::RegistrationRetained {
+                error: DurableOwnershipError::DeadlineElapsed,
+                ..
+            }
+        ));
+        let selector = store_handoff_terminal(&coordinator, outcome);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &actor,
+                selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert_eq!(handoff_terminal_count(&coordinator), 0);
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn key_terminal_retires_the_exact_intent_and_shutdown_unblocks() {
+        let context_id = [110; 16];
+        let (_directory, mut actor) = durable_actor_fixture();
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let outcome = coordinator.durable_passive_prepare_handoff_with_until(
+            &actor,
+            durable_worker_registration(context_id, 110),
+            Duration::ZERO,
+            HardDeadline::after(Duration::from_secs(1)).expect("handoff deadline"),
+            |_reservation, _deadline| panic!("invalid TTL cannot spawn"),
+        );
+        assert!(matches!(
+            outcome,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                ..
+            }
+        ));
+        let selector = store_handoff_terminal(&coordinator, outcome);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &actor,
+                selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn definitive_worker_admission_and_registered_terminals_reap_before_intent_retirement() {
+        for (context_id, registered) in [([111; 16], false), ([112; 16], true)] {
+            let (_directory, mut actor) = durable_actor_fixture();
+            let key = registered_durable_key(&actor, context_id, context_id[0]);
+            let fixture = durable_pending_lifecycle_fixture(context_id, VecDeque::new(), true);
+            assert_no_worker_request_bytes(&fixture.peer);
+            let outcome = if registered {
+                DurableWorkerPrepareOutcome::RegisteredWorkerRetained {
+                    error: WorkerV3Error::Conflict,
+                    registered: DurableRegisteredStartingWorker {
+                        key,
+                        worker: fixture.worker,
+                    },
+                }
+            } else {
+                DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                    error: WorkerV3Error::Conflict,
+                    key,
+                    worker: fixture.worker,
+                }
+            };
+            let selector = store_handoff_terminal(&fixture.coordinator, outcome);
+            assert!(matches!(
+                settle_handoff_terminal(
+                    &fixture.coordinator,
+                    &actor,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+                ),
+                DurableHandoffTerminalSettlement::Absent
+            ));
+            assert!(!fixture.alive.load(Ordering::SeqCst));
+            assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+            assert!(fixture.coordinator.shutdown().await);
+            assert_eq!(
+                actor.shutdown_for_test(
+                    HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_and_definite_custody_fence_terminals_reap_before_intent_retirement() {
+        for (context_id, custody) in [([113; 16], false), ([114; 16], true)] {
+            let mut fixture = fenced_durable_handoff_fixture(
+                context_id,
+                HardDeadline::after(Duration::from_secs(2)).expect("handoff deadline"),
+                |coordinator, context_id, _generation, _directory| {
+                    lock_worker_registry(&coordinator.registry)
+                        .records
+                        .get_mut(&context_id)
+                        .expect("registered passive worker")
+                        .stable_phase = StablePhase::Initialised;
+                },
+            );
+            lock_worker_registry(&fixture.coordinator.registry)
+                .records
+                .get_mut(&context_id)
+                .expect("registered passive worker")
+                .stable_phase = StablePhase::Starting;
+            let DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. } =
+                fixture.outcome
+            else {
+                panic!("phase fence did not retain a handoff")
+            };
+            let outcome = if custody {
+                DurableWorkerPrepareOutcome::CustodyFenceRetained {
+                    error: DurableOwnershipError::Rejected,
+                    handoff,
+                }
+            } else {
+                DurableWorkerPrepareOutcome::HandoffWorkerRetained {
+                    error: WorkerV3Error::Conflict,
+                    handoff,
+                }
+            };
+            let selector = store_handoff_terminal(&fixture.coordinator, outcome);
+            assert!(matches!(
+                settle_handoff_terminal(
+                    &fixture.coordinator,
+                    &fixture.actor,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
+                ),
+                DurableHandoffTerminalSettlement::Absent
+            ));
+            assert!(fixture.coordinator.shutdown().await);
+            assert_eq!(
+                fixture.actor.shutdown_for_test(
+                    HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_worker_and_custody_terminals_retain_the_exact_affine_owner() {
+        let worker_context = [115; 16];
+        let (_worker_directory, worker_actor) = durable_actor_fixture();
+        let worker_coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let worker_outcome = worker_coordinator.durable_passive_prepare_handoff_with_until(
+            &worker_actor,
+            durable_worker_registration(worker_context, 115),
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("ambiguous admission deadline"),
+            |reservation, _deadline| {
+                Err(WorkerSpawnFailure {
+                    error: WorkerV3Error::Ambiguous,
+                    reservation,
+                })
+            },
+        );
+        let worker_selector = store_handoff_terminal(&worker_coordinator, worker_outcome);
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Ambiguous,
+            selector: _worker_selector,
+        } = settle_handoff_terminal(
+            &worker_coordinator,
+            &worker_actor,
+            worker_selector,
+            worker_context,
+            HardDeadline::after(Duration::from_secs(1)).expect("worker settlement deadline"),
+        )
+        else {
+            panic!("ambiguous worker admission was not retained")
+        };
+        assert_eq!(handoff_terminal_count(&worker_coordinator), 1);
+
+        let custody_context = [116; 16];
+        let fixture = fenced_durable_handoff_fixture(
+            custody_context,
+            HardDeadline::after(Duration::from_secs(2)).expect("custody fixture deadline"),
+            |coordinator, context_id, _generation, _directory| {
+                lock_worker_registry(&coordinator.registry)
+                    .records
+                    .get_mut(&context_id)
+                    .expect("registered passive worker")
+                    .stable_phase = StablePhase::Initialised;
+            },
+        );
+        lock_worker_registry(&fixture.coordinator.registry)
+            .records
+            .get_mut(&custody_context)
+            .expect("registered passive worker")
+            .stable_phase = StablePhase::Starting;
+        let DurableWorkerPrepareOutcome::HandoffWorkerRetained { handoff, .. } = fixture.outcome
+        else {
+            panic!("phase fence did not retain a handoff")
+        };
+        let custody_selector = store_handoff_terminal(
+            &fixture.coordinator,
+            DurableWorkerPrepareOutcome::CustodyFenceRetained {
+                error: DurableOwnershipError::Ambiguous,
+                handoff,
+            },
+        );
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Ambiguous,
+            selector: _custody_selector,
+        } = settle_handoff_terminal(
+            &fixture.coordinator,
+            &fixture.actor,
+            custody_selector,
+            custody_context,
+            HardDeadline::after(Duration::from_secs(1)).expect("custody settlement deadline"),
+        )
+        else {
+            panic!("ambiguous custody fence was not retained")
+        };
+        assert_eq!(handoff_terminal_count(&fixture.coordinator), 1);
+        assert_durable_handoff_registry_pristine(&fixture.coordinator, custody_context, 1);
+        assert_no_worker_request_bytes(&fixture.peer);
+    }
+
+    #[tokio::test]
+    async fn reaped_never_dispatched_proof_survives_deadline_and_retries_without_second_reap() {
+        let context_id = [117; 16];
+        let (_directory, mut actor) = durable_actor_fixture();
+        let key = registered_durable_key(&actor, context_id, 117);
+        let fixture = durable_pending_lifecycle_fixture(context_id, VecDeque::new(), true);
+        let proof = match fixture.coordinator.settle_never_dispatched_worker_until(
+            key,
+            fixture.worker,
+            None,
+            HardDeadline::after(Duration::from_secs(1)).expect("worker reap deadline"),
+        ) {
+            NeverDispatchedWorkerSettlement::Proven(proof) => proof,
+            NeverDispatchedWorkerSettlement::Retained {
+                error,
+                key,
+                worker,
+                source,
+            } => {
+                drop((key, worker, source));
+                panic!("exact worker reap remained retained: {error}")
+            }
+        };
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(!fixture.alive.load(Ordering::SeqCst));
+        let selector = store_handoff_terminal(
+            &fixture.coordinator,
+            DurableWorkerPrepareOutcome::NeverDispatchedRetained {
+                error: DurableOwnershipError::DeadlineElapsed,
+                proof,
+            },
+        );
+        let identity = selector.identity;
+        let elapsed =
+            HardDeadline::after(Duration::from_millis(5)).expect("expired settlement deadline");
+        wait_until_deadline_elapsed(elapsed);
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Deadline,
+            selector,
+        } = settle_handoff_terminal(&fixture.coordinator, &actor, selector, context_id, elapsed)
+        else {
+            panic!("elapsed proof retirement was not retained")
+        };
+        assert!(selector.identity == identity);
+        assert_eq!(handoff_terminal_count(&fixture.coordinator), 1);
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &fixture.coordinator,
+                &actor,
+                selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("retry deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
+        assert!(fixture.coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_context_and_ownership_mismatch_do_not_take_the_stored_terminal() {
+        let context_id = [118; 16];
+        let (_first_directory, mut first_actor) = durable_actor_fixture();
+        let (_second_directory, mut second_actor) = durable_actor_fixture();
+        let first_key = registered_durable_key(&first_actor, context_id, 118);
+        let second_key = registered_durable_key(&second_actor, context_id, 119);
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let first_selector = store_handoff_terminal(
+            &coordinator,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                key: first_key,
+            },
+        );
+        let first_identity = first_selector.identity;
+
+        let wrong_context = DurableHandoffTerminalSelector {
+            identity: DurableHandoffTerminalIdentity {
+                context_id: [0xee; 16],
+                ..first_identity
+            },
+        };
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &first_actor,
+                wrong_context,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("context mismatch deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Conflict,
+                ..
+            }
+        ));
+        assert_eq!(handoff_terminal_count(&coordinator), 1);
+
+        let wrong_ownership = DurableHandoffTerminalSelector {
+            identity: DurableHandoffTerminalIdentity {
+                ownership: Some(DurableOwnershipSelector::from_key(&second_key)),
+                ..first_identity
+            },
+        };
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &first_actor,
+                wrong_ownership,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("ownership mismatch deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Retained {
+                error: WorkerV3Error::Ambiguous,
+                ..
+            }
+        ));
+        assert_eq!(handoff_terminal_count(&coordinator), 1);
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &first_actor,
+                DurableHandoffTerminalSelector {
+                    identity: first_identity,
+                },
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("exact settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+
+        let second_selector = store_handoff_terminal(
+            &coordinator,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                key: second_key,
+            },
+        );
+        assert!(matches!(
+            settle_handoff_terminal(
+                &coordinator,
+                &second_actor,
+                second_selector,
+                context_id,
+                HardDeadline::after(Duration::from_secs(1)).expect("second settlement deadline"),
+            ),
+            DurableHandoffTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        for actor in [&mut first_actor, &mut second_actor] {
+            assert_eq!(
+                actor.shutdown_for_test(
+                    HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn actor_ambiguity_retains_the_opaque_never_dispatched_proof() {
+        let context_id = [119; 16];
+        let (_directory, actor) = durable_actor_fixture();
+        let key = registered_durable_key(&actor, context_id, 120);
+        let coordinator =
+            WorkerCoordinator::new(WorkerRegistry::new(1, 4, Duration::from_secs(10)));
+        let selector = store_handoff_terminal(
+            &coordinator,
+            DurableWorkerPrepareOutcome::KeyRetained {
+                error: WorkerV3Error::Invalid,
+                key,
+            },
+        );
+        let panic_registration = durable_worker_registration([120; 16], 121);
+        let panic_handle = actor.prepare_handle().expect("panic test Prepare handle");
+        assert!(matches!(
+            panic_handle.panic_after_registration_for_test(panic_registration),
+            DurableRegistrationOutcome::Retained {
+                error: DurableOwnershipError::Ambiguous,
+                ..
+            }
+        ));
+        let DurableHandoffTerminalSettlement::Retained {
+            error: WorkerV3Error::Ambiguous,
+            selector: _selector,
+        } = settle_handoff_terminal(
+            &coordinator,
+            &actor,
+            selector,
+            context_id,
+            HardDeadline::after(Duration::from_secs(1)).expect("ambiguous actor deadline"),
+        )
+        else {
+            panic!("actor ambiguity did not retain opaque retirement proof")
+        };
+        assert_eq!(handoff_terminal_count(&coordinator), 1);
+        let settlements = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            settlements.durable_prepare_terminals.as_slice(),
+            [StoredDurableWorkerPrepareTerminal {
+                terminal: DurableWorkerPrepareTerminal::Handoff(outcome),
+                ..
+            }] if matches!(
+                outcome.as_ref(),
+                DurableWorkerPrepareOutcome::NeverDispatchedRetained {
+                    error: DurableOwnershipError::Ambiguous,
+                    ..
+                }
+            )
+        ));
+    }
+
     #[test]
     fn durable_pending_fence_survives_ambiguous_reap_and_exact_retry() {
         let context_id = [99; 16];
@@ -14256,7 +16133,7 @@ mod tests {
             .expect("post-attestation arm implementation");
         let prepare = &source[start..arm_start];
         let register = prepare
-            .find("actor.register_until(registration, deadline)")
+            .find("handle.register_until(registration, deadline)")
             .expect("durable Intent registration");
         let worker = prepare
             .find("self.reserve_spawn_register_durable_handoff_with_until")
@@ -14279,7 +16156,7 @@ mod tests {
             .map(|offset| durable_binding + offset)
             .expect("post-measurement absolute deadline fence");
         let durable_mark = prepare
-            .find("actor.mark_custody_until(key, anchor, binding, deadline)")
+            .find("handle.mark_custody_until(key, anchor, binding, deadline)")
             .expect("durable MayOwnCustody mark");
         let custody_name = prepare
             .find("durable.custody_name_digest()")
@@ -14302,7 +16179,7 @@ mod tests {
         assert!(!prepare.contains("publish_current_process_custody("));
 
         let arm_end = source[arm_start..]
-            .find("\n    /// Open process-owned seam: reserves")
+            .find("\n    /// Complete the cancellation-safe durable Prepare handoff")
             .map(|offset| arm_start + offset)
             .expect("post-attestation arm implementation boundary");
         let arm = &source[arm_start..arm_end];
@@ -14413,6 +16290,44 @@ mod tests {
                 < commit
                     .find("self.records.insert(")
                     .expect("atomic record insertion")
+        );
+
+        let open_start = source
+            .find("    fn open_durable_handoff_dispatch(")
+            .expect("exact durable dispatch-open transition");
+        let open_end = source[open_start..]
+            .find("\n    fn reject_pending_durable_handoff_dispatch(")
+            .map(|offset| open_start + offset)
+            .expect("durable dispatch-open boundary");
+        let open = &source[open_start..open_end];
+        let exact_fence_check = open
+            .find("self.confirm_durable_handoff_pending(coordinates, fence)?")
+            .expect("exact retained handoff fence check");
+        let cleanup_origin = open
+            .find("record.dispatch_fence = WorkerDispatchFence::DurableStagedCleanupOpen")
+            .expect("typed durable staged-cleanup origin");
+        assert!(exact_fence_check < cleanup_origin);
+
+        let production = &source[..source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("worker production boundary")];
+        assert_eq!(
+            production
+                .matches("record.dispatch_fence = WorkerDispatchFence::DurableStagedCleanupOpen",)
+                .count(),
+            1,
+            "only exact durable dispatch-open may mint the cleanup origin"
+        );
+        let retain_start = production
+            .find("    fn retain_ambiguous_initialise_for_destroy(")
+            .expect("response-lost Initialise retention");
+        let retain_end = production[retain_start..]
+            .find("\n    fn report_dead(")
+            .map(|offset| retain_start + offset)
+            .expect("response-lost Initialise retention boundary");
+        assert!(
+            production[retain_start..retain_end]
+                .contains("record.dispatch_fence != WorkerDispatchFence::DurableStagedCleanupOpen")
         );
     }
 
@@ -18680,6 +20595,292 @@ mod tests {
             coordinator.phase(context_id, generation),
             Err(WorkerV3Error::Stale)
         ));
+    }
+
+    #[test]
+    fn initialise_cleanup_pending_phase_allows_only_terminal_destroy() {
+        let context_id = [0x91; 16];
+        assert!(matches!(
+            transition(
+                StablePhase::InitialiseCleanupPending,
+                &initialise(context_id, 1),
+            ),
+            Err(WorkerV3Error::Conflict)
+        ));
+        assert!(matches!(
+            transition(
+                StablePhase::InitialiseCleanupPending,
+                &acquire(context_id, 2),
+            ),
+            Err(WorkerV3Error::Conflict)
+        ));
+        assert_eq!(
+            transition(
+                StablePhase::InitialiseCleanupPending,
+                &destroy(context_id, 3),
+            )
+            .expect("terminal Destroy transition"),
+            (StablePhase::InitialiseCleanupPending, true)
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test proves retain, exact terminal clear, aligned retry and purge in one lineage"
+    )]
+    fn exact_terminal_response_clears_retained_initialise_before_reap_or_cache_replay() {
+        let context_id = [0x94; 16];
+        let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+        let (mut process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let reservation = registry
+            .reserve_generation(context_id, Duration::from_secs(5), Instant::now())
+            .expect("generation reservation");
+        process.binding = Some(reservation.binding());
+        let WorkerRegistrationCommit::DurableHandoffPending { generation, fence } = registry
+            .commit_reserved_with_dispatch(
+                reservation,
+                process,
+                Instant::now(),
+                WorkerDispatchRegistration::DurableHandoffPending,
+            )
+            .expect("durable registration")
+        else {
+            panic!("durable registration returned an open generation")
+        };
+        registry
+            .open_durable_handoff_dispatch(
+                WorkerGenerationCoordinates {
+                    context_id,
+                    worker_generation: NonZeroU64::new(generation).expect("non-zero generation"),
+                },
+                &fence,
+                HardDeadline::after(Duration::from_secs(1)).expect("dispatch-open deadline"),
+            )
+            .expect("open durable dispatch");
+        let initialise = initialise(context_id, 0xe1);
+        let initialise_call = call(
+            registry
+                .plan(context_id, generation, &initialise, Instant::now())
+                .expect("plan Initialise"),
+        );
+        registry
+            .retain_ambiguous_initialise_for_destroy(initialise_call.token, &initialise)
+            .expect("retain exact Initialise reconciliation");
+        assert_eq!(
+            registry
+                .records
+                .get(&context_id)
+                .and_then(|record| record.initialise_reconciliation.as_ref()),
+            Some(&initialise)
+        );
+
+        let destroy_request = destroy(context_id, 0xe2);
+        let destroy_call = call(
+            registry
+                .plan(context_id, generation, &destroy_request, Instant::now())
+                .expect("plan terminal Destroy"),
+        );
+        assert_eq!(
+            destroy_call.initialise_reconciliation.as_ref(),
+            Some(&initialise)
+        );
+        let absent = correlated_response(&destroy_request, InternalWorkerResult::NotFound, None)
+            .expect("exact terminal NotFound");
+        assert!(matches!(
+            registry.finish(
+                destroy_call.token,
+                &destroy_request,
+                &absent,
+                Instant::now(),
+                true,
+            ),
+            FinishOutcome::Committed
+        ));
+        let record = registry
+            .records
+            .get(&context_id)
+            .expect("live worker record");
+        assert!(record.initialise_reconciliation.is_none());
+        assert!(
+            registry
+                .cache
+                .values()
+                .any(|entry| entry.response == absent)
+        );
+
+        let aligned_retry = destroy(context_id, 0xe3);
+        let retry_call = call(
+            registry
+                .plan(context_id, generation, &aligned_retry, Instant::now())
+                .expect("plan aligned terminal retry"),
+        );
+        assert!(retry_call.initialise_reconciliation.is_none());
+        let retry_absent =
+            correlated_response(&aligned_retry, InternalWorkerResult::NotFound, None)
+                .expect("exact aligned retry NotFound");
+        assert!(matches!(
+            registry.finish(
+                retry_call.token,
+                &aligned_retry,
+                &retry_absent,
+                Instant::now(),
+                true,
+            ),
+            FinishOutcome::Committed
+        ));
+
+        let detached = registry
+            .report_dead(context_id, generation)
+            .expect("quarantine exact generation")
+            .expect("detach exact generation");
+        stop_and_purge(&mut registry, detached);
+        assert!(!registry.records.contains_key(&context_id));
+    }
+
+    async fn exercise_real_child_initialise_response_loss(mode: &str, context_id: ContextId) {
+        let authenticated = spawn_authenticated_fixture(mode, context_id, 1)
+            .expect("authenticated real child fixture");
+        let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+        let reservation = registry
+            .reserve_generation(context_id, Duration::from_secs(5), Instant::now())
+            .expect("generation reservation");
+        assert_eq!(reservation.generation, 1);
+        let WorkerRegistrationCommit::DurableHandoffPending { generation, fence } = registry
+            .commit_reserved_with_dispatch(
+                reservation,
+                authenticated.process,
+                Instant::now(),
+                WorkerDispatchRegistration::DurableHandoffPending,
+            )
+            .expect("durable worker registration")
+        else {
+            panic!("durable registration returned an open generation")
+        };
+        let coordinates = WorkerGenerationCoordinates {
+            context_id,
+            worker_generation: NonZeroU64::new(generation).expect("non-zero generation"),
+        };
+        registry
+            .open_durable_handoff_dispatch(
+                coordinates,
+                &fence,
+                HardDeadline::after(Duration::from_secs(1)).expect("dispatch-open deadline"),
+            )
+            .expect("open exact durable dispatch");
+        let coordinator = WorkerCoordinator::new(registry);
+
+        let initialise = initialise(context_id, 0xd1);
+        let initialise_deadline =
+            HardDeadline::after(Duration::from_millis(25)).expect("short Initialise deadline");
+        assert!(matches!(
+            coordinator
+                .execute_until(
+                    context_id,
+                    generation,
+                    initialise.clone(),
+                    initialise_deadline
+                )
+                .await,
+            Err(WorkerV3Error::Deadline)
+        ));
+        {
+            let registry = lock_worker_registry(&coordinator.registry);
+            let record = registry.records.get(&context_id).expect("retained worker");
+            assert_eq!(record.stable_phase, StablePhase::InitialiseCleanupPending);
+            assert_eq!(record.initialise_reconciliation.as_ref(), Some(&initialise));
+            assert!(!record.quarantined);
+            assert!(record.process.is_some());
+        }
+
+        let destroy = destroy(context_id, 0xd2);
+        let execution = coordinator
+            .execute_until(
+                context_id,
+                generation,
+                destroy,
+                HardDeadline::after(Duration::from_secs(2)).expect("separate cleanup deadline"),
+            )
+            .await
+            .expect("exact staged Destroy after response loss");
+        assert!(execution.descriptor.is_none());
+        assert_eq!(execution.response.result, InternalWorkerResult::Ok as i32);
+        assert!(matches!(
+            execution.response.outcome,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {}
+            ))
+        ));
+        assert!(matches!(
+            coordinator.phase(context_id, generation),
+            Err(WorkerV3Error::Stale)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_child_survives_expired_initialise_response_for_separately_budgeted_destroy() {
+        exercise_real_child_initialise_response_loss(
+            "connect-expire-initialise-response",
+            [0x92; 16],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_child_late_initialise_response_is_reconciled_before_destroy_response() {
+        exercise_real_child_initialise_response_loss(
+            "connect-late-initialise-response",
+            [0x93; 16],
+        )
+        .await;
+    }
+
+    #[test]
+    fn production_and_fixture_child_loops_share_the_only_initialise_send_survival_seam() {
+        let source = include_str!("worker_v3.rs");
+        let fixture_start = source
+            .find("fn fixture_memory_child_loop(")
+            .expect("fixture child loop");
+        let fixture_end = source[fixture_start..]
+            .find("\nfn receive_deadline_bound_worker_request(")
+            .map(|offset| fixture_start + offset)
+            .expect("fixture child loop boundary");
+        let fixture = &source[fixture_start..fixture_end];
+        let production_start = source
+            .find("fn child_loop(")
+            .expect("production child loop");
+        let production_end = source[production_start..]
+            .find("\n/// Preserve the only authenticated cleanup executor")
+            .map(|offset| production_start + offset)
+            .expect("production child loop boundary");
+        let production = &source[production_start..production_end];
+        for operation_loop in [fixture, production] {
+            assert_eq!(
+                operation_loop
+                    .matches("send_child_response_preserving_initialise_cleanup(")
+                    .count(),
+                1,
+                "each child loop must use the shared response-loss survival seam exactly once"
+            );
+            assert!(
+                !operation_loop.contains("send_credential_worker_response_with_deadline("),
+                "a child loop bypassed Initialise cleanup survivability"
+            );
+        }
+        let helper_start = source
+            .find("fn send_child_response_preserving_initialise_cleanup(")
+            .expect("shared response-loss helper");
+        let helper_end = source[helper_start..]
+            .find("\nfn correlated_response(")
+            .map(|offset| helper_start + offset)
+            .expect("shared response-loss helper boundary");
+        assert_eq!(
+            source[helper_start..helper_end]
+                .matches("send_credential_worker_response_with_deadline(")
+                .count(),
+            1,
+            "all operation-loop response sends must remain behind the shared helper"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

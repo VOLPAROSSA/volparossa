@@ -46,8 +46,8 @@
     },
     "checks": {
       "type": "array",
-      "minItems": 16,
-      "maxItems": 16,
+      "minItems": 18,
+      "maxItems": 18,
       "prefixItems": [
         {
           "$ref": "#/$defs/sourceTreeCleanCheck"
@@ -80,13 +80,19 @@
           "$ref": "#/$defs/productionIpcBoundaryCheck"
         },
         {
-          "$ref": "#/$defs/productionFdstoreZeroDuringRunCheck"
+          "$ref": "#/$defs/productionFdstoreZeroAtIdleObservationCheck"
+        },
+        {
+          "$ref": "#/$defs/productionFdstoreExactCustodyDuringActiveCyclesCheck"
+        },
+        {
+          "$ref": "#/$defs/productionFdstoreZeroAfterSettledCyclesCheck"
         },
         {
           "$ref": "#/$defs/productionRetiredUnitNotFoundCheck"
         },
         {
-          "$ref": "#/$defs/retirementJournalUnchangedCheck"
+          "$ref": "#/$defs/retirementJournalSettledAbsentCheck"
         },
         {
           "$ref": "#/$defs/retirementLockReleasedCheck"
@@ -204,15 +210,27 @@
       "additionalProperties": false,
       "required": [
         "argumentless",
-        "fdstore_during_run",
+        "fdstore_active_cycle_counts",
+        "fdstore_exact_identity_bound",
+        "fdstore_idle_observation",
+        "fdstore_settled_cycle_counts",
         "unit_load_state_after_retirement"
       ],
       "properties": {
         "argumentless": {
           "const": true
         },
-        "fdstore_during_run": {
+        "fdstore_active_cycle_counts": {
+          "const": [2, 2, 2]
+        },
+        "fdstore_exact_identity_bound": {
+          "const": true
+        },
+        "fdstore_idle_observation": {
           "const": 0
+        },
+        "fdstore_settled_cycle_counts": {
+          "const": [0, 0, 0]
         },
         "unit_load_state_after_retirement": {
           "const": "not-found"
@@ -226,12 +244,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "journal_unchanged",
+        "journal_settled_absent",
         "lock_released",
         "socket_absent"
       ],
       "properties": {
-        "journal_unchanged": {
+        "journal_settled_absent": {
           "const": true
         },
         "lock_released": {
@@ -440,11 +458,33 @@
         }
       }
     },
-    "productionFdstoreZeroDuringRunCheck": {
+    "productionFdstoreZeroAtIdleObservationCheck": {
       "$ref": "#/$defs/passCheck",
       "properties": {
         "id": {
-          "const": "PRODUCTION_FDSTORE_ZERO_DURING_RUN"
+          "const": "PRODUCTION_FDSTORE_ZERO_AT_IDLE_OBSERVATION"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "productionFdstoreExactCustodyDuringActiveCyclesCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "PRODUCTION_FDSTORE_EXACT_CUSTODY_DURING_ACTIVE_CYCLES"
+        },
+        "result": {
+          "const": "PASS"
+        }
+      }
+    },
+    "productionFdstoreZeroAfterSettledCyclesCheck": {
+      "$ref": "#/$defs/passCheck",
+      "properties": {
+        "id": {
+          "const": "PRODUCTION_FDSTORE_ZERO_AFTER_SETTLED_CYCLES"
         },
         "result": {
           "const": "PASS"
@@ -462,11 +502,11 @@
         }
       }
     },
-    "retirementJournalUnchangedCheck": {
+    "retirementJournalSettledAbsentCheck": {
       "$ref": "#/$defs/passCheck",
       "properties": {
         "id": {
-          "const": "RETIREMENT_JOURNAL_UNCHANGED"
+          "const": "RETIREMENT_JOURNAL_SETTLED_ABSENT"
         },
         "result": {
           "const": "PASS"

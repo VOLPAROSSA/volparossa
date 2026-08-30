@@ -317,6 +317,15 @@ absence of every owned local object before the coordinator releases endpoint lea
 state. A failed or ambiguous cleanup keeps authority quarantined for retry; it is never discarded
 because a remote grant expired.
 
+Before any parent-side birth-link mutation, internal worker protocol v4 requires `Initialise` to
+accept the same canonical role-complete Prepare plan and stage its exact child-namespace cleanup
+set. If Prepare never adopts a moved birth link, Destroy must delete and prove that staged set absent
+inside the still-pinned child namespace; `NotFound` is cleanup evidence only for a genuinely
+pre-birth lineage. A response-lost durable `Initialise` moves to a cleanup-only phase without
+killing the authenticated child. The next exact Destroy has a separate deadline and may reconcile
+at most one fully correlated late `Initialise` response; it never replays `Initialise`, accepts no
+foreign or duplicate record, and does not treat a lost Destroy response as cleanup evidence.
+
 At the half-open setup boundary (`now >= setup expiry`), retirement reconnects, sends read-only
 `BindHelperRuntime(None)`, and compares the retained per-process runtime ID before tag 28. Runtime
 mismatch sends no reconciliation request and remains quarantined. A matching tag 28 targets only the
@@ -326,6 +335,13 @@ Missing evidence, Activated/Committed state, unrelated state, or incomplete clea
 absence. Exact `Absent` tombstones remain in a 1024-entry runtime-lifetime ledger because no ACK
 protocol exists. Tag 28 itself retries exact Pending/Owned cleanup; tag 29 is an independent
 process-wide cleanup operation, neither part of route reconciliation nor an ACK.
+
+An unpublished Handoff failure is stored under a fresh serial, exact context and optional durable
+ownership selector. A later exact functional Destroy can take only that terminal. A definitive
+no-worker outcome retires its Intent directly; a worker-bearing outcome first requires exact
+generation reap and complete registry purge. Deadline or actor failure restores the same affine
+proof and selector, mismatch takes nothing, and ambiguous admission remains retained. This path
+cannot publish custody, open dispatch, send a child request or mutate network resources.
 
 External requests carry Unix expiries. On the first accepted Bind/Prepare intent the helper freezes
 matching process-local `CLOCK_BOOTTIME` setup and hard deadlines and carries them through the exact
@@ -361,14 +377,19 @@ sequentially in private namespaces and retained run 33301595311 proves the simul
 before forwarding. Non-retained run 33306523739 first proved the current exact single-path
 cross-leg fence, traffic, counter evidence, teardown and host-state boundary; retained exact-main
 run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced it as artifact 9731470248.
-The production manager does not call
-that helper-backed transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
-cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
-never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
-blocks startup. There is no production request-path issuance/arming writer, absence-proving
-recovery backend, restart reaper, or cross-runtime tag-28 proof. Tag 35 carries the exact canonical
-closed Prepare plan needed by that store, but production does not yet issue it; journal absence is
-not cleanup proof. Client ingress is also
+The current 18-check exact-head contract additionally requires active Client/Exit/Relay FD-store
+counts `[2, 2, 2]` bound to exact pidfd/network-namespace identities, settled counts `[0, 0, 0]`, and
+exactly three stable `Absent(RecoveredMayOwn)` journal tombstones for the Client, ordered Relay pair
+and Exit plans. Its unit, schema, fixture and shell checks pass, but no privileged KVM run or retained
+artifact has exercised it; the older 16-check artifact remains historical helper-boundary evidence.
+The production manager does not call that helper-backed transaction. A boot-scoped, secret-free
+canonical/CAS ownership actor starts before
+cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now
+reconstructs and registers tag 35's exact canonical intent before worker reservation, then carries
+its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. The
+refusing restart executor still leaves inherited `MayOwnPrepare` byte-identical and blocks startup;
+there is no inherited-custody recovery backend, restart reaper, or cross-runtime tag-28 proof.
+Journal absence is not cleanup proof. Client ingress is also
 blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
 helper's isolated endpoint-lifecycle path reaches Probe/Commit. Route-level end-to-end configuration and
 Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. Retained run 33294974441

@@ -8,9 +8,10 @@
 //! inside its exact private namespace, and atomically admits the two context-bound directions with
 //! authenticated rate and hard-expiry bounds. Probe-Commit requires a recent handshake plus strict
 //! `WireGuard` and forwarding-counter growth on both legs. This seam proves only helper-internal
-//! Relay forwarding; it does not yet claim a complete client-to-destination datapath or durable
-//! crash/restart recovery. Durable journal and systemd descriptor-store composition stay closed
-//! until their affine recovery path is complete.
+//! Relay forwarding; it does not yet claim a complete client-to-destination datapath or
+//! crash/restart recovery. Production Prepare now completes the durable journal plus systemd
+//! descriptor-store handoff before child/kernel mutation, and same-runtime clean teardown settles
+//! that exact custody. Inherited-custody recovery after a helper restart remains fail-closed.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -26,9 +27,9 @@ use volparossa_protocol::{
     relay_reservation_request_sha256, verify_control_message, verify_relay_reservation,
 };
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, ContextRole, HELPER_HANDLE_BYTES,
-    LeasePlan as RoutingLeasePlan, PrepareLeaseBatch, PublicUdpEndpoint,
-    UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
+    AcquireTransportSocket, ActivateLeaseBatch, ClosedPreparePlan, ContextRole,
+    HELPER_HANDLE_BYTES, LeasePlan as RoutingLeasePlan, PrepareIntent, PrepareLeaseBatch,
+    PublicUdpEndpoint, UnderlayEvidence as RoutingUnderlayEvidence, WireguardRole,
 };
 
 use crate::{
@@ -48,14 +49,20 @@ use crate::{
     },
     kernel::{BirthLinkError, BirthNamespaceKernel, LiveWireguardLeaseOwner},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
-    ownership_journal::DurableWireguardResource,
+    ownership_journal::{
+        DurableCleanupConfirmed, DurableCleanupOutcome, DurableIntentRegistration,
+        DurableManagerAbsentOutcome, DurableOwnershipPrepareHandle, DurablePrepareSettlement,
+        DurableWireguardResource,
+    },
     underlay::{UnderlayCandidate, collect_consistent_direct_underlay},
 };
 
 use super::{
-    DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_TTL, ShutdownStatus, WorkerCoordinator,
-    WorkerGenerationOwnership, WorkerGenerationReap, WorkerLifecycleAdmission,
-    WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
+    ConfirmedWorkerGenerationAbsent, DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_TTL,
+    DurableFunctionalPrepareFailure, DurableFunctionalWorkerOwnership,
+    DurableHandoffPrepareFailure, DurableHandoffTerminalSelector, DurableHandoffTerminalSettlement,
+    ShutdownStatus, WorkerCoordinator, WorkerGenerationOwnership, WorkerGenerationReap,
+    WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
 };
 
 const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 1;
@@ -71,7 +78,9 @@ const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 25;
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
 /// Install the deliberately narrow process-owned backend used only by the production server.
-pub(crate) fn functional_alpha_lease_backend() -> Arc<dyn AsyncLeaseBackend> {
+pub(crate) fn functional_alpha_lease_backend(
+    durable_ownership: DurableOwnershipPrepareHandle,
+) -> Arc<dyn AsyncLeaseBackend> {
     Arc::new(FunctionalAlphaLeaseBackend {
         coordinator: WorkerCoordinator::new(WorkerRegistry::new(
             MAX_FUNCTIONAL_ALPHA_CONTEXTS,
@@ -80,6 +89,7 @@ pub(crate) fn functional_alpha_lease_backend() -> Arc<dyn AsyncLeaseBackend> {
         )),
         relay_replay: Mutex::new(functional_alpha_replay_cache()),
         state: Mutex::new(None),
+        durable_ownership: Some(durable_ownership),
     })
 }
 
@@ -94,6 +104,9 @@ struct FunctionalAlphaLeaseBackend {
     coordinator: WorkerCoordinator,
     relay_replay: Mutex<ReplayCache>,
     state: Mutex<Option<OpenLeaseEntry>>,
+    /// Always present in production. `None` exists only for narrow unit fixtures which never
+    /// execute Prepare.
+    durable_ownership: Option<DurableOwnershipPrepareHandle>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -128,7 +141,11 @@ impl From<BackendLineage> for OpenLineageKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenLeasePhase {
     Reserved,
+    DurableHandoffPending,
     Registered,
+    /// The exact Initialise cleanup fence is armed. This does not assert that dispatch occurred;
+    /// only exact staged Destroy settlement may advance cleanup from this phase.
+    InitialiseCleanupPending,
     Initialised,
     BirthMayExist,
     Prepared,
@@ -171,6 +188,8 @@ struct OpenLeaseEntry {
     context_role: ContextRole,
     worker: Option<WorkerGenerationOwnership>,
     recovery: Option<WorkerRecoveryIdentitySource>,
+    durable: Option<DurableLeaseCustody>,
+    durable_handoff_terminal: Option<DurableHandoffTerminalSelector>,
     wireguard: Vec<LiveWireguardLeaseOwner>,
     prepare: PrepareLeases,
     underlay: UnderlayCandidate,
@@ -178,9 +197,176 @@ struct OpenLeaseEntry {
     activated: Vec<ActivatedWorkerLease>,
     phase: OpenLeasePhase,
     birth_may_exist: Vec<bool>,
+    /// Safe phase/birth-classified exact child `Destroyed` response observed before worker reap.
+    /// Durable settlement must never infer worker-namespace cleanup from process death while
+    /// systemd still pins that namespace.
+    child_cleanup: Option<ExactChildCleanupConfirmed>,
+    /// Affine exact-generation reap and complete registry-purge authority. A missing worker owner
+    /// is not by itself absence evidence.
+    worker_cleanup: Option<ConfirmedWorkerGenerationAbsent>,
+}
+
+enum DurableJournalSettlement {
+    MayOwn(DurablePrepareSettlement),
+    CleanupProven(ExactSameRuntimeCleanupProof),
+    CleanupConfirmed(DurableCleanupConfirmed),
+    RemovalAmbiguous {
+        cleanup: DurableCleanupConfirmed,
+        attempt_id: crate::systemd_fdstore::RemovalAttemptId,
+    },
+    RemovalRetryAuthorized {
+        cleanup: DurableCleanupConfirmed,
+        evidence: Box<crate::systemd_fdstore::ExactStillPresentRemovalEvidence>,
+    },
+    ManagerRemovalProven(ExactSameRuntimeManagerAbsenceProof),
+}
+
+struct DurableLeaseCustody {
+    settlement: DurableJournalSettlement,
+    custody_name: crate::systemd_fdstore::CustodyFdName,
+    attestation: crate::systemd_fdstore::InventoryAttestation,
+}
+
+struct ExactChildCleanupConfirmed {
+    key: OpenLineageKey,
+}
+
+struct ExactParentKernelAbsent {
+    key: OpenLineageKey,
+}
+
+impl ExactParentKernelAbsent {
+    fn after_exact_parent_kernel_absence(key: OpenLineageKey) -> Self {
+        Self { key }
+    }
+}
+
+enum ExactSameRuntimeCleanupEvidence {
+    Production(Box<ExactProductionCleanupEvidence>),
+    #[cfg(test)]
+    Fixture,
+}
+
+struct ExactProductionCleanupEvidence {
+    _child: ExactChildCleanupConfirmed,
+    _worker: ConfirmedWorkerGenerationAbsent,
+    _parent: ExactParentKernelAbsent,
+}
+
+/// Opaque authority that the functional backend may mint only after an exact child `Destroyed`
+/// response, exact worker-generation reap and complete parent/kernel absence.
+///
+/// Its field and constructor remain private to this module. Other crate modules can only retain or
+/// consume a proof which this backend already produced.
+#[must_use = "exact same-runtime cleanup evidence must be consumed or retained"]
+pub(crate) struct ExactSameRuntimeCleanupProof {
+    settlement: DurablePrepareSettlement,
+    _evidence: ExactSameRuntimeCleanupEvidence,
+}
+
+impl ExactSameRuntimeCleanupProof {
+    fn after_exact_worker_kernel_cleanup(
+        settlement: DurablePrepareSettlement,
+        child: ExactChildCleanupConfirmed,
+        worker: ConfirmedWorkerGenerationAbsent,
+        parent: ExactParentKernelAbsent,
+    ) -> Self {
+        if child.key != parent.key
+            || worker.coordinates.context_id != child.key.context_id
+            || settlement.context_id() != child.key.context_id
+        {
+            std::process::abort();
+        }
+        Self {
+            settlement,
+            _evidence: ExactSameRuntimeCleanupEvidence::Production(Box::new(
+                ExactProductionCleanupEvidence {
+                    _child: child,
+                    _worker: worker,
+                    _parent: parent,
+                },
+            )),
+        }
+    }
+
+    pub(crate) const fn settlement(&self) -> &DurablePrepareSettlement {
+        &self.settlement
+    }
+
+    pub(crate) fn into_settlement(self) -> DurablePrepareSettlement {
+        self.settlement
+    }
+}
+
+impl std::fmt::Debug for ExactSameRuntimeCleanupProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ExactSameRuntimeCleanupProof(<redacted>)")
+    }
+}
+
+enum ExactManagerRemovalEvidence {
+    Production(Box<crate::systemd_fdstore::ExactRemovalProof>),
+    #[cfg(test)]
+    Fixture,
+}
+
+/// Opaque authority that the functional backend may mint only from exact named-removal evidence.
+///
+/// The exact systemd proof stays owned inside this value until the journal reaches `Absent` or the
+/// complete affine proof is returned for retry.
+#[must_use = "exact manager-absence evidence must be consumed or retained"]
+pub(crate) struct ExactSameRuntimeManagerAbsenceProof {
+    cleanup: DurableCleanupConfirmed,
+    _removal: ExactManagerRemovalEvidence,
+}
+
+impl ExactSameRuntimeManagerAbsenceProof {
+    fn after_exact_named_removal(
+        cleanup: DurableCleanupConfirmed,
+        removal: crate::systemd_fdstore::ExactRemovalProof,
+    ) -> Self {
+        Self {
+            cleanup,
+            _removal: ExactManagerRemovalEvidence::Production(Box::new(removal)),
+        }
+    }
+
+    pub(crate) const fn cleanup(&self) -> &DurableCleanupConfirmed {
+        &self.cleanup
+    }
+}
+
+impl std::fmt::Debug for ExactSameRuntimeManagerAbsenceProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ExactSameRuntimeManagerAbsenceProof(<redacted>)")
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn exact_same_runtime_cleanup_proof_for_test(
+    settlement: DurablePrepareSettlement,
+) -> ExactSameRuntimeCleanupProof {
+    ExactSameRuntimeCleanupProof {
+        settlement,
+        _evidence: ExactSameRuntimeCleanupEvidence::Fixture,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn exact_same_runtime_manager_absence_proof_for_test(
+    cleanup: DurableCleanupConfirmed,
+) -> ExactSameRuntimeManagerAbsenceProof {
+    ExactSameRuntimeManagerAbsenceProof {
+        cleanup,
+        _removal: ExactManagerRemovalEvidence::Fixture,
+    }
 }
 
 impl FunctionalAlphaLeaseBackend {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "durable handoff and the first child mutation remain one auditable transaction"
+    )]
     async fn prepare_one(
         &self,
         binding: BackendBinding,
@@ -194,13 +380,71 @@ impl FunctionalAlphaLeaseBackend {
             .ok_or(BackendError::Invalid)?;
         let deadline = prepare_deadline(binding)?;
         let operation_deadline = worker_operation_deadline(deadline)?;
+        let durable_handle = self
+            .durable_ownership
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?;
+        let intent = reconstruct_durable_prepare_intent(binding.lineage, &value)?;
+        let registration =
+            DurableIntentRegistration::try_from_wire(binding.lineage.helper_runtime_id, &intent)
+                .map_err(|_| BackendError::Invalid)?;
         let underlay = collect_consistent_direct_underlay(operation_deadline)
             .map_err(|_| BackendError::Unavailable)?;
-        let wireguard = leases
-            .iter()
-            .map(|lease| process_owned_resource(key, lease))
-            .collect::<Result<Vec<_>, _>>()?;
-        if wireguard.len() != leases.len()
+        self.reserve_entry(key, context_role, underlay)?;
+        {
+            let mut state = lock_state(&self.state);
+            exact_entry_mut(&mut state, key)?.phase = OpenLeasePhase::DurableHandoffPending;
+        }
+        let durable = match self
+            .coordinator
+            .durable_functional_prepare_until(
+                durable_handle,
+                registration,
+                context_role,
+                path_id,
+                context_ttl,
+                operation_deadline,
+            )
+            .await
+        {
+            Ok(durable) => durable,
+            Err(DurableFunctionalPrepareFailure::Handoff(DurableHandoffPrepareFailure {
+                error: _,
+                selector,
+            })) => {
+                if selector.context_id() != key.context_id {
+                    std::process::abort();
+                }
+                let mut state = lock_state(&self.state);
+                let entry = exact_entry_mut(&mut state, key)?;
+                if entry.durable_handoff_terminal.replace(selector).is_some() {
+                    std::process::abort();
+                }
+                return Err(BackendError::CleanupIncomplete);
+            }
+            Err(DurableFunctionalPrepareFailure::Later(_error)) => {
+                return Err(BackendError::CleanupIncomplete);
+            }
+        };
+        let DurableFunctionalWorkerOwnership {
+            settlement,
+            resources,
+            prepare,
+            worker,
+            source,
+            custody_name,
+            attestation,
+        } = durable;
+        let wireguard = resources
+            .into_iter()
+            .map(LiveWireguardLeaseOwner::claim)
+            .collect::<Vec<_>>();
+        if settlement.context_id() != key.context_id
+            || prepare.route_context_id.as_slice() != key.context_id.as_slice()
+            || wireguard.len() != leases.len()
+            || wireguard.iter().zip(&leases).any(|(owner, lease)| {
+                owner.resource().key() != (u8::try_from(lease.path_id).unwrap_or(0), lease.role)
+            })
             || wireguard.iter().enumerate().any(|(index, owner)| {
                 wireguard[index + 1..].iter().any(|other| {
                     owner.resource().key() == other.resource().key()
@@ -209,22 +453,34 @@ impl FunctionalAlphaLeaseBackend {
                 })
             })
         {
-            return Err(BackendError::Invalid);
+            // Dispatch is already durably open; retain every owner in the process and fail closed.
+            let mut state = lock_state(&self.state);
+            let entry = exact_entry_mut(&mut state, key)?;
+            entry.worker = Some(worker);
+            entry.recovery = Some(source);
+            entry.wireguard = wireguard;
+            entry.prepare = prepare;
+            entry.durable = Some(DurableLeaseCustody {
+                settlement: DurableJournalSettlement::MayOwn(settlement),
+                custody_name,
+                attestation,
+            });
+            return Err(BackendError::CleanupIncomplete);
         }
-        let prepare = internal_prepare_batch_plan(&wireguard, key, &leases)?;
-
-        self.reserve_entry(key, context_role, wireguard, prepare, underlay)?;
-        self.admit_worker(
-            key,
-            context_role,
-            path_id,
-            context_ttl,
-            operation_deadline,
-            deadline,
-        )
-        .await?;
-        if let Err(error) = self.retain_recovery_source(key, operation_deadline) {
-            return Err(self.cleanup_after_failure(key, deadline, error).await);
+        {
+            let mut state = lock_state(&self.state);
+            let entry = exact_entry_mut(&mut state, key)?;
+            entry.worker = Some(worker);
+            entry.recovery = Some(source);
+            entry.wireguard = wireguard;
+            entry.prepare = prepare;
+            entry.durable = Some(DurableLeaseCustody {
+                settlement: DurableJournalSettlement::MayOwn(settlement),
+                custody_name,
+                attestation,
+            });
+            entry.birth_may_exist = vec![false; entry.wireguard.len()];
+            entry.phase = OpenLeasePhase::Registered;
         }
         if let Err(error) = self.initialise_child(key, &value, operation_deadline).await {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
@@ -266,27 +522,31 @@ impl FunctionalAlphaLeaseBackend {
         &self,
         key: OpenLineageKey,
         context_role: ContextRole,
-        wireguard: Vec<LiveWireguardLeaseOwner>,
-        prepare: PrepareLeases,
         underlay: UnderlayCandidate,
     ) -> Result<(), BackendError> {
         let mut state = lock_state(&self.state);
         if state.is_some() {
             return Err(BackendError::Capacity);
         }
-        let birth_may_exist = vec![false; wireguard.len()];
         *state = Some(OpenLeaseEntry {
             key,
             context_role,
             worker: None,
             recovery: None,
-            wireguard,
-            prepare,
+            durable: None,
+            durable_handoff_terminal: None,
+            wireguard: Vec::new(),
+            prepare: PrepareLeases {
+                route_context_id: key.context_id.to_vec(),
+                leases: Vec::new(),
+            },
             underlay,
             prepared: Vec::new(),
             activated: Vec::new(),
             phase: OpenLeasePhase::Reserved,
-            birth_may_exist,
+            birth_may_exist: Vec::new(),
+            child_cleanup: None,
+            worker_cleanup: None,
         });
         Ok(())
     }
@@ -360,7 +620,7 @@ impl FunctionalAlphaLeaseBackend {
         value: &PrepareLeaseBatch,
         deadline: HardDeadline,
     ) -> Result<(), BackendError> {
-        let (generation, context_role) = {
+        let (generation, context_role, prepare) = {
             let state = lock_state(&self.state);
             let entry = exact_entry(state.as_ref(), key)?;
             let generation = entry
@@ -370,7 +630,7 @@ impl FunctionalAlphaLeaseBackend {
                 .coordinates
                 .worker_generation
                 .get();
-            (generation, entry.context_role)
+            (generation, entry.context_role, entry.prepare.clone())
         };
         let internal_context = internal_context_role(context_role).ok_or(BackendError::Invalid)?;
         let request = worker_request(
@@ -380,8 +640,20 @@ impl FunctionalAlphaLeaseBackend {
                 role: internal_context as i32,
                 mptcp_accepted_addrs: value.mptcp_accepted_addrs,
                 mptcp_subflows: value.mptcp_subflows,
+                prepare: Some(prepare),
             }),
         );
+        {
+            let mut state = lock_state(&self.state);
+            let entry = exact_entry_mut(&mut state, key)?;
+            if entry.phase != OpenLeasePhase::Registered || entry.child_cleanup.is_some() {
+                return Err(BackendError::CleanupIncomplete);
+            }
+            // Linearize the possible child mutation before dispatch. Cancellation, a definite
+            // child error and response loss must all route through the same exact staged Destroy;
+            // the deterministic request tombstone prevents a blind Initialise replay.
+            entry.phase = OpenLeasePhase::InitialiseCleanupPending;
+        }
         let execution = self
             .coordinator
             .execute_until(key.context_id, generation, request, deadline)
@@ -717,19 +989,67 @@ impl FunctionalAlphaLeaseBackend {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "worker, kernel and durable cleanup ordering remains one auditable transaction"
+    )]
     async fn cleanup_exact(
         &self,
         key: OpenLineageKey,
         deadline: HardDeadline,
         request_child_destroy: bool,
     ) -> bool {
+        let handoff_terminal = {
+            let mut state = lock_state(&self.state);
+            state.as_mut().and_then(|entry| {
+                if entry.key == key
+                    && entry.phase == OpenLeasePhase::DurableHandoffPending
+                    && entry.worker.is_none()
+                {
+                    entry.durable_handoff_terminal.take()
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(selector) = handoff_terminal {
+            let Some(handle) = self.durable_ownership.as_ref() else {
+                self.restore_durable_handoff_terminal(key, selector);
+                return false;
+            };
+            match self.coordinator.settle_durable_handoff_terminal_until(
+                handle,
+                selector,
+                key.context_id,
+                deadline,
+            ) {
+                DurableHandoffTerminalSettlement::Absent => {
+                    return remove_exact_entry(&self.state, key);
+                }
+                DurableHandoffTerminalSettlement::Retained { error: _, selector } => {
+                    self.restore_durable_handoff_terminal(key, selector);
+                    return false;
+                }
+            }
+        }
+        if lock_state(&self.state).as_ref().is_some_and(|entry| {
+            entry.key == key
+                && entry.phase == OpenLeasePhase::DurableHandoffPending
+                && entry.worker.is_none()
+        }) {
+            // The coordinator retains the exact failed handoff terminal. No local cleanup path may
+            // erase the corresponding durable record or make shutdown appear complete.
+            return false;
+        }
         let generation = entry_generation(&self.state, key).ok();
         let should_destroy = request_child_destroy
             && lock_state(&self.state).as_ref().is_some_and(|entry| {
                 entry.key == key
+                    && entry.child_cleanup.is_none()
                     && matches!(
                         entry.phase,
-                        OpenLeasePhase::Initialised
+                        OpenLeasePhase::InitialiseCleanupPending
+                            | OpenLeasePhase::Initialised
                             | OpenLeasePhase::BirthMayExist
                             | OpenLeasePhase::Prepared
                             | OpenLeasePhase::Activated
@@ -744,11 +1064,30 @@ impl FunctionalAlphaLeaseBackend {
                 }),
             );
             if let Ok(destroy_deadline) = worker_operation_deadline(deadline) {
-                let _ = self
+                let execution = self
                     .coordinator
                     .execute_until(key.context_id, generation, destroy, destroy_deadline)
                     .await;
+                let mut state = lock_state(&self.state);
+                let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                    return false;
+                };
+                entry.child_cleanup =
+                    classify_exact_child_cleanup(entry, key, execution.as_ref().ok());
             }
+        }
+
+        if lock_state(&self.state).as_ref().is_some_and(|entry| {
+            entry.key == key
+                && entry.durable.as_ref().is_some_and(|custody| {
+                    matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+                })
+                && entry.child_cleanup.is_none()
+        }) {
+            // Exact child cleanup did not complete. Keep the worker and all recovery authority
+            // available for a later same-runtime Destroy retry; process death is not namespace
+            // cleanup evidence while PID 1 still owns the published namespace descriptor.
+            return false;
         }
 
         let worker = {
@@ -763,7 +1102,7 @@ impl FunctionalAlphaLeaseBackend {
                 .coordinator
                 .settle_and_terminate_lifecycle_until(worker, deadline)
             {
-                WorkerGenerationReap::Confirmed(_) => {
+                WorkerGenerationReap::Confirmed(proof) => {
                     // Process death alone does not destroy an anonymous network namespace while
                     // duplicated recovery descriptors still pin it. Consume those descriptors
                     // immediately after exact reap confirmation, before any fallible parent-link
@@ -773,7 +1112,15 @@ impl FunctionalAlphaLeaseBackend {
                         let Ok(entry) = exact_entry_mut(&mut state, key) else {
                             return false;
                         };
-                        entry.recovery.take()
+                        if entry.durable.is_none() {
+                            drop(proof);
+                            entry.recovery.take()
+                        } else {
+                            if entry.worker_cleanup.replace(proof).is_some() {
+                                std::process::abort();
+                            }
+                            None
+                        }
                     };
                     drop(recovery);
                 }
@@ -821,7 +1168,322 @@ impl FunctionalAlphaLeaseBackend {
         if !parent_absent || deadline.ensure_remaining().is_err() {
             return false;
         }
+        let durable_cleanup_ready = lock_state(&self.state)
+            .as_ref()
+            .filter(|entry| entry.key == key)
+            .and_then(|entry| {
+                entry.durable.as_ref().map(|custody| {
+                    !matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+                        || (entry.child_cleanup.is_some() && entry.worker_cleanup.is_some())
+                })
+            });
+        if let Some(cleanup_ready) = durable_cleanup_ready {
+            if !cleanup_ready {
+                return false;
+            }
+            let parent = ExactParentKernelAbsent::after_exact_parent_kernel_absence(key);
+            if !self.settle_durable_cleanup(key, parent, deadline).await {
+                return false;
+            }
+        }
         remove_exact_entry(&self.state, key)
+    }
+
+    fn restore_durable_handoff_terminal(
+        &self,
+        key: OpenLineageKey,
+        selector: DurableHandoffTerminalSelector,
+    ) {
+        let mut state = lock_state(&self.state);
+        let Ok(entry) = exact_entry_mut(&mut state, key) else {
+            std::process::abort();
+        };
+        if entry.phase != OpenLeasePhase::DurableHandoffPending
+            || entry.worker.is_some()
+            || entry.durable_handoff_terminal.replace(selector).is_some()
+        {
+            std::process::abort();
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "both journal phases and exact manager removal remain one affine transaction"
+    )]
+    async fn settle_durable_cleanup(
+        &self,
+        key: OpenLineageKey,
+        parent: ExactParentKernelAbsent,
+        deadline: HardDeadline,
+    ) -> bool {
+        let Some(handle) = self.durable_ownership.as_ref() else {
+            return false;
+        };
+        let (mut custody, recovery, child, worker) = {
+            let mut state = lock_state(&self.state);
+            let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                return false;
+            };
+            if entry.durable.is_none() || entry.recovery.is_none() {
+                return false;
+            }
+            if entry
+                .durable
+                .as_ref()
+                .is_none_or(|custody| custody_context_id(custody) != key.context_id)
+            {
+                return false;
+            }
+            let requires_cleanup_evidence = entry.durable.as_ref().is_some_and(|custody| {
+                matches!(custody.settlement, DurableJournalSettlement::MayOwn(_))
+            });
+            if requires_cleanup_evidence
+                && (entry.child_cleanup.is_none() || entry.worker_cleanup.is_none())
+            {
+                return false;
+            }
+            let Some(custody) = entry.durable.take() else {
+                std::process::abort();
+            };
+            let Some(recovery) = entry.recovery.take() else {
+                std::process::abort();
+            };
+            (
+                custody,
+                recovery,
+                entry.child_cleanup.take(),
+                entry.worker_cleanup.take(),
+            )
+        };
+        if custody_context_id(&custody) != key.context_id {
+            std::process::abort();
+        }
+
+        custody.settlement = match custody.settlement {
+            DurableJournalSettlement::MayOwn(settlement) => {
+                let (Some(child), Some(worker)) = (child, worker) else {
+                    std::process::abort();
+                };
+                DurableJournalSettlement::CleanupProven(
+                    ExactSameRuntimeCleanupProof::after_exact_worker_kernel_cleanup(
+                        settlement, child, worker, parent,
+                    ),
+                )
+            }
+            settlement => settlement,
+        };
+
+        custody.settlement = match custody.settlement {
+            DurableJournalSettlement::CleanupProven(proof) => {
+                match handle.confirm_cleanup_until(proof, deadline) {
+                    DurableCleanupOutcome::Confirmed(cleanup) => {
+                        DurableJournalSettlement::CleanupConfirmed(cleanup)
+                    }
+                    DurableCleanupOutcome::Retained { proof, .. } => {
+                        custody.settlement = DurableJournalSettlement::CleanupProven(proof);
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                }
+            }
+            settlement => settlement,
+        };
+
+        let Ok(pair) = crate::systemd_fdstore::BorrowedCustodyPair::new(
+            recovery.restart_custody.borrowed_pidfd(),
+            recovery.restart_custody.borrowed_network_namespace(),
+        ) else {
+            self.restore_durable_cleanup(key, custody, recovery);
+            return false;
+        };
+        let Ok(binding) = pair.descriptor_binding() else {
+            self.restore_durable_cleanup(key, custody, recovery);
+            return false;
+        };
+
+        custody.settlement = match custody.settlement {
+            DurableJournalSettlement::CleanupConfirmed(cleanup) => {
+                let Some(baseline) = custody.attestation.removal_baseline() else {
+                    custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
+                    self.restore_durable_cleanup(key, custody, recovery);
+                    return false;
+                };
+                match crate::systemd_fdstore::remove_current_process_custody(
+                    baseline,
+                    custody.custody_name,
+                    binding.clone(),
+                    pair,
+                    deadline,
+                )
+                .await
+                {
+                    Ok(proof) => {
+                        if proof
+                            .verify_exact_target(custody.custody_name, &binding)
+                            .is_err()
+                        {
+                            custody.settlement =
+                                DurableJournalSettlement::CleanupConfirmed(cleanup);
+                            self.restore_durable_cleanup(key, custody, recovery);
+                            return false;
+                        }
+                        DurableJournalSettlement::ManagerRemovalProven(
+                            ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(
+                                cleanup, proof,
+                            ),
+                        )
+                    }
+                    Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
+                        custody.settlement = DurableJournalSettlement::CleanupConfirmed(cleanup);
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                    Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
+                        attempt_id,
+                        ..
+                    }) => {
+                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                            cleanup,
+                            attempt_id,
+                        };
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                }
+            }
+            DurableJournalSettlement::RemovalAmbiguous {
+                cleanup,
+                attempt_id,
+            } => match crate::systemd_fdstore::reconcile_current_process_removal(
+                attempt_id,
+                custody.custody_name,
+                binding.clone(),
+                pair,
+                deadline,
+            )
+            .await
+            {
+                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactRemoved(proof) => {
+                    if proof
+                        .verify_exact_target(custody.custody_name, &binding)
+                        .is_err()
+                    {
+                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                            cleanup,
+                            attempt_id,
+                        };
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                    DurableJournalSettlement::ManagerRemovalProven(
+                        ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(
+                            cleanup, proof,
+                        ),
+                    )
+                }
+                crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(
+                    evidence,
+                ) => {
+                    custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
+                        cleanup,
+                        evidence: Box::new(evidence),
+                    };
+                    self.restore_durable_cleanup(key, custody, recovery);
+                    return false;
+                }
+                crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved { .. } => {
+                    custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                        cleanup,
+                        attempt_id,
+                    };
+                    self.restore_durable_cleanup(key, custody, recovery);
+                    return false;
+                }
+            },
+            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence } => {
+                match crate::systemd_fdstore::retry_current_process_removal(
+                    &evidence,
+                    custody.custody_name,
+                    binding.clone(),
+                    pair,
+                    deadline,
+                )
+                .await
+                {
+                    Ok(proof) => {
+                        if proof
+                            .verify_exact_target(custody.custody_name, &binding)
+                            .is_err()
+                        {
+                            custody.settlement = DurableJournalSettlement::RemovalRetryAuthorized {
+                                cleanup,
+                                evidence,
+                            };
+                            self.restore_durable_cleanup(key, custody, recovery);
+                            return false;
+                        }
+                        DurableJournalSettlement::ManagerRemovalProven(
+                            ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(
+                                cleanup, proof,
+                            ),
+                        )
+                    }
+                    Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { .. }) => {
+                        custody.settlement =
+                            DurableJournalSettlement::RemovalRetryAuthorized { cleanup, evidence };
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                    Err(crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
+                        attempt_id,
+                        ..
+                    }) => {
+                        custody.settlement = DurableJournalSettlement::RemovalAmbiguous {
+                            cleanup,
+                            attempt_id,
+                        };
+                        self.restore_durable_cleanup(key, custody, recovery);
+                        return false;
+                    }
+                }
+            }
+            settlement @ DurableJournalSettlement::ManagerRemovalProven(_) => settlement,
+            DurableJournalSettlement::MayOwn(_) | DurableJournalSettlement::CleanupProven(_) => {
+                std::process::abort()
+            }
+        };
+
+        let DurableJournalSettlement::ManagerRemovalProven(proof) = custody.settlement else {
+            std::process::abort();
+        };
+        match handle.confirm_manager_absent_until(proof, deadline) {
+            DurableManagerAbsentOutcome::Absent => {
+                drop(recovery);
+                true
+            }
+            DurableManagerAbsentOutcome::Retained { proof, .. } => {
+                custody.settlement = DurableJournalSettlement::ManagerRemovalProven(proof);
+                self.restore_durable_cleanup(key, custody, recovery);
+                false
+            }
+        }
+    }
+
+    fn restore_durable_cleanup(
+        &self,
+        key: OpenLineageKey,
+        custody: DurableLeaseCustody,
+        recovery: WorkerRecoveryIdentitySource,
+    ) {
+        let mut state = lock_state(&self.state);
+        let Ok(entry) = exact_entry_mut(&mut state, key) else {
+            std::process::abort();
+        };
+        if entry.durable.is_some() || entry.recovery.is_some() {
+            std::process::abort();
+        }
+        entry.durable = Some(custody);
+        entry.recovery = Some(recovery);
     }
 
     async fn destroy_one(
@@ -1028,6 +1690,37 @@ fn validate_prepare_batch_binding(
         value.leases.clone(),
         context_ttl,
     ))
+}
+
+/// Reconstruct the exact wire intent accepted by Bind from the immutable engine lineage and the
+/// subsequently correlated canonical Prepare batch.
+fn reconstruct_durable_prepare_intent(
+    lineage: BackendLineage,
+    value: &PrepareLeaseBatch,
+) -> Result<PrepareIntent, BackendError> {
+    if value.route_context_id.as_slice() != lineage.context_id.as_slice()
+        || value.setup_expires_at_unix != lineage.setup_expires_at_unix
+        || value.hard_expires_at_unix != lineage.hard_expires_at_unix
+        || lineage.helper_runtime_id.iter().all(|byte| *byte == 0)
+        || lineage.prepare_request_id.iter().all(|byte| *byte == 0)
+        || lineage
+            .prepare_operation_digest
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(PrepareIntent {
+        route_context_id: value.route_context_id.clone(),
+        prepare_request_id: lineage.prepare_request_id.to_vec(),
+        prepare_operation_digest: lineage.prepare_operation_digest.to_vec(),
+        setup_expires_at_unix: value.setup_expires_at_unix,
+        hard_expires_at_unix: value.hard_expires_at_unix,
+        closed_plan: Some(ClosedPreparePlan {
+            context_role: value.role,
+            leases: value.leases.clone(),
+        }),
+    })
 }
 
 fn validate_activate_batch_binding(
@@ -2233,6 +2926,62 @@ fn matches_initialised(
     })
 }
 
+fn exact_child_cleanup_is_confirmed(
+    execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
+    phase: OpenLeasePhase,
+    birth_may_exist: &[bool],
+    resource_count: usize,
+) -> bool {
+    if resource_count == 0 || birth_may_exist.len() != resource_count {
+        return false;
+    }
+    let Some(execution) = execution.filter(|execution| execution.descriptor.is_none()) else {
+        return false;
+    };
+    match (
+        InternalWorkerResult::try_from(execution.response.result).ok(),
+        execution.response.outcome.as_ref(),
+    ) {
+        (Some(InternalWorkerResult::Ok), Some(internal_worker_response::Outcome::Destroyed(_))) => {
+            matches!(
+                phase,
+                OpenLeasePhase::InitialiseCleanupPending
+                    | OpenLeasePhase::Initialised
+                    | OpenLeasePhase::BirthMayExist
+                    | OpenLeasePhase::Prepared
+                    | OpenLeasePhase::Activated
+                    | OpenLeasePhase::Committed
+            )
+        }
+        (Some(InternalWorkerResult::NotFound), None) => {
+            matches!(
+                phase,
+                OpenLeasePhase::InitialiseCleanupPending
+                    | OpenLeasePhase::Initialised
+                    | OpenLeasePhase::BirthMayExist
+            ) && birth_may_exist.iter().all(|may_exist| !*may_exist)
+        }
+        _ => false,
+    }
+}
+
+fn classify_exact_child_cleanup(
+    entry: &OpenLeaseEntry,
+    key: OpenLineageKey,
+    execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
+) -> Option<ExactChildCleanupConfirmed> {
+    if entry.key != key {
+        return None;
+    }
+    exact_child_cleanup_is_confirmed(
+        execution,
+        entry.phase,
+        &entry.birth_may_exist,
+        entry.wireguard.len(),
+    )
+    .then_some(ExactChildCleanupConfirmed { key })
+}
+
 fn matches_prepared_batch(
     execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
     leases: &[RoutingLeasePlan],
@@ -2470,6 +3219,17 @@ fn remove_exact_entry(state: &Mutex<Option<OpenLeaseEntry>>, key: OpenLineageKey
     }
 }
 
+fn custody_context_id(custody: &DurableLeaseCustody) -> [u8; 16] {
+    match &custody.settlement {
+        DurableJournalSettlement::MayOwn(settlement) => settlement.context_id(),
+        DurableJournalSettlement::CleanupProven(proof) => proof.settlement().context_id(),
+        DurableJournalSettlement::CleanupConfirmed(cleanup)
+        | DurableJournalSettlement::RemovalAmbiguous { cleanup, .. }
+        | DurableJournalSettlement::RemovalRetryAuthorized { cleanup, .. } => cleanup.context_id(),
+        DurableJournalSettlement::ManagerRemovalProven(proof) => proof.cleanup().context_id(),
+    }
+}
+
 fn lock_state(
     state: &Mutex<Option<OpenLeaseEntry>>,
 ) -> std::sync::MutexGuard<'_, Option<OpenLeaseEntry>> {
@@ -2508,6 +3268,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
     use nix::unistd::{getegid, geteuid};
+    use tempfile::tempdir;
     use volparossa_protocol::{
         MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE, RelayAuthorization, RelayReservation,
         SignedEnvelope, Transport, decode_canonical, generate_nonce, node_id_from_public_key,
@@ -2523,7 +3284,8 @@ mod tests {
             receive_credential_worker_request, send_credential_worker_response,
         },
         worker_v3::{
-            BootstrapChallenge, SpawnedWorker, StablePhase, WorkerProcess, correlated_response,
+            BootstrapChallenge, DurableWorkerPrepareOutcome, DurableWorkerPrepareTerminal,
+            SpawnedWorker, StablePhase, WorkerProcess, correlated_response,
         },
     };
 
@@ -2536,6 +3298,83 @@ mod tests {
             )),
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(state),
+            durable_ownership: None,
+        }
+    }
+
+    fn registered_initialise_backend(
+        open_key: OpenLineageKey,
+    ) -> (
+        FunctionalAlphaLeaseBackend,
+        socket2::Socket,
+        Arc<AtomicBool>,
+    ) {
+        let (parent, peer) =
+            private_credential_worker_channel().expect("credentialed fake worker channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let mut process = WorkerProcess::fake(parent, std::process::id(), Arc::clone(&alive));
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let ownership = match coordinator.reserve_spawn_register_with_until(
+            open_key.context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xe5; 32]),
+                })
+            },
+        ) {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("fake worker registration rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("fake worker registration unresolved: {error}")
+            }
+        };
+        coordinator
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records
+            .get_mut(&open_key.context_id)
+            .expect("functional durable worker record")
+            .dispatch_fence = crate::worker_v3::WorkerDispatchFence::DurableStagedCleanupOpen;
+        let mut entry = open_entry(open_key);
+        entry.worker = Some(ownership);
+        entry.phase = OpenLeasePhase::Registered;
+        (
+            FunctionalAlphaLeaseBackend {
+                coordinator,
+                relay_replay: Mutex::new(functional_alpha_replay_cache()),
+                state: Mutex::new(Some(entry)),
+                durable_ownership: None,
+            },
+            peer,
+            alive,
+        )
+    }
+
+    fn initialise_value(open_key: OpenLineageKey) -> PrepareLeaseBatch {
+        PrepareLeaseBatch {
+            route_context_id: open_key.context_id.to_vec(),
+            role: ContextRole::Client as i32,
+            mptcp_accepted_addrs: 2,
+            mptcp_subflows: 2,
+            leases: vec![RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+            }],
+            setup_expires_at_unix: open_key.setup_expires_at_unix,
+            hard_expires_at_unix: open_key.hard_expires_at_unix,
         }
     }
 
@@ -2639,6 +3478,8 @@ mod tests {
             context_role: role.context,
             worker: None,
             recovery: None,
+            durable: None,
+            durable_handoff_terminal: None,
             wireguard: vec![wireguard],
             prepare,
             underlay: UnderlayCandidate {
@@ -2650,6 +3491,8 @@ mod tests {
             activated: Vec::new(),
             phase: OpenLeasePhase::Reserved,
             birth_may_exist: vec![false],
+            child_cleanup: None,
+            worker_cleanup: None,
         }
     }
 
@@ -2676,6 +3519,8 @@ mod tests {
             context_role: ContextRole::Relay,
             worker: None,
             recovery: None,
+            durable: None,
+            durable_handoff_terminal: None,
             birth_may_exist: vec![false; wireguard.len()],
             wireguard,
             prepare,
@@ -2683,6 +3528,8 @@ mod tests {
             prepared: Vec::new(),
             activated: Vec::new(),
             phase: OpenLeasePhase::Reserved,
+            child_cleanup: None,
+            worker_cleanup: None,
         }
     }
 
@@ -2737,6 +3584,818 @@ mod tests {
             },
         ];
         (binding, value)
+    }
+
+    #[test]
+    fn durable_prepare_reconstruction_is_byte_exact_for_every_functional_context_shape() {
+        for (binding, value) in [
+            live_prepare_fixture(),
+            live_relay_prepare_fixture(),
+            live_exit_prepare_fixture(),
+        ] {
+            let expected = PrepareIntent {
+                route_context_id: value.route_context_id.clone(),
+                prepare_request_id: binding.lineage.prepare_request_id.to_vec(),
+                prepare_operation_digest: binding.lineage.prepare_operation_digest.to_vec(),
+                setup_expires_at_unix: value.setup_expires_at_unix,
+                hard_expires_at_unix: value.hard_expires_at_unix,
+                closed_plan: Some(ClosedPreparePlan {
+                    context_role: value.role,
+                    leases: value.leases.clone(),
+                }),
+            };
+            let reconstructed =
+                reconstruct_durable_prepare_intent(binding.lineage, &value).expect("exact intent");
+            assert_eq!(
+                prost::Message::encode_to_vec(&reconstructed),
+                prost::Message::encode_to_vec(&expected)
+            );
+
+            let mut wrong_context = value.clone();
+            wrong_context.route_context_id[0] ^= 1;
+            assert_eq!(
+                reconstruct_durable_prepare_intent(binding.lineage, &wrong_context),
+                Err(BackendError::Invalid)
+            );
+            let mut wrong_setup = value.clone();
+            wrong_setup.setup_expires_at_unix = wrong_setup.setup_expires_at_unix.saturating_add(1);
+            assert_eq!(
+                reconstruct_durable_prepare_intent(binding.lineage, &wrong_setup),
+                Err(BackendError::Invalid)
+            );
+            let mut wrong_hard = value.clone();
+            wrong_hard.hard_expires_at_unix = wrong_hard.hard_expires_at_unix.saturating_add(1);
+            assert_eq!(
+                reconstruct_durable_prepare_intent(binding.lineage, &wrong_hard),
+                Err(BackendError::Invalid)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_child_destroy_classifier_is_phase_and_birth_fail_closed() {
+        let open_key = key();
+        let mut entry = open_entry(open_key);
+        let destroyed = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        let not_found = cleanup_execution(InternalWorkerResult::NotFound, None);
+
+        entry.phase = OpenLeasePhase::Registered;
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_none());
+
+        entry.phase = OpenLeasePhase::InitialiseCleanupPending;
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&not_found)).is_some());
+
+        entry.phase = OpenLeasePhase::Initialised;
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
+
+        entry.phase = OpenLeasePhase::BirthMayExist;
+        entry.birth_may_exist[0] = true;
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&not_found)).is_none());
+        entry.birth_may_exist[0] = false;
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&not_found)).is_some());
+
+        entry.phase = OpenLeasePhase::Prepared;
+        entry.birth_may_exist[0] = true;
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
+
+        entry.birth_may_exist.clear();
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_none());
+        entry.birth_may_exist.push(true);
+        let mut wrong_key = open_key;
+        wrong_key.context_id[0] ^= 1;
+        assert!(classify_exact_child_cleanup(&entry, wrong_key, Some(&destroyed)).is_none());
+    }
+
+    #[tokio::test]
+    async fn definite_initialise_failure_dispatches_staged_destroy_before_reap() {
+        let open_key = key();
+        let (backend, peer, alive) = registered_initialise_backend(open_key);
+        let value = initialise_value(open_key);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let initialise = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Initialise request");
+            assert!(matches!(
+                initialise.request.operation,
+                Some(internal_worker_request::Operation::Initialise(_))
+            ));
+            let failed =
+                correlated_response(&initialise.request, InternalWorkerResult::Kernel, None)
+                    .expect("correlated definite Initialise failure");
+            send_credential_worker_response(&peer, &initialise.request, &failed, None)
+                .expect("send definite Initialise failure");
+
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("cleanup Destroy request");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let absent =
+                correlated_response(&destroy.request, InternalWorkerResult::NotFound, None)
+                    .expect("correlated pre-birth absence");
+            send_credential_worker_response(&peer, &destroy.request, &absent, None)
+                .expect("send pre-birth absence");
+        });
+
+        let initialise_error = backend
+            .initialise_child(
+                open_key,
+                &value,
+                HardDeadline::after(Duration::from_secs(1)).expect("Initialise deadline"),
+            )
+            .await
+            .expect_err("definite Initialise failure");
+        assert_eq!(initialise_error, BackendError::Kernel);
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::InitialiseCleanupPending)
+        );
+        assert_eq!(
+            backend
+                .coordinator
+                .phase(open_key.context_id, 1)
+                .expect("registered worker phase"),
+            super::super::VisiblePhase::Stable(StablePhase::Starting)
+        );
+        assert_eq!(
+            backend
+                .cleanup_after_failure(
+                    open_key,
+                    HardDeadline::after(Duration::from_secs(2)).expect("cleanup deadline"),
+                    initialise_error,
+                )
+                .await,
+            BackendError::Kernel
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[tokio::test]
+    async fn response_lost_initialise_is_preserved_only_for_exact_staged_destroy() {
+        let open_key = key();
+        let (backend, peer, alive) = registered_initialise_backend(open_key);
+        let value = initialise_value(open_key);
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let initialise = receive_credential_worker_request(&peer, expected_worker)
+                .expect("dispatched Initialise request");
+            assert!(matches!(
+                initialise.request.operation,
+                Some(internal_worker_request::Operation::Initialise(_))
+            ));
+            // The child accepted and staged Initialise, but its response is deliberately lost.
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("cleanup Destroy after lost response");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let destroyed = correlated_response(
+                &destroy.request,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::Destroyed(
+                    ContextDestroyed {},
+                )),
+            )
+            .expect("correlated staged Destroy success");
+            send_credential_worker_response(&peer, &destroy.request, &destroyed, None)
+                .expect("send staged Destroy success");
+        });
+
+        let initialise_error = backend
+            .initialise_child(
+                open_key,
+                &value,
+                HardDeadline::after(Duration::from_millis(80)).expect("response-loss deadline"),
+            )
+            .await
+            .expect_err("lost Initialise response");
+        assert_eq!(initialise_error, BackendError::Unavailable);
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::InitialiseCleanupPending)
+        );
+        {
+            let registry = backend
+                .coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = registry
+                .records
+                .get(&open_key.context_id)
+                .expect("cleanup-capable exact worker");
+            assert_eq!(
+                record.dispatch_fence,
+                crate::worker_v3::WorkerDispatchFence::DurableStagedCleanupOpen
+            );
+            assert_eq!(record.stable_phase, StablePhase::InitialiseCleanupPending);
+            assert!(record.in_flight.is_none());
+            assert!(!record.quarantined);
+            assert!(record.process.is_some());
+            assert_eq!(registry.tombstones.len(), 1);
+            assert!(registry.cache.is_empty());
+        }
+        assert!(alive.load(Ordering::SeqCst));
+
+        assert_eq!(
+            backend
+                .cleanup_after_failure(
+                    open_key,
+                    HardDeadline::after(Duration::from_secs(2)).expect("cleanup deadline"),
+                    initialise_error,
+                )
+                .await,
+            BackendError::Unavailable
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_initialise_plan_mints_no_dispatch_evidence() {
+        let open_key = key();
+        let (backend, peer, alive) = registered_initialise_backend(open_key);
+        let backend = Arc::new(backend);
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        backend
+            .coordinator
+            .set_before_plan_hook(crate::worker_v3::BeforePlanHook {
+                reached: Arc::clone(&reached),
+                release: Arc::clone(&release),
+            });
+
+        let executing = Arc::clone(&backend);
+        let task = tokio::spawn(async move {
+            executing
+                .initialise_child(
+                    open_key,
+                    &initialise_value(open_key),
+                    HardDeadline::after(Duration::from_secs(1))
+                        .expect("cancelled Initialise deadline"),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), reached.notified())
+            .await
+            .expect("Initialise reached pre-PLAN cancellation point");
+        task.abort();
+        let error = task.await.expect_err("Initialise task was cancelled");
+        assert!(error.is_cancelled());
+
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::InitialiseCleanupPending)
+        );
+        {
+            let registry = backend
+                .coordinator
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = registry
+                .records
+                .get(&open_key.context_id)
+                .expect("unchanged registered worker");
+            assert_eq!(
+                record.dispatch_fence,
+                crate::worker_v3::WorkerDispatchFence::DurableStagedCleanupOpen
+            );
+            assert_eq!(record.stable_phase, StablePhase::Starting);
+            assert!(record.in_flight.is_none());
+            assert!(!record.quarantined);
+            assert!(record.process.is_some());
+            assert!(registry.tombstones.is_empty());
+            assert!(registry.cache.is_empty());
+        }
+        assert!(alive.load(Ordering::SeqCst));
+
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let destroy = receive_credential_worker_request(&peer, expected_worker)
+                .expect("first channel request is cleanup Destroy");
+            assert!(matches!(
+                destroy.request.operation,
+                Some(internal_worker_request::Operation::DestroyContext(_))
+            ));
+            let absent =
+                correlated_response(&destroy.request, InternalWorkerResult::NotFound, None)
+                    .expect("correlated never-dispatched absence");
+            send_credential_worker_response(&peer, &destroy.request, &absent, None)
+                .expect("send never-dispatched absence");
+        });
+        release.add_permits(1);
+        assert_eq!(
+            backend
+                .cleanup_after_failure(
+                    open_key,
+                    HardDeadline::after(Duration::from_secs(2)).expect("cleanup deadline"),
+                    BackendError::Unavailable,
+                )
+                .await,
+            BackendError::Unavailable
+        );
+        worker.join().expect("fake worker thread");
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[test]
+    fn production_prepare_order_is_fail_closed() {
+        let source = include_str!("functional_backend.rs");
+        let prepare_start = source
+            .find("    async fn prepare_one(")
+            .expect("Prepare start");
+        let prepare_end = source[prepare_start..]
+            .find("\n    fn reserve_entry(")
+            .map(|offset| prepare_start + offset)
+            .expect("Prepare end");
+        let prepare = &source[prepare_start..prepare_end];
+        let intent = prepare
+            .find("reconstruct_durable_prepare_intent(binding.lineage, &value)")
+            .expect("wire intent reconstruction");
+        let handoff = prepare
+            .find(".durable_functional_prepare_until(")
+            .expect("durable handoff");
+        let initialise = prepare
+            .find("self.initialise_child(")
+            .expect("first child request");
+        let kernel = prepare
+            .find("self.create_birth_links(")
+            .expect("first kernel mutation");
+        assert!(intent < handoff && handoff < initialise && handoff < kernel);
+        let initialise_start = source
+            .find("    async fn initialise_child(")
+            .expect("Initialise child start");
+        let initialise_end = source[initialise_start..]
+            .find("\n    fn create_birth_links(")
+            .map(|offset| initialise_start + offset)
+            .expect("Initialise child end");
+        let initialise_body = &source[initialise_start..initialise_end];
+        let staged_plan = initialise_body
+            .find("entry.prepare.clone()")
+            .expect("canonical staged Prepare plan");
+        let encoded_plan = initialise_body
+            .find("prepare: Some(prepare)")
+            .expect("typed Initialise cleanup target");
+        let cleanup_fence = initialise_body
+            .find("entry.phase = OpenLeasePhase::InitialiseCleanupPending")
+            .expect("pre-dispatch cleanup fence");
+        let dispatch = initialise_body
+            .find(".execute_until(")
+            .expect("Initialise dispatch");
+        assert!(
+            staged_plan < encoded_plan && encoded_plan < cleanup_fence && cleanup_fence < dispatch
+        );
+    }
+
+    #[test]
+    fn production_clean_settlement_order_is_fail_closed() {
+        let source = include_str!("functional_backend.rs");
+        let cleanup_start = source
+            .find("    async fn settle_durable_cleanup(")
+            .expect("durable cleanup start");
+        let cleanup_end = source[cleanup_start..]
+            .find("\n    fn restore_durable_cleanup(")
+            .map(|offset| cleanup_start + offset)
+            .expect("durable cleanup end");
+        let cleanup = &source[cleanup_start..cleanup_end];
+        let child_cleanup_classified = source[..cleanup_start]
+            .rfind("classify_exact_child_cleanup(entry, key, execution.as_ref().ok())")
+            .expect("phase/birth-classified child cleanup authority");
+        let retain_without_child_cleanup = source[..cleanup_start]
+            .rfind("// Exact child cleanup did not complete.")
+            .expect("unproven child cleanup retention");
+        let exact_worker_reap = source[..cleanup_start]
+            .rfind("WorkerGenerationReap::Confirmed(proof) =>")
+            .expect("exact worker-generation reap");
+        let worker_reap_recorded = source[..cleanup_start]
+            .rfind("entry.worker_cleanup.replace(proof)")
+            .expect("affine worker reap evidence retention");
+        let kernel_absent = source[..cleanup_start]
+            .rfind("if !parent_absent")
+            .expect("kernel absence gate");
+        let all_cleanup_evidence = source[..cleanup_start]
+            .rfind("entry.child_cleanup.is_some() && entry.worker_cleanup.is_some()")
+            .expect("joined exact cleanup evidence gate");
+        let parent_absence = source[..cleanup_start]
+            .rfind("ExactParentKernelAbsent::after_exact_parent_kernel_absence(key)")
+            .expect("opaque parent/kernel absence marker");
+        let durable_call = source[..cleanup_start]
+            .rfind("self.settle_durable_cleanup(key, parent, deadline).await")
+            .expect("durable cleanup call");
+        assert!(
+            child_cleanup_classified < retain_without_child_cleanup
+                && retain_without_child_cleanup < exact_worker_reap
+                && exact_worker_reap < worker_reap_recorded
+                && worker_reap_recorded < kernel_absent
+                && kernel_absent < all_cleanup_evidence
+                && all_cleanup_evidence < parent_absence
+                && parent_absence < durable_call
+                && durable_call < cleanup_start
+        );
+        let cleanup_proof = cleanup
+            .find("ExactSameRuntimeCleanupProof::after_exact_worker_kernel_cleanup(")
+            .expect("opaque exact cleanup proof mint");
+        let cleanup_confirmed = cleanup
+            .find("handle.confirm_cleanup_until(proof, deadline)")
+            .expect("CleanupConfirmed transition");
+        let fdstore_remove = cleanup
+            .find("remove_current_process_custody(")
+            .expect("exact FD-store removal");
+        let direct_removal_validation = cleanup
+            .find(".verify_exact_target(custody.custody_name, &binding)")
+            .expect("direct exact named-removal validation");
+        let direct_manager_proof = cleanup
+            .find("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
+            .expect("direct opaque manager-absence proof mint");
+        let removal_reconcile = cleanup
+            .find("reconcile_current_process_removal(")
+            .expect("ambiguous removal reconciliation");
+        let retry_authority = cleanup
+            .find("DurableJournalSettlement::RemovalRetryAuthorized {")
+            .expect("exact-still-present retry authority");
+        let fdstore_retry = cleanup
+            .find("retry_current_process_removal(")
+            .expect("exact correlated FD-store retry");
+        let retry_removal_validation = cleanup
+            .rfind(".verify_exact_target(custody.custody_name, &binding)")
+            .expect("retry exact named-removal validation");
+        let retry_manager_proof = cleanup
+            .rfind("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
+            .expect("retry opaque manager-absence proof mint");
+        let manager_absent = cleanup
+            .find("handle.confirm_manager_absent_until(proof, deadline)")
+            .expect("Absent transition");
+        assert!(
+            cleanup_proof < cleanup_confirmed
+                && cleanup_confirmed < fdstore_remove
+                && fdstore_remove < direct_removal_validation
+                && direct_removal_validation < direct_manager_proof
+                && direct_manager_proof < removal_reconcile
+                && removal_reconcile < retry_authority
+                && retry_authority < fdstore_retry
+                && fdstore_retry < retry_removal_validation
+                && retry_removal_validation < retry_manager_proof
+                && retry_manager_proof < manager_absent
+        );
+    }
+
+    #[test]
+    fn opaque_same_runtime_settlement_has_one_private_production_path() {
+        let source = include_str!("functional_backend.rs");
+        let production_end = source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("production source boundary");
+        let production = &source[..production_end];
+        let actor_source = include_str!("../ownership_journal/actor.rs");
+        let journal_source = include_str!("../ownership_journal.rs");
+        let classifier_start = production
+            .find("fn classify_exact_child_cleanup(")
+            .expect("private child-cleanup classifier");
+        let classifier_end = production[classifier_start..]
+            .find("\nfn matches_prepared_batch(")
+            .map(|offset| classifier_start + offset)
+            .expect("bounded child-cleanup classifier");
+        assert!(
+            production[classifier_start..classifier_end]
+                .contains("exact_child_cleanup_is_confirmed(")
+        );
+
+        assert_eq!(
+            production.matches("handle.confirm_cleanup_until(").count(),
+            1,
+            "only the functional production cleanup transaction may invoke same-runtime cleanup"
+        );
+        assert_eq!(
+            production
+                .matches("handle.confirm_manager_absent_until(")
+                .count(),
+            1,
+            "only the functional production cleanup transaction may invoke manager absence"
+        );
+        assert_eq!(
+            production
+                .matches("ExactSameRuntimeCleanupProof::after_exact_worker_kernel_cleanup(")
+                .count(),
+            1,
+            "exact cleanup authority has one production mint site"
+        );
+        assert_eq!(
+            production
+                .matches("ExactParentKernelAbsent::after_exact_parent_kernel_absence(key)")
+                .count(),
+            1,
+            "parent/kernel absence has one production marker site"
+        );
+        assert_eq!(
+            production
+                .matches("classify_exact_child_cleanup(entry, key, execution.as_ref().ok())")
+                .count(),
+            1,
+            "child cleanup authority has one production classifier site"
+        );
+        assert_eq!(
+            production
+                .matches("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
+                .count(),
+            3,
+            "direct, reconciled and correlated-retry removals each have one proof mint"
+        );
+
+        let cleanup_api = actor_source
+            .find("    pub(crate) fn confirm_cleanup_until(\n        &self,\n        proof: ExactSameRuntimeCleanupProof,")
+            .expect("cleanup handle requires opaque backend proof");
+        let manager_api = actor_source
+            .find("    pub(crate) fn confirm_manager_absent_until(\n        &self,\n        proof: ExactSameRuntimeManagerAbsenceProof,")
+            .expect("manager handle requires opaque backend proof");
+        assert!(cleanup_api < manager_api);
+        assert!(!actor_source.contains(
+            "pub(crate) fn confirm_cleanup_until(\n        &self,\n        settlement: DurablePrepareSettlement,"
+        ));
+        assert!(!actor_source.contains(
+            "pub(crate) fn confirm_manager_absent_until(\n        &self,\n        cleanup: DurableCleanupConfirmed,"
+        ));
+        assert!(production.contains("fn after_exact_worker_kernel_cleanup("));
+        assert!(!production.contains("pub(crate) fn after_exact_worker_kernel_cleanup"));
+        assert!(production.contains("_worker: ConfirmedWorkerGenerationAbsent"));
+        assert!(production.contains("_parent: ExactParentKernelAbsent"));
+        assert!(production.contains("_child: ExactChildCleanupConfirmed"));
+        assert!(production.contains("fn after_exact_parent_kernel_absence("));
+        assert!(!production.contains("pub(crate) fn after_exact_parent_kernel_absence("));
+        assert!(production.contains("fn after_exact_named_removal("));
+        assert!(!production.contains("pub(crate) fn after_exact_named_removal("));
+        assert!(journal_source.contains("struct SameRuntimeCleanSettlement;"));
+        assert!(!journal_source.contains("pub(crate) struct SameRuntimeCleanSettlement;"));
+        assert!(!journal_source.contains("pub(super) struct SameRuntimeCleanSettlement;"));
+    }
+
+    fn cleanup_execution(
+        result: InternalWorkerResult,
+        outcome: Option<internal_worker_response::Outcome>,
+    ) -> crate::worker_transport::CredentialedWorkerExecution {
+        crate::worker_transport::CredentialedWorkerExecution {
+            response: crate::internal_protocol::InternalWorkerResponse {
+                protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                request_id: vec![0xd1; 16],
+                result: result as i32,
+                request_digest: vec![0xd2; 32],
+                outcome,
+            },
+            descriptor: None,
+        }
+    }
+
+    #[test]
+    fn exact_child_cleanup_evidence_is_phase_and_birth_sensitive() {
+        let destroyed = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        for phase in [
+            OpenLeasePhase::InitialiseCleanupPending,
+            OpenLeasePhase::Initialised,
+            OpenLeasePhase::BirthMayExist,
+            OpenLeasePhase::Prepared,
+            OpenLeasePhase::Activated,
+            OpenLeasePhase::Committed,
+        ] {
+            assert!(exact_child_cleanup_is_confirmed(
+                Some(&destroyed),
+                phase,
+                &[true, false],
+                2,
+            ));
+        }
+        for phase in [
+            OpenLeasePhase::Reserved,
+            OpenLeasePhase::DurableHandoffPending,
+            OpenLeasePhase::Registered,
+        ] {
+            assert!(!exact_child_cleanup_is_confirmed(
+                Some(&destroyed),
+                phase,
+                &[false],
+                1,
+            ));
+        }
+
+        let not_found = cleanup_execution(InternalWorkerResult::NotFound, None);
+        for phase in [
+            OpenLeasePhase::InitialiseCleanupPending,
+            OpenLeasePhase::Initialised,
+            OpenLeasePhase::BirthMayExist,
+        ] {
+            assert!(exact_child_cleanup_is_confirmed(
+                Some(&not_found),
+                phase,
+                &[false, false],
+                2,
+            ));
+            assert!(!exact_child_cleanup_is_confirmed(
+                Some(&not_found),
+                phase,
+                &[true, false],
+                2,
+            ));
+        }
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&not_found),
+            OpenLeasePhase::Prepared,
+            &[false],
+            1,
+        ));
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&not_found),
+            OpenLeasePhase::BirthMayExist,
+            &[],
+            1,
+        ));
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&not_found),
+            OpenLeasePhase::BirthMayExist,
+            &[false],
+            0,
+        ));
+    }
+
+    #[test]
+    fn cleanup_evidence_rejects_wrong_result_outcome_and_descriptor() {
+        let wrong_result = cleanup_execution(
+            InternalWorkerResult::CleanupIncomplete,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        let wrong_outcome = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Initialised(
+                crate::internal_protocol::ContextInitialised {
+                    route_context_id: key().context_id.to_vec(),
+                },
+            )),
+        );
+        for execution in [&wrong_result, &wrong_outcome] {
+            assert!(!exact_child_cleanup_is_confirmed(
+                Some(execution),
+                OpenLeasePhase::BirthMayExist,
+                &[false],
+                1,
+            ));
+        }
+
+        let mut with_descriptor = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        with_descriptor.descriptor = Some(
+            std::fs::File::open("/dev/null")
+                .expect("test descriptor")
+                .into(),
+        );
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&with_descriptor),
+            OpenLeasePhase::Committed,
+            &[false],
+            1,
+        ));
+        assert!(!exact_child_cleanup_is_confirmed(
+            None,
+            OpenLeasePhase::Committed,
+            &[false],
+            1,
+        ));
+    }
+
+    #[test]
+    fn opaque_never_dispatched_settlement_has_one_bounded_production_path() {
+        let functional_source = include_str!("functional_backend.rs");
+        let functional_end = functional_source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("functional production boundary");
+        let functional = &functional_source[..functional_end];
+        let worker_source = include_str!("../worker_v3.rs");
+        let worker_end = worker_source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("worker production boundary");
+        let worker = &worker_source[..worker_end];
+        let actor = include_str!("../ownership_journal/actor.rs");
+        let journal = include_str!("../ownership_journal.rs");
+
+        assert_eq!(
+            worker
+                .matches(
+                    "ExactNeverDispatchedPrepareProof::after_definite_worker_admission_rejection("
+                )
+                .count(),
+            1,
+            "definite no-worker admission has one proof mint"
+        );
+        assert_eq!(
+            worker
+                .matches("ExactNeverDispatchedPrepareProof::after_exact_worker_absence(")
+                .count(),
+            1,
+            "exact worker reap has one proof mint"
+        );
+        assert_eq!(
+            worker
+                .matches("handle.retire_never_dispatched_until(proof, deadline)")
+                .count(),
+            1,
+            "the coordinator has one proof-consuming actor call"
+        );
+        assert_eq!(
+            functional
+                .matches(".settle_durable_handoff_terminal_until(")
+                .count(),
+            1,
+            "only exact later functional cleanup retries a handoff terminal"
+        );
+        assert!(actor.contains(
+            "pub(crate) fn retire_never_dispatched_until(\n        &self,\n        proof: ExactNeverDispatchedPrepareProof,"
+        ));
+        assert!(!actor.contains(
+            "pub(crate) fn retire_never_dispatched_until(\n        &self,\n        key: DurableOwnershipKey,"
+        ));
+
+        let settlement_start = worker
+            .find("    fn settle_durable_handoff_terminal_until(")
+            .expect("bounded handoff settlement");
+        let settlement_end = worker[settlement_start..]
+            .find("\n    /// Complete the cancellation-safe durable Prepare handoff")
+            .map(|offset| settlement_start + offset)
+            .expect("bounded handoff settlement end");
+        let settlement = &worker[settlement_start..settlement_end];
+        assert!(!settlement.contains("async fn"));
+        assert!(!settlement.contains(".await"));
+        assert!(settlement.contains("take_exact_durable_handoff_terminal(&selector)"));
+        assert!(settlement.contains("restore_exact_durable_handoff_terminal(&selector, outcome)"));
+        assert!(!settlement.contains("PublicationStart"));
+        assert!(!settlement.contains("DispatchOpen"));
+        assert!(!settlement.contains("remove_current_process_custody"));
+        assert!(!settlement.contains("reconcile_current_process_removal"));
+
+        let cleanup_start = functional
+            .find("    async fn cleanup_exact(")
+            .expect("functional cleanup");
+        let cleanup_end = functional[cleanup_start..]
+            .find("\n    fn restore_durable_handoff_terminal(")
+            .map(|offset| cleanup_start + offset)
+            .expect("handoff cleanup end");
+        let cleanup = &functional[cleanup_start..cleanup_end];
+        let retry = cleanup
+            .find(".settle_durable_handoff_terminal_until(")
+            .expect("exact handoff retry");
+        let absent = cleanup
+            .find("DurableHandoffTerminalSettlement::Absent")
+            .expect("durable Absent result");
+        let remove = cleanup
+            .find("remove_exact_entry(&self.state, key)")
+            .expect("entry removal");
+        assert!(retry < absent && absent < remove);
+
+        // Any registration reply lost after a possible mutation is promoted to Ambiguous. A
+        // non-Ambiguous persistence error is returned only after the complete journal boundary is
+        // confirmed unchanged, so the registration can be dropped without orphaning its Intent.
+        assert!(actor.contains("operation.complete_unstarted_deadline();"));
+        assert!(actor.contains("fence_terminal(&self.lifecycle, Lifecycle::Ambiguous)"));
+        assert!(actor.contains("self.journal.confirm_retry_safe_after_definite_failure()"));
+        assert!(journal.contains("fn confirm_retry_safe_after_definite_failure(&mut self)"));
+        assert!(journal.contains("Err(failure) if failure.uncertain =>"));
+        assert!(journal.contains("self.poisoned = true;"));
     }
 
     fn live_activate_fixture() -> (
@@ -4670,6 +6329,7 @@ mod tests {
             coordinator,
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
+            durable_ownership: None,
         };
 
         let expected_worker = ExpectedUnixCredentials::new(
@@ -4894,6 +6554,7 @@ mod tests {
             coordinator,
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
+            durable_ownership: None,
         };
 
         let expected_worker = ExpectedUnixCredentials::new(
@@ -5161,6 +6822,7 @@ mod tests {
             coordinator,
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
             state: Mutex::new(Some(entry)),
+            durable_ownership: None,
         };
 
         let cleanup_deadline =
@@ -5203,6 +6865,114 @@ mod tests {
         assert_eq!(
             lock_state(&backend.state).as_ref().map(|entry| entry.key),
             Some(open_key)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn later_destroy_retries_exact_handoff_terminal_and_removes_only_after_durable_absent() {
+        let open_key = key();
+        let directory = tempdir().expect("durable handoff directory");
+        let mut actor = crate::ownership_journal::spawn_test_durable_ownership_actor_until(
+            directory.path(),
+            HardDeadline::after(Duration::from_secs(2)).expect("actor startup deadline"),
+        )
+        .expect("durable ownership actor");
+        let handle = actor.prepare_handle().expect("durable Prepare handle");
+        let registration = DurableIntentRegistration::try_from_wire(
+            open_key.helper_runtime_id,
+            &PrepareIntent {
+                route_context_id: open_key.context_id.to_vec(),
+                prepare_request_id: open_key.prepare_request_id.to_vec(),
+                prepare_operation_digest: open_key.prepare_operation_digest.to_vec(),
+                setup_expires_at_unix: 100,
+                hard_expires_at_unix: 200,
+                closed_plan: Some(ClosedPreparePlan {
+                    context_role: ContextRole::Client as i32,
+                    leases: vec![RoutingLeasePlan {
+                        path_id: 1,
+                        role: WireguardRole::Client as i32,
+                    }],
+                }),
+            },
+        )
+        .expect("durable registration");
+        let durable_key = match handle.register_until(
+            registration,
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+        ) {
+            crate::ownership_journal::DurableRegistrationOutcome::Registered(key) => key,
+            crate::ownership_journal::DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            } => {
+                drop(registration);
+                panic!("durable registration remained retained: {error}")
+            }
+        };
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let selector = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(Box::new(
+                DurableWorkerPrepareOutcome::KeyRetained {
+                    error: WorkerV3Error::Invalid,
+                    key: durable_key,
+                },
+            )))
+            .expect("ordinary handoff selector");
+        let mut entry = open_entry(open_key);
+        entry.phase = OpenLeasePhase::DurableHandoffPending;
+        entry.durable_handoff_terminal = Some(selector);
+        let backend = FunctionalAlphaLeaseBackend {
+            coordinator,
+            relay_replay: Mutex::new(functional_alpha_replay_cache()),
+            state: Mutex::new(Some(entry)),
+            durable_ownership: Some(handle),
+        };
+
+        assert_eq!(
+            backend
+                .destroy_one(
+                    destroy_binding(
+                        open_key,
+                        tokio::time::Instant::now() - Duration::from_millis(1),
+                    ),
+                    destroy_value(open_key),
+                )
+                .await,
+            Err(BackendError::CleanupIncomplete)
+        );
+        assert!(
+            lock_state(&backend.state)
+                .as_ref()
+                .is_some_and(|entry| entry.durable_handoff_terminal.is_some())
+        );
+        assert_eq!(
+            backend
+                .destroy_one(
+                    destroy_binding(
+                        open_key,
+                        tokio::time::Instant::now() + Duration::from_secs(1),
+                    ),
+                    destroy_value(open_key),
+                )
+                .await,
+            Ok(ConfirmedAbsent)
+        );
+        assert!(lock_state(&backend.state).is_none());
+        assert!(backend.coordinator.shutdown().await);
+        drop(backend);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
         );
     }
 

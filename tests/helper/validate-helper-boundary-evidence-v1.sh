@@ -98,9 +98,11 @@ if ! jq -e '
           "PRODUCTION_DISTINCT_INVOCATION_BOUND",
           "PRODUCTION_ARGUMENTLESS",
           "PRODUCTION_IPC_BOUNDARY",
-          "PRODUCTION_FDSTORE_ZERO_DURING_RUN",
+          "PRODUCTION_FDSTORE_ZERO_AT_IDLE_OBSERVATION",
+          "PRODUCTION_FDSTORE_EXACT_CUSTODY_DURING_ACTIVE_CYCLES",
+          "PRODUCTION_FDSTORE_ZERO_AFTER_SETTLED_CYCLES",
           "PRODUCTION_RETIRED_UNIT_NOT_FOUND",
-          "RETIREMENT_JOURNAL_UNCHANGED",
+          "RETIREMENT_JOURNAL_SETTLED_ABSENT",
           "RETIREMENT_LOCK_RELEASED",
           "RETIREMENT_SOCKET_ABSENT",
           "ENUMERATED_HOST_STATE_EQUAL_AT_FENCES"
@@ -195,15 +197,21 @@ if ! jq -e '
     and (.production
         | exact_keys([
             "argumentless",
-            "fdstore_during_run",
+            "fdstore_active_cycle_counts",
+            "fdstore_exact_identity_bound",
+            "fdstore_idle_observation",
+            "fdstore_settled_cycle_counts",
             "unit_load_state_after_retirement"
           ])
         and .argumentless == true
-        and .fdstore_during_run == 0
+        and .fdstore_active_cycle_counts == [2, 2, 2]
+        and .fdstore_exact_identity_bound == true
+        and .fdstore_idle_observation == 0
+        and .fdstore_settled_cycle_counts == [0, 0, 0]
         and .unit_load_state_after_retirement == "not-found")
     and (.retirement
-        | exact_keys(["journal_unchanged", "lock_released", "socket_absent"])
-        and .journal_unchanged == true
+        | exact_keys(["journal_settled_absent", "lock_released", "socket_absent"])
+        and .journal_settled_absent == true
         and .lock_released == true
         and .socket_absent == true)
     and (.enumerated_host_state
@@ -230,7 +238,7 @@ if ! jq -e '
         and .restart_recovery == false)
     and (.checks
         | type == "array"
-        and length == 16
+        and length == 18
         and [.[].id] == expected_check_ids
         and all(.[];
             exact_keys(["id", "result"])

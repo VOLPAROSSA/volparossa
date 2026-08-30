@@ -76,6 +76,14 @@ pub fn run_internal_worker_v3_live_proof_staged() -> Result<(), WorkerV3LiveProo
     worker_v3::run_internal_worker_v3_live_proof_staged()
 }
 
+/// Read-only fixed-path proof that the three functional KVM cycles left only exact Absent
+/// tombstones. This grants no journal mutation or restart-cleanup authority.
+#[doc(hidden)]
+#[must_use]
+pub fn production_functional_journal_is_exactly_settled() -> bool {
+    ownership_journal::production_functional_journal_is_exactly_settled()
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::{needs_drop, size_of};

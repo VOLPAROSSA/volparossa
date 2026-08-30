@@ -4,21 +4,24 @@
 //! production startup stops and an operator must inspect the host explicitly. Production now opens
 //! the v3 store through one canonical locked actor before publishing its cleanup token or socket.
 //! Startup projects custody-bound `MayOwnCustody`, `MayOwnPrepare` and `CleanupConfirmed` records
-//! without mutation. The installed production executor deliberately refuses both the trusted
+//! without mutation. The installed restart executor deliberately refuses both the trusted
 //! worker-plus-kernel cleanup proof and the distinct stable manager-absence proof, so only an empty
-//! projection may continue to settle never-dispatched `Intent` records until composition is wired.
+//! startup projection may continue. A separate affine production handle admits live Prepare and
+//! can settle only its same-runtime owner after the backend has completed the two exact proofs.
 
-#![allow(dead_code)] // The production actor is live; mutation APIs remain private until wiring.
+#![allow(dead_code)] // The production actor is live; restart-recovery APIs remain private.
 
 mod actor;
 
-// This affine surface and its opaque, non-authoritative custody digest are intentionally exported
-// before their production composition is installed.
+// This affine surface and its opaque, non-authoritative custody digest remain crate-private.
 #[allow(unused_imports)]
 pub(crate) use actor::{
-    DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyNameDigest, DurableCustodyOutcome,
-    DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare, DurableOwnershipActor,
-    DurableOwnershipError, DurableOwnershipKey, DurablePrepareAnchor, DurablePrepareAnchorParts,
+    DurableArmOutcome, DurableCleanupConfirmed, DurableCleanupOutcome, DurableCustodyArmHandle,
+    DurableCustodyNameDigest, DurableCustodyOutcome, DurableIntentRegistration,
+    DurableManagerAbsentOutcome, DurableMayOwnCustody, DurableMayOwnPrepare,
+    DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
+    DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
+    DurablePrepareAnchor, DurablePrepareAnchorParts, DurablePrepareSettlement,
     DurableRegistrationOutcome, StartupCustodyPhase, StartupCustodyTarget,
 };
 
@@ -55,7 +58,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 
-/// Starts the dormant actor against a caller-owned temporary directory for cross-module tests.
+/// Starts the actor against a caller-owned temporary directory for cross-module tests.
 ///
 /// The fixture never opens production paths and deliberately accepts one absolute outer deadline.
 /// Its recovery executor is a typed exact echo suitable only for deterministic unit tests.
@@ -98,6 +101,91 @@ pub(crate) fn journal_bytes_have_exact_custody_phase_for_test(
     })
 }
 
+/// Read-only KVM evidence seam for the three fixed functional production cycles.
+///
+/// This decodes only the fixed production journal, requires a stable canonical snapshot with one
+/// settled Client, Relay and Exit tombstone, and grants no cleanup or restart authority.
+pub(crate) fn production_functional_journal_is_exactly_settled() -> bool {
+    let config = JournalConfig::production();
+    let Ok(parent_directory) = open_verified_parent(&config) else {
+        return false;
+    };
+    if config.validate().is_err() || verify_next_absent(&config, &parent_directory).is_err() {
+        return false;
+    }
+    let Ok(Some(first)) = load_snapshot(&config, &parent_directory) else {
+        return false;
+    };
+    if !functional_snapshot_is_exactly_settled(&first) {
+        return false;
+    }
+    let Ok(first_bytes) = first.encode() else {
+        return false;
+    };
+    if verify_next_absent(&config, &parent_directory).is_err() {
+        return false;
+    }
+    let Ok(Some(second)) = load_snapshot(&config, &parent_directory) else {
+        return false;
+    };
+    functional_snapshot_is_exactly_settled(&second)
+        && second.encode().is_ok_and(|bytes| bytes == first_bytes)
+        && verify_next_absent(&config, &parent_directory).is_ok()
+}
+
+fn functional_snapshot_is_exactly_settled(snapshot: &JournalSnapshot) -> bool {
+    if snapshot.records.len() != 3
+        || snapshot.records.values().any(|record| {
+            record.phase != OwnershipPhase::Absent
+                || record.absent_origin != Some(AbsentOrigin::RecoveredMayOwn)
+                || record.recovery_evidence.is_some()
+                || record.reconcile.is_some()
+        })
+    {
+        return false;
+    }
+    let mut client = 0_u8;
+    let mut relay = 0_u8;
+    let mut exit = 0_u8;
+    for record in snapshot.records.values() {
+        match (record.plan.context_role, record.plan.paths.as_slice()) {
+            (
+                ContextRole::Client,
+                [
+                    PathPlan {
+                        path_id: 1,
+                        role: WireguardRole::Client,
+                    },
+                ],
+            ) => client = client.saturating_add(1),
+            (
+                ContextRole::Relay,
+                [
+                    PathPlan {
+                        path_id: 1,
+                        role: WireguardRole::RelayClient,
+                    },
+                    PathPlan {
+                        path_id: 1,
+                        role: WireguardRole::RelayExit,
+                    },
+                ],
+            ) => relay = relay.saturating_add(1),
+            (
+                ContextRole::Exit,
+                [
+                    PathPlan {
+                        path_id: 1,
+                        role: WireguardRole::Exit,
+                    },
+                ],
+            ) => exit = exit.saturating_add(1),
+            _ => return false,
+        }
+    }
+    (client, relay, exit) == (1, 1, 1)
+}
+
 #[cfg(test)]
 struct ExactTestRecoveryExecutor;
 
@@ -127,11 +215,10 @@ impl ManagerAbsenceExecutor for ExactTestRecoveryExecutor {
     }
 }
 
-/// Production ownership lifecycle with one separately cloneable arm-only authority.
+/// Production ownership lifecycle with a separately cloneable typed Prepare authority.
 ///
-/// The wrapper remains the sole owner of actor shutdown and thread settlement. It cannot register,
-/// mark, retire or recover ownership; future custody publication may receive only the narrow handle
-/// needed to arm an already durable custody token.
+/// The wrapper remains the sole owner of actor startup, shutdown, recovery and thread settlement.
+/// Its handle can admit and cleanly settle only affine same-runtime Prepare ownership.
 pub(crate) struct ProductionOwnershipRuntime {
     actor: DurableOwnershipActor,
 }
@@ -212,6 +299,14 @@ impl ProductionOwnershipRuntime {
         self.actor.custody_arm_handle()
     }
 
+    /// Issue the typed production admission/settlement authority while retaining sole actor
+    /// startup, recovery and shutdown ownership in this runtime.
+    pub(crate) fn prepare_handle(
+        &self,
+    ) -> Result<DurableOwnershipPrepareHandle, DurableOwnershipError> {
+        self.actor.prepare_handle()
+    }
+
     /// Fence admission, prove that every record is Absent and join the actor thread.
     pub(crate) fn shutdown_until(
         mut self,
@@ -226,6 +321,35 @@ struct RefuseMayOwnRecovery;
 
 #[derive(Debug, Eq, PartialEq)]
 struct MayOwnRecoveryUnavailable;
+
+/// Typed echo used only after the live production backend has independently completed the exact
+/// same-runtime worker/kernel or manager-custody operation. This is deliberately distinct from
+/// the installed restart executor, which continues to refuse every recovery proof.
+struct SameRuntimeCleanSettlement;
+
+impl CleanupExecutor for SameRuntimeCleanSettlement {
+    type Error = std::convert::Infallible;
+
+    fn confirm_cleanup(
+        &mut self,
+        target: &CleanupTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedCleanupProof, Self::Error> {
+        Ok(target.confirmed_cleanup())
+    }
+}
+
+impl ManagerAbsenceExecutor for SameRuntimeCleanSettlement {
+    type Error = std::convert::Infallible;
+
+    fn confirm_manager_absent(
+        &mut self,
+        target: &ManagerAbsenceTarget,
+        _deadline: HardDeadline,
+    ) -> Result<ConfirmedManagerAbsentProof, Self::Error> {
+        Ok(target.confirmed_manager_absent())
+    }
+}
 
 impl CleanupExecutor for RefuseMayOwnRecovery {
     type Error = MayOwnRecoveryUnavailable;
@@ -1788,7 +1912,8 @@ impl CleanupTarget {
 
     /// Constructs only a typed echo, not cryptographic or kernel evidence. A trusted executor may
     /// call this only after both trusted-worker teardown and exact kernel cleanup have completed.
-    /// This dormant slice deliberately provides no production executor.
+    /// Restart recovery deliberately provides no accepting production executor; same-runtime clean
+    /// settlement reaches this echo only through its separate affine actor operation.
     fn confirmed_cleanup(&self) -> ConfirmedCleanupProof {
         ConfirmedCleanupProof {
             exact_record: self.exact_record.clone(),
@@ -6208,18 +6333,111 @@ mod tests {
     fn production_config_is_consumed_only_by_the_lifecycle_wrapper() {
         let source = include_str!("ownership_journal.rs");
         let production_config = ["JournalConfig", "::production()"].concat();
-        assert_eq!(source.matches(&production_config).count(), 1);
-        let call = source
+        assert_eq!(source.matches(&production_config).count(), 2);
+        let observer = source
+            .find("pub(crate) fn production_functional_journal_is_exactly_settled")
+            .expect("read-only production observer");
+        let observer_call = source[observer..]
             .find(&production_config)
-            .expect("production config call");
+            .map(|offset| observer + offset)
+            .expect("observer production config call");
         let wrapper = source
             .find("impl ProductionOwnershipRuntime")
             .expect("production wrapper");
+        let wrapper_call = source[wrapper..]
+            .find(&production_config)
+            .map(|offset| wrapper + offset)
+            .expect("lifecycle production config call");
         let executor = source
             .find("struct RefuseMayOwnRecovery")
             .expect("production executor");
-        assert!(wrapper < call);
-        assert!(call < executor);
+        assert!(observer < observer_call && observer_call < wrapper);
+        assert!(wrapper < wrapper_call && wrapper_call < executor);
+    }
+
+    #[test]
+    fn functional_journal_evidence_requires_three_exact_fixed_recovered_tombstones() {
+        let journal_epoch = epoch(1);
+        let mut client = record(journal_epoch, 1, 2, 3, 1, OwnershipPhase::Absent);
+        client.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        client.plan = ClosedPlan::new(
+            ContextRole::Client,
+            vec![PathPlan {
+                path_id: 1,
+                role: WireguardRole::Client,
+            }],
+        )
+        .expect("client plan");
+        let mut relay = record(journal_epoch, 4, 5, 6, 2, OwnershipPhase::Absent);
+        relay.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        relay.plan = ClosedPlan::new(
+            ContextRole::Relay,
+            vec![
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayClient,
+                },
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayExit,
+                },
+            ],
+        )
+        .expect("relay plan");
+        let mut exit = record(journal_epoch, 7, 8, 9, 3, OwnershipPhase::Absent);
+        exit.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        exit.plan = ClosedPlan::new(
+            ContextRole::Exit,
+            vec![PathPlan {
+                path_id: 1,
+                role: WireguardRole::Exit,
+            }],
+        )
+        .expect("exit plan");
+        let settled = snapshot_with(vec![client.clone(), relay.clone(), exit.clone()]);
+        assert!(functional_snapshot_is_exactly_settled(&settled));
+
+        let mut never_dispatched = client.clone();
+        never_dispatched.absent_origin = Some(AbsentOrigin::NeverDispatched);
+        assert!(!functional_snapshot_is_exactly_settled(&snapshot_with(
+            vec![never_dispatched, relay.clone(), exit.clone(),]
+        )));
+        let mut duplicate_role = relay;
+        duplicate_role.plan = exit.plan.clone();
+        assert!(!functional_snapshot_is_exactly_settled(&snapshot_with(
+            vec![client, duplicate_role, exit,]
+        )));
+
+        let mut wrong_fixed_path = settled
+            .records
+            .values()
+            .find(|record| record.plan.context_role == ContextRole::Relay)
+            .expect("Relay tombstone")
+            .clone();
+        wrong_fixed_path.plan = ClosedPlan::new(
+            ContextRole::Relay,
+            vec![
+                PathPlan {
+                    path_id: 2,
+                    role: WireguardRole::RelayClient,
+                },
+                PathPlan {
+                    path_id: 2,
+                    role: WireguardRole::RelayExit,
+                },
+            ],
+        )
+        .expect("valid but non-fixture Relay plan");
+        let other_records = settled
+            .records
+            .values()
+            .filter(|record| record.plan.context_role != ContextRole::Relay)
+            .cloned()
+            .chain(std::iter::once(wrong_fixed_path))
+            .collect();
+        assert!(!functional_snapshot_is_exactly_settled(&snapshot_with(
+            other_records
+        )));
     }
 
     #[test]

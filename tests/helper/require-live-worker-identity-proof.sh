@@ -454,10 +454,12 @@ production_functional_probe_failure_value_is_safe() {
         || return 1
     case $production_functional_failure_phase in
         plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|\
+        client-settled|client-settlement-release|\
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|\
         second-cycle-release|second-cycle-reconnect|second-cycle-commit|\
-        second-cycle-destroy|relay-pair-plan|relay-pair-bind|relay-pair-prepare|\
+        second-cycle-destroy|second-cycle-settlement-release|\
+        relay-pair-plan|relay-pair-bind|relay-pair-prepare|\
         relay-pair-activate|relay-pair-reuse|relay-pair-shutdown|relay-pair-ready|\
         relay-pair-release|relay-pair-reconnect|relay-pair-commit|\
         relay-pair-destroy|final-shutdown)
@@ -1507,6 +1509,10 @@ cleanup_error=no
 worker_fdstore_before_retirement=
 worker_retired_load_state=
 production_fdstore_during_run=
+production_fdstore_active_counts=
+production_fdstore_settled_counts=
+production_fdstore_identity_bound=
+production_journal_settled_absent=
 production_retired_load_state=
 driver_phase=staging
 structured_failure_reported=no
@@ -3654,6 +3660,30 @@ if [ "$proof_ok" = yes ]; then
         || [ -L "$temporary_stage/production-runtime/helper.ownership-v3.next" ]; then
         record_proof_failure 'production-stop-records'
     fi
+    printf '%s\n' 'VOLPAROSSA_HELPER_V3_FUNCTIONAL_FDSTORE_CYCLES_V1=pass' \
+        >"$temporary_stage/expected-production-fdstore-cycles.pass"
+    printf '%s\n' 'VOLPAROSSA_HELPER_V3_FUNCTIONAL_JOURNAL_SETTLED_V1=pass' \
+        >"$temporary_stage/expected-production-journal.settled"
+    if vp_capture_file_is_safe \
+        "$temporary_stage/production-output/fdstore-cycles.pass" \
+        && cmp -s "$temporary_stage/expected-production-fdstore-cycles.pass" \
+            "$temporary_stage/production-output/fdstore-cycles.pass"; then
+        production_fdstore_active_counts='2 2 2'
+        production_fdstore_settled_counts='0 0 0'
+        production_fdstore_identity_bound=true
+    else
+        record_proof_failure 'production-stop-records'
+    fi
+    if vp_capture_file_is_safe \
+        "$temporary_stage/production-output/journal.settled" \
+        && cmp -s "$temporary_stage/expected-production-journal.settled" \
+            "$temporary_stage/production-output/journal.settled" \
+        && vp_capture_file_is_safe \
+            "$temporary_stage/production-output/journal.settled.state"; then
+        production_journal_settled_absent=true
+    else
+        record_proof_failure 'production-stop-records'
+    fi
     if [ "$production_ok" != "$proof_ok" ]; then
         failed 'internal production proof failure state is inconsistent'
     fi
@@ -3693,6 +3723,10 @@ final_checkpoint=lifecycle-summary
 if [ "$worker_fdstore_before_retirement" != 2 ] \
     || [ "$worker_retired_load_state" != not-found ] \
     || [ "$production_fdstore_during_run" != 0 ] \
+    || [ "$production_fdstore_active_counts" != '2 2 2' ] \
+    || [ "$production_fdstore_settled_counts" != '0 0 0' ] \
+    || [ "$production_fdstore_identity_bound" != true ] \
+    || [ "$production_journal_settled_absent" != true ] \
     || [ "$production_retired_load_state" != not-found ]; then
     failed 'the retained fdstore or exact-unit retirement observations are incomplete'
 fi
@@ -3771,6 +3805,8 @@ jq -n -S -c \
     --arg worker_fdstore_before_retirement "$worker_fdstore_before_retirement" \
     --arg worker_retired_load_state "$worker_retired_load_state" \
     --arg production_fdstore_during_run "$production_fdstore_during_run" \
+    --arg production_fdstore_active_counts "$production_fdstore_active_counts" \
+    --arg production_fdstore_settled_counts "$production_fdstore_settled_counts" \
     --arg production_retired_load_state "$production_retired_load_state" '
     {
       schema_version: 1,
@@ -3799,10 +3835,19 @@ jq -n -S -c \
       },
       production: {
         argumentless: true,
-        fdstore_during_run: ($production_fdstore_during_run | tonumber),
+        fdstore_idle_observation: ($production_fdstore_during_run | tonumber),
+        fdstore_active_cycle_counts:
+          ($production_fdstore_active_counts | split(" ") | map(tonumber)),
+        fdstore_settled_cycle_counts:
+          ($production_fdstore_settled_counts | split(" ") | map(tonumber)),
+        fdstore_exact_identity_bound: true,
         unit_load_state_after_retirement: $production_retired_load_state
       },
-      retirement: {journal_unchanged: true, lock_released: true, socket_absent: true},
+      retirement: {
+        journal_settled_absent: true,
+        lock_released: true,
+        socket_absent: true
+      },
       enumerated_host_state: {
         before_sha256: $before_digest,
         after_sha256: $after_digest,
@@ -3828,9 +3873,11 @@ jq -n -S -c \
         "PRODUCTION_DISTINCT_INVOCATION_BOUND",
         "PRODUCTION_ARGUMENTLESS",
         "PRODUCTION_IPC_BOUNDARY",
-        "PRODUCTION_FDSTORE_ZERO_DURING_RUN",
+        "PRODUCTION_FDSTORE_ZERO_AT_IDLE_OBSERVATION",
+        "PRODUCTION_FDSTORE_EXACT_CUSTODY_DURING_ACTIVE_CYCLES",
+        "PRODUCTION_FDSTORE_ZERO_AFTER_SETTLED_CYCLES",
         "PRODUCTION_RETIRED_UNIT_NOT_FOUND",
-        "RETIREMENT_JOURNAL_UNCHANGED",
+        "RETIREMENT_JOURNAL_SETTLED_ABSENT",
         "RETIREMENT_LOCK_RELEASED",
         "RETIREMENT_SOCKET_ABSENT",
         "ENUMERATED_HOST_STATE_EQUAL_AT_FENCES"

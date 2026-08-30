@@ -1,8 +1,11 @@
-//! Dormant single-writer actor for durable helper ownership.
+//! Single-writer actor for durable helper ownership.
 //!
-//! The actor is intentionally disconnected from production. It owns the journal and trusted
-//! recovery executor on one named OS thread, exposes no revision/CAS surface, and never reopens a
-//! store in the same process after its store-identity latch has been acquired.
+//! Production owns this actor for startup, live Prepare admission, same-runtime clean settlement
+//! and shutdown. It owns the journal and trusted recovery executor on one named OS thread, exposes
+//! no revision/CAS surface, and never reopens a store in the same process after its store-identity
+//! latch has been acquired. The installed restart executor remains a separate fail-closed refusal;
+//! only opaque functional-backend evidence joined to the affine live-Prepare settlement may
+//! request the private same-runtime proof echo.
 //!
 //! A recovery executor cannot be forcefully cancelled safely. If it exceeds the bounded reply
 //! wait, admission becomes permanently ambiguous and the worker handle is detached instead of
@@ -36,14 +39,21 @@ use std::{collections::BTreeSet, sync::OnceLock};
 
 use volparossa_routing::PrepareIntent;
 
-use crate::{deadline::HardDeadline, internal_protocol::PrepareLeases};
+use crate::{
+    deadline::HardDeadline,
+    internal_protocol::PrepareLeases,
+    worker_v3::{
+        ExactNeverDispatchedPrepareProof, ExactSameRuntimeCleanupProof,
+        ExactSameRuntimeManagerAbsenceProof,
+    },
+};
 
 use super::{
     CleanupExecutor, ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16,
     JournalConfig, JournalEpochId, JournalError, JournalSnapshot, ManagerAbsenceExecutor,
     NewOwnershipIntent, OwnershipId, OwnershipJournal, OwnershipPhase, PrepareRecoveryAnchorV1,
-    PrepareRecoveryEvidenceV1, RuntimeId, SettlementAttemptError, open_verified_parent,
-    random_ownership_id,
+    PrepareRecoveryEvidenceV1, RuntimeId, SameRuntimeCleanSettlement, SettlementAttemptError,
+    open_verified_parent, random_ownership_id,
 };
 #[cfg(test)]
 use super::{DurableCustodyDescriptorIdentity, DurableCustodyDescriptorIdentityParts};
@@ -287,6 +297,27 @@ pub(crate) struct DurableOwnershipKey {
     coordinates: OwnershipCoordinates,
 }
 
+/// Copyable correlation identity for selecting one retained terminal without carrying mutation
+/// authority. Only affine keys and proofs can expose this opaque value.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct DurableOwnershipSelector(OwnershipCoordinates);
+
+impl DurableOwnershipSelector {
+    pub(crate) const fn from_key(key: &DurableOwnershipKey) -> Self {
+        Self(key.coordinates)
+    }
+
+    pub(crate) const fn context_id(self) -> [u8; 16] {
+        self.0.context_id.0
+    }
+}
+
+impl fmt::Debug for DurableOwnershipSelector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableOwnershipSelector(<redacted>)")
+    }
+}
+
 /// Stable, secret-free descriptor-store identity derived from one exact durable key.
 ///
 /// This value is not ownership authority and is therefore copyable. Its raw digest remains
@@ -477,7 +508,7 @@ impl DurableMayOwnPrepare {
     /// Canonically project the complete ordered durable plan for the private worker-v3 channel.
     ///
     /// No path, role, address, expiry or marker is supplied by an agent or call site. Production
-    /// dispatch remains disconnected; this only closes the descriptor-construction boundary.
+    /// dispatch can consume this projection only with the same affine `MayOwnPrepare` owner.
     pub(crate) fn prepare_leases_v3(&self) -> Result<PrepareLeases, DurableOwnershipError> {
         let leases = self
             .resources
@@ -490,12 +521,90 @@ impl DurableMayOwnPrepare {
             leases,
         })
     }
+
+    /// Split the armed authority into the exact durable resources which may be dispatched and
+    /// the affine journal settlement owner which must survive until cleanup is proven.
+    ///
+    /// The resources cannot be copied or reconstructed by a production caller. Consuming this
+    /// value is therefore the only path from durable `MayOwnPrepare` evidence to live kernel
+    /// owners, while the returned settlement token prevents that dispatch authority from being
+    /// mistaken for a completed lifecycle.
+    pub(crate) fn into_dispatch_parts(
+        self,
+    ) -> (DurablePrepareSettlement, Vec<DurableWireguardResource>) {
+        let Self { key, resources } = self;
+        (DurablePrepareSettlement { key }, resources)
+    }
 }
 
 impl fmt::Debug for DurableMayOwnPrepare {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DurableMayOwnPrepare(<redacted>)")
     }
+}
+
+/// Affine journal authority retained after the exact durable resources leave the actor token.
+#[must_use = "dispatched durable Prepare ownership must be cleanup-confirmed or retained"]
+pub(crate) struct DurablePrepareSettlement {
+    key: DurableOwnershipKey,
+}
+
+impl DurablePrepareSettlement {
+    pub(crate) const fn context_id(&self) -> [u8; 16] {
+        self.key.coordinates.context_id.0
+    }
+}
+
+impl fmt::Debug for DurablePrepareSettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurablePrepareSettlement(<redacted>)")
+    }
+}
+
+/// Affine proof that kernel/worker cleanup was durably confirmed but manager custody is not yet
+/// proven absent.
+#[must_use = "CleanupConfirmed ownership must be manager-absent-confirmed or retained"]
+pub(crate) struct DurableCleanupConfirmed {
+    key: DurableOwnershipKey,
+}
+
+impl DurableCleanupConfirmed {
+    pub(crate) const fn context_id(&self) -> [u8; 16] {
+        self.key.coordinates.context_id.0
+    }
+}
+
+impl fmt::Debug for DurableCleanupConfirmed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurableCleanupConfirmed(<redacted>)")
+    }
+}
+
+#[must_use = "cleanup confirmation retains the opaque cleanup proof on every error"]
+pub(crate) enum DurableCleanupOutcome {
+    Confirmed(DurableCleanupConfirmed),
+    Retained {
+        error: DurableOwnershipError,
+        proof: ExactSameRuntimeCleanupProof,
+    },
+}
+
+#[must_use = "manager-absence confirmation retains the opaque removal proof on every error"]
+pub(crate) enum DurableManagerAbsentOutcome {
+    Absent,
+    Retained {
+        error: DurableOwnershipError,
+        proof: ExactSameRuntimeManagerAbsenceProof,
+    },
+}
+
+#[must_use = "never-dispatched retirement retains the opaque absence proof on every error"]
+pub(crate) enum DurableNeverDispatchedOutcome {
+    Absent,
+    Retained {
+        error: DurableOwnershipError,
+        proof: ExactNeverDispatchedPrepareProof,
+    },
 }
 
 #[must_use = "registration outcomes retain the unique owner on every error"]
@@ -844,6 +953,16 @@ enum Operation {
         key: OwnershipCoordinates,
         reply: ReplySender<()>,
     },
+    SameRuntimeCleanup {
+        deadline: HardDeadline,
+        key: OwnershipCoordinates,
+        reply: ReplySender<()>,
+    },
+    SameRuntimeManagerAbsent {
+        deadline: HardDeadline,
+        key: OwnershipCoordinates,
+        reply: ReplySender<()>,
+    },
     #[cfg(test)]
     PanicAfterRegister {
         deadline: HardDeadline,
@@ -883,7 +1002,9 @@ impl Operation {
             | Self::ArmCustody { deadline, .. }
             | Self::RetireNeverDispatched { deadline, .. }
             | Self::ConfirmCleanup { deadline, .. }
-            | Self::ConfirmManagerAbsent { deadline, .. } => *deadline,
+            | Self::ConfirmManagerAbsent { deadline, .. }
+            | Self::SameRuntimeCleanup { deadline, .. }
+            | Self::SameRuntimeManagerAbsent { deadline, .. } => *deadline,
             #[cfg(test)]
             Self::PanicAfterRegister { deadline, .. } | Self::TestBarrier { deadline, .. } => {
                 *deadline
@@ -908,7 +1029,9 @@ impl Operation {
             }
             Self::RetireNeverDispatched { reply, .. }
             | Self::ConfirmCleanup { reply, .. }
-            | Self::ConfirmManagerAbsent { reply, .. } => {
+            | Self::ConfirmManagerAbsent { reply, .. }
+            | Self::SameRuntimeCleanup { reply, .. }
+            | Self::SameRuntimeManagerAbsent { reply, .. } => {
                 reply.complete_unstarted_deadline();
             }
             #[cfg(test)]
@@ -1100,6 +1223,30 @@ impl ActorClient {
         })
     }
 
+    fn same_runtime_cleanup_pending_until(
+        &self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::SameRuntimeCleanup {
+            deadline,
+            key,
+            reply,
+        })
+    }
+
+    fn same_runtime_manager_absent_pending_until(
+        &self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> Result<PendingReply<()>, DurableOwnershipError> {
+        self.submit(deadline, |reply| Operation::SameRuntimeManagerAbsent {
+            deadline,
+            key,
+            reply,
+        })
+    }
+
     #[cfg(test)]
     fn panic_after_register_pending(
         &self,
@@ -1180,6 +1327,135 @@ impl DurableCustodyArmHandle {
         deadline: HardDeadline,
     ) -> DurableArmOutcome {
         arm_custody_with_client(&self.client, custody, deadline)
+    }
+}
+
+/// Cloneable, typed production admission and settlement authority.
+///
+/// This handle cannot start, stop or recover the journal actor. It accepts only immutable wire
+/// intent registration, the exact worker-derived custody binding, arming of that same custody,
+/// and the two ordered clean-settlement transitions. Clean settlement additionally requires
+/// non-forgeable functional-backend evidence; every affine input is returned on failure.
+#[derive(Clone)]
+#[must_use = "durable Prepare admission remains bound to the owning journal runtime"]
+pub(crate) struct DurableOwnershipPrepareHandle {
+    client: ActorClient,
+}
+
+impl DurableOwnershipPrepareHandle {
+    pub(crate) fn register_until(
+        &self,
+        registration: DurableIntentRegistration,
+        deadline: HardDeadline,
+    ) -> DurableRegistrationOutcome {
+        let payload = registration.actor_payload();
+        let result = self
+            .client
+            .register_pending_until(payload, deadline)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(key) => DurableRegistrationOutcome::Registered(key),
+            Err(error) => DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            },
+        }
+    }
+
+    /// Inject a reply-path panic after a different Intent has durably registered.
+    ///
+    /// This cross-module test seam makes the actor deterministically ambiguous without exposing
+    /// its client, journal coordinates or any production mutation authority.
+    #[cfg(test)]
+    pub(crate) fn panic_after_registration_for_test(
+        &self,
+        registration: DurableIntentRegistration,
+    ) -> DurableRegistrationOutcome {
+        let payload = registration.actor_payload();
+        let result = self
+            .client
+            .panic_after_register_pending(payload)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(key) => DurableRegistrationOutcome::Registered(key),
+            Err(error) => DurableRegistrationOutcome::Retained {
+                error,
+                registration,
+            },
+        }
+    }
+
+    pub(crate) fn mark_custody_until(
+        &self,
+        key: DurableOwnershipKey,
+        anchor: DurablePrepareAnchor,
+        binding: DurableCustodyDescriptorBinding,
+        deadline: HardDeadline,
+    ) -> DurableCustodyOutcome {
+        let result = self
+            .client
+            .mark_custody_pending_until(key.coordinates, anchor, binding, deadline)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(()) => DurableCustodyOutcome::Marked(DurableMayOwnCustody { key }),
+            Err(error) => DurableCustodyOutcome::Retained { error, key },
+        }
+    }
+
+    pub(crate) fn custody_arm_handle(&self) -> DurableCustodyArmHandle {
+        DurableCustodyArmHandle {
+            client: self.client.clone(),
+        }
+    }
+
+    pub(crate) fn retire_never_dispatched_until(
+        &self,
+        proof: ExactNeverDispatchedPrepareProof,
+        deadline: HardDeadline,
+    ) -> DurableNeverDispatchedOutcome {
+        let result = self
+            .client
+            .retire_pending_until(proof.key().coordinates, deadline)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(()) => DurableNeverDispatchedOutcome::Absent,
+            Err(error) => DurableNeverDispatchedOutcome::Retained { error, proof },
+        }
+    }
+
+    pub(crate) fn confirm_cleanup_until(
+        &self,
+        proof: ExactSameRuntimeCleanupProof,
+        deadline: HardDeadline,
+    ) -> DurableCleanupOutcome {
+        let result = self
+            .client
+            .same_runtime_cleanup_pending_until(proof.settlement().key.coordinates, deadline)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(()) => {
+                let settlement = proof.into_settlement();
+                DurableCleanupOutcome::Confirmed(DurableCleanupConfirmed {
+                    key: settlement.key,
+                })
+            }
+            Err(error) => DurableCleanupOutcome::Retained { error, proof },
+        }
+    }
+
+    pub(crate) fn confirm_manager_absent_until(
+        &self,
+        proof: ExactSameRuntimeManagerAbsenceProof,
+        deadline: HardDeadline,
+    ) -> DurableManagerAbsentOutcome {
+        let result = self
+            .client
+            .same_runtime_manager_absent_pending_until(proof.cleanup().key.coordinates, deadline)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(()) => DurableManagerAbsentOutcome::Absent,
+            Err(error) => DurableManagerAbsentOutcome::Retained { error, proof },
+        }
     }
 }
 
@@ -1579,6 +1855,15 @@ impl DurableOwnershipActor {
         self.client
             .clone()
             .map(|client| DurableCustodyArmHandle { client })
+            .ok_or(DurableOwnershipError::Unavailable)
+    }
+
+    pub(crate) fn prepare_handle(
+        &self,
+    ) -> Result<DurableOwnershipPrepareHandle, DurableOwnershipError> {
+        self.client
+            .clone()
+            .map(|client| DurableOwnershipPrepareHandle { client })
             .ok_or(DurableOwnershipError::Unavailable)
     }
 
@@ -2174,6 +2459,66 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
         }
     }
 
+    fn confirm_same_runtime_cleanup(
+        &mut self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> OperationOutcome<()> {
+        if let Err(error) = self.validate_key(key) {
+            return OperationOutcome::failure(error);
+        }
+        let mut executor = SameRuntimeCleanSettlement;
+        match self.journal.confirm_cleanup(
+            self.revision,
+            key.ownership_id,
+            key.generation,
+            &mut executor,
+            deadline,
+        ) {
+            Ok(revision) => {
+                self.revision = revision;
+                OperationOutcome::Complete(Ok(()))
+            }
+            Err(SettlementAttemptError::Executor(error)) => match error {},
+            Err(SettlementAttemptError::Deadline) => {
+                OperationOutcome::Complete(Err(DurableOwnershipError::DeadlineElapsed))
+            }
+            Err(SettlementAttemptError::Journal(error)) => {
+                OperationOutcome::failure(self.classify_journal_error(error))
+            }
+        }
+    }
+
+    fn confirm_same_runtime_manager_absent(
+        &mut self,
+        key: OwnershipCoordinates,
+        deadline: HardDeadline,
+    ) -> OperationOutcome<()> {
+        if let Err(error) = self.validate_key(key) {
+            return OperationOutcome::failure(error);
+        }
+        let mut executor = SameRuntimeCleanSettlement;
+        match self.journal.confirm_manager_absent(
+            self.revision,
+            key.ownership_id,
+            key.generation,
+            &mut executor,
+            deadline,
+        ) {
+            Ok(revision) => {
+                self.revision = revision;
+                OperationOutcome::Complete(Ok(()))
+            }
+            Err(SettlementAttemptError::Executor(error)) => match error {},
+            Err(SettlementAttemptError::Deadline) => {
+                OperationOutcome::Complete(Err(DurableOwnershipError::DeadlineElapsed))
+            }
+            Err(SettlementAttemptError::Journal(error)) => {
+                OperationOutcome::failure(self.classify_journal_error(error))
+            }
+        }
+    }
+
     fn classify_settlement_error<ExecutorError>(
         &mut self,
         error: SettlementAttemptError<ExecutorError>,
@@ -2585,6 +2930,10 @@ fn terminal_start_failure(failure: FailureDisposition) -> (DurableOwnershipError
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "all affine actor operations remain one exhaustive owner-preserving dispatch"
+)]
 fn process_operation<Executor: CleanupExecutor + ManagerAbsenceExecutor>(
     core: &mut ActorCore<Executor>,
     operation: Operation,
@@ -2653,6 +3002,32 @@ fn process_operation<Executor: CleanupExecutor + ManagerAbsenceExecutor>(
             finish_operation(
                 reply,
                 core.confirm_manager_absent(key, deadline),
+                lifecycle,
+                admission,
+            )
+        }
+        Operation::SameRuntimeCleanup {
+            deadline,
+            key,
+            mut reply,
+        } => {
+            reply.arm();
+            finish_operation(
+                reply,
+                core.confirm_same_runtime_cleanup(key, deadline),
+                lifecycle,
+                admission,
+            )
+        }
+        Operation::SameRuntimeManagerAbsent {
+            deadline,
+            key,
+            mut reply,
+        } => {
+            reply.arm();
+            finish_operation(
+                reply,
+                core.confirm_same_runtime_manager_absent(key, deadline),
                 lifecycle,
                 admission,
             )
