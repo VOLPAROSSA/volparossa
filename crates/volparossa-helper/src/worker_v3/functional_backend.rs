@@ -734,7 +734,20 @@ impl FunctionalAlphaLeaseBackend {
                 .coordinator
                 .settle_and_terminate_lifecycle_until(worker, deadline)
             {
-                WorkerGenerationReap::Confirmed(_) => {}
+                WorkerGenerationReap::Confirmed(_) => {
+                    // Process death alone does not destroy an anonymous network namespace while
+                    // duplicated recovery descriptors still pin it. Consume those descriptors
+                    // immediately after exact reap confirmation, before any fallible parent-link
+                    // cleanup or later deadline check can retain the entry for retry.
+                    let recovery = {
+                        let mut state = lock_state(&self.state);
+                        let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                            return false;
+                        };
+                        entry.recovery.take()
+                    };
+                    drop(recovery);
+                }
                 WorkerGenerationReap::Retained { ownership, .. } => {
                     let mut state = lock_state(&self.state);
                     if let Ok(entry) = exact_entry_mut(&mut state, key) {
@@ -4985,6 +4998,79 @@ mod tests {
             lock_state(&backend.state).as_ref().map(|entry| entry.key),
             Some(open_key)
         );
+    }
+
+    #[tokio::test]
+    async fn confirmed_reap_releases_recovery_pins_before_retryable_parent_cleanup() {
+        let open_key = key();
+        let (parent, _peer) =
+            private_credential_worker_channel().expect("credentialed fake worker channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let mut process = WorkerProcess::fake(parent, std::process::id(), Arc::clone(&alive));
+        let coordinator = WorkerCoordinator::new(WorkerRegistry::new(
+            MAX_FUNCTIONAL_ALPHA_CONTEXTS,
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_TTL,
+        ));
+        let ownership = match coordinator.reserve_spawn_register_with_until(
+            open_key.context_id,
+            Duration::from_secs(5),
+            HardDeadline::after(Duration::from_secs(1)).expect("registration deadline"),
+            move |reservation, _deadline| {
+                process.binding = Some(reservation.binding());
+                Ok(SpawnedWorker {
+                    reservation,
+                    process,
+                    bootstrap_challenge: BootstrapChallenge([0xd5; 32]),
+                })
+            },
+        ) {
+            WorkerLifecycleAdmission::Registered(ownership) => ownership,
+            WorkerLifecycleAdmission::Rejected(error) => {
+                panic!("fake worker registration rejected: {error}")
+            }
+            WorkerLifecycleAdmission::Retained { error, ownership } => {
+                drop(ownership);
+                panic!("fake worker registration unresolved: {error}")
+            }
+        };
+        let recovery = coordinator
+            .recovery_identity_source_until(
+                &ownership,
+                HardDeadline::after(Duration::from_secs(1)).expect("recovery deadline"),
+            )
+            .expect("authenticated duplicate recovery pins");
+
+        let mut entry = open_relay_entry(open_key);
+        entry.worker = Some(ownership);
+        entry.recovery = Some(recovery);
+        entry.phase = OpenLeasePhase::Registered;
+        // A corrupt cardinality is a deterministic, retryable parent-cleanup failure after reap.
+        // The remaining WireGuard owners must survive, but the dead worker's namespace pins must
+        // not survive with them.
+        entry.birth_may_exist.clear();
+        let backend = FunctionalAlphaLeaseBackend {
+            coordinator,
+            relay_replay: Mutex::new(functional_alpha_replay_cache()),
+            state: Mutex::new(Some(entry)),
+        };
+
+        assert!(
+            !backend
+                .cleanup_exact(
+                    open_key,
+                    HardDeadline::after(Duration::from_secs(1)).expect("cleanup deadline"),
+                    false,
+                )
+                .await
+        );
+        assert!(!alive.load(Ordering::SeqCst));
+        let state = lock_state(&backend.state);
+        let retained = state.as_ref().expect("retryable parent ownership");
+        assert!(retained.worker.is_none());
+        assert!(retained.recovery.is_none());
+        assert_eq!(retained.wireguard.len(), 2);
+        assert!(retained.birth_may_exist.is_empty());
     }
 
     #[tokio::test]
