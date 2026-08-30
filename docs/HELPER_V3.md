@@ -14,8 +14,12 @@ The v3 route-context lifecycle is:
 
 1. `PrepareLeaseBatch` describes a route context, its client/relay/exit role, one to eight paths,
    bounded MPTCP limits, a setup expiry, and a hard expiry.
-2. `ActivateLeaseBatch` presents only the exact public key and public UDP endpoint of every peer,
-   correlated by opaque helper-issued context and lease handles. Relay rate limits are bounded.
+2. `ActivateLeaseBatch` presents the exact public key and public UDP endpoint of every peer,
+   correlated by opaque helper-issued context and lease handles. Relay rate limits are bounded. A
+   tag-8 byte string additionally preserves one opaque signed relay reservation per lease; empty
+   remains the wire-compatible default, per-item and aggregate bytes are bounded by the 128 KiB helper
+   frame ceiling, and the complete protobuf frame including overhead must still fit that ceiling.
+   This wire step neither decodes nor verifies the reservation and grants no authority from it.
 3. `CommitLeaseBatch` presents the same opaque handles and identities. Success is permitted only
    after a correlated kernel probe proves a recent handshake and strict growth of both RX and TX
    counters relative to the activation baseline.

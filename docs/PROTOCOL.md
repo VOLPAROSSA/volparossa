@@ -395,7 +395,7 @@ rejected before dispatch.
 | Operation | Typed effect |
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
-| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint; derive local overlay and privileged state |
+| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and carry one default-empty, opaque, bounded signed-relay-reservation byte string; derive local overlay and privileged state |
 | `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease |
 | `DestroyContext` | idempotently remove one context and all contained state |
 | `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
@@ -418,6 +418,11 @@ non-canonical before dispatch.
 The active v3 agent API has no private-key field and cannot select an interface name, local overlay
 address, allowed prefix, listen port, nftables expression, sysctl, command, filesystem path, or free-form
 diagnostic.
+The tag-8 `signed_relay_reservation` bytes in each activation lease are preserved by the
+canonical wire and committed by the request digest, but this boundary currently neither decodes nor
+verifies them and they grant no helper authority. Each item and their aggregate are capped at the
+128 KiB helper frame ceiling; protobuf and request-envelope overhead make the final complete-frame
+check stricter.
 Responses echo the request identity, return a stable result, a bounded diagnostic code, the BLAKE3
 digest of the canonical request, and an operation-specific success value. Failure responses cannot
 contain a success value.

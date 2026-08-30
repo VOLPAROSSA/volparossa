@@ -1309,6 +1309,7 @@ mod tests {
                 }),
                 maximum_up_mbps: 0,
                 maximum_down_mbps: 0,
+                signed_relay_reservation: Vec::new(),
             }],
         };
         let prepared = PreparedWorkerLease {

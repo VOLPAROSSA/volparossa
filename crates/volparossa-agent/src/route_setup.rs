@@ -3096,6 +3096,9 @@ fn activation_request<P: ClientReservationProtocol>(
             // lease must therefore carry the protocol-canonical zero values.
             maximum_up_mbps: 0,
             maximum_down_mbps: 0,
+            // Helper verification is not wired yet; preserve the v3 default instead of
+            // manufacturing authority from the already verified in-process grant.
+            signed_relay_reservation: Vec::new(),
         });
     }
     Ok(ActivateLeaseBatch {
