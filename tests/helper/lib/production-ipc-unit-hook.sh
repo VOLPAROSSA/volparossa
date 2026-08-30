@@ -160,6 +160,12 @@ start_failure_stage_is_safe() {
         functional-underlay-readback-address|\
         functional-underlay-readback-route|\
         functional-probe-ready|\
+        functional-probe-fixture|\
+        functional-probe-launch|\
+        functional-probe-wait|\
+        functional-probe-identity|\
+        functional-probe-socket|\
+        functional-probe-fdstore|\
         functional-worker-observation|\
         functional-probe-finish|\
         functional-cleanup|\
@@ -204,7 +210,13 @@ advance_start_failure_stage() {
         functional-underlay-readback-link:functional-underlay-readback-address|\
         functional-underlay-readback-address:functional-underlay-readback-route|\
         functional-underlay-readback-route:functional-probe-ready|\
-        functional-probe-ready:functional-worker-observation|\
+        functional-probe-ready:functional-probe-fixture|\
+        functional-probe-fixture:functional-probe-launch|\
+        functional-probe-launch:functional-probe-wait|\
+        functional-probe-wait:functional-probe-identity|\
+        functional-probe-identity:functional-probe-socket|\
+        functional-probe-socket:functional-probe-fdstore|\
+        functional-probe-fdstore:functional-worker-observation|\
         functional-worker-observation:functional-probe-finish|\
         functional-probe-finish:functional-cleanup|\
         functional-cleanup:publication)
@@ -1616,6 +1628,7 @@ run_functional_client_lease_probe() {
 
     advance_start_failure_stage functional-probe-ready || return 1
 
+    advance_start_failure_stage functional-probe-fixture || return 1
     hook_functional_fifo=$proof_directory/functional-client-lease.release
     hook_functional_stdout=$proof_directory/functional-client-lease.stdout
     hook_functional_stderr=$proof_directory/functional-client-lease.stderr
@@ -1634,6 +1647,7 @@ run_functional_client_lease_probe() {
     private_file_is_safe "$hook_functional_stdout" || return 1
     private_file_is_safe "$hook_functional_stderr" || return 1
     command exec 6<>"$hook_functional_fifo" || return 1
+    advance_start_failure_stage functional-probe-launch || return 1
     (
         command exec 6>&- || exit 1
         command exec /usr/bin/setpriv \
@@ -1651,6 +1665,7 @@ run_functional_client_lease_probe() {
     hook_functional_probe_pid=$!
     number_is_safe "$hook_functional_probe_pid" || return 1
 
+    advance_start_failure_stage functional-probe-wait || return 1
     hook_functional_wait_attempt=0
     while ! probe_output_is_exact \
         "$hook_functional_stdout" "$functional_ready_record"; do
@@ -1663,12 +1678,15 @@ run_functional_client_lease_probe() {
     done
     private_file_is_safe "$hook_functional_stderr" || return 1
     [ ! -s "$hook_functional_stderr" ] || return 1
+    advance_start_failure_stage functional-probe-identity || return 1
     running_identity_is_unchanged \
         "$hook_functional_unit" \
         "$proof_directory/unit.identity" \
         "$hook_functional_agent_gid" || return 1
+    advance_start_failure_stage functional-probe-socket || return 1
     socket_identity_is_unchanged \
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
+    advance_start_failure_stage functional-probe-fdstore || return 1
     unit_fdstore_is_empty "$hook_functional_unit" || return 1
 
     advance_start_failure_stage functional-worker-observation || return 1

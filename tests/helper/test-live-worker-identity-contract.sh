@@ -472,6 +472,12 @@ printf '%s\n' \
     functional-underlay-readback-address \
     functional-underlay-readback-route \
     functional-probe-ready \
+    functional-probe-fixture \
+    functional-probe-launch \
+    functional-probe-wait \
+    functional-probe-identity \
+    functional-probe-socket \
+    functional-probe-fdstore \
     functional-worker-observation \
     functional-probe-finish \
     functional-cleanup \
