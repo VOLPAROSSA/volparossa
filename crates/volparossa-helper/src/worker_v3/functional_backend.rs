@@ -3474,7 +3474,7 @@ mod tests {
     }
 
     #[test]
-    fn production_prepare_and_clean_settlement_order_is_fail_closed() {
+    fn production_prepare_order_is_fail_closed() {
         let source = include_str!("functional_backend.rs");
         let prepare_start = source
             .find("    async fn prepare_one(")
@@ -3497,7 +3497,11 @@ mod tests {
             .find("self.create_birth_links(")
             .expect("first kernel mutation");
         assert!(intent < handoff && handoff < initialise && handoff < kernel);
+    }
 
+    #[test]
+    fn production_clean_settlement_order_is_fail_closed() {
+        let source = include_str!("functional_backend.rs");
         let cleanup_start = source
             .find("    async fn settle_durable_cleanup(")
             .expect("durable cleanup start");
