@@ -668,10 +668,13 @@ immutable lineage plus the correlated batch, commits it before worker reservatio
 affine owner through systemd custody, durable `MayOwnPrepare`, dispatch, and clean same-runtime
 settlement. No production route-manager caller reaches this transaction. Production starts one boot-scoped,
 secret-free canonical/CAS ownership actor before publishing its cleanup token or socket, and joins
-it after expiry-driver and engine cleanup. Startup may durably settle only never-dispatched
-`Intent`; its deliberately refusing restart executor leaves every inherited `MayOwnPrepare`
-byte-identical and blocks the internal socket-publication boundary. No inherited-custody recovery
-backend, restart reaper, or cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
+it after expiry-driver and engine cleanup. Startup may durably settle never-dispatched `Intent` and
+one narrow restart state: a full set of already durable `CleanupConfirmedNoStoredCustody` targets,
+after journal revalidation plus a fresh manager barrier and two stable exact-empty snapshots. The
+resulting one-shot evidence authorizes only `CleanupConfirmed -> Absent`; the deliberately refusing
+cleanup executor leaves every inherited `MayOwnCustody` or `MayOwnPrepare` byte-identical and blocks
+the internal socket-publication boundary. No inherited-custody recovery backend, restart reaper, or
+cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
 authority remains quarantined rather than being misreported as absent; an absent journal is not
 cleanup evidence.
 

@@ -541,9 +541,11 @@ single clean-build A01--A15 run; the score is not a release claim.
   trips a process-global one-shot start latch before lock creation. The latch remains set after
   startup failure or clean shutdown. The generic actor path settles every custody-bearing phase in
   two-proof order before retiring even one `Intent`; production's prior lock-held exact-set join
-  still refuses every non-empty custody target before handing control to that path. The installed
-  restart executor deliberately refuses both proofs, leaving inherited `MayOwnCustody`,
-  `MayOwnPrepare`, or `CleanupConfirmed` byte-identical and blocking Ready. A separate affine
+  now hands it a non-empty set only when every record is already `CleanupConfirmed`, no inherited
+  or manager custody exists, the journal revalidates, and a fresh manager barrier plus two new
+  identical complete empty snapshots mint one-shot exact-target manager-absence evidence. The
+  installed restart cleanup executor still refuses every `MayOwnCustody` or `MayOwnPrepare` proof,
+  leaving those phases byte-identical and blocking Ready. A separate affine
   same-runtime handle may echo only proofs already completed by the live functional backend;
   independently, the actor may settle never-dispatched `Intent` records. Admission is bounded to four
   operations plus shutdown.
@@ -573,6 +575,13 @@ single clean-build A01--A15 run; the score is not a release claim.
   inventory-attested pidfd/network-namespace publication caller and live clean-Destroy settlement;
   no inherited-custody cleanup executor, restart reaper, supported on-disk migration, cross-runtime
   tag-28 proof, or live-root production lifecycle proof exists.
+  One narrower startup case is now production-wired: a complete non-empty set consisting only of
+  already durable `CleanupConfirmedNoStoredCustody` targets is revalidated, reobserved after a fresh
+  manager barrier and two stable exact-empty snapshots, and consumed as one-shot exact-target
+  manager-absence evidence by the existing actor sweep. The cleanup executor is never invoked.
+  Full-set validation occurs before the first CAS; exact partial progress after a crash is safely
+  retryable from the remaining `CleanupConfirmed` targets. This retires confirmed journal custody,
+  but does not reap a worker, destroy a namespace, clean kernel state or adopt inherited custody.
   The production non-empty restart-refusal path now owns the outer composition. It retains and
   revalidates the exact startup journal guard, holds the same opaque process-wide admission guard
   used by every worker spawn, drives the borrowing async sampler non-cancellably, and performs the
@@ -591,8 +600,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   membership across two initial, one post-manager and one synchronous-join projection. These remain
   bounded non-atomic samples. The process-local spawn guard does not exclude PID 1 migration, and
   the strict mount observation does not prove absence of an inherited writable cgroup descriptor.
-  No namespace destruction, kernel cleanup, descriptor-store removal, journal transition or socket
-  readiness occurs. AV1-10 therefore remains Open and the fixed alpha score remains 11/100.
+  That refusal observer performs no namespace destruction, kernel cleanup, descriptor-store
+  removal, journal transition or socket readiness; it grants no authority to the narrow cleanup-
+  confirmed path above. AV1-10 therefore remains Open and the fixed alpha score remains 11/100.
 - [ ] `HelperEngine` now keeps one armed affine owner across asynchronous PLAN/CALL/COMMIT or exact
   rollback. Stable Prepare lineage is separate from rotating operation generations; every backend
   and runtime call binds exact phase/action/request/digest plus one monotonic absolute deadline.
@@ -731,10 +741,10 @@ single clean-build A01--A15 run; the score is not a release claim.
   removal are connected only through the functional backend. Startup separately performs a
   record-transition-free, lock-held exact-set
   classification of durable journal targets, affinely inherited custody and a barrier-ordered
-  stable manager inventory before any `Intent` mutation. There remains no restart terminal consumer,
-  inherited adoption/absence proof consumer, restart reaper, or inherited namespace/kernel cleanup
-  executor. Every non-empty
-  classification therefore continues to block startup. Its production refusal observer waits
+  stable manager inventory before any `Intent` mutation. There remains no inherited adoption,
+  restart reaper, or inherited namespace/kernel cleanup executor. Only an all-
+  `CleanupConfirmedNoStoredCustody` set can consume the narrow fresh manager-absence proof described
+  above; every other non-empty classification continues to block startup. Its production refusal observer waits
   for exact inherited process-pidfd `POLLIN` under one hard deadline, permits `POLLHUP` only with
   `POLLIN`, remeasures the exact descriptor binding before and after each wait, and remeasures the
   complete pending set once more before constructing evidence. Process/thread-group interpretation
@@ -914,12 +924,16 @@ single clean-build A01--A15 run; the score is not a release claim.
   Manager and inherited maps must be identical and every present pair must match exactly one
   derived journal name and role binding. `MayOwnPrepare` must be exactly present. An absent
   `MayOwnCustody` becomes only `ExactNoStoredCustody`; an absent `CleanupConfirmed` receives the
-  distinct `CleanupConfirmedNoStoredCustody` disposition. Neither is an `Absent` proof or mutation
-  authority, and the former cannot substitute for either durable settlement proof. Every non-empty
-  classification still refuses startup before cleanup
-  token or socket publication. Dropping the refused set closes the exact process-local source
+  distinct `CleanupConfirmedNoStoredCustody` disposition. Neither initial disposition is an
+  `Absent` proof or mutation authority, and the former cannot substitute for either durable
+  settlement proof. An all-cleanup-confirmed set is revalidated once more, then requires a fresh
+  manager barrier and two new stable exact-empty snapshots before one-shot exact-target manager-
+  absence evidence reaches the existing actor sweep. Full-set validation precedes the first per-
+  record CAS; a crash after partial exact progress leaves retryable `Absent + CleanupConfirmed`
+  state. Every mixed, present, `MayOwn`, changed, missing, duplicate, deadline or observation-
+  failure case still refuses startup before cleanup token or socket publication. Dropping a refused set closes the exact process-local source
   slots; source ownership and the read-only exact-set join are no longer positive-adoption
-  blockers, but a custody-capable production restart-settlement executor remains absent. The
+  blockers, but a custody-capable production restart cleanup/reaper remains absent. The
   production durable-Prepare publisher sends only an exact two-FD `FDSTORE=1` notification with one fixed-shape
   opaque name and `FDPOLL=0`, then a separate one-FD barrier; it can report success only when bounded
   pre/post counts and the complete systemd v257 descriptor-store dump prove the expected multiset.
@@ -951,8 +965,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   complete startup observer and journal/inherited classifier are production-wired but grant no
   mutation, adoption, arming or cleanup authority. The live composition has no recorded
   transient-unit acceptance result. This is
-  fail-closed same-runtime custody and clean settlement plus a read-only restart-classification
-  boundary, not production adoption, restart settlement, or crash cleanup. The child
+  fail-closed same-runtime custody and clean settlement plus a read-only `MayOwn` restart boundary
+  and narrow already-cleanup-confirmed tombstone retirement, not production adoption, restart
+  reaping, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists and the production-server phase of the committed disposable driver now exercises one normal
   functional worker lifetime. Staged-package validation remains outstanding. Exact-main Debian 13

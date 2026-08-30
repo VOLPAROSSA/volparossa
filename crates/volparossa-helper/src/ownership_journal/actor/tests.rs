@@ -1500,6 +1500,229 @@ fn empty_target_preflight_preserves_existing_intent_settlement() {
 }
 
 #[test]
+fn cleanup_confirmed_restart_evidence_settles_exact_full_set_without_cleanup_executor() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open restart setup journal");
+    let (revision, first, _) =
+        prepopulate_custody_target(&mut journal, 0, 50, StartupCustodyPhase::CleanupConfirmed);
+    let (revision, second, _) = prepopulate_custody_target(
+        &mut journal,
+        revision,
+        51,
+        StartupCustodyPhase::CleanupConfirmed,
+    );
+    let intent = journal
+        .insert_intent(revision, durable_intent(52).0)
+        .expect("persist restart Intent");
+    drop(journal);
+
+    let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+    let observations_capture = Arc::clone(&observations);
+    let startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        move || executor(ExecutorMode::Error, &observations_capture, None),
+        io_deadline(),
+    )
+    .expect("lock-held CleanupConfirmed restart preflight");
+    assert_eq!(startup.targets().len(), 2);
+    assert!(
+        startup
+            .targets()
+            .iter()
+            .all(|target| target.phase() == StartupCustodyPhase::CleanupConfirmed)
+    );
+    let evidence =
+        CleanupConfirmedManagerAbsenceEvidence::from_targets_for_test(startup.targets().to_vec());
+    let actor = startup
+        .continue_cleanup_confirmed_absent(evidence)
+        .expect("settle exact CleanupConfirmed restart set");
+    actor.shutdown().expect("clean restart actor shutdown");
+
+    let snapshot = reopened_snapshot(&config);
+    for coordinates in [first, second] {
+        let record = snapshot
+            .records
+            .get(&coordinates.ownership_id)
+            .expect("settled CleanupConfirmed record");
+        assert_eq!(record.phase, OwnershipPhase::Absent);
+        assert_eq!(record.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
+    }
+    let intent = snapshot
+        .records
+        .get(&intent.ownership_id)
+        .expect("settled restart Intent");
+    assert_eq!(intent.phase, OwnershipPhase::Absent);
+    assert_eq!(intent.absent_origin, Some(AbsentOrigin::NeverDispatched));
+    assert_eq!(
+        observations.lock().expect("executor observations").calls,
+        0,
+        "installed cleanup and fallback manager executors must remain refusing and unused"
+    );
+}
+
+#[test]
+fn cleanup_confirmed_restart_rejects_nonexact_evidence_before_first_write() {
+    #[derive(Clone, Copy)]
+    enum InvalidEvidence {
+        Missing,
+        Duplicate,
+        Foreign,
+        MixedMayOwn,
+    }
+
+    for invalid in [
+        InvalidEvidence::Missing,
+        InvalidEvidence::Duplicate,
+        InvalidEvidence::Foreign,
+        InvalidEvidence::MixedMayOwn,
+    ] {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal =
+            OwnershipJournal::open(config.clone()).expect("open invalid restart setup");
+        let (revision, _, _) =
+            prepopulate_custody_target(&mut journal, 0, 53, StartupCustodyPhase::CleanupConfirmed);
+        let second_phase = if matches!(invalid, InvalidEvidence::MixedMayOwn) {
+            StartupCustodyPhase::MayOwnCustody
+        } else {
+            StartupCustodyPhase::CleanupConfirmed
+        };
+        prepopulate_custody_target(&mut journal, revision, 54, second_phase);
+        drop(journal);
+        let before = fs::read(&config.journal_path).expect("invalid restart bytes before");
+
+        let observations = Arc::new(Mutex::new(ExecutorObservations::default()));
+        let observations_capture = Arc::clone(&observations);
+        let startup = DurableOwnershipActor::begin_with_executor_factory_until(
+            config.clone(),
+            move || executor(ExecutorMode::Error, &observations_capture, None),
+            io_deadline(),
+        )
+        .expect("invalid restart preflight");
+        let mut targets = startup.targets().to_vec();
+        match invalid {
+            InvalidEvidence::Missing => {
+                targets.pop();
+            }
+            InvalidEvidence::Duplicate => targets[1] = targets[0],
+            InvalidEvidence::Foreign => {
+                targets[0].custody_name_digest = DurableCustodyNameDigest::for_test([0xa5; 32]);
+            }
+            InvalidEvidence::MixedMayOwn => {}
+        }
+        let evidence = CleanupConfirmedManagerAbsenceEvidence::from_targets_for_test(targets);
+        assert_eq!(
+            expect_error(&startup.continue_cleanup_confirmed_absent(evidence)),
+            DurableOwnershipError::RecoveryNotConfirmed
+        );
+        assert_eq!(
+            fs::read(&config.journal_path).expect("invalid restart bytes after"),
+            before,
+            "nonexact restart evidence must fail before the first journal transition"
+        );
+        assert_eq!(observations.lock().expect("executor observations").calls, 0);
+    }
+}
+
+#[test]
+fn cleanup_confirmed_restart_drop_and_expired_deadline_are_mutation_free() {
+    for expire in [false, true] {
+        let directory = tempdir().expect("temporary directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("open cancellation setup");
+        prepopulate_custody_target(&mut journal, 0, 55, StartupCustodyPhase::CleanupConfirmed);
+        drop(journal);
+        let before = fs::read(&config.journal_path).expect("cancellation bytes before");
+        let deadline =
+            HardDeadline::after(Duration::from_millis(40)).expect("short startup deadline");
+        let startup = DurableOwnershipActor::begin_with_executor_factory_until(
+            config.clone(),
+            || RefuseMayOwnRecovery,
+            deadline,
+        )
+        .expect("cancellation restart preflight");
+        let evidence = CleanupConfirmedManagerAbsenceEvidence::from_targets_for_test(
+            startup.targets().to_vec(),
+        );
+        if expire {
+            while deadline.ensure_remaining().is_ok() {
+                thread::yield_now();
+            }
+            assert_eq!(
+                expect_error(&startup.continue_cleanup_confirmed_absent(evidence)),
+                DurableOwnershipError::DeadlineElapsed
+            );
+        } else {
+            drop(evidence);
+            drop(startup);
+        }
+        assert_eq!(
+            fs::read(&config.journal_path).expect("cancellation bytes after"),
+            before
+        );
+    }
+}
+
+#[test]
+fn cleanup_confirmed_partial_progress_is_exactly_retryable_after_crash() {
+    let directory = tempdir().expect("temporary directory");
+    let config = test_config(directory.path());
+    let mut journal = OwnershipJournal::open(config.clone()).expect("open crash setup journal");
+    let (revision, first, _) =
+        prepopulate_custody_target(&mut journal, 0, 56, StartupCustodyPhase::CleanupConfirmed);
+    let (_revision, second, _) = prepopulate_custody_target(
+        &mut journal,
+        revision,
+        57,
+        StartupCustodyPhase::CleanupConfirmed,
+    );
+
+    // This is the durable state left when a restart actor crashes after its first exact per-record
+    // CAS and before the second. No batch transition is required: the next preflight excludes the
+    // exact Absent tombstone and reobserves only the still-CleanupConfirmed target.
+    let revision = journal.snapshot().expect("crash snapshot").revision;
+    journal
+        .confirm_manager_absent(
+            revision,
+            first.ownership_id,
+            first.generation,
+            &mut SameRuntimeCleanSettlement,
+            io_deadline(),
+        )
+        .expect("persist first exact restart settlement");
+    drop(journal);
+
+    let startup = DurableOwnershipActor::begin_with_executor_factory_until(
+        config.clone(),
+        || RefuseMayOwnRecovery,
+        io_deadline(),
+    )
+    .expect("retry partial restart preflight");
+    assert_eq!(startup.targets().len(), 1);
+    assert_eq!(
+        startup.targets()[0].custody_name_digest(),
+        custody_name_digest_for_coordinates(second)
+    );
+    let evidence =
+        CleanupConfirmedManagerAbsenceEvidence::from_targets_for_test(startup.targets().to_vec());
+    let actor = startup
+        .continue_cleanup_confirmed_absent(evidence)
+        .expect("retry remaining CleanupConfirmed record");
+    actor.shutdown().expect("clean partial-retry shutdown");
+
+    let snapshot = reopened_snapshot(&config);
+    for coordinates in [first, second] {
+        let record = snapshot
+            .records
+            .get(&coordinates.ownership_id)
+            .expect("restart tombstone");
+        assert_eq!(record.phase, OwnershipPhase::Absent);
+        assert_eq!(record.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
+    }
+}
+
+#[test]
 fn startup_and_command_recovery_receive_the_exact_outer_deadline() {
     let startup_directory = tempdir().expect("startup temporary directory");
     let startup_config = test_config(startup_directory.path());

@@ -4,10 +4,11 @@
 //! production startup stops and an operator must inspect the host explicitly. Production now opens
 //! the v3 store through one canonical locked actor before publishing its cleanup token or socket.
 //! Startup projects custody-bound `MayOwnCustody`, `MayOwnPrepare` and `CleanupConfirmed` records
-//! without mutation. The installed restart executor deliberately refuses both the trusted
-//! worker-plus-kernel cleanup proof and the distinct stable manager-absence proof, so only an empty
-//! startup projection may continue. A separate affine production handle admits live Prepare and
-//! can settle only its same-runtime owner after the backend has completed the two exact proofs.
+//! without mutation. The installed restart cleanup executor deliberately refuses every trusted
+//! worker-plus-kernel cleanup proof. A complete set consisting only of already durable
+//! `CleanupConfirmed` records may receive one-shot exact-target manager-absence evidence from the
+//! external startup join; every `MayOwn` set still refuses. A separate affine production handle
+//! admits live Prepare and can settle only its same-runtime owner after both exact proofs.
 
 #![allow(dead_code)] // The production actor is live; restart-recovery APIs remain private.
 
@@ -30,6 +31,7 @@ use crate::{
     deadline::HardDeadline,
     internal_protocol::{InternalEndpointRole, InternalIpPrefix, LeasePlan as InternalLeasePlan},
     lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec},
+    systemd_custody::CleanupConfirmedManagerAbsenceEvidence,
 };
 
 /// Constructs one journal anchor without exposing actor-internal failure types outside this module.
@@ -257,6 +259,17 @@ impl ProductionOwnershipStartup {
     ) -> Result<ProductionOwnershipRuntime, DurableOwnershipError> {
         self.startup
             .continue_empty()
+            .map(|actor| ProductionOwnershipRuntime { actor })
+    }
+
+    /// Continue the retained startup only with fresh exact manager-absence evidence for its full
+    /// canonical non-empty `CleanupConfirmed` target set.
+    pub(crate) fn continue_cleanup_confirmed_absent(
+        self,
+        evidence: CleanupConfirmedManagerAbsenceEvidence,
+    ) -> Result<ProductionOwnershipRuntime, DurableOwnershipError> {
+        self.startup
+            .continue_cleanup_confirmed_absent(evidence)
             .map(|actor| ProductionOwnershipRuntime { actor })
     }
 }
@@ -6585,6 +6598,55 @@ mod tests {
     }
 
     #[test]
+    fn production_wrapper_consumes_only_exact_cleanup_confirmed_restart_absence() {
+        let directory = tempdir().expect("CleanupConfirmed directory");
+        let config = test_config(directory.path());
+        let mut journal = OwnershipJournal::open(config.clone()).expect("CleanupConfirmed journal");
+        let inserted = journal
+            .insert_intent(0, intent(35, 36))
+            .expect("CleanupConfirmed intent");
+        let armed =
+            mark_and_arm_custody_fixture(&mut journal, inserted.revision, inserted, anchor(37));
+        let revision = confirm_cleanup_fixture(
+            &mut journal,
+            armed.revision,
+            inserted,
+            &mut SameRuntimeCleanSettlement,
+        )
+        .expect("durable CleanupConfirmed fixture");
+        drop(journal);
+
+        let startup = ProductionOwnershipRuntime::begin_with_config_until(
+            config.clone(),
+            recovery_deadline(),
+        )
+        .expect("production CleanupConfirmed preflight");
+        assert_eq!(startup.targets().len(), 1);
+        assert_eq!(
+            startup.targets()[0].phase(),
+            StartupCustodyPhase::CleanupConfirmed
+        );
+        let evidence = CleanupConfirmedManagerAbsenceEvidence::from_targets_for_test(
+            startup.targets().to_vec(),
+        );
+        startup
+            .continue_cleanup_confirmed_absent(evidence)
+            .expect("consume exact production restart absence")
+            .shutdown_until(recovery_deadline())
+            .expect("production restart shutdown");
+
+        let reopened = OwnershipJournal::open(config).expect("reopen settled restart journal");
+        let snapshot = reopened.snapshot().expect("settled restart snapshot");
+        assert_eq!(snapshot.revision, revision + 1);
+        let record = snapshot
+            .records
+            .get(&inserted.ownership_id)
+            .expect("restart tombstone");
+        assert_eq!(record.phase, OwnershipPhase::Absent);
+        assert_eq!(record.absent_origin, Some(AbsentOrigin::RecoveredMayOwn));
+    }
+
+    #[test]
     fn absent_is_accepted_but_every_existing_object_fails_closed_without_mutation() {
         let directory = tempdir().expect("temporary directory");
         let candidate = directory.path().join("journal");
@@ -6648,6 +6710,9 @@ mod tests {
         let continue_empty = production
             .find("continue_empty()")
             .expect("empty projection continuation");
+        let cleanup_confirmed_restart = production
+            .find("settle_cleanup_confirmed_restart_absence(")
+            .expect("cleanup-confirmed restart settlement");
         let bind_call = production
             .find("bind_production_socket(prepared_runtime, ownership_runtime)")
             .expect("production socket bind call");
@@ -6660,7 +6725,9 @@ mod tests {
         assert!(observe < revalidate);
         assert!(revalidate < classify);
         assert!(classify < continue_empty);
+        assert!(classify < cleanup_confirmed_restart);
         assert!(continue_empty < bind_call);
+        assert!(cleanup_confirmed_restart < bind_call);
 
         let bind_start = source
             .find("fn bind_production_socket")

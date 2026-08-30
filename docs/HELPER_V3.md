@@ -240,8 +240,11 @@ single-writer actor owns the store and both executor interfaces on one named thr
 verified parent-directory descriptor and acquires a process-global one-shot store latch before
 opening the lock. Its generic settlement path processes every custody-bearing phase before retiring
 even one `Intent`, rechecks the complete durable boundary, and only then reports ready. The
-production lock-held startup join still refuses every non-empty custody target set before this path,
-and its installed executor refuses both proofs. Its non-blocking admission accepts at most four
+production lock-held startup join admits a non-empty set only when every target is already durable
+`CleanupConfirmed` and both inherited and manager custody are exactly empty. It then revalidates the
+journal, sends a fresh manager barrier, requires two new identical complete empty snapshots, and
+passes one-shot exact-target manager-absence evidence into this path. The installed cleanup executor
+still refuses every worker/kernel proof. Its non-blocking admission accepts at most four
 operations while reserving channel capacity for shutdown; opaque non-`Clone` keys expose neither
 the journal revision nor raw ownership coordinates. Each validated wire intent locally receives a
 fresh random 256-bit `OwnershipId` inside a non-`Clone` registration owner. Registration consumes
@@ -261,10 +264,11 @@ same-runtime handoff reaches durable `MayOwnPrepare`; the marker alone authorize
 Production retains the sole start/shutdown owner and issues one cloneable typed Prepare handle.
 That handle can register a validated wire intent, bind exact worker custody, arm it, and consume the
 resulting affine token through the two ordered same-runtime settlement phases. It exposes no raw
-revision, coordinates, startup recovery, or lifecycle authority. The installed restart executor
-still refuses both proof requests, so inherited `MayOwnCustody`, `MayOwnPrepare`, and
-`CleanupConfirmed` remain byte-identical and block startup. There is no inherited-custody adoption,
-restart reaper, supported on-disk migration, or live-root proof. Every non-test actor
+revision, coordinates, startup recovery, or lifecycle authority. The installed restart cleanup
+executor still refuses every `MayOwnCustody`/`MayOwnPrepare` proof request, so those phases remain
+byte-identical and block startup. Only an already durable `CleanupConfirmed` set with no stored
+custody can be retired through the fresh manager-absence join above. There is no inherited-custody
+adoption, restart reaper, supported on-disk migration, or live-root proof. Every non-test actor
 entry point requires one caller-supplied absolute hard deadline. That same value is carried through
 admission, the queued command, actor-thread execution, reply handling and thread settlement. Each
 settlement operation additionally receives its exact supplied deadline and rechecks it before
@@ -360,12 +364,13 @@ A custody-bound `MayOwnCustody` target may classify either `ExactPresent` or
 `ExactNoStoredCustody`; the latter means only that its name and both journal identities are absent
 from both complete observed maps. A `CleanupConfirmed` target is likewise `ExactPresent` when the
 pair remains stored, but manager absence receives the distinct
-`CleanupConfirmedNoStoredCustody` disposition. Neither no-store disposition proves old-worker
-death, kernel cleanup, or authority for a journal transition. In particular,
-`ExactNoStoredCustody` cannot substitute for either settlement proof, while the cleanup-confirmed
-disposition is still only read-only startup classification rather than the actor's separate affine
-manager-absence proof. Every partial, one-sided, wrong-name, wrong-binding or unstable case remains
-unresolved.
+`CleanupConfirmedNoStoredCustody` disposition. Neither initial no-store disposition alone proves
+old-worker death, kernel cleanup, or authority for a journal transition. In particular,
+`ExactNoStoredCustody` cannot substitute for either settlement proof. Only a complete set consisting
+solely of the cleanup-confirmed disposition is revalidated against the locked journal and upgraded
+by a fresh barrier plus two new exact-empty manager snapshots into one-shot affine manager-absence
+evidence. Every partial, mixed, one-sided, wrong-name, wrong-binding, changed or unstable case
+remains unresolved and reaches no journal transition or socket publication.
 
 A refusal-only observation seam can consume the complete affine classification and wait for exact
 inherited process-pidfd exit. Before its first wait, every pending `MayOwnCustody` or
@@ -447,17 +452,18 @@ cleanup authority. It exposes no PID, path, descriptor, signal, cgroup write, cl
 manager-removal, adoption, or server authority. The process-wide admission guard excludes only new
 workers created through this helper; it does not constrain PID 1 or another privileged actor. The
 configured and observed strict mount does not prove that no writable cgroup descriptor was
-inherited before startup. This slice therefore proves no network-namespace destruction,
-kernel-resource cleanup, manager removal or journal transition. It keeps the helper in the same
-non-empty refusal state, leaves AV1-10 Open, and leaves the fixed alpha score at 11/100 (11%).
+inherited before startup. This refusal sampler therefore proves no network-namespace destruction,
+kernel-resource cleanup, manager removal or authority for a `MayOwn` journal transition. It leaves
+AV1-10 Open and the fixed alpha score at 11/100 (11%).
 
-This is still a refusal boundary, not production recovery. Any non-empty journal target set blocks
-startup after read-only classification and drops its exact source-slot owners without publishing a
-cleanup token or helper socket. The takeover creates no additional process-local source alias;
-dropping the refused set closes every captured source slot while PID 1 retains any manager copies.
-This classification invokes no descriptor-store removal, journal transition, worker adoption,
-reaper or cleanup. Those proofs remain mandatory before the refusal may be replaced by settlement
-and socket publication; the same-runtime removal path below does not grant restart authority.
+This remains the refusal boundary for every present, mixed or `MayOwn` journal target set. Such a
+set blocks startup after read-only classification and drops its exact source-slot owners without
+publishing a cleanup token or helper socket. The takeover creates no additional process-local
+source alias; dropping the refused set closes every captured source slot while PID 1 retains any
+manager copies. This classification invokes no descriptor-store removal, journal transition,
+worker adoption, reaper or cleanup. The sole exception is the separately revalidated all-
+`CleanupConfirmedNoStoredCustody` manager-absence settlement described above; the same-runtime
+removal path below grants no broader restart authority.
 
 ### Production systemd descriptor-store mutation boundary
 
@@ -1549,9 +1555,12 @@ recovery descriptors are released. Cancellation, mismatch, deadline or ambiguous
 preserves the complete affine terminal under its exact selector for a fresh-deadline retry.
 
 Production startup still performs the separate read-only complete-set classification described
-above before retiring any `Intent`, and every non-empty classification still blocks. This is
-same-runtime clean settlement, not restart recovery: inherited custody is never adopted, the
-installed restart executor still refuses both proof transitions, and no restart reaper exists.
+above before retiring any `Intent`. Every non-empty classification blocks except an all-
+`CleanupConfirmedNoStoredCustody` set which passes the fresh exact-empty manager join; that narrow
+case consumes only manager-absence evidence through the existing actor sweep. A crash after one
+per-record CAS leaves exact `Absent` tombstones plus remaining `CleanupConfirmed` records, which a
+later restart reclassifies and retries. Inherited custody is never adopted, the installed restart
+cleanup executor still refuses both `MayOwn` phases, and no restart reaper exists.
 
 Remaining durable/runtime blockers are explicit:
 
