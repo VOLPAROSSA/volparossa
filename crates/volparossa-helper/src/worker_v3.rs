@@ -95,7 +95,14 @@ mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
 mod relay_fence;
-pub(crate) use functional_backend::functional_alpha_lease_backend;
+pub(crate) use functional_backend::{
+    ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof,
+    functional_alpha_lease_backend,
+};
+#[cfg(test)]
+pub(crate) use functional_backend::{
+    exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
+};
 
 pub(crate) const INTERNAL_WORKER_V3_ARGUMENT: &str = "--internal-worker-v3";
 pub(crate) const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str = "--internal-worker-v3-live-proof";

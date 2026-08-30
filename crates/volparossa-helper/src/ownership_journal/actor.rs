@@ -4,7 +4,8 @@
 //! and shutdown. It owns the journal and trusted recovery executor on one named OS thread, exposes
 //! no revision/CAS surface, and never reopens a store in the same process after its store-identity
 //! latch has been acquired. The installed restart executor remains a separate fail-closed refusal;
-//! only an affine live-Prepare settlement token can request the private same-runtime proof echo.
+//! only opaque functional-backend evidence joined to the affine live-Prepare settlement may
+//! request the private same-runtime proof echo.
 //!
 //! A recovery executor cannot be forcefully cancelled safely. If it exceeds the bounded reply
 //! wait, admission becomes permanently ambiguous and the worker handle is detached instead of
@@ -38,7 +39,11 @@ use std::{collections::BTreeSet, sync::OnceLock};
 
 use volparossa_routing::PrepareIntent;
 
-use crate::{deadline::HardDeadline, internal_protocol::PrepareLeases};
+use crate::{
+    deadline::HardDeadline,
+    internal_protocol::PrepareLeases,
+    worker_v3::{ExactSameRuntimeCleanupProof, ExactSameRuntimeManagerAbsenceProof},
+};
 
 use super::{
     CleanupExecutor, ClosedPlan, DurableCustodyDescriptorBinding, DurableWireguardResource, Id16,
@@ -551,21 +556,21 @@ impl fmt::Debug for DurableCleanupConfirmed {
     }
 }
 
-#[must_use = "cleanup confirmation retains the affine journal owner on every error"]
+#[must_use = "cleanup confirmation retains the opaque cleanup proof on every error"]
 pub(crate) enum DurableCleanupOutcome {
     Confirmed(DurableCleanupConfirmed),
     Retained {
         error: DurableOwnershipError,
-        settlement: DurablePrepareSettlement,
+        proof: ExactSameRuntimeCleanupProof,
     },
 }
 
-#[must_use = "manager-absence confirmation retains the affine journal owner on every error"]
+#[must_use = "manager-absence confirmation retains the opaque removal proof on every error"]
 pub(crate) enum DurableManagerAbsentOutcome {
     Absent,
     Retained {
         error: DurableOwnershipError,
-        cleanup: DurableCleanupConfirmed,
+        proof: ExactSameRuntimeManagerAbsenceProof,
     },
 }
 
@@ -1296,7 +1301,8 @@ impl DurableCustodyArmHandle {
 ///
 /// This handle cannot start, stop or recover the journal actor. It accepts only immutable wire
 /// intent registration, the exact worker-derived custody binding, arming of that same custody,
-/// and the two ordered clean-settlement transitions. Every affine input is returned on failure.
+/// and the two ordered clean-settlement transitions. Clean settlement additionally requires
+/// non-forgeable functional-backend evidence; every affine input is returned on failure.
 #[derive(Clone)]
 #[must_use = "durable Prepare admission remains bound to the owning journal runtime"]
 pub(crate) struct DurableOwnershipPrepareHandle {
@@ -1348,33 +1354,36 @@ impl DurableOwnershipPrepareHandle {
 
     pub(crate) fn confirm_cleanup_until(
         &self,
-        settlement: DurablePrepareSettlement,
+        proof: ExactSameRuntimeCleanupProof,
         deadline: HardDeadline,
     ) -> DurableCleanupOutcome {
         let result = self
             .client
-            .same_runtime_cleanup_pending_until(settlement.key.coordinates, deadline)
+            .same_runtime_cleanup_pending_until(proof.settlement().key.coordinates, deadline)
             .and_then(PendingReply::wait);
         match result {
-            Ok(()) => DurableCleanupOutcome::Confirmed(DurableCleanupConfirmed {
-                key: settlement.key,
-            }),
-            Err(error) => DurableCleanupOutcome::Retained { error, settlement },
+            Ok(()) => {
+                let settlement = proof.into_settlement();
+                DurableCleanupOutcome::Confirmed(DurableCleanupConfirmed {
+                    key: settlement.key,
+                })
+            }
+            Err(error) => DurableCleanupOutcome::Retained { error, proof },
         }
     }
 
     pub(crate) fn confirm_manager_absent_until(
         &self,
-        cleanup: DurableCleanupConfirmed,
+        proof: ExactSameRuntimeManagerAbsenceProof,
         deadline: HardDeadline,
     ) -> DurableManagerAbsentOutcome {
         let result = self
             .client
-            .same_runtime_manager_absent_pending_until(cleanup.key.coordinates, deadline)
+            .same_runtime_manager_absent_pending_until(proof.cleanup().key.coordinates, deadline)
             .and_then(PendingReply::wait);
         match result {
             Ok(()) => DurableManagerAbsentOutcome::Absent,
-            Err(error) => DurableManagerAbsentOutcome::Retained { error, cleanup },
+            Err(error) => DurableManagerAbsentOutcome::Retained { error, proof },
         }
     }
 }

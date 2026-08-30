@@ -19,6 +19,10 @@ use volparossa_routing::{
     WireguardRole as WireRole,
 };
 
+use crate::worker_v3::{
+    exact_same_runtime_cleanup_proof_for_test, exact_same_runtime_manager_absence_proof_for_test,
+};
+
 use super::super::{
     AbsentOrigin, CleanupTarget, ConfirmedCleanupProof, ConfirmedManagerAbsentProof,
     JournalSnapshot, ManagerAbsenceTarget, PrepareRecoveryEvidenceV1, RefuseMayOwnRecovery,
@@ -1708,6 +1712,10 @@ fn actor_exposes_only_ordered_distinct_cleanup_and_manager_absence_transitions()
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "both opaque settlement phases and retained-error retries form one actor transaction"
+)]
 fn production_prepare_handle_preserves_affinity_through_both_clean_settlement_phases() {
     let directory = tempdir().expect("temporary directory");
     let config = test_config(directory.path());
@@ -1766,7 +1774,31 @@ fn production_prepare_handle_preserves_affinity_through_both_clean_settlement_ph
     );
     assert_eq!(resources.len(), expected_plan.leases.len());
     drop(resources);
-    let cleanup = match handle.confirm_cleanup_until(settlement, io_deadline()) {
+    let proof = exact_same_runtime_cleanup_proof_for_test(settlement);
+    assert_eq!(
+        format!("{proof:?}"),
+        "ExactSameRuntimeCleanupProof(<redacted>)"
+    );
+    let proof = match handle.confirm_cleanup_until(proof, expired_deadline()) {
+        DurableCleanupOutcome::Retained { error, proof } => {
+            assert_eq!(error, DurableOwnershipError::DeadlineElapsed);
+            proof
+        }
+        DurableCleanupOutcome::Confirmed(_) => {
+            panic!("expired cleanup proof unexpectedly settled")
+        }
+    };
+    assert_eq!(
+        JournalSnapshot::decode(&fs::read(&config.journal_path).expect("retained cleanup bytes"))
+            .expect("retained cleanup snapshot")
+            .records
+            .values()
+            .next()
+            .expect("retained cleanup record")
+            .phase,
+        OwnershipPhase::MayOwnPrepare
+    );
+    let cleanup = match handle.confirm_cleanup_until(proof, io_deadline()) {
         DurableCleanupOutcome::Confirmed(cleanup) => cleanup,
         DurableCleanupOutcome::Retained { error, .. } => {
             panic!("cleanup confirmation retained unexpectedly: {error}")
@@ -1786,8 +1818,32 @@ fn production_prepare_handle_preserves_affinity_through_both_clean_settlement_ph
             .phase,
         OwnershipPhase::CleanupConfirmed
     );
+    let proof = exact_same_runtime_manager_absence_proof_for_test(cleanup);
+    assert_eq!(
+        format!("{proof:?}"),
+        "ExactSameRuntimeManagerAbsenceProof(<redacted>)"
+    );
+    let proof = match handle.confirm_manager_absent_until(proof, expired_deadline()) {
+        DurableManagerAbsentOutcome::Retained { error, proof } => {
+            assert_eq!(error, DurableOwnershipError::DeadlineElapsed);
+            proof
+        }
+        DurableManagerAbsentOutcome::Absent => {
+            panic!("expired manager-absence proof unexpectedly settled")
+        }
+    };
+    assert_eq!(
+        JournalSnapshot::decode(&fs::read(&config.journal_path).expect("retained manager bytes"))
+            .expect("retained manager snapshot")
+            .records
+            .values()
+            .next()
+            .expect("retained manager record")
+            .phase,
+        OwnershipPhase::CleanupConfirmed
+    );
     assert!(matches!(
-        handle.confirm_manager_absent_until(cleanup, io_deadline()),
+        handle.confirm_manager_absent_until(proof, io_deadline()),
         DurableManagerAbsentOutcome::Absent
     ));
     actor.shutdown().expect("clean actor shutdown");
