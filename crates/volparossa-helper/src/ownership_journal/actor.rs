@@ -44,7 +44,8 @@ use crate::{
     internal_protocol::PrepareLeases,
     worker_v3::{
         ExactNeverDispatchedPrepareProof, ExactSameRuntimeCleanupProof,
-        ExactSameRuntimeManagerAbsenceProof,
+        ExactSameRuntimeManagerAbsenceProof, ExactUndispatchedDurableAuthority,
+        ExactUndispatchedPrepareCleanupProof,
     },
 };
 
@@ -474,6 +475,10 @@ impl DurableMayOwnCustody {
         self.key.coordinates.context_id.0
     }
 
+    pub(crate) const fn selector(&self) -> DurableOwnershipSelector {
+        DurableOwnershipSelector(self.key.coordinates)
+    }
+
     /// Derive stable descriptor-store name material only after phase 4 is known durable.
     pub(crate) fn custody_name_digest(&self) -> DurableCustodyNameDigest {
         custody_name_digest_for_coordinates(self.key.coordinates)
@@ -499,6 +504,10 @@ pub(crate) struct DurableMayOwnPrepare {
 impl DurableMayOwnPrepare {
     pub(crate) const fn context_id(&self) -> [u8; 16] {
         self.key.coordinates.context_id.0
+    }
+
+    pub(crate) const fn selector(&self) -> DurableOwnershipSelector {
+        DurableOwnershipSelector(self.key.coordinates)
     }
 
     pub(crate) fn resources(&self) -> &[DurableWireguardResource] {
@@ -586,6 +595,15 @@ pub(crate) enum DurableCleanupOutcome {
     Retained {
         error: DurableOwnershipError,
         proof: ExactSameRuntimeCleanupProof,
+    },
+}
+
+#[must_use = "undispatched cleanup confirmation retains its opaque proof on every error"]
+pub(crate) enum DurableUndispatchedCleanupOutcome {
+    Confirmed(DurableCleanupConfirmed),
+    Retained {
+        error: DurableOwnershipError,
+        proof: ExactUndispatchedPrepareCleanupProof,
     },
 }
 
@@ -1440,6 +1458,27 @@ impl DurableOwnershipPrepareHandle {
                 })
             }
             Err(error) => DurableCleanupOutcome::Retained { error, proof },
+        }
+    }
+
+    pub(crate) fn confirm_undispatched_cleanup_until(
+        &self,
+        proof: ExactUndispatchedPrepareCleanupProof,
+        deadline: HardDeadline,
+    ) -> DurableUndispatchedCleanupOutcome {
+        let result = self
+            .client
+            .same_runtime_cleanup_pending_until(proof.selector().0, deadline)
+            .and_then(PendingReply::wait);
+        match result {
+            Ok(()) => {
+                let key = match proof.into_authority() {
+                    ExactUndispatchedDurableAuthority::Custody(authority) => authority.key,
+                    ExactUndispatchedDurableAuthority::Prepare(authority) => authority.key,
+                };
+                DurableUndispatchedCleanupOutcome::Confirmed(DurableCleanupConfirmed { key })
+            }
+            Err(error) => DurableUndispatchedCleanupOutcome::Retained { error, proof },
         }
     }
 

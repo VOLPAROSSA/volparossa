@@ -59,10 +59,11 @@ use crate::{
 
 use super::{
     ConfirmedWorkerGenerationAbsent, DEFAULT_MAX_CACHE_ENTRIES, DEFAULT_MAX_TTL,
-    DurableFunctionalPrepareFailure, DurableFunctionalWorkerOwnership,
-    DurableHandoffPrepareFailure, DurableHandoffTerminalSelector, DurableHandoffTerminalSettlement,
-    ShutdownStatus, WorkerCoordinator, WorkerGenerationOwnership, WorkerGenerationReap,
-    WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
+    DurableFunctionalPrepareFailure, DurableFunctionalPrepareInput,
+    DurableFunctionalWorkerOwnership, DurablePrepareTerminalSelector,
+    DurablePrepareTerminalSettlement, ShutdownStatus, WorkerCoordinator, WorkerGenerationOwnership,
+    WorkerGenerationReap, WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry,
+    WorkerV3Error,
 };
 
 const MAX_FUNCTIONAL_ALPHA_CONTEXTS: usize = 1;
@@ -189,7 +190,7 @@ struct OpenLeaseEntry {
     worker: Option<WorkerGenerationOwnership>,
     recovery: Option<WorkerRecoveryIdentitySource>,
     durable: Option<DurableLeaseCustody>,
-    durable_handoff_terminal: Option<DurableHandoffTerminalSelector>,
+    durable_prepare_terminal: Option<DurablePrepareTerminalSelector>,
     wireguard: Vec<LiveWireguardLeaseOwner>,
     prepare: PrepareLeases,
     underlay: UnderlayCandidate,
@@ -304,30 +305,31 @@ impl std::fmt::Debug for ExactSameRuntimeCleanupProof {
     }
 }
 
-enum ExactManagerRemovalEvidence {
-    Production(Box<crate::systemd_fdstore::ExactRemovalProof>),
+enum ExactManagerAbsenceEvidence {
+    Production(Box<crate::systemd_fdstore::SameRuntimeManagerProof>),
     #[cfg(test)]
     Fixture,
 }
 
-/// Opaque authority that the functional backend may mint only from exact named-removal evidence.
+/// Opaque authority minted at the worker/functional boundary only from exact same-runtime manager
+/// absence, whether observed directly or proven by exact named removal.
 ///
 /// The exact systemd proof stays owned inside this value until the journal reaches `Absent` or the
 /// complete affine proof is returned for retry.
 #[must_use = "exact manager-absence evidence must be consumed or retained"]
 pub(crate) struct ExactSameRuntimeManagerAbsenceProof {
     cleanup: DurableCleanupConfirmed,
-    _removal: ExactManagerRemovalEvidence,
+    _manager: ExactManagerAbsenceEvidence,
 }
 
 impl ExactSameRuntimeManagerAbsenceProof {
-    fn after_exact_named_removal(
+    pub(super) fn after_exact_manager_absence(
         cleanup: DurableCleanupConfirmed,
-        removal: crate::systemd_fdstore::ExactRemovalProof,
+        manager: crate::systemd_fdstore::SameRuntimeManagerProof,
     ) -> Self {
         Self {
             cleanup,
-            _removal: ExactManagerRemovalEvidence::Production(Box::new(removal)),
+            _manager: ExactManagerAbsenceEvidence::Production(Box::new(manager)),
         }
     }
 
@@ -358,7 +360,7 @@ pub(crate) fn exact_same_runtime_manager_absence_proof_for_test(
 ) -> ExactSameRuntimeManagerAbsenceProof {
     ExactSameRuntimeManagerAbsenceProof {
         cleanup,
-        _removal: ExactManagerRemovalEvidence::Fixture,
+        _manager: ExactManagerAbsenceEvidence::Fixture,
     }
 }
 
@@ -395,37 +397,59 @@ impl FunctionalAlphaLeaseBackend {
             let mut state = lock_state(&self.state);
             exact_entry_mut(&mut state, key)?.phase = OpenLeasePhase::DurableHandoffPending;
         }
-        let durable = match self
+        let selector_state = &self.state;
+        let selector_ready = move |selector: DurablePrepareTerminalSelector| {
+            if selector.context_id() != key.context_id {
+                std::process::abort();
+            }
+            let mut state = lock_state(selector_state);
+            let entry = exact_entry_mut(&mut state, key).unwrap_or_else(|_| {
+                std::process::abort();
+            });
+            if entry.phase != OpenLeasePhase::DurableHandoffPending
+                || entry.worker.is_some()
+                || entry.durable_prepare_terminal.replace(selector).is_some()
+            {
+                std::process::abort();
+            }
+        };
+        let (durable, terminal_selector) = match self
             .coordinator
             .durable_functional_prepare_until(
                 durable_handle,
-                registration,
-                context_role,
-                path_id,
-                context_ttl,
-                operation_deadline,
+                DurableFunctionalPrepareInput {
+                    registration,
+                    context_role,
+                    path_id,
+                    worker_ttl: context_ttl,
+                    deadline: operation_deadline,
+                },
+                selector_ready,
             )
             .await
         {
             Ok(durable) => durable,
-            Err(DurableFunctionalPrepareFailure::Handoff(DurableHandoffPrepareFailure {
-                error: _,
-                selector,
-            })) => {
+            Err(DurableFunctionalPrepareFailure { error: _, selector }) => {
                 if selector.context_id() != key.context_id {
                     std::process::abort();
                 }
-                let mut state = lock_state(&self.state);
-                let entry = exact_entry_mut(&mut state, key)?;
-                if entry.durable_handoff_terminal.replace(selector).is_some() {
+                let state = lock_state(&self.state);
+                let entry = state.as_ref().unwrap_or_else(|| {
+                    std::process::abort();
+                });
+                if entry.key != key || entry.durable_prepare_terminal != Some(selector) {
                     std::process::abort();
                 }
                 return Err(BackendError::CleanupIncomplete);
             }
-            Err(DurableFunctionalPrepareFailure::Later(_error)) => {
-                return Err(BackendError::CleanupIncomplete);
-            }
         };
+        {
+            let mut state = lock_state(&self.state);
+            let entry = exact_entry_mut(&mut state, key)?;
+            if entry.durable_prepare_terminal.take() != Some(terminal_selector) {
+                std::process::abort();
+            }
+        }
         let DurableFunctionalWorkerOwnership {
             settlement,
             resources,
@@ -534,7 +558,7 @@ impl FunctionalAlphaLeaseBackend {
             worker: None,
             recovery: None,
             durable: None,
-            durable_handoff_terminal: None,
+            durable_prepare_terminal: None,
             wireguard: Vec::new(),
             prepare: PrepareLeases {
                 route_context_id: key.context_id.to_vec(),
@@ -999,35 +1023,38 @@ impl FunctionalAlphaLeaseBackend {
         deadline: HardDeadline,
         request_child_destroy: bool,
     ) -> bool {
-        let handoff_terminal = {
-            let mut state = lock_state(&self.state);
-            state.as_mut().and_then(|entry| {
+        let prepare_terminal = {
+            let state = lock_state(&self.state);
+            state.as_ref().and_then(|entry| {
                 if entry.key == key
                     && entry.phase == OpenLeasePhase::DurableHandoffPending
                     && entry.worker.is_none()
                 {
-                    entry.durable_handoff_terminal.take()
+                    entry.durable_prepare_terminal
                 } else {
                     None
                 }
             })
         };
-        if let Some(selector) = handoff_terminal {
+        if let Some(selector) = prepare_terminal {
             let Some(handle) = self.durable_ownership.as_ref() else {
-                self.restore_durable_handoff_terminal(key, selector);
                 return false;
             };
-            match self.coordinator.settle_durable_handoff_terminal_until(
-                handle,
-                selector,
-                key.context_id,
-                deadline,
-            ) {
-                DurableHandoffTerminalSettlement::Absent => {
+            match self
+                .coordinator
+                .settle_durable_prepare_terminal_until(handle, selector, key.context_id, deadline)
+                .await
+            {
+                DurablePrepareTerminalSettlement::Absent => {
                     return remove_exact_entry(&self.state, key);
                 }
-                DurableHandoffTerminalSettlement::Retained { error: _, selector } => {
-                    self.restore_durable_handoff_terminal(key, selector);
+                DurablePrepareTerminalSettlement::Retained {
+                    error: _,
+                    selector: retained,
+                } => {
+                    if retained != selector {
+                        std::process::abort();
+                    }
                     return false;
                 }
             }
@@ -1189,23 +1216,6 @@ impl FunctionalAlphaLeaseBackend {
         remove_exact_entry(&self.state, key)
     }
 
-    fn restore_durable_handoff_terminal(
-        &self,
-        key: OpenLineageKey,
-        selector: DurableHandoffTerminalSelector,
-    ) {
-        let mut state = lock_state(&self.state);
-        let Ok(entry) = exact_entry_mut(&mut state, key) else {
-            std::process::abort();
-        };
-        if entry.phase != OpenLeasePhase::DurableHandoffPending
-            || entry.worker.is_some()
-            || entry.durable_handoff_terminal.replace(selector).is_some()
-        {
-            std::process::abort();
-        }
-    }
-
     #[allow(
         clippy::too_many_lines,
         reason = "both journal phases and exact manager removal remain one affine transaction"
@@ -1328,8 +1338,9 @@ impl FunctionalAlphaLeaseBackend {
                             return false;
                         }
                         DurableJournalSettlement::ManagerRemovalProven(
-                            ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(
-                                cleanup, proof,
+                            ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                                cleanup,
+                                proof.into_same_runtime_manager_proof(),
                             ),
                         )
                     }
@@ -1376,8 +1387,9 @@ impl FunctionalAlphaLeaseBackend {
                         return false;
                     }
                     DurableJournalSettlement::ManagerRemovalProven(
-                        ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(
-                            cleanup, proof,
+                        ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                            cleanup,
+                            proof.into_same_runtime_manager_proof(),
                         ),
                     )
                 }
@@ -1423,8 +1435,9 @@ impl FunctionalAlphaLeaseBackend {
                             return false;
                         }
                         DurableJournalSettlement::ManagerRemovalProven(
-                            ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(
-                                cleanup, proof,
+                            ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                                cleanup,
+                                proof.into_same_runtime_manager_proof(),
                             ),
                         )
                     }
@@ -3479,7 +3492,7 @@ mod tests {
             worker: None,
             recovery: None,
             durable: None,
-            durable_handoff_terminal: None,
+            durable_prepare_terminal: None,
             wireguard: vec![wireguard],
             prepare,
             underlay: UnderlayCandidate {
@@ -3520,7 +3533,7 @@ mod tests {
             worker: None,
             recovery: None,
             durable: None,
-            durable_handoff_terminal: None,
+            durable_prepare_terminal: None,
             birth_may_exist: vec![false; wireguard.len()],
             wireguard,
             prepare,
@@ -4034,7 +4047,7 @@ mod tests {
             .find(".verify_exact_target(custody.custody_name, &binding)")
             .expect("direct exact named-removal validation");
         let direct_manager_proof = cleanup
-            .find("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
+            .find("ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(")
             .expect("direct opaque manager-absence proof mint");
         let removal_reconcile = cleanup
             .find("reconcile_current_process_removal(")
@@ -4049,7 +4062,7 @@ mod tests {
             .rfind(".verify_exact_target(custody.custody_name, &binding)")
             .expect("retry exact named-removal validation");
         let retry_manager_proof = cleanup
-            .rfind("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
+            .rfind("ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(")
             .expect("retry opaque manager-absence proof mint");
         let manager_absent = cleanup
             .find("handle.confirm_manager_absent_until(proof, deadline)")
@@ -4124,7 +4137,7 @@ mod tests {
         );
         assert_eq!(
             production
-                .matches("ExactSameRuntimeManagerAbsenceProof::after_exact_named_removal(")
+                .matches("ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(")
                 .count(),
             3,
             "direct, reconciled and correlated-retry removals each have one proof mint"
@@ -4150,8 +4163,8 @@ mod tests {
         assert!(production.contains("_child: ExactChildCleanupConfirmed"));
         assert!(production.contains("fn after_exact_parent_kernel_absence("));
         assert!(!production.contains("pub(crate) fn after_exact_parent_kernel_absence("));
-        assert!(production.contains("fn after_exact_named_removal("));
-        assert!(!production.contains("pub(crate) fn after_exact_named_removal("));
+        assert!(production.contains("pub(super) fn after_exact_manager_absence("));
+        assert!(!production.contains("pub(crate) fn after_exact_manager_absence("));
         assert!(journal_source.contains("struct SameRuntimeCleanSettlement;"));
         assert!(!journal_source.contains("pub(crate) struct SameRuntimeCleanSettlement;"));
         assert!(!journal_source.contains("pub(super) struct SameRuntimeCleanSettlement;"));
@@ -4339,7 +4352,7 @@ mod tests {
         );
         assert_eq!(
             functional
-                .matches(".settle_durable_handoff_terminal_until(")
+                .matches(".settle_durable_prepare_terminal_until(")
                 .count(),
             1,
             "only exact later functional cleanup retries a handoff terminal"
@@ -4352,17 +4365,15 @@ mod tests {
         ));
 
         let settlement_start = worker
-            .find("    fn settle_durable_handoff_terminal_until(")
+            .find("    fn settle_durable_handoff_outcome_until(")
             .expect("bounded handoff settlement");
         let settlement_end = worker[settlement_start..]
-            .find("\n    /// Complete the cancellation-safe durable Prepare handoff")
+            .find("\n    #[allow(\n        clippy::too_many_lines,\n        reason = \"post-custody journal")
             .map(|offset| settlement_start + offset)
             .expect("bounded handoff settlement end");
         let settlement = &worker[settlement_start..settlement_end];
         assert!(!settlement.contains("async fn"));
         assert!(!settlement.contains(".await"));
-        assert!(settlement.contains("take_exact_durable_handoff_terminal(&selector)"));
-        assert!(settlement.contains("restore_exact_durable_handoff_terminal(&selector, outcome)"));
         assert!(!settlement.contains("PublicationStart"));
         assert!(!settlement.contains("DispatchOpen"));
         assert!(!settlement.contains("remove_current_process_custody"));
@@ -4372,15 +4383,15 @@ mod tests {
             .find("    async fn cleanup_exact(")
             .expect("functional cleanup");
         let cleanup_end = functional[cleanup_start..]
-            .find("\n    fn restore_durable_handoff_terminal(")
+            .find("\n    async fn settle_durable_cleanup(")
             .map(|offset| cleanup_start + offset)
             .expect("handoff cleanup end");
         let cleanup = &functional[cleanup_start..cleanup_end];
         let retry = cleanup
-            .find(".settle_durable_handoff_terminal_until(")
+            .find(".settle_durable_prepare_terminal_until(")
             .expect("exact handoff retry");
         let absent = cleanup
-            .find("DurableHandoffTerminalSettlement::Absent")
+            .find("DurablePrepareTerminalSettlement::Absent")
             .expect("durable Absent result");
         let remove = cleanup
             .find("remove_exact_entry(&self.state, key)")
@@ -6924,11 +6935,10 @@ mod tests {
                     error: WorkerV3Error::Invalid,
                     key: durable_key,
                 },
-            )))
-            .expect("ordinary handoff selector");
+            )));
         let mut entry = open_entry(open_key);
         entry.phase = OpenLeasePhase::DurableHandoffPending;
-        entry.durable_handoff_terminal = Some(selector);
+        entry.durable_prepare_terminal = Some(selector);
         let backend = FunctionalAlphaLeaseBackend {
             coordinator,
             relay_replay: Mutex::new(functional_alpha_replay_cache()),
@@ -6951,7 +6961,7 @@ mod tests {
         assert!(
             lock_state(&backend.state)
                 .as_ref()
-                .is_some_and(|entry| entry.durable_handoff_terminal.is_some())
+                .is_some_and(|entry| entry.durable_prepare_terminal.is_some())
         );
         assert_eq!(
             backend

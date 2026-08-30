@@ -2939,8 +2939,9 @@ fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
         .split("impl fmt::Debug for DurableMayOwnPrepare")
         .next()
         .expect("bounded MayOwn implementation");
-    assert_eq!(may_own_surface.matches("pub(crate)").count(), 4);
+    assert_eq!(may_own_surface.matches("pub(crate)").count(), 5);
     assert!(may_own_surface.contains("context_id(&self)"));
+    assert!(may_own_surface.contains("selector(&self) -> DurableOwnershipSelector"));
     assert!(may_own_surface.contains("resources(&self) -> &[DurableWireguardResource]"));
     assert!(may_own_surface.contains("prepare_leases_v3(&self)"));
     assert!(may_own_surface.contains("into_dispatch_parts("));
@@ -2953,8 +2954,9 @@ fn affine_authority_types_are_non_clone_must_use_and_minimally_exposed() {
         .split("impl fmt::Debug for DurableMayOwnCustody")
         .next()
         .expect("bounded durable custody implementation");
-    assert_eq!(custody_surface.matches("pub(crate)").count(), 2);
+    assert_eq!(custody_surface.matches("pub(crate)").count(), 3);
     assert!(custody_surface.contains("context_id(&self)"));
+    assert!(custody_surface.contains("selector(&self) -> DurableOwnershipSelector"));
     assert!(custody_surface.contains("custody_name_digest(&self) -> DurableCustodyNameDigest"));
 
     let digest_surface = actor_source

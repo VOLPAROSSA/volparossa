@@ -22,7 +22,8 @@ pub(crate) use actor::{
     DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
     DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
     DurablePrepareAnchor, DurablePrepareAnchorParts, DurablePrepareSettlement,
-    DurableRegistrationOutcome, StartupCustodyPhase, StartupCustodyTarget,
+    DurableRegistrationOutcome, DurableUndispatchedCleanupOutcome, StartupCustodyPhase,
+    StartupCustodyTarget,
 };
 
 use crate::{

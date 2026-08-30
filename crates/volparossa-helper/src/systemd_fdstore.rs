@@ -800,11 +800,7 @@ impl ExactRemovalProof {
         self.successor
     }
 
-    /// Erase the successful-removal provenance behind the same-runtime manager-proof boundary.
-    ///
-    /// The worker settlement path is intentionally not wired in this change; until it is, keep
-    /// the conversion available only to code which already owns this unforgeable proof.
-    #[allow(dead_code)]
+    /// Erase successful-removal provenance behind the same-runtime manager-proof boundary.
     pub(crate) fn into_same_runtime_manager_proof(self) -> SameRuntimeManagerProof {
         SameRuntimeManagerProof {
             proof: SameRuntimeManagerProofKind::ExactRemoval(Box::new(self)),
@@ -876,6 +872,17 @@ impl SameRuntimeManagerProof {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn same_runtime_manager_proof_for_test(
+    custody_name: CustodyFdName,
+    custody: BorrowedCustodyPair<'_>,
+) -> Result<SameRuntimeManagerProof, FdStoreError> {
+    Ok(SameRuntimeManagerProof::exact_publication_absence(
+        custody_name,
+        CustodyDescriptorBinding::from_custody(custody)?,
+    ))
 }
 
 /// Affine observation that an attempted exact removal left the complete baseline unchanged.
@@ -2869,8 +2876,7 @@ impl fmt::Debug for CustodyInventoryReconciliation {
 ///
 /// The affine descriptor owners remain borrowed across the full barrier and both snapshots. This
 /// function reopens the exact unit object stored at the send boundary and reuses that attempt's
-/// parsed notify address. It has no production server/request-path caller yet.
-#[allow(dead_code)]
+/// parsed notify address. Only exact later functional Destroy settlement calls this adapter.
 pub(crate) async fn reconcile_current_process_custody(
     attempt_id: PublicationAttemptId,
     custody_name: CustodyFdName,
@@ -2898,7 +2904,6 @@ pub(crate) async fn reconcile_current_process_custody(
 ///
 /// Selection still requires the exact custody name and role-ordered live descriptor binding; it
 /// never adopts the first or merely publication-shaped global poison.
-#[allow(dead_code)]
 pub(crate) async fn reconcile_current_process_custody_target(
     custody_name: CustodyFdName,
     custody: BorrowedCustodyPair<'_>,
@@ -3019,7 +3024,6 @@ where
 /// This path is shared by `PublicationStart` and `BeforeSend` settlement. It serializes with every
 /// manager mutation, retains the local owners across one causal barrier and two snapshots, and
 /// emits no descriptor-store mutation.
-#[allow(dead_code)]
 pub(crate) async fn observe_current_process_publication_absence(
     custody_name: CustodyFdName,
     custody: BorrowedCustodyPair<'_>,

@@ -70,11 +70,12 @@ use crate::{
         WireguardV3PeerProof,
     },
     ownership_journal::{
-        DurableArmOutcome, DurableCustodyArmHandle, DurableCustodyOutcome,
-        DurableIntentRegistration, DurableMayOwnCustody, DurableMayOwnPrepare,
-        DurableNeverDispatchedOutcome, DurableOwnershipActor, DurableOwnershipError,
-        DurableOwnershipKey, DurableOwnershipPrepareHandle, DurableOwnershipSelector,
-        DurablePrepareSettlement, DurableRegistrationOutcome, DurableWireguardResource,
+        DurableArmOutcome, DurableCleanupConfirmed, DurableCustodyArmHandle, DurableCustodyOutcome,
+        DurableIntentRegistration, DurableManagerAbsentOutcome, DurableMayOwnCustody,
+        DurableMayOwnPrepare, DurableNeverDispatchedOutcome, DurableOwnershipActor,
+        DurableOwnershipError, DurableOwnershipKey, DurableOwnershipPrepareHandle,
+        DurableOwnershipSelector, DurablePrepareSettlement, DurableRegistrationOutcome,
+        DurableUndispatchedCleanupOutcome, DurableWireguardResource,
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
@@ -4614,6 +4615,65 @@ impl std::fmt::Debug for ExactNeverDispatchedPrepareProof {
     }
 }
 
+/// The exact post-custody journal authority which never crossed the worker dispatch fence.
+///
+/// This remains affine: the custody-phase or armed-Prepare token is consumed into the cleanup
+/// proof and can never be used to arm or dispatch again.
+#[must_use = "undispatched durable authority must remain joined to cleanup evidence"]
+pub(crate) enum ExactUndispatchedDurableAuthority {
+    Custody(DurableMayOwnCustody),
+    Prepare(DurableMayOwnPrepare),
+}
+
+impl ExactUndispatchedDurableAuthority {
+    fn selector(&self) -> DurableOwnershipSelector {
+        match self {
+            Self::Custody(authority) => authority.selector(),
+            Self::Prepare(authority) => authority.selector(),
+        }
+    }
+}
+
+/// Opaque affine authority that a post-custody durable Prepare remained undispatched and its exact
+/// passive worker generation is now absent.
+///
+/// Only this worker boundary can mint the proof, after checking the dispatch fence and consuming
+/// exact generation-reap evidence. The actor can consume or return it, but cannot manufacture it.
+#[must_use = "undispatched cleanup evidence must reach CleanupConfirmed or remain retained"]
+pub(crate) struct ExactUndispatchedPrepareCleanupProof {
+    authority: ExactUndispatchedDurableAuthority,
+    _worker: ConfirmedWorkerGenerationAbsent,
+}
+
+impl ExactUndispatchedPrepareCleanupProof {
+    fn after_exact_passive_worker_absence(
+        authority: ExactUndispatchedDurableAuthority,
+        worker: ConfirmedWorkerGenerationAbsent,
+    ) -> Self {
+        if authority.selector().context_id() != worker.coordinates.context_id {
+            std::process::abort();
+        }
+        Self {
+            authority,
+            _worker: worker,
+        }
+    }
+
+    pub(crate) fn selector(&self) -> DurableOwnershipSelector {
+        self.authority.selector()
+    }
+
+    pub(crate) fn into_authority(self) -> ExactUndispatchedDurableAuthority {
+        self.authority
+    }
+}
+
+impl std::fmt::Debug for ExactUndispatchedPrepareCleanupProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ExactUndispatchedPrepareCleanupProof(<redacted>)")
+    }
+}
+
 /// Affine terminal retained when production durable Prepare cannot reach dispatch-open.
 #[must_use = "failed durable Prepare authority must remain retained"]
 enum DurableWorkerPrepareTerminal {
@@ -4622,33 +4682,68 @@ enum DurableWorkerPrepareTerminal {
         error: WorkerV3Error,
         publication: Box<DurableWorkerCustodyPublicationOwner>,
     },
+    CustodyPublication(Box<DurableWorkerCustodyPublicationTerminal>),
     DispatchOpen {
         error: WorkerV3Error,
         may_own: Box<DurableWorkerMayOwnPrepare>,
     },
+    UndispatchedSettlement(Box<DurableUndispatchedPrepareSettlement>),
+}
+
+#[must_use = "undispatched journal authority must reach manager-absent or remain retained"]
+enum DurableUndispatchedJournalSettlement {
+    Authority(ExactUndispatchedDurableAuthority),
+    CleanupProven(ExactUndispatchedPrepareCleanupProof),
+    CleanupConfirmed(DurableCleanupConfirmed),
+    ManagerProven(ExactSameRuntimeManagerAbsenceProof),
+}
+
+#[must_use = "manager custody evidence must be reconciled exactly or remain retained"]
+enum DurableUndispatchedManagerSettlement {
+    NoSend,
+    PublicationAttempt(crate::systemd_fdstore::PublicationAttemptId),
+    PublicationTarget,
+    Attested(crate::systemd_fdstore::InventoryAttestation),
+    ExactAbsent(crate::systemd_fdstore::SameRuntimeManagerProof),
+    RemovalAmbiguous(crate::systemd_fdstore::RemovalAttemptId),
+    RemovalRetryAuthorized(Box<crate::systemd_fdstore::ExactStillPresentRemovalEvidence>),
+    Consumed,
+}
+
+/// Affine same-runtime settlement for a Prepare which reached durable custody but never opened
+/// worker dispatch. Journal and manager authority advance independently but remain joined here.
+#[must_use = "post-custody terminal settlement must complete or remain exactly retained"]
+struct DurableUndispatchedPrepareSettlement {
+    ownership: DurableOwnershipSelector,
+    custody_name: crate::systemd_fdstore::CustodyFdName,
+    source: WorkerRecoveryIdentitySource,
+    worker: Option<WorkerGenerationOwnership>,
+    journal: Option<DurableUndispatchedJournalSettlement>,
+    manager: Option<DurableUndispatchedManagerSettlement>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-struct DurableHandoffTerminalIdentity {
+struct DurablePrepareTerminalIdentity {
     serial: NonZeroU64,
     context_id: ContextId,
     ownership: Option<DurableOwnershipSelector>,
 }
 
-#[must_use = "a retained handoff selector must be settled or kept for an exact retry"]
-struct DurableHandoffTerminalSelector {
-    identity: DurableHandoffTerminalIdentity,
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[must_use = "a retained Prepare selector must be settled or kept for an exact retry"]
+struct DurablePrepareTerminalSelector {
+    identity: DurablePrepareTerminalIdentity,
 }
 
-impl DurableHandoffTerminalSelector {
+impl DurablePrepareTerminalSelector {
     const fn context_id(&self) -> ContextId {
         self.identity.context_id
     }
 }
 
-impl std::fmt::Debug for DurableHandoffTerminalSelector {
+impl std::fmt::Debug for DurablePrepareTerminalSelector {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("DurableHandoffTerminalSelector(<redacted>)")
+        formatter.write_str("DurablePrepareTerminalSelector(<redacted>)")
     }
 }
 
@@ -4657,22 +4752,25 @@ struct StoredDurableWorkerPrepareTerminal {
     terminal: DurableWorkerPrepareTerminal,
 }
 
-struct DurableHandoffPrepareFailure {
+struct DurableFunctionalPrepareFailure {
     error: WorkerV3Error,
-    selector: DurableHandoffTerminalSelector,
+    selector: DurablePrepareTerminalSelector,
 }
 
-enum DurableFunctionalPrepareFailure {
-    Handoff(DurableHandoffPrepareFailure),
-    Later(WorkerV3Error),
+struct DurableFunctionalPrepareInput {
+    registration: DurableIntentRegistration,
+    context_role: RoutingContextRole,
+    path_id: u8,
+    worker_ttl: Duration,
+    deadline: HardDeadline,
 }
 
-#[must_use = "handoff settlement either proves durable absence or returns the exact selector"]
-enum DurableHandoffTerminalSettlement {
+#[must_use = "Prepare settlement either proves durable absence or returns the exact selector"]
+enum DurablePrepareTerminalSettlement {
     Absent,
     Retained {
         error: WorkerV3Error,
-        selector: DurableHandoffTerminalSelector,
+        selector: DurablePrepareTerminalSelector,
     },
 }
 
@@ -4720,6 +4818,84 @@ fn durable_handoff_outcome_identity(
         DurableWorkerPrepareOutcome::NeverDispatchedRetained { proof, .. } => {
             Some((proof.selector().context_id(), Some(proof.selector())))
         }
+    }
+}
+
+fn durable_publication_owner_identity(
+    publication: &DurableWorkerCustodyPublicationOwner,
+) -> Option<(ContextId, DurableOwnershipSelector)> {
+    let ownership = publication.durable.selector();
+    let context_id = ownership.context_id();
+    (context_id == publication.worker.coordinates.context_id
+        && context_id == publication.source.pending.coordinates.context_id
+        && publication.worker.coordinates == publication.source.pending.coordinates)
+        .then_some((context_id, ownership))
+}
+
+fn durable_may_own_identity(
+    may_own: &DurableWorkerMayOwnPrepare,
+) -> Option<(ContextId, DurableOwnershipSelector)> {
+    let ownership = may_own.durable.selector();
+    let context_id = ownership.context_id();
+    (context_id == may_own.worker.coordinates.context_id
+        && context_id == may_own.source.pending.coordinates.context_id
+        && may_own.worker.coordinates == may_own.source.pending.coordinates)
+        .then_some((context_id, ownership))
+}
+
+fn durable_post_attestation_identity(
+    outcome: &DurableWorkerPostAttestationOutcome,
+) -> Option<(ContextId, DurableOwnershipSelector)> {
+    match outcome {
+        DurableWorkerPostAttestationOutcome::MayOwn(may_own)
+        | DurableWorkerPostAttestationOutcome::ContextMismatch(may_own) => {
+            durable_may_own_identity(may_own)
+        }
+        DurableWorkerPostAttestationOutcome::PublicationUnresolved { publication, .. }
+        | DurableWorkerPostAttestationOutcome::ArmRetained { publication, .. } => {
+            durable_publication_owner_identity(publication)
+        }
+    }
+}
+
+fn durable_custody_terminal_identity(
+    terminal: &DurableWorkerCustodyPublicationTerminal,
+) -> Option<(ContextId, DurableOwnershipSelector)> {
+    match terminal {
+        DurableWorkerCustodyPublicationTerminal::MayOwn(may_own) => {
+            durable_may_own_identity(may_own)
+        }
+        DurableWorkerCustodyPublicationTerminal::PublicationUnresolved { publication, .. }
+        | DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication) => {
+            durable_publication_owner_identity(publication)
+        }
+        DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved(outcome) => {
+            durable_post_attestation_identity(outcome)
+        }
+    }
+}
+
+fn durable_prepare_terminal_identity(
+    terminal: &DurableWorkerPrepareTerminal,
+) -> Option<(ContextId, Option<DurableOwnershipSelector>)> {
+    match terminal {
+        DurableWorkerPrepareTerminal::Handoff(outcome) => durable_handoff_outcome_identity(outcome),
+        DurableWorkerPrepareTerminal::PublicationStart { publication, .. } => {
+            durable_publication_owner_identity(publication)
+                .map(|(context_id, ownership)| (context_id, Some(ownership)))
+        }
+        DurableWorkerPrepareTerminal::CustodyPublication(terminal) => {
+            durable_custody_terminal_identity(terminal)
+                .map(|(context_id, ownership)| (context_id, Some(ownership)))
+        }
+        DurableWorkerPrepareTerminal::DispatchOpen { may_own, .. } => {
+            durable_may_own_identity(may_own)
+                .map(|(context_id, ownership)| (context_id, Some(ownership)))
+        }
+        DurableWorkerPrepareTerminal::UndispatchedSettlement(settlement) => Some((
+            settlement.ownership.context_id(),
+            Some(settlement.ownership),
+        )),
     }
 }
 
@@ -4865,8 +5041,9 @@ enum DurableCustodyPublicationBoundary {
 /// Coordinator-owned terminal authority from one non-cancellable custody publication supervisor.
 ///
 /// Every variant retains the exact affine owner which exists at that terminal boundary. These
-/// values remain coordinator-owned. Production consumes only the exact successful `MayOwn`
-/// terminal; every other terminal stays retained and keeps shutdown fail-closed.
+/// values remain coordinator-owned. Production consumes the exact successful `MayOwn` terminal;
+/// every other terminal moves into exact-selector settlement and keeps shutdown fail-closed until
+/// a later correlated Destroy proves worker, journal and manager absence.
 #[must_use = "terminal custody publication authority must remain coordinator-owned"]
 #[allow(clippy::large_enum_variant)] // Every variant retains its exact affine owner unboxed.
 enum DurableWorkerCustodyPublicationTerminal {
@@ -4922,6 +5099,127 @@ fn durable_publication_terminal_error(
                     durable_ownership_worker_error(*error)
                 }
             }
+        }
+    }
+}
+
+fn undispatched_settlement_from_publication(
+    publication: DurableWorkerCustodyPublicationOwner,
+    manager: DurableUndispatchedManagerSettlement,
+) -> DurableUndispatchedPrepareSettlement {
+    let DurableWorkerCustodyPublicationOwner {
+        custody_name,
+        deadline: _,
+        durable,
+        worker,
+        source,
+    } = publication;
+    let ownership = durable.selector();
+    DurableUndispatchedPrepareSettlement {
+        ownership,
+        custody_name,
+        source,
+        worker: Some(worker),
+        journal: Some(DurableUndispatchedJournalSettlement::Authority(
+            ExactUndispatchedDurableAuthority::Custody(durable),
+        )),
+        manager: Some(manager),
+    }
+}
+
+fn undispatched_settlement_from_may_own(
+    may_own: DurableWorkerMayOwnPrepare,
+) -> DurableUndispatchedPrepareSettlement {
+    let DurableWorkerMayOwnPrepare {
+        durable,
+        worker,
+        source,
+        custody_name,
+        attestation,
+    } = may_own;
+    let ownership = durable.selector();
+    DurableUndispatchedPrepareSettlement {
+        ownership,
+        custody_name,
+        source,
+        worker: Some(worker),
+        journal: Some(DurableUndispatchedJournalSettlement::Authority(
+            ExactUndispatchedDurableAuthority::Prepare(durable),
+        )),
+        manager: Some(DurableUndispatchedManagerSettlement::Attested(attestation)),
+    }
+}
+
+fn undispatched_settlement_from_post_attestation(
+    outcome: DurableWorkerPostAttestationOutcome,
+) -> DurableUndispatchedPrepareSettlement {
+    match outcome {
+        DurableWorkerPostAttestationOutcome::MayOwn(may_own)
+        | DurableWorkerPostAttestationOutcome::ContextMismatch(may_own) => {
+            undispatched_settlement_from_may_own(may_own)
+        }
+        DurableWorkerPostAttestationOutcome::PublicationUnresolved {
+            publication,
+            attestation,
+            ..
+        }
+        | DurableWorkerPostAttestationOutcome::ArmRetained {
+            publication,
+            attestation,
+            ..
+        } => undispatched_settlement_from_publication(
+            publication,
+            DurableUndispatchedManagerSettlement::Attested(attestation),
+        ),
+    }
+}
+
+fn into_undispatched_prepare_settlement(
+    terminal: DurableWorkerPrepareTerminal,
+) -> DurableUndispatchedPrepareSettlement {
+    match terminal {
+        DurableWorkerPrepareTerminal::PublicationStart { publication, .. } => {
+            undispatched_settlement_from_publication(
+                *publication,
+                DurableUndispatchedManagerSettlement::NoSend,
+            )
+        }
+        DurableWorkerPrepareTerminal::CustodyPublication(terminal) => match *terminal {
+            DurableWorkerCustodyPublicationTerminal::MayOwn(may_own) => {
+                undispatched_settlement_from_may_own(may_own)
+            }
+            DurableWorkerCustodyPublicationTerminal::PublicationUnresolved {
+                boundary,
+                publication,
+                ..
+            } => {
+                let manager = match boundary {
+                    DurableCustodyPublicationBoundary::BeforeSend => {
+                        DurableUndispatchedManagerSettlement::NoSend
+                    }
+                    DurableCustodyPublicationBoundary::ManagerMayOwn(attempt_id) => {
+                        DurableUndispatchedManagerSettlement::PublicationAttempt(attempt_id)
+                    }
+                };
+                undispatched_settlement_from_publication(publication, manager)
+            }
+            DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved(outcome) => {
+                undispatched_settlement_from_post_attestation(outcome)
+            }
+            DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication) => {
+                undispatched_settlement_from_publication(
+                    publication,
+                    DurableUndispatchedManagerSettlement::PublicationTarget,
+                )
+            }
+        },
+        DurableWorkerPrepareTerminal::DispatchOpen { may_own, .. } => {
+            undispatched_settlement_from_may_own(*may_own)
+        }
+        DurableWorkerPrepareTerminal::UndispatchedSettlement(settlement) => *settlement,
+        DurableWorkerPrepareTerminal::Handoff(outcome) => {
+            drop(outcome);
+            std::process::abort();
         }
     }
 }
@@ -6362,7 +6660,9 @@ fn ensure_worker_deadline(deadline: HardDeadline) -> Result<(), WorkerV3Error> {
 struct SupervisorSettlements {
     shutdown_owners: Vec<DetachedWorker>,
     durable_prepare_terminals: Vec<StoredDurableWorkerPrepareTerminal>,
-    active_durable_handoff_settlements: usize,
+    reserved_durable_prepare_terminals: Vec<DurablePrepareTerminalIdentity>,
+    completed_durable_prepare_terminals: Vec<DurablePrepareTerminalIdentity>,
+    active_durable_prepare_settlements: Vec<DurablePrepareTerminalIdentity>,
     next_durable_prepare_terminal_serial: u64,
     custody_publication_terminals: Vec<DurableWorkerCustodyPublicationTerminal>,
     reserved_custody_publication_terminals: usize,
@@ -6380,7 +6680,9 @@ impl SupervisorSettlements {
         Self {
             shutdown_owners: Vec::with_capacity(MAX_PROCESS_OWNERS),
             durable_prepare_terminals: Vec::with_capacity(MAX_PROCESS_OWNERS),
-            active_durable_handoff_settlements: 0,
+            reserved_durable_prepare_terminals: Vec::with_capacity(MAX_PROCESS_OWNERS),
+            completed_durable_prepare_terminals: Vec::with_capacity(MAX_PROCESS_OWNERS),
+            active_durable_prepare_settlements: Vec::with_capacity(MAX_PROCESS_OWNERS),
             next_durable_prepare_terminal_serial: 0,
             custody_publication_terminals: Vec::with_capacity(MAX_CUSTODY_PUBLICATION_TERMINALS),
             reserved_custody_publication_terminals: 0,
@@ -6454,11 +6756,33 @@ impl SupervisorSettlements {
     fn store_durable_prepare_terminal(
         &mut self,
         terminal: DurableWorkerPrepareTerminal,
-    ) -> Option<DurableHandoffTerminalSelector> {
+    ) -> DurablePrepareTerminalSelector {
+        let Some((context_id, ownership)) = durable_prepare_terminal_identity(&terminal) else {
+            std::process::abort();
+        };
+        let selector = self.reserve_durable_prepare_terminal(context_id, ownership);
+        self.store_reserved_durable_prepare_terminal(selector, terminal);
+        selector
+    }
+
+    fn reserve_durable_prepare_terminal(
+        &mut self,
+        context_id: ContextId,
+        ownership: Option<DurableOwnershipSelector>,
+    ) -> DurablePrepareTerminalSelector {
+        if ownership.is_some_and(|ownership| ownership.context_id() != context_id) {
+            std::process::abort();
+        }
         if self
             .durable_prepare_terminals
             .len()
-            .checked_add(self.active_durable_handoff_settlements)
+            .checked_add(self.reserved_durable_prepare_terminals.len())
+            .and_then(|occupied| {
+                occupied.checked_add(self.active_durable_prepare_settlements.len())
+            })
+            .and_then(|occupied| {
+                occupied.checked_add(self.completed_durable_prepare_terminals.len())
+            })
             .is_none_or(|occupied| occupied >= MAX_PROCESS_OWNERS)
         {
             std::process::abort();
@@ -6470,67 +6794,31 @@ impl SupervisorSettlements {
             std::process::abort();
         };
         self.next_durable_prepare_terminal_serial = next_serial;
-        let selector = match &terminal {
-            DurableWorkerPrepareTerminal::Handoff(outcome) => {
-                let Some((context_id, ownership)) = durable_handoff_outcome_identity(outcome)
-                else {
-                    std::process::abort();
-                };
-                Some(DurableHandoffTerminalSelector {
-                    identity: DurableHandoffTerminalIdentity {
-                        serial,
-                        context_id,
-                        ownership,
-                    },
-                })
-            }
-            DurableWorkerPrepareTerminal::PublicationStart { .. }
-            | DurableWorkerPrepareTerminal::DispatchOpen { .. } => None,
+        let selector = DurablePrepareTerminalSelector {
+            identity: DurablePrepareTerminalIdentity {
+                serial,
+                context_id,
+                ownership,
+            },
         };
-        self.durable_prepare_terminals
-            .push(StoredDurableWorkerPrepareTerminal { serial, terminal });
+        self.reserved_durable_prepare_terminals
+            .push(selector.identity);
         selector
     }
 
-    fn take_exact_durable_handoff_terminal(
+    fn store_reserved_durable_prepare_terminal(
         &mut self,
-        selector: &DurableHandoffTerminalSelector,
-    ) -> Option<DurableWorkerPrepareOutcome> {
-        let index = self
-            .durable_prepare_terminals
-            .iter()
-            .position(|stored| stored.serial == selector.identity.serial)?;
-        let DurableWorkerPrepareTerminal::Handoff(outcome) =
-            &self.durable_prepare_terminals[index].terminal
-        else {
-            return None;
-        };
-        let Some((context_id, ownership)) = durable_handoff_outcome_identity(outcome) else {
-            std::process::abort();
-        };
-        if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership) {
-            return None;
-        }
-        let stored = self.durable_prepare_terminals.swap_remove(index);
-        let Some(active) = self.active_durable_handoff_settlements.checked_add(1) else {
-            std::process::abort();
-        };
-        if active > MAX_PROCESS_OWNERS {
-            std::process::abort();
-        }
-        self.active_durable_handoff_settlements = active;
-        let DurableWorkerPrepareTerminal::Handoff(outcome) = stored.terminal else {
-            std::process::abort();
-        };
-        Some(*outcome)
-    }
-
-    fn restore_exact_durable_handoff_terminal(
-        &mut self,
-        selector: &DurableHandoffTerminalSelector,
-        outcome: DurableWorkerPrepareOutcome,
+        selector: DurablePrepareTerminalSelector,
+        terminal: DurableWorkerPrepareTerminal,
     ) {
-        let Some((context_id, ownership)) = durable_handoff_outcome_identity(&outcome) else {
+        let Some((context_id, ownership)) = durable_prepare_terminal_identity(&terminal) else {
+            std::process::abort();
+        };
+        let Some(index) = self
+            .reserved_durable_prepare_terminals
+            .iter()
+            .position(|identity| *identity == selector.identity)
+        else {
             std::process::abort();
         };
         if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership)
@@ -6541,19 +6829,147 @@ impl SupervisorSettlements {
         {
             std::process::abort();
         }
-        self.finish_durable_handoff_settlement_reservation();
+        self.reserved_durable_prepare_terminals.swap_remove(index);
         self.durable_prepare_terminals
             .push(StoredDurableWorkerPrepareTerminal {
                 serial: selector.identity.serial,
-                terminal: DurableWorkerPrepareTerminal::Handoff(Box::new(outcome)),
+                terminal,
             });
     }
 
-    fn finish_durable_handoff_settlement_reservation(&mut self) {
-        let Some(active) = self.active_durable_handoff_settlements.checked_sub(1) else {
+    fn has_exact_durable_prepare_reservation(
+        &self,
+        selector: DurablePrepareTerminalSelector,
+    ) -> bool {
+        self.reserved_durable_prepare_terminals
+            .contains(&selector.identity)
+    }
+
+    fn take_exact_durable_prepare_terminal(
+        &mut self,
+        selector: &DurablePrepareTerminalSelector,
+    ) -> Option<DurableWorkerPrepareTerminal> {
+        let index = self
+            .durable_prepare_terminals
+            .iter()
+            .position(|stored| stored.serial == selector.identity.serial)?;
+        let Some((context_id, ownership)) =
+            durable_prepare_terminal_identity(&self.durable_prepare_terminals[index].terminal)
+        else {
             std::process::abort();
         };
-        self.active_durable_handoff_settlements = active;
+        if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership) {
+            return None;
+        }
+        let stored = self.durable_prepare_terminals.swap_remove(index);
+        if self.active_durable_prepare_settlements.len() >= MAX_PROCESS_OWNERS
+            || self
+                .active_durable_prepare_settlements
+                .contains(&selector.identity)
+        {
+            std::process::abort();
+        }
+        self.active_durable_prepare_settlements
+            .push(selector.identity);
+        Some(stored.terminal)
+    }
+
+    fn restore_exact_durable_prepare_terminal(
+        &mut self,
+        selector: &DurablePrepareTerminalSelector,
+        terminal: DurableWorkerPrepareTerminal,
+    ) {
+        let Some((context_id, ownership)) = durable_prepare_terminal_identity(&terminal) else {
+            std::process::abort();
+        };
+        if (context_id, ownership) != (selector.identity.context_id, selector.identity.ownership)
+            || self
+                .durable_prepare_terminals
+                .iter()
+                .any(|stored| stored.serial == selector.identity.serial)
+        {
+            std::process::abort();
+        }
+        self.finish_durable_prepare_settlement_reservation(selector);
+        self.durable_prepare_terminals
+            .push(StoredDurableWorkerPrepareTerminal {
+                serial: selector.identity.serial,
+                terminal,
+            });
+    }
+
+    fn complete_exact_durable_prepare_terminal(
+        &mut self,
+        selector: DurablePrepareTerminalSelector,
+    ) {
+        if self
+            .completed_durable_prepare_terminals
+            .iter()
+            .any(|identity| identity.serial == selector.identity.serial)
+            || self
+                .durable_prepare_terminals
+                .iter()
+                .any(|stored| stored.serial == selector.identity.serial)
+        {
+            std::process::abort();
+        }
+        self.finish_durable_prepare_settlement_reservation(&selector);
+        if self.completed_durable_prepare_terminals.len() >= MAX_PROCESS_OWNERS {
+            std::process::abort();
+        }
+        self.completed_durable_prepare_terminals
+            .push(selector.identity);
+    }
+
+    fn consume_exact_completed_durable_prepare_terminal(
+        &mut self,
+        selector: DurablePrepareTerminalSelector,
+    ) -> bool {
+        let Some(index) = self
+            .completed_durable_prepare_terminals
+            .iter()
+            .position(|identity| *identity == selector.identity)
+        else {
+            return false;
+        };
+        self.completed_durable_prepare_terminals.swap_remove(index);
+        true
+    }
+
+    fn finish_durable_prepare_settlement_reservation(
+        &mut self,
+        selector: &DurablePrepareTerminalSelector,
+    ) {
+        let Some(index) = self
+            .active_durable_prepare_settlements
+            .iter()
+            .position(|identity| *identity == selector.identity)
+        else {
+            std::process::abort();
+        };
+        self.active_durable_prepare_settlements.swap_remove(index);
+    }
+
+    fn consume_exact_active_durable_prepare_terminal(
+        &mut self,
+        selector: DurablePrepareTerminalSelector,
+    ) {
+        if self
+            .durable_prepare_terminals
+            .iter()
+            .any(|stored| stored.serial == selector.identity.serial)
+            || self
+                .reserved_durable_prepare_terminals
+                .iter()
+                .any(|identity| identity.serial == selector.identity.serial)
+            || self
+                .completed_durable_prepare_terminals
+                .iter()
+                .any(|identity| identity.serial == selector.identity.serial)
+        {
+            std::process::abort();
+        }
+        self.finish_durable_prepare_settlement_reservation(&selector);
     }
 
     fn take_exact_custody_publication_terminal(
@@ -6571,7 +6987,9 @@ impl SupervisorSettlements {
         let custody_settled = self.custody_publication_terminals.is_empty()
             && self.reserved_custody_publication_terminals == 0
             && self.durable_prepare_terminals.is_empty()
-            && self.active_durable_handoff_settlements == 0;
+            && self.reserved_durable_prepare_terminals.is_empty()
+            && self.completed_durable_prepare_terminals.is_empty()
+            && self.active_durable_prepare_settlements.is_empty();
         (
             std::mem::take(&mut self.shutdown_owners),
             !self.unresolved && custody_settled,
@@ -6726,7 +7144,14 @@ struct DurableCustodyPublicationTerminalGuard {
     settlements: Arc<Mutex<SupervisorSettlements>>,
     publication: Option<DurableWorkerCustodyPublicationOwner>,
     completion: Option<oneshot::Sender<()>>,
+    destination: DurableCustodyPublicationTerminalDestination,
     terminal_reserved: bool,
+}
+
+#[derive(Clone, Copy)]
+enum DurableCustodyPublicationTerminalDestination {
+    Custody,
+    Prepare(DurablePrepareTerminalSelector),
 }
 
 impl DurableCustodyPublicationTerminalGuard {
@@ -6734,11 +7159,13 @@ impl DurableCustodyPublicationTerminalGuard {
         settlements: Arc<Mutex<SupervisorSettlements>>,
         publication: DurableWorkerCustodyPublicationOwner,
         completion: oneshot::Sender<()>,
+        destination: DurableCustodyPublicationTerminalDestination,
     ) -> Self {
         Self {
             settlements,
             publication: Some(publication),
             completion: Some(completion),
+            destination,
             terminal_reserved: true,
         }
     }
@@ -6759,10 +7186,22 @@ impl DurableCustodyPublicationTerminalGuard {
         if self.publication.is_some() || !self.terminal_reserved {
             std::process::abort();
         }
-        self.settlements
+        let mut settlements = self
+            .settlements
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .store_custody_publication_terminal(terminal);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match self.destination {
+            DurableCustodyPublicationTerminalDestination::Custody => {
+                settlements.store_custody_publication_terminal(terminal);
+            }
+            DurableCustodyPublicationTerminalDestination::Prepare(selector) => {
+                settlements.store_reserved_durable_prepare_terminal(
+                    selector,
+                    DurableWorkerPrepareTerminal::CustodyPublication(Box::new(terminal)),
+                );
+            }
+        }
+        drop(settlements);
         self.terminal_reserved = false;
         if let Some(completion) = self.completion.take() {
             let _ = completion.send(());
@@ -6773,10 +7212,15 @@ impl DurableCustodyPublicationTerminalGuard {
         if !self.terminal_reserved {
             std::process::abort();
         }
-        self.settlements
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .release_custody_publication_terminal();
+        if matches!(
+            self.destination,
+            DurableCustodyPublicationTerminalDestination::Custody
+        ) {
+            self.settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release_custody_publication_terminal();
+        }
         self.terminal_reserved = false;
         drop(self.completion.take());
         self.take_publication()
@@ -6791,12 +7235,23 @@ impl Drop for DurableCustodyPublicationTerminalGuard {
         let publication = self.publication.take().unwrap_or_else(|| {
             std::process::abort();
         });
-        self.settlements
+        let terminal = DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication);
+        let mut settlements = self
+            .settlements
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .store_custody_publication_terminal(
-                DurableWorkerCustodyPublicationTerminal::SupervisorDropped(publication),
-            );
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match self.destination {
+            DurableCustodyPublicationTerminalDestination::Custody => {
+                settlements.store_custody_publication_terminal(terminal);
+            }
+            DurableCustodyPublicationTerminalDestination::Prepare(selector) => {
+                settlements.store_reserved_durable_prepare_terminal(
+                    selector,
+                    DurableWorkerPrepareTerminal::CustodyPublication(Box::new(terminal)),
+                );
+            }
+        }
+        drop(settlements);
         self.terminal_reserved = false;
         if let Some(completion) = self.completion.take() {
             let _ = completion.send(());
@@ -8162,52 +8617,595 @@ impl WorkerCoordinator {
         }
     }
 
-    fn settle_durable_handoff_terminal_until(
+    #[allow(
+        clippy::too_many_lines,
+        reason = "post-custody journal and manager authority form one explicit affine state machine"
+    )]
+    async fn settle_undispatched_prepare_until(
         &self,
         handle: &DurableOwnershipPrepareHandle,
-        selector: DurableHandoffTerminalSelector,
+        mut settlement: DurableUndispatchedPrepareSettlement,
+        expected_ownership: DurableOwnershipSelector,
+        deadline: HardDeadline,
+    ) -> Result<(), (WorkerV3Error, DurableUndispatchedPrepareSettlement)> {
+        if settlement.ownership != expected_ownership
+            || settlement.ownership.context_id() != expected_ownership.context_id()
+            || settlement.source.pending.coordinates.context_id != expected_ownership.context_id()
+            || settlement.worker.as_ref().is_some_and(|worker| {
+                worker.coordinates != settlement.source.pending.coordinates
+                    || worker.coordinates.context_id != expected_ownership.context_id()
+            })
+        {
+            return Err((WorkerV3Error::Conflict, settlement));
+        }
+        if let Err(error) = ensure_worker_deadline(deadline) {
+            return Err((error, settlement));
+        }
+
+        let journal = settlement
+            .journal
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        settlement.journal = Some(match journal {
+            DurableUndispatchedJournalSettlement::Authority(authority) => {
+                if authority.selector() != expected_ownership {
+                    settlement.journal =
+                        Some(DurableUndispatchedJournalSettlement::Authority(authority));
+                    return Err((WorkerV3Error::Conflict, settlement));
+                }
+                let Some(worker) = settlement.worker.take() else {
+                    settlement.journal =
+                        Some(DurableUndispatchedJournalSettlement::Authority(authority));
+                    return Err((WorkerV3Error::Conflict, settlement));
+                };
+                if worker.dispatch_registration != WorkerDispatchRegistration::DurableHandoffPending
+                    || !worker.has_valid_dispatch_fence_shape()
+                    || worker.coordinates != settlement.source.pending.coordinates
+                {
+                    settlement.worker = Some(worker);
+                    settlement.journal =
+                        Some(DurableUndispatchedJournalSettlement::Authority(authority));
+                    return Err((WorkerV3Error::Conflict, settlement));
+                }
+                match self.settle_and_terminate_lifecycle_until(worker, deadline) {
+                    WorkerGenerationReap::Confirmed(worker) => {
+                        DurableUndispatchedJournalSettlement::CleanupProven(
+                            ExactUndispatchedPrepareCleanupProof::after_exact_passive_worker_absence(
+                                authority, worker,
+                            ),
+                        )
+                    }
+                    WorkerGenerationReap::Retained { error, ownership } => {
+                        settlement.worker = Some(*ownership);
+                        settlement.journal = Some(
+                            DurableUndispatchedJournalSettlement::Authority(authority),
+                        );
+                        return Err((worker_error_class(&error), settlement));
+                    }
+                }
+            }
+            journal => journal,
+        });
+
+        let journal = settlement
+            .journal
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        settlement.journal = Some(match journal {
+            DurableUndispatchedJournalSettlement::CleanupProven(proof) => {
+                match handle.confirm_undispatched_cleanup_until(proof, deadline) {
+                    DurableUndispatchedCleanupOutcome::Confirmed(cleanup) => {
+                        DurableUndispatchedJournalSettlement::CleanupConfirmed(cleanup)
+                    }
+                    DurableUndispatchedCleanupOutcome::Retained { error, proof } => {
+                        settlement.journal =
+                            Some(DurableUndispatchedJournalSettlement::CleanupProven(proof));
+                        return Err((durable_ownership_worker_error(error), settlement));
+                    }
+                }
+            }
+            journal => journal,
+        });
+
+        if matches!(
+            settlement.journal,
+            Some(DurableUndispatchedJournalSettlement::CleanupConfirmed(_))
+        ) {
+            let pair = match crate::systemd_fdstore::BorrowedCustodyPair::new(
+                settlement.source.restart_custody.borrowed_pidfd(),
+                settlement
+                    .source
+                    .restart_custody
+                    .borrowed_network_namespace(),
+            ) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                }
+            };
+            let binding = match pair.descriptor_binding() {
+                Ok(binding) => binding,
+                Err(error) => {
+                    return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                }
+            };
+            let manager = settlement
+                .manager
+                .take()
+                .unwrap_or_else(|| std::process::abort());
+            settlement.manager = Some(match manager {
+                DurableUndispatchedManagerSettlement::NoSend => {
+                    match crate::systemd_fdstore::observe_current_process_publication_absence(
+                        settlement.custody_name,
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        Ok(proof) => DurableUndispatchedManagerSettlement::ExactAbsent(proof),
+                        Err(error) => {
+                            settlement.manager = Some(
+                                DurableUndispatchedManagerSettlement::NoSend,
+                            );
+                            return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                        }
+                    }
+                }
+                DurableUndispatchedManagerSettlement::PublicationAttempt(attempt_id) => {
+                    match crate::systemd_fdstore::reconcile_current_process_custody(
+                        attempt_id,
+                        settlement.custody_name,
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        crate::systemd_fdstore::CustodyInventoryReconciliation::ExactPresent(
+                            attestation,
+                        ) => DurableUndispatchedManagerSettlement::Attested(attestation),
+                        crate::systemd_fdstore::CustodyInventoryReconciliation::ExactAbsent(
+                            proof,
+                        ) => DurableUndispatchedManagerSettlement::ExactAbsent(proof),
+                        crate::systemd_fdstore::CustodyInventoryReconciliation::Unresolved {
+                            error,
+                        } => {
+                            settlement.manager = Some(
+                                DurableUndispatchedManagerSettlement::PublicationAttempt(
+                                    attempt_id,
+                                ),
+                            );
+                            return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                        }
+                    }
+                }
+                DurableUndispatchedManagerSettlement::PublicationTarget => {
+                    match crate::systemd_fdstore::reconcile_current_process_custody_target(
+                        settlement.custody_name,
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        crate::systemd_fdstore::CustodyInventoryReconciliation::ExactPresent(
+                            attestation,
+                        ) => DurableUndispatchedManagerSettlement::Attested(attestation),
+                        crate::systemd_fdstore::CustodyInventoryReconciliation::ExactAbsent(
+                            proof,
+                        ) => DurableUndispatchedManagerSettlement::ExactAbsent(proof),
+                        crate::systemd_fdstore::CustodyInventoryReconciliation::Unresolved {
+                            error: crate::systemd_fdstore::FdStoreError::PublicationNotPoisoned,
+                        } => {
+                            match crate::systemd_fdstore::observe_current_process_publication_absence(
+                                settlement.custody_name,
+                                pair,
+                                deadline,
+                            )
+                            .await
+                            {
+                                Ok(proof) => {
+                                    DurableUndispatchedManagerSettlement::ExactAbsent(proof)
+                                }
+                                Err(error) => {
+                                    settlement.manager = Some(
+                                        DurableUndispatchedManagerSettlement::PublicationTarget,
+                                    );
+                                    return Err((
+                                        WorkerV3Error::SystemdCustodyInput(error),
+                                        settlement,
+                                    ));
+                                }
+                            }
+                        }
+                        crate::systemd_fdstore::CustodyInventoryReconciliation::Unresolved {
+                            error,
+                        } => {
+                            settlement.manager = Some(
+                                DurableUndispatchedManagerSettlement::PublicationTarget,
+                            );
+                            return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                        }
+                    }
+                }
+                manager => manager,
+            });
+
+            let manager = settlement
+                .manager
+                .take()
+                .unwrap_or_else(|| std::process::abort());
+            settlement.manager = Some(match manager {
+                DurableUndispatchedManagerSettlement::Attested(attestation) => {
+                    if let Err(error) = attestation
+                        .verify_exact_custody(settlement.custody_name, pair)
+                    {
+                        settlement.manager = Some(
+                            DurableUndispatchedManagerSettlement::Attested(attestation),
+                        );
+                        return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                    }
+                    let Some(baseline) = attestation.removal_baseline() else {
+                        settlement.manager = Some(
+                            DurableUndispatchedManagerSettlement::Attested(attestation),
+                        );
+                        return Err((WorkerV3Error::Ambiguous, settlement));
+                    };
+                    match crate::systemd_fdstore::remove_current_process_custody(
+                        baseline,
+                        settlement.custody_name,
+                        binding.clone(),
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        Ok(proof) => DurableUndispatchedManagerSettlement::ExactAbsent(
+                            proof.into_same_runtime_manager_proof(),
+                        ),
+                        Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { error }) => {
+                            settlement.manager = Some(
+                                DurableUndispatchedManagerSettlement::Attested(attestation),
+                            );
+                            return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                        }
+                        Err(
+                            crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
+                                attempt_id,
+                                error: _,
+                            },
+                        ) => DurableUndispatchedManagerSettlement::RemovalAmbiguous(attempt_id),
+                    }
+                }
+                DurableUndispatchedManagerSettlement::RemovalAmbiguous(attempt_id) => {
+                    match crate::systemd_fdstore::reconcile_current_process_removal(
+                        attempt_id,
+                        settlement.custody_name,
+                        binding.clone(),
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        crate::systemd_fdstore::RemovalInventoryReconciliation::ExactRemoved(
+                            proof,
+                        ) => DurableUndispatchedManagerSettlement::ExactAbsent(
+                            proof.into_same_runtime_manager_proof(),
+                        ),
+                        crate::systemd_fdstore::RemovalInventoryReconciliation::ExactStillPresent(
+                            evidence,
+                        ) => DurableUndispatchedManagerSettlement::RemovalRetryAuthorized(
+                            Box::new(evidence),
+                        ),
+                        crate::systemd_fdstore::RemovalInventoryReconciliation::Unresolved {
+                            error,
+                        } => {
+                            settlement.manager = Some(
+                                DurableUndispatchedManagerSettlement::RemovalAmbiguous(attempt_id),
+                            );
+                            return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                        }
+                    }
+                }
+                DurableUndispatchedManagerSettlement::RemovalRetryAuthorized(evidence) => {
+                    match crate::systemd_fdstore::retry_current_process_removal(
+                        &evidence,
+                        settlement.custody_name,
+                        binding.clone(),
+                        pair,
+                        deadline,
+                    )
+                    .await
+                    {
+                        Ok(proof) => DurableUndispatchedManagerSettlement::ExactAbsent(
+                            proof.into_same_runtime_manager_proof(),
+                        ),
+                        Err(crate::systemd_fdstore::RemovalFailure::BeforeSend { error }) => {
+                            settlement.manager = Some(
+                                DurableUndispatchedManagerSettlement::RemovalRetryAuthorized(
+                                    evidence,
+                                ),
+                            );
+                            return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                        }
+                        Err(
+                            crate::systemd_fdstore::RemovalFailure::ManagerMayHaveRemoved {
+                                attempt_id,
+                                error: _,
+                            },
+                        ) => DurableUndispatchedManagerSettlement::RemovalAmbiguous(attempt_id),
+                    }
+                }
+                manager => manager,
+            });
+
+            if matches!(
+                settlement.manager,
+                Some(DurableUndispatchedManagerSettlement::ExactAbsent(_))
+            ) {
+                let Some(DurableUndispatchedManagerSettlement::ExactAbsent(manager_proof)) =
+                    settlement.manager.take()
+                else {
+                    std::process::abort();
+                };
+                if let Err(error) =
+                    manager_proof.verify_exact_target(settlement.custody_name, &binding)
+                {
+                    settlement.manager = Some(DurableUndispatchedManagerSettlement::ExactAbsent(
+                        manager_proof,
+                    ));
+                    return Err((WorkerV3Error::SystemdCustodyInput(error), settlement));
+                }
+                let Some(DurableUndispatchedJournalSettlement::CleanupConfirmed(cleanup)) =
+                    settlement.journal.take()
+                else {
+                    std::process::abort();
+                };
+                settlement.journal = Some(DurableUndispatchedJournalSettlement::ManagerProven(
+                    ExactSameRuntimeManagerAbsenceProof::after_exact_manager_absence(
+                        cleanup,
+                        manager_proof,
+                    ),
+                ));
+                settlement.manager = Some(DurableUndispatchedManagerSettlement::Consumed);
+            }
+        }
+
+        let journal = settlement
+            .journal
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        match journal {
+            DurableUndispatchedJournalSettlement::ManagerProven(proof) => {
+                match handle.confirm_manager_absent_until(proof, deadline) {
+                    DurableManagerAbsentOutcome::Absent => {
+                        drop(settlement.source);
+                        Ok(())
+                    }
+                    DurableManagerAbsentOutcome::Retained { error, proof } => {
+                        settlement.journal =
+                            Some(DurableUndispatchedJournalSettlement::ManagerProven(proof));
+                        Err((durable_ownership_worker_error(error), settlement))
+                    }
+                }
+            }
+            journal => {
+                settlement.journal = Some(journal);
+                Err((WorkerV3Error::Ambiguous, settlement))
+            }
+        }
+    }
+
+    async fn settle_durable_prepare_terminal_once_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        selector: DurablePrepareTerminalSelector,
         expected_context_id: ContextId,
         deadline: HardDeadline,
-    ) -> DurableHandoffTerminalSettlement {
+    ) -> DurablePrepareTerminalSettlement {
         if selector.identity.context_id != expected_context_id
             || selector
                 .identity
                 .ownership
                 .is_some_and(|ownership| ownership.context_id() != expected_context_id)
         {
-            return DurableHandoffTerminalSettlement::Retained {
+            return DurablePrepareTerminalSettlement::Retained {
                 error: WorkerV3Error::Conflict,
                 selector,
             };
         }
         if let Err(error) = ensure_worker_deadline(deadline) {
-            return DurableHandoffTerminalSettlement::Retained { error, selector };
+            return DurablePrepareTerminalSettlement::Retained { error, selector };
         }
-        let outcome = self
+        let terminal = self
             .settlements
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take_exact_durable_handoff_terminal(&selector);
-        let Some(outcome) = outcome else {
-            return DurableHandoffTerminalSettlement::Retained {
+            .take_exact_durable_prepare_terminal(&selector);
+        let Some(terminal) = terminal else {
+            if self
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .completed_durable_prepare_terminals
+                .contains(&selector.identity)
+            {
+                return DurablePrepareTerminalSettlement::Absent;
+            }
+            return DurablePrepareTerminalSettlement::Retained {
                 error: WorkerV3Error::Ambiguous,
                 selector,
             };
         };
-        match self.settle_durable_handoff_outcome_until(handle, outcome, deadline) {
+        let result = match terminal {
+            DurableWorkerPrepareTerminal::Handoff(outcome) => self
+                .settle_durable_handoff_outcome_until(handle, *outcome, deadline)
+                .map_err(|(error, outcome)| {
+                    (
+                        error,
+                        DurableWorkerPrepareTerminal::Handoff(Box::new(outcome)),
+                    )
+                }),
+            terminal => {
+                let Some(expected_ownership) = selector.identity.ownership else {
+                    self.settlements
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .restore_exact_durable_prepare_terminal(&selector, terminal);
+                    return DurablePrepareTerminalSettlement::Retained {
+                        error: WorkerV3Error::Conflict,
+                        selector,
+                    };
+                };
+                self.settle_undispatched_prepare_until(
+                    handle,
+                    into_undispatched_prepare_settlement(terminal),
+                    expected_ownership,
+                    deadline,
+                )
+                .await
+                .map_err(|(error, settlement)| {
+                    (
+                        error,
+                        DurableWorkerPrepareTerminal::UndispatchedSettlement(Box::new(settlement)),
+                    )
+                })
+            }
+        };
+        match result {
             Ok(()) => {
                 self.settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .finish_durable_handoff_settlement_reservation();
-                DurableHandoffTerminalSettlement::Absent
+                    .complete_exact_durable_prepare_terminal(selector);
+                DurablePrepareTerminalSettlement::Absent
             }
-            Err((error, outcome)) => {
+            Err((error, terminal)) => {
                 self.settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .restore_exact_durable_handoff_terminal(&selector, outcome);
-                DurableHandoffTerminalSettlement::Retained { error, selector }
+                    .restore_exact_durable_prepare_terminal(&selector, terminal);
+                DurablePrepareTerminalSettlement::Retained { error, selector }
+            }
+        }
+    }
+
+    /// Run terminal settlement on a non-abortable blocking task. Dropping the caller's Destroy
+    /// future cannot cancel a manager send or discard affine journal/worker authority; completion
+    /// is recorded under the exact selector for the next retry to consume.
+    async fn settle_durable_prepare_terminal_until(
+        &self,
+        handle: &DurableOwnershipPrepareHandle,
+        selector: DurablePrepareTerminalSelector,
+        expected_context_id: ContextId,
+        deadline: HardDeadline,
+    ) -> DurablePrepareTerminalSettlement {
+        if self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .consume_exact_completed_durable_prepare_terminal(selector)
+        {
+            return DurablePrepareTerminalSettlement::Absent;
+        }
+        let coordinator = self.clone();
+        let handle = handle.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| WorkerV3Error::RuntimeUnavailable)?;
+            let settlement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(coordinator.settle_durable_prepare_terminal_once_until(
+                    &handle,
+                    selector,
+                    expected_context_id,
+                    deadline,
+                ))
+            }));
+            match settlement {
+                Ok(settlement) => Ok::<_, WorkerV3Error>(settlement),
+                Err(_) => std::process::abort(),
+            }
+        });
+        let settlement = match task.await {
+            Ok(Ok(settlement)) => settlement,
+            Ok(Err(error)) => DurablePrepareTerminalSettlement::Retained { error, selector },
+            Err(_) => DurablePrepareTerminalSettlement::Retained {
+                error: WorkerV3Error::Ambiguous,
+                selector,
+            },
+        };
+        if matches!(settlement, DurablePrepareTerminalSettlement::Absent) {
+            let _ = self
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .consume_exact_completed_durable_prepare_terminal(selector);
+        }
+        settlement
+    }
+
+    fn finish_durable_functional_prepare_until(
+        &self,
+        selector: DurablePrepareTerminalSelector,
+        deadline: HardDeadline,
+    ) -> Result<DurableFunctionalWorkerOwnership, DurableFunctionalPrepareFailure> {
+        let terminal = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_prepare_terminal(&selector)
+            .unwrap_or_else(|| std::process::abort());
+        let terminal = match terminal {
+            DurableWorkerPrepareTerminal::CustodyPublication(terminal) => *terminal,
+            terminal => {
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .restore_exact_durable_prepare_terminal(&selector, terminal);
+                return Err(DurableFunctionalPrepareFailure {
+                    error: WorkerV3Error::Conflict,
+                    selector,
+                });
+            }
+        };
+        let may_own = match terminal {
+            DurableWorkerCustodyPublicationTerminal::MayOwn(may_own) => may_own,
+            retained => {
+                let error = durable_publication_terminal_error(&retained);
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .restore_exact_durable_prepare_terminal(
+                        &selector,
+                        DurableWorkerPrepareTerminal::CustodyPublication(Box::new(retained)),
+                    );
+                return Err(DurableFunctionalPrepareFailure { error, selector });
+            }
+        };
+        match self.open_durable_functional_worker_until(may_own, deadline) {
+            Ok(ownership) => {
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .consume_exact_active_durable_prepare_terminal(selector);
+                Ok(ownership)
+            }
+            Err((error, may_own)) => {
+                let returned_error = worker_error_class(&error);
+                self.settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .restore_exact_durable_prepare_terminal(
+                        &selector,
+                        DurableWorkerPrepareTerminal::DispatchOpen {
+                            error,
+                            may_own: Box::new(may_own),
+                        },
+                    );
+                Err(DurableFunctionalPrepareFailure {
+                    error: returned_error,
+                    selector,
+                })
             }
         }
     }
@@ -8215,18 +9213,31 @@ impl WorkerCoordinator {
     /// Complete the cancellation-safe durable Prepare handoff and return only after the exact
     /// worker dispatch fence has opened from attested `MayOwnPrepare` authority.
     ///
-    /// Every non-success outcome is retained inside the coordinator and permanently blocks its
-    /// confirmed shutdown. The caller therefore receives no ownerless partial authority and must
-    /// not issue any child or kernel operation on error.
-    async fn durable_functional_prepare_until(
+    /// Every non-success outcome is retained inside the coordinator and blocks confirmed shutdown
+    /// until an exact later Destroy settles it. The caller receives no ownerless partial authority
+    /// and must not issue any child or kernel operation on error.
+    async fn durable_functional_prepare_until<SelectorReady>(
         &self,
         handle: &DurableOwnershipPrepareHandle,
-        registration: DurableIntentRegistration,
-        context_role: RoutingContextRole,
-        path_id: u8,
-        worker_ttl: Duration,
-        deadline: HardDeadline,
-    ) -> Result<DurableFunctionalWorkerOwnership, DurableFunctionalPrepareFailure> {
+        input: DurableFunctionalPrepareInput,
+        selector_ready: SelectorReady,
+    ) -> Result<
+        (
+            DurableFunctionalWorkerOwnership,
+            DurablePrepareTerminalSelector,
+        ),
+        DurableFunctionalPrepareFailure,
+    >
+    where
+        SelectorReady: FnOnce(DurablePrepareTerminalSelector),
+    {
+        let DurableFunctionalPrepareInput {
+            registration,
+            context_role,
+            path_id,
+            worker_ttl,
+            deadline,
+        } = input;
         let handoff = self.durable_passive_prepare_handoff_for_context_until(
             handle,
             registration,
@@ -8245,71 +9256,46 @@ impl WorkerCoordinator {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(
                         Box::new(retained),
-                    ))
-                    .unwrap_or_else(|| std::process::abort());
-                return Err(DurableFunctionalPrepareFailure::Handoff(
-                    DurableHandoffPrepareFailure { error, selector },
-                ));
+                    ));
+                selector_ready(selector);
+                return Err(DurableFunctionalPrepareFailure { error, selector });
             }
         };
 
+        let Some((context_id, ownership)) = durable_publication_owner_identity(&publication) else {
+            std::process::abort();
+        };
+        let selector = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserve_durable_prepare_terminal(context_id, Some(ownership));
+        selector_ready(selector);
+
         let arm = handle.custody_arm_handle();
-        let completion = match self.start_durable_custody_publication(arm, publication) {
+        let completion = match self.start_durable_custody_publication(arm, publication, selector) {
             DurableCustodyPublicationStartOutcome::Started(completion) => completion,
             DurableCustodyPublicationStartOutcome::Retained { error, publication } => {
                 let returned_error = worker_error_class(&error);
-                let _ = self
-                    .settlements
+                self.settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .store_durable_prepare_terminal(
+                    .store_reserved_durable_prepare_terminal(
+                        selector,
                         DurableWorkerPrepareTerminal::PublicationStart {
                             error,
                             publication: Box::new(publication),
                         },
                     );
-                return Err(DurableFunctionalPrepareFailure::Later(returned_error));
+                return Err(DurableFunctionalPrepareFailure {
+                    error: returned_error,
+                    selector,
+                });
             }
         };
-        if !completion.wait().await {
-            return Err(DurableFunctionalPrepareFailure::Later(
-                WorkerV3Error::Ambiguous,
-            ));
-        }
-        let terminal = self
-            .settlements
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take_exact_custody_publication_terminal()
-            .ok_or(DurableFunctionalPrepareFailure::Later(
-                WorkerV3Error::Ambiguous,
-            ))?;
-        let may_own = match terminal {
-            DurableWorkerCustodyPublicationTerminal::MayOwn(may_own) => may_own,
-            retained => {
-                let error = durable_publication_terminal_error(&retained);
-                self.settlements
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .store_custody_publication_terminal(retained);
-                return Err(DurableFunctionalPrepareFailure::Later(error));
-            }
-        };
-        match self.open_durable_functional_worker_until(may_own, deadline) {
-            Ok(ownership) => Ok(ownership),
-            Err((error, may_own)) => {
-                let returned_error = worker_error_class(&error);
-                let _ = self
-                    .settlements
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::DispatchOpen {
-                        error,
-                        may_own: Box::new(may_own),
-                    });
-                Err(DurableFunctionalPrepareFailure::Later(returned_error))
-            }
-        }
+        let _completion_observed = completion.wait().await;
+        self.finish_durable_functional_prepare_until(selector, deadline)
+            .map(|ownership| (ownership, selector))
     }
 
     fn open_durable_functional_worker_until(
@@ -9141,6 +10127,7 @@ impl WorkerCoordinator {
         &self,
         arm: DurableCustodyArmHandle,
         publication: DurableWorkerCustodyPublicationOwner,
+        selector: DurablePrepareTerminalSelector,
     ) -> DurableCustodyPublicationStartOutcome {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return DurableCustodyPublicationStartOutcome::Retained {
@@ -9148,15 +10135,16 @@ impl WorkerCoordinator {
                 publication,
             };
         };
-        self.start_durable_custody_publication_with(
+        self.start_durable_custody_publication_with_destination(
             &runtime,
             arm,
             publication,
             DurableCustodyPublisher::Production,
+            DurableCustodyPublicationTerminalDestination::Prepare(selector),
         )
     }
 
-    #[allow(clippy::too_many_lines)] // Keep the complete activation and affine-drop fence auditable.
+    #[cfg(test)]
     fn start_durable_custody_publication_with(
         &self,
         runtime: &tokio::runtime::Handle,
@@ -9164,23 +10152,52 @@ impl WorkerCoordinator {
         publication: DurableWorkerCustodyPublicationOwner,
         publisher: DurableCustodyPublisher,
     ) -> DurableCustodyPublicationStartOutcome {
+        self.start_durable_custody_publication_with_destination(
+            runtime,
+            arm,
+            publication,
+            publisher,
+            DurableCustodyPublicationTerminalDestination::Custody,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the complete activation and affine-drop fence auditable.
+    fn start_durable_custody_publication_with_destination(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        arm: DurableCustodyArmHandle,
+        publication: DurableWorkerCustodyPublicationOwner,
+        publisher: DurableCustodyPublisher,
+        destination: DurableCustodyPublicationTerminalDestination,
+    ) -> DurableCustodyPublicationStartOutcome {
         let permit = match self.acquire_supervisor_permit() {
             Ok(permit) => permit,
             Err(error) => {
                 return DurableCustodyPublicationStartOutcome::Retained { error, publication };
             }
         };
-        let terminal_reserved = self
-            .settlements
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .reserve_custody_publication_terminal();
-        if !terminal_reserved {
-            drop(permit);
-            return DurableCustodyPublicationStartOutcome::Retained {
-                error: WorkerV3Error::Capacity,
-                publication,
-            };
+        {
+            let mut settlements = self
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match destination {
+                DurableCustodyPublicationTerminalDestination::Custody => {
+                    if !settlements.reserve_custody_publication_terminal() {
+                        drop(settlements);
+                        drop(permit);
+                        return DurableCustodyPublicationStartOutcome::Retained {
+                            error: WorkerV3Error::Capacity,
+                            publication,
+                        };
+                    }
+                }
+                DurableCustodyPublicationTerminalDestination::Prepare(selector) => {
+                    if !settlements.has_exact_durable_prepare_reservation(selector) {
+                        std::process::abort();
+                    }
+                }
+            }
         }
 
         let (completion_sender, completion_receiver) = oneshot::channel();
@@ -9188,6 +10205,7 @@ impl WorkerCoordinator {
             Arc::clone(&self.settlements),
             publication,
             completion_sender,
+            destination,
         );
         let (activation_sender, activation_receiver) = oneshot::channel();
         let activation = DurableCustodyPublicationActivation {
@@ -10177,7 +11195,7 @@ mod tests {
     fn store_handoff_terminal(
         coordinator: &WorkerCoordinator,
         outcome: DurableWorkerPrepareOutcome,
-    ) -> DurableHandoffTerminalSelector {
+    ) -> DurablePrepareTerminalSelector {
         coordinator
             .settlements
             .lock()
@@ -10185,7 +11203,6 @@ mod tests {
             .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::Handoff(Box::new(
                 outcome,
             )))
-            .expect("ordinary handoff terminal selector")
     }
 
     fn handoff_terminal_count(coordinator: &WorkerCoordinator) -> usize {
@@ -10212,12 +11229,141 @@ mod tests {
     fn settle_handoff_terminal(
         coordinator: &WorkerCoordinator,
         actor: &DurableOwnershipActor,
-        selector: DurableHandoffTerminalSelector,
+        selector: DurablePrepareTerminalSelector,
         context_id: ContextId,
         deadline: HardDeadline,
-    ) -> DurableHandoffTerminalSettlement {
+    ) -> DurablePrepareTerminalSettlement {
         let handle = actor.prepare_handle().expect("durable Prepare handle");
-        coordinator.settle_durable_handoff_terminal_until(&handle, selector, context_id, deadline)
+        let coordinator = coordinator.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("terminal settlement runtime")
+                .block_on(
+                    coordinator.settle_durable_prepare_terminal_until(
+                        &handle, selector, context_id, deadline,
+                    ),
+                )
+        })
+        .join()
+        .expect("terminal settlement task")
+    }
+
+    fn replace_retained_terminal_with_exact_test_manager_absence(
+        coordinator: &WorkerCoordinator,
+        selector: DurablePrepareTerminalSelector,
+    ) {
+        let terminal = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_prepare_terminal(&selector)
+            .expect("exact retained post-custody terminal");
+        let DurableWorkerPrepareTerminal::UndispatchedSettlement(mut settlement) = terminal else {
+            drop(terminal);
+            process::abort();
+        };
+        let pair = crate::systemd_fdstore::BorrowedCustodyPair::new(
+            settlement.source.restart_custody.borrowed_pidfd(),
+            settlement
+                .source
+                .restart_custody
+                .borrowed_network_namespace(),
+        )
+        .expect("test settlement custody pair");
+        let proof = crate::systemd_fdstore::same_runtime_manager_proof_for_test(
+            settlement.custody_name,
+            pair,
+        )
+        .expect("exact test manager-absence proof");
+        settlement.manager = Some(DurableUndispatchedManagerSettlement::ExactAbsent(proof));
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore_exact_durable_prepare_terminal(
+                &selector,
+                DurableWorkerPrepareTerminal::UndispatchedSettlement(settlement),
+            );
+    }
+
+    struct AmbiguousPostCustodyFixture {
+        actor: DurableOwnershipActor,
+        coordinator: WorkerCoordinator,
+        peer: Socket,
+        directory: tempfile::TempDir,
+        selector: DurablePrepareTerminalSelector,
+        attempt_id: crate::systemd_fdstore::PublicationAttemptId,
+    }
+
+    fn ambiguous_post_custody_fixture(context_id: ContextId) -> AmbiguousPostCustodyFixture {
+        let FencedDurableHandoffFixture {
+            actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("post-custody fixture deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("post-custody fixture did not reach publication authority")
+        };
+        assert_no_worker_request_bytes(&peer);
+        let attempt_id =
+            crate::systemd_fdstore::PublicationAttemptId::for_test(u64::from(context_id[0]));
+        let terminal = DurableWorkerCustodyPublicationTerminal::PublicationUnresolved {
+            boundary: DurableCustodyPublicationBoundary::ManagerMayOwn(attempt_id),
+            error: WorkerV3Error::Ambiguous,
+            publication,
+        };
+        let selector = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::CustodyPublication(
+                Box::new(terminal),
+            ));
+        AmbiguousPostCustodyFixture {
+            actor,
+            coordinator,
+            peer,
+            directory,
+            selector,
+            attempt_id,
+        }
+    }
+
+    fn assert_retained_post_custody_progress(
+        coordinator: &WorkerCoordinator,
+        selector: DurablePrepareTerminalSelector,
+        attempt_id: crate::systemd_fdstore::PublicationAttemptId,
+    ) {
+        let settlements = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stored = settlements
+            .durable_prepare_terminals
+            .iter()
+            .find(|stored| stored.serial == selector.identity.serial)
+            .expect("retained exact post-custody terminal");
+        let DurableWorkerPrepareTerminal::UndispatchedSettlement(settlement) = &stored.terminal
+        else {
+            panic!("post-custody terminal did not retain settlement progress")
+        };
+        assert!(settlement.worker.is_none(), "worker was not exactly reaped");
+        assert!(matches!(
+            settlement.journal.as_ref(),
+            Some(DurableUndispatchedJournalSettlement::CleanupConfirmed(_))
+        ));
+        assert!(matches!(
+            settlement.manager.as_ref(),
+            Some(DurableUndispatchedManagerSettlement::PublicationAttempt(id)) if *id == attempt_id
+        ));
     }
 
     fn request(
@@ -13012,6 +14158,30 @@ mod tests {
         }
     }
 
+    fn wait_for_exact_durable_prepare_terminal(
+        coordinator: &WorkerCoordinator,
+        selector: DurablePrepareTerminalSelector,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let stored = coordinator
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .durable_prepare_terminals
+                .iter()
+                .any(|terminal| terminal.serial == selector.identity.serial);
+            if stored {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "custody supervisor did not store its exact Prepare terminal"
+            );
+            thread::yield_now();
+        }
+    }
+
     fn reap_durable_may_own(coordinator: &WorkerCoordinator, may_own: DurableWorkerMayOwnPrepare) {
         let DurableWorkerMayOwnPrepare {
             durable,
@@ -14752,6 +15922,116 @@ mod tests {
         drop(directory);
     }
 
+    async fn assert_dropped_prepare_waiter_preserves_exact_terminal(
+        context_id: ContextId,
+        drop_before_storage: bool,
+    ) {
+        let FencedDurableHandoffFixture {
+            mut actor,
+            coordinator,
+            outcome,
+            peer: _peer,
+            directory: _directory,
+        } = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("Prepare waiter fixture deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("Prepare waiter fixture did not reach publication authority")
+        };
+        let (_, ownership) = durable_publication_owner_identity(&publication)
+            .expect("exact Prepare waiter publication identity");
+        let selector = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserve_durable_prepare_terminal(context_id, Some(ownership));
+        let arm = actor
+            .custody_arm_handle()
+            .expect("Prepare waiter arm handle");
+        let (publisher, started, release, _) = deterministic_custody_publisher(
+            &coordinator,
+            DurableCustodyTestPublicationDisposition::ExactAttestation,
+            false,
+        );
+        let start = coordinator.start_durable_custody_publication_with_destination(
+            &tokio::runtime::Handle::current(),
+            arm,
+            publication,
+            publisher,
+            DurableCustodyPublicationTerminalDestination::Prepare(selector),
+        );
+        let DurableCustodyPublicationStartOutcome::Started(completion) = start else {
+            panic!("Prepare waiter supervisor did not start: {start:?}")
+        };
+        wait_for_custody_publisher_start(&started);
+        if drop_before_storage {
+            drop(completion);
+            assert!(
+                coordinator
+                    .settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .has_exact_durable_prepare_reservation(selector),
+                "caller drop lost the pre-storage selector reservation"
+            );
+            release.add_permits(1);
+            wait_for_exact_durable_prepare_terminal(&coordinator, selector);
+        } else {
+            release.add_permits(1);
+            wait_for_exact_durable_prepare_terminal(&coordinator, selector);
+            drop(completion);
+        }
+        let terminal = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_prepare_terminal(&selector)
+            .expect("exact caller-cancel terminal");
+        assert!(matches!(
+            terminal,
+            DurableWorkerPrepareTerminal::CustodyPublication(ref terminal)
+                if matches!(terminal.as_ref(), DurableWorkerCustodyPublicationTerminal::MayOwn(_))
+        ));
+        let settlement = into_undispatched_prepare_settlement(terminal);
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore_exact_durable_prepare_terminal(
+                &selector,
+                DurableWorkerPrepareTerminal::UndispatchedSettlement(Box::new(settlement)),
+            );
+        replace_retained_terminal_with_exact_test_manager_absence(&coordinator, selector);
+        let handle = actor.prepare_handle().expect("Prepare waiter actor handle");
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(2))
+                        .expect("Prepare waiter settlement deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("Prepare waiter actor shutdown")
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_cancel_before_or_after_terminal_storage_keeps_exact_destroy_authority() {
+        assert_dropped_prepare_waiter_preserves_exact_terminal([118; 16], true).await;
+        assert_dropped_prepare_waiter_preserves_exact_terminal([119; 16], false).await;
+    }
+
     #[test]
     fn activated_blocking_publication_survives_outer_runtime_shutdown() {
         let context_id = [112; 16];
@@ -15357,6 +16637,447 @@ mod tests {
         drop(fixture.directory);
     }
 
+    #[test]
+    fn post_custody_terminal_source_is_ordered_dispatch_free_and_variant_complete() {
+        let source = include_str!("worker_v3.rs");
+        let start = source
+            .find("    async fn settle_undispatched_prepare_until(")
+            .expect("post-custody settlement state machine");
+        let end = source[start..]
+            .find("\n    async fn settle_durable_prepare_terminal_once_until(")
+            .map(|offset| start + offset)
+            .expect("post-custody settlement boundary");
+        let settlement = &source[start..end];
+        let worker_reap = settlement
+            .find("self.settle_and_terminate_lifecycle_until(worker, deadline)")
+            .expect("exact passive worker reap");
+        let proof = settlement
+            .find("ExactUndispatchedPrepareCleanupProof::after_exact_passive_worker_absence(")
+            .expect("opaque undispatched cleanup proof");
+        let cleanup = settlement
+            .find("handle.confirm_undispatched_cleanup_until(proof, deadline)")
+            .expect("CleanupConfirmed transition");
+        let manager = [
+            "observe_current_process_publication_absence(",
+            "reconcile_current_process_custody(",
+            "reconcile_current_process_custody_target(",
+            "remove_current_process_custody(",
+        ]
+        .into_iter()
+        .map(|needle| {
+            settlement
+                .find(needle)
+                .expect("manager settlement operation")
+        })
+        .min()
+        .expect("manager operation order");
+        let absent = settlement
+            .find("handle.confirm_manager_absent_until(proof, deadline)")
+            .expect("durable Absent transition");
+        assert!(worker_reap < proof && proof < cleanup && cleanup < manager && manager < absent);
+        for forbidden in [
+            "InternalWorkerRequest",
+            "DestroyContext",
+            "execute_until(",
+            "BirthNamespaceKernel",
+            "delete_owned_wireguard",
+            "retire_never_dispatched_until",
+        ] {
+            assert!(
+                !settlement.contains(forbidden),
+                "post-custody settlement gained forbidden mutation: {forbidden}"
+            );
+        }
+
+        let conversion_start = source
+            .find("fn into_undispatched_prepare_settlement(")
+            .expect("terminal conversion");
+        let conversion_end = source[conversion_start..]
+            .find("\n/// Non-authoritative notice")
+            .map(|offset| conversion_start + offset)
+            .expect("terminal conversion boundary");
+        let conversion = &source[conversion_start..conversion_end];
+        for required in [
+            "DurableWorkerPrepareTerminal::PublicationStart",
+            "DurableCustodyPublicationBoundary::BeforeSend",
+            "DurableCustodyPublicationBoundary::ManagerMayOwn(attempt_id)",
+            "DurableWorkerCustodyPublicationTerminal::PostAttestationUnresolved",
+            "DurableWorkerCustodyPublicationTerminal::SupervisorDropped",
+            "DurableWorkerPrepareTerminal::DispatchOpen",
+        ] {
+            assert!(
+                conversion.contains(required),
+                "missing terminal: {required}"
+            );
+        }
+        assert_eq!(
+            source[..source
+                .find("#[cfg(test)]\nmod tests {")
+                .expect("production boundary")]
+                .matches(
+                    "ExactUndispatchedPrepareCleanupProof::after_exact_passive_worker_absence("
+                )
+                .count(),
+            1,
+            "the worker boundary has one undispatched cleanup-proof mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_start_is_no_send_and_exact_absence_settles_without_dispatch() {
+        let context_id = [114; 16];
+        let FencedDurableHandoffFixture {
+            mut actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("no-send fixture deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("no-send fixture did not reach publication authority")
+        };
+        assert_no_worker_request_bytes(&peer);
+        let selector = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::PublicationStart {
+                error: WorkerV3Error::RuntimeUnavailable,
+                publication: Box::new(publication),
+            });
+        let terminal = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_prepare_terminal(&selector)
+            .expect("exact PublicationStart terminal");
+        let settlement = into_undispatched_prepare_settlement(terminal);
+        assert_eq!(settlement.ownership.context_id(), context_id);
+        assert!(settlement.worker.is_some());
+        assert!(matches!(
+            settlement.journal.as_ref(),
+            Some(DurableUndispatchedJournalSettlement::Authority(
+                ExactUndispatchedDurableAuthority::Custody(_)
+            ))
+        ));
+        assert!(matches!(
+            settlement.manager.as_ref(),
+            Some(DurableUndispatchedManagerSettlement::NoSend)
+        ));
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore_exact_durable_prepare_terminal(
+                &selector,
+                DurableWorkerPrepareTerminal::UndispatchedSettlement(Box::new(settlement)),
+            );
+        replace_retained_terminal_with_exact_test_manager_absence(&coordinator, selector);
+        let handle = actor.prepare_handle().expect("no-send actor handle");
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(2))
+                        .expect("no-send settlement deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("no-send actor shutdown")
+            ),
+            Ok(())
+        );
+        drop((peer, directory));
+    }
+
+    #[tokio::test]
+    async fn dispatch_open_failure_settles_armed_authority_without_child_dispatch() {
+        let context_id = [113; 16];
+        let FencedDurableHandoffFixture {
+            mut actor,
+            coordinator,
+            outcome,
+            peer,
+            directory,
+        } = fenced_durable_handoff_fixture(
+            context_id,
+            HardDeadline::after(Duration::from_secs(5)).expect("dispatch failure fixture deadline"),
+            |_coordinator, _context_id, _generation, _directory| {},
+        );
+        let DurableWorkerPrepareOutcome::CustodyPublication(publication) = outcome else {
+            panic!("dispatch failure fixture did not reach publication authority")
+        };
+        let attestation = exact_custody_attestation(&publication);
+        let outcome = coordinator.arm_attested_durable_worker(&actor, publication, attestation);
+        let DurableWorkerPostAttestationOutcome::MayOwn(may_own) = outcome else {
+            panic!("dispatch failure fixture did not reach MayOwnPrepare")
+        };
+        assert_no_worker_request_bytes(&peer);
+        let selector = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_durable_prepare_terminal(DurableWorkerPrepareTerminal::DispatchOpen {
+                error: WorkerV3Error::Conflict,
+                may_own: Box::new(may_own),
+            });
+        let terminal = coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_exact_durable_prepare_terminal(&selector)
+            .expect("exact DispatchOpen terminal");
+        let settlement = into_undispatched_prepare_settlement(terminal);
+        assert!(matches!(
+            settlement.journal.as_ref(),
+            Some(DurableUndispatchedJournalSettlement::Authority(
+                ExactUndispatchedDurableAuthority::Prepare(_)
+            ))
+        ));
+        assert!(matches!(
+            settlement.manager.as_ref(),
+            Some(DurableUndispatchedManagerSettlement::Attested(_))
+        ));
+        coordinator
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore_exact_durable_prepare_terminal(
+                &selector,
+                DurableWorkerPrepareTerminal::UndispatchedSettlement(Box::new(settlement)),
+            );
+        replace_retained_terminal_with_exact_test_manager_absence(&coordinator, selector);
+        let handle = actor
+            .prepare_handle()
+            .expect("dispatch failure actor handle");
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(2))
+                        .expect("dispatch failure settlement deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1))
+                    .expect("dispatch failure actor shutdown")
+            ),
+            Ok(())
+        );
+        drop((peer, directory));
+    }
+
+    #[tokio::test]
+    async fn post_custody_selector_deadline_and_ambiguous_attempt_retain_exact_progress() {
+        let context_id = [115; 16];
+        let AmbiguousPostCustodyFixture {
+            mut actor,
+            coordinator,
+            peer,
+            directory,
+            selector,
+            attempt_id,
+        } = ambiguous_post_custody_fixture(context_id);
+        let handle = actor.prepare_handle().expect("post-custody actor handle");
+
+        let mut wrong = selector;
+        wrong.identity.context_id = [116; 16];
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    wrong,
+                    [116; 16],
+                    HardDeadline::after(Duration::from_secs(1)).expect("wrong selector deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Retained {
+                error: WorkerV3Error::Conflict,
+                ..
+            }
+        ));
+        assert_eq!(
+            coordinator
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .durable_prepare_terminals
+                .len(),
+            1
+        );
+
+        let elapsed =
+            HardDeadline::after(Duration::from_millis(5)).expect("elapsed selector deadline");
+        wait_until_deadline_elapsed(elapsed);
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(&handle, selector, context_id, elapsed,)
+                .await,
+            DurablePrepareTerminalSettlement::Retained {
+                error: WorkerV3Error::Deadline,
+                ..
+            }
+        ));
+
+        let unpolled = coordinator.settle_durable_prepare_terminal_until(
+            &handle,
+            selector,
+            context_id,
+            HardDeadline::after(Duration::from_secs(1)).expect("unpolled caller deadline"),
+        );
+        drop(unpolled);
+        assert_eq!(
+            coordinator
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .durable_prepare_terminals
+                .len(),
+            1
+        );
+
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(2))
+                        .expect("ambiguous attempt deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Retained { .. }
+        ));
+        assert_retained_post_custody_progress(&coordinator, selector, attempt_id);
+        replace_retained_terminal_with_exact_test_manager_absence(&coordinator, selector);
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(2)).expect("manager-absence deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("actor shutdown deadline")
+            ),
+            Ok(())
+        );
+        drop((peer, directory));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_abort_after_terminal_take_cannot_cancel_post_custody_settlement() {
+        let context_id = [117; 16];
+        let AmbiguousPostCustodyFixture {
+            mut actor,
+            coordinator,
+            peer,
+            directory,
+            selector,
+            attempt_id,
+        } = ambiguous_post_custody_fixture(context_id);
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        coordinator.set_lifecycle_mutation_hook(Some(LifecycleMutationHook {
+            point: LifecycleMutationPoint::Detach,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        }));
+        let handle = actor.prepare_handle().expect("cancel actor handle");
+        let task_coordinator = coordinator.clone();
+        let task_handle = handle.clone();
+        let caller = tokio::spawn(async move {
+            task_coordinator
+                .settle_durable_prepare_terminal_until(
+                    &task_handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(3))
+                        .expect("cancel settlement deadline"),
+                )
+                .await
+        });
+        tokio::task::spawn_blocking(move || reached.wait())
+            .await
+            .expect("terminal take barrier");
+        caller.abort();
+        let cancelled = caller.await;
+        assert!(matches!(cancelled, Err(error) if error.is_cancelled()));
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("terminal release barrier");
+        coordinator.set_lifecycle_mutation_hook(None);
+
+        let settled_by = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let done = {
+                let settlements = coordinator
+                    .settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                settlements.active_durable_prepare_settlements.is_empty()
+                    && settlements.durable_prepare_terminals.iter().any(|stored| {
+                        stored.serial == selector.identity.serial
+                            && matches!(
+                                &stored.terminal,
+                                DurableWorkerPrepareTerminal::UndispatchedSettlement(_)
+                            )
+                    })
+            };
+            if done {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < settled_by,
+                "background settlement stalled"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_retained_post_custody_progress(&coordinator, selector, attempt_id);
+        replace_retained_terminal_with_exact_test_manager_absence(&coordinator, selector);
+        assert!(matches!(
+            coordinator
+                .settle_durable_prepare_terminal_until(
+                    &handle,
+                    selector,
+                    context_id,
+                    HardDeadline::after(Duration::from_secs(2)).expect("cancel retry deadline"),
+                )
+                .await,
+            DurablePrepareTerminalSettlement::Absent
+        ));
+        assert!(coordinator.shutdown().await);
+        assert_eq!(
+            actor.shutdown_for_test(
+                HardDeadline::after(Duration::from_secs(1)).expect("cancel actor shutdown")
+            ),
+            Ok(())
+        );
+        drop((peer, directory));
+    }
+
     #[tokio::test]
     async fn definitive_registration_terminal_is_mutation_free_and_shutdown_unblocks() {
         let context_id = [109; 16];
@@ -15389,7 +17110,7 @@ mod tests {
                 context_id,
                 HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
             ),
-            DurableHandoffTerminalSettlement::Absent
+            DurablePrepareTerminalSettlement::Absent
         ));
         assert_eq!(handoff_terminal_count(&coordinator), 0);
         assert!(coordinator.shutdown().await);
@@ -15430,7 +17151,7 @@ mod tests {
                 context_id,
                 HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
             ),
-            DurableHandoffTerminalSettlement::Absent
+            DurablePrepareTerminalSettlement::Absent
         ));
         assert!(coordinator.shutdown().await);
         assert_eq!(
@@ -15472,7 +17193,7 @@ mod tests {
                     context_id,
                     HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
                 ),
-                DurableHandoffTerminalSettlement::Absent
+                DurablePrepareTerminalSettlement::Absent
             ));
             assert!(!fixture.alive.load(Ordering::SeqCst));
             assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
@@ -15530,7 +17251,7 @@ mod tests {
                     context_id,
                     HardDeadline::after(Duration::from_secs(1)).expect("settlement deadline"),
                 ),
-                DurableHandoffTerminalSettlement::Absent
+                DurablePrepareTerminalSettlement::Absent
             ));
             assert!(fixture.coordinator.shutdown().await);
             assert_eq!(
@@ -15561,7 +17282,7 @@ mod tests {
             },
         );
         let worker_selector = store_handoff_terminal(&worker_coordinator, worker_outcome);
-        let DurableHandoffTerminalSettlement::Retained {
+        let DurablePrepareTerminalSettlement::Retained {
             error: WorkerV3Error::Ambiguous,
             selector: _worker_selector,
         } = settle_handoff_terminal(
@@ -15604,7 +17325,7 @@ mod tests {
                 handoff,
             },
         );
-        let DurableHandoffTerminalSettlement::Retained {
+        let DurablePrepareTerminalSettlement::Retained {
             error: WorkerV3Error::Ambiguous,
             selector: _custody_selector,
         } = settle_handoff_terminal(
@@ -15658,7 +17379,7 @@ mod tests {
         let elapsed =
             HardDeadline::after(Duration::from_millis(5)).expect("expired settlement deadline");
         wait_until_deadline_elapsed(elapsed);
-        let DurableHandoffTerminalSettlement::Retained {
+        let DurablePrepareTerminalSettlement::Retained {
             error: WorkerV3Error::Deadline,
             selector,
         } = settle_handoff_terminal(&fixture.coordinator, &actor, selector, context_id, elapsed)
@@ -15676,7 +17397,7 @@ mod tests {
                 context_id,
                 HardDeadline::after(Duration::from_secs(1)).expect("retry deadline"),
             ),
-            DurableHandoffTerminalSettlement::Absent
+            DurablePrepareTerminalSettlement::Absent
         ));
         assert_eq!(fixture.attempts.load(Ordering::SeqCst), 1);
         assert!(fixture.coordinator.shutdown().await);
@@ -15706,8 +17427,8 @@ mod tests {
         );
         let first_identity = first_selector.identity;
 
-        let wrong_context = DurableHandoffTerminalSelector {
-            identity: DurableHandoffTerminalIdentity {
+        let wrong_context = DurablePrepareTerminalSelector {
+            identity: DurablePrepareTerminalIdentity {
                 context_id: [0xee; 16],
                 ..first_identity
             },
@@ -15720,15 +17441,15 @@ mod tests {
                 context_id,
                 HardDeadline::after(Duration::from_secs(1)).expect("context mismatch deadline"),
             ),
-            DurableHandoffTerminalSettlement::Retained {
+            DurablePrepareTerminalSettlement::Retained {
                 error: WorkerV3Error::Conflict,
                 ..
             }
         ));
         assert_eq!(handoff_terminal_count(&coordinator), 1);
 
-        let wrong_ownership = DurableHandoffTerminalSelector {
-            identity: DurableHandoffTerminalIdentity {
+        let wrong_ownership = DurablePrepareTerminalSelector {
+            identity: DurablePrepareTerminalIdentity {
                 ownership: Some(DurableOwnershipSelector::from_key(&second_key)),
                 ..first_identity
             },
@@ -15741,7 +17462,7 @@ mod tests {
                 context_id,
                 HardDeadline::after(Duration::from_secs(1)).expect("ownership mismatch deadline"),
             ),
-            DurableHandoffTerminalSettlement::Retained {
+            DurablePrepareTerminalSettlement::Retained {
                 error: WorkerV3Error::Ambiguous,
                 ..
             }
@@ -15751,13 +17472,13 @@ mod tests {
             settle_handoff_terminal(
                 &coordinator,
                 &first_actor,
-                DurableHandoffTerminalSelector {
+                DurablePrepareTerminalSelector {
                     identity: first_identity,
                 },
                 context_id,
                 HardDeadline::after(Duration::from_secs(1)).expect("exact settlement deadline"),
             ),
-            DurableHandoffTerminalSettlement::Absent
+            DurablePrepareTerminalSettlement::Absent
         ));
 
         let second_selector = store_handoff_terminal(
@@ -15775,7 +17496,7 @@ mod tests {
                 context_id,
                 HardDeadline::after(Duration::from_secs(1)).expect("second settlement deadline"),
             ),
-            DurableHandoffTerminalSettlement::Absent
+            DurablePrepareTerminalSettlement::Absent
         ));
         assert!(coordinator.shutdown().await);
         for actor in [&mut first_actor, &mut second_actor] {
@@ -15811,7 +17532,7 @@ mod tests {
                 ..
             }
         ));
-        let DurableHandoffTerminalSettlement::Retained {
+        let DurablePrepareTerminalSettlement::Retained {
             error: WorkerV3Error::Ambiguous,
             selector: _selector,
         } = settle_handoff_terminal(
@@ -16179,7 +17900,7 @@ mod tests {
         assert!(!prepare.contains("publish_current_process_custody("));
 
         let arm_end = source[arm_start..]
-            .find("\n    /// Complete the cancellation-safe durable Prepare handoff")
+            .find("\n    fn settle_never_dispatched_worker_until(")
             .map(|offset| arm_start + offset)
             .expect("post-attestation arm implementation boundary");
         let arm = &source[arm_start..arm_end];
