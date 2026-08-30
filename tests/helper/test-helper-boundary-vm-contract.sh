@@ -750,8 +750,19 @@ for non_retained_final_checkpoint in \
     }
 done
 
+for non_retained_production_stage in \
+    functional-worker-observation functional-relay-fixture \
+    functional-relay-traffic functional-relay-cleanup functional-probe-finish; do
+    non_retained_production_launch_stage_is_safe \
+        "$non_retained_production_stage" || {
+            printf 'non-retained parser rejected production stage: %s\n' \
+                "$non_retained_production_stage" >&2
+            exit 1
+        }
+done
+
 for non_retained_functional_phase in \
-    plan connect bind prepare activate shutdown ready release reconnect destroy \
+    plan connect bind prepare activate shutdown ready release reconnect commit destroy \
     second-cycle-plan second-cycle-bind second-cycle-prepare \
     second-cycle-activate reuse \
     second-cycle-destroy final-shutdown; do

@@ -53,9 +53,10 @@ probe producer.
 
 The production agent route state machine is not yet proven end to end. The no-argument production
 helper can execute at most one live Client context at a time, containing exactly one Client-role
-WireGuard lease, through Bind, Prepare, signed-grant-bound Activate and Destroy. Commit, Probe,
-transport acquisition, real two-leg probing, client ingress, and live relay/exit publication remain
-fail closed. The unprivileged tests above
+WireGuard lease, through Bind, Prepare, signed-grant-bound Activate, correlated Probe/Commit and
+Destroy. Commit requires a handshake no older than activation plus strict RX and TX growth and
+caches the exact successful receipt for an identical retry. Transport acquisition, real two-leg
+probing, client ingress, and live relay/exit publication remain fail closed. The unprivileged tests above
 create no WireGuard device or host route; the separate disposable gate below confines its network
 fixtures to private namespaces and does not satisfy an acceptance case without retained exact-main
 evidence.
@@ -115,18 +116,30 @@ validates exact response correlation, opaque non-zero handles, the fixed `Direct
 address and the helper-returned kernel proof; the external observation deliberately does not print
 or independently byte-compare endpoint or key material.
 
-After one fixed release byte, the probe requires exact Destroy followed by an idempotent
-`existed=false` Destroy, then performs a second Prepare/Activate/Destroy cycle under the same helper runtime
-with a distinct context, handles and public key. The hook finally requires zero helper children,
+The expanded branch hook next creates one temporary relay-side WireGuard interface on fixed
+test-only UDP port 10000 in the same transient `PrivateNetwork`. It configures the opposite
+helper-derived IPv6 `/128`, the exact ephemeral Client peer and no default route. Guest provisioning
+includes `iputils-ping` solely so the hook can send one bounded ICMPv6 echo from that relay fixture
+to the Client lease. The hook requires the echo reply, a non-zero handshake and strict RX/TX growth
+on both WireGuard peer views. It then deletes the temporary relay interface and route, proves exact
+absence, and re-proves the unchanged worker object plus retained counter growth before releasing the
+staged-agent probe.
+
+After one fixed release byte, the probe reconnects and sends the exact same Commit frame twice. It
+requires an exactly correlated `CommittedLeaseBatch` and byte-identical cached retry before exact
+Destroy followed by an idempotent `existed=false` Destroy. It then performs a second
+Prepare/Activate/Destroy cycle under the same helper runtime with a distinct context, handles and
+public key. The hook finally requires zero helper children,
 no descriptor-relative `stat` or `status` through the retained process-directory observer, no
 helper pidfd/process-directory/foreign-netns custody, no WireGuard object through the retained
 first-worker namespace observer, an empty systemd descriptor store, and a
 private network satisfying the fixed exact-one-loopback/no-default-route cleanup predicate after
-removing the dummy fixture. These checks prove a live, reusable Client lease with one
-cryptographically bound peer, derived route and normal process-owned cleanup only. They do not
-prove a peer handshake, routed packet, transport, tunnel, crash/restart cleanup, package behavior,
-or datapath. The self-contained probe signers are not evidence that discovery-selected or
-policy-authorized operators were used.
+removing the dummy fixture. These checks prove one live client-to-relay WireGuard leg, bounded
+ICMPv6, a recent handshake as enforced by Commit, strict bidirectional counter growth, cached Commit
+retry and exact normal cleanup. They do not prove trusted discovery selection or policy authority,
+a second relay-to-exit leg, a transport descriptor, ingress, a usable end-to-end VPN/datapath,
+crash/restart cleanup or package behavior. The self-contained probe signers are fixture identities,
+not evidence that discovery-selected or policy-authorized operators were used.
 
 The guest does not wrap that complete root producer in one 1 MiB file-size limit: the reviewed
 helper and IPC-probe binaries are legitimately larger. Instead, each source must be one non-empty,
@@ -170,9 +183,12 @@ semantic meaning. Contract tests pin both zero-length acceptance and rejection o
 wrong mode, symlink or additional hard link.
 
 The report carries those non-claims in its exact `scope` object: it is evidence only for the helper
-boundary and does not claim package behavior, restart recovery, `CleanupOwned`, a VPN datapath, or
-any A01--A15 result. AV1-09 remains Open until
-the exact committed gate passes on the required clean disposable VM and its report is retained.
+boundary and does not claim trusted selection/policy authority, the relay-to-exit leg, transport
+descriptor handoff, ingress, package behavior, restart recovery, `CleanupOwned`, a usable VPN
+datapath, or any A01--A15 result. This slice leaves AV1-09 Open and the fixed alpha score at
+**11/100 (11%)**. A future successful exact merged-main run on the required clean disposable VM and
+its retained report are prerequisites for a separate evidence assessment, not an automatic
+checkbox or score change.
 
 ### Manual non-retained branch smoke and retained main-branch VM evidence
 
@@ -185,7 +201,12 @@ on the host, and uploads the allowlisted artifacts. A canonical non-main `refs/h
 validation run. On PASS every proof file is discarded and the output directory must be empty; the
 workflow uploads neither branch PASS artifacts nor branch failure diagnostics. This is manual branch selection, not an
 automatic `pull_request` trigger and not support for `refs/pull/*`. Only a retained exact-main PASS
-can count as AV1-09 evidence or change the alpha score.
+can be considered as AV1-09 evidence; it remains subject to the complete milestone criteria and
+does not automatically change the alpha score.
+
+The expanded Probe/Commit plus one-leg ICMPv6 fixture described above is branch work. It must not be
+called retained-main KVM evidence unless that exact implementation is merged and a retained
+host-revalidated `retained-main` run succeeds.
 
 If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
 category (or `unclassified`) to job stderr. For `worker-launch-status` only, it may additionally emit

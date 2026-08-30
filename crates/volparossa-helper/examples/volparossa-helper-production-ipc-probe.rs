@@ -2,10 +2,11 @@
 //!
 //! This example accepts no socket path, request bytes or privileged operation from its caller. It
 //! requires one exact expected production PID/GID pair and connects only to the fixed production
-//! socket. Its closed modes exercise read-only runtime binding, bounded fail-closed framing, or two
-//! exact functional Client-lease cycles through Activate. The functional mode publishes one fixed
-//! READY record only after the first exact Activated receipt, accepts one fixed release byte on
-//! standard input, and never prints handles or endpoint material.
+//! socket. Its closed modes exercise read-only runtime binding, bounded fail-closed framing, or one
+//! exact functional Client-lease cycle through Commit followed by one reusable cycle through
+//! Activate. The functional mode publishes one fixed READY record only after the first exact
+//! Activated receipt, accepts one fixed release byte on standard input, and never prints handles or
+//! endpoint material.
 
 use std::{
     cell::Cell,
@@ -33,11 +34,12 @@ use volparossa_protocol::{
     node_id_from_public_key, sign_control_message,
 };
 use volparossa_routing::{
-    ActivateLeaseBatch, ActivatedLeaseBatch, BindHelperRuntime, ClosedPreparePlan, ContextRole,
-    DestroyContext, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
-    LeaseActivation, LeasePlan, PrepareIntent, PrepareLeaseBatch, PreparedLeaseBatch,
-    PublicUdpEndpoint, UnderlayEvidence, WireguardRole, encode_request, helper_request,
-    helper_response, operation_digest, read_response,
+    ActivateLeaseBatch, ActivatedLeaseBatch, BindHelperRuntime, ClosedPreparePlan,
+    CommitLeaseBatch, CommittedLeaseBatch, ContextRole, DestroyContext, HELPER_PROTOCOL_VERSION,
+    HelperRequest, HelperResponse, HelperResult, LeaseActivation, LeaseCommit, LeasePlan,
+    PrepareIntent, PrepareLeaseBatch, PreparedLeaseBatch, PublicUdpEndpoint, UnderlayEvidence,
+    WireguardRole, encode_request, helper_request, helper_response, operation_digest,
+    read_response,
 };
 use zeroize::Zeroizing;
 
@@ -49,6 +51,7 @@ const ROOT_UID: u32 = 0;
 const HELPER_RUNTIME_DIAGNOSTIC: &str = "HELPER_RUNTIME";
 const LEASES_PREPARED_DIAGNOSTIC: &str = "LEASES_PREPARED";
 const LEASES_ACTIVATED_DIAGNOSTIC: &str = "LEASES_ACTIVATED";
+const LEASES_COMMITTED_DIAGNOSTIC: &str = "LEASES_COMMITTED";
 const CONTEXT_DESTROYED_DIAGNOSTIC: &str = "CONTEXT_DESTROYED";
 const CONTEXT_ABSENT_DIAGNOSTIC: &str = "CONTEXT_ABSENT";
 const FAILURE_RECORD: &str = "VOLPAROSSA_HELPER_V3_IPC_PROBE_V1=fail";
@@ -58,11 +61,16 @@ const FUNCTIONAL_HARD_TTL_SECONDS: u64 = 300;
 const FUNCTIONAL_MPTCP_LIMIT: u32 = 4;
 const FUNCTIONAL_PATH_ID: u32 = 1;
 const FUNCTIONAL_PUBLIC_IPV4: [u8; 4] = [192, 31, 195, 254];
-// This exact public peer tuple is shared with the public helper-protocol Activate fixture. It is
-// intentionally neither a local helper key nor the helper's prepared public endpoint.
-const FUNCTIONAL_PEER_PUBLIC_KEY: [u8; 32] = [8; 32];
-const FUNCTIONAL_PEER_IPV4: [u8; 4] = [1, 1, 1, 1];
-const FUNCTIONAL_PEER_PORT: u16 = 51_820;
+// This exact test-only public peer tuple is shared with the public helper-protocol Activate fixture
+// and the disposable KVM relay fixture. The Base64 public key is
+// `MdSras7slhE3kXA3k25gcW+sVzr+lNnahKgCBEjfwRI=`. It is intentionally neither a local helper key
+// nor the helper's prepared public endpoint.
+const FUNCTIONAL_PEER_PUBLIC_KEY: [u8; 32] = [
+    0x31, 0xd4, 0xab, 0x6a, 0xce, 0xec, 0x96, 0x11, 0x37, 0x91, 0x70, 0x37, 0x93, 0x6e, 0x60, 0x71,
+    0x6f, 0xac, 0x57, 0x3a, 0xfe, 0x94, 0xd9, 0xda, 0x84, 0xa8, 0x02, 0x04, 0x48, 0xdf, 0xc1, 0x12,
+];
+const FUNCTIONAL_PEER_IPV4: [u8; 4] = FUNCTIONAL_PUBLIC_IPV4;
+const FUNCTIONAL_PEER_PORT: u16 = 10_000;
 const FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY: [u8; 32] = [9; 32];
 const FUNCTIONAL_RELAY_EXIT_IPV4: [u8; 4] = [8, 8, 8, 8];
 const FUNCTIONAL_RELAY_EXIT_PORT: u16 = 51_821;
@@ -70,7 +78,7 @@ const FUNCTIONAL_EXIT_PUBLIC_KEY: [u8; 32] = [10; 32];
 const FUNCTIONAL_EXIT_IPV4: [u8; 4] = [9, 9, 9, 9];
 const FUNCTIONAL_EXIT_PORT: u16 = 51_822;
 const FUNCTIONAL_SIGNED_RATE_MBPS: u64 = 1;
-const FUNCTIONAL_RELEASE_TIMEOUT_MILLIS: u16 = 10_000;
+const FUNCTIONAL_RELEASE_TIMEOUT_MILLIS: u16 = 20_000;
 const FUNCTIONAL_RELEASE_BYTE: u8 = b'G';
 const FUNCTIONAL_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready";
 const FUNCTIONAL_FAILURE_RECORD_PREFIX: &str =
@@ -165,6 +173,7 @@ enum FunctionalPhase {
     Ready,
     Release,
     Reconnect,
+    Commit,
     Destroy,
     SecondCyclePlan,
     SecondCycleBind,
@@ -187,6 +196,7 @@ impl FunctionalPhase {
             Self::Ready => "ready",
             Self::Release => "release",
             Self::Reconnect => "reconnect",
+            Self::Commit => "commit",
             Self::Destroy => "destroy",
             Self::SecondCyclePlan => "second-cycle-plan",
             Self::SecondCycleBind => "second-cycle-bind",
@@ -296,16 +306,18 @@ struct FunctionalCycleIds {
     bind_request: [u8; 16],
     prepare_request: [u8; 16],
     activate_request: [u8; 16],
+    commit_request: [u8; 16],
     destroy_present_request: [u8; 16],
     destroy_absent_request: [u8; 16],
 }
 
 impl FunctionalCycleIds {
-    const fn request_ids(self) -> [[u8; 16]; 5] {
+    const fn request_ids(self) -> [[u8; 16]; 6] {
         [
             self.bind_request,
             self.prepare_request,
             self.activate_request,
+            self.commit_request,
             self.destroy_present_request,
             self.destroy_absent_request,
         ]
@@ -332,6 +344,8 @@ impl FunctionalCyclePlan {
         request_ids.push(prepare_request_id);
         let activate_request_id = random_unique_id(&request_ids)?;
         request_ids.push(activate_request_id);
+        let commit_request_id = random_unique_id(&request_ids)?;
+        request_ids.push(commit_request_id);
         let destroy_present_request_id = random_unique_id(&request_ids)?;
         request_ids.push(destroy_present_request_id);
         let destroy_absent_request_id = random_unique_id(&request_ids)?;
@@ -341,6 +355,7 @@ impl FunctionalCyclePlan {
                 bind_request: bind_request_id,
                 prepare_request: prepare_request_id,
                 activate_request: activate_request_id,
+                commit_request: commit_request_id,
                 destroy_present_request: destroy_present_request_id,
                 destroy_absent_request: destroy_absent_request_id,
             },
@@ -600,6 +615,10 @@ async fn run_functional_client_lease(
         let mut stream = connect_trusted_helper(expected_peer)
             .await
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::Commit);
+        commit_functional_cycle(&mut stream, &first_plan, &first.prepared)
+            .await
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
         phase.set(FunctionalPhase::Destroy);
         destroy_functional_cycle(&mut stream, &first_plan, &first.prepared)
             .await
@@ -676,6 +695,42 @@ async fn activate_functional_cycle(
     Ok(FunctionalCycleResult {
         helper_runtime_id,
         prepared,
+    })
+}
+
+async fn commit_functional_cycle(
+    stream: &mut UnixStream,
+    plan: &FunctionalCyclePlan,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<(), ProbeError> {
+    let commit = functional_commit_exchange(plan, prepared)?;
+    let committed_outcome =
+        exchange_functional(stream, &commit, LEASES_COMMITTED_DIAGNOSTIC).await?;
+    let retried_outcome = exchange_functional(stream, &commit, LEASES_COMMITTED_DIAGNOSTIC).await?;
+    validate_committed_retry(&committed_outcome, &retried_outcome, prepared)
+}
+
+fn functional_commit_exchange(
+    plan: &FunctionalCyclePlan,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<FunctionalRequestExchange, ProbeError> {
+    if prepared.context_id != plan.ids.context {
+        return Err(ProbeError::Correlation);
+    }
+    FunctionalRequestExchange::from_request(&HelperRequest {
+        protocol_version: HELPER_PROTOCOL_VERSION,
+        request_id: plan.ids.commit_request.to_vec(),
+        operation: Some(helper_request::Operation::CommitLeaseBatch(
+            CommitLeaseBatch {
+                route_context_id: prepared.context_id.to_vec(),
+                context_handle: prepared.context_handle.to_vec(),
+                leases: vec![LeaseCommit {
+                    lease_handle: prepared.lease_handle.to_vec(),
+                    path_id: FUNCTIONAL_PATH_ID,
+                    role: WireguardRole::Client as i32,
+                }],
+            },
+        )),
     })
 }
 
@@ -1035,6 +1090,44 @@ fn validate_activated_outcome(
     Ok(())
 }
 
+fn validate_committed_outcome(
+    outcome: &helper_response::Outcome,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<(), ProbeError> {
+    let helper_response::Outcome::CommittedLeaseBatch(CommittedLeaseBatch {
+        context_handle,
+        leases,
+    }) = outcome
+    else {
+        return Err(ProbeError::Correlation);
+    };
+    let [lease] = leases.as_slice() else {
+        return Err(ProbeError::Correlation);
+    };
+    if context_handle.as_slice() != prepared.context_handle
+        || lease.lease_handle.as_slice() != prepared.lease_handle
+        || lease.latest_handshake_unix == 0
+        || lease.received_bytes == 0
+        || lease.transmitted_bytes == 0
+    {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(())
+}
+
+fn validate_committed_retry(
+    committed: &helper_response::Outcome,
+    retried: &helper_response::Outcome,
+    prepared: &FunctionalPreparedReceipt,
+) -> Result<(), ProbeError> {
+    validate_committed_outcome(committed, prepared)?;
+    validate_committed_outcome(retried, prepared)?;
+    if committed != retried {
+        return Err(ProbeError::Correlation);
+    }
+    Ok(())
+}
+
 fn validate_destroyed_outcome(
     outcome: helper_response::Outcome,
     expected_existed: bool,
@@ -1245,7 +1338,8 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     use volparossa_routing::{
-        DestroyedContext, HelperRuntime, MAX_HELPER_FRAME, PreparedLease, decode_request,
+        CommittedLease, DestroyedContext, HelperRuntime, MAX_HELPER_FRAME, PreparedLease,
+        decode_request,
     };
 
     use super::*;
@@ -1256,8 +1350,9 @@ mod tests {
             bind_request: [seed.wrapping_add(1); 16],
             prepare_request: [seed.wrapping_add(2); 16],
             activate_request: [seed.wrapping_add(3); 16],
-            destroy_present_request: [seed.wrapping_add(4); 16],
-            destroy_absent_request: [seed.wrapping_add(5); 16],
+            commit_request: [seed.wrapping_add(4); 16],
+            destroy_present_request: [seed.wrapping_add(5); 16],
+            destroy_absent_request: [seed.wrapping_add(6); 16],
         }
     }
 
@@ -1297,6 +1392,18 @@ mod tests {
         helper_response::Outcome::ActivatedLeaseBatch(ActivatedLeaseBatch {
             context_handle: prepared.context_handle.to_vec(),
             lease_handles: vec![prepared.lease_handle.to_vec()],
+        })
+    }
+
+    fn valid_committed_outcome(prepared: &FunctionalPreparedReceipt) -> helper_response::Outcome {
+        helper_response::Outcome::CommittedLeaseBatch(CommittedLeaseBatch {
+            context_handle: prepared.context_handle.to_vec(),
+            leases: vec![CommittedLease {
+                lease_handle: prepared.lease_handle.to_vec(),
+                latest_handshake_unix: 1_234,
+                received_bytes: 56,
+                transmitted_bytes: 78,
+            }],
         })
     }
 
@@ -1437,6 +1544,16 @@ mod tests {
             }
         }
         assert_eq!(FUNCTIONAL_RELEASE_BYTE, b'G');
+        assert_eq!(
+            FUNCTIONAL_PEER_PUBLIC_KEY,
+            [
+                0x31, 0xd4, 0xab, 0x6a, 0xce, 0xec, 0x96, 0x11, 0x37, 0x91, 0x70, 0x37, 0x93, 0x6e,
+                0x60, 0x71, 0x6f, 0xac, 0x57, 0x3a, 0xfe, 0x94, 0xd9, 0xda, 0x84, 0xa8, 0x02, 0x04,
+                0x48, 0xdf, 0xc1, 0x12,
+            ]
+        );
+        assert_eq!(FUNCTIONAL_PEER_IPV4, [192, 31, 195, 254]);
+        assert_eq!(FUNCTIONAL_PEER_PORT, 10_000);
     }
 
     #[test]
@@ -1451,6 +1568,7 @@ mod tests {
             FunctionalPhase::Ready,
             FunctionalPhase::Release,
             FunctionalPhase::Reconnect,
+            FunctionalPhase::Commit,
             FunctionalPhase::Destroy,
             FunctionalPhase::SecondCyclePlan,
             FunctionalPhase::SecondCycleBind,
@@ -1657,12 +1775,38 @@ mod tests {
             activate_exchange.operation_digest
         );
 
+        let commit_exchange =
+            functional_commit_exchange(&plan, &prepared).expect("commit exchange");
+        let commit = decode_request(&commit_exchange.frame[4..]).expect("canonical Commit");
+        let Some(helper_request::Operation::CommitLeaseBatch(value)) = commit.operation.as_ref()
+        else {
+            panic!("CommitLeaseBatch");
+        };
+        assert_eq!(commit.request_id, ids.commit_request);
+        assert_eq!(value.route_context_id, ids.context);
+        assert_eq!(value.context_handle, prepared.context_handle);
+        assert_eq!(
+            value.leases,
+            [LeaseCommit {
+                lease_handle: prepared.lease_handle.to_vec(),
+                path_id: FUNCTIONAL_PATH_ID,
+                role: WireguardRole::Client as i32,
+            }]
+        );
+        assert_eq!(
+            operation_digest(&commit).expect("Commit digest"),
+            commit_exchange.operation_digest
+        );
+
         let mut duplicate = ids;
         duplicate.destroy_absent_request = duplicate.destroy_present_request;
         assert!(FunctionalCyclePlan::from_ids(duplicate, 1_000).is_err());
         let mut duplicate_activate = ids;
         duplicate_activate.activate_request = duplicate_activate.prepare_request;
         assert!(FunctionalCyclePlan::from_ids(duplicate_activate, 1_000).is_err());
+        let mut duplicate_commit = ids;
+        duplicate_commit.commit_request = duplicate_commit.activate_request;
+        assert!(FunctionalCyclePlan::from_ids(duplicate_commit, 1_000).is_err());
         let mut zero_context = ids;
         zero_context.context = [0; 16];
         assert!(FunctionalCyclePlan::from_ids(zero_context, 1_000).is_err());
@@ -1874,6 +2018,99 @@ mod tests {
         for outcome in substitutions {
             assert!(validate_activated_outcome(outcome, &prepared).is_err());
         }
+    }
+
+    #[test]
+    fn functional_commit_requires_exact_prepared_lineage_receipt_and_identical_retry() {
+        let ids = fixed_cycle_ids(0x79);
+        let plan = FunctionalCyclePlan::from_ids(ids, 1_000).expect("functional cycle");
+        let prepared = validate_prepared_outcome(valid_prepared_outcome(0x7a, 41_234), ids.context)
+            .expect("prepared receipt");
+        let exchange = functional_commit_exchange(&plan, &prepared).expect("commit exchange");
+        let request = decode_request(&exchange.frame[4..]).expect("canonical Commit");
+        assert_eq!(request.request_id, ids.commit_request);
+        assert!(matches!(
+            request.operation,
+            Some(helper_request::Operation::CommitLeaseBatch(_))
+        ));
+
+        let committed = valid_committed_outcome(&prepared);
+        validate_committed_outcome(&committed, &prepared).expect("exact committed receipt");
+        validate_committed_retry(&committed, &committed, &prepared)
+            .expect("identical committed retry");
+
+        let mut wrong_context = prepared.clone();
+        wrong_context.context_id[0] ^= 1;
+        assert!(functional_commit_exchange(&plan, &wrong_context).is_err());
+
+        let mut substitutions = Vec::new();
+        let mut wrong_context_handle = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut wrong_context_handle else {
+            unreachable!();
+        };
+        batch.context_handle[0] ^= 1;
+        substitutions.push(wrong_context_handle);
+
+        let mut wrong_lease_handle = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut wrong_lease_handle else {
+            unreachable!();
+        };
+        batch.leases[0].lease_handle[0] ^= 1;
+        substitutions.push(wrong_lease_handle);
+
+        let mut zero_handshake = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut zero_handshake else {
+            unreachable!();
+        };
+        batch.leases[0].latest_handshake_unix = 0;
+        substitutions.push(zero_handshake);
+
+        let mut zero_received = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut zero_received else {
+            unreachable!();
+        };
+        batch.leases[0].received_bytes = 0;
+        substitutions.push(zero_received);
+
+        let mut zero_transmitted = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut zero_transmitted else {
+            unreachable!();
+        };
+        batch.leases[0].transmitted_bytes = 0;
+        substitutions.push(zero_transmitted);
+
+        let mut absent_lease = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut absent_lease else {
+            unreachable!();
+        };
+        batch.leases.clear();
+        substitutions.push(absent_lease);
+
+        let mut extra_lease = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut extra_lease else {
+            unreachable!();
+        };
+        batch.leases.push(CommittedLease {
+            lease_handle: vec![0x7f; 32],
+            latest_handshake_unix: 1_234,
+            received_bytes: 1,
+            transmitted_bytes: 1,
+        });
+        substitutions.push(extra_lease);
+        substitutions.push(valid_prepared_outcome(0x7a, 41_234));
+
+        for outcome in substitutions {
+            assert!(validate_committed_outcome(&outcome, &prepared).is_err());
+        }
+
+        let mut changed_retry = committed.clone();
+        let helper_response::Outcome::CommittedLeaseBatch(batch) = &mut changed_retry else {
+            unreachable!();
+        };
+        batch.leases[0].received_bytes += 1;
+        validate_committed_outcome(&changed_retry, &prepared)
+            .expect("individually valid changed receipt");
+        assert!(validate_committed_retry(&committed, &changed_retry, &prepared).is_err());
     }
 
     #[test]

@@ -334,6 +334,12 @@ pub(crate) struct BackendDestroy {
     pub(crate) backend_generation: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct BackendProbe {
+    pub(crate) commit: volparossa_routing::CommitLeaseBatch,
+    pub(crate) activated_at_unix: u64,
+}
+
 /// One non-cloneable backend input. Engine rollback authority remains in `OperationOwner`.
 #[must_use = "an affine backend call must produce one correlated completion"]
 pub(crate) struct BackendRequest<T> {
@@ -513,7 +519,7 @@ pub(crate) trait AsyncLeaseBackend: Send + Sync {
 
     fn probe(
         self: Arc<Self>,
-        request: BackendRequest<volparossa_routing::CommitLeaseBatch>,
+        request: BackendRequest<BackendProbe>,
     ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>>;
 
     fn destroy(
@@ -558,7 +564,7 @@ impl AsyncLeaseBackend for UnavailableLeaseBackend {
 
     fn probe(
         self: Arc<Self>,
-        request: BackendRequest<volparossa_routing::CommitLeaseBatch>,
+        request: BackendRequest<BackendProbe>,
     ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
         let (completion, _) = request.into_parts();
         Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
@@ -2389,7 +2395,7 @@ impl HelperEngine {
         let Some(context_id) = fixed::<16>(&value.route_context_id) else {
             return Some(execution(invalid_response(request), None));
         };
-        let (token, next_generation) = {
+        let (token, next_generation, activated_at_unix) = {
             let mut state = self.inner.state.lock().await;
             let Some(context) = state.contexts.get(&context_id) else {
                 return Some(execution(
@@ -2422,6 +2428,17 @@ impl HelperEngine {
                     None,
                 ));
             }
+            let Some(activated_at_unix) = context.activated_at_unix else {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::Kernel,
+                        "HANDSHAKE_PROOF_INCOMPLETE",
+                        None,
+                    ),
+                    None,
+                ));
+            };
             let generation = context.generation;
             let lineage = context_backend_lineage(context_id, context);
             let Some(next_generation) = state.next_generation.checked_add(1) else {
@@ -2448,7 +2465,7 @@ impl HelperEngine {
             };
             state.next_generation = next_generation;
             state.cleanup_pending.insert((context_id, generation));
-            (token, next_generation)
+            (token, next_generation, activated_at_unix)
         };
 
         let backend = Arc::clone(&self.inner.backend);
@@ -2458,7 +2475,13 @@ impl HelperEngine {
             BackendAction::Probe,
             token.call_deadline(),
         );
-        let backend_value = BackendRequest::new(binding, value.clone());
+        let backend_value = BackendRequest::new(
+            binding,
+            BackendProbe {
+                commit: value.clone(),
+                activated_at_unix,
+            },
+        );
         let call = self
             .call_backend(binding.call_deadline, move || backend.probe(backend_value))
             .await;
@@ -4198,6 +4221,7 @@ mod tests {
         substitute_prepare_deadline: AtomicBool,
         substitute_acquire_generation: AtomicBool,
         prepare_bindings: StdMutex<Vec<BackendBinding>>,
+        probe_requests: StdMutex<Vec<(BackendBinding, BackendProbe)>>,
         destroy_calls: StdMutex<Vec<(BackendBinding, BackendDestroy)>>,
         runtime_bindings: StdMutex<Vec<BackendRuntimeBinding>>,
     }
@@ -4307,15 +4331,20 @@ mod tests {
 
         fn probe(
             self: Arc<Self>,
-            request: BackendRequest<CommitLeaseBatch>,
+            request: BackendRequest<BackendProbe>,
         ) -> BackendFuture<BackendCompletion<Vec<KernelCounters>>> {
             let (completion, request) = request.into_parts();
+            self.probe_requests
+                .lock()
+                .expect("probe requests")
+                .push((completion.binding(), request.clone()));
             Box::pin(async move {
                 if self.fail_probe_cleanup.load(Ordering::Acquire) {
                     return completion.complete(Err(BackendError::CleanupIncomplete));
                 }
                 let increment = self.proof_increment.load(Ordering::Relaxed);
                 let result = request
+                    .commit
                     .leases
                     .iter()
                     .map(|lease| KernelCounters {
@@ -5048,6 +5077,14 @@ mod tests {
             ))
             .await;
         assert_eq!(committed.result, HelperResult::Ok as i32);
+        let probes = backend.probe_requests.lock().expect("probe requests");
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0].1.activated_at_unix, 100);
+        assert_eq!(probes[1].1.activated_at_unix, 100);
+        assert_eq!(probes[0].0.request_id, [4; 16]);
+        assert_eq!(probes[1].0.request_id, [5; 16]);
+        assert_ne!(probes[0].0.request_id, probes[1].0.request_id);
+        assert_eq!(probes[0].1.commit, probes[1].1.commit);
     }
 
     #[tokio::test]
