@@ -152,19 +152,17 @@ For each cycle, the hook requires the retained process-directory observer to bec
 pinned namespace to become WireGuard-empty before closing those observers. It finally requires zero
 helper children, no helper pidfd/process-directory/foreign-netns custody, an empty systemd descriptor
 store, and a private network satisfying the fixed exact-one-loopback/no-default-route cleanup
-predicate after removing the dummy fixture. These checks prove sequential capacity reuse and two
-real but independent WireGuard legs: Client-to-relay and relay-to-Exit. They do not prove trusted
-discovery selection or policy authority, a simultaneous two-leg route, a Relay context or
-forwarding, a transport descriptor, ingress, a usable end-to-end VPN/datapath, crash/restart cleanup
+predicate after removing the dummy fixture. The first two cycles prove sequential capacity reuse
+and two real but independent singleton WireGuard legs: Client-to-relay and relay-to-Exit. The third
+cycle proves one simultaneous Relay endpoint pair, both independent handshakes and strict RX/TX
+growth, pair Commit plus byte-identical retry, complete Destroy, custody cleanup and subsequent
+capacity reuse. Exact-main run 33301595311 at
+`0095b113e450a0ab29da853fafa53b2b130f05fc` retained that third live-kernel proof as artifact
+9729172274. Packets still terminate independently at the two Relay interfaces; no cross-leg
+forwarding or end-to-end route is installed. These checks do not prove trusted discovery selection
+or policy authority, a transport descriptor, ingress, a usable VPN/datapath, crash/restart cleanup
 or package behavior. The self-contained probe signers are fixture identities, not evidence that
 discovery-selected or policy-authorized operators were used.
-
-The current branch additionally defines a third separate worker/namespace cycle for the exact
-ordered Relay endpoint pair. It is intended to keep both worker-local Relay leases and both
-temporary external peers live together, prove the handshake and strict RX/TX growth for both leases,
-then require one pair Commit, byte-identical retry, complete Destroy and custody cleanup. Packets
-terminate independently at the two Relay interfaces; no forwarding is installed. This Relay cycle
-has no accepted or retained disposable-KVM/CI result yet and therefore is not live-kernel evidence.
 
 The guest does not wrap that complete root producer in one 1 MiB file-size limit: the reviewed
 helper and IPC-probe binaries are legitimately larger. Instead, each source must be one non-empty,
@@ -219,8 +217,11 @@ Exact-main [run
 `1ca51fe0d2a2be855adb182e85c229d1d12bc017` subsequently succeeded and retained the Exit-expanded
 report as artifact
 [9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271).
-The Relay-pair KVM/CI proof remains pending and non-retained. Neither retained result automatically
-closes AV1-09 or any acceptance checkbox, and the fixed alpha score remains **11/100 (11%)**.
+[Exact-main run 33301595311](https://github.com/VOLPAROSSA/volparossa/actions/runs/33301595311) at
+`0095b113e450a0ab29da853fafa53b2b130f05fc` subsequently retained the Relay-pair report as artifact
+[9729172274](https://github.com/VOLPAROSSA/volparossa/actions/runs/33301595311/artifacts/9729172274).
+None of these retained results automatically closes AV1-09 or any acceptance checkbox, and the
+fixed alpha score remains **11/100 (11%)**.
 
 ### Manual non-retained branch smoke and retained main-branch VM evidence
 
@@ -236,11 +237,9 @@ automatic `pull_request` trigger and not support for `refs/pull/*`. Only a retai
 can be considered as AV1-09 evidence; it remains subject to the complete milestone criteria and
 does not automatically change the alpha score.
 
-The Client and Exit Probe/Commit plus ICMPv6 fixtures described above have the separate retained
-exact-main evidence identified above. The Relay endpoint-pair worker/namespace and its two
-simultaneous endpoint fixtures remain branch work and must not be called retained-main KVM evidence
-unless that exact implementation is merged and a retained host-revalidated `retained-main` run
-succeeds.
+The Client, Exit and Relay-pair Probe/Commit plus ICMPv6 fixtures described above have the separate
+retained exact-main evidence identified above. The Relay result proves both endpoint leases in one
+worker namespace, but does not prove cross-leg forwarding or a simultaneous end-to-end route.
 
 If the guest proof fails in branch-smoke mode, the runner may emit only one fixed allowlisted failure
 category (or `unclassified`) to job stderr. For `worker-launch-status` only, it may additionally emit
