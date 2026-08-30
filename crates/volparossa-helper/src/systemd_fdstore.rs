@@ -4,9 +4,13 @@
 //! pidfd/network-namespace pair to the current service's systemd descriptor store, wait for a
 //! separate barrier acknowledgement, and attest the resulting manager inventory over D-Bus. The
 //! caller retains both local owners throughout. Once the first `sendmsg(2)` is attempted, every
-//! failure is classified as `ManagerMayOwn`. A separate callerless observer can classify that
-//! exact poisoned in-process attempt as present, absent, or unresolved, but never clears the
-//! poison or authorizes a resend. A read-only startup observer uses one manager barrier and two
+//! failure is classified as `ManagerMayOwn`. Exact later functional Destroy settlement can use
+//! attempt-bound or target-bound observation to classify retained same-runtime publication
+//! custody as present, absent, or unresolved. Only an exact correlated stable `ExactPresent` or
+//! `ExactAbsent` projection consumes that publication's poison; unresolved, cancelled or
+//! mismatched observation leaves it unchanged, and no observation authorizes a publication resend.
+//! A distinct no-send observer proves absence only when no publication attempt is poisoned. A
+//! read-only startup observer uses one manager barrier and two
 //! uncached exact-service snapshots, then exposes only an opaque exact-set comparison against
 //! inherited custody bindings. That observer never publishes descriptors. Same-runtime clean
 //! teardown can remove one already-proven exact custody name, orders that notification with a
@@ -799,6 +803,90 @@ impl ExactRemovalProof {
     pub(crate) fn into_successor(self) -> StableStartupInventory {
         self.successor
     }
+
+    /// Erase successful-removal provenance behind the same-runtime manager-proof boundary.
+    pub(crate) fn into_same_runtime_manager_proof(self) -> SameRuntimeManagerProof {
+        SameRuntimeManagerProof {
+            proof: SameRuntimeManagerProofKind::ExactRemoval(Box::new(self)),
+        }
+    }
+}
+
+/// Exact affine proof that one never-confirmed publication pair is absent from this same runtime's
+/// stable manager inventory. Construction remains private to the bounded observation paths below.
+struct ExactPublicationAbsentProof {
+    custody_name: CustodyFdName,
+    binding: CustodyDescriptorBinding,
+}
+
+enum SameRuntimeManagerProofKind {
+    ExactRemoval(Box<ExactRemovalProof>),
+    ExactPublicationAbsent(ExactPublicationAbsentProof),
+}
+
+/// Opaque affine evidence that this exact runtime's manager does not own one correlated pair.
+///
+/// Its private provenance is either a successful exact named removal or a stable exact absence
+/// observation. Callers can correlate the target but cannot construct, clone, or distinguish the
+/// underlying proof class.
+#[must_use = "same-runtime manager absence must remain joined to durable settlement"]
+pub(crate) struct SameRuntimeManagerProof {
+    proof: SameRuntimeManagerProofKind,
+}
+
+impl fmt::Debug for SameRuntimeManagerProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SameRuntimeManagerProof(<redacted>)")
+    }
+}
+
+impl SameRuntimeManagerProof {
+    fn exact_publication_absence(
+        custody_name: CustodyFdName,
+        binding: CustodyDescriptorBinding,
+    ) -> Self {
+        Self {
+            proof: SameRuntimeManagerProofKind::ExactPublicationAbsent(
+                ExactPublicationAbsentProof {
+                    custody_name,
+                    binding,
+                },
+            ),
+        }
+    }
+
+    /// Revalidate only the target correlation; the proof's manager provenance stays opaque.
+    pub(crate) fn verify_exact_target(
+        &self,
+        custody_name: CustodyFdName,
+        binding: &CustodyDescriptorBinding,
+    ) -> Result<(), FdStoreError> {
+        let exact = match &self.proof {
+            SameRuntimeManagerProofKind::ExactRemoval(proof) => {
+                proof.custody_name == custody_name && &proof.binding == binding
+            }
+            SameRuntimeManagerProofKind::ExactPublicationAbsent(proof) => {
+                proof.custody_name == custody_name && &proof.binding == binding
+            }
+        };
+        if !exact {
+            return Err(invalid_inventory(
+                "same-runtime manager proof does not match the exact custody target",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn same_runtime_manager_proof_for_test(
+    custody_name: CustodyFdName,
+    custody: BorrowedCustodyPair<'_>,
+) -> Result<SameRuntimeManagerProof, FdStoreError> {
+    Ok(SameRuntimeManagerProof::exact_publication_absence(
+        custody_name,
+        CustodyDescriptorBinding::from_custody(custody)?,
+    ))
 }
 
 /// Affine observation that an attempted exact removal left the complete baseline unchanged.
@@ -946,6 +1034,39 @@ impl DescriptorStoreSnapshot {
         }) {
             return Err(invalid_inventory(
                 "custody descriptor identity already exists",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_publication_absence(
+        &self,
+        expected_scope: &DescriptorStoreScope,
+        custody_name: CustodyFdName,
+        custody_identities: &[DescriptorIdentity; DESCRIPTORS_PER_CUSTODY],
+    ) -> Result<(), FdStoreError> {
+        self.validate_service_contract(expected_scope)?;
+        if self.entries.len() > MAX_DESCRIPTOR_STORE_ENTRIES {
+            return Err(invalid_inventory(
+                "publication-absence inventory exceeds the descriptor-store bound",
+            ));
+        }
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.name.as_ref() == custody_name.as_bytes())
+        {
+            return Err(invalid_inventory(
+                "publication-absence custody name is present",
+            ));
+        }
+        if self.entries.iter().any(|entry| {
+            custody_identities
+                .iter()
+                .any(|identity| identity.is_same_kernel_object(&entry.identity))
+        }) {
+            return Err(invalid_inventory(
+                "publication-absence custody identity is aliased",
             ));
         }
         Ok(())
@@ -1112,43 +1233,26 @@ impl DescriptorStoreSnapshot {
         &self,
         target: &PublicationTarget,
     ) -> Result<TargetInventoryProjection, FdStoreError> {
-        if self.entries.iter().any(|entry| {
-            entry.name.as_ref() != target.custody_name.as_bytes()
-                && target
-                    .identities
-                    .iter()
-                    .any(|identity| identity.is_same_kernel_object(&entry.identity))
-        }) {
-            return Err(invalid_inventory(
-                "custody descriptor identity exists under another name",
-            ));
+        target.baseline.validate_baseline(
+            &target.scope,
+            target.custody_name,
+            &target.identities,
+        )?;
+        self.validate_service_contract(&target.scope)?;
+        if self == &target.baseline {
+            return Ok(TargetInventoryProjection::ExactAbsent {
+                snapshot: self.clone(),
+            });
         }
-
-        let mut target_identities = self
-            .entries
-            .iter()
-            .filter(|entry| entry.name.as_ref() == target.custody_name.as_bytes())
-            .map(|entry| entry.identity.clone())
-            .collect::<Vec<_>>();
-        let stored_descriptors = u32::try_from(self.entries.len())
-            .map_err(|_| invalid_inventory("descriptor count is invalid"))?;
-        if target_identities.is_empty() {
-            return Ok(TargetInventoryProjection::ExactAbsent { stored_descriptors });
-        }
-        if target_identities.len() != DESCRIPTORS_PER_CUSTODY {
-            return Err(invalid_inventory(
-                "custody name does not contain exactly one descriptor pair",
-            ));
-        }
-        target_identities.sort_unstable();
-        let mut expected = target.identities.clone();
-        expected.sort_unstable();
-        if target_identities != expected {
-            return Err(invalid_inventory(
-                "custody name does not contain the exact correlated descriptor pair",
-            ));
-        }
-        Ok(TargetInventoryProjection::ExactPresent { stored_descriptors })
+        let attestation = target.baseline.attest_extension(
+            self,
+            target.custody_name,
+            target.identities.clone(),
+        )?;
+        Ok(TargetInventoryProjection::ExactPresent {
+            attestation,
+            snapshot: self.clone(),
+        })
     }
 }
 
@@ -1307,8 +1411,13 @@ impl StableStartupInventory {
 }
 
 enum TargetInventoryProjection {
-    ExactPresent { stored_descriptors: u32 },
-    ExactAbsent { stored_descriptors: u32 },
+    ExactPresent {
+        attestation: InventoryAttestation,
+        snapshot: DescriptorStoreSnapshot,
+    },
+    ExactAbsent {
+        snapshot: DescriptorStoreSnapshot,
+    },
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1317,6 +1426,7 @@ struct PublicationTarget {
     notify_address: NotifySocketAddress,
     custody_name: CustodyFdName,
     identities: [DescriptorIdentity; DESCRIPTORS_PER_CUSTODY],
+    baseline: DescriptorStoreSnapshot,
 }
 
 impl fmt::Debug for PublicationTarget {
@@ -1382,9 +1492,9 @@ struct ManagerMutationGateState {
 /// Serializes every descriptor-store mutation from its fresh baseline observation through final
 /// attestation. Publication and removal draw typed IDs from one monotonic sequence and share one
 /// poison state. Dropping either attempt after its first send boundary blocks both mutation kinds.
-/// After an ambiguous attempt, publication reconciliation is observation-only. Exact-removed
-/// reconciliation may reopen a removal poison directly; exact-still-present evidence may instead
-/// rotate that exact poison into one correlated retry whose own exact proof reopens the gate.
+/// Exact baseline-bound publication reconciliation and exact-removed reconciliation may reopen
+/// their respective poison. Exact-still-present removal evidence may instead rotate that exact
+/// poison into one correlated retry whose own exact proof reopens the gate.
 struct ManagerMutationGate {
     state: tokio::sync::Mutex<ManagerMutationGateState>,
 }
@@ -1506,6 +1616,17 @@ impl ManagerMutationGate {
         })
     }
 
+    async fn acquire_stable_observation(
+        &self,
+        deadline: HardDeadline,
+    ) -> Result<ManagerStableObservation<'_>, FdStoreError> {
+        let state = self.lock_state(deadline).await?;
+        if state.poisoned.is_some() {
+            return Err(FdStoreError::PublicationPoisoned);
+        }
+        Ok(ManagerStableObservation { _state: state })
+    }
+
     async fn acquire_poisoned_publication(
         &self,
         attempt_id: PublicationAttemptId,
@@ -1527,10 +1648,32 @@ impl ManagerMutationGate {
         {
             return Err(FdStoreError::PublicationTargetMismatch);
         }
-        Ok(PoisonedObservation {
-            _state: state,
-            poisoned,
-        })
+        Ok(PoisonedObservation { state, poisoned })
+    }
+
+    /// Select the sole process-global poison only by an exact publication target.
+    ///
+    /// This is used when a dropped supervisor reply retained no visible attempt ID. A publication
+    /// of another name, role-ordered binding, or mutation class is never selected implicitly.
+    async fn acquire_poisoned_publication_target(
+        &self,
+        custody_name: CustodyFdName,
+        identities: &[DescriptorIdentity; DESCRIPTORS_PER_CUSTODY],
+        deadline: HardDeadline,
+    ) -> Result<PoisonedObservation<'_>, FdStoreError> {
+        let state = self.lock_state(deadline).await?;
+        let poisoned = match state.poisoned.clone() {
+            Some(PoisonedManagerMutation::Publication(poisoned)) => poisoned,
+            Some(PoisonedManagerMutation::Removal(_)) => {
+                return Err(FdStoreError::PublicationTargetMismatch);
+            }
+            None => return Err(FdStoreError::PublicationNotPoisoned),
+        };
+        if poisoned.target.custody_name != custody_name || &poisoned.target.identities != identities
+        {
+            return Err(FdStoreError::PublicationTargetMismatch);
+        }
+        Ok(PoisonedObservation { state, poisoned })
     }
 }
 
@@ -1584,8 +1727,28 @@ impl PublicationAttempt<'_> {
 /// Holds the shared manager-mutation gate while a poisoned publication is observed. Dropping this
 /// guard never clears the poison, including cancellation and panic unwinding.
 struct PoisonedObservation<'a> {
-    _state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
+    state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
     poisoned: PoisonedPublication,
+}
+
+impl PoisonedObservation<'_> {
+    fn complete_exact_projection(mut self) {
+        let exact = matches!(
+            self.state.poisoned.as_ref(),
+            Some(PoisonedManagerMutation::Publication(poisoned))
+                if poisoned == &self.poisoned
+        );
+        if !exact {
+            std::process::abort();
+        }
+        self.state.poisoned = None;
+    }
+}
+
+/// Holds the shared manager gate across one non-mutating stable observation. It cannot mark a
+/// mutation boundary and dropping it has no ownership side effect.
+struct ManagerStableObservation<'a> {
+    _state: tokio::sync::MutexGuard<'a, ManagerMutationGateState>,
 }
 
 struct RemovalAttempt<'a> {
@@ -2656,6 +2819,7 @@ async fn publish_and_attest<S: DescriptorStoreInventorySource>(
         notify_address: address.clone(),
         custody_name,
         identities: identities.clone(),
+        baseline: baseline.clone(),
     };
     let attempt_id = attempt
         .mark_send_attempted(target)
@@ -2688,46 +2852,14 @@ async fn publish_and_attest<S: DescriptorStoreInventorySource>(
     }))
 }
 
-/// Observation-only evidence that one poisoned in-process publication is present in the exact
-/// stable manager inventory projection.
-///
-/// This is deliberately a different type from [`InventoryAttestation`]. It cannot arm a worker,
-/// adopt custody, remove descriptors, clear publication poison, or authorize a retry.
-#[must_use = "present descriptor-store evidence must remain bound to its poisoned attempt"]
-pub(crate) struct ExactPresentEvidence {
-    attempt: PoisonedPublication,
-    stored_descriptors: u32,
-}
-
-impl fmt::Debug for ExactPresentEvidence {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ExactPresentEvidence(<redacted>)")
-    }
-}
-
-/// Observation-only evidence that one poisoned in-process publication is absent from the exact
-/// stable manager inventory projection.
-///
-/// Absence does not clear the permanent publication poison and does not authorize a resend.
-#[must_use = "absent descriptor-store evidence must remain bound to its poisoned attempt"]
-pub(crate) struct ExactAbsentEvidence {
-    attempt: PoisonedPublication,
-    stored_descriptors: u32,
-}
-
-impl fmt::Debug for ExactAbsentEvidence {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ExactAbsentEvidence(<redacted>)")
-    }
-}
-
 /// Bounded result of observing one exact, still-poisoned in-process publication attempt.
 ///
-/// Every variant is terminal only for this observation. None changes manager or gate state.
-#[must_use = "descriptor-store reconciliation never authorizes an implicit retry"]
+/// Exact present and absent projections consume only that exact poison. Every unresolved result,
+/// mismatch, drift, deadline, or cancellation retains it unchanged, and no branch resends.
+#[must_use = "descriptor-store reconciliation proofs must remain joined to durable settlement"]
 pub(crate) enum CustodyInventoryReconciliation {
-    ExactPresent(ExactPresentEvidence),
-    ExactAbsent(ExactAbsentEvidence),
+    ExactPresent(InventoryAttestation),
+    ExactAbsent(SameRuntimeManagerProof),
     Unresolved { error: FdStoreError },
 }
 
@@ -2748,8 +2880,7 @@ impl fmt::Debug for CustodyInventoryReconciliation {
 ///
 /// The affine descriptor owners remain borrowed across the full barrier and both snapshots. This
 /// function reopens the exact unit object stored at the send boundary and reuses that attempt's
-/// parsed notify address. It has no production server/request-path caller yet.
-#[allow(dead_code)]
+/// parsed notify address. Only exact later functional Destroy settlement calls this adapter.
 pub(crate) async fn reconcile_current_process_custody(
     attempt_id: PublicationAttemptId,
     custody_name: CustodyFdName,
@@ -2770,6 +2901,40 @@ pub(crate) async fn reconcile_current_process_custody(
         Ok(observation) => observation,
         Err(error) => return CustodyInventoryReconciliation::Unresolved { error },
     };
+    reconcile_current_process_observation(observation, custody, deadline).await
+}
+
+/// Reconcile a dropped publication supervisor which retained no visible attempt ID.
+///
+/// Selection still requires the exact custody name and role-ordered live descriptor binding; it
+/// never adopts the first or merely publication-shaped global poison.
+pub(crate) async fn reconcile_current_process_custody_target(
+    custody_name: CustodyFdName,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> CustodyInventoryReconciliation {
+    if let Err(error) = ensure_deadline(deadline) {
+        return CustodyInventoryReconciliation::Unresolved { error };
+    }
+    let identities = match exact_custody_identities(custody) {
+        Ok(identities) => identities,
+        Err(error) => return CustodyInventoryReconciliation::Unresolved { error },
+    };
+    let observation = match PRODUCTION_MANAGER_MUTATION_GATE
+        .acquire_poisoned_publication_target(custody_name, &identities, deadline)
+        .await
+    {
+        Ok(observation) => observation,
+        Err(error) => return CustodyInventoryReconciliation::Unresolved { error },
+    };
+    reconcile_current_process_observation(observation, custody, deadline).await
+}
+
+async fn reconcile_current_process_observation(
+    observation: PoisonedObservation<'_>,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> CustodyInventoryReconciliation {
     let source = match SystemdDescriptorStoreSource::for_scope(
         observation.poisoned.target.scope.clone(),
         deadline,
@@ -2834,20 +2999,90 @@ where
     .await;
 
     match outcome {
-        Ok(TargetInventoryProjection::ExactPresent { stored_descriptors }) => {
-            CustodyInventoryReconciliation::ExactPresent(ExactPresentEvidence {
-                attempt: observation.poisoned.clone(),
-                stored_descriptors,
-            })
+        Ok(TargetInventoryProjection::ExactPresent {
+            attestation,
+            snapshot,
+        }) => {
+            let removal_baseline = StableStartupInventory {
+                snapshot,
+                notify_address: observation.poisoned.target.notify_address.clone(),
+            };
+            let attestation = attestation.with_removal_baseline(removal_baseline);
+            observation.complete_exact_projection();
+            CustodyInventoryReconciliation::ExactPresent(attestation)
         }
-        Ok(TargetInventoryProjection::ExactAbsent { stored_descriptors }) => {
-            CustodyInventoryReconciliation::ExactAbsent(ExactAbsentEvidence {
-                attempt: observation.poisoned.clone(),
-                stored_descriptors,
-            })
+        Ok(TargetInventoryProjection::ExactAbsent { snapshot: _ }) => {
+            let proof = SameRuntimeManagerProof::exact_publication_absence(
+                observation.poisoned.target.custody_name,
+                CustodyDescriptorBinding(observation.poisoned.target.identities.clone()),
+            );
+            observation.complete_exact_projection();
+            CustodyInventoryReconciliation::ExactAbsent(proof)
         }
         Err(error) => CustodyInventoryReconciliation::Unresolved { error },
     }
+}
+
+/// Observe stable exact manager absence for a publication which never crossed its send boundary.
+///
+/// This path is shared by `PublicationStart` and `BeforeSend` settlement. It serializes with every
+/// manager mutation, retains the local owners across one causal barrier and two snapshots, and
+/// emits no descriptor-store mutation.
+pub(crate) async fn observe_current_process_publication_absence(
+    custody_name: CustodyFdName,
+    custody: BorrowedCustodyPair<'_>,
+    deadline: HardDeadline,
+) -> Result<SameRuntimeManagerProof, FdStoreError> {
+    ensure_deadline(deadline)?;
+    let source = SystemdDescriptorStoreSource::for_current_process(deadline).await?;
+    let address = NotifySocketAddress::from_environment()?;
+    let sender = NotifySender::new(&address)?;
+    observe_serialized_publication_absence(
+        &PRODUCTION_MANAGER_MUTATION_GATE,
+        &source,
+        custody_name,
+        custody,
+        synchronize_manager(&sender, deadline),
+        deadline,
+    )
+    .await
+}
+
+async fn observe_serialized_publication_absence<S, B>(
+    gate: &ManagerMutationGate,
+    source: &S,
+    custody_name: CustodyFdName,
+    custody: BorrowedCustodyPair<'_>,
+    barrier: B,
+    deadline: HardDeadline,
+) -> Result<SameRuntimeManagerProof, FdStoreError>
+where
+    S: DescriptorStoreInventorySource,
+    B: Future<Output = Result<(), FdStoreError>>,
+{
+    ensure_deadline(deadline)?;
+    let _serialization = gate.acquire_stable_observation(deadline).await?;
+    let before = exact_custody_identities(custody)?;
+    within_deadline(deadline, barrier).await?;
+    let first = within_deadline(deadline, source.snapshot(deadline)).await?;
+    first.validate_service_contract(source.scope())?;
+    let second = within_deadline(deadline, source.snapshot(deadline)).await?;
+    second.validate_service_contract(source.scope())?;
+    if first != second {
+        return Err(FdStoreError::UnstableInventory);
+    }
+    let after = exact_custody_identities(custody)?;
+    if before != after {
+        return Err(invalid_inventory(
+            "retained custody descriptor binding changed during publication-absence observation",
+        ));
+    }
+    first.validate_publication_absence(source.scope(), custody_name, &before)?;
+    ensure_deadline(deadline)?;
+    Ok(SameRuntimeManagerProof::exact_publication_absence(
+        custody_name,
+        CustodyDescriptorBinding(before),
+    ))
 }
 
 /// Send one non-mutating systemd manager barrier and wait for its pipe acknowledgement. This
@@ -3377,6 +3612,7 @@ mod tests {
         gate: &ManagerMutationGate,
         scope: &DescriptorStoreScope,
         notify_address: &NotifySocketAddress,
+        baseline: DescriptorStoreSnapshot,
         custody_name: CustodyFdName,
         custody: BorrowedCustodyPair<'_>,
     ) -> PublicationAttemptId {
@@ -3393,6 +3629,7 @@ mod tests {
                 notify_address: notify_address.clone(),
                 custody_name,
                 identities,
+                baseline,
             })
             .expect("poison publication gate")
     }
@@ -4369,6 +4606,44 @@ mod tests {
                 baseline.project_exact_removal(&drift, target_name, &binding),
                 Err(FdStoreError::InvalidInventory(_))
             ));
+        }
+    }
+
+    #[test]
+    fn same_runtime_manager_proof_erases_removal_and_publication_absence_provenance() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let binding = custody_binding(custody);
+        let name = custody_name(64);
+        let removed = ExactRemovalProof {
+            custody_name: name,
+            binding: binding.clone(),
+            successor: stable_inventory(snapshot(42, Vec::new()), fake_notify_address()),
+            stored_descriptors: 0,
+        }
+        .into_same_runtime_manager_proof();
+        let absent = SameRuntimeManagerProof::exact_publication_absence(name, binding.clone());
+        let reversed = CustodyDescriptorBinding([binding.0[1].clone(), binding.0[0].clone()]);
+
+        for proof in [removed, absent] {
+            proof
+                .verify_exact_target(name, &binding)
+                .expect("opaque manager proof exact target");
+            assert!(matches!(
+                proof.verify_exact_target(custody_name(65), &binding),
+                Err(FdStoreError::InvalidInventory(
+                    "same-runtime manager proof does not match the exact custody target"
+                ))
+            ));
+            assert!(matches!(
+                proof.verify_exact_target(name, &reversed),
+                Err(FdStoreError::InvalidInventory(
+                    "same-runtime manager proof does not match the exact custody target"
+                ))
+            ));
+            assert_eq!(format!("{proof:?}"), "SameRuntimeManagerProof(<redacted>)");
         }
     }
 
@@ -6236,6 +6511,10 @@ mod tests {
         assert!(matches!(error, PublicationFailure::ManagerMayOwn { .. }));
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test keeps the causal barrier, exact projection, cleanup baseline and poison consumption visible"
+    )]
     #[tokio::test]
     async fn reconciliation_uses_one_causal_barrier_then_observes_exact_present() {
         let directory = tempdir().expect("notification directory");
@@ -6253,16 +6532,21 @@ mod tests {
         let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
             .expect("borrow exact pair");
         let identities = exact_custody_identities(custody).expect("exact identities");
+        let binding = custody_binding(custody);
         let name = custody_name(40);
-        let unrelated = inventory_entry(custody_name(41), descriptor_identity(400));
-        let exact = snapshot(
+        let unrelated_name = custody_name(41);
+        let unrelated_binding =
+            CustodyDescriptorBinding([descriptor_identity(400), descriptor_identity(410)]);
+        let baseline = snapshot(
             42,
-            vec![
-                unrelated,
-                inventory_entry(name, identities[1].clone()),
-                inventory_entry(name, identities[0].clone()),
-            ],
+            Vec::from(exact_pair_entries(unrelated_name, &unrelated_binding)),
         );
+        let mut exact_entries = baseline.entries.clone();
+        exact_entries.extend([
+            inventory_entry(name, identities[1].clone()),
+            inventory_entry(name, identities[0].clone()),
+        ]);
+        let exact = snapshot(42, exact_entries);
         let barrier_seen = Arc::new(AtomicBool::new(false));
         let source = FakeInventorySource::after_barrier(
             42,
@@ -6270,7 +6554,8 @@ mod tests {
             Arc::clone(&barrier_seen),
         );
         let gate = ManagerMutationGate::new();
-        let attempt_id = poison_attempt(&gate, source.scope(), &address, name, custody).await;
+        let attempt_id =
+            poison_attempt(&gate, source.scope(), &address, baseline, name, custody).await;
         let deadline = HardDeadline::after(Duration::from_secs(2)).expect("reconcile deadline");
         let observation = gate
             .acquire_poisoned_publication(attempt_id, name, &identities, deadline)
@@ -6305,13 +6590,26 @@ mod tests {
         )
         .await;
         receiver_thread.join().expect("fake systemd receiver");
-        let CustodyInventoryReconciliation::ExactPresent(evidence) = result else {
+        let CustodyInventoryReconciliation::ExactPresent(attestation) = result else {
             panic!("exact inventory was not classified present: {result:?}")
         };
-        assert_eq!(evidence.attempt.attempt_id, attempt_id);
-        assert_eq!(evidence.attempt.target.custody_name, name);
-        assert_eq!(evidence.stored_descriptors, 3);
-        assert_eq!(format!("{evidence:?}"), "ExactPresentEvidence(<redacted>)");
+        attestation
+            .verify_exact_custody(name, custody)
+            .expect("reconciled attestation owns the exact pair");
+        assert_eq!(attestation.stored_descriptors, 4);
+        assert_eq!(
+            format!("{attestation:?}"),
+            "InventoryAttestation(<redacted>)"
+        );
+        let removal_baseline = attestation
+            .removal_baseline()
+            .expect("reconciled presence is cleanup-capable");
+        removal_baseline
+            .verify_complete_exact_set(&BTreeMap::from([
+                (name, binding),
+                (unrelated_name, unrelated_binding),
+            ]))
+            .expect("removal baseline is the exact baseline plus target pair");
         assert!(barrier_seen.load(Ordering::SeqCst));
         assert!(
             source
@@ -6321,17 +6619,27 @@ mod tests {
                 .is_empty(),
             "reconciliation consumes exactly two snapshots"
         );
-        assert!(matches!(
+        drop(
             gate.acquire_publication(
-                HardDeadline::after(Duration::from_secs(1)).expect("poison check deadline")
+                HardDeadline::after(Duration::from_secs(1)).expect("cleared gate deadline"),
+            )
+            .await
+            .expect("exact-present reconciliation consumes only its exact poison"),
+        );
+        assert!(matches!(
+            gate.acquire_poisoned_publication(
+                attempt_id,
+                name,
+                &identities,
+                HardDeadline::after(Duration::from_secs(1)).expect("consumed attempt deadline"),
             )
             .await,
-            Err(FdStoreError::PublicationPoisoned)
+            Err(FdStoreError::PublicationNotPoisoned)
         ));
     }
 
     #[tokio::test]
-    async fn reconciliation_observes_exact_absent_but_never_clears_poison() {
+    async fn reconciliation_exact_absent_consumes_poison_into_opaque_manager_proof() {
         let pidfd = tempfile().expect("pidfd fixture");
         let mut network_namespace = tempfile().expect("network namespace fixture");
         network_namespace
@@ -6339,15 +6647,27 @@ mod tests {
             .expect("make fixture distinct");
         let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
             .expect("borrow exact pair");
+        let identities = exact_custody_identities(custody).expect("exact identities");
+        let binding = custody_binding(custody);
         let name = custody_name(42);
-        let unrelated = snapshot(
+        let unrelated_name = custody_name(43);
+        let unrelated_binding =
+            CustodyDescriptorBinding([descriptor_identity(430), descriptor_identity(440)]);
+        let baseline = snapshot(
             42,
-            vec![inventory_entry(custody_name(43), descriptor_identity(430))],
+            Vec::from(exact_pair_entries(unrelated_name, &unrelated_binding)),
         );
-        let source = FakeInventorySource::new(42, vec![unrelated.clone(), unrelated]);
+        let source = FakeInventorySource::new(42, vec![baseline.clone(), baseline.clone()]);
         let gate = ManagerMutationGate::new();
-        let attempt_id =
-            poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
+        let attempt_id = poison_attempt(
+            &gate,
+            source.scope(),
+            &fake_notify_address(),
+            baseline,
+            name,
+            custody,
+        )
+        .await;
 
         let result = reconcile_fake(
             &gate,
@@ -6358,19 +6678,312 @@ mod tests {
             std::future::ready(Ok(())),
         )
         .await;
-        let CustodyInventoryReconciliation::ExactAbsent(evidence) = result else {
+        let CustodyInventoryReconciliation::ExactAbsent(proof) = result else {
             panic!("exact inventory was not classified absent: {result:?}")
         };
-        assert_eq!(evidence.attempt.attempt_id, attempt_id);
-        assert_eq!(evidence.stored_descriptors, 1);
-        assert_eq!(format!("{evidence:?}"), "ExactAbsentEvidence(<redacted>)");
-        assert!(matches!(
+        proof
+            .verify_exact_target(name, &binding)
+            .expect("exact absent proof target");
+        assert!(
+            proof
+                .verify_exact_target(custody_name(44), &binding)
+                .is_err(),
+            "opaque absence proof rejects target substitution"
+        );
+        let reversed = CustodyDescriptorBinding([binding.0[1].clone(), binding.0[0].clone()]);
+        assert!(
+            proof.verify_exact_target(name, &reversed).is_err(),
+            "opaque absence proof rejects role-order substitution"
+        );
+        assert_eq!(format!("{proof:?}"), "SameRuntimeManagerProof(<redacted>)");
+        drop(
             gate.acquire_publication(
-                HardDeadline::after(Duration::from_secs(1)).expect("poison check deadline")
+                HardDeadline::after(Duration::from_secs(1)).expect("cleared gate deadline"),
+            )
+            .await
+            .expect("exact-absent reconciliation consumes only its exact poison"),
+        );
+        assert!(matches!(
+            gate.acquire_poisoned_publication(
+                attempt_id,
+                name,
+                &identities,
+                HardDeadline::after(Duration::from_secs(1)).expect("consumed attempt deadline"),
             )
             .await,
-            Err(FdStoreError::PublicationPoisoned)
+            Err(FdStoreError::PublicationNotPoisoned)
         ));
+    }
+
+    #[tokio::test]
+    async fn no_send_absence_observer_is_serialized_barriered_stable_and_target_exact() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct no-send absence descriptor")
+            .expect("make fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let binding = custody_binding(custody);
+        let name = custody_name(55);
+        let unrelated_name = custody_name(56);
+        let unrelated_binding =
+            CustodyDescriptorBinding([descriptor_identity(550), descriptor_identity(560)]);
+        let stable = snapshot(
+            42,
+            Vec::from(exact_pair_entries(unrelated_name, &unrelated_binding)),
+        );
+        let barrier_seen = Arc::new(AtomicBool::new(false));
+        let source = FakeInventorySource::after_barrier(
+            42,
+            vec![stable.clone(), stable],
+            Arc::clone(&barrier_seen),
+        );
+        let gate = ManagerMutationGate::new();
+        let observed_barrier = Arc::clone(&barrier_seen);
+
+        let proof = observe_serialized_publication_absence(
+            &gate,
+            &source,
+            name,
+            custody,
+            async move {
+                observed_barrier.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            HardDeadline::after(Duration::from_secs(2)).expect("absence deadline"),
+        )
+        .await
+        .expect("stable exact no-send absence");
+
+        proof
+            .verify_exact_target(name, &binding)
+            .expect("exact no-send proof target");
+        assert!(
+            proof
+                .verify_exact_target(custody_name(57), &binding)
+                .is_err(),
+            "no-send proof rejects name substitution"
+        );
+        let reversed = CustodyDescriptorBinding([binding.0[1].clone(), binding.0[0].clone()]);
+        assert!(
+            proof.verify_exact_target(name, &reversed).is_err(),
+            "no-send proof rejects role-order substitution"
+        );
+        assert_eq!(format!("{proof:?}"), "SameRuntimeManagerProof(<redacted>)");
+        assert!(barrier_seen.load(Ordering::SeqCst));
+        assert!(
+            source
+                .snapshots
+                .lock()
+                .expect("absence snapshots")
+                .is_empty(),
+            "absence proof consumes exactly two stable snapshots"
+        );
+        drop(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("released observer deadline"),
+            )
+            .await
+            .expect("non-mutating observer releases the shared gate"),
+        );
+    }
+
+    #[tokio::test]
+    async fn no_send_absence_observer_rejects_present_alias_and_inventory_drift() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct no-send rejection descriptor")
+            .expect("make fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let identities = exact_custody_identities(custody).expect("exact identities");
+        let name = custody_name(58);
+        let deadline = HardDeadline::after(Duration::from_secs(2)).expect("absence deadline");
+        let gate = ManagerMutationGate::new();
+
+        let present = snapshot(
+            42,
+            identities
+                .iter()
+                .cloned()
+                .map(|identity| inventory_entry(name, identity))
+                .collect(),
+        );
+        let present_source = FakeInventorySource::new(42, vec![present.clone(), present.clone()]);
+        assert!(matches!(
+            observe_serialized_publication_absence(
+                &gate,
+                &present_source,
+                name,
+                custody,
+                std::future::ready(Ok(())),
+                deadline,
+            )
+            .await,
+            Err(FdStoreError::InvalidInventory(
+                "publication-absence custody name is present"
+            ))
+        ));
+
+        let alias_name = custody_name(59);
+        let alias = snapshot(
+            42,
+            identities
+                .iter()
+                .cloned()
+                .map(|identity| inventory_entry(alias_name, identity))
+                .collect(),
+        );
+        let alias_source = FakeInventorySource::new(42, vec![alias.clone(), alias]);
+        assert!(matches!(
+            observe_serialized_publication_absence(
+                &gate,
+                &alias_source,
+                name,
+                custody,
+                std::future::ready(Ok(())),
+                deadline,
+            )
+            .await,
+            Err(FdStoreError::InvalidInventory(
+                "publication-absence custody identity is aliased"
+            ))
+        ));
+
+        let empty = snapshot(42, Vec::new());
+        let drifted = snapshot(
+            42,
+            vec![inventory_entry(custody_name(60), descriptor_identity(600))],
+        );
+        let drift_source = FakeInventorySource::new(42, vec![empty, drifted]);
+        assert!(matches!(
+            observe_serialized_publication_absence(
+                &gate,
+                &drift_source,
+                name,
+                custody,
+                std::future::ready(Ok(())),
+                deadline,
+            )
+            .await,
+            Err(FdStoreError::UnstableInventory)
+        ));
+        drop(
+            gate.acquire_publication(
+                HardDeadline::after(Duration::from_secs(1)).expect("failure release deadline"),
+            )
+            .await
+            .expect("failed no-send observations leave the gate unpoisoned"),
+        );
+    }
+
+    #[tokio::test]
+    async fn no_send_absence_cancellation_never_observes_or_poison_reconciles() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let name = custody_name(61);
+        let empty = snapshot(42, Vec::new());
+        let source = FakeInventorySource::new(42, vec![empty.clone(), empty]);
+        let gate = ManagerMutationGate::new();
+        let held = gate
+            .acquire_removal(
+                HardDeadline::after(Duration::from_secs(2)).expect("held mutation deadline"),
+            )
+            .await
+            .expect("hold shared mutation gate");
+        let barrier_polled = Arc::new(AtomicBool::new(false));
+        let observed_poll = Arc::clone(&barrier_polled);
+        let barrier = std::future::poll_fn(move |_| {
+            observed_poll.store(true, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        });
+        let mut observation = Box::pin(observe_serialized_publication_absence(
+            &gate,
+            &source,
+            name,
+            custody,
+            barrier,
+            HardDeadline::after(Duration::from_secs(2)).expect("cancel deadline"),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut observation)
+                .await
+                .is_err(),
+            "absence observer waits behind the shared mutation gate"
+        );
+        drop(observation);
+        assert!(!barrier_polled.load(Ordering::SeqCst));
+        assert_eq!(source.snapshots.lock().expect("cancel snapshots").len(), 2);
+        drop(held);
+        drop(
+            gate.acquire_publication(
+                HardDeadline::after(Duration::from_secs(1)).expect("cancel release deadline"),
+            )
+            .await
+            .expect("cancelled no-send observation creates no poison"),
+        );
+    }
+
+    #[tokio::test]
+    async fn no_send_absence_cancellation_inside_barrier_releases_unpoisoned_gate() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let network_namespace = tempfile().expect("network namespace fixture");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let name = custody_name(62);
+        let empty = snapshot(42, Vec::new());
+        let source = FakeInventorySource::new(42, vec![empty.clone(), empty]);
+        let gate = ManagerMutationGate::new();
+        let barrier_entered = Arc::new(AtomicBool::new(false));
+        let observed_entry = Arc::clone(&barrier_entered);
+        let barrier = std::future::poll_fn(move |_| {
+            observed_entry.store(true, Ordering::SeqCst);
+            Poll::Pending
+        });
+        let mut observation = Box::pin(observe_serialized_publication_absence(
+            &gate,
+            &source,
+            name,
+            custody,
+            barrier,
+            HardDeadline::after(Duration::from_secs(2)).expect("observation deadline"),
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut observation)
+                .await
+                .is_err(),
+            "observer remains pending inside its causal barrier"
+        );
+        assert!(barrier_entered.load(Ordering::SeqCst));
+
+        let mut blocked_mutation = Box::pin(gate.acquire_publication(
+            HardDeadline::after(Duration::from_secs(2)).expect("blocked mutation deadline"),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut blocked_mutation)
+                .await
+                .is_err(),
+            "the stable observer serializes every manager mutation"
+        );
+        drop(blocked_mutation);
+        drop(observation);
+        assert_eq!(
+            source.snapshots.lock().expect("cancel snapshots").len(),
+            2,
+            "cancellation inside the barrier observes no inventory"
+        );
+        drop(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("released gate deadline"),
+            )
+            .await
+            .expect("cancelled stable observer leaves the gate unpoisoned"),
+        );
     }
 
     #[allow(
@@ -6398,7 +7011,15 @@ mod tests {
         let name = custody_name(54);
         let baseline = snapshot(42, Vec::from(exact_pair_entries(name, &binding)));
         let gate = ManagerMutationGate::new();
-        let attempt_id = poison_attempt(&gate, &fake_scope(42), &address, name, custody).await;
+        let attempt_id = poison_attempt(
+            &gate,
+            &fake_scope(42),
+            &address,
+            snapshot(42, Vec::new()),
+            name,
+            custody,
+        )
+        .await;
 
         let removal_source = FakeInventorySource::new(42, vec![baseline.clone()]);
         let blocked = remove_and_attest(
@@ -6475,28 +7096,6 @@ mod tests {
             Err(FdStoreError::RemovalPoisoned)
         ));
 
-        let absent = snapshot(42, Vec::new());
-        let absent_source = FakeInventorySource::new(42, vec![absent.clone(), absent]);
-        assert!(matches!(
-            reconcile_fake(
-                &gate,
-                &absent_source,
-                attempt_id,
-                name,
-                custody,
-                std::future::ready(Ok(())),
-            )
-            .await,
-            CustodyInventoryReconciliation::ExactAbsent(_)
-        ));
-        assert!(matches!(
-            gate.acquire_removal(
-                HardDeadline::after(Duration::from_secs(1)).expect("absent cross-poison deadline")
-            )
-            .await,
-            Err(FdStoreError::RemovalPoisoned)
-        ));
-
         let exact_present = snapshot(
             42,
             identities
@@ -6507,121 +7106,167 @@ mod tests {
         );
         let present_source =
             FakeInventorySource::new(42, vec![exact_present.clone(), exact_present]);
-        assert!(matches!(
-            reconcile_fake(
-                &gate,
-                &present_source,
-                attempt_id,
-                name,
-                custody,
-                std::future::ready(Ok(())),
-            )
-            .await,
-            CustodyInventoryReconciliation::ExactPresent(_)
-        ));
-
-        let blocked_again = remove_and_attest(
+        let result = reconcile_fake(
             &gate,
-            &removal_source,
-            &sender,
-            stable_inventory(baseline, address),
+            &present_source,
+            attempt_id,
             name,
-            binding,
             custody,
-            HardDeadline::after(Duration::from_secs(2)).expect("present cross-poison deadline"),
+            std::future::ready(Ok(())),
         )
         .await;
-        assert!(matches!(
-            blocked_again,
-            Err(RemovalFailure::BeforeSend {
-                error: FdStoreError::RemovalPoisoned
-            })
-        ));
-        assert_eq!(
-            removal_source
-                .snapshots
-                .lock()
-                .expect("still blocked removal snapshots")
-                .len(),
-            1,
-            "publication reconciliation never releases removal"
+        let CustodyInventoryReconciliation::ExactPresent(attestation) = result else {
+            panic!("exact present projection did not settle publication: {result:?}")
+        };
+        attestation
+            .verify_exact_custody(name, custody)
+            .expect("exact present attestation target");
+        assert!(attestation.removal_baseline().is_some());
+        drop(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("settled cross-poison deadline"),
+            )
+            .await
+            .expect("exact projection releases the shared mutation gate"),
         );
         assert_no_datagram(&receiver);
     }
 
+    #[tokio::test]
+    async fn stable_unrelated_publication_drift_is_unresolved_and_retains_exact_poison() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct stable drift descriptor")
+            .expect("make fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let identities = exact_custody_identities(custody).expect("exact identities");
+        let name = custody_name(62);
+        let baseline = snapshot(42, Vec::new());
+        let unrelated = snapshot(
+            42,
+            Vec::from(exact_pair_entries(
+                custody_name(63),
+                &CustodyDescriptorBinding([descriptor_identity(620), descriptor_identity(630)]),
+            )),
+        );
+        let source = FakeInventorySource::new(42, vec![unrelated.clone(), unrelated]);
+        let gate = ManagerMutationGate::new();
+        let attempt_id = poison_attempt(
+            &gate,
+            source.scope(),
+            &fake_notify_address(),
+            baseline,
+            name,
+            custody,
+        )
+        .await;
+
+        let result = reconcile_fake(
+            &gate,
+            &source,
+            attempt_id,
+            name,
+            custody,
+            std::future::ready(Ok(())),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            CustodyInventoryReconciliation::Unresolved {
+                error: FdStoreError::InvalidInventory(
+                    "descriptor inventory is not the exact baseline plus custody pair"
+                )
+            }
+        ));
+        let observation = gate
+            .acquire_poisoned_publication(
+                attempt_id,
+                name,
+                &identities,
+                HardDeadline::after(Duration::from_secs(1)).expect("retained poison deadline"),
+            )
+            .await
+            .expect("stable unrelated drift retains exact publication poison");
+        assert_eq!(observation.poisoned.attempt_id, attempt_id);
+        assert_eq!(observation.poisoned.target.custody_name, name);
+        drop(observation);
+        assert!(matches!(
+            gate.acquire_removal(
+                HardDeadline::after(Duration::from_secs(1)).expect("cross-poison deadline")
+            )
+            .await,
+            Err(FdStoreError::RemovalPoisoned)
+        ));
+    }
+
     #[test]
-    fn reconciliation_projection_rejects_partial_wrong_duplicate_and_aliased_pairs() {
+    fn reconciliation_projection_accepts_only_exact_baseline_or_exact_baseline_plus_pair() {
         let name = custody_name(44);
         let first = descriptor_identity(440);
         let second = descriptor_identity(450);
+        let unrelated_name = custody_name(45);
+        let unrelated =
+            CustodyDescriptorBinding([descriptor_identity(460), descriptor_identity(470)]);
+        let baseline = snapshot(
+            42,
+            Vec::from(exact_pair_entries(unrelated_name, &unrelated)),
+        );
         let target = PublicationTarget {
             scope: fake_scope(42),
             notify_address: fake_notify_address(),
             custody_name: name,
             identities: [first.clone(), second.clone()],
+            baseline: baseline.clone(),
         };
-        let exact_reversed = snapshot(
-            42,
-            vec![
-                inventory_entry(name, second.clone()),
-                inventory_entry(name, first.clone()),
-            ],
-        );
+        let mut exact_entries = baseline.entries.clone();
+        exact_entries.extend([
+            inventory_entry(name, second.clone()),
+            inventory_entry(name, first.clone()),
+        ]);
+        let exact_present = snapshot(42, exact_entries);
         assert!(matches!(
-            exact_reversed.project_poisoned_target(&target),
+            exact_present.project_poisoned_target(&target),
             Ok(TargetInventoryProjection::ExactPresent {
-                stored_descriptors: 2
-            })
+                attestation,
+                snapshot,
+            }) if attestation.stored_descriptors == 4 && snapshot == exact_present
         ));
         assert!(matches!(
-            snapshot(
-                42,
-                vec![inventory_entry(custody_name(45), descriptor_identity(460))]
-            )
-            .project_poisoned_target(&target),
-            Ok(TargetInventoryProjection::ExactAbsent {
-                stored_descriptors: 1
-            })
+            baseline.project_poisoned_target(&target),
+            Ok(TargetInventoryProjection::ExactAbsent { snapshot }) if snapshot == baseline
         ));
 
         let mut flag_alias = first.clone();
         flag_alias.status_flags ^=
             u32::try_from(OFlag::O_NONBLOCK.bits()).expect("nonblocking flag fits identity field");
         assert!(flag_alias.is_same_kernel_object(&first));
+        let mut partial_entries = baseline.entries.clone();
+        partial_entries.push(inventory_entry(name, first.clone()));
+        let mut wrong_pair_entries = baseline.entries.clone();
+        wrong_pair_entries.extend([
+            inventory_entry(name, descriptor_identity(480)),
+            inventory_entry(name, descriptor_identity(490)),
+        ]);
+        let mut unrelated_drift_entries = exact_present.entries.clone();
+        unrelated_drift_entries.extend(exact_pair_entries(
+            custody_name(46),
+            &CustodyDescriptorBinding([descriptor_identity(500), descriptor_identity(510)]),
+        ));
+        let mut alias_entries = baseline.entries.clone();
+        alias_entries.extend([
+            inventory_entry(custody_name(46), flag_alias),
+            inventory_entry(custody_name(46), descriptor_identity(520)),
+        ]);
+        let mut service_drift = exact_present.clone();
+        service_drift.notify_access = "all".into();
         let invalid = [
-            snapshot(42, vec![inventory_entry(name, first.clone())]),
-            snapshot(
-                42,
-                vec![
-                    inventory_entry(name, first.clone()),
-                    inventory_entry(name, second.clone()),
-                    inventory_entry(name, descriptor_identity(470)),
-                ],
-            ),
-            snapshot(
-                42,
-                vec![
-                    inventory_entry(name, first.clone()),
-                    inventory_entry(name, first.clone()),
-                ],
-            ),
-            snapshot(
-                42,
-                vec![
-                    inventory_entry(name, descriptor_identity(480)),
-                    inventory_entry(name, descriptor_identity(490)),
-                ],
-            ),
-            snapshot(42, vec![inventory_entry(custody_name(45), first.clone())]),
-            snapshot(42, vec![inventory_entry(custody_name(45), flag_alias)]),
-            snapshot(
-                42,
-                vec![
-                    inventory_entry(name, first.clone()),
-                    inventory_entry(name, second.clone()),
-                    inventory_entry(custody_name(45), first),
-                ],
-            ),
+            snapshot(42, partial_entries),
+            snapshot(42, wrong_pair_entries),
+            snapshot(42, unrelated_drift_entries),
+            snapshot(42, alias_entries),
+            service_drift,
         ];
         for inventory in invalid {
             assert!(inventory.project_poisoned_target(&target).is_err());
@@ -6654,8 +7299,15 @@ mod tests {
         second.entries.sort_unstable();
         let source = FakeInventorySource::new(42, vec![first, second]);
         let gate = ManagerMutationGate::new();
-        let attempt_id =
-            poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
+        let attempt_id = poison_attempt(
+            &gate,
+            source.scope(),
+            &fake_notify_address(),
+            snapshot(42, Vec::new()),
+            name,
+            custody,
+        )
+        .await;
         let result = reconcile_fake(
             &gate,
             &source,
@@ -6709,8 +7361,15 @@ mod tests {
         let source = FakeInventorySource::new(42, Vec::new());
         let gate = ManagerMutationGate::new();
         let name = custody_name(48);
-        let attempt_id =
-            poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
+        let attempt_id = poison_attempt(
+            &gate,
+            source.scope(),
+            &fake_notify_address(),
+            snapshot(42, Vec::new()),
+            name,
+            custody,
+        )
+        .await;
         let deadline = HardDeadline::after(Duration::from_secs(1)).expect("mismatch deadline");
         let stale = PublicationAttemptId::for_test(attempt_id.0.get() + 1);
         for mismatch in [
@@ -6731,6 +7390,32 @@ mod tests {
                 Err(FdStoreError::PublicationTargetMismatch)
             ));
         }
+        for mismatch in [
+            gate.acquire_poisoned_publication_target(custody_name(49), &identities, deadline)
+                .await,
+            gate.acquire_poisoned_publication_target(
+                name,
+                &[identities[1].clone(), identities[0].clone()],
+                deadline,
+            )
+            .await,
+        ] {
+            assert!(matches!(
+                mismatch,
+                Err(FdStoreError::PublicationTargetMismatch)
+            ));
+        }
+        let exact_target = gate
+            .acquire_poisoned_publication_target(name, &identities, deadline)
+            .await
+            .expect("dropped-supervisor selector requires the exact target");
+        assert_eq!(exact_target.poisoned.attempt_id, attempt_id);
+        assert_eq!(
+            exact_target.poisoned.target.baseline,
+            snapshot(42, Vec::new()),
+            "the poisoned target retains the exact pre-send manager baseline"
+        );
+        drop(exact_target);
         assert!(
             source
                 .snapshots
@@ -6742,6 +7427,48 @@ mod tests {
             format!("{attempt_id:?}"),
             "PublicationAttemptId(<redacted>)"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_target_publication_selector_never_adopts_removal_poison() {
+        let pidfd = tempfile().expect("pidfd fixture");
+        let mut network_namespace = tempfile().expect("network namespace fixture");
+        network_namespace
+            .write_all(b"distinct removal selector descriptor")
+            .expect("make fixture distinct");
+        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+            .expect("borrow exact pair");
+        let identities = exact_custody_identities(custody).expect("exact identities");
+        let binding = custody_binding(custody);
+        let name = custody_name(47);
+        let baseline = snapshot(42, Vec::from(exact_pair_entries(name, &binding)));
+        let gate = ManagerMutationGate::new();
+        let deadline = HardDeadline::after(Duration::from_secs(2)).expect("selector deadline");
+        let mut attempt = gate
+            .acquire_removal(deadline)
+            .await
+            .expect("open removal attempt");
+        let attempt_id = attempt
+            .mark_send_attempted(RemovalTarget {
+                scope: fake_scope(42),
+                notify_address: fake_notify_address(),
+                custody_name: name,
+                binding: binding.clone(),
+                baseline,
+            })
+            .expect("poison removal attempt");
+        drop(attempt);
+
+        assert!(matches!(
+            gate.acquire_poisoned_publication_target(name, &identities, deadline)
+                .await,
+            Err(FdStoreError::PublicationTargetMismatch)
+        ));
+        let retained = gate
+            .acquire_poisoned_removal(attempt_id, name, &binding, deadline)
+            .await
+            .expect("wrong-class selection retains the exact removal poison");
+        assert_eq!(retained.poisoned.attempt_id, attempt_id);
     }
 
     #[tokio::test]
@@ -6760,6 +7487,7 @@ mod tests {
             notify_address: fake_notify_address(),
             custody_name: name,
             identities: identities.clone(),
+            baseline: snapshot(42, Vec::new()),
         };
         let binding = custody_binding(custody);
         let baseline = snapshot(42, Vec::from(exact_pair_entries(name, &binding)));
@@ -6847,8 +7575,15 @@ mod tests {
         );
         let source = FakeInventorySource::new(42, vec![exact.clone(), exact]);
         let gate = ManagerMutationGate::new();
-        let attempt_id =
-            poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
+        let attempt_id = poison_attempt(
+            &gate,
+            source.scope(),
+            &fake_notify_address(),
+            snapshot(42, Vec::new()),
+            name,
+            custody,
+        )
+        .await;
         let deadline = HardDeadline::after(Duration::from_secs(2)).expect("cancel deadline");
         let observation = gate
             .acquire_poisoned_publication(attempt_id, name, &identities, deadline)
@@ -6909,8 +7644,15 @@ mod tests {
         );
         let source = FakeInventorySource::new(42, vec![exact.clone(), exact]);
         let gate = ManagerMutationGate::new();
-        let attempt_id =
-            poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
+        let attempt_id = poison_attempt(
+            &gate,
+            source.scope(),
+            &fake_notify_address(),
+            snapshot(42, Vec::new()),
+            name,
+            custody,
+        )
+        .await;
         let deadline = HardDeadline::after(Duration::from_millis(20)).expect("short deadline");
         let observation = gate
             .acquire_poisoned_publication(attempt_id, name, &identities, deadline)
@@ -6965,8 +7707,15 @@ mod tests {
         );
         let source = FakeInventorySource::new(42, vec![exact.clone(), exact]);
         let gate = ManagerMutationGate::new();
-        let attempt_id =
-            poison_attempt(&gate, source.scope(), &fake_notify_address(), name, custody).await;
+        let attempt_id = poison_attempt(
+            &gate,
+            source.scope(),
+            &fake_notify_address(),
+            snapshot(42, Vec::new()),
+            name,
+            custody,
+        )
+        .await;
         let result = reconcile_fake(&gate, &source, attempt_id, name, custody, async {
             fcntl(
                 network_namespace.as_fd(),
@@ -6994,7 +7743,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_source_has_only_non_mutating_barrier_notification() {
+    fn publication_settlement_sources_are_bounded_serialized_and_observation_only() {
         let source = include_str!("systemd_fdstore.rs");
         let start = source
             .find("pub(crate) async fn reconcile_current_process_custody")
@@ -7004,11 +7753,46 @@ mod tests {
             .map(|offset| start + offset)
             .expect("reconciliation source end");
         let reconciliation = &source[start..end];
-        assert!(reconciliation.contains("synchronize_manager"));
-        for forbidden in ["FDSTORE_PREFIX", "FDSTORE=1", "FDSTOREREMOVE=1", "READY=1"] {
+        assert_eq!(
+            reconciliation
+                .matches("synchronize_manager(&sender, deadline)")
+                .count(),
+            2
+        );
+        assert_eq!(
+            reconciliation.matches("source.snapshot(deadline)").count(),
+            4
+        );
+        assert_eq!(
+            reconciliation
+                .matches("sender.send_once(BARRIER_MESSAGE")
+                .count(),
+            1
+        );
+        assert!(reconciliation.contains("acquire_stable_observation"));
+        assert!(reconciliation.contains("acquire_poisoned_publication_target"));
+        for forbidden in [
+            "FDSTORE_PREFIX",
+            "FDSTORE=1",
+            "FDSTOREREMOVE=1",
+            "READY=1",
+            "send_without_descriptors_once",
+            "mark_send_attempted",
+        ] {
             assert!(
                 !reconciliation.contains(forbidden),
                 "reconciliation must not contain {forbidden}"
+            );
+        }
+        let server = include_str!("server.rs");
+        for private in [
+            "reconcile_current_process_custody",
+            "reconcile_current_process_custody_target",
+            "observe_current_process_publication_absence",
+        ] {
+            assert!(
+                !server.contains(private),
+                "production server must not directly wire private {private}"
             );
         }
     }
