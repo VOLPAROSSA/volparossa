@@ -6713,6 +6713,9 @@ mod tests {
         let cleanup_confirmed_restart = production
             .find("settle_cleanup_confirmed_restart_absence(")
             .expect("cleanup-confirmed restart settlement");
+        let cleanup_confirmed_present = production
+            .find("settle_cleanup_confirmed_restart_present(")
+            .expect("cleanup-confirmed exact-present removal");
         let bind_call = production
             .find("bind_production_socket(prepared_runtime, ownership_runtime)")
             .expect("production socket bind call");
@@ -6726,8 +6729,10 @@ mod tests {
         assert!(revalidate < classify);
         assert!(classify < continue_empty);
         assert!(classify < cleanup_confirmed_restart);
+        assert!(cleanup_confirmed_restart < cleanup_confirmed_present);
         assert!(continue_empty < bind_call);
         assert!(cleanup_confirmed_restart < bind_call);
+        assert!(cleanup_confirmed_present < bind_call);
 
         let bind_start = source
             .find("fn bind_production_socket")

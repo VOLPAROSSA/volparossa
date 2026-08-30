@@ -10,8 +10,8 @@
 //! server selects the functional backend. Production owns the canonical durable journal actor as a
 //! startup/shutdown barrier but still refuses `MayOwnPrepare` recovery; it has no restart-stable
 //! pidfd/network-namespace custody or restart reaper. It can only retire an already durable
-//! `CleanupConfirmed` restart record after a fresh exact-empty manager observation. Leader
-//! retirement still does not own descendants.
+//! `CleanupConfirmed` restart set after exact present-pair removals and a fresh exact-empty manager
+//! observation. Leader retirement still does not own descendants.
 
 #![cfg(target_os = "linux")]
 
