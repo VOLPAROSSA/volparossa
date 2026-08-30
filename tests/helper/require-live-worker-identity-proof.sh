@@ -3744,8 +3744,10 @@ vp_capture_file_is_safe "$report_path" \
 final_checkpoint=report-validation
 validator_stdout=$temporary_stage/report-validator.stdout
 validator_stderr=$temporary_stage/report-validator.stderr
-install -o root -g root -m 0600 /dev/null "$validator_stdout" "$validator_stderr" \
-    || failed 'private validator output files could not be created'
+install -o root -g root -m 0600 /dev/null "$validator_stdout" \
+    || failed 'private validator stdout could not be created'
+install -o root -g root -m 0600 /dev/null "$validator_stderr" \
+    || failed 'private validator stderr could not be created'
 set +e
 "$evidence_validator" "$report_path" >"$validator_stdout" 2>"$validator_stderr"
 validator_status=$?

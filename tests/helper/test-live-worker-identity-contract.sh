@@ -3987,6 +3987,8 @@ for required_contract in \
     "blocked 'the source worktree must be clean before live evidence execution'" \
     "failed 'the exact clean source revision changed during live execution'" \
     'jq -n -S -c' \
+    'install -o root -g root -m 0600 /dev/null "$validator_stdout"' \
+    'install -o root -g root -m 0600 /dev/null "$validator_stderr"' \
     '"$evidence_validator" "$report_path" >"$validator_stdout" 2>"$validator_stderr"' \
     '[ "$validator_status" -ne 0 ]' \
     '[ -s "$validator_stdout" ]' \
@@ -4001,6 +4003,14 @@ do
         exit 1
     }
 done
+# These are literal gate-source contracts; expansion here would defeat the assertions.
+# shellcheck disable=SC2016
+if grep -F '"$validator_stdout" "$validator_stderr"' "$gate" >/dev/null \
+    || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$validator_stdout"' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$validator_stderr"' "$gate")" -ne 1 ]; then
+    printf '%s\n' 'private validator captures are not created as two exact files' >&2
+    exit 1
+fi
 if ! awk '
     /^[[:space:]]*resolver_runtime_uid=\$\(/ { runtime_uid_derived = NR }
     /^[[:space:]]*resolver_runtime_gid=\$\(/ { runtime_gid_derived = NR }
