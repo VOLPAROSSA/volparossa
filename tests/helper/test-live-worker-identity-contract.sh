@@ -4862,6 +4862,8 @@ if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
         'production hook does not use the exact policy-mediated systemd bus' >&2
     exit 1
 fi
+# These patterns are also literal hook-source contracts; shell expansion would weaken the check.
+# shellcheck disable=SC2016
 if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 7 ] \
     || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 4 ] \
     || [ "$(grep -Fc 'unit_fdstore_prior_custody_is_absent' "$ipc_hook")" -ne 4 ] \
