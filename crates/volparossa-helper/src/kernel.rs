@@ -4,6 +4,7 @@ use std::{
     io,
     net::{IpAddr, Ipv6Addr, SocketAddr as InternetSocketAddr},
     os::fd::RawFd,
+    time::Duration,
 };
 
 use netlink_sys::{
@@ -52,11 +53,13 @@ const NLMSG_ERROR: u16 = 2;
 const RTM_NEWLINK: u16 = 16;
 const RTM_DELLINK: u16 = 17;
 const RTM_GETLINK: u16 = 18;
+const RTM_SETLINK: u16 = 19;
 const RTM_NEWADDR: u16 = 20;
 const IFLA_IFNAME: u16 = 3;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_NET_NS_FD: u16 = 28;
 const IFLA_IFALIAS: u16 = 20;
+const IFLA_NEW_IFINDEX: u16 = 49;
 const IFLA_INFO_KIND: u16 = 1;
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
@@ -70,6 +73,10 @@ const CTRL_ATTR_FAMILY_NAME: u16 = 2;
 const MAX_IFNAME_BYTES: usize = 15;
 const MAX_IFALIAS_BYTES: usize = 255;
 const MAX_LINK_KIND_BYTES: usize = 16;
+const BIRTH_LINK_PROGRESS_TAIL: Duration = Duration::from_millis(500);
+const BIRTH_LINK_RECONCILE_TAIL: Duration = Duration::from_millis(250);
+const BIRTH_LINK_IFINDEX_PREFIX: u32 = 0x4000_0000;
+const BIRTH_LINK_IFINDEX_MASK: u32 = 0x3fff_ffff;
 
 const WG_GENL_NAME: &str = "wireguard";
 const WG_GENL_VERSION: u8 = 1;
@@ -138,17 +145,89 @@ pub(crate) enum BirthLinkError {
 /// the journal's separate affine authority.
 pub(crate) struct LiveWireguardLeaseOwner {
     resource: DurableWireguardResource,
+    birth: LiveBirthLinkState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveBirthLinkState {
+    Uncreated,
+    CreateSent(u32),
+    CreateAcknowledged(u32),
+    Provisional(u32),
+    AliasSent(u32),
+    Marked(u32),
+    Moved,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BirthCleanupTarget {
+    ProveAbsent,
+    Unmarked(u32),
+    AliasMayBeSet(u32),
+    Marked(u32),
+}
+
+const fn birth_cleanup_target(state: LiveBirthLinkState) -> BirthCleanupTarget {
+    match state {
+        LiveBirthLinkState::Uncreated | LiveBirthLinkState::Moved => {
+            BirthCleanupTarget::ProveAbsent
+        }
+        LiveBirthLinkState::CreateSent(index)
+        | LiveBirthLinkState::CreateAcknowledged(index)
+        | LiveBirthLinkState::Provisional(index) => BirthCleanupTarget::Unmarked(index),
+        LiveBirthLinkState::AliasSent(index) => BirthCleanupTarget::AliasMayBeSet(index),
+        LiveBirthLinkState::Marked(index) => BirthCleanupTarget::Marked(index),
+    }
+}
+
+const fn valid_birth_transition(current: LiveBirthLinkState, next: LiveBirthLinkState) -> bool {
+    match current {
+        LiveBirthLinkState::Uncreated => matches!(next, LiveBirthLinkState::CreateSent(_)),
+        LiveBirthLinkState::CreateSent(current) => match next {
+            LiveBirthLinkState::Uncreated => true,
+            LiveBirthLinkState::CreateAcknowledged(next) => current == next,
+            _ => false,
+        },
+        LiveBirthLinkState::CreateAcknowledged(current) => {
+            matches!(next, LiveBirthLinkState::Provisional(next) if current == next)
+        }
+        LiveBirthLinkState::Provisional(current) => {
+            matches!(next, LiveBirthLinkState::AliasSent(next) if current == next)
+        }
+        LiveBirthLinkState::AliasSent(current) => matches!(
+            next,
+            LiveBirthLinkState::Provisional(next) | LiveBirthLinkState::Marked(next)
+                if current == next
+        ),
+        LiveBirthLinkState::Marked(_) => matches!(next, LiveBirthLinkState::Moved),
+        LiveBirthLinkState::Moved => false,
+    }
 }
 
 impl LiveWireguardLeaseOwner {
     /// Mint one live owner before any same-runtime birth-link mutation.
     pub(crate) const fn claim(resource: DurableWireguardResource) -> Self {
-        Self { resource }
+        Self {
+            resource,
+            birth: LiveBirthLinkState::Uncreated,
+        }
     }
 
     /// Borrow the secret-free evidence needed by the authenticated child request.
     pub(crate) const fn resource(&self) -> &DurableWireguardResource {
         &self.resource
+    }
+
+    fn transition_birth(
+        &mut self,
+        expected: LiveBirthLinkState,
+        next: LiveBirthLinkState,
+    ) -> Result<(), KernelError> {
+        if self.birth != expected || !valid_birth_transition(expected, next) {
+            return Err(KernelError::Invalid);
+        }
+        self.birth = next;
+        Ok(())
     }
 }
 
@@ -156,6 +235,50 @@ impl std::fmt::Debug for LiveWireguardLeaseOwner {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("LiveWireguardLeaseOwner(<redacted>)")
     }
+}
+
+/// Same-transaction evidence for one confirmed, still-unmarked birth link.
+///
+/// This non-`Clone` value is minted only after a successful exclusive create acknowledgement and
+/// exact readback of the new DOWN `WireGuard` link. It permits cleanup during the short marker-set
+/// transaction; it is not durable restart authority.
+#[must_use = "an acknowledged unmarked birth link must be marked, moved, or cleaned"]
+struct ProvisionalWireguardBirthLink {
+    index: u32,
+}
+
+/// Same-transaction evidence that the provisional link now has its exact durable marker.
+#[must_use = "a marked birth link must be moved or cleaned"]
+struct MarkedWireguardBirthLink {
+    index: u32,
+}
+
+enum ObservedMutationAcknowledgement {
+    Timely,
+    Late(KernelError),
+    Rejected(KernelError),
+    Ambiguous(KernelError),
+}
+
+fn classify_mutation_acknowledgement(
+    acknowledgement: Result<(), KernelError>,
+    completed_before_progress_cutoff: bool,
+) -> ObservedMutationAcknowledgement {
+    match acknowledgement {
+        Ok(()) if completed_before_progress_cutoff => ObservedMutationAcknowledgement::Timely,
+        Ok(()) => ObservedMutationAcknowledgement::Late(KernelError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "birth-link progress cutoff elapsed",
+        ))),
+        Err(error @ KernelError::Errno(_)) => ObservedMutationAcknowledgement::Rejected(error),
+        Err(error) => ObservedMutationAcknowledgement::Ambiguous(error),
+    }
+}
+
+struct PendingMutationRequest {
+    sequence: u32,
+    request_type: u16,
+    sent_before_progress_cutoff: bool,
 }
 
 /// Physical-namespace rtnetlink client used only by the root helper parent.
@@ -174,55 +297,241 @@ impl BirthNamespaceKernel {
     /// Create a `WireGuard` device here and then move it by target namespace fd.
     pub(crate) fn create_and_move_wireguard(
         &mut self,
-        ownership: &LiveWireguardLeaseOwner,
+        ownership: &mut LiveWireguardLeaseOwner,
         target_namespace: RawFd,
         deadline: HardDeadline,
     ) -> Result<(), BirthLinkError> {
-        let resource = ownership.resource();
-        let interface = resource.interface();
-        if validate_durable_wireguard_resource(resource).is_err() || target_namespace < 0 {
+        if ownership.birth != LiveBirthLinkState::Uncreated {
+            return Err(BirthLinkError::CleanupIncomplete);
+        }
+        let interface = ownership.resource().interface().to_owned();
+        if validate_durable_wireguard_resource(ownership.resource()).is_err()
+            || target_namespace < 0
+        {
             return Err(BirthLinkError::Kernel(KernelError::Invalid));
         }
-        match self.route.link_index(interface, deadline) {
+        let progress_deadline = deadline
+            .before_tail(BIRTH_LINK_PROGRESS_TAIL)
+            .map_err(KernelError::Io)
+            .map_err(BirthLinkError::Kernel)?;
+        let reconcile_deadline = deadline
+            .before_tail(BIRTH_LINK_RECONCILE_TAIL)
+            .map_err(KernelError::Io)
+            .map_err(BirthLinkError::Kernel)?;
+        let requested_index =
+            requested_birth_ifindex(ownership.resource()).map_err(BirthLinkError::Kernel)?;
+        match self.route.link_index(&interface, progress_deadline) {
+            Ok(_) => return Err(BirthLinkError::Conflict),
+            Err(error) if error.is_errno(libc::ENODEV) => {}
+            Err(error) => return Err(BirthLinkError::Kernel(error)),
+        }
+        match self
+            .route
+            .link_details_by_index(requested_index, progress_deadline)
+        {
             Ok(_) => return Err(BirthLinkError::Conflict),
             Err(error) if error.is_errno(libc::ENODEV) => {}
             Err(error) => return Err(BirthLinkError::Kernel(error)),
         }
 
-        let index = match self.route.create_wireguard_link(resource, deadline) {
-            Ok(()) => self
-                .route
-                .exact_owned_wireguard_link_index(resource, deadline)
-                .map_err(|_| BirthLinkError::CleanupIncomplete)?,
-            Err(error) if error.is_errno(libc::EEXIST) => {
-                return Err(BirthLinkError::Conflict);
-            }
-            Err(create_error) => match self
-                .route
-                .exact_owned_wireguard_link_index(resource, deadline)
-            {
-                Ok(index) => index,
-                Err(error) if error.is_errno(libc::ENODEV) => {
-                    return Err(BirthLinkError::Kernel(create_error));
-                }
-                Err(_) => return Err(BirthLinkError::CleanupIncomplete),
-            },
-        };
+        let provisional = self.begin_wireguard_birth(
+            ownership,
+            requested_index,
+            progress_deadline,
+            reconcile_deadline,
+            deadline,
+        )?;
+        let marked = self.mark_wireguard_birth(
+            ownership,
+            &provisional,
+            progress_deadline,
+            reconcile_deadline,
+            deadline,
+        )?;
+        self.move_marked_wireguard_birth(
+            ownership,
+            &marked,
+            target_namespace,
+            progress_deadline,
+            deadline,
+        )
+    }
 
+    fn begin_wireguard_birth(
+        &mut self,
+        ownership: &mut LiveWireguardLeaseOwner,
+        requested_index: u32,
+        progress_deadline: HardDeadline,
+        reconcile_deadline: HardDeadline,
+        cleanup_deadline: HardDeadline,
+    ) -> Result<ProvisionalWireguardBirthLink, BirthLinkError> {
+        let pending = self
+            .route
+            .send_create_wireguard_link(ownership.resource(), requested_index, progress_deadline)
+            .map_err(BirthLinkError::Kernel)?;
+        ownership
+            .transition_birth(
+                LiveBirthLinkState::Uncreated,
+                LiveBirthLinkState::CreateSent(requested_index),
+            )
+            .map_err(|_| BirthLinkError::CleanupIncomplete)?;
         match self
             .route
-            .move_link_to_namespace(index, target_namespace, deadline)
+            .observe_mutation_ack(&pending, progress_deadline, reconcile_deadline)
         {
-            Ok(()) => Ok(()),
-            Err(move_error) => match self.route.link_index(interface, deadline) {
-                Err(error) if error.is_errno(libc::ENODEV) => Ok(()),
-                Ok(_) => {
-                    if self
-                        .route
-                        .delete_named_exact_owned_wireguard_link(resource, deadline)
+            ObservedMutationAcknowledgement::Timely => {
+                ownership
+                    .transition_birth(
+                        LiveBirthLinkState::CreateSent(requested_index),
+                        LiveBirthLinkState::CreateAcknowledged(requested_index),
+                    )
+                    .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+            }
+            ObservedMutationAcknowledgement::Late(error) => {
+                ownership
+                    .transition_birth(
+                        LiveBirthLinkState::CreateSent(requested_index),
+                        LiveBirthLinkState::CreateAcknowledged(requested_index),
+                    )
+                    .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+                return Err(self.reconcile_birth_failure(ownership, error, cleanup_deadline));
+            }
+            ObservedMutationAcknowledgement::Rejected(error) => {
+                ownership
+                    .transition_birth(
+                        LiveBirthLinkState::CreateSent(requested_index),
+                        LiveBirthLinkState::Uncreated,
+                    )
+                    .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+                return if error.is_errno(libc::EEXIST) || error.is_errno(libc::EBUSY) {
+                    Err(BirthLinkError::Conflict)
+                } else {
+                    Err(BirthLinkError::Kernel(error))
+                };
+            }
+            ObservedMutationAcknowledgement::Ambiguous(error) => {
+                return Err(self.reconcile_birth_failure(ownership, error, cleanup_deadline));
+            }
+        }
+
+        match self.route.provisional_created_wireguard_link(
+            ownership.resource(),
+            requested_index,
+            progress_deadline,
+        ) {
+            Ok(provisional) => {
+                ownership
+                    .transition_birth(
+                        LiveBirthLinkState::CreateAcknowledged(provisional.index),
+                        LiveBirthLinkState::Provisional(provisional.index),
+                    )
+                    .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+                Ok(provisional)
+            }
+            Err(error) => Err(self.reconcile_birth_failure(ownership, error, cleanup_deadline)),
+        }
+    }
+
+    fn mark_wireguard_birth(
+        &mut self,
+        ownership: &mut LiveWireguardLeaseOwner,
+        provisional: &ProvisionalWireguardBirthLink,
+        progress_deadline: HardDeadline,
+        reconcile_deadline: HardDeadline,
+        cleanup_deadline: HardDeadline,
+    ) -> Result<MarkedWireguardBirthLink, BirthLinkError> {
+        let pending = match self.route.send_set_link_alias(
+            provisional.index,
+            ownership.resource().ownership_alias(),
+            progress_deadline,
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                return Err(self.reconcile_birth_failure(ownership, error, cleanup_deadline));
+            }
+        };
+        ownership
+            .transition_birth(
+                LiveBirthLinkState::Provisional(provisional.index),
+                LiveBirthLinkState::AliasSent(provisional.index),
+            )
+            .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+        match self
+            .route
+            .observe_mutation_ack(&pending, progress_deadline, reconcile_deadline)
+        {
+            ObservedMutationAcknowledgement::Timely => {}
+            ObservedMutationAcknowledgement::Rejected(error) => {
+                ownership
+                    .transition_birth(
+                        LiveBirthLinkState::AliasSent(provisional.index),
+                        LiveBirthLinkState::Provisional(provisional.index),
+                    )
+                    .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+                return Err(self.reconcile_birth_failure(ownership, error, cleanup_deadline));
+            }
+            ObservedMutationAcknowledgement::Late(error)
+            | ObservedMutationAcknowledgement::Ambiguous(error) => {
+                return Err(self.reconcile_birth_failure(ownership, error, cleanup_deadline));
+            }
+        }
+        match self.route.marked_wireguard_birth_link(
+            ownership.resource(),
+            provisional,
+            progress_deadline,
+        ) {
+            Ok(marked) => {
+                ownership
+                    .transition_birth(
+                        LiveBirthLinkState::AliasSent(marked.index),
+                        LiveBirthLinkState::Marked(marked.index),
+                    )
+                    .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+                Ok(marked)
+            }
+            Err(error) => Err(self.reconcile_birth_failure(ownership, error, cleanup_deadline)),
+        }
+    }
+
+    fn move_marked_wireguard_birth(
+        &mut self,
+        ownership: &mut LiveWireguardLeaseOwner,
+        marked: &MarkedWireguardBirthLink,
+        target_namespace: RawFd,
+        progress_deadline: HardDeadline,
+        cleanup_deadline: HardDeadline,
+    ) -> Result<(), BirthLinkError> {
+        match self
+            .route
+            .move_link_to_namespace(marked.index, target_namespace, progress_deadline)
+        {
+            Ok(()) => {
+                ownership
+                    .transition_birth(
+                        LiveBirthLinkState::Marked(marked.index),
+                        LiveBirthLinkState::Moved,
+                    )
+                    .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+                Ok(())
+            }
+            Err(move_error) => match self
+                .route
+                .link_details_by_index(marked.index, cleanup_deadline)
+            {
+                Err(error) if error.is_errno(libc::ENODEV) => {
+                    ownership
+                        .transition_birth(
+                            LiveBirthLinkState::Marked(marked.index),
+                            LiveBirthLinkState::Moved,
+                        )
+                        .map_err(|_| BirthLinkError::CleanupIncomplete)?;
+                    Ok(())
+                }
+                Ok(details) => {
+                    if prove_marked_wireguard_birth_link(ownership.resource(), marked, &details)
                         .is_ok()
                     {
-                        Err(BirthLinkError::Kernel(move_error))
+                        Err(self.reconcile_birth_failure(ownership, move_error, cleanup_deadline))
                     } else {
                         Err(BirthLinkError::CleanupIncomplete)
                     }
@@ -232,18 +541,57 @@ impl BirthNamespaceKernel {
         }
     }
 
+    fn reconcile_birth_failure(
+        &mut self,
+        ownership: &mut LiveWireguardLeaseOwner,
+        error: KernelError,
+        cleanup_deadline: HardDeadline,
+    ) -> BirthLinkError {
+        if self
+            .delete_owned_wireguard(ownership, cleanup_deadline)
+            .is_ok()
+        {
+            BirthLinkError::Kernel(error)
+        } else {
+            BirthLinkError::CleanupIncomplete
+        }
+    }
+
     /// Delete a same-runtime process-owned link only when exact name, marker and kind match.
     ///
     /// The live owner is not crash-recovery authority; durable restart cleanup remains a separate
     /// journal-authorized path.
     pub(crate) fn delete_owned_wireguard(
         &mut self,
-        ownership: &LiveWireguardLeaseOwner,
+        ownership: &mut LiveWireguardLeaseOwner,
         deadline: HardDeadline,
     ) -> Result<(), KernelError> {
-        let resource = ownership.resource();
-        self.route
-            .delete_named_exact_owned_wireguard_link(resource, deadline)
+        let result = match birth_cleanup_target(ownership.birth) {
+            BirthCleanupTarget::ProveAbsent => self
+                .route
+                .prove_link_absent(ownership.resource().interface(), deadline),
+            BirthCleanupTarget::Unmarked(index) => self.route.cleanup_provisional_wireguard_link(
+                ownership.resource(),
+                &ProvisionalWireguardBirthLink { index },
+                deadline,
+            ),
+            BirthCleanupTarget::AliasMayBeSet(index) => {
+                self.route.cleanup_alias_sent_wireguard_link(
+                    ownership.resource(),
+                    &ProvisionalWireguardBirthLink { index },
+                    deadline,
+                )
+            }
+            BirthCleanupTarget::Marked(index) => self.route.cleanup_marked_wireguard_link(
+                ownership.resource(),
+                &MarkedWireguardBirthLink { index },
+                deadline,
+            ),
+        };
+        if result.is_ok() {
+            ownership.birth = LiveBirthLinkState::Uncreated;
+        }
+        result
     }
 }
 
@@ -261,6 +609,73 @@ fn prove_exact_owned_wireguard_link(
     Ok(())
 }
 
+fn prove_provisional_wireguard_birth_link(
+    resource: &DurableWireguardResource,
+    details: &LinkDetails,
+) -> Result<(), KernelError> {
+    validate_durable_wireguard_resource(resource)?;
+    let up = u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)?;
+    if details.name.as_deref() != Some(resource.interface())
+        || details.alias.is_some()
+        || details.kind.as_deref() != Some(WG_GENL_NAME)
+        || details.flags & up != 0
+    {
+        return Err(KernelError::Invalid);
+    }
+    Ok(())
+}
+
+fn prove_cleanup_eligible_provisional_wireguard_birth_link(
+    resource: &DurableWireguardResource,
+    provisional: &ProvisionalWireguardBirthLink,
+    details: &LinkDetails,
+) -> Result<(), KernelError> {
+    validate_durable_wireguard_resource(resource)?;
+    let up = u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)?;
+    if details.index != provisional.index
+        || details.name.as_deref() != Some(resource.interface())
+        || details.alias.is_some()
+        || details.kind.as_deref() != Some(WG_GENL_NAME)
+        || details.flags & up != 0
+    {
+        return Err(KernelError::Invalid);
+    }
+    Ok(())
+}
+
+fn prove_cleanup_eligible_alias_sent_wireguard_birth_link(
+    resource: &DurableWireguardResource,
+    provisional: &ProvisionalWireguardBirthLink,
+    details: &LinkDetails,
+) -> Result<(), KernelError> {
+    validate_durable_wireguard_resource(resource)?;
+    let up = u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)?;
+    let marker_is_transactional =
+        details.alias.is_none() || details.alias.as_deref() == Some(resource.ownership_alias());
+    if details.index != provisional.index
+        || details.name.as_deref() != Some(resource.interface())
+        || !marker_is_transactional
+        || details.kind.as_deref() != Some(WG_GENL_NAME)
+        || details.flags & up != 0
+    {
+        return Err(KernelError::Invalid);
+    }
+    Ok(())
+}
+
+fn prove_marked_wireguard_birth_link(
+    resource: &DurableWireguardResource,
+    marked: &MarkedWireguardBirthLink,
+    details: &LinkDetails,
+) -> Result<(), KernelError> {
+    prove_exact_owned_wireguard_link(resource, details)?;
+    let up = u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)?;
+    if details.index != marked.index || details.flags & up != 0 {
+        return Err(KernelError::Invalid);
+    }
+    Ok(())
+}
+
 fn validate_durable_wireguard_resource(
     resource: &DurableWireguardResource,
 ) -> Result<(), KernelError> {
@@ -271,6 +686,17 @@ fn validate_durable_wireguard_resource(
         return Err(KernelError::Invalid);
     }
     Ok(())
+}
+
+fn requested_birth_ifindex(resource: &DurableWireguardResource) -> Result<u32, KernelError> {
+    validate_durable_wireguard_resource(resource)?;
+    let digest = blake3::hash(resource.ownership_alias().as_bytes());
+    let prefix = u32::from_be_bytes(
+        digest.as_bytes()[..4]
+            .try_into()
+            .map_err(|_| KernelError::Invalid)?,
+    );
+    Ok(BIRTH_LINK_IFINDEX_PREFIX | (prefix & BIRTH_LINK_IFINDEX_MASK))
 }
 
 fn valid_string_field(value: &str, maximum_bytes: usize) -> bool {
@@ -740,6 +1166,32 @@ impl NetlinkClient {
         }
     }
 
+    fn send_observed_request(
+        &self,
+        message: &[u8],
+        progress_deadline: HardDeadline,
+    ) -> Result<bool, KernelError> {
+        loop {
+            progress_deadline.ensure_remaining()?;
+            match self.socket.send(message, 0) {
+                Ok(written) if written == message.len() => {
+                    return Ok(progress_deadline.ensure_remaining().is_ok());
+                }
+                Ok(_) => {
+                    return Err(KernelError::Io(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "short netlink datagram write",
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_for_fd(&self.socket, PollFlags::POLLOUT, progress_deadline)?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     fn receive(&self, deadline: HardDeadline) -> Result<NetlinkReply, KernelError> {
         let mut bytes = Zeroizing::new(vec![0_u8; MAX_NETLINK_MESSAGE]);
         loop {
@@ -763,13 +1215,151 @@ impl NetlinkClient {
         }
     }
 
-    fn create_wireguard_link(
+    fn send_create_wireguard_link(
         &mut self,
         resource: &DurableWireguardResource,
+        requested_index: u32,
+        progress_deadline: HardDeadline,
+    ) -> Result<PendingMutationRequest, KernelError> {
+        let (message_type, flags, payload) =
+            encode_create_wireguard_link(resource, requested_index)?;
+        self.send_mutation_request(message_type, flags, &payload, progress_deadline)
+    }
+
+    fn send_mutation_request(
+        &mut self,
+        message_type: u16,
+        flags: u16,
+        payload: &[u8],
+        progress_deadline: HardDeadline,
+    ) -> Result<PendingMutationRequest, KernelError> {
+        let sequence = self.next_sequence();
+        let message = Zeroizing::new(build_netlink_message(
+            message_type,
+            flags | NLM_F_REQUEST | NLM_F_ACK,
+            sequence,
+            payload,
+        )?);
+        let sent_before_progress_cutoff =
+            self.send_observed_request(&message, progress_deadline)?;
+        Ok(PendingMutationRequest {
+            sequence,
+            request_type: message_type,
+            sent_before_progress_cutoff,
+        })
+    }
+
+    fn observe_mutation_ack(
+        &self,
+        pending: &PendingMutationRequest,
+        progress_deadline: HardDeadline,
+        reconcile_deadline: HardDeadline,
+    ) -> ObservedMutationAcknowledgement {
+        let response = match self.receive(reconcile_deadline) {
+            Ok(response) => response,
+            Err(error) => return ObservedMutationAcknowledgement::Ambiguous(error),
+        };
+        let acknowledgement = parse_ack(
+            &response,
+            pending.sequence,
+            pending.request_type,
+            self.local_port_id,
+        );
+        classify_mutation_acknowledgement(
+            acknowledgement,
+            pending.sent_before_progress_cutoff && progress_deadline.ensure_remaining().is_ok(),
+        )
+    }
+
+    fn provisional_created_wireguard_link(
+        &mut self,
+        resource: &DurableWireguardResource,
+        requested_index: u32,
+        deadline: HardDeadline,
+    ) -> Result<ProvisionalWireguardBirthLink, KernelError> {
+        let details = self.link_details_by_index(requested_index, deadline)?;
+        prove_provisional_wireguard_birth_link(resource, &details)?;
+        Ok(ProvisionalWireguardBirthLink {
+            index: details.index,
+        })
+    }
+
+    fn send_set_link_alias(
+        &mut self,
+        index: u32,
+        alias: &str,
+        progress_deadline: HardDeadline,
+    ) -> Result<PendingMutationRequest, KernelError> {
+        let (message_type, flags, payload) = encode_set_link_alias(index, alias)?;
+        self.send_mutation_request(message_type, flags, &payload, progress_deadline)
+    }
+
+    fn marked_wireguard_birth_link(
+        &mut self,
+        resource: &DurableWireguardResource,
+        provisional: &ProvisionalWireguardBirthLink,
+        deadline: HardDeadline,
+    ) -> Result<MarkedWireguardBirthLink, KernelError> {
+        let details = self.link_details_by_index(provisional.index, deadline)?;
+        let marked = MarkedWireguardBirthLink {
+            index: provisional.index,
+        };
+        prove_marked_wireguard_birth_link(resource, &marked, &details)?;
+        Ok(marked)
+    }
+
+    fn cleanup_provisional_wireguard_link(
+        &mut self,
+        resource: &DurableWireguardResource,
+        provisional: &ProvisionalWireguardBirthLink,
         deadline: HardDeadline,
     ) -> Result<(), KernelError> {
-        let (message_type, flags, payload) = encode_create_wireguard_link(resource)?;
-        self.request_ack(message_type, flags, &payload, deadline)
+        let details = match self.link_details_by_index(provisional.index, deadline) {
+            Ok(details) => details,
+            Err(error) if error.is_errno(libc::ENODEV) => {
+                return self.prove_link_absent(resource.interface(), deadline);
+            }
+            Err(error) => return Err(error),
+        };
+        prove_cleanup_eligible_provisional_wireguard_birth_link(resource, provisional, &details)?;
+        self.delete_owned_link(details.index, resource.interface(), deadline)?;
+        self.prove_deleted_birth_link_absent(provisional.index, resource.interface(), deadline)
+    }
+
+    fn cleanup_alias_sent_wireguard_link(
+        &mut self,
+        resource: &DurableWireguardResource,
+        provisional: &ProvisionalWireguardBirthLink,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let details = match self.link_details_by_index(provisional.index, deadline) {
+            Ok(details) => details,
+            Err(error) if error.is_errno(libc::ENODEV) => {
+                return self.prove_link_absent(resource.interface(), deadline);
+            }
+            Err(error) => return Err(error),
+        };
+        prove_cleanup_eligible_alias_sent_wireguard_birth_link(resource, provisional, &details)?;
+        self.delete_owned_link(details.index, resource.interface(), deadline)?;
+        self.prove_deleted_birth_link_absent(provisional.index, resource.interface(), deadline)
+    }
+
+    fn cleanup_marked_wireguard_link(
+        &mut self,
+        resource: &DurableWireguardResource,
+        marked: &MarkedWireguardBirthLink,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let details = match self.link_details_by_index(marked.index, deadline) {
+            Ok(details) => details,
+            Err(error) if error.is_errno(libc::ENODEV) => {
+                return self.prove_link_absent(resource.interface(), deadline);
+            }
+            Err(error) => return Err(error),
+        };
+        prove_marked_wireguard_birth_link(resource, marked, &details)?;
+        self.delete_owned_link(details.index, resource.interface(), deadline)?;
+        self.prove_deleted_birth_link_absent(marked.index, resource.interface(), deadline)
     }
 
     fn move_link_to_namespace(
@@ -846,6 +1436,31 @@ impl NetlinkClient {
         }
     }
 
+    fn prove_link_index_absent(
+        &mut self,
+        index: u32,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        match self.link_details_by_index(index, deadline) {
+            Err(error) if error.is_errno(libc::ENODEV) => {
+                deadline.ensure_remaining()?;
+                Ok(())
+            }
+            Ok(_) => Err(KernelError::Invalid),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn prove_deleted_birth_link_absent(
+        &mut self,
+        index: u32,
+        name: &str,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        self.prove_link_index_absent(index, deadline)?;
+        self.prove_link_absent(name, deadline)
+    }
+
     fn link_index(&mut self, name: &str, deadline: HardDeadline) -> Result<u32, KernelError> {
         self.link_details(name, deadline).map(|(index, _)| index)
     }
@@ -857,6 +1472,35 @@ impl NetlinkClient {
     ) -> Result<(u32, Option<String>), KernelError> {
         let details = self.link_details_full(name, deadline)?;
         Ok((details.index, details.alias))
+    }
+
+    fn link_details_by_index(
+        &mut self,
+        index: u32,
+        deadline: HardDeadline,
+    ) -> Result<LinkDetails, KernelError> {
+        if index == 0 || index > i32::MAX as u32 {
+            return Err(KernelError::Invalid);
+        }
+        let payload = interface_info(index, 0, 0)?;
+        let (response, sequence) = self.request_reply(RTM_GETLINK, &payload, deadline)?;
+        validate_kernel_sender(&response.sender)?;
+        let response_frames = frames(&response.message)?;
+        if response_frames.len() != 1 {
+            return Err(KernelError::Malformed);
+        }
+        let frame = response_frames[0];
+        if read_u16(frame, 4) == Some(NLMSG_ERROR) {
+            parse_ack(&response, sequence, RTM_GETLINK, self.local_port_id)?;
+            return Err(KernelError::Malformed);
+        }
+        validate_kernel_header(frame, sequence, RTM_NEWLINK, self.local_port_id)?;
+        let details = parse_link_details_frame(frame)?;
+        if details.index != index {
+            return Err(KernelError::Malformed);
+        }
+        deadline.ensure_remaining()?;
+        Ok(details)
     }
 
     fn link_details_full(
@@ -938,8 +1582,12 @@ impl NetlinkClient {
 
 fn encode_create_wireguard_link(
     resource: &DurableWireguardResource,
+    requested_index: u32,
 ) -> Result<(u16, u16, Vec<u8>), KernelError> {
     validate_durable_wireguard_resource(resource)?;
+    if requested_index == 0 || requested_index > i32::MAX as u32 {
+        return Err(KernelError::Invalid);
+    }
     let mut link_info = Vec::with_capacity(32);
     push_bounded_string_attribute(
         &mut link_info,
@@ -947,34 +1595,39 @@ fn encode_create_wireguard_link(
         WG_GENL_NAME,
         MAX_LINK_KIND_BYTES,
     )?;
-    let mut link_attributes = Vec::with_capacity(128);
+    let mut link_attributes = Vec::with_capacity(64);
     push_bounded_string_attribute(
         &mut link_attributes,
         IFLA_IFNAME,
         resource.interface(),
         MAX_IFNAME_BYTES,
     )?;
-    push_bounded_string_attribute(
-        &mut link_attributes,
-        IFLA_IFALIAS,
-        resource.ownership_alias(),
-        MAX_IFALIAS_BYTES,
-    )?;
     push_attribute(
         &mut link_attributes,
         IFLA_LINKINFO | NLA_F_NESTED,
         &link_info,
     )?;
-    let mut payload = interface_info(0, 0, 0)?;
+    let mut payload = interface_info(requested_index, 0, 0)?;
     payload.extend_from_slice(&link_attributes);
     Ok((RTM_NEWLINK, NLM_F_CREATE | NLM_F_EXCL, payload))
+}
+
+fn encode_set_link_alias(index: u32, alias: &str) -> Result<(u16, u16, Vec<u8>), KernelError> {
+    if index == 0 || index > i32::MAX as u32 || !valid_string_field(alias, MAX_IFALIAS_BYTES) {
+        return Err(KernelError::Invalid);
+    }
+    let mut payload = interface_info(index, 0, 0)?;
+    // IFLA_IFALIAS is NLA_BINARY on SET so that an empty value can remove it. Match iproute2 and
+    // send the bounded alias bytes without a trailing NUL; GET replies use nla_put_string instead.
+    push_attribute(&mut payload, IFLA_IFALIAS, alias.as_bytes())?;
+    Ok((RTM_SETLINK, 0, payload))
 }
 
 fn encode_move_link_to_namespace(
     index: u32,
     target_namespace: RawFd,
 ) -> Result<(u16, u16, Vec<u8>), KernelError> {
-    if index == 0 || target_namespace < 0 {
+    if index == 0 || index > i32::MAX as u32 || target_namespace < 0 {
         return Err(KernelError::Invalid);
     }
     let mut payload = interface_info(index, 0, 0)?;
@@ -983,11 +1636,12 @@ fn encode_move_link_to_namespace(
         IFLA_NET_NS_FD,
         &target_namespace.to_ne_bytes(),
     )?;
+    push_attribute(&mut payload, IFLA_NEW_IFINDEX, &index.to_ne_bytes())?;
     Ok((RTM_NEWLINK, 0, payload))
 }
 
 fn encode_delete_link(index: u32) -> Result<(u16, u16, Vec<u8>), KernelError> {
-    if index == 0 {
+    if index == 0 || index > i32::MAX as u32 {
         return Err(KernelError::Invalid);
     }
     Ok((RTM_DELLINK, 0, interface_info(index, 0, 0)?))
@@ -1707,17 +2361,25 @@ mod tests {
         let resource = durable_resource(7, 11);
         let name = resource.interface();
         let alias = resource.ownership_alias();
+        let requested_index = requested_birth_ifindex(&resource).expect("requested ifindex");
+        assert!((BIRTH_LINK_IFINDEX_PREFIX..=i32::MAX as u32).contains(&requested_index));
+        assert_eq!(requested_index, requested_birth_ifindex(&resource).unwrap());
+        assert_ne!(
+            requested_index,
+            requested_birth_ifindex(&durable_resource(8, 12)).unwrap()
+        );
         let (message_type, flags, payload) =
-            encode_create_wireguard_link(&resource).expect("create encoding");
+            encode_create_wireguard_link(&resource, requested_index).expect("create encoding");
         assert_eq!(message_type, RTM_NEWLINK);
         assert_eq!(flags, NLM_F_CREATE | NLM_F_EXCL);
+        assert_eq!(read_u32(&payload, 4), Some(requested_index));
+        assert!(encode_create_wireguard_link(&resource, 0).is_err());
+        assert!(encode_create_wireguard_link(&resource, i32::MAX as u32 + 1).is_err());
         let top = attributes(&payload[16..]).expect("top-level attributes");
         assert!(top.iter().any(|(kind, value)| {
             *kind == IFLA_IFNAME && value.strip_suffix(&[0]) == Some(name.as_bytes())
         }));
-        assert!(top.iter().any(|(kind, value)| {
-            *kind == IFLA_IFALIAS && value.strip_suffix(&[0]) == Some(alias.as_bytes())
-        }));
+        assert!(top.iter().all(|(kind, _)| *kind != IFLA_IFALIAS));
         let link_info = top
             .iter()
             .find_map(|(kind, value)| (*kind == (IFLA_LINKINFO | NLA_F_NESTED)).then_some(*value))
@@ -1730,6 +2392,19 @@ mod tests {
         );
 
         let (message_type, flags, payload) =
+            encode_set_link_alias(17, alias).expect("alias encoding");
+        assert_eq!(message_type, RTM_SETLINK);
+        assert_eq!(flags, 0);
+        assert_eq!(read_u32(&payload, 4), Some(17));
+        let alias_attributes = attributes(&payload[16..]).expect("alias attributes");
+        assert_eq!(alias_attributes, [(IFLA_IFALIAS, alias.as_bytes())]);
+        assert!(encode_set_link_alias(0, alias).is_err());
+        assert!(encode_set_link_alias(i32::MAX as u32 + 1, alias).is_err());
+        assert!(encode_set_link_alias(17, "").is_err());
+        assert!(encode_set_link_alias(17, "marker\0suffix").is_err());
+        assert!(encode_set_link_alias(17, &"a".repeat(MAX_IFALIAS_BYTES + 1)).is_err());
+
+        let (message_type, flags, payload) =
             encode_move_link_to_namespace(17, 23).expect("move encoding");
         assert_eq!(message_type, RTM_NEWLINK);
         assert_eq!(flags, 0);
@@ -1740,10 +2415,41 @@ mod tests {
                 .iter()
                 .any(|(kind, value)| { *kind == IFLA_NET_NS_FD && *value == 23_i32.to_ne_bytes() })
         );
+        assert!(
+            attributes(&payload[16..])
+                .expect("move attributes")
+                .iter()
+                .any(|(kind, value)| {
+                    *kind == IFLA_NEW_IFINDEX && *value == 17_u32.to_ne_bytes()
+                })
+        );
         let (message_type, _, _) = encode_delete_link(17).expect("delete encoding");
         assert_eq!(message_type, RTM_DELLINK);
         assert!(encode_move_link_to_namespace(0, 23).is_err());
+        assert!(encode_move_link_to_namespace(i32::MAX as u32 + 1, 23).is_err());
         assert!(encode_move_link_to_namespace(17, -1).is_err());
+        assert!(encode_delete_link(i32::MAX as u32 + 1).is_err());
+    }
+
+    #[test]
+    fn birth_deadlines_reserve_reconciliation_then_cleanup_in_one_outer_budget() {
+        let outer = HardDeadline::after(Duration::from_secs(2)).expect("outer deadline");
+        let progress = outer
+            .before_tail(BIRTH_LINK_PROGRESS_TAIL)
+            .expect("progress cutoff");
+        let reconcile = outer
+            .before_tail(BIRTH_LINK_RECONCILE_TAIL)
+            .expect("reconcile cutoff");
+        assert!(progress.expires_at() < reconcile.expires_at());
+        assert!(reconcile.expires_at() < outer.expires_at());
+        assert_eq!(
+            outer.expires_at().duration_since(progress.expires_at()),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            outer.expires_at().duration_since(reconcile.expires_at()),
+            Duration::from_millis(250)
+        );
     }
 
     #[test]
@@ -1791,6 +2497,222 @@ mod tests {
         duplicate_alias[0..4].copy_from_slice(&new_length.to_ne_bytes());
         assert!(duplicate_alias.len() > length);
         assert!(parse_link_details_frame(&duplicate_alias).is_err());
+    }
+
+    #[test]
+    fn provisional_birth_identity_is_unmarked_down_exact_name_and_wireguard_kind() {
+        let resource = durable_resource(7, 11);
+        let exact = LinkDetails {
+            index: 17,
+            name: Some(resource.interface().to_owned()),
+            alias: None,
+            kind: Some(WG_GENL_NAME.to_owned()),
+            flags: 0,
+        };
+        assert!(prove_provisional_wireguard_birth_link(&resource, &exact).is_ok());
+        let provisional = ProvisionalWireguardBirthLink { index: 17 };
+        assert!(
+            prove_cleanup_eligible_provisional_wireguard_birth_link(
+                &resource,
+                &provisional,
+                &exact
+            )
+            .is_ok()
+        );
+        assert!(
+            prove_cleanup_eligible_alias_sent_wireguard_birth_link(&resource, &provisional, &exact)
+                .is_ok()
+        );
+
+        let mut marked = exact.clone();
+        marked.alias = Some(resource.ownership_alias().to_owned());
+        assert!(prove_provisional_wireguard_birth_link(&resource, &marked).is_err());
+        assert!(
+            prove_cleanup_eligible_provisional_wireguard_birth_link(
+                &resource,
+                &provisional,
+                &marked
+            )
+            .is_err()
+        );
+        assert!(
+            prove_cleanup_eligible_alias_sent_wireguard_birth_link(
+                &resource,
+                &provisional,
+                &marked
+            )
+            .is_ok()
+        );
+        let marked_owner = MarkedWireguardBirthLink { index: 17 };
+        assert!(prove_marked_wireguard_birth_link(&resource, &marked_owner, &marked).is_ok());
+        let wrong_marked_owner = MarkedWireguardBirthLink { index: 18 };
+        assert!(
+            prove_marked_wireguard_birth_link(&resource, &wrong_marked_owner, &marked).is_err()
+        );
+
+        for changed in [
+            LinkDetails {
+                index: 18,
+                ..exact.clone()
+            },
+            LinkDetails {
+                name: Some("vp-other".to_owned()),
+                ..exact.clone()
+            },
+            LinkDetails {
+                alias: Some("not-our-marker".to_owned()),
+                ..exact.clone()
+            },
+            LinkDetails {
+                kind: Some("dummy".to_owned()),
+                ..exact.clone()
+            },
+            LinkDetails {
+                flags: u32::try_from(libc::IFF_UP).expect("UP flag"),
+                ..exact.clone()
+            },
+        ] {
+            assert!(
+                prove_cleanup_eligible_provisional_wireguard_birth_link(
+                    &resource,
+                    &provisional,
+                    &changed
+                )
+                .is_err()
+            );
+            assert!(
+                prove_cleanup_eligible_alias_sent_wireguard_birth_link(
+                    &resource,
+                    &provisional,
+                    &changed
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn birth_cleanup_targets_preserve_each_identity_strength() {
+        let index = 17;
+        assert_eq!(
+            birth_cleanup_target(LiveBirthLinkState::Uncreated),
+            BirthCleanupTarget::ProveAbsent
+        );
+        assert_eq!(
+            birth_cleanup_target(LiveBirthLinkState::CreateSent(index)),
+            BirthCleanupTarget::Unmarked(index)
+        );
+        assert_eq!(
+            birth_cleanup_target(LiveBirthLinkState::CreateAcknowledged(index)),
+            BirthCleanupTarget::Unmarked(index)
+        );
+        assert_eq!(
+            birth_cleanup_target(LiveBirthLinkState::Provisional(index)),
+            BirthCleanupTarget::Unmarked(index)
+        );
+        assert_eq!(
+            birth_cleanup_target(LiveBirthLinkState::AliasSent(index)),
+            BirthCleanupTarget::AliasMayBeSet(index)
+        );
+        assert_eq!(
+            birth_cleanup_target(LiveBirthLinkState::Marked(index)),
+            BirthCleanupTarget::Marked(index)
+        );
+        assert_eq!(
+            birth_cleanup_target(LiveBirthLinkState::Moved),
+            BirthCleanupTarget::ProveAbsent
+        );
+    }
+
+    #[test]
+    fn birth_owner_transitions_retain_one_exact_requested_index() {
+        let resource = durable_resource(7, 11);
+        let mut owner = LiveWireguardLeaseOwner::claim(resource);
+        let index = requested_birth_ifindex(owner.resource()).expect("requested index");
+        assert!(!valid_birth_transition(
+            LiveBirthLinkState::Uncreated,
+            LiveBirthLinkState::Moved
+        ));
+        assert!(!valid_birth_transition(
+            LiveBirthLinkState::CreateSent(index),
+            LiveBirthLinkState::CreateAcknowledged(index + 1)
+        ));
+        assert!(valid_birth_transition(
+            LiveBirthLinkState::CreateSent(index),
+            LiveBirthLinkState::Uncreated
+        ));
+        assert!(valid_birth_transition(
+            LiveBirthLinkState::AliasSent(index),
+            LiveBirthLinkState::Provisional(index)
+        ));
+        for (expected, next) in [
+            (
+                LiveBirthLinkState::Uncreated,
+                LiveBirthLinkState::CreateSent(index),
+            ),
+            (
+                LiveBirthLinkState::CreateSent(index),
+                LiveBirthLinkState::CreateAcknowledged(index),
+            ),
+            (
+                LiveBirthLinkState::CreateAcknowledged(index),
+                LiveBirthLinkState::Provisional(index),
+            ),
+            (
+                LiveBirthLinkState::Provisional(index),
+                LiveBirthLinkState::AliasSent(index),
+            ),
+            (
+                LiveBirthLinkState::AliasSent(index),
+                LiveBirthLinkState::Marked(index),
+            ),
+            (LiveBirthLinkState::Marked(index), LiveBirthLinkState::Moved),
+        ] {
+            owner
+                .transition_birth(expected, next)
+                .expect("valid affine transition");
+            assert_eq!(owner.birth, next);
+        }
+        assert!(
+            owner
+                .transition_birth(
+                    LiveBirthLinkState::Marked(index),
+                    LiveBirthLinkState::Uncreated
+                )
+                .is_err()
+        );
+        assert_eq!(owner.birth, LiveBirthLinkState::Moved);
+    }
+
+    #[test]
+    fn late_positive_create_ack_retains_exact_unmarked_cleanup_authority() {
+        let mut late_owner = LiveWireguardLeaseOwner::claim(durable_resource(9, 13));
+        let late_index = requested_birth_ifindex(late_owner.resource()).expect("late index");
+        late_owner
+            .transition_birth(
+                LiveBirthLinkState::Uncreated,
+                LiveBirthLinkState::CreateSent(late_index),
+            )
+            .expect("full send retains exact index");
+        let observation = classify_mutation_acknowledgement(Ok(()), false);
+        assert!(matches!(
+            observation,
+            ObservedMutationAcknowledgement::Late(_)
+        ));
+        late_owner
+            .transition_birth(
+                LiveBirthLinkState::CreateSent(late_index),
+                LiveBirthLinkState::CreateAcknowledged(late_index),
+            )
+            .expect("late positive ACK retains authority");
+        assert_eq!(
+            late_owner.birth,
+            LiveBirthLinkState::CreateAcknowledged(late_index)
+        );
+        assert_eq!(
+            birth_cleanup_target(late_owner.birth),
+            BirthCleanupTarget::Unmarked(late_index)
+        );
     }
 
     #[test]
@@ -2000,6 +2922,27 @@ mod tests {
         let second = wrong.message.clone();
         wrong.message.extend_from_slice(&second);
         assert!(parse_ack(&wrong, TEST_SEQUENCE, TEST_REQUEST_TYPE, TEST_PORT_ID).is_err());
+    }
+
+    #[test]
+    fn mutation_acknowledgement_matrix_distinguishes_late_rejected_and_ambiguous() {
+        assert!(matches!(
+            classify_mutation_acknowledgement(Ok(()), true),
+            ObservedMutationAcknowledgement::Timely
+        ));
+        assert!(matches!(
+            classify_mutation_acknowledgement(Ok(()), false),
+            ObservedMutationAcknowledgement::Late(KernelError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(matches!(
+            classify_mutation_acknowledgement(Err(KernelError::Errno(libc::EBUSY)), false),
+            ObservedMutationAcknowledgement::Rejected(KernelError::Errno(libc::EBUSY))
+        ));
+        assert!(matches!(
+            classify_mutation_acknowledgement(Err(KernelError::Malformed), true),
+            ObservedMutationAcknowledgement::Ambiguous(KernelError::Malformed)
+        ));
     }
 
     #[test]

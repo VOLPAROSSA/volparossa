@@ -111,6 +111,28 @@ impl HardDeadline {
         self.expires_at
     }
 
+    /// Derive an earlier absolute deadline while preserving a tail of the original budget.
+    ///
+    /// Mutation code uses this to leave bounded reconciliation and cleanup time inside the one
+    /// caller-supplied operation deadline. The returned deadline never refreshes either clock.
+    pub(crate) fn before_tail(self, tail: Duration) -> io::Result<Self> {
+        if tail.is_zero() {
+            return Err(invalid_deadline());
+        }
+        let tail_ns = duration_nanos(tail)?;
+        let expires_at = self.expires_at.checked_sub(tail).ok_or_else(timed_out)?;
+        let monotonic_expires_at_ns = self
+            .monotonic_expires_at_ns
+            .checked_sub(tail_ns)
+            .ok_or_else(timed_out)?;
+        let deadline = Self {
+            expires_at,
+            monotonic_expires_at_ns,
+        };
+        deadline.ensure_remaining()?;
+        Ok(deadline)
+    }
+
     /// Return the remaining budget without extending the absolute deadline.
     pub(crate) fn remaining(self) -> io::Result<Duration> {
         self.remaining_at(Instant::now())
@@ -313,6 +335,21 @@ mod tests {
                 .kind(),
             io::ErrorKind::TimedOut
         );
+    }
+
+    #[test]
+    fn earlier_deadline_reserves_an_exact_tail_without_refreshing_outer_budget() {
+        let outer = HardDeadline::after(Duration::from_secs(2)).expect("outer deadline");
+        let inner = outer
+            .before_tail(Duration::from_millis(400))
+            .expect("reserved tail");
+        assert_eq!(
+            outer.expires_at().duration_since(inner.expires_at()),
+            Duration::from_millis(400)
+        );
+        assert!(inner.remaining().expect("inner remaining") < outer.remaining().expect("outer"));
+        assert!(outer.before_tail(Duration::ZERO).is_err());
+        assert!(outer.before_tail(Duration::from_secs(3)).is_err());
     }
 
     #[test]

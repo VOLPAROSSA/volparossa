@@ -666,9 +666,12 @@ single clean-build A01--A15 run; the score is not a release claim.
   The production server now installs a crate-private functional-alpha backend for exactly one
   Client context containing exactly one Client-role lease. Before mutation it selects one
   consistent direct underlay through bounded read-only state, then opens a process-owned
-  coordinator, initializes the authenticated child, creates the helper-derived WireGuard birth
-  link under a separate non-cloneable live owner in the parent and moves it into the pinned child
-  `NEWNET`. Child Prepare supplies only the
+  coordinator, initializes the authenticated child, exclusively creates the helper-derived
+  WireGuard birth link under a separate non-cloneable live owner at one deterministic high
+  ifindex in the parent, proves the provisional DOWN name/kind identity, sets and re-proves the
+  exact durable alias by that retained index, and moves it without renumbering into the pinned
+  child `NEWNET`. The outer deadline reserves separate response-reconciliation and cleanup tails.
+  Child Prepare supplies only the
   correlated kernel public key/port proof; the response adds the selected direct-underlay IP.
   Destroy dispatches the exact child operation and confirms worker termination, reap and registry
   purge before success. A server-owned driver schedules cancellation-safe exact expiry cleanup once

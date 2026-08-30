@@ -291,7 +291,7 @@ impl FunctionalAlphaLeaseBackend {
                 .as_raw_fd();
             entry.birth_may_exist = true;
             entry.phase = OpenLeasePhase::BirthMayExist;
-            kernel.create_and_move_wireguard(&entry.wireguard, target_namespace, deadline)
+            kernel.create_and_move_wireguard(&mut entry.wireguard, target_namespace, deadline)
         };
         if matches!(
             birth,
@@ -417,7 +417,7 @@ impl FunctionalAlphaLeaseBackend {
             if entry.birth_may_exist {
                 BirthNamespaceKernel::connect(deadline)
                     .and_then(|mut kernel| {
-                        kernel.delete_owned_wireguard(&entry.wireguard, deadline)
+                        kernel.delete_owned_wireguard(&mut entry.wireguard, deadline)
                     })
                     .is_ok()
             } else {

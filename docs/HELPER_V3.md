@@ -102,8 +102,13 @@ durable-journal path; transaction-wide crash/restart rollback is still absent. T
 server now selects a crate-private functional-alpha backend for exactly one Client context with
 exactly one `WireguardRole::Client` lease. It obtains a consistent read-only direct-underlay
 snapshot before mutation, opens a process-owned worker coordinator, initializes the authenticated
-child, creates the helper-derived WireGuard birth link in the parent and moves it into the pinned
-child `NEWNET`, then dispatches Prepare. Only the child's correlated kernel proof supplies the
+child, exclusively creates the helper-derived WireGuard birth link at one deterministic high
+ifindex in the parent, proves its provisional DOWN name/kind identity, sets the exact ownership
+alias by that index, re-proves the full marked identity, and requires the move to preserve the same
+index in the pinned child `NEWNET` before dispatching Prepare. The single outer deadline reserves
+separate reconciliation and cleanup tails; same-runtime owner state retains the exact index after
+every fully sent mutation. Only the
+child's correlated kernel proof supplies the
 public key and UDP port; the response combines that proof with the selected direct-underlay IP.
 Destroy sends the exact child operation and succeeds only after worker termination, reap and
 registry purge. The backend permits no second live context. Activate, Probe, transport acquisition,
@@ -993,8 +998,10 @@ owned unit. It never guesses that a same-named unit belongs to this run.
 The child opens its worker-local netlink sockets, activates loopback, and implements exact
 single-lease WireGuard `Prepare` and `Destroy`. The no-argument production server now dispatches it
 through the crate-private functional-alpha backend: for at most one live Client context at a time,
-containing exactly one Client-role lease, the parent creates the helper-derived birth link and moves it into the pinned
-child `NEWNET` before Prepare. Activate, Commit, peer configuration, routing, nftables, sysctl,
+containing exactly one Client-role lease, the parent exclusively creates and provisionally proves
+the helper-derived birth link at a deterministic retained ifindex, sets and re-proves its exact
+durable alias, and moves it without renumbering into the pinned child `NEWNET` before Prepare.
+Activate, Commit, peer configuration, routing, nftables, sysctl,
 socket-factory operations and every datapath remain rejected. The public `HelperEngine::new`
 constructor remains unavailable and does not select this backend.
 
