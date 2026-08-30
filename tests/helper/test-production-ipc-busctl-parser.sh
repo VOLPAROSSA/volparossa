@@ -34,6 +34,7 @@ trap 'exit 130' HUP INT TERM
 parser_functions=$temporary_directory/parser-functions.sh
 for function_name in \
     number_is_safe \
+    main_pid_property_is_safe \
     unit_name_is_safe \
     invocation_id_is_safe \
     unit_object_path \
@@ -45,7 +46,7 @@ do
         >>"$parser_functions"
 done
 
-[ "$(grep -c '^[_a-z][a-z0-9_]*() {$' "$parser_functions")" -eq 7 ] || {
+[ "$(grep -c '^[_a-z][a-z0-9_]*() {$' "$parser_functions")" -eq 8 ] || {
     printf '%s\n' 'the production bus parser functions cannot be isolated exactly' >&2
     exit 1
 }
@@ -94,6 +95,7 @@ case ${3:-} in
         [ "$5" = "$VOLPAROSSA_BUSCTL_FIXTURE_OBJECT_PATH" ] || exit 102
         case "$6:$7" in
             org.freedesktop.systemd1.Unit:InvocationID|\
+            org.freedesktop.systemd1.Service:ControlPID|\
             org.freedesktop.systemd1.Service:MainPID|\
             org.freedesktop.systemd1.Service:NFileDescriptorStore)
                 ;;
@@ -275,9 +277,16 @@ expect_failure 'valid u32 preceded by a second JSON document' \
     org.freedesktop.systemd1.Service NFileDescriptorStore
 
 set_property_fixture '{"type":"u","data":0}'
-expect_failure 'zero MainPID' unit_main_pid "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT"
+expect_success 0 'manager-unbound zero MainPID' \
+    unit_main_pid "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT"
+expect_success 0 'manager-unbound zero ControlPID' \
+    unit_u32_property "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT" \
+        org.freedesktop.systemd1.Service ControlPID
 set_property_fixture '{"type":"u","data":1}'
 expect_success 1 'one MainPID' unit_main_pid "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT"
+expect_success 1 'one ControlPID' \
+    unit_u32_property "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT" \
+        org.freedesktop.systemd1.Service ControlPID
 set_property_fixture '{"type":"u","data":4294967294}'
 expect_success 4294967294 'maximum safe MainPID' \
     unit_main_pid "$VOLPAROSSA_BUSCTL_FIXTURE_UNIT"

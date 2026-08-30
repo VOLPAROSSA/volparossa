@@ -153,6 +153,9 @@ printf '%s\n' \
     production-launch \
     production-observation \
     production-retirement \
+    restart-launch \
+    restart-observation \
+    restart-retirement \
     final-verification >"$expected_driver_phases"
 while IFS= read -r expected_driver_phase; do
     driver_phase_is_safe "$expected_driver_phase" || {
@@ -185,6 +188,7 @@ printf '%s\n' \
     report-times \
     report-generation \
     report-validation \
+    restart-report-validation \
     publication-fence \
     stage-retirement >"$expected_final_checkpoints"
 while IFS= read -r expected_final_checkpoint; do
@@ -230,7 +234,13 @@ exercise_gate_cleanup() (
     # shellcheck disable=SC2317
     retire_unit() { return "$retire_status"; }
     # shellcheck disable=SC2317
-    remove_temporary_stage() { return "$removal_status"; }
+    remove_temporary_stage() {
+        if [ "$removal_status" -eq 9 ]; then
+            printf '%s\n' 'unsafe-stage-removal-after-ambiguous-retirement' >&2
+            return 0
+        fi
+        return "$removal_status"
+    }
     cleanup_error=no
     structured_failure_reported=$structured
     if [ "$phase" = missing ]; then
@@ -260,7 +270,7 @@ expect_status 2 exercise_gate_cleanup invalid-phase missing no 2 0 0
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
 expect_status 2 exercise_gate_cleanup production-launch report-validation yes 2 0 0
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
-expect_status 1 exercise_gate_cleanup worker-retirement missing no 0 1 0
+expect_status 1 exercise_gate_cleanup worker-retirement missing no 0 1 9
 test ! -s "$last_stdout"
 test "$(cat "$last_stderr")" \
     = 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=worker-retirement'
@@ -1270,7 +1280,9 @@ for recovery_function in \
     unit_load_state \
     unit_active_state \
     adopt_tentative_unit \
-    recover_failed_worker_manager_binding
+    adopt_launched_tentative_unit \
+    recover_failed_worker_manager_binding \
+    recover_successful_restart_manager_binding
 do
     sed -n "/^$recovery_function() {$/,/^}$/p" "$gate" \
         >>"$worker_binding_recovery_functions"
@@ -1286,7 +1298,9 @@ for recovery_function in \
     unit_load_state \
     unit_active_state \
     adopt_tentative_unit \
-    recover_failed_worker_manager_binding
+    adopt_launched_tentative_unit \
+    recover_failed_worker_manager_binding \
+    recover_successful_restart_manager_binding
 do
     if [ "$(grep -c "^$recovery_function() {$" \
         "$worker_binding_recovery_functions")" -ne 1 ]; then
@@ -1298,6 +1312,80 @@ done
 sh -n "$worker_binding_recovery_functions"
 # shellcheck source=/dev/null
 . "$worker_binding_recovery_functions"
+
+# A launched no-block unit is still cleanup-owned while PID 1 temporarily
+# reports not-found. The retain form must therefore leave the complete affine
+# tuple byte-for-byte intact; the ordinary retirement form may forget it.
+exercise_tentative_not_found_disposition() (
+    [ "$#" -eq 1 ] || exit 98
+    not_found_disposition=$1
+    unit_name=volparossa-helper-live-proof-ABC123.service
+    unit_owned=no
+    unit_may_own=yes
+    unit_invocation_id=
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    expected_name=$unit_name
+    expected_marker=$unit_ownership_marker
+    interrupted=no
+    read -r exercise_pid _ </proc/self/stat
+    # Invoked through the extracted production adopter.
+    # shellcheck disable=SC2317
+    unit_load_state() {
+        if [ "$not_found_disposition" = interrupted-retain ]; then
+            kill -TERM "$exercise_pid"
+        fi
+        printf '%s\n' not-found
+    }
+    if [ "$not_found_disposition" = interrupted-retain ]; then
+        trap '[ "$unit_name" = "$expected_name" ] \
+            && [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ] \
+            && [ -z "$unit_invocation_id" ] \
+            && [ "$unit_ownership_marker" = "$expected_marker" ] \
+            || exit 89; interrupted=yes' TERM
+    fi
+    case $not_found_disposition in
+        retain|interrupted-retain)
+            adopt_tentative_unit retain || exit 97
+            [ "$unit_name" = "$expected_name" ] \
+                && [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ] \
+                && [ -z "$unit_invocation_id" ] \
+                && [ "$unit_ownership_marker" = "$expected_marker" ] \
+                || exit 96
+            ;;
+        forget)
+            adopt_tentative_unit || exit 97
+            [ -z "$unit_name" ] && [ "$unit_owned" = no ] \
+                && [ "$unit_may_own" = no ] \
+                && [ -z "$unit_invocation_id" ] \
+                && [ -z "$unit_ownership_marker" ] || exit 96
+            ;;
+        invalid)
+            if adopt_tentative_unit invalid; then
+                exit 95
+            fi
+            [ "$unit_name" = "$expected_name" ] \
+                && [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ] \
+                && [ -z "$unit_invocation_id" ] \
+                && [ "$unit_ownership_marker" = "$expected_marker" ] \
+                || exit 94
+            ;;
+        *) exit 93 ;;
+    esac
+    if [ "$not_found_disposition" = interrupted-retain ]; then
+        [ "$interrupted" = yes ] || exit 92
+    else
+        [ "$interrupted" = no ] || exit 92
+    fi
+)
+for not_found_disposition in retain interrupted-retain forget invalid; do
+    expect_status 0 exercise_tentative_not_found_disposition \
+        "$not_found_disposition"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'tentative not-found disposition emitted diagnostics: %s\n' \
+            "$not_found_disposition" >&2
+        exit 1
+    fi
+done
 
 # ShellCheck cannot resolve the extracted recovery and classifier reads of
 # these fixture globals or the indirect calls to the systemctl fixture.
@@ -1443,16 +1531,284 @@ not-found-success-return empty not-found failure worker-launch-status no
 nonzero-success empty exact success worker-launch-status yes
 EOF
 
+# A successful no-block systemd request may produce an exactly empty CLI
+# envelope. In that one case, bind through PID1's exact marker and invocation;
+# every nonempty/malformed envelope must fail before tentative adoption.
+# ShellCheck cannot resolve the fixture globals consumed by the extracted
+# manager-binding helper.
+# shellcheck disable=SC2034
+exercise_successful_restart_binding_recovery() (
+    [ "$#" -eq 4 ] || exit 98
+    restart_recovery_scenario=$1
+    expected_restart_recovery_status=$2
+    expected_restart_adoptions=$3
+    expected_restart_disposition=$4
+    temporary_stage=$temporary_directory/restart-binding-$restart_recovery_scenario
+    mkdir -m 0700 "$temporary_stage"
+    : >"$temporary_stage/systemd-run-restart.stdout"
+    : >"$temporary_stage/systemd-run-restart.stderr"
+    chmod 0600 "$temporary_stage/systemd-run-restart.stdout" \
+        "$temporary_stage/systemd-run-restart.stderr"
+
+    restart_run_status=0
+    restart_launch_captures_ok=yes
+    restart_launch_json_ok=no
+    restart_launch_stderr=empty
+    restart_launch_fresh=no
+    restart_launch_stdout=empty
+    restart_initial_invocation_id=
+    unit_name=volparossa-helper-live-proof-ABC123.service
+    unit_owned=no
+    unit_may_own=yes
+    unit_invocation_id=
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    production_invocation_id=ffffffffffffffffffffffffffffffff
+    restart_exact_invocation_id=0123456789abcdef0123456789abcdef
+    restart_adoptions=0
+    restart_capture_safe=yes
+    restart_adoption_shape=exact
+    restart_current=yes
+    restart_marker=yes
+    restart_interrupt=none
+    restart_interrupt_observed=no
+    read -r restart_exercise_pid _ </proc/self/stat
+
+    case $restart_recovery_scenario in
+        exact-empty) ;;
+        delayed-exact) restart_adoption_shape=not-found-once ;;
+        never-found) restart_adoption_shape=not-found ;;
+        wrong-marker) restart_marker=no ;;
+        wrong-marker-interrupt)
+            restart_marker=no
+            restart_interrupt=marker
+            ;;
+        unsafe-id) restart_adoption_shape=unsafe-id ;;
+        same-production)
+            production_invocation_id=$restart_exact_invocation_id
+            ;;
+        current-mismatch) restart_current=no ;;
+        current-mismatch-interrupt)
+            restart_current=no
+            restart_interrupt=current
+            ;;
+        nonzero-status) restart_run_status=1 ;;
+        unsafe-capture) restart_capture_safe=no ;;
+        nonempty-stderr)
+            printf '\n' >"$temporary_stage/systemd-run-restart.stderr"
+            restart_launch_stderr=nonempty
+            ;;
+        json-claimed) restart_launch_json_ok=yes ;;
+        fresh-claimed) restart_launch_fresh=yes ;;
+        dirty-owned)
+            unit_owned=yes
+            unit_invocation_id=$restart_exact_invocation_id
+            ;;
+        dirty-may-own) unit_may_own=no ;;
+        whitespace-stdout)
+            printf ' \n' >"$temporary_stage/systemd-run-restart.stdout"
+            restart_launch_stdout=nonempty
+            ;;
+        unit-only-stdout)
+            printf '%s\n' \
+                '{"unit":"volparossa-helper-live-proof-ABC123.service"}' \
+                >"$temporary_stage/systemd-run-restart.stdout"
+            restart_launch_stdout=unit-only
+            ;;
+        forged-unit-only-stdout)
+            printf '%s\n' \
+                '{"unit":"other.service"}' \
+                >"$temporary_stage/systemd-run-restart.stdout"
+            restart_launch_stdout=unit-only
+            ;;
+        malformed-stdout)
+            printf '%s\n' '{"unit":' \
+                >"$temporary_stage/systemd-run-restart.stdout"
+            restart_launch_stdout=nonempty
+            ;;
+        wrong-unit-stdout)
+            printf '%s\n' \
+                '{"invocation_id":"0123456789abcdef0123456789abcdef","unit":"other.service"}' \
+                >"$temporary_stage/systemd-run-restart.stdout"
+            restart_launch_stdout=nonempty
+            ;;
+        valid-json-stdout)
+            printf '%s\n' \
+                '{"invocation_id":"0123456789abcdef0123456789abcdef","unit":"volparossa-helper-live-proof-ABC123.service"}' \
+                >"$temporary_stage/systemd-run-restart.stdout"
+            restart_launch_stdout=nonempty
+            ;;
+        *) exit 97 ;;
+    esac
+
+    # Invoked indirectly by the extracted manager-binding recovery helper.
+    # shellcheck disable=SC2317
+    vp_capture_file_is_safe() {
+        [ "$restart_capture_safe" = yes ] \
+            && [ -f "$1" ] && [ ! -L "$1" ]
+    }
+    # shellcheck disable=SC2317
+    adopt_tentative_unit() {
+        [ "$#" -eq 1 ] && [ "$1" = retain ] || return 1
+        restart_adoptions=$((restart_adoptions + 1))
+        case $restart_adoption_shape in
+            exact)
+                unit_owned=yes
+                unit_may_own=no
+                unit_invocation_id=$restart_exact_invocation_id
+                ;;
+            not-found-once)
+                if [ "$restart_adoptions" -ne 1 ]; then
+                    unit_owned=yes
+                    unit_may_own=no
+                    unit_invocation_id=$restart_exact_invocation_id
+                fi
+                ;;
+            not-found) ;;
+            unsafe-id)
+                unit_owned=yes
+                unit_may_own=no
+                unit_invocation_id=unsafe
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    # shellcheck disable=SC2317
+    unit_invocation_is_current() {
+        if [ "$restart_interrupt" = current ] \
+            && [ "$restart_interrupt_observed" = no ]; then
+            kill -TERM "$restart_exercise_pid"
+        fi
+        [ "$restart_current" = yes ] \
+            && [ "$unit_invocation_id" = "$restart_exact_invocation_id" ]
+    }
+    # shellcheck disable=SC2317
+    unit_description_matches_marker() {
+        if [ "$restart_interrupt" = marker ] \
+            && [ "$restart_interrupt_observed" = no ]; then
+            kill -TERM "$restart_exercise_pid"
+        fi
+        [ "$restart_marker" = yes ]
+    }
+    # Invoked by the bounded launched-unit appearance loop.
+    # shellcheck disable=SC2317
+    sleep() {
+        [ "$#" -eq 1 ] && [ "$1" = 0.05 ]
+    }
+    if [ "$restart_interrupt" != none ]; then
+        trap '[ "$unit_owned" = yes ] && [ "$unit_may_own" = no ] \
+            && [ "$unit_invocation_id" = "$restart_exact_invocation_id" ] \
+            || exit 89; restart_interrupt_observed=yes' TERM
+    fi
+
+    if recover_successful_restart_manager_binding; then
+        observed_restart_recovery_status=0
+    else
+        observed_restart_recovery_status=$?
+    fi
+    [ "$observed_restart_recovery_status" -eq \
+        "$expected_restart_recovery_status" ] || exit 96
+    [ "$restart_adoptions" -eq "$expected_restart_adoptions" ] || exit 95
+    if [ "$restart_recovery_scenario" = fresh-claimed ]; then
+        [ "$restart_launch_fresh" = yes ] || exit 94
+    else
+        [ "$restart_launch_fresh" = no ] || exit 94
+    fi
+    if [ "$expected_restart_recovery_status" -eq 0 ]; then
+        [ "$restart_initial_invocation_id" = \
+            "$restart_exact_invocation_id" ] \
+            && [ "$unit_owned" = yes ] && [ "$unit_may_own" = no ] \
+            || exit 93
+    elif [ "$expected_restart_adoptions" -eq 0 ]; then
+        [ -z "$restart_initial_invocation_id" ] || exit 92
+    fi
+    if [ "$restart_interrupt" = none ]; then
+        [ "$restart_interrupt_observed" = no ] || exit 89
+    else
+        [ "$restart_interrupt_observed" = yes ] || exit 89
+    fi
+    case $expected_restart_disposition in
+        owned)
+            [ "$unit_owned" = yes ] && [ "$unit_may_own" = no ] \
+                && [ "$unit_invocation_id" = "$restart_exact_invocation_id" ] \
+                || exit 91
+            ;;
+        tentative)
+            [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ] \
+                && [ -z "$unit_invocation_id" ] \
+                && [ "$unit_name" = \
+                    volparossa-helper-live-proof-ABC123.service ] \
+                || exit 91
+            ;;
+        forgotten)
+            [ "$unit_owned" = no ] && [ "$unit_may_own" = no ] \
+                && [ -z "$unit_invocation_id" ] && [ -z "$unit_name" ] \
+                || exit 91
+            ;;
+        unowned)
+            [ "$unit_owned" = no ] && [ "$unit_may_own" = no ] \
+                && [ -z "$unit_invocation_id" ] \
+                && [ "$unit_name" = \
+                    volparossa-helper-live-proof-ABC123.service ] \
+                || exit 91
+            ;;
+        dirty)
+            [ "$unit_owned" = yes ] && [ "$unit_may_own" = yes ] \
+                && [ "$unit_invocation_id" = "$restart_exact_invocation_id" ] \
+                && [ "$unit_name" = \
+                    volparossa-helper-live-proof-ABC123.service ] \
+                || exit 91
+            ;;
+        *) exit 90 ;;
+    esac
+)
+while read -r restart_recovery_name restart_recovery_status restart_recovery_adoptions \
+    restart_recovery_disposition
+do
+    expect_status 0 exercise_successful_restart_binding_recovery \
+        "$restart_recovery_name" "$restart_recovery_status" \
+        "$restart_recovery_adoptions" "$restart_recovery_disposition"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'successful restart binding recovery emitted diagnostics: %s\n' \
+            "$restart_recovery_name" >&2
+        exit 1
+    fi
+done <<'EOF'
+exact-empty 0 1 owned
+unit-only-stdout 0 1 owned
+forged-unit-only-stdout 1 0 tentative
+delayed-exact 0 2 owned
+never-found 1 1000 tentative
+wrong-marker 1 1 tentative
+wrong-marker-interrupt 1 1 tentative
+unsafe-id 1 1 tentative
+same-production 1 1 tentative
+current-mismatch 1 1 tentative
+current-mismatch-interrupt 1 1 tentative
+nonzero-status 1 0 tentative
+unsafe-capture 1 0 tentative
+nonempty-stderr 1 0 tentative
+json-claimed 1 0 tentative
+fresh-claimed 1 0 tentative
+dirty-owned 1 0 dirty
+dirty-may-own 1 0 unowned
+whitespace-stdout 1 0 tentative
+malformed-stdout 1 0 tentative
+wrong-unit-stdout 1 0 tentative
+valid-json-stdout 1 0 tentative
+EOF
+
 # Exercise retirement through exact manager snapshots. The fixture accepts
 # only one five-property `systemctl show` call per observation, so collection
 # can be represented as a complete not-found state instead of occurring
 # between independent property reads. No host unit is created or mutated.
 retirement_state_machine_functions=$temporary_directory/retirement-state-machine-functions.sh
-for retirement_function in observe_unit_retirement_snapshot retire_unit; do
+for retirement_function in retire_failure_stage_is_safe \
+    observe_unit_retirement_snapshot retire_unit; do
     sed -n "/^$retirement_function() {$/,/^}$/p" "$gate" \
         >>"$retirement_state_machine_functions"
 done
-for retirement_function in observe_unit_retirement_snapshot retire_unit; do
+for retirement_function in retire_failure_stage_is_safe \
+    observe_unit_retirement_snapshot retire_unit; do
     if [ "$(grep -c "^$retirement_function() {$" \
         "$retirement_state_machine_functions")" -ne 1 ]; then
         printf 'retirement state-machine helper is not uniquely extractable: %s\n' \
@@ -1464,16 +1820,83 @@ sh -n "$retirement_state_machine_functions"
 # shellcheck source=/dev/null
 . "$retirement_state_machine_functions"
 
+for retirement_failure_stage in adoption identity initial-snapshot stop-request \
+    stop-wait reset-failed reset-wait fdstore-clean post-clean final-reset \
+    collection; do
+    retire_failure_stage_is_safe "$retirement_failure_stage"
+done
+for retirement_failure_stage in '' private-runtime-detail snapshot stop reset; do
+    if retire_failure_stage_is_safe "$retirement_failure_stage"; then
+        printf 'retirement substage allowlist accepted: %s\n' \
+            "$retirement_failure_stage" >&2
+        exit 1
+    fi
+done
+
+if ! awk '
+    /^retire_unit\(\) \{$/ { in_retire = 1; start = NR }
+    in_retire && /^    retire_failure_stage=adoption$/ { adoption = NR; adoption_count++ }
+    in_retire && /^    retire_failure_stage=identity$/ { identity = NR; identity_count++ }
+    in_retire && /^    retire_failure_stage=initial-snapshot$/ {
+        initial_snapshot = NR; initial_snapshot_count++
+    }
+    in_retire && /^    retire_failure_stage=stop-request$/ {
+        stop_request = NR; stop_request_count++
+    }
+    in_retire && /^    retire_failure_stage=stop-wait$/ {
+        stop_wait = NR; stop_wait_count++
+    }
+    in_retire && /^        retire_failure_stage=reset-failed$/ {
+        reset_failed = NR; reset_failed_count++
+    }
+    in_retire && /^        retire_failure_stage=reset-wait$/ {
+        reset_wait = NR; reset_wait_count++
+    }
+    in_retire && /^    retire_failure_stage=fdstore-clean$/ {
+        fdstore_clean = NR; fdstore_clean_count++
+    }
+    in_retire && /^    retire_failure_stage=post-clean$/ {
+        post_clean = NR; post_clean_count++
+    }
+    in_retire && /^    retire_failure_stage=final-reset$/ {
+        final_reset = NR; final_reset_count++
+    }
+    in_retire && /^    retire_failure_stage=collection$/ {
+        collection = NR; collection_count++
+    }
+    in_retire && /^}$/ { end = NR; in_retire = 0 }
+    END {
+        valid = start > 0 && adoption_count == 1 && identity_count == 1
+        valid = valid && initial_snapshot_count == 1 && stop_request_count == 1
+        valid = valid && stop_wait_count == 1 && reset_failed_count == 1
+        valid = valid && reset_wait_count == 1 && fdstore_clean_count == 1
+        valid = valid && post_clean_count == 1 && final_reset_count == 1
+        valid = valid && collection_count == 1 && end > 0
+        valid = valid && start < adoption && adoption < identity
+        valid = valid && identity < initial_snapshot
+        valid = valid && initial_snapshot < stop_request && stop_request < stop_wait
+        valid = valid && stop_wait < reset_failed && reset_failed < reset_wait
+        valid = valid && reset_wait < fdstore_clean && fdstore_clean < post_clean
+        valid = valid && post_clean < final_reset && final_reset < collection
+        valid = valid && collection < end
+        if (!valid) exit 1
+    }
+' "$gate"; then
+    printf '%s\n' 'retirement substages do not cover the exact state machine' >&2
+    exit 1
+fi
+
 # ShellCheck cannot resolve the fixture globals consumed by the extracted
 # retirement function or the dynamically dispatched systemctl/sleep mocks.
 # shellcheck disable=SC2034
 exercise_retirement_sequence() (
-    [ "$#" -eq 5 ] || exit 98
+    [ "$#" -eq 6 ] || exit 98
     retirement_scenario=$1
     expected_retirement_status=$2
     expected_retirement_disposition=$3
     expected_retirement_actions=$4
     expected_retirement_shows=$5
+    expected_retirement_failure_stage=$6
     retirement_stage=$temporary_directory/retirement-$retirement_scenario
     mkdir -m 0700 "$retirement_stage"
     retirement_sequence=$retirement_stage/snapshots
@@ -1489,6 +1912,15 @@ exercise_retirement_sequence() (
                 'loaded current active absent 0' \
                 'not-found absent inactive absent 0' \
                 >"$retirement_sequence"
+            ;;
+        tentative-successor-collected-after-stop)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'not-found absent inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        tentative-never-found)
+            : >"$retirement_sequence"
             ;;
         settled-then-collected)
             printf '%s\n' \
@@ -1551,6 +1983,12 @@ exercise_retirement_sequence() (
     unit_ownership_marker=volparossa-helper-live-proof-owner-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     retirement_other_invocation=ffffffffffffffffffffffffffffffff
     expected_show_call="show --no-pager --property=LoadState --property=InvocationID --property=ActiveState --property=Job --property=NFileDescriptorStore $unit_name"
+    if [ "$retirement_scenario" = tentative-successor-collected-after-stop ] \
+        || [ "$retirement_scenario" = tentative-never-found ]; then
+        unit_owned=no
+        unit_may_own=yes
+        unit_invocation_id=
+    fi
 
     # Invoked indirectly by the extracted retirement function.
     # shellcheck disable=SC2317
@@ -1559,6 +1997,22 @@ exercise_retirement_sequence() (
         retirement_operation=$1
         case $retirement_operation in
             show)
+                if [ "$*" = "show --property=LoadState --value $unit_name" ]; then
+                    if [ "$retirement_scenario" = tentative-never-found ]; then
+                        printf '%s\n' not-found
+                    else
+                        printf '%s\n' loaded
+                    fi
+                    return 0
+                fi
+                if [ "$*" = "show --property=Description --value $unit_name" ]; then
+                    printf '%s\n' "$unit_ownership_marker"
+                    return 0
+                fi
+                if [ "$*" = "show --property=InvocationID --value $unit_name" ]; then
+                    printf '%s\n' 0123456789abcdef0123456789abcdef
+                    return 0
+                fi
                 [ "$*" = "$expected_show_call" ] || return 1
                 observed_show_count=$(cat "$retirement_show_count") || return 1
                 observed_show_count=$((observed_show_count + 1))
@@ -1630,6 +2084,7 @@ exercise_retirement_sequence() (
         [ "$#" -eq 1 ] && [ "$1" = 0.05 ]
     }
 
+    retire_failure_stage=
     if retire_unit; then
         observed_retirement_status=0
     else
@@ -1637,6 +2092,10 @@ exercise_retirement_sequence() (
     fi
     [ "$observed_retirement_status" -eq "$expected_retirement_status" ] \
         || exit 96
+    if [ "$expected_retirement_failure_stage" != - ]; then
+        [ "$retire_failure_stage" = "$expected_retirement_failure_stage" ] \
+            || exit 96
+    fi
     case $expected_retirement_disposition in
         forgotten)
             [ -z "$unit_name" ] && [ "$unit_owned" = no ] \
@@ -1648,6 +2107,12 @@ exercise_retirement_sequence() (
                 && [ "$unit_owned" = yes ] && [ "$unit_may_own" = no ] \
                 && [ "$unit_invocation_id" \
                     = 0123456789abcdef0123456789abcdef ] || exit 95
+            ;;
+        tentative)
+            [ "$unit_name" = volparossa-helper-live-proof-A1b2C3.service ] \
+                && [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ] \
+                && [ -z "$unit_invocation_id" ] \
+                && [ -n "$unit_ownership_marker" ] || exit 95
             ;;
         *) exit 94 ;;
     esac
@@ -1662,25 +2127,199 @@ exercise_retirement_sequence() (
         || exit 92
 )
 while read -r retirement_name retirement_status retirement_disposition \
-    retirement_actions_expected retirement_shows_expected
+    retirement_actions_expected retirement_shows_expected \
+    retirement_failure_stage_expected
 do
     expect_status 0 exercise_retirement_sequence \
         "$retirement_name" "$retirement_status" "$retirement_disposition" \
-        "$retirement_actions_expected" "$retirement_shows_expected"
+        "$retirement_actions_expected" "$retirement_shows_expected" \
+        "$retirement_failure_stage_expected"
     if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
         printf 'retirement sequence emitted diagnostics: %s\n' \
             "$retirement_name" >&2
         exit 1
     fi
 done <<'EOF'
-collected-after-stop 0 forgotten stop 2
-settled-then-collected 0 forgotten stop,clean,reset 5
-failed-then-collected 0 forgotten stop,reset,clean,reset 5
-collected-after-clean 0 forgotten stop,clean 3
-stop-failed-collected 0 forgotten stop 2
-substituted-after-stop 1 retained stop 2
-malformed-snapshot 1 retained - 1
-never-collected 1 retained stop,clean,reset 1203
+collected-after-stop 0 forgotten stop 2 -
+tentative-successor-collected-after-stop 0 forgotten stop 2 -
+tentative-never-found 1 tentative - 0 adoption
+settled-then-collected 0 forgotten stop,clean,reset 5 -
+failed-then-collected 0 forgotten stop,reset,clean,reset 5 -
+collected-after-clean 0 forgotten stop,clean 3 -
+stop-failed-collected 0 forgotten stop 2 -
+substituted-after-stop 1 retained stop 2 stop-wait
+malformed-snapshot 1 retained - 1 initial-snapshot
+never-collected 1 retained stop,clean,reset 1203 collection
+EOF
+
+# A real TERM/HUP/INT path exits through cleanup. If PID 1 still reports a
+# status-0 transient launch as not-found for the full bounded window, cleanup
+# must fail while preserving the stage; deleting it could strand a unit that
+# appears after the driver has lost its bound files.
+interrupted_cleanup_stage_marker=$temporary_directory/interrupted-cleanup-stage-removed
+exercise_interrupted_launched_cleanup() (
+    [ "$#" -eq 1 ] || exit 98
+    interrupted_signal=$1
+    unit_name=volparossa-helper-live-proof-A1b2C3.service
+    unit_owned=no
+    unit_may_own=yes
+    unit_invocation_id=
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    cleanup_error=no
+    structured_failure_reported=yes
+    # Read indirectly by the extracted production cleanup function.
+    # shellcheck disable=SC2034
+    restart_successor_debugger_pid='' \
+        restart_successor_debugger_starttime='' restart_mount_keeper_pid='' \
+        restart_mount_keeper_starttime='' temporary_stage_identity=fixture
+    temporary_stage=$temporary_directory/interrupted-cleanup-stage
+    # Invoked by the real launched-unit adoption loop.
+    # shellcheck disable=SC2317
+    unit_load_state() { printf '%s\n' not-found; }
+    # shellcheck disable=SC2317
+    sleep() { [ "$#" -eq 1 ] && [ "$1" = 0.05 ]; }
+    # Invoked only if cleanup violates the retained-stage contract.
+    # shellcheck disable=SC2317
+    remove_temporary_stage() {
+        : >"$interrupted_cleanup_stage_marker"
+    }
+    # shellcheck disable=SC1090
+    . "$gate_cleanup_function"
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    read -r interrupted_cleanup_pid _ </proc/self/stat
+    kill -s "$interrupted_signal" "$interrupted_cleanup_pid"
+    exit 97
+)
+while read -r interrupted_signal interrupted_status; do
+    rm -f -- "$interrupted_cleanup_stage_marker"
+    expect_status "$interrupted_status" exercise_interrupted_launched_cleanup \
+        "$interrupted_signal"
+    if [ -e "$interrupted_cleanup_stage_marker" ] \
+        || [ -L "$interrupted_cleanup_stage_marker" ]; then
+        printf 'ambiguous interrupted launch removed its stage: %s\n' \
+            "$interrupted_signal" >&2
+        exit 1
+    fi
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'ambiguous interrupted launch emitted diagnostics: %s\n' \
+            "$interrupted_signal" >&2
+        exit 1
+    fi
+done <<'EOF'
+HUP 129
+INT 130
+TERM 143
+EOF
+
+# The production identity must be fully retired before the restart proof may
+# derive or publish a second transient unit name. Exercise the real transition
+# helper and prove every dirty affine precondition fails without changing any
+# of the guarded fields.
+restart_identity_function=$temporary_directory/restart-identity-function.sh
+sed -n '/^prepare_restart_unit_identity() {$/,/^}$/p' "$gate" \
+    >"$restart_identity_function"
+if [ "$(grep -c '^prepare_restart_unit_identity() {$' \
+    "$restart_identity_function")" -ne 1 ]; then
+    printf '%s\n' 'the restart identity transition is not uniquely extractable' >&2
+    exit 1
+fi
+sh -n "$restart_identity_function"
+# shellcheck source=/dev/null
+. "$restart_identity_function"
+
+# ShellCheck cannot resolve the fixture globals consumed by the extracted
+# restart identity transition.
+# shellcheck disable=SC2034
+exercise_restart_identity_transition() (
+    [ "$#" -eq 3 ] || exit 98
+    restart_identity_scenario=$1
+    expected_transition_status=$2
+    expected_restart_name=$3
+
+    stage_suffix=ABC123
+    production_unit_name=volparossa-helper-live-proof-ABC123.service
+    production_retirement_confirmed=yes
+    unit_name=
+    unit_owned=no
+    unit_may_own=no
+    unit_invocation_id=
+    unit_ownership_marker=
+
+    case $restart_identity_scenario in
+        success-a) ;;
+        success-other)
+            stage_suffix=zBC123
+            production_unit_name=volparossa-helper-live-proof-zBC123.service
+            ;;
+        unconfirmed) production_retirement_confirmed=no ;;
+        dirty-name) unit_name=$production_unit_name ;;
+        dirty-owned) unit_owned=yes ;;
+        dirty-may-own) unit_may_own=yes ;;
+        dirty-invocation)
+            unit_invocation_id=0123456789abcdef0123456789abcdef
+            ;;
+        dirty-marker)
+            unit_ownership_marker=volparossa-helper-live-proof-owner-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+            ;;
+        invalid-stage) stage_suffix=ABC12- ;;
+        invalid-production)
+            production_unit_name=volparossa-helper-live-proof-ABC12-.service
+            ;;
+        *) exit 97 ;;
+    esac
+
+    transition_before=$(printf '%s|%s|%s|%s|%s|%s' \
+        "$production_retirement_confirmed" "$unit_name" "$unit_owned" \
+        "$unit_may_own" "$unit_invocation_id" "$unit_ownership_marker") \
+        || exit 96
+    if prepare_restart_unit_identity; then
+        observed_transition_status=0
+    else
+        observed_transition_status=$?
+    fi
+    transition_after=$(printf '%s|%s|%s|%s|%s|%s' \
+        "$production_retirement_confirmed" "$unit_name" "$unit_owned" \
+        "$unit_may_own" "$unit_invocation_id" "$unit_ownership_marker") \
+        || exit 96
+
+    [ "$observed_transition_status" -eq "$expected_transition_status" ] \
+        || exit 95
+    if [ "$expected_transition_status" -eq 0 ]; then
+        [ "$unit_name" = "$expected_restart_name" ] \
+            && [ "$production_retirement_confirmed" = yes ] \
+            && [ "$unit_owned" = no ] && [ "$unit_may_own" = no ] \
+            && [ -z "$unit_invocation_id" ] \
+            && [ -z "$unit_ownership_marker" ] \
+            || exit 94
+    else
+        [ "$transition_after" = "$transition_before" ] || exit 93
+    fi
+)
+while read -r restart_identity_name expected_restart_identity_status \
+    expected_restart_identity_unit
+do
+    expect_status 0 exercise_restart_identity_transition \
+        "$restart_identity_name" "$expected_restart_identity_status" \
+        "$expected_restart_identity_unit"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'restart identity transition emitted diagnostics: %s\n' \
+            "$restart_identity_name" >&2
+        exit 1
+    fi
+done <<'EOF'
+success-a 0 volparossa-helper-live-proof-BBC123.service
+success-other 0 volparossa-helper-live-proof-ABC123.service
+unconfirmed 1 -
+dirty-name 1 -
+dirty-owned 1 -
+dirty-may-own 1 -
+dirty-invocation 1 -
+dirty-marker 1 -
+invalid-stage 1 -
+invalid-production 1 -
 EOF
 
 # Exercise the exact capability normalizer with Debian's awk implementation.
@@ -3828,7 +4467,8 @@ expected_preview=$temporary_directory/expected-preview
 printf '%s\n' \
     'VOLPAROSSA live worker-identity proof plan:' \
     '  require a disposable Debian 13 amd64 VM, root, and the exact systemd v257 manager;' \
-    '  bookend one unchanged clean Git revision and three exact staged artifact hashes;' \
+    '  bookend one unchanged clean Git revision and exact helper, probe, hook,' \
+    '    restart observer/launcher, and debugger artifact hashes;' \
     '  copy the already-built real helper into one validated root-only temporary stage;' \
     '  create synthetic, collision-free agent/worker/group records only inside that stage;' \
     '  bind account files plus the system bus socket read-only in two sequential invocations;' \
@@ -3858,6 +4498,7 @@ printf '%s\n' \
     '  stop, clean only its fdstore, and collect that exact first invocation;' \
     '  only after the unit is not-found, reuse its random name with a new exact marker and ID;' \
     '  run the argumentless production helper and fixed IPC probe inside the confined unit;' \
+    '  use one fixed no-argument launcher only to hold the restart successor before helper exec;' \
     '  require stable Bind identity, bounded malformed-frame and wire-shape rejection,' \
     '    exact peer PID/UID/GID rejection, stable socket inode/token metadata, and zero fdstore;' \
     '  create one fixed dummy underlay only inside the production PrivateNetwork namespace;' \
@@ -3939,6 +4580,7 @@ if ! awk '
         run_count++
         if (run_count == 1) first_run = NR
         if (run_count == 2) second_run = NR
+        if (run_count == 3) third_run = NR
     }
     /^worker_unit_name=\$unit_name$/ { first_identity_saved = NR }
     /^        unit_name=\$worker_unit_name$/ { name_reused = NR }
@@ -3946,12 +4588,63 @@ if ! awk '
     /VOLPAROSSA helper production IPC transient ownership marker v1/ {
         production_marker = NR
     }
+    /VOLPAROSSA helper singleton ExactPresent restart marker v1/ {
+        restart_marker = NR
+    }
+    /^    production_retirement_confirmed=no$/ {
+        production_retirement_init = NR
+    }
+    /^    production_unit_name=\$unit_name$/ { production_name_saved = NR }
+    second_run > 0 && /^    if ! retire_unit; then$/ \
+        && production_retirement == 0 { production_retirement = NR }
+    /failed '\''production unit retirement did not settle'\''/ {
+        production_retirement_failed = NR
+    }
+    /failed '\''production unit retirement retained affine ownership state'\''/ {
+        production_affine_failed = NR
+    }
+    /^    unit_name=\$production_unit_name$/ { production_name_restored = NR }
+    /^    production_retired_load_state=/ { production_not_found_observation = NR }
+    /! retired_runtime_is_absent "\$production_unit_name"/ {
+        production_runtime_fence = NR
+    }
+    /failed '\''production unit retirement fence did not settle'\''/ {
+        production_fence_failed = NR
+    }
+    production_fence_failed > 0 && production_ownership_forgotten == 0 \
+        && /^    forget_unit_ownership$/ {
+        production_ownership_forgotten = NR
+    }
+    /^    production_retirement_confirmed=yes$/ {
+        production_retirement_confirmed = NR
+    }
+    /^    prepare_restart_unit_identity \\$/ {
+        restart_identity_prepared = NR
+    }
+    /^    \[ "\$restart_initial_load_state" = not-found \]/ {
+        restart_not_found_required = NR
+    }
     END {
-        valid = run_count == 2 && first_run < first_identity_saved
+        valid = run_count == 3 && first_run < first_identity_saved
         valid = valid && first_identity_saved < name_reused
         valid = valid && name_reused < not_found_required
         valid = valid && not_found_required < production_marker
         valid = valid && production_marker < second_run
+        valid = valid && second_run < production_retirement_init
+        valid = valid && production_retirement_init < production_name_saved
+        valid = valid && production_name_saved < production_retirement
+        valid = valid && production_retirement < production_retirement_failed
+        valid = valid && production_retirement_failed < production_affine_failed
+        valid = valid && production_affine_failed < production_name_restored
+        valid = valid && production_name_restored < production_not_found_observation
+        valid = valid && production_not_found_observation < production_runtime_fence
+        valid = valid && production_runtime_fence < production_fence_failed
+        valid = valid && production_fence_failed < production_ownership_forgotten
+        valid = valid && production_ownership_forgotten < production_retirement_confirmed
+        valid = valid && production_retirement_confirmed < restart_identity_prepared
+        valid = valid && restart_identity_prepared < restart_not_found_required
+        valid = valid && restart_not_found_required < restart_marker
+        valid = valid && restart_marker < third_run
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -4306,6 +4999,12 @@ for required_contract in \
     'install -o root -g root -m 0600 /dev/null "$validator_stdout"' \
     'install -o root -g root -m 0600 /dev/null "$validator_stderr"' \
     '"$evidence_validator" "$report_path" >"$validator_stdout" 2>"$validator_stderr"' \
+    'vp_capture_file_is_safe "$restart_report_path"' \
+    'install -o root -g root -m 0600 /dev/null "$restart_validator_stdout"' \
+    'install -o root -g root -m 0600 /dev/null "$restart_validator_stderr"' \
+    'vp_capture_file_is_safe "$restart_validator_stdout"' \
+    'vp_capture_file_is_safe "$restart_validator_stderr"' \
+    '"$restart_evidence_validator" "$restart_report_path"' \
     '[ "$validator_status" -ne 0 ]' \
     '[ -s "$validator_stdout" ]' \
     '[ -s "$validator_stderr" ]' \
@@ -4325,6 +5024,16 @@ if grep -F '"$validator_stdout" "$validator_stderr"' "$gate" >/dev/null \
     || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$validator_stdout"' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$validator_stderr"' "$gate")" -ne 1 ]; then
     printf '%s\n' 'private validator captures are not created as two exact files' >&2
+    exit 1
+fi
+# These are literal gate-source contracts; expansion here would defeat them.
+# shellcheck disable=SC2016
+if grep -F '"$restart_validator_stdout" "$restart_validator_stderr"' \
+    "$gate" >/dev/null \
+    || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$restart_validator_stdout"' "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc 'install -o root -g root -m 0600 /dev/null "$restart_validator_stderr"' "$gate")" -ne 1 ]; then
+    printf '%s\n' \
+        'private restart-validator captures are not created as two exact files' >&2
     exit 1
 fi
 if ! awk '
@@ -4362,26 +5071,42 @@ fi
 if ! awk '
     /if \[ "\$proof_ok" != yes \]; then/ { proof_gate = NR }
     /final_source_commit=\$\(git / { source_revalidation = NR }
-    /^jq -n -S -c \\/ { report_generation = NR }
+    /^jq -n -S -c \\/ && report_generation == 0 { report_generation = NR }
     /^"\$evidence_validator" "\$report_path" >/ { report_validation = NR }
     /^validator_status=\$\?$/ { validator_status = NR }
     /if ! vp_capture_file_is_safe "\$validator_stdout"/ { validator_gate = NR }
     /validated_report=\$\(cat "\$report_path"\)/ { retained_report = NR }
+    /restart_report_path=\$temporary_stage\/helper-restart-exact-present-evidence-v1[.]json/ {
+        restart_generation = NR
+    }
+    /^"\$restart_evidence_validator" "\$restart_report_path" \\/ {
+        restart_validation = NR
+    }
+    /validated_restart_report=\$\(cat "\$restart_report_path"\)/ {
+        retained_restart_report = NR
+    }
     /publication_source_commit=\$\(git / { publication_fence = NR }
     /if ! remove_temporary_stage; then/ { stage_removal = NR }
     /^printf '\''%s\\n'\'' "\$validated_report"$/ { publication = NR }
+    /^printf '\''%s\\n'\'' "\$validated_restart_report"$/ {
+        restart_publication = NR
+    }
     END {
         valid = proof_gate > 0 && source_revalidation > 0 && report_generation > 0
         valid = valid && report_validation > 0 && validator_status > 0
         valid = valid && validator_gate > 0 && retained_report > 0
+        valid = valid && restart_generation > retained_report
+        valid = valid && restart_validation > restart_generation
+        valid = valid && retained_restart_report > restart_validation
         valid = valid && publication_fence > 0 && stage_removal > 0 && publication > 0
+        valid = valid && restart_publication > publication
         valid = valid && proof_gate < source_revalidation
         valid = valid && source_revalidation < report_generation
         valid = valid && report_generation < report_validation
         valid = valid && report_validation < validator_status
         valid = valid && validator_status < validator_gate
         valid = valid && validator_gate < retained_report
-        valid = valid && retained_report < publication_fence
+        valid = valid && retained_restart_report < publication_fence
         valid = valid && publication_fence < stage_removal
         valid = valid && stage_removal < publication
         if (!valid) exit 1
@@ -4390,8 +5115,8 @@ if ! awk '
     printf '%s\n' 'validated report publication is not ordered after proof and stage removal' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 2 ]; then
-    printf '%s\n' 'both transient helper invocations do not have the exact file-size limit' >&2
+if [ "$(grep -Fc -- '--property=LimitFSIZE=1048576' "$gate")" -ne 3 ]; then
+    printf '%s\n' 'all three transient helper invocations do not have the exact file-size limit' >&2
     exit 1
 fi
 if ! awk '
@@ -4416,6 +5141,7 @@ if ! awk '
                 && argument_line !~ /^--slice=/ \
                 && argument_line !~ /^--description=/ \
                 && argument_line !~ /^--service-type=/ \
+                && argument_line !~ /^--no-block([[:space:]]|\\|$)/ \
                 && argument_line !~ /^--remain-after-exit([[:space:]]|\\|$)/ \
                 && argument_line !~ /^--property=/) invalid++
         } else if (argument_line !~ /^\/usr\/bin\/setpriv([[:space:]]|$)/ \
@@ -4423,12 +5149,14 @@ if ! awk '
             && argument_line !~ /^2>/) invalid++
         if (index($0, "--ignore-failure") > 0 \
             || index($0, "--collect") > 0 \
-            || index($0, "--no-block") > 0 \
             || index($0, "--wait") > 0 \
             || index($0, "--pipe") > 0 \
             || index($0, "--pty") > 0 \
             || index($0, "--scope") > 0 \
             || index($0, "--shell") > 0) invalid++
+
+        if (index($0, "--no-block") > 0) no_block_assignments[run_count]++
+        if ($0 ~ /^[[:space:]]*--no-block \\$/) exact_no_block[run_count]++
 
         if (index($0, "--service-type=") > 0) type_assignments[run_count]++
         if ($0 ~ /^[[:space:]]*--service-type=exec \\$/) exact_types[run_count]++
@@ -4456,6 +5184,9 @@ if ! awk '
         if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=180s \\$/) {
             exact_production_runtime[run_count]++
         }
+        if ($0 ~ /^[[:space:]]*--property=RuntimeMaxSec=240s \\$/) {
+            exact_restart_runtime[run_count]++
+        }
 
         if ($0 !~ /\\[[:space:]]*$/) {
             in_run = 0
@@ -4463,8 +5194,8 @@ if ! awk '
         }
     }
     END {
-        valid = !in_run && invalid == 0 && run_count == 2 && run_end_count == 2
-        for (run = 1; run <= 2; run++) {
+        valid = !in_run && invalid == 0 && run_count == 3 && run_end_count == 3
+        for (run = 1; run <= 3; run++) {
             valid = valid && type_assignments[run] == 1 && exact_types[run] == 1
             valid = valid && collect_assignments[run] == 1
             valid = valid && exact_collect_modes[run] == 1
@@ -4472,12 +5203,22 @@ if ! awk '
         }
         valid = valid && remain_assignments[1] == 1 && exact_remain[1] == 1
         valid = valid && remain_assignments[2] == 0 && exact_remain[2] == 0
+        valid = valid && remain_assignments[3] == 0 && exact_remain[3] == 0
         valid = valid && slice_assignments[1] == 1 && exact_worker_slice[1] == 1
         valid = valid && slice_assignments[2] == 1 && exact_worker_slice[2] == 1
+        valid = valid && slice_assignments[3] == 1 && exact_worker_slice[3] == 1
+        valid = valid && no_block_assignments[1] == 0 && exact_no_block[1] == 0
+        valid = valid && no_block_assignments[2] == 0 && exact_no_block[2] == 0
+        valid = valid && no_block_assignments[3] == 1 && exact_no_block[3] == 1
         valid = valid && exact_worker_runtime[1] == 1
         valid = valid && exact_worker_runtime[2] == 0
+        valid = valid && exact_worker_runtime[3] == 0
         valid = valid && exact_production_runtime[1] == 0
         valid = valid && exact_production_runtime[2] == 1
+        valid = valid && exact_production_runtime[3] == 0
+        valid = valid && exact_restart_runtime[1] == 0
+        valid = valid && exact_restart_runtime[2] == 0
+        valid = valid && exact_restart_runtime[3] == 1
         if (!valid) exit 1
     }
 ' "$gate"; then
@@ -4551,8 +5292,8 @@ for exact_cgroup_property in \
     "--property='SystemCallFilter=@system-service @network-io seccomp'" \
     "--property='SystemCallFilter=~@mount'"
 do
-    if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 2 ]; then
-        printf 'both transient helper invocations lack exact cgroup isolation: %s\n' \
+    if [ "$(grep -Fc -- "$exact_cgroup_property" "$gate")" -ne 3 ]; then
+        printf 'all three transient helper invocations lack exact cgroup isolation: %s\n' \
             "$exact_cgroup_property" >&2
         exit 1
     fi
@@ -4566,6 +5307,7 @@ transient_slice_contract_is_exact() {
             slice_assignment++
             if (slice_assignment == 1) worker_slice_assignment_line = NR
             if (slice_assignment == 2) production_slice_assignment_line = NR
+            if (slice_assignment == 3) restart_slice_assignment_line = NR
         }
         /^if capture_unit_property ActiveState "\$temporary_stage\/unit-active-state"; then$/ {
             terminal_read++
@@ -4608,7 +5350,7 @@ transient_slice_contract_is_exact() {
             retirement_line = NR
         }
         END {
-            valid = slice_assignment == 2 && terminal_read == 1
+            valid = slice_assignment == 3 && terminal_read == 1
             valid = valid && worker_slice_read == 1 && worker_slice_requirement == 1
             valid = valid && terminal_control_group_read == 1
             valid = valid && terminal_control_group_empty == 1 && cgroup_derivation == 1
@@ -4626,6 +5368,7 @@ transient_slice_contract_is_exact() {
             valid = valid && production_slice_assignment_line < production_slice_read_line
             valid = valid && production_slice_read_line < production_slice_requirement_line
             valid = valid && production_slice_requirement_line < production_control_group_read_line
+            valid = valid && production_control_group_read_line < restart_slice_assignment_line
             if (!valid) exit 1
         }
     ' "$worker_slice_source"
@@ -4685,21 +5428,21 @@ do
         exit 1
     fi
 done
-if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 2 ] \
+if [ "$(grep -Fc -- '--property=RestrictSUIDSGID=no' "$gate")" -ne 3 ] \
     || grep -F -- '--property=RestrictSUIDSGID=yes' "$gate" >/dev/null \
     || [ "$(grep -Fc -- \
         "capture_unit_property RestrictSUIDSGID \\" "$gate")" -ne 2 ] \
     || [ "$(grep -Fc -- 'restrict_suid_sgid" != no ]' "$gate")" -ne 2 ]; then
     printf '%s\n' \
-        'both transient helpers must disable and read back the v257 openat2-incompatible restriction' >&2
+        'all transient helpers must disable the v257 openat2-incompatible restriction' >&2
     exit 1
 fi
 if grep -F -- 'ProtectControlGroups=' "$gate" >/dev/null; then
     printf '%s\n' 'a transient helper still assigns the boolean-only legacy cgroup property' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 2 ]; then
-    printf '%s\n' 'both transient helper invocations lack the exact fixed executable search path' >&2
+if [ "$(grep -Fc -- "--property='ExecSearchPath=/usr/sbin /usr/bin /sbin /bin'" "$gate")" -ne 3 ]; then
+    printf '%s\n' 'all three transient helper invocations lack the exact fixed executable search path' >&2
     exit 1
 fi
 # These are literal gate-source contracts; expansion here would defeat the checks.
@@ -4712,8 +5455,8 @@ if [ "$(grep -Fc 'notify_socket=/run/systemd/notify' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc "!= 'socket:0:0:777:1' ]; then" "$gate")" -ne 1 ] \
     || [ "$(grep -Fc 'notify_socket_bind="$notify_socket:$notify_socket:norbind"' \
         "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc '$notify_socket_bind' "$gate")" -ne 2 ]; then
-    printf '%s\n' 'the exact canonical systemd notify-socket preflight and two binds are not pinned' >&2
+    || [ "$(grep -Fc '$notify_socket_bind' "$gate")" -ne 3 ]; then
+    printf '%s\n' 'the exact canonical systemd notify-socket preflight and three binds are not pinned' >&2
     exit 1
 fi
 # These are literal source assignments; expansion here would defeat the check.
@@ -4734,6 +5477,9 @@ if [ "$(grep -Fc \
     "$gate")" -ne 1 ] \
     || [ "$(grep -Fc \
         '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-production \' \
+        "$gate")" -ne 1 ] \
+    || [ "$(grep -Fc \
+        '/usr/bin/setpriv --regid="$agent_gid" --groups="$agent_gid" -- /run/volparossa-helper-restart-launcher \' \
         "$gate")" -ne 1 ]; then
     printf '%s\n' 'transient helper credential trampolines are not exact' >&2
     exit 1
@@ -4762,9 +5508,9 @@ unit_credential_source_contract_is_exact() {
             }
         }
         END {
-            valid = user == 2 && exact_user == 2
-            valid = valid && group == 2 && exact_group == 2
-            valid = valid && supplementary == 2 && exact_supplementary == 2
+            valid = user == 3 && exact_user == 3
+            valid = valid && group == 3 && exact_group == 3
+            valid = valid && supplementary == 3 && exact_supplementary == 3
             if (!valid) exit 1
         }
     ' "$credential_contract_source"
@@ -4807,7 +5553,7 @@ if [ "$(grep -Fc 'setpriv_path=/usr/bin/setpriv' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc '[ "$(command -v setpriv)" != "$setpriv_path" ]' "$gate")" -ne 1 ] \
     || [ "$(grep -Fc "stat -Lc '%F:%u:%g:%a:%h' \"\$setpriv_path\" 2>/dev/null || true" \
         "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc "!= 'regular file:0:0:755:1' ]; then" "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc "!= 'regular file:0:0:755:1' ]; then" "$gate")" -ne 3 ] \
     || [ "$(grep -Fc \
         "blocked 'the fixed root-owned setpriv credential trampoline is unavailable'" \
         "$gate")" -ne 1 ]; then
@@ -4827,10 +5573,10 @@ if [ "$(grep -Fc 'busctl_path=/usr/bin/busctl' "$gate")" -ne 1 ] \
     exit 1
 fi
 for cgroup_assignment_contract in \
-    'ProtectControlGroupsEx=:2' \
-    'Delegate=:2' \
-    'PrivatePIDs=:2' \
-    'SystemCallFilter=:4'
+    'ProtectControlGroupsEx=:3' \
+    'Delegate=:3' \
+    'PrivatePIDs=:3' \
+    'SystemCallFilter=:6'
 do
     assignment_key=${cgroup_assignment_contract%:*}
     expected_count=${cgroup_assignment_contract##*:}
@@ -4865,7 +5611,7 @@ fi
 # These patterns are also literal hook-source contracts; shell expansion would weaken the check.
 # shellcheck disable=SC2016
 if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 7 ] \
-    || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 4 ] \
+    || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 5 ] \
     || [ "$(grep -Fc 'unit_fdstore_prior_custody_is_absent' "$ipc_hook")" -ne 4 ] \
     || [ "$(grep -Fc 'fdstore_dump_exact_custody_name' "$ipc_hook")" -ne 2 ] \
     || [ "$(grep -Fc 'prove-settled-journal' "$ipc_hook")" -ne 2 ] \
@@ -4873,7 +5619,7 @@ if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 7 ] \
         'hook_descriptor_status_flags=$((hook_descriptor_status_flags & ~524288 & ~32768))' \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' \
-        'production hook does not bind all three active and settled custody cycles exactly' >&2
+        'production hook does not bind all active, restart and settled custody cycles exactly' >&2
     exit 1
 fi
 
@@ -4885,12 +5631,15 @@ hook_launch_parser_functions=$temporary_directory/hook-launch-parser-functions.s
     sed -n '/^systemd_exec_record_from_json() {$/,/^}$/p' "$ipc_hook"
     sed -n '/^process_starttime_from_stat() {$/,/^}$/p' "$ipc_hook"
     sed -n '/^capture_process_starttime() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^capture_traced_process_starttime() {$/,/^}$/p' "$ipc_hook"
 } >"$hook_launch_parser_functions"
 if [ "$(grep -c '^systemd_exec_record_from_json() {$' \
         "$hook_launch_parser_functions")" -ne 1 ] \
     || [ "$(grep -c '^process_starttime_from_stat() {$' \
         "$hook_launch_parser_functions")" -ne 1 ] \
     || [ "$(grep -c '^capture_process_starttime() {$' \
+        "$hook_launch_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^capture_traced_process_starttime() {$' \
         "$hook_launch_parser_functions")" -ne 1 ]; then
     printf '%s\n' 'production launch parsers are not uniquely extractable' >&2
     exit 1
@@ -4906,15 +5655,35 @@ exercise_hook_launch_parsers() (
         esac
     }
     production_helper=/run/volparossa-helper-production
+    restart_launcher=/run/volparossa-helper-restart-launcher
     # shellcheck disable=SC1090
     . "$hook_launch_parser_functions"
     basic='{"type":"a(sasbttttuii)","data":[["/usr/bin/setpriv",["/usr/bin/setpriv","--regid=61000","--groups=61000","--","/run/volparossa-helper-production"],false,123456789,234567890,0,0,4242,0,0]]}'
     extended='{"type":"a(sasasttttuii)","data":[["/usr/bin/setpriv",["/usr/bin/setpriv","--regid=61000","--groups=61000","--","/run/volparossa-helper-production"],[],123456789,234567890,0,0,4242,0,0]]}'
     expected='systemd-launch-v1=pid:4242;gid:61000;start-realtime:123456789;start-monotonic:234567890'
     [ "$(systemd_exec_record_from_json \
-        "$basic" basic 4242 61000 'a(sasbttttuii)')" = "$expected" ]
+        "$basic" basic 4242 61000 'a(sasbttttuii)' \
+        "$production_helper")" = "$expected" ]
     [ "$(systemd_exec_record_from_json \
-        "$extended" extended 4242 61000 'a(sasasttttuii)')" = "$expected" ]
+        "$extended" extended 4242 61000 'a(sasasttttuii)' \
+        "$production_helper")" = "$expected" ]
+    restart_basic=$(printf '%s' "$basic" \
+        | sed 's#/run/volparossa-helper-production#/run/volparossa-helper-restart-launcher#')
+    [ "$(systemd_exec_record_from_json \
+        "$restart_basic" basic 4242 61000 'a(sasbttttuii)' \
+        "$restart_launcher")" = "$expected" ]
+    if systemd_exec_record_from_json \
+        "$basic" basic 4242 61000 'a(sasbttttuii)' \
+        "$restart_launcher" >/dev/null 2>&1 \
+        || systemd_exec_record_from_json \
+            "$restart_basic" basic 4242 61000 'a(sasbttttuii)' \
+            "$production_helper" >/dev/null 2>&1 \
+        || systemd_exec_record_from_json \
+            "$basic" basic 4242 61000 'a(sasbttttuii)' \
+            /usr/bin/env >/dev/null 2>&1; then
+        printf '%s\n' 'production launch parser accepted a substituted entrypoint' >&2
+        exit 1
+    fi
     for mutation in wrong-path wrong-argument wrong-gid wrong-pid wrong-type \
         wrong-flag nonzero-stop nonzero-status duplicate-document
     do
@@ -4931,7 +5700,8 @@ exercise_hook_launch_parsers() (
             *) exit 99 ;;
         esac
         if systemd_exec_record_from_json \
-            "$candidate" basic 4242 61000 'a(sasbttttuii)' >/dev/null 2>&1; then
+            "$candidate" basic 4242 61000 'a(sasbttttuii)' \
+            "$production_helper" >/dev/null 2>&1; then
             printf 'production launch parser accepted mutation: %s\n' "$mutation" >&2
             exit 1
         fi
@@ -4946,6 +5716,20 @@ exercise_hook_launch_parsers() (
     [ "$(process_starttime_from_stat "$valid_stat" 4242)" = 98765 ]
     embedded_close_stat=$(printf '%s' "$valid_stat" | sed 's/worker ) name/worker ) name ) tail/')
     [ "$(process_starttime_from_stat "$embedded_close_stat" 4242)" = 98765 ]
+    traced_stat=$(printf '%s' "$valid_stat" | sed 's/) S /) t /')
+    [ "$(process_starttime_from_stat "$traced_stat" 4242 traced)" = 98765 ]
+    if process_starttime_from_stat "$traced_stat" 4242 >/dev/null 2>&1 \
+        || process_starttime_from_stat "$valid_stat" 4242 traced \
+            >/dev/null 2>&1 \
+        || process_starttime_from_stat "$traced_stat" 4242 active \
+            >/dev/null 2>&1 \
+        || process_starttime_from_stat \
+            "$(printf '%s' "$valid_stat" | sed 's/) S /) T /')" \
+            4242 traced >/dev/null 2>&1; then
+        printf '%s\n' \
+            'process starttime parser did not isolate the exact ptrace stop' >&2
+        exit 1
+    fi
     for invalid_stat in \
         "$(printf '%s' "$valid_stat" | sed 's/^4242 /4243 /')" \
         "$(printf '%s' "$valid_stat" | sed 's/) S /) Z /')" \
@@ -4963,6 +5747,11 @@ exercise_hook_launch_parsers() (
     case $current_starttime in
         ''|0|0*|*[!0-9]*) exit 1 ;;
     esac
+    if capture_traced_process_starttime "$$" >/dev/null 2>&1; then
+        printf '%s\n' 'traced starttime capture accepted an active process' >&2
+        exit 1
+    fi
+
 )
 exercise_hook_launch_parsers || {
     printf '%s\n' 'production launch parser behavior is not exact' >&2
@@ -5494,7 +6283,7 @@ done
 if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
-        "$ipc_hook")" -ne 19 ] \
+        "$ipc_hook")" -ne 21 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
@@ -6443,7 +7232,7 @@ test ! -s "$last_stdout" && test ! -s "$last_stderr"
 # shellcheck disable=SC2016
 if [ "$(grep -Fc 'wait "$hook_functional_failure_pid"' "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc 'wait "$hook_functional_failure_pid"; then' "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 6 ]; then
+    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 7 ]; then
     printf '%s\n' 'functional probe failures are not observed through exact child waits' >&2
     exit 1
 fi
@@ -6465,9 +7254,9 @@ if [ "$(grep -Fc -- '--property=RuntimeMaxSec=180s' "$gate")" -ne 1 ]; then
     printf '%s\n' 'production IPC invocation does not have one exact runtime limit' >&2
     exit 1
 fi
-if [ "$(grep -Fc -- '--property=StandardOutput=null' "$gate")" -ne 1 ] \
-    || [ "$(grep -Fc -- '--property=StandardError=null' "$gate")" -ne 1 ]; then
-    printf '%s\n' 'production IPC invocation does not have exact null output streams' >&2
+if [ "$(grep -Fc -- '--property=StandardOutput=null' "$gate")" -ne 2 ] \
+    || [ "$(grep -Fc -- '--property=StandardError=null' "$gate")" -ne 2 ]; then
+    printf '%s\n' 'production IPC and restart invocations do not have exact null output streams' >&2
     exit 1
 fi
 # These are literal source paths; expansion here would defeat the check.
@@ -6487,6 +7276,7 @@ for required_hook_contract in \
     'cleanup_token=$runtime_directory/helper.cleanup-token' \
     'probe=/run/volparossa-helper-production-ipc-probe' \
     'production_helper=/run/volparossa-helper-production' \
+    'restart_launcher=/run/volparossa-helper-restart-launcher' \
     'helper_bootstrap_capability_mask=00000000002031e0' \
     "'directory:0:0:2700'" \
     'systemd_exec_record_from_json() {' \
@@ -6494,7 +7284,9 @@ for required_hook_contract in \
     '--arg expected_path /usr/bin/setpriv' \
     '--arg expected_regid "--regid=$hook_exec_gid"' \
     '--arg expected_groups "--groups=$hook_exec_gid"' \
+    '--arg expected_entrypoint "$hook_exec_expected_entrypoint"' \
     'capture_systemd_launch_contract() {' \
+    'yes) hook_launch_entrypoint=$restart_launcher ;;' \
     'org.freedesktop.systemd1.Service' \
     'ExecStart 2>/dev/null)' \
     'ExecStartEx 2>/dev/null)' \
@@ -7411,7 +8203,7 @@ if ! awk '
 fi
 if ! awk '
     /^run_functional_client_lease_probe\(\) \{$/ { in_functional = 1; next }
-    /^validate_runtime_metadata\(\) \{$/ { in_functional = 0 }
+    /^restart_record_line\(\) \{$/ { in_functional = 0 }
     in_functional && /private_network_is_pristine/ {
         pristine_count++
         if (pristine_count == 1) pristine_before = NR
@@ -7499,6 +8291,26 @@ if ! awk '
     in_functional && /advance_start_failure_stage functional-client-cleanup/ {
         client_cleanup_stage = NR
     }
+    in_functional && /publish_restart_initial_release_authorized/ {
+        exact_release_authorized = NR
+    }
+    in_functional && /hook_restart_termination_main=\$\(unit_main_pid/ {
+        exact_main_wait = NR
+    }
+    in_functional && exact_main_wait > 0 && exact_ack == 0 \
+        && /observe_functional_probe_failure/ {
+        exact_failure_observe = NR
+    }
+    in_functional && exact_failure_observe > 0 && exact_ack == 0 \
+        && /probe_output_is_exact/ {
+        exact_ready_only = NR
+    }
+    in_functional && /publish_and_wait_for_restart_initial_failure_ack/ {
+        exact_ack = NR
+    }
+    in_functional && exact_ack > 0 && /^                return 1$/ {
+        exact_return = NR
+    }
     in_functional && /advance_start_failure_stage functional-exit-ready/ {
         exit_ready_stage = NR
     }
@@ -7567,17 +8379,19 @@ if ! awk '
     in_functional && /helper_has_no_children/ { no_children = NR }
     in_functional && /worker_process_fd_is_retired 8/ {
         retired_count++
-        if (retired_count == 1) client_retired = NR
-        if (retired_count == 2) exit_retired = NR
-        if (retired_count == 3) pair_retired = NR
+        if (retired_count == 1) exact_client_retired = NR
+        if (retired_count == 2) client_retired = NR
+        if (retired_count == 3) exit_retired = NR
+        if (retired_count == 4) pair_retired = NR
     }
     in_functional && /helper_holds_no_worker_custody/ { custody_absent = NR }
     in_functional && /worker_wireguard_is_absent/ {
         wireguard_absent_count++
-        if (wireguard_absent_count == 1) client_wireguard_absent = NR
-        if (wireguard_absent_count == 2) exit_wireguard_absent = NR
-        if (wireguard_absent_count == 3) pair_client_wireguard_absent = NR
-        if (wireguard_absent_count == 4) pair_exit_wireguard_absent = NR
+        if (wireguard_absent_count == 1) exact_client_wireguard_absent = NR
+        if (wireguard_absent_count == 2) client_wireguard_absent = NR
+        if (wireguard_absent_count == 3) exit_wireguard_absent = NR
+        if (wireguard_absent_count == 4) pair_client_wireguard_absent = NR
+        if (wireguard_absent_count == 5) pair_exit_wireguard_absent = NR
     }
     in_functional && /command exec 8>&-/ { process_release_count++ }
     in_functional && /command exec 7>&-/ { namespace_release_count++ }
@@ -7587,8 +8401,8 @@ if ! awk '
         valid = valid && relay_ping_count == 2 && exit_relay_ping_count == 1
         valid = valid && custody_count == 9 && identity_count == 6
         valid = valid && activated_count == 10 && growth_count == 12
-        valid = valid && release_count == 5 && retired_count == 3
-        valid = valid && wireguard_absent_count == 4
+        valid = valid && release_count == 5 && retired_count == 4
+        valid = valid && wireguard_absent_count == 5
         valid = valid && process_release_count == 3 && namespace_release_count == 3
         valid = valid && pristine_before < underlay && underlay < fifo
         valid = valid && fifo < fifo_open && fifo_open < probe && probe < client_ready
@@ -7600,8 +8414,15 @@ if ! awk '
         valid = valid && client_relay_create < client_traffic
         valid = valid && client_traffic < client_relay_remove
         valid = valid && client_relay_remove < client_release_stage
-        valid = valid && client_release_stage < client_release
-        valid = valid && client_release < client_settled_wait
+        valid = valid && client_release_stage < exact_release_authorized
+        valid = valid && exact_release_authorized < client_release
+        valid = valid && client_release < exact_client_retired
+        valid = valid && exact_client_retired < exact_client_wireguard_absent
+        valid = valid && exact_client_wireguard_absent < exact_main_wait
+        valid = valid && exact_main_wait < exact_failure_observe
+        valid = valid && exact_failure_observe < exact_ready_only
+        valid = valid && exact_ready_only < exact_ack && exact_ack < exact_return
+        valid = valid && exact_return < client_settled_wait
         valid = valid && client_settled_wait < client_cleanup_stage
         valid = valid && client_cleanup_stage < client_retired
         valid = valid && client_retired < client_wireguard_absent

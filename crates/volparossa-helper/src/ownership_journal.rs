@@ -109,6 +109,27 @@ pub(crate) fn journal_bytes_have_exact_custody_phase_for_test(
 /// This decodes only the fixed production journal, requires a stable canonical snapshot with one
 /// settled Client, Relay and Exit tombstone, and grants no cleanup or restart authority.
 pub(crate) fn production_functional_journal_is_exactly_settled() -> bool {
+    production_journal_matches_stably(functional_snapshot_is_exactly_settled)
+}
+
+/// Read-only KVM evidence seam for the forced-crash boundary immediately after the fourth
+/// functional Client record became durably `CleanupConfirmed`.
+///
+/// The three earlier functional records must remain their exact settled tombstones. This grants
+/// no journal mutation, cleanup, descriptor-store removal or restart authority.
+pub(crate) fn production_functional_journal_is_exactly_restart_cleanup_confirmed() -> bool {
+    production_journal_matches_stably(functional_snapshot_is_exactly_restart_cleanup_confirmed)
+}
+
+/// Read-only KVM evidence seam for the forced-crash successor after exact-present recovery.
+///
+/// The snapshot must contain the original three tombstones plus exactly one second Client
+/// tombstone. This grants no journal mutation or restart authority.
+pub(crate) fn production_functional_journal_is_exactly_restart_settled() -> bool {
+    production_journal_matches_stably(functional_snapshot_is_exactly_restart_settled)
+}
+
+fn production_journal_matches_stably(predicate: fn(&JournalSnapshot) -> bool) -> bool {
     let config = JournalConfig::production();
     let Ok(parent_directory) = open_verified_parent(&config) else {
         return false;
@@ -119,7 +140,7 @@ pub(crate) fn production_functional_journal_is_exactly_settled() -> bool {
     let Ok(Some(first)) = load_snapshot(&config, &parent_directory) else {
         return false;
     };
-    if !functional_snapshot_is_exactly_settled(&first) {
+    if !predicate(&first) {
         return false;
     }
     let Ok(first_bytes) = first.encode() else {
@@ -131,62 +152,141 @@ pub(crate) fn production_functional_journal_is_exactly_settled() -> bool {
     let Ok(Some(second)) = load_snapshot(&config, &parent_directory) else {
         return false;
     };
-    functional_snapshot_is_exactly_settled(&second)
+    predicate(&second)
         && second.encode().is_ok_and(|bytes| bytes == first_bytes)
         && verify_next_absent(&config, &parent_directory).is_ok()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionalJournalRecordKind {
+    Client,
+    Relay,
+    Exit,
+}
+
+fn functional_journal_record_kind(record: &OwnershipRecord) -> Option<FunctionalJournalRecordKind> {
+    match (record.plan.context_role, record.plan.paths.as_slice()) {
+        (
+            ContextRole::Client,
+            [
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::Client,
+                },
+            ],
+        ) => Some(FunctionalJournalRecordKind::Client),
+        (
+            ContextRole::Relay,
+            [
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayClient,
+                },
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayExit,
+                },
+            ],
+        ) => Some(FunctionalJournalRecordKind::Relay),
+        (
+            ContextRole::Exit,
+            [
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::Exit,
+                },
+            ],
+        ) => Some(FunctionalJournalRecordKind::Exit),
+        _ => None,
+    }
+}
+
+fn is_exact_recovered_tombstone(record: &OwnershipRecord) -> bool {
+    record.phase == OwnershipPhase::Absent
+        && record.absent_origin == Some(AbsentOrigin::RecoveredMayOwn)
+        && record.recovery_evidence.is_none()
+        && record.reconcile.is_none()
+}
+
 fn functional_snapshot_is_exactly_settled(snapshot: &JournalSnapshot) -> bool {
-    if snapshot.records.len() != 3
-        || snapshot.records.values().any(|record| {
-            record.phase != OwnershipPhase::Absent
-                || record.absent_origin != Some(AbsentOrigin::RecoveredMayOwn)
-                || record.recovery_evidence.is_some()
-                || record.reconcile.is_some()
-        })
-    {
+    if snapshot.records.len() != 3 {
         return false;
     }
     let mut client = 0_u8;
     let mut relay = 0_u8;
     let mut exit = 0_u8;
     for record in snapshot.records.values() {
-        match (record.plan.context_role, record.plan.paths.as_slice()) {
-            (
-                ContextRole::Client,
-                [
-                    PathPlan {
-                        path_id: 1,
-                        role: WireguardRole::Client,
-                    },
-                ],
-            ) => client = client.saturating_add(1),
-            (
-                ContextRole::Relay,
-                [
-                    PathPlan {
-                        path_id: 1,
-                        role: WireguardRole::RelayClient,
-                    },
-                    PathPlan {
-                        path_id: 1,
-                        role: WireguardRole::RelayExit,
-                    },
-                ],
-            ) => relay = relay.saturating_add(1),
-            (
-                ContextRole::Exit,
-                [
-                    PathPlan {
-                        path_id: 1,
-                        role: WireguardRole::Exit,
-                    },
-                ],
-            ) => exit = exit.saturating_add(1),
-            _ => return false,
+        if !is_exact_recovered_tombstone(record) {
+            return false;
+        }
+        match functional_journal_record_kind(record) {
+            Some(FunctionalJournalRecordKind::Client) => client = client.saturating_add(1),
+            Some(FunctionalJournalRecordKind::Relay) => relay = relay.saturating_add(1),
+            Some(FunctionalJournalRecordKind::Exit) => exit = exit.saturating_add(1),
+            None => return false,
         }
     }
     (client, relay, exit) == (1, 1, 1)
+}
+
+fn functional_snapshot_is_exactly_restart_cleanup_confirmed(snapshot: &JournalSnapshot) -> bool {
+    if snapshot.records.len() != 4 {
+        return false;
+    }
+    let mut settled_client = 0_u8;
+    let mut settled_relay = 0_u8;
+    let mut settled_exit = 0_u8;
+    let mut cleanup_client = 0_u8;
+    for record in snapshot.records.values() {
+        match (record.phase, functional_journal_record_kind(record)) {
+            (OwnershipPhase::Absent, Some(kind)) if is_exact_recovered_tombstone(record) => {
+                match kind {
+                    FunctionalJournalRecordKind::Client => {
+                        settled_client = settled_client.saturating_add(1);
+                    }
+                    FunctionalJournalRecordKind::Relay => {
+                        settled_relay = settled_relay.saturating_add(1);
+                    }
+                    FunctionalJournalRecordKind::Exit => {
+                        settled_exit = settled_exit.saturating_add(1);
+                    }
+                }
+            }
+            (OwnershipPhase::CleanupConfirmed, Some(FunctionalJournalRecordKind::Client))
+                if record.absent_origin.is_none()
+                    && matches!(
+                        record.recovery_evidence,
+                        Some(PrepareRecoveryEvidenceV1::CustodyBound { .. })
+                    )
+                    && record.reconcile.is_none() =>
+            {
+                cleanup_client = cleanup_client.saturating_add(1);
+            }
+            _ => return false,
+        }
+    }
+    (settled_client, settled_relay, settled_exit, cleanup_client) == (1, 1, 1, 1)
+}
+
+fn functional_snapshot_is_exactly_restart_settled(snapshot: &JournalSnapshot) -> bool {
+    if snapshot.records.len() != 4 {
+        return false;
+    }
+    let mut client = 0_u8;
+    let mut relay = 0_u8;
+    let mut exit = 0_u8;
+    for record in snapshot.records.values() {
+        if !is_exact_recovered_tombstone(record) {
+            return false;
+        }
+        match functional_journal_record_kind(record) {
+            Some(FunctionalJournalRecordKind::Client) => client = client.saturating_add(1),
+            Some(FunctionalJournalRecordKind::Relay) => relay = relay.saturating_add(1),
+            Some(FunctionalJournalRecordKind::Exit) => exit = exit.saturating_add(1),
+            None => return false,
+        }
+    }
+    (client, relay, exit) == (2, 1, 1)
 }
 
 #[cfg(test)]
@@ -6452,6 +6552,96 @@ mod tests {
         assert!(!functional_snapshot_is_exactly_settled(&snapshot_with(
             other_records
         )));
+    }
+
+    #[test]
+    fn restart_evidence_accepts_only_one_cleanup_confirmed_client_then_four_tombstones() {
+        let journal_epoch = epoch(1);
+        let mut client = record(journal_epoch, 1, 2, 3, 1, OwnershipPhase::Absent);
+        client.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        client.plan = ClosedPlan::new(
+            ContextRole::Client,
+            vec![PathPlan {
+                path_id: 1,
+                role: WireguardRole::Client,
+            }],
+        )
+        .expect("client plan");
+        let mut relay = record(journal_epoch, 4, 5, 6, 2, OwnershipPhase::Absent);
+        relay.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        relay.plan = ClosedPlan::new(
+            ContextRole::Relay,
+            vec![
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayClient,
+                },
+                PathPlan {
+                    path_id: 1,
+                    role: WireguardRole::RelayExit,
+                },
+            ],
+        )
+        .expect("relay plan");
+        let mut exit = record(journal_epoch, 7, 8, 9, 3, OwnershipPhase::Absent);
+        exit.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        exit.plan = ClosedPlan::new(
+            ContextRole::Exit,
+            vec![PathPlan {
+                path_id: 1,
+                role: WireguardRole::Exit,
+            }],
+        )
+        .expect("exit plan");
+        let mut restart_client = record(
+            journal_epoch,
+            10,
+            11,
+            12,
+            4,
+            OwnershipPhase::CleanupConfirmed,
+        );
+        restart_client.plan = client.plan.clone();
+
+        let precrash = snapshot_with(vec![
+            client.clone(),
+            relay.clone(),
+            exit.clone(),
+            restart_client.clone(),
+        ]);
+        assert!(functional_snapshot_is_exactly_restart_cleanup_confirmed(
+            &precrash
+        ));
+        let mut wrong_role = restart_client.clone();
+        wrong_role.plan = exit.plan.clone();
+        assert!(!functional_snapshot_is_exactly_restart_cleanup_confirmed(
+            &snapshot_with(vec![
+                client.clone(),
+                relay.clone(),
+                exit.clone(),
+                wrong_role
+            ])
+        ));
+        let mut lost_custody = restart_client.clone();
+        lost_custody.recovery_evidence = None;
+        assert!(!functional_snapshot_is_exactly_restart_cleanup_confirmed(
+            &snapshot_with(vec![
+                client.clone(),
+                relay.clone(),
+                exit.clone(),
+                lost_custody,
+            ])
+        ));
+
+        restart_client.phase = OwnershipPhase::Absent;
+        restart_client.absent_origin = Some(AbsentOrigin::RecoveredMayOwn);
+        restart_client.recovery_evidence = None;
+        let settled = snapshot_with(vec![client, relay, exit, restart_client.clone()]);
+        assert!(functional_snapshot_is_exactly_restart_settled(&settled));
+        restart_client.absent_origin = Some(AbsentOrigin::NeverDispatched);
+        assert!(!functional_snapshot_is_exactly_restart_settled(
+            &snapshot_with(vec![restart_client])
+        ));
     }
 
     #[test]

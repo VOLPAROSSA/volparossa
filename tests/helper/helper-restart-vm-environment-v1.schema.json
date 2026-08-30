@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volparossa.org/schemas/helper-restart-vm-environment-v1.schema.json",
+  "title": "VOLPAROSSA singleton restart KVM environment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["expected_commit", "guest", "image_release_build", "image_sha512", "proof_network", "report_kind", "report_sha256", "schema_version", "status"],
+  "properties": {
+    "expected_commit": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},
+    "guest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["architecture", "cargo_version", "debian_version", "rustc_version", "systemd_version", "virtualization"],
+      "properties": {
+        "architecture": {"const": "amd64"}, "cargo_version": {"const": "1.85.0"},
+        "debian_version": {"const": "13"}, "rustc_version": {"const": "1.85.0"},
+        "systemd_version": {"const": 257}, "virtualization": {"const": "kvm"}
+      }
+    },
+    "image_release_build": {"const": "20260826-2582"},
+    "image_sha512": {"type": "string", "pattern": "^[0-9a-f]{128}$"},
+    "proof_network": {
+      "type": "object", "additionalProperties": false,
+      "required": ["external_https", "mode"],
+      "properties": {"external_https": {"const": "denied"}, "mode": {"const": "qemu-user-restrict-on"}}
+    },
+    "report_kind": {"const": "volparossa-helper-restart-vm-environment"},
+    "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "schema_version": {"const": 1},
+    "status": {"const": "PASS"}
+  }
+}
