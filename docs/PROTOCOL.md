@@ -654,9 +654,13 @@ counts `[2, 2, 2]` joined to each cycle's pidfd and network-namespace identities
 status flags, and settled counts `[0, 0, 0]`. The journal must finish as exactly three stable
 `Absent(RecoveredMayOwn)` tombstones with no recovery or reconciliation evidence: Client path 1
 `[Client]`, Relay path 1 ordered `[RelayClient, RelayExit]`, and Exit path 1 `[Exit]`. Two canonical
-reads must agree byte-for-byte and `.next` must remain absent. Unit, schema, fixture and shell checks
-cover this expanded contract, but no privileged Debian 13 KVM run or retained artifact does yet; the
-committed PASS fixture is validation data rather than run evidence.
+reads must agree byte-for-byte and `.next` must remain absent. Exact-main
+[run 33318629099](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099) at
+`63e405119ca1266499fef145fbeff7348cef5562` proved all 18 checks on privileged Debian 13 KVM and
+retained
+[artifact 9734273695](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099/artifacts/9734273695).
+Its scope is only `helper_boundary_only=true`; acceptance A01--A15, datapath, cleanup ownership,
+installed-package and restart-recovery evidence remain explicitly false.
 
 Tags 35 and 28 still provide only same-process ambiguity containment to the agent. The
 functional-alpha request path reconstructs the original canonical Prepare intent from tag 35's

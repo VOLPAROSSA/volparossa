@@ -996,12 +996,23 @@ must be terminal and each pinned worker namespace must be WireGuard-empty before
 observer closes. The private namespace must retain exactly loopback and no default route after the
 dummy underlay is removed.
 
-At this branch boundary the expanded contract has unit, schema, fixture and shell-contract coverage
-only. No privileged Debian 13 KVM run or retained artifact has exercised it; the committed PASS
-fixture is validation data, not run evidence. The older retained artifact remains valid only for its
-historical helper-boundary scope. PID 1 bounds the transient unit to three minutes even if the runner
-disappears, and the unit receives a 1 MiB hard/soft `RLIMIT_FSIZE`. Unit stdout and stderr are
-attested as `null`, so structured helper rejection logs cannot grow host files. Host
+Exact-main
+[run 33318629099](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099) at
+`63e405119ca1266499fef145fbeff7348cef5562` exercised the expanded contract on privileged Debian 13
+KVM and retained the 40,476-byte
+[artifact 9734273695](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099/artifacts/9734273695),
+named `helper-boundary-evidence-63e405119ca1266499fef145fbeff7348cef5562` and expiring
+`2026-11-28T15:04:58Z`. The locally validated report records overall `PASS`, all 18 checks `PASS`,
+exact clean source, Debian 13 amd64 (`x86_64`) with systemd 257, and equal before/after
+enumerated-host-state SHA-256
+`736dc4eafc5832c672a7366978a0f18f69c47db1f2087f132bbee3dc17afd043`. Its scope is explicitly
+`helper_boundary_only=true`, `acceptance_a01_a15=false`, `datapath=false`,
+`cleanup_owned=false`, `installed_package=false`, and `restart_recovery=false`. It is not evidence
+for an installed package, shipped restart, route manager, transport, ingress, usable VPN, cleanup
+ownership, datapath, or A01--A15 acceptance. The older retained artifact remains valid only for its
+historical 16-check helper-boundary scope. PID 1 bounds the transient unit to three minutes even if
+the runner disappears, and the unit receives a 1 MiB hard/soft `RLIMIT_FSIZE`. Unit stdout and
+stderr are attested as `null`, so structured helper rejection logs cannot grow host files. Host
 `/run/volparossa` must be absent at both host-state fences; the private runtime bind never targets
 the host path.
 
