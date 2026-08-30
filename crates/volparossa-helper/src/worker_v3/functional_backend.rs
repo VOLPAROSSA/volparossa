@@ -1,8 +1,10 @@
 //! Process-owned functional-alpha lease backend.
 //!
-//! This adapter deliberately proves only one live helper-runtime Client lease. It uses the real
-//! authenticated worker, a real anonymous network namespace and kernel `WireGuard` UAPI. Activate
-//! installs and reads back one exact public peer plus its main-table IPv6 `/128` link route. It does
+//! This adapter deliberately proves only one live helper-runtime Client or Exit lease. It uses the
+//! real authenticated worker, a real anonymous network namespace and kernel `WireGuard` UAPI.
+//! Activate verifies the signed role-specific local and peer authority, then installs and reads
+//! back one exact public peer plus its main-table IPv6 `/128` link route. Probe-Commit requires a
+//! recent handshake and strict bidirectional counter growth from the activation baseline. It does
 //! not claim a usable datapath or crash/restart recovery. Durable journal and systemd
 //! descriptor-store composition stay closed until their affine recovery path is complete.
 
@@ -137,14 +139,23 @@ struct ActivatedWorkerLease {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct VerifiedRelayClientEndpoint {
+struct VerifiedWireguardEndpoint {
     public_key: [u8; 32],
     address: IpAddr,
     port: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FunctionalLeaseRole {
+    context: ContextRole,
+    wireguard: WireguardRole,
+    internal_context: InternalContextRole,
+    internal_endpoint: InternalEndpointRole,
+}
+
 struct OpenLeaseEntry {
     key: OpenLineageKey,
+    context_role: ContextRole,
     worker: Option<WorkerGenerationOwnership>,
     recovery: Option<WorkerRecoveryIdentitySource>,
     wireguard: LiveWireguardLeaseOwner,
@@ -162,14 +173,14 @@ impl FunctionalAlphaLeaseBackend {
         binding: BackendBinding,
         value: PrepareLeaseBatch,
     ) -> Result<Vec<PreparedKernelLease>, BackendError> {
-        let (key, lease, context_ttl) = validate_prepare_binding(binding, &value)?;
+        let (key, role, lease, context_ttl) = validate_prepare_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
         let underlay =
             collect_consistent_direct_underlay(deadline).map_err(|_| BackendError::Unavailable)?;
         let wireguard = process_owned_resource(key, &lease)?;
         let prepare = internal_prepare_plan(wireguard.resource(), key, &lease);
 
-        self.reserve_entry(key, wireguard, prepare, underlay)?;
+        self.reserve_entry(key, role.context, wireguard, prepare, underlay)?;
         self.admit_worker(key, context_ttl, deadline).await?;
         if let Err(error) = self.retain_recovery_source(key, deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
@@ -215,6 +226,7 @@ impl FunctionalAlphaLeaseBackend {
     fn reserve_entry(
         &self,
         key: OpenLineageKey,
+        context_role: ContextRole,
         wireguard: LiveWireguardLeaseOwner,
         prepare: PrepareLeases,
         underlay: UnderlayCandidate,
@@ -225,6 +237,7 @@ impl FunctionalAlphaLeaseBackend {
         }
         *state = Some(OpenLeaseEntry {
             key,
+            context_role,
             worker: None,
             recovery: None,
             wireguard,
@@ -300,12 +313,24 @@ impl FunctionalAlphaLeaseBackend {
         value: &PrepareLeaseBatch,
         deadline: HardDeadline,
     ) -> Result<(), BackendError> {
-        let generation = entry_generation(&self.state, key)?;
+        let (generation, context_role) = {
+            let state = lock_state(&self.state);
+            let entry = exact_entry(state.as_ref(), key)?;
+            let generation = entry
+                .worker
+                .as_ref()
+                .ok_or(BackendError::CleanupIncomplete)?
+                .coordinates
+                .worker_generation
+                .get();
+            (generation, entry.context_role)
+        };
+        let role = functional_lease_role_for_context(context_role).ok_or(BackendError::Invalid)?;
         let request = worker_request(
             worker_request_id(key, STAGE_INITIALISE),
             internal_worker_request::Operation::Initialise(InitialiseContext {
                 route_context_id: key.context_id.to_vec(),
-                role: InternalContextRole::Client as i32,
+                role: role.internal_context as i32,
                 mptcp_accepted_addrs: value.mptcp_accepted_addrs,
                 mptcp_subflows: value.mptcp_subflows,
             }),
@@ -389,7 +414,9 @@ impl FunctionalAlphaLeaseBackend {
         matches_prepared(
             execution.as_ref().ok(),
             lease.path_id,
-            InternalEndpointRole::Client as i32,
+            functional_lease_role_for_wireguard(lease.role)
+                .ok_or(BackendError::Invalid)?
+                .internal_endpoint as i32,
         )
         .ok_or_else(|| response_error(execution))
     }
@@ -777,7 +804,15 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
 fn validate_prepare_binding(
     binding: BackendBinding,
     value: &PrepareLeaseBatch,
-) -> Result<(OpenLineageKey, RoutingLeasePlan, Duration), BackendError> {
+) -> Result<
+    (
+        OpenLineageKey,
+        FunctionalLeaseRole,
+        RoutingLeasePlan,
+        Duration,
+    ),
+    BackendError,
+> {
     let lineage = binding.lineage;
     let context_id: [u8; 16] = value
         .route_context_id
@@ -787,6 +822,7 @@ fn validate_prepare_binding(
     let [lease] = value.leases.as_slice() else {
         return Err(BackendError::Unavailable);
     };
+    let role = functional_lease_role(value.role, lease.role).ok_or(BackendError::Invalid)?;
     if binding.action != BackendAction::Prepare
         || binding.phase != BackendPhase::PreparePending
         || binding.operation_kind != OperationKind::Prepare
@@ -799,8 +835,6 @@ fn validate_prepare_binding(
         || context_id.iter().all(|byte| *byte == 0)
         || lineage.helper_runtime_id.iter().all(|byte| *byte == 0)
         || lineage.backend_generation == 0
-        || value.role != ContextRole::Client as i32
-        || lease.role != WireguardRole::Client as i32
         || !(1..=8).contains(&lease.path_id)
         || value.setup_expires_at_unix != lineage.setup_expires_at_unix
         || value.hard_expires_at_unix != lineage.hard_expires_at_unix
@@ -822,6 +856,7 @@ fn validate_prepare_binding(
     }
     Ok((
         OpenLineageKey::from(lineage),
+        role,
         lease.clone(),
         Duration::from_secs(ttl_seconds),
     ))
@@ -840,6 +875,9 @@ fn validate_activate_binding(
     let [activation] = value.leases.as_slice() else {
         return Err(BackendError::Unavailable);
     };
+    if functional_lease_role_for_wireguard(activation.role).is_none() {
+        return Err(BackendError::Invalid);
+    }
     if binding.action != BackendAction::Activate
         || binding.phase != BackendPhase::Prepared
         || binding.operation_kind != OperationKind::Activate
@@ -864,7 +902,6 @@ fn validate_activate_binding(
         || activation.lease_handle.len() != HELPER_HANDLE_BYTES
         || activation.lease_handle.iter().all(|byte| *byte == 0)
         || !(1..=8).contains(&activation.path_id)
-        || activation.role != WireguardRole::Client as i32
         || activation.peer_public_key.len() != 32
         || activation.peer_public_key.iter().all(|byte| *byte == 0)
         || activation.signed_relay_reservation.is_empty()
@@ -898,6 +935,9 @@ fn validate_probe_binding(
     let [commit] = value.commit.leases.as_slice() else {
         return Err(BackendError::Unavailable);
     };
+    if functional_lease_role_for_wireguard(commit.role).is_none() {
+        return Err(BackendError::Invalid);
+    }
     if binding.action != BackendAction::Probe
         || binding.phase != BackendPhase::Activated
         || binding.operation_kind != OperationKind::Probe
@@ -922,7 +962,6 @@ fn validate_probe_binding(
         || commit.lease_handle.len() != HELPER_HANDLE_BYTES
         || commit.lease_handle.iter().all(|byte| *byte == 0)
         || !(1..=8).contains(&commit.path_id)
-        || commit.role != WireguardRole::Client as i32
         || value.activated_at_unix == 0
         || value.activated_at_unix >= lineage.setup_expires_at_unix
     {
@@ -1002,17 +1041,46 @@ const fn destroy_operation_shape_is_valid(binding: BackendBinding) -> bool {
     )
 }
 
+fn functional_lease_role(context: i32, wireguard: i32) -> Option<FunctionalLeaseRole> {
+    let context = ContextRole::try_from(context).ok()?;
+    let role = functional_lease_role_for_context(context)?;
+    (role.wireguard as i32 == wireguard).then_some(role)
+}
+
+const fn functional_lease_role_for_context(context: ContextRole) -> Option<FunctionalLeaseRole> {
+    match context {
+        ContextRole::Client => Some(FunctionalLeaseRole {
+            context,
+            wireguard: WireguardRole::Client,
+            internal_context: InternalContextRole::Client,
+            internal_endpoint: InternalEndpointRole::Client,
+        }),
+        ContextRole::Exit => Some(FunctionalLeaseRole {
+            context,
+            wireguard: WireguardRole::Exit,
+            internal_context: InternalContextRole::Exit,
+            internal_endpoint: InternalEndpointRole::Exit,
+        }),
+        ContextRole::Relay | ContextRole::Unspecified => None,
+    }
+}
+
+fn functional_lease_role_for_wireguard(wireguard: i32) -> Option<FunctionalLeaseRole> {
+    match WireguardRole::try_from(wireguard).ok()? {
+        WireguardRole::Client => functional_lease_role_for_context(ContextRole::Client),
+        WireguardRole::Exit => functional_lease_role_for_context(ContextRole::Exit),
+        WireguardRole::RelayClient | WireguardRole::RelayExit | WireguardRole::Unspecified => None,
+    }
+}
+
 fn process_owned_resource(
     key: OpenLineageKey,
     lease: &RoutingLeasePlan,
 ) -> Result<LiveWireguardLeaseOwner, BackendError> {
-    let specification = WireguardLeaseSpec::derive(
-        key.context_id,
-        ContextRole::Client,
-        lease.path_id,
-        lease.role,
-    )
-    .map_err(|_| BackendError::Invalid)?;
+    let role = functional_lease_role_for_wireguard(lease.role).ok_or(BackendError::Invalid)?;
+    let specification =
+        WireguardLeaseSpec::derive(key.context_id, role.context, lease.path_id, lease.role)
+            .map_err(|_| BackendError::Invalid)?;
     let marker = ownership_marker(key, lease);
     let alias = format!(
         "{DURABLE_WIREGUARD_ALIAS_PREFIX}{}:{marker}",
@@ -1020,7 +1088,7 @@ fn process_owned_resource(
     );
     let resource = DurableWireguardResource::from_authenticated_worker_binding(
         key.context_id,
-        ContextRole::Client,
+        role.context,
         lease.path_id,
         lease.role,
         alias,
@@ -1085,11 +1153,13 @@ fn internal_prepare_plan(
     key: OpenLineageKey,
     lease: &RoutingLeasePlan,
 ) -> PrepareLeases {
+    let role = functional_lease_role_for_wireguard(lease.role)
+        .expect("process-owned resource already validated the functional lease role");
     PrepareLeases {
         route_context_id: key.context_id.to_vec(),
         leases: vec![InternalLeasePlan {
             path_id: lease.path_id,
-            role: InternalEndpointRole::Client as i32,
+            role: role.internal_endpoint as i32,
             local_overlay_address: Some(InternalIpPrefix {
                 address: resource.local_address().octets().to_vec(),
                 prefix_length: 128,
@@ -1131,7 +1201,7 @@ fn verified_internal_activate_plan(
         if relay_message.route_context_id.as_slice() != key.context_id
             || relay_message.path_id != activation.path_id
             || relay_message.path_id != prepared.path_id
-            || relay_message.client_wireguard_public_key.as_slice() != prepared.public_key
+            || activation.role != prepared.role
             || relay_grant.expires_at_ms() < hard_expires_at_ms
             || !signer_matches_peer_id(
                 relay_grant.sender_public_key(),
@@ -1142,11 +1212,6 @@ fn verified_internal_activate_plan(
             return Err(BackendError::Invalid);
         }
 
-        let endpoint = relay_message
-            .relay_client_wireguard_endpoint
-            .as_ref()
-            .and_then(verified_relay_client_endpoint)
-            .ok_or(BackendError::Invalid)?;
         let supplied_public_key: [u8; 32] = activation
             .peer_public_key
             .as_slice()
@@ -1154,6 +1219,40 @@ fn verified_internal_activate_plan(
             .map_err(|_| BackendError::Invalid)?;
         let supplied_endpoint = parse_public_udp_endpoint(activation.peer_endpoint.as_ref())
             .ok_or(BackendError::Invalid)?;
+        let endpoint =
+            match WireguardRole::try_from(prepared.role).map_err(|_| BackendError::Invalid)? {
+                WireguardRole::Client => {
+                    if relay_message.client_wireguard_public_key.as_slice() != prepared.public_key {
+                        return Err(BackendError::Invalid);
+                    }
+                    relay_message
+                        .relay_client_wireguard_endpoint
+                        .as_ref()
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)?
+                }
+                WireguardRole::Exit => {
+                    let signed_local = exit_message
+                        .exit_wireguard_endpoint
+                        .as_ref()
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)?;
+                    if signed_local.public_key != prepared.public_key
+                        || (signed_local.address, signed_local.port)
+                            != (underlay.address, prepared.listen_port)
+                    {
+                        return Err(BackendError::Invalid);
+                    }
+                    relay_message
+                        .relay_exit_wireguard_endpoint
+                        .as_ref()
+                        .and_then(verified_wireguard_endpoint)
+                        .ok_or(BackendError::Invalid)?
+                }
+                WireguardRole::RelayClient
+                | WireguardRole::RelayExit
+                | WireguardRole::Unspecified => return Err(BackendError::Invalid),
+            };
         if supplied_public_key != endpoint.public_key
             || supplied_endpoint != (endpoint.address, endpoint.port)
             || endpoint.public_key == prepared.public_key
@@ -1162,7 +1261,7 @@ fn verified_internal_activate_plan(
             return Err(BackendError::Invalid);
         }
 
-        internal_activate_plan(resource, key, activation.path_id, endpoint)
+        internal_activate_plan(resource, key, activation.path_id, prepared.role, endpoint)
     })();
 
     if result.is_err() {
@@ -1176,12 +1275,14 @@ fn internal_activate_plan(
     resource: &DurableWireguardResource,
     key: OpenLineageKey,
     path_id: u32,
-    endpoint: VerifiedRelayClientEndpoint,
+    wireguard_role: i32,
+    endpoint: VerifiedWireguardEndpoint,
 ) -> Result<ActivateLeases, BackendError> {
+    let role = functional_lease_role_for_wireguard(wireguard_role).ok_or(BackendError::Invalid)?;
     if resource.key()
         != (
             u8::try_from(path_id).map_err(|_| BackendError::Invalid)?,
-            WireguardRole::Client as i32,
+            wireguard_role,
         )
     {
         return Err(BackendError::Invalid);
@@ -1190,7 +1291,7 @@ fn internal_activate_plan(
         route_context_id: key.context_id.to_vec(),
         leases: vec![InternalLeaseActivation {
             path_id,
-            role: InternalEndpointRole::Client as i32,
+            role: role.internal_endpoint as i32,
             peer_public_key: endpoint.public_key.to_vec(),
             peer_endpoint: Some(InternalUdpEndpoint {
                 address: ip_bytes(endpoint.address),
@@ -1205,9 +1306,7 @@ fn internal_activate_plan(
     })
 }
 
-fn verified_relay_client_endpoint(
-    value: &WireguardEndpoint,
-) -> Option<VerifiedRelayClientEndpoint> {
+fn verified_wireguard_endpoint(value: &WireguardEndpoint) -> Option<VerifiedWireguardEndpoint> {
     let public_key: [u8; 32] = value.public_key.as_slice().try_into().ok()?;
     let port = u16::try_from(value.listen_port)
         .ok()
@@ -1217,7 +1316,7 @@ fn verified_relay_client_endpoint(
         bytes if bytes.len() == 16 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).ok()?)),
         _ => return None,
     };
-    Some(VerifiedRelayClientEndpoint {
+    (!address.is_unspecified() && !address.is_multicast()).then_some(VerifiedWireguardEndpoint {
         public_key,
         address,
         port,
@@ -1585,14 +1684,21 @@ mod tests {
     }
 
     fn open_entry(key: OpenLineageKey) -> OpenLeaseEntry {
+        open_entry_for_role(key, WireguardRole::Client)
+    }
+
+    fn open_entry_for_role(key: OpenLineageKey, wireguard_role: WireguardRole) -> OpenLeaseEntry {
+        let role = functional_lease_role_for_wireguard(wireguard_role as i32)
+            .expect("functional fixture role");
         let lease = RoutingLeasePlan {
             path_id: 1,
-            role: WireguardRole::Client as i32,
+            role: wireguard_role as i32,
         };
         let wireguard = process_owned_resource(key, &lease).expect("live owner");
         let prepare = internal_prepare_plan(wireguard.resource(), key, &lease);
         OpenLeaseEntry {
             key,
+            context_role: role.context,
             worker: None,
             recovery: None,
             wireguard,
@@ -1640,6 +1746,13 @@ mod tests {
             setup_expires_at_unix: key.setup_expires_at_unix,
             hard_expires_at_unix: key.hard_expires_at_unix,
         };
+        (binding, value)
+    }
+
+    fn live_exit_prepare_fixture() -> (BackendBinding, PrepareLeaseBatch) {
+        let (binding, mut value) = live_prepare_fixture();
+        value.role = ContextRole::Exit as i32;
+        value.leases[0].role = WireguardRole::Exit as i32;
         (binding, value)
     }
 
@@ -1758,6 +1871,128 @@ mod tests {
         (key, binding, value, activated)
     }
 
+    fn live_exit_activate_fixture() -> (
+        OpenLineageKey,
+        BackendBinding,
+        ActivateLeaseBatch,
+        PreparedWorkerLease,
+        UnderlayCandidate,
+        SignedRouteFixture,
+    ) {
+        let now_ms = unix_milliseconds().expect("fixture time");
+        let now = now_ms / 1_000;
+        let route = SignedRouteFixture::new(1, &[Transport::TcpMptcp], now_ms)
+            .expect("signed route fixture");
+        let relay = decode_relay_reservation(
+            route
+                .relay_reservations()
+                .first()
+                .expect("one relay reservation"),
+        );
+        let relay_exit = relay
+            .relay_exit_wireguard_endpoint
+            .as_ref()
+            .expect("relay-exit endpoint");
+        let exit = relay
+            .exit_wireguard_endpoint
+            .as_ref()
+            .expect("exit endpoint");
+        let verified_exit = verified_wireguard_endpoint(exit).expect("verified exit endpoint");
+        let key = OpenLineageKey {
+            context_id: *route.route_context_id(),
+            setup_expires_at_unix: now + 20,
+            hard_expires_at_unix: now + 120,
+            ..key()
+        };
+        let mut binding = binding(
+            key,
+            OperationKind::Activate,
+            BackendPhase::Prepared,
+            BackendAction::Activate,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        binding.prior_phase = Some(ContextPhase::Prepared);
+        let value = ActivateLeaseBatch {
+            route_context_id: key.context_id.to_vec(),
+            context_handle: vec![0x41; HELPER_HANDLE_BYTES],
+            leases: vec![volparossa_routing::LeaseActivation {
+                lease_handle: vec![0x42; HELPER_HANDLE_BYTES],
+                path_id: 1,
+                role: WireguardRole::Exit as i32,
+                peer_public_key: relay_exit.public_key.clone(),
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: relay_exit.underlay_ip.clone(),
+                    port: relay_exit.listen_port,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                signed_relay_reservation: route.relay_reservations()[0].clone(),
+            }],
+        };
+        let prepared = PreparedWorkerLease {
+            path_id: 1,
+            role: WireguardRole::Exit as i32,
+            public_key: verified_exit.public_key,
+            listen_port: verified_exit.port,
+        };
+        let underlay = UnderlayCandidate {
+            ifindex: 3,
+            address: verified_exit.address,
+            evidence: crate::underlay::UnderlayEvidence::DirectAssigned,
+        };
+        (key, binding, value, prepared, underlay, route)
+    }
+
+    fn live_exit_probe_fixture() -> (
+        OpenLineageKey,
+        BackendBinding,
+        BackendProbe,
+        ActivatedWorkerLease,
+    ) {
+        let (key, _, activation, prepared, _, _) = live_exit_activate_fixture();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let mut binding = binding(
+            key,
+            OperationKind::Probe,
+            BackendPhase::Activated,
+            BackendAction::Probe,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        binding.prior_phase = Some(ContextPhase::Activated);
+        binding.operation_generation = key.backend_generation + 1;
+        let value = BackendProbe {
+            commit: volparossa_routing::CommitLeaseBatch {
+                route_context_id: key.context_id.to_vec(),
+                context_handle: activation.context_handle,
+                leases: vec![volparossa_routing::LeaseCommit {
+                    lease_handle: activation.leases[0].lease_handle.clone(),
+                    path_id: prepared.path_id,
+                    role: prepared.role,
+                }],
+            },
+            activated_at_unix: now,
+        };
+        let activated = ActivatedWorkerLease {
+            prepared,
+            peer_public_key: activation.leases[0]
+                .peer_public_key
+                .as_slice()
+                .try_into()
+                .expect("relay-exit peer key"),
+            baseline: KernelCounters {
+                path_id: prepared.path_id,
+                role: prepared.role,
+                latest_handshake_unix: 0,
+                received_bytes: 50,
+                transmitted_bytes: 60,
+            },
+        };
+        (key, binding, value, activated)
+    }
+
     fn decode_relay_reservation(encoded: &[u8]) -> RelayReservation {
         let envelope: SignedEnvelope =
             decode_canonical(encoded, MAX_CONTROL_MESSAGE_SIZE).expect("relay envelope");
@@ -1863,6 +2098,33 @@ mod tests {
         )
     }
 
+    fn verify_exit_fixture_plan(
+        replay: &Mutex<ReplayCache>,
+        key: OpenLineageKey,
+        prepared: PreparedWorkerLease,
+        underlay: UnderlayCandidate,
+        value: &ActivateLeaseBatch,
+        now_ms: u64,
+    ) -> Result<ActivateLeases, BackendError> {
+        let resource = process_owned_resource(
+            key,
+            &RoutingLeasePlan {
+                path_id: prepared.path_id,
+                role: WireguardRole::Exit as i32,
+            },
+        )
+        .expect("exit resource");
+        verified_internal_activate_plan(
+            replay,
+            resource.resource(),
+            key,
+            prepared,
+            underlay,
+            &value.leases[0],
+            now_ms,
+        )
+    }
+
     #[test]
     fn markers_and_stage_request_ids_bind_complete_lineage() {
         let lease = RoutingLeasePlan {
@@ -1951,6 +2213,252 @@ mod tests {
             projected.ownership_alias,
             resource.resource().ownership_alias()
         );
+    }
+
+    #[test]
+    fn functional_role_matrix_accepts_only_exact_client_and_exit_singletons() {
+        for (binding, value, context, wireguard, internal_context, internal_endpoint) in [
+            {
+                let (binding, value) = live_prepare_fixture();
+                (
+                    binding,
+                    value,
+                    ContextRole::Client,
+                    WireguardRole::Client,
+                    InternalContextRole::Client,
+                    InternalEndpointRole::Client,
+                )
+            },
+            {
+                let (binding, value) = live_exit_prepare_fixture();
+                (
+                    binding,
+                    value,
+                    ContextRole::Exit,
+                    WireguardRole::Exit,
+                    InternalContextRole::Exit,
+                    InternalEndpointRole::Exit,
+                )
+            },
+        ] {
+            let (_, role, lease, _) =
+                validate_prepare_binding(binding, &value).expect("functional role pair");
+            assert_eq!(role.context, context);
+            assert_eq!(role.wireguard, wireguard);
+            assert_eq!(role.internal_context, internal_context);
+            assert_eq!(role.internal_endpoint, internal_endpoint);
+            let resource = process_owned_resource(OpenLineageKey::from(binding.lineage), &lease)
+                .expect("role-bound resource");
+            let plan = internal_prepare_plan(
+                resource.resource(),
+                OpenLineageKey::from(binding.lineage),
+                &lease,
+            );
+            assert_eq!(plan.leases[0].role, internal_endpoint as i32);
+        }
+
+        let (binding, client) = live_prepare_fixture();
+        let (_, exit) = live_exit_prepare_fixture();
+        let mut invalid = Vec::new();
+        let mut cross = client.clone();
+        cross.leases[0].role = WireguardRole::Exit as i32;
+        invalid.push(cross);
+        let mut cross = exit;
+        cross.leases[0].role = WireguardRole::Client as i32;
+        invalid.push(cross);
+        for role in [WireguardRole::RelayClient, WireguardRole::RelayExit] {
+            let mut relay = client.clone();
+            relay.role = ContextRole::Relay as i32;
+            relay.leases[0].role = role as i32;
+            invalid.push(relay);
+        }
+        let mut unspecified_context = client.clone();
+        unspecified_context.role = ContextRole::Unspecified as i32;
+        invalid.push(unspecified_context);
+        let mut unspecified_endpoint = client;
+        unspecified_endpoint.leases[0].role = WireguardRole::Unspecified as i32;
+        invalid.push(unspecified_endpoint);
+
+        for value in invalid {
+            assert_eq!(
+                validate_prepare_binding(binding, &value),
+                Err(BackendError::Invalid)
+            );
+        }
+
+        let (exit_binding, mut multipath_exit) = live_exit_prepare_fixture();
+        multipath_exit.leases.push(multipath_exit.leases[0].clone());
+        multipath_exit.leases[1].path_id = 2;
+        assert_eq!(
+            validate_prepare_binding(exit_binding, &multipath_exit),
+            Err(BackendError::Unavailable),
+            "the functional Exit seam remains an exact singleton"
+        );
+    }
+
+    #[test]
+    fn exit_activation_projects_only_exact_signed_relay_exit_peer() {
+        let (key, binding, value, prepared, underlay, _) = live_exit_activate_fixture();
+        let (validated_key, activation) =
+            validate_activate_binding(binding, &value).expect("valid Exit Activate binding");
+        assert_eq!(validated_key, key);
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let plan = verify_exit_fixture_plan(
+            &replay,
+            key,
+            prepared,
+            underlay,
+            &value,
+            unix_milliseconds().expect("fixture time"),
+        )
+        .expect("verified Exit activation plan");
+        assert_eq!(lock_replay_cache(&replay).len(), 2);
+        let [lease] = plan.leases.as_slice() else {
+            panic!("one Exit activation")
+        };
+        assert_eq!(lease.role, InternalEndpointRole::Exit as i32);
+        assert_eq!(lease.peer_public_key, activation.peer_public_key);
+        assert_eq!(
+            lease.peer_endpoint,
+            Some(InternalUdpEndpoint {
+                address: activation
+                    .peer_endpoint
+                    .as_ref()
+                    .expect("relay-exit endpoint")
+                    .address
+                    .clone(),
+                port: activation
+                    .peer_endpoint
+                    .as_ref()
+                    .expect("relay-exit endpoint")
+                    .port,
+            })
+        );
+        let resource = process_owned_resource(
+            key,
+            &RoutingLeasePlan {
+                path_id: 1,
+                role: WireguardRole::Exit as i32,
+            },
+        )
+        .expect("Exit resource");
+        assert_eq!(
+            lease.allowed_prefixes[0].address,
+            resource.resource().peer_address().octets()
+        );
+        assert_eq!(lease.allowed_prefixes[0].prefix_length, 128);
+
+        let mut nonzero_rate = value;
+        nonzero_rate.leases[0].maximum_down_mbps = 1;
+        assert_eq!(
+            validate_activate_binding(binding, &nonzero_rate),
+            Err(BackendError::Invalid)
+        );
+    }
+
+    #[test]
+    fn exit_activation_rejects_every_peer_endpoint_substitution_and_rolls_back_replay() {
+        let (key, _, value, prepared, underlay, _) = live_exit_activate_fixture();
+        let grant = decode_relay_reservation(&value.leases[0].signed_relay_reservation);
+        let exit_endpoint = grant
+            .exit_wireguard_endpoint
+            .as_ref()
+            .expect("signed exit endpoint")
+            .clone();
+        let client_endpoint = WireguardEndpoint {
+            public_key: grant.client_wireguard_public_key.clone(),
+            underlay_ip: exit_endpoint.underlay_ip.clone(),
+            listen_port: 30_000,
+        };
+        for forbidden in [
+            grant
+                .relay_client_wireguard_endpoint
+                .as_ref()
+                .expect("relay-client endpoint")
+                .clone(),
+            exit_endpoint,
+            client_endpoint,
+        ] {
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            let mut substituted = value.clone();
+            let (public_key, endpoint) = endpoint_copy(&forbidden);
+            substituted.leases[0].peer_public_key = public_key;
+            substituted.leases[0].peer_endpoint = Some(endpoint);
+            assert_eq!(
+                verify_exit_fixture_plan(
+                    &replay,
+                    key,
+                    prepared,
+                    underlay,
+                    &substituted,
+                    unix_milliseconds().expect("fixture time"),
+                ),
+                Err(BackendError::Invalid)
+            );
+            assert!(lock_replay_cache(&replay).is_empty());
+            assert!(
+                verify_exit_fixture_plan(
+                    &replay,
+                    key,
+                    prepared,
+                    underlay,
+                    &value,
+                    unix_milliseconds().expect("fixture time"),
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn exit_activation_binds_each_signed_local_endpoint_field_and_rolls_back_replay() {
+        let (key, _, value, prepared, underlay, route) = live_exit_activate_fixture();
+        let mutations: [fn(&mut WireguardEndpoint); 3] = [
+            |endpoint| endpoint.public_key[0] ^= 1,
+            |endpoint| endpoint.underlay_ip = vec![8, 8, 8, 8],
+            |endpoint| endpoint.listen_port += 1,
+        ];
+        for mutate_endpoint in mutations {
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            let mut substituted = value.clone();
+            substituted.leases[0].signed_relay_reservation =
+                resign_consistent_grant(&route, |relay, exit| {
+                    mutate_endpoint(
+                        relay
+                            .exit_wireguard_endpoint
+                            .as_mut()
+                            .expect("relay copy of exit endpoint"),
+                    );
+                    mutate_endpoint(
+                        exit.exit_wireguard_endpoint
+                            .as_mut()
+                            .expect("exit-signed endpoint"),
+                    );
+                });
+            assert_eq!(
+                verify_exit_fixture_plan(
+                    &replay,
+                    key,
+                    prepared,
+                    underlay,
+                    &substituted,
+                    unix_milliseconds().expect("fixture time"),
+                ),
+                Err(BackendError::Invalid)
+            );
+            assert!(lock_replay_cache(&replay).is_empty());
+            assert!(
+                verify_exit_fixture_plan(
+                    &replay,
+                    key,
+                    prepared,
+                    underlay,
+                    &value,
+                    unix_milliseconds().expect("fixture time"),
+                )
+                .is_ok()
+            );
+        }
     }
 
     #[test]
@@ -2079,11 +2587,29 @@ mod tests {
             BackendError::Invalid
         );
         let mut wrong = value.clone();
-        wrong.leases[0].role = WireguardRole::Exit as i32;
+        wrong.leases[0].role = WireguardRole::RelayExit as i32;
         assert_eq!(
             validate_activate_binding(binding, &wrong).unwrap_err(),
             BackendError::Invalid
         );
+        let mut cross_role = value.clone();
+        cross_role.leases[0].role = WireguardRole::Exit as i32;
+        let (_, cross_role) =
+            validate_activate_binding(binding, &cross_role).expect("supported Exit shape");
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert_eq!(
+            verified_internal_activate_plan(
+                &replay,
+                resource.resource(),
+                key,
+                prepared,
+                fixture_underlay(),
+                &cross_role,
+                unix_milliseconds().expect("fixture time"),
+            ),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
         let mut wrong = value.clone();
         wrong.leases[0].signed_relay_reservation.clear();
         assert_eq!(
@@ -2149,6 +2675,192 @@ mod tests {
             validate_probe_binding(binding, &wrong).unwrap_err(),
             BackendError::Invalid
         );
+    }
+
+    #[tokio::test]
+    async fn exit_probe_binds_activation_threshold_role_and_strict_counter_growth() {
+        let (key, binding, value, activated) = live_exit_probe_fixture();
+        let (_, commit, threshold) =
+            validate_probe_binding(binding, &value).expect("valid Exit Probe binding");
+        assert_eq!(commit.role, WireguardRole::Exit as i32);
+        assert_eq!(threshold, value.activated_at_unix);
+
+        let execution = |handshake, received, transmitted| {
+            crate::worker_transport::CredentialedWorkerExecution {
+                response: crate::internal_protocol::InternalWorkerResponse {
+                    protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                    magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                    request_id: vec![0x91; 16],
+                    result: InternalWorkerResult::Ok as i32,
+                    request_digest: vec![0x92; 32],
+                    outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
+                        crate::internal_protocol::ProbedLeases {
+                            leases: vec![crate::internal_protocol::ProbedLease {
+                                path_id: activated.prepared.path_id,
+                                role: activated.prepared.role,
+                                latest_handshake_unix: handshake,
+                                received_bytes: received,
+                                transmitted_bytes: transmitted,
+                            }],
+                        },
+                    )),
+                },
+                descriptor: None,
+            }
+        };
+        assert_eq!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix, 51, 61)),
+                activated,
+                value.activated_at_unix,
+            ),
+            Some(KernelCounters {
+                path_id: 1,
+                role: WireguardRole::Exit as i32,
+                latest_handshake_unix: value.activated_at_unix,
+                received_bytes: 51,
+                transmitted_bytes: 61,
+            })
+        );
+        assert!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix - 1, 51, 61)),
+                activated,
+                value.activated_at_unix,
+            )
+            .is_none()
+        );
+        assert!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix, 50, 61)),
+                activated,
+                value.activated_at_unix,
+            )
+            .is_none()
+        );
+        assert!(
+            matches_probed(
+                Some(&execution(value.activated_at_unix, 51, 60)),
+                activated,
+                value.activated_at_unix,
+            )
+            .is_none()
+        );
+
+        let mut substituted = value;
+        substituted.commit.leases[0].role = WireguardRole::Client as i32;
+        let mut entry = open_entry_for_role(key, WireguardRole::Exit);
+        entry.prepared = Some(activated.prepared);
+        entry.activated = Some(activated);
+        entry.phase = OpenLeasePhase::Activated;
+        let backend = backend_with_state(Some(entry));
+        assert_eq!(
+            backend.probe_one(binding, substituted).await,
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(
+            lock_state(&backend.state).as_ref().map(|entry| entry.phase),
+            Some(OpenLeasePhase::Activated)
+        );
+    }
+
+    #[test]
+    fn exit_signed_scope_ttl_signers_and_replay_fail_closed() {
+        let (key, _, value, prepared, underlay, route) = live_exit_activate_fixture();
+        let now_ms = unix_milliseconds().expect("fixture time");
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrong_context = key;
+        wrong_context.context_id[0] ^= 1;
+        assert_eq!(
+            verify_exit_fixture_plan(&replay, wrong_context, prepared, underlay, &value, now_ms,),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut wrong_path = prepared;
+        wrong_path.path_id = 2;
+        assert_eq!(
+            verify_exit_fixture_plan(&replay, key, wrong_path, underlay, &value, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        let mut outlives_grant = key;
+        outlives_grant.hard_expires_at_unix = route.expires_at_ms() / 1_000 + 1;
+        assert_eq!(
+            verify_exit_fixture_plan(&replay, outlives_grant, prepared, underlay, &value, now_ms,),
+            Err(BackendError::Invalid)
+        );
+        assert!(lock_replay_cache(&replay).is_empty());
+
+        for signed in [
+            resign_consistent_grant(&route, |relay, exit| {
+                relay.relay_peer_id = vec![0xa1];
+                exit.relay_peer_id = vec![0xa1];
+            }),
+            resign_consistent_grant(&route, |relay, exit| {
+                relay.exit_peer_id = vec![0xa2];
+                exit.exit_peer_id = vec![0xa2];
+            }),
+        ] {
+            let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+            let mut substituted = value.clone();
+            substituted.leases[0].signed_relay_reservation = signed;
+            assert_eq!(
+                verify_exit_fixture_plan(&replay, key, prepared, underlay, &substituted, now_ms,),
+                Err(BackendError::Invalid)
+            );
+            assert!(lock_replay_cache(&replay).is_empty());
+            assert!(
+                verify_exit_fixture_plan(&replay, key, prepared, underlay, &value, now_ms,).is_ok()
+            );
+        }
+
+        let replay = Mutex::new(ReplayCache::new(8).expect("replay cache"));
+        assert!(verify_exit_fixture_plan(&replay, key, prepared, underlay, &value, now_ms).is_ok());
+        assert_eq!(lock_replay_cache(&replay).len(), 2);
+        assert_eq!(
+            verify_exit_fixture_plan(&replay, key, prepared, underlay, &value, now_ms),
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&replay).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn exit_post_verification_worker_lookup_failure_retains_both_replay_records() {
+        let (key, binding, value, prepared, underlay, _) = live_exit_activate_fixture();
+        let mut entry = open_entry_for_role(key, WireguardRole::Exit);
+        entry.underlay = underlay;
+        entry.prepared = Some(prepared);
+        entry.phase = OpenLeasePhase::Prepared;
+        let backend = backend_with_state(Some(entry));
+
+        assert_eq!(
+            backend.activate_one(binding, value.clone()).await,
+            Err(BackendError::CleanupIncomplete)
+        );
+        assert!(lock_state(&backend.state).is_none());
+        assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
+
+        let mut retry = open_entry_for_role(key, WireguardRole::Exit);
+        retry.underlay = underlay;
+        retry.prepared = Some(prepared);
+        retry.phase = OpenLeasePhase::Prepared;
+        *lock_state(&backend.state) = Some(retry);
+        let mut retry_binding = binding;
+        retry_binding.operation_sequence += 1;
+        retry_binding.request_id = [0xb3; 16];
+        retry_binding.request_digest = [0xb4; 32];
+        retry_binding.call_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            backend.activate_one(retry_binding, value).await,
+            Err(BackendError::Invalid)
+        );
+        assert_eq!(lock_replay_cache(&backend.relay_replay).len(), 2);
+        drop(lock_state(&backend.state).take());
     }
 
     #[test]

@@ -233,8 +233,10 @@ fn bind_production_socket(
 /// Serves until SIGINT/SIGTERM while an owned expiry driver retires stale in-memory contexts, then
 /// closes the durable actor.
 ///
-/// The crate-internal production engine can prepare, activate and destroy one process-owned
-/// functional-alpha Client lease. Probe, transport acquisition and every datapath remain
+/// The crate-internal production engine can prepare, activate, probe-commit and destroy one
+/// process-owned functional-alpha Client or Exit singleton lease. A committed response proves only
+/// the exact `WireGuard` identity, signed peer, `/128` route, recent handshake and strict
+/// bidirectional counter growth; transport descriptor acquisition and every usable datapath remain
 /// unavailable. A successful return proves the engine was cleaned before the durable journal actor
 /// became quiescent. Startup still refuses `MayOwnPrepare` because no production restart reaper can
 /// yet prove absence of stale kernel state. Unexpected expiry-driver exit stops serving and fails
