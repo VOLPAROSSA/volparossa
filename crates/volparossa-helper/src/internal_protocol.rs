@@ -13,7 +13,7 @@ use prost::Message;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 3;
+pub(crate) const INTERNAL_WORKER_PROTOCOL_VERSION: u32 = 4;
 pub(crate) const INTERNAL_WORKER_MAGIC: &[u8; 8] = b"VPWKR3\0\0";
 pub(crate) const MAX_INTERNAL_WORKER_FRAME: usize = 128 * 1024;
 const INTERNAL_WORKER_DEADLINE_ENVELOPE_VERSION: u32 = 1;
@@ -158,6 +158,9 @@ pub(crate) struct InitialiseContext {
     pub(crate) mptcp_accepted_addrs: u32,
     #[prost(uint32, tag = "4")]
     pub(crate) mptcp_subflows: u32,
+    /// Canonical cleanup target frozen before any parent-side birth-link mutation.
+    #[prost(message, optional, tag = "5")]
+    pub(crate) prepare: Option<PrepareLeases>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -712,27 +715,17 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
                 return Err(InternalProtocolError::Invalid);
             }
             bounded_limit(operation.mptcp_accepted_addrs)?;
-            bounded_limit(operation.mptcp_subflows)
+            bounded_limit(operation.mptcp_subflows)?;
+            let prepare = operation
+                .prepare
+                .as_ref()
+                .ok_or(InternalProtocolError::Invalid)?;
+            if prepare.route_context_id != operation.route_context_id {
+                return Err(InternalProtocolError::Invalid);
+            }
+            validate_prepare_leases(prepare)
         }
-        Operation::PrepareLeases(operation) => {
-            route_id(&operation.route_context_id)?;
-            validate_lease_batch(&operation.leases, |lease| {
-                path_role(lease.path_id, lease.role)?;
-                validate_host_prefix(
-                    lease
-                        .local_overlay_address
-                        .as_ref()
-                        .ok_or(InternalProtocolError::Invalid)?,
-                )?;
-                if lease.setup_expires_at_unix == 0
-                    || lease.hard_expires_at_unix < lease.setup_expires_at_unix
-                    || !crate::lease_spec::ownership_alias_has_valid_shape(&lease.ownership_alias)
-                {
-                    return Err(InternalProtocolError::Invalid);
-                }
-                Ok((lease.path_id, lease.role))
-            })
-        }
+        Operation::PrepareLeases(operation) => validate_prepare_leases(operation),
         Operation::ActivateLeases(operation) => {
             route_id(&operation.route_context_id)?;
             if operation.hard_expires_at_boottime_ns == 0 {
@@ -817,6 +810,26 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
         }
         Operation::DestroyContext(operation) => route_id(&operation.route_context_id),
     }
+}
+
+fn validate_prepare_leases(operation: &PrepareLeases) -> Result<(), InternalProtocolError> {
+    route_id(&operation.route_context_id)?;
+    validate_lease_batch(&operation.leases, |lease| {
+        path_role(lease.path_id, lease.role)?;
+        validate_host_prefix(
+            lease
+                .local_overlay_address
+                .as_ref()
+                .ok_or(InternalProtocolError::Invalid)?,
+        )?;
+        if lease.setup_expires_at_unix == 0
+            || lease.hard_expires_at_unix < lease.setup_expires_at_unix
+            || !crate::lease_spec::ownership_alias_has_valid_shape(&lease.ownership_alias)
+        {
+            return Err(InternalProtocolError::Invalid);
+        }
+        Ok((lease.path_id, lease.role))
+    })
 }
 
 fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProtocolError> {
@@ -1133,7 +1146,7 @@ mod tests {
 
     #[test]
     fn protocol_identity_and_operation_tags_are_fixed() {
-        assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 3);
+        assert_eq!(INTERNAL_WORKER_PROTOCOL_VERSION, 4);
         assert_eq!(INTERNAL_WORKER_MAGIC, b"VPWKR3\0\0");
         assert_eq!(INTERNAL_WORKER_DEADLINE_ENVELOPE_VERSION, 1);
         assert_eq!(INTERNAL_WORKER_DEADLINE_ENVELOPE_MAGIC, b"VPDLN1\0\0");
@@ -1144,6 +1157,10 @@ mod tests {
                 role: InternalContextRole::Client as i32,
                 mptcp_accepted_addrs: 4,
                 mptcp_subflows: 4,
+                prepare: Some(PrepareLeases {
+                    route_context_id: vec![1; 16],
+                    leases: vec![plan(1)],
+                }),
             }),
             internal_worker_request::Operation::PrepareLeases(PrepareLeases {
                 route_context_id: vec![1; 16],
@@ -1475,6 +1492,10 @@ mod tests {
                     role: InternalContextRole::Relay as i32,
                     mptcp_accepted_addrs,
                     mptcp_subflows,
+                    prepare: Some(PrepareLeases {
+                        route_context_id: vec![1; 16],
+                        leases: vec![plan(1)],
+                    }),
                 },
             ))
         };
@@ -1497,6 +1518,31 @@ mod tests {
     }
 
     #[test]
+    fn initialise_requires_one_same_context_canonical_prepare_plan() {
+        let initialise = |prepare| {
+            request(internal_worker_request::Operation::Initialise(
+                InitialiseContext {
+                    route_context_id: vec![1; 16],
+                    role: InternalContextRole::Client as i32,
+                    mptcp_accepted_addrs: 4,
+                    mptcp_subflows: 4,
+                    prepare,
+                },
+            ))
+        };
+        let exact = PrepareLeases {
+            route_context_id: vec![1; 16],
+            leases: vec![plan(1)],
+        };
+        assert!(encode_request(&initialise(Some(exact.clone()))).is_ok());
+        assert!(encode_request(&initialise(None)).is_err());
+
+        let mut wrong_context = exact;
+        wrong_context.route_context_id[0] ^= 1;
+        assert!(encode_request(&initialise(Some(wrong_context))).is_err());
+    }
+
+    #[test]
     fn omitted_enum_defaults_are_rejected() {
         let initialise = request(internal_worker_request::Operation::Initialise(
             InitialiseContext {
@@ -1504,6 +1550,10 @@ mod tests {
                 role: InternalContextRole::Unspecified as i32,
                 mptcp_accepted_addrs: 4,
                 mptcp_subflows: 4,
+                prepare: Some(PrepareLeases {
+                    route_context_id: vec![1; 16],
+                    leases: vec![plan(1)],
+                }),
             },
         ));
         assert!(encode_request(&initialise).is_err());
@@ -1625,6 +1675,10 @@ mod tests {
                 role: InternalContextRole::Client as i32,
                 mptcp_accepted_addrs: 4,
                 mptcp_subflows: 4,
+                prepare: Some(PrepareLeases {
+                    route_context_id: vec![1; 16],
+                    leases: vec![plan(1)],
+                }),
             },
         ));
         let success = correlated_response(

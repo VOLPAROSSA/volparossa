@@ -597,7 +597,7 @@ impl FunctionalAlphaLeaseBackend {
         value: &PrepareLeaseBatch,
         deadline: HardDeadline,
     ) -> Result<(), BackendError> {
-        let (generation, context_role) = {
+        let (generation, context_role, prepare) = {
             let state = lock_state(&self.state);
             let entry = exact_entry(state.as_ref(), key)?;
             let generation = entry
@@ -607,7 +607,7 @@ impl FunctionalAlphaLeaseBackend {
                 .coordinates
                 .worker_generation
                 .get();
-            (generation, entry.context_role)
+            (generation, entry.context_role, entry.prepare.clone())
         };
         let internal_context = internal_context_role(context_role).ok_or(BackendError::Invalid)?;
         let request = worker_request(
@@ -617,6 +617,7 @@ impl FunctionalAlphaLeaseBackend {
                 role: internal_context as i32,
                 mptcp_accepted_addrs: value.mptcp_accepted_addrs,
                 mptcp_subflows: value.mptcp_subflows,
+                prepare: Some(prepare),
             }),
         );
         let execution = self
@@ -999,13 +1000,12 @@ impl FunctionalAlphaLeaseBackend {
                     .coordinator
                     .execute_until(key.context_id, generation, destroy, destroy_deadline)
                     .await;
-                if matches_destroyed(execution.as_ref().ok()) {
-                    let mut state = lock_state(&self.state);
-                    let Ok(entry) = exact_entry_mut(&mut state, key) else {
-                        return false;
-                    };
-                    entry.child_cleanup = classify_exact_child_cleanup(entry, key);
-                }
+                let mut state = lock_state(&self.state);
+                let Ok(entry) = exact_entry_mut(&mut state, key) else {
+                    return false;
+                };
+                entry.child_cleanup =
+                    classify_exact_child_cleanup(entry, key, execution.as_ref().ok());
             }
         }
 
@@ -2841,37 +2841,57 @@ fn matches_initialised(
     })
 }
 
-fn matches_destroyed(
+fn exact_child_cleanup_is_confirmed(
     execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
+    phase: OpenLeasePhase,
+    birth_may_exist: &[bool],
+    resource_count: usize,
 ) -> bool {
-    execution.is_some_and(|execution| {
-        execution.descriptor.is_none()
-            && execution.response.result == InternalWorkerResult::Ok as i32
-            && matches!(
-                execution.response.outcome.as_ref(),
-                Some(internal_worker_response::Outcome::Destroyed(_))
+    if resource_count == 0 || birth_may_exist.len() != resource_count {
+        return false;
+    }
+    let Some(execution) = execution.filter(|execution| execution.descriptor.is_none()) else {
+        return false;
+    };
+    match (
+        InternalWorkerResult::try_from(execution.response.result).ok(),
+        execution.response.outcome.as_ref(),
+    ) {
+        (Some(InternalWorkerResult::Ok), Some(internal_worker_response::Outcome::Destroyed(_))) => {
+            matches!(
+                phase,
+                OpenLeasePhase::Initialised
+                    | OpenLeasePhase::BirthMayExist
+                    | OpenLeasePhase::Prepared
+                    | OpenLeasePhase::Activated
+                    | OpenLeasePhase::Committed
             )
-    })
+        }
+        (Some(InternalWorkerResult::NotFound), None) => {
+            matches!(
+                phase,
+                OpenLeasePhase::Initialised | OpenLeasePhase::BirthMayExist
+            ) && birth_may_exist.iter().all(|may_exist| !*may_exist)
+        }
+        _ => false,
+    }
 }
 
 fn classify_exact_child_cleanup(
     entry: &OpenLeaseEntry,
     key: OpenLineageKey,
+    execution: Option<&crate::worker_transport::CredentialedWorkerExecution>,
 ) -> Option<ExactChildCleanupConfirmed> {
-    if entry.key != key || entry.birth_may_exist.len() != entry.wireguard.len() {
+    if entry.key != key {
         return None;
     }
-    let child_owned_exact_set = matches!(
+    exact_child_cleanup_is_confirmed(
+        execution,
         entry.phase,
-        OpenLeasePhase::Prepared | OpenLeasePhase::Activated | OpenLeasePhase::Committed
-    );
-    let no_birth_link_can_have_entered =
-        matches!(
-            entry.phase,
-            OpenLeasePhase::Initialised | OpenLeasePhase::BirthMayExist
-        ) && entry.birth_may_exist.iter().all(|may_exist| !*may_exist);
-    (child_owned_exact_set || no_birth_link_can_have_entered)
-        .then_some(ExactChildCleanupConfirmed { key })
+        &entry.birth_may_exist,
+        entry.wireguard.len(),
+    )
+    .then_some(ExactChildCleanupConfirmed { key })
 }
 
 fn matches_prepared_batch(
@@ -3448,29 +3468,37 @@ mod tests {
     fn exact_child_destroy_classifier_is_phase_and_birth_fail_closed() {
         let open_key = key();
         let mut entry = open_entry(open_key);
+        let destroyed = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        let not_found = cleanup_execution(InternalWorkerResult::NotFound, None);
 
         entry.phase = OpenLeasePhase::Registered;
-        assert!(classify_exact_child_cleanup(&entry, open_key).is_none());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_none());
 
         entry.phase = OpenLeasePhase::Initialised;
-        assert!(classify_exact_child_cleanup(&entry, open_key).is_some());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
 
         entry.phase = OpenLeasePhase::BirthMayExist;
         entry.birth_may_exist[0] = true;
-        assert!(classify_exact_child_cleanup(&entry, open_key).is_none());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&not_found)).is_none());
         entry.birth_may_exist[0] = false;
-        assert!(classify_exact_child_cleanup(&entry, open_key).is_some());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&not_found)).is_some());
 
         entry.phase = OpenLeasePhase::Prepared;
         entry.birth_may_exist[0] = true;
-        assert!(classify_exact_child_cleanup(&entry, open_key).is_some());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_some());
 
         entry.birth_may_exist.clear();
-        assert!(classify_exact_child_cleanup(&entry, open_key).is_none());
+        assert!(classify_exact_child_cleanup(&entry, open_key, Some(&destroyed)).is_none());
         entry.birth_may_exist.push(true);
         let mut wrong_key = open_key;
         wrong_key.context_id[0] ^= 1;
-        assert!(classify_exact_child_cleanup(&entry, wrong_key).is_none());
+        assert!(classify_exact_child_cleanup(&entry, wrong_key, Some(&destroyed)).is_none());
     }
 
     #[test]
@@ -3497,6 +3525,24 @@ mod tests {
             .find("self.create_birth_links(")
             .expect("first kernel mutation");
         assert!(intent < handoff && handoff < initialise && handoff < kernel);
+        let initialise_start = source
+            .find("    async fn initialise_child(")
+            .expect("Initialise child start");
+        let initialise_end = source[initialise_start..]
+            .find("\n    fn create_birth_links(")
+            .map(|offset| initialise_start + offset)
+            .expect("Initialise child end");
+        let initialise_body = &source[initialise_start..initialise_end];
+        let staged_plan = initialise_body
+            .find("entry.prepare.clone()")
+            .expect("canonical staged Prepare plan");
+        let encoded_plan = initialise_body
+            .find("prepare: Some(prepare)")
+            .expect("typed Initialise cleanup target");
+        let dispatch = initialise_body
+            .find(".execute_until(")
+            .expect("Initialise dispatch");
+        assert!(staged_plan < encoded_plan && encoded_plan < dispatch);
     }
 
     #[test]
@@ -3510,11 +3556,8 @@ mod tests {
             .map(|offset| cleanup_start + offset)
             .expect("durable cleanup end");
         let cleanup = &source[cleanup_start..cleanup_end];
-        let exact_child_cleanup = source[..cleanup_start]
-            .rfind("matches_destroyed(execution.as_ref().ok())")
-            .expect("exact child cleanup response");
         let child_cleanup_classified = source[..cleanup_start]
-            .rfind("entry.child_cleanup = classify_exact_child_cleanup(entry, key)")
+            .rfind("classify_exact_child_cleanup(entry, key, execution.as_ref().ok())")
             .expect("phase/birth-classified child cleanup authority");
         let retain_without_child_cleanup = source[..cleanup_start]
             .rfind("// Exact child cleanup did not complete.")
@@ -3538,8 +3581,7 @@ mod tests {
             .rfind("self.settle_durable_cleanup(key, parent, deadline).await")
             .expect("durable cleanup call");
         assert!(
-            exact_child_cleanup < child_cleanup_classified
-                && child_cleanup_classified < retain_without_child_cleanup
+            child_cleanup_classified < retain_without_child_cleanup
                 && retain_without_child_cleanup < exact_worker_reap
                 && exact_worker_reap < worker_reap_recorded
                 && worker_reap_recorded < kernel_absent
@@ -3604,6 +3646,17 @@ mod tests {
         let production = &source[..production_end];
         let actor_source = include_str!("../ownership_journal/actor.rs");
         let journal_source = include_str!("../ownership_journal.rs");
+        let classifier_start = production
+            .find("fn classify_exact_child_cleanup(")
+            .expect("private child-cleanup classifier");
+        let classifier_end = production[classifier_start..]
+            .find("\nfn matches_prepared_batch(")
+            .map(|offset| classifier_start + offset)
+            .expect("bounded child-cleanup classifier");
+        assert!(
+            production[classifier_start..classifier_end]
+                .contains("exact_child_cleanup_is_confirmed(")
+        );
 
         assert_eq!(
             production.matches("handle.confirm_cleanup_until(").count(),
@@ -3633,7 +3686,7 @@ mod tests {
         );
         assert_eq!(
             production
-                .matches("classify_exact_child_cleanup(entry, key)")
+                .matches("classify_exact_child_cleanup(entry, key, execution.as_ref().ok())")
                 .count(),
             1,
             "child cleanup authority has one production classifier site"
@@ -3671,6 +3724,143 @@ mod tests {
         assert!(journal_source.contains("struct SameRuntimeCleanSettlement;"));
         assert!(!journal_source.contains("pub(crate) struct SameRuntimeCleanSettlement;"));
         assert!(!journal_source.contains("pub(super) struct SameRuntimeCleanSettlement;"));
+    }
+
+    fn cleanup_execution(
+        result: InternalWorkerResult,
+        outcome: Option<internal_worker_response::Outcome>,
+    ) -> crate::worker_transport::CredentialedWorkerExecution {
+        crate::worker_transport::CredentialedWorkerExecution {
+            response: crate::internal_protocol::InternalWorkerResponse {
+                protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                request_id: vec![0xd1; 16],
+                result: result as i32,
+                request_digest: vec![0xd2; 32],
+                outcome,
+            },
+            descriptor: None,
+        }
+    }
+
+    #[test]
+    fn exact_child_cleanup_evidence_is_phase_and_birth_sensitive() {
+        let destroyed = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        for phase in [
+            OpenLeasePhase::Initialised,
+            OpenLeasePhase::BirthMayExist,
+            OpenLeasePhase::Prepared,
+            OpenLeasePhase::Activated,
+            OpenLeasePhase::Committed,
+        ] {
+            assert!(exact_child_cleanup_is_confirmed(
+                Some(&destroyed),
+                phase,
+                &[true, false],
+                2,
+            ));
+        }
+        for phase in [
+            OpenLeasePhase::Reserved,
+            OpenLeasePhase::DurableHandoffPending,
+            OpenLeasePhase::Registered,
+        ] {
+            assert!(!exact_child_cleanup_is_confirmed(
+                Some(&destroyed),
+                phase,
+                &[false],
+                1,
+            ));
+        }
+
+        let not_found = cleanup_execution(InternalWorkerResult::NotFound, None);
+        for phase in [OpenLeasePhase::Initialised, OpenLeasePhase::BirthMayExist] {
+            assert!(exact_child_cleanup_is_confirmed(
+                Some(&not_found),
+                phase,
+                &[false, false],
+                2,
+            ));
+            assert!(!exact_child_cleanup_is_confirmed(
+                Some(&not_found),
+                phase,
+                &[true, false],
+                2,
+            ));
+        }
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&not_found),
+            OpenLeasePhase::Prepared,
+            &[false],
+            1,
+        ));
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&not_found),
+            OpenLeasePhase::BirthMayExist,
+            &[],
+            1,
+        ));
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&not_found),
+            OpenLeasePhase::BirthMayExist,
+            &[false],
+            0,
+        ));
+    }
+
+    #[test]
+    fn cleanup_evidence_rejects_wrong_result_outcome_and_descriptor() {
+        let wrong_result = cleanup_execution(
+            InternalWorkerResult::CleanupIncomplete,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        let wrong_outcome = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Initialised(
+                crate::internal_protocol::ContextInitialised {
+                    route_context_id: key().context_id.to_vec(),
+                },
+            )),
+        );
+        for execution in [&wrong_result, &wrong_outcome] {
+            assert!(!exact_child_cleanup_is_confirmed(
+                Some(execution),
+                OpenLeasePhase::BirthMayExist,
+                &[false],
+                1,
+            ));
+        }
+
+        let mut with_descriptor = cleanup_execution(
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        with_descriptor.descriptor = Some(
+            std::fs::File::open("/dev/null")
+                .expect("test descriptor")
+                .into(),
+        );
+        assert!(!exact_child_cleanup_is_confirmed(
+            Some(&with_descriptor),
+            OpenLeasePhase::Committed,
+            &[false],
+            1,
+        ));
+        assert!(!exact_child_cleanup_is_confirmed(
+            None,
+            OpenLeasePhase::Committed,
+            &[false],
+            1,
+        ));
     }
 
     fn live_activate_fixture() -> (

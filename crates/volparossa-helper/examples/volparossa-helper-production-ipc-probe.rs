@@ -20,7 +20,7 @@ use std::{
 use ed25519_dalek::SigningKey;
 use nix::{
     poll::{PollFd, PollFlags, poll},
-    unistd::read,
+    unistd::{getegid, geteuid, read},
 };
 use rand_core::{OsRng, RngCore};
 use tokio::{
@@ -91,6 +91,8 @@ const FUNCTIONAL_SIGNED_RATE_MBPS: u64 = 1;
 const FUNCTIONAL_RELEASE_TIMEOUT_MILLIS: u16 = 20_000;
 const FUNCTIONAL_RELEASE_BYTE: u8 = b'G';
 const FUNCTIONAL_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready";
+const FUNCTIONAL_CLIENT_SETTLED_RECORD: &str =
+    "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_SETTLED_V1=pass";
 const FUNCTIONAL_EXIT_READY_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=ready";
 const FUNCTIONAL_EXIT_PASS_RECORD: &str = "VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=pass";
 const FUNCTIONAL_RELAY_PAIR_READY_RECORD: &str =
@@ -124,6 +126,7 @@ const NONCANONICAL_UNKNOWN_OUTER_FIELD_FRAME: [u8; 29] = [
 enum Mode {
     BindRuntime,
     FunctionalClientLease,
+    ProveSettledJournal,
     RejectFrameBounds,
     RejectWireShapes,
     ExpectUnauthorisedPeer,
@@ -146,6 +149,7 @@ impl Mode {
         match self {
             Self::BindRuntime => "VOLPAROSSA_HELPER_V3_IPC_BIND_RUNTIME_V1=pass",
             Self::FunctionalClientLease => "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass",
+            Self::ProveSettledJournal => "VOLPAROSSA_HELPER_V3_FUNCTIONAL_JOURNAL_SETTLED_V1=pass",
             Self::RejectFrameBounds => "VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass",
             Self::RejectWireShapes => "VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass",
             Self::ExpectUnauthorisedPeer => "VOLPAROSSA_HELPER_V3_IPC_UNAUTHORISED_PEER_V1=pass",
@@ -191,6 +195,8 @@ enum FunctionalPhase {
     Reconnect,
     Commit,
     Destroy,
+    ClientSettled,
+    ClientSettlementRelease,
     SecondCyclePlan,
     SecondCycleBind,
     SecondCyclePrepare,
@@ -202,6 +208,7 @@ enum FunctionalPhase {
     SecondCycleReconnect,
     SecondCycleCommit,
     SecondCycleDestroy,
+    SecondCycleSettlementRelease,
     RelayPairPlan,
     RelayPairBind,
     RelayPairPrepare,
@@ -230,6 +237,8 @@ impl FunctionalPhase {
             Self::Reconnect => "reconnect",
             Self::Commit => "commit",
             Self::Destroy => "destroy",
+            Self::ClientSettled => "client-settled",
+            Self::ClientSettlementRelease => "client-settlement-release",
             Self::SecondCyclePlan => "second-cycle-plan",
             Self::SecondCycleBind => "second-cycle-bind",
             Self::SecondCyclePrepare => "second-cycle-prepare",
@@ -241,6 +250,7 @@ impl FunctionalPhase {
             Self::SecondCycleReconnect => "second-cycle-reconnect",
             Self::SecondCycleCommit => "second-cycle-commit",
             Self::SecondCycleDestroy => "second-cycle-destroy",
+            Self::SecondCycleSettlementRelease => "second-cycle-settlement-release",
             Self::RelayPairPlan => "relay-pair-plan",
             Self::RelayPairBind => "relay-pair-bind",
             Self::RelayPairPrepare => "relay-pair-prepare",
@@ -741,6 +751,7 @@ fn parse_invocation(arguments: impl IntoIterator<Item = OsString>) -> Option<Pro
     let mode = match mode_argument.to_str()? {
         "bind-runtime" => Mode::BindRuntime,
         "functional-client-lease" => Mode::FunctionalClientLease,
+        "prove-settled-journal" => Mode::ProveSettledJournal,
         "reject-frame-bounds" => Mode::RejectFrameBounds,
         "reject-wire-shapes" => Mode::RejectWireShapes,
         "expect-unauthorised-peer" => Mode::ExpectUnauthorisedPeer,
@@ -780,6 +791,9 @@ async fn run_mode(invocation: ProbeInvocation) -> Result<(), ProbeFailure> {
         Mode::FunctionalClientLease => run_functional_client_lease(invocation.expected_peer)
             .await
             .map_err(ProbeFailure::Functional),
+        Mode::ProveSettledJournal => {
+            prove_settled_journal(invocation.expected_peer).map_err(|_| ProbeFailure::Generic)
+        }
         Mode::RejectFrameBounds => run_reject_frame_bounds(invocation.expected_peer)
             .await
             .map_err(|_| ProbeFailure::Generic),
@@ -790,6 +804,17 @@ async fn run_mode(invocation: ProbeInvocation) -> Result<(), ProbeFailure> {
             .await
             .map_err(|_| ProbeFailure::Generic),
     }
+}
+
+fn prove_settled_journal(expected_peer: ExpectedPeer) -> Result<(), ProbeError> {
+    if geteuid().as_raw() != ROOT_UID
+        || getegid().as_raw() != expected_peer.gid
+        || expected_peer.pid <= 0
+        || !volparossa_helper::production_functional_journal_is_exactly_settled()
+    {
+        return Err(ProbeError::UntrustedServer);
+    }
+    Ok(())
 }
 
 async fn run_bind_runtime(expected_peer: ExpectedPeer) -> Result<(), ProbeError> {
@@ -856,6 +881,12 @@ async fn run_functional_client_lease(
         destroy_functional_cycle(&mut stream, &first_plan, &first.prepared)
             .await
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::ClientSettled);
+        publish_fixed_record(FUNCTIONAL_CLIENT_SETTLED_RECORD)
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::ClientSettlementRelease);
+        wait_for_functional_release()
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
 
         phase.set(FunctionalPhase::SecondCyclePlan);
         let second_plan = FunctionalCyclePlan::random(
@@ -904,6 +935,9 @@ async fn run_functional_client_lease(
             .await
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
         publish_fixed_record(FUNCTIONAL_EXIT_PASS_RECORD)
+            .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
+        phase.set(FunctionalPhase::SecondCycleSettlementRelease);
+        wait_for_functional_release()
             .map_err(|error| FunctionalProbeFailure::new(phase.get(), error))?;
 
         phase.set(FunctionalPhase::RelayPairPlan);
@@ -2593,6 +2627,7 @@ mod tests {
         for (argument, expected) in [
             ("bind-runtime", Mode::BindRuntime),
             ("functional-client-lease", Mode::FunctionalClientLease),
+            ("prove-settled-journal", Mode::ProveSettledJournal),
             ("reject-frame-bounds", Mode::RejectFrameBounds),
             ("reject-wire-shapes", Mode::RejectWireShapes),
             ("expect-unauthorised-peer", Mode::ExpectUnauthorisedPeer),
@@ -2686,6 +2721,10 @@ mod tests {
             "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready"
         );
         assert_eq!(
+            FUNCTIONAL_CLIENT_SETTLED_RECORD,
+            "VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_SETTLED_V1=pass"
+        );
+        assert_eq!(
             FUNCTIONAL_EXIT_READY_RECORD,
             "VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=ready"
         );
@@ -2713,9 +2752,14 @@ mod tests {
             Mode::ExpectUnauthorisedPeer.success_record(),
             "VOLPAROSSA_HELPER_V3_IPC_UNAUTHORISED_PEER_V1=pass"
         );
+        assert_eq!(
+            Mode::ProveSettledJournal.success_record(),
+            "VOLPAROSSA_HELPER_V3_FUNCTIONAL_JOURNAL_SETTLED_V1=pass"
+        );
         for record in [
             Mode::BindRuntime.success_record(),
             Mode::FunctionalClientLease.success_record(),
+            Mode::ProveSettledJournal.success_record(),
             Mode::RejectFrameBounds.success_record(),
             Mode::RejectWireShapes.success_record(),
             Mode::ExpectUnauthorisedPeer.success_record(),
@@ -2777,6 +2821,8 @@ mod tests {
             FunctionalPhase::Reconnect,
             FunctionalPhase::Commit,
             FunctionalPhase::Destroy,
+            FunctionalPhase::ClientSettled,
+            FunctionalPhase::ClientSettlementRelease,
             FunctionalPhase::SecondCyclePlan,
             FunctionalPhase::SecondCycleBind,
             FunctionalPhase::SecondCyclePrepare,
@@ -2788,6 +2834,7 @@ mod tests {
             FunctionalPhase::SecondCycleReconnect,
             FunctionalPhase::SecondCycleCommit,
             FunctionalPhase::SecondCycleDestroy,
+            FunctionalPhase::SecondCycleSettlementRelease,
             FunctionalPhase::RelayPairPlan,
             FunctionalPhase::RelayPairBind,
             FunctionalPhase::RelayPairPrepare,

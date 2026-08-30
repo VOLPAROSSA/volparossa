@@ -1750,6 +1750,9 @@ struct WorkerContext<Kernel> {
     bound_path_id: Option<u8>,
     relay_fence: Option<WorkerRelayFence>,
     kernel: Kernel,
+    /// Canonical public resource evidence staged by authenticated Initialise before the parent
+    /// moves any birth link. This is not durable authority, but it bounds same-runtime cleanup.
+    staged_resources: Option<Vec<DurableWireguardResource>>,
     lease: Option<WorkerLeaseLifecycle>,
 }
 
@@ -1803,7 +1806,7 @@ enum RelayForwardingGrowth {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerDestroyOutcome {
     Destroyed,
-    NoAdoptedLease,
+    Invalid,
     CleanupIncomplete,
     Terminate,
 }
@@ -1821,6 +1824,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 WorkerRelayFence::NonRelay
             }),
             kernel,
+            staged_resources: None,
             lease: None,
         }
     }
@@ -1831,6 +1835,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         path_id: u8,
         bootstrap: WorkerNetworkBootstrap,
         kernel: Kernel,
+        staged_resources: Vec<DurableWireguardResource>,
     ) -> Option<Self> {
         let relay_fence = match (role, bootstrap) {
             (
@@ -1850,8 +1855,18 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             bound_path_id: Some(path_id),
             relay_fence: Some(relay_fence),
             kernel,
+            staged_resources: Some(staged_resources),
             lease: None,
         })
+    }
+
+    fn accepts_prepare_resources(&self, resources: &[DurableWireguardResource]) -> bool {
+        self.staged_resources
+            .as_ref()
+            .is_none_or(|staged| staged == resources)
+            && self
+                .bound_path_id
+                .is_none_or(|path_id| resources.iter().all(|resource| resource.key().0 == path_id))
     }
 
     fn prepare(
@@ -1867,10 +1882,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         else {
             return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
         };
-        if self
-            .bound_path_id
-            .is_some_and(|path_id| resources.iter().any(|resource| resource.key().0 != path_id))
-        {
+        if !self.accepts_prepare_resources(&resources) {
             return WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid);
         }
         if self
@@ -2291,18 +2303,37 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     }
 
     fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
-        let Some(lifecycle) = self.lease.take() else {
-            // A parent may already have moved a birth link into this namespace, so no adopted
-            // lease is not link-absence evidence. A production Relay therefore keeps its policy-
-            // drop baseline installed and exits successfully; confirmed process/namespace death
-            // performs the only safe cleanup without opening an unfenced forwarding window.
-            return match self.relay_fence.as_ref() {
-                Some(WorkerRelayFence::Restricted(_)) => WorkerDestroyOutcome::Destroyed,
-                Some(WorkerRelayFence::NonRelay) => WorkerDestroyOutcome::NoAdoptedLease,
-                #[cfg(test)]
-                Some(WorkerRelayFence::Fixture) => WorkerDestroyOutcome::NoAdoptedLease,
-                Some(WorkerRelayFence::Active { .. }) | None => WorkerDestroyOutcome::Terminate,
+        let Some(lifecycle) = self.lease.as_ref() else {
+            // Birth links are moved before Prepare adopts them. The exact authenticated cleanup
+            // resource set therefore remains necessary even when no lifecycle exists in this
+            // child. Delete and prove that set absent while the namespace is still live and
+            // systemd-pinned; only then may Relay policy-drop custody be retired.
+            let Some(cleanup) = self.staged_resources.as_deref() else {
+                return WorkerDestroyOutcome::Invalid;
             };
+            if !cleanup_unadopted_worker_resources(&mut self.kernel, cleanup, deadline) {
+                return WorkerDestroyOutcome::CleanupIncomplete;
+            }
+            return self.retire_relay_forwarding_fence(deadline);
+        };
+        let adopted = match lifecycle {
+            WorkerLeaseLifecycle::Prepared(ownerships)
+            | WorkerLeaseLifecycle::Activated(ownerships)
+            | WorkerLeaseLifecycle::Committed(ownerships)
+            | WorkerLeaseLifecycle::CleanupRequired(ownerships) => ownerships,
+        };
+        if let Some(cleanup) = self.staged_resources.as_deref() {
+            if adopted.len() != cleanup.len()
+                || adopted
+                    .iter()
+                    .zip(cleanup)
+                    .any(|(ownership, cleanup)| ownership.resource != *cleanup)
+            {
+                return WorkerDestroyOutcome::Invalid;
+            }
+        }
+        let Some(lifecycle) = self.lease.take() else {
+            std::process::abort();
         };
         let ownerships = match lifecycle {
             WorkerLeaseLifecycle::Prepared(ownerships)
@@ -2333,7 +2364,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
                 WorkerDestroyOutcome::CleanupIncomplete
             }
-            WorkerDestroyOutcome::Terminate | WorkerDestroyOutcome::NoAdoptedLease => {
+            WorkerDestroyOutcome::Terminate | WorkerDestroyOutcome::Invalid => {
                 WorkerDestroyOutcome::Terminate
             }
         }
@@ -2733,6 +2764,23 @@ fn cleanup_worker_resources(
     all_absent
 }
 
+fn cleanup_unadopted_worker_resources(
+    kernel: &mut impl WorkerNamespaceKernel,
+    resources: &[DurableWireguardResource],
+    deadline: HardDeadline,
+) -> bool {
+    if resources.is_empty() {
+        return false;
+    }
+    for resource in resources.iter().rev() {
+        let _ = kernel.delete_exact_owned_wireguard(resource, deadline);
+    }
+    resources
+        .iter()
+        .rev()
+        .all(|resource| kernel.prove_wireguard_absent(resource, deadline).is_ok())
+}
+
 fn routing_context_role(role: i32) -> Option<RoutingContextRole> {
     match InternalContextRole::try_from(role).ok()? {
         InternalContextRole::Client => Some(RoutingContextRole::Client),
@@ -2781,6 +2829,18 @@ fn initialise_child_context(
     if context.is_some() || route_context_id != bound_context {
         return Ok((InternalWorkerResult::Conflict, None, false));
     }
+    let Some(staged_resources) = initialise
+        .prepare
+        .as_ref()
+        .and_then(|prepare| validate_worker_prepare(prepare, route_context_id, role))
+        .filter(|resources| {
+            resources
+                .iter()
+                .all(|resource| resource.key().0 == bound_path_id)
+        })
+    else {
+        return Ok((InternalWorkerResult::Invalid, None, false));
+    };
     match NamespaceKernel::connect(deadline).and_then(|mut kernel| {
         kernel.activate_loopback(deadline)?;
         Ok(kernel)
@@ -2789,9 +2849,15 @@ fn initialise_child_context(
             let bootstrap = network_bootstrap
                 .take()
                 .ok_or(WorkerV3Error::Authentication)?;
-            let worker_context =
-                WorkerContext::new_bound(route_context_id, role, bound_path_id, bootstrap, kernel)
-                    .ok_or(WorkerV3Error::Authentication)?;
+            let worker_context = WorkerContext::new_bound(
+                route_context_id,
+                role,
+                bound_path_id,
+                bootstrap,
+                kernel,
+                staged_resources,
+            )
+            .ok_or(WorkerV3Error::Authentication)?;
             *context = Some(worker_context);
             Ok((
                 InternalWorkerResult::Ok,
@@ -2905,7 +2971,7 @@ fn destroy_child_context(
                 true,
             )
         }
-        WorkerDestroyOutcome::NoAdoptedLease => (InternalWorkerResult::NotFound, None, false),
+        WorkerDestroyOutcome::Invalid => (InternalWorkerResult::Invalid, None, false),
         WorkerDestroyOutcome::CleanupIncomplete => {
             (InternalWorkerResult::CleanupIncomplete, None, false)
         }
@@ -9407,6 +9473,7 @@ mod tests {
                 role: InternalContextRole::Client as i32,
                 mptcp_accepted_addrs: 4,
                 mptcp_subflows: 4,
+                prepare: Some(worker_prepare(context_id, 0x51)),
             }),
         )
     }
@@ -11254,18 +11321,115 @@ mod tests {
     }
 
     #[test]
-    fn worker_destroy_without_an_adopted_lease_is_not_absence_proof() {
+    fn unadopted_relay_pair_destroy_requires_exact_staged_absence_before_success() {
+        let route_context_id = [0x37; 16];
+        let prepare = worker_relay_prepare(route_context_id, 0x57);
+        let staged = validate_worker_prepare(&prepare, route_context_id, RoutingContextRole::Relay)
+            .expect("exact staged Relay resources");
         let mut context = WorkerContext::new(
-            [0x37; 16],
-            RoutingContextRole::Client,
-            FakeWorkerKernel::default(),
+            route_context_id,
+            RoutingContextRole::Relay,
+            FakeWorkerKernel {
+                failures: vec![FakeWorkerKernelFailure::AbsenceAt(1)],
+                ..FakeWorkerKernel::default()
+            },
         );
+        context.staged_resources = Some(staged);
 
         assert_eq!(
             context.destroy(worker_deadline()),
-            WorkerDestroyOutcome::NoAdoptedLease
+            WorkerDestroyOutcome::CleanupIncomplete
         );
+        assert!(context.lease.is_none());
+        assert!(context.staged_resources.is_some());
+        assert_eq!(
+            context.destroy(worker_deadline()),
+            WorkerDestroyOutcome::Destroyed
+        );
+        assert_eq!(
+            context.kernel.cleanup_calls,
+            [
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "delete",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayExit as i32)
+                ),
+                (
+                    "absent",
+                    (1, volparossa_routing::WireguardRole::RelayClient as i32)
+                ),
+            ]
+        );
+
+        let source = include_str!("worker_v3.rs");
+        let initialise = source
+            .split_once("fn initialise_child_context(")
+            .and_then(|(_, tail)| tail.split_once("\nfn prepare_child_context("))
+            .map(|(body, _)| body)
+            .expect("bounded Initialise implementation");
+        let staged_validation = initialise
+            .find("validate_worker_prepare(prepare, route_context_id, role)")
+            .expect("typed staged plan validation");
+        let first_kernel_mutation = initialise
+            .find("NamespaceKernel::connect(deadline)")
+            .expect("first namespace-kernel access");
+        assert!(staged_validation < first_kernel_mutation);
+    }
+
+    #[test]
+    fn staged_initialise_plan_rejects_prepare_substitution_before_kernel_access() {
+        let route_context_id = [0x38; 16];
+        let exact = worker_prepare(route_context_id, 0x58);
+        let staged = validate_worker_prepare(&exact, route_context_id, RoutingContextRole::Client)
+            .expect("exact staged Client resource");
+        let mut context = WorkerContext::new(
+            route_context_id,
+            RoutingContextRole::Client,
+            FakeWorkerKernel::default(),
+        );
+        context.staged_resources = Some(staged);
+        let mut keys = FixedWorkerKeySource {
+            private_key: Some([0x48; 32]),
+        };
+
+        assert!(matches!(
+            context.prepare(
+                &worker_prepare(route_context_id, 0x59),
+                &mut keys,
+                worker_deadline(),
+            ),
+            WorkerPrepareOutcome::Failed(InternalWorkerResult::Invalid)
+        ));
         assert!(context.kernel.calls.is_empty());
+        assert!(context.lease.is_none());
+        assert!(context.staged_resources.is_some());
+        assert!(matches!(
+            context.prepare(&exact, &mut keys, worker_deadline()),
+            WorkerPrepareOutcome::Prepared(_)
+        ));
     }
 
     #[test]

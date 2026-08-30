@@ -125,10 +125,16 @@ reject_mutation worker-fdstore-not-two '.worker.fdstore_before_retirement = 1'
 reject_mutation worker-unit-still-loaded \
     '.worker.unit_load_state_after_retirement = "loaded"'
 reject_mutation production-not-argumentless '.production.argumentless = false'
-reject_mutation production-fdstore-not-zero '.production.fdstore_during_run = 1'
+reject_mutation production-idle-fdstore-not-zero '.production.fdstore_idle_observation = 1'
+reject_mutation production-active-fdstore-not-two \
+    '.production.fdstore_active_cycle_counts[1] = 1'
+reject_mutation production-settled-fdstore-not-zero \
+    '.production.fdstore_settled_cycle_counts[2] = 1'
+reject_mutation production-fdstore-identity-unbound \
+    '.production.fdstore_exact_identity_bound = false'
 reject_mutation production-unit-still-loaded \
     '.production.unit_load_state_after_retirement = "loaded"'
-reject_mutation journal-changed '.retirement.journal_unchanged = false'
+reject_mutation journal-unsettled '.retirement.journal_settled_absent = false'
 reject_mutation lock-held '.retirement.lock_released = false'
 reject_mutation socket-present '.retirement.socket_absent = false'
 reject_mutation host-digest-mismatch \
@@ -150,7 +156,7 @@ reject_mutation scope-claims-datapath '.scope.datapath = true'
 reject_mutation scope-claims-acceptance '.scope.acceptance_a01_a15 = true'
 reject_mutation scope-not-helper-only '.scope.helper_boundary_only = false'
 reject_mutation failed-check '.checks[0].result = "FAIL"'
-reject_mutation missing-check '.checks = .checks[0:15]'
+reject_mutation missing-check '.checks = .checks[0:17]'
 reject_mutation extra-check '.checks += [.checks[-1]]'
 # The dollar variables below belong to jq, not the shell.
 # shellcheck disable=SC2016

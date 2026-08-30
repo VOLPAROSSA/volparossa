@@ -32,6 +32,7 @@ functional_exit_relay_alias=volparossa-proof-relay-exit-v1
 functional_exit_relay_listen_port=10001
 functional_exit_relay_public_key=c7LYt2qptTZgAyvI9di+46OuTjs6f9Sa3oH3NHo0qmg=
 functional_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready
+functional_client_settled_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_SETTLED_V1=pass
 functional_exit_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_V1=ready
 functional_relay_pair_ready_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=ready
 functional_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass
@@ -45,6 +46,8 @@ functional_exit_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_EXIT_LEASE_EXTERN
 functional_relay_pair_activated_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_ACTIVATED_KERNEL_V1=pass
 functional_relay_pair_committed_kernel_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_COMMITTED_KERNEL_V1=pass
 functional_relay_pair_pass_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass
+functional_journal_settled_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_JOURNAL_SETTLED_V1=pass
+functional_fdstore_proof_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_FDSTORE_CYCLES_V1=pass
 functional_relay_pair_cleanup_record=VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_EXTERNAL_CLEANUP_V1=pass
 functional_failure_prefix=VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_FAILURE_V1=
 functional_failure_record=$proof_directory/functional-client-lease.failure
@@ -1441,6 +1444,7 @@ EOF
     hook_custody_process_count=0
     hook_custody_namespace_count=0
     hook_custody_pidfd_identity=
+    hook_custody_pidfd_fd=
     hook_custody_process_fd=
     hook_custody_process_identity=
     hook_custody_namespace_fd=
@@ -1455,6 +1459,7 @@ EOF
                     "$hook_custody_parent_pid" "$hook_custody_fd" \
                     "$hook_custody_worker_pid") || return 1
                 if [ -z "$hook_custody_pidfd_identity" ]; then
+                    hook_custody_pidfd_fd=$hook_custody_fd
                     hook_custody_pidfd_identity=$hook_custody_observed_identity
                 else
                     [ "$hook_custody_observed_identity" = \
@@ -3675,11 +3680,199 @@ unit_fdstore_is_empty() {
     [ "$#" -eq 1 ] || return 1
     hook_fdstore_unit=$1
     unit_name_is_safe "$hook_fdstore_unit" || return 1
-    hook_fdstore_count=$(unit_u32_property \
+    hook_fdstore_count_before=$(unit_u32_property \
         "$hook_fdstore_unit" \
         org.freedesktop.systemd1.Service \
         NFileDescriptorStore) || return 1
-    [ "$hook_fdstore_count" = 0 ]
+    [ "$hook_fdstore_count_before" = 0 ] || return 1
+    hook_fdstore_object=$(unit_object_path "$hook_fdstore_unit") || return 1
+    hook_fdstore_dump=$(/usr/bin/busctl \
+        --address="$system_bus_address" \
+        --json=short \
+        call \
+        org.freedesktop.systemd1 \
+        "$hook_fdstore_object" \
+        org.freedesktop.systemd1.Service \
+        DumpFileDescriptorStore 2>/dev/null) || return 1
+    [ "${#hook_fdstore_dump}" -le 8192 ] || return 1
+    printf '%s' "$hook_fdstore_dump" | /usr/bin/jq -e '
+        type == "object"
+        and keys == ["data", "type"]
+        and .type == "a(suuutuusu)"
+        and .data == []
+    ' >/dev/null 2>&1 || return 1
+    hook_fdstore_count_after=$(unit_u32_property \
+        "$hook_fdstore_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore) || return 1
+    [ "$hook_fdstore_count_after" = 0 ]
+}
+
+custody_fd_name_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    hook_custody_name=$1
+    [ "${#hook_custody_name}" -eq 86 ] || return 1
+    case $hook_custody_name in
+        volparossa-custody-v1-*) ;;
+        *) return 1 ;;
+    esac
+    hook_custody_digest=${hook_custody_name#volparossa-custody-v1-}
+    [ "${#hook_custody_digest}" -eq 64 ] || return 1
+    case $hook_custody_digest in
+        ''|*[!0-9a-f]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+capture_fdstore_descriptor_identity() {
+    [ "$#" -eq 1 ] || return 1
+    hook_descriptor_path=$1
+    case $hook_descriptor_path in
+        /proc/[1-9][0-9]*/fd/[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    hook_descriptor_pid=${hook_descriptor_path#/proc/}
+    hook_descriptor_pid=${hook_descriptor_pid%%/*}
+    hook_descriptor_fd=${hook_descriptor_path##*/}
+    number_is_safe "$hook_descriptor_pid" || return 1
+    fd_number_is_safe "$hook_descriptor_fd" || return 1
+    [ "$hook_descriptor_path" = \
+        "/proc/$hook_descriptor_pid/fd/$hook_descriptor_fd" ] || return 1
+    hook_descriptor_identity=$(stat -Lc '%f:%Hd:%Ld:%i:%Hr:%Lr' \
+        "$hook_descriptor_path" 2>/dev/null) || return 1
+    hook_descriptor_mode_hex=${hook_descriptor_identity%%:*}
+    case $hook_descriptor_mode_hex in
+        ''|*[!0-9a-fA-F]*) return 1 ;;
+    esac
+    [ "${#hook_descriptor_mode_hex}" -le 8 ] || return 1
+    hook_descriptor_tail=${hook_descriptor_identity#*:}
+    hook_descriptor_mode=$((0x$hook_descriptor_mode_hex))
+    case $hook_descriptor_mode:$hook_descriptor_tail in
+        0:*|*[!0-9:]*) return 1 ;;
+    esac
+    [ "${#hook_descriptor_tail}" -le 96 ] || return 1
+    hook_descriptor_flags_octal=$(/usr/bin/awk '
+        $1 == "flags:" {
+            records++
+            value = $2
+        }
+        END {
+            if (records != 1) exit 1
+            print value
+        }
+    ' "/proc/$hook_descriptor_pid/fdinfo/$hook_descriptor_fd" 2>/dev/null) \
+        || return 1
+    case $hook_descriptor_flags_octal in
+        ''|*[!0-7]*) return 1 ;;
+    esac
+    [ "${#hook_descriptor_flags_octal}" -le 11 ] || return 1
+    hook_descriptor_status_flags=$((0$hook_descriptor_flags_octal))
+    [ "$hook_descriptor_status_flags" -le 4294967295 ] || return 1
+    # fdinfo includes descriptor-local O_CLOEXEC, while F_GETFL/systemd's dump does not.
+    # Match the Rust boundary by also removing Linux O_LARGEFILE before comparison.
+    hook_descriptor_status_flags=$((hook_descriptor_status_flags & ~524288 & ~32768))
+    printf '%s:%s:%s\n' \
+        "$hook_descriptor_mode" "$hook_descriptor_tail" \
+        "$hook_descriptor_status_flags"
+}
+
+fdstore_dump_exact_custody_name() {
+    [ "$#" -eq 3 ] || return 1
+    hook_fdstore_dump_input=$1
+    hook_fdstore_pidfd_identity=$2
+    hook_fdstore_namespace_identity=$3
+    [ "${#hook_fdstore_dump_input}" -le 8192 ] || return 1
+    printf '%s' "$hook_fdstore_dump_input" | /usr/bin/jq -ers -r \
+        --arg pidfd "$hook_fdstore_pidfd_identity" \
+        --arg namespace "$hook_fdstore_namespace_identity" '
+        def exact_u32:
+            type == "number" and . >= 0 and . <= 4294967295 and floor == .;
+        def exact_u53:
+            type == "number" and . >= 0 and . <= 9007199254740991 and floor == .;
+        def exact_entry:
+            type == "array" and length == 9
+            and (.[0] | type == "string" and test("^volparossa-custody-v1-[0-9a-f]{64}$"))
+            and (.[1] | exact_u32 and . > 0)
+            and (.[2] | exact_u32)
+            and (.[3] | exact_u32)
+            and (.[4] | exact_u53 and . > 0)
+            and (.[5] | exact_u32)
+            and (.[6] | exact_u32)
+            and (.[7] | type == "string" and length <= 256)
+            and (.[8] | exact_u32);
+        def normalized_status_flags:
+            . as $flags
+            | $flags - (((($flags / 32768) | floor) % 2) * 32768);
+        def identity:
+            [.[1], .[2], .[3], .[4], .[5], .[6],
+             (.[8] | normalized_status_flags)];
+        if length == 1
+            and (.[0] | keys) == ["data", "type"]
+            and .[0].type == "a(suuutuusu)"
+            and (.[0].data | type == "array" and length == 2)
+            and all(.[0].data[]; exact_entry)
+            and .[0].data[0][0] == .[0].data[1][0]
+            and ($pidfd | split(":") | map(tonumber)) as $pidfd_identity
+            | ($namespace | split(":") | map(tonumber)) as $namespace_identity
+            | (($pidfd_identity | length) == 7
+                and ($namespace_identity | length) == 7
+                and ((.[0].data[0] | identity) == $pidfd_identity
+                    and (.[0].data[1] | identity) == $namespace_identity
+                    or (.[0].data[1] | identity) == $pidfd_identity
+                    and (.[0].data[0] | identity) == $namespace_identity))
+        then .[0].data[0][0]
+        else empty
+        end
+    '
+}
+
+unit_fdstore_exact_active_custody() {
+    [ "$#" -eq 3 ] || return 1
+    hook_fdstore_unit=$1
+    hook_expected_pidfd_identity=$2
+    hook_expected_namespace_identity=$3
+    unit_name_is_safe "$hook_fdstore_unit" || return 1
+    for hook_expected_identity in \
+        "$hook_expected_pidfd_identity" "$hook_expected_namespace_identity"; do
+        case $hook_expected_identity in
+            ''|*[!0-9:]*) return 1 ;;
+        esac
+        [ "${#hook_expected_identity}" -le 128 ] || return 1
+    done
+    [ "$hook_expected_pidfd_identity" != \
+        "$hook_expected_namespace_identity" ] || return 1
+    hook_fdstore_count_before=$(unit_u32_property \
+        "$hook_fdstore_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore) || return 1
+    [ "$hook_fdstore_count_before" = 2 ] || return 1
+    hook_fdstore_object=$(unit_object_path "$hook_fdstore_unit") || return 1
+    hook_fdstore_dump=$(/usr/bin/busctl \
+        --address="$system_bus_address" \
+        --json=short \
+        call \
+        org.freedesktop.systemd1 \
+        "$hook_fdstore_object" \
+        org.freedesktop.systemd1.Service \
+        DumpFileDescriptorStore 2>/dev/null) || return 1
+    [ "${#hook_fdstore_dump}" -le 8192 ] || return 1
+    hook_fdstore_custody_name=$(fdstore_dump_exact_custody_name \
+        "$hook_fdstore_dump" \
+        "$hook_expected_pidfd_identity" \
+        "$hook_expected_namespace_identity") || return 1
+    custody_fd_name_is_safe "$hook_fdstore_custody_name" || return 1
+    hook_fdstore_count_after=$(unit_u32_property \
+        "$hook_fdstore_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore) || return 1
+    [ "$hook_fdstore_count_after" = 2 ] || return 1
+    printf '%s\n' "$hook_fdstore_custody_name"
+}
+
+unit_fdstore_prior_custody_is_absent() {
+    [ "$#" -eq 2 ] || return 1
+    custody_fd_name_is_safe "$2" || return 1
+    unit_fdstore_is_empty "$1"
 }
 
 helper_holds_no_worker_custody() {
@@ -3731,8 +3924,9 @@ functional_probe_output_is_exact() {
     hook_functional_expected=$hook_functional_output.expected
     [ ! -e "$hook_functional_expected" ] && [ ! -L "$hook_functional_expected" ] \
         || return 1
-    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$functional_ready_record" \
+        "$functional_client_settled_record" \
         "$functional_exit_ready_record" \
         "$functional_exit_pass_record" \
         "$functional_relay_pair_ready_record" \
@@ -3758,10 +3952,12 @@ functional_probe_failure_value_is_safe() {
         || return 1
     case $hook_functional_failure_phase in
         plan|connect|bind|prepare|activate|shutdown|ready|release|reconnect|commit|destroy|\
+        client-settled|client-settlement-release|\
         second-cycle-plan|second-cycle-bind|second-cycle-prepare|\
         second-cycle-activate|reuse|second-cycle-shutdown|second-cycle-ready|\
         second-cycle-release|second-cycle-reconnect|second-cycle-commit|\
-        second-cycle-destroy|relay-pair-plan|relay-pair-bind|relay-pair-prepare|\
+        second-cycle-destroy|second-cycle-settlement-release|\
+        relay-pair-plan|relay-pair-bind|relay-pair-prepare|\
         relay-pair-activate|relay-pair-reuse|relay-pair-shutdown|relay-pair-ready|\
         relay-pair-release|relay-pair-reconnect|relay-pair-commit|\
         relay-pair-destroy|final-shutdown)
@@ -3947,7 +4143,10 @@ run_functional_client_lease_probe() {
     socket_identity_is_unchanged \
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
     advance_start_failure_stage functional-probe-fdstore || return 1
-    unit_fdstore_is_empty "$hook_functional_unit" || return 1
+    [ "$(unit_u32_property \
+        "$hook_functional_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore)" = 2 ] || return 1
 
     advance_start_failure_stage functional-worker-observation || return 1
 
@@ -3964,6 +4163,14 @@ run_functional_client_lease_probe() {
     hook_functional_process_identity=$hook_custody_process_identity
     hook_functional_namespace_parent_fd=$hook_custody_namespace_fd
     hook_functional_worker_namespace=$hook_custody_namespace_identity
+    hook_functional_pidfd_fdstore_identity=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_pidfd_fd") || return 1
+    hook_functional_namespace_fdstore_identity=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_namespace_fd") || return 1
+    hook_functional_custody_name=$(unit_fdstore_exact_active_custody \
+        "$hook_functional_unit" \
+        "$hook_functional_pidfd_fdstore_identity" \
+        "$hook_functional_namespace_fdstore_identity") || return 1
     [ "$hook_functional_parent_namespace" != "$hook_functional_worker_namespace" ] \
         || return 1
     hook_functional_parent_process_path=/proc/$hook_functional_main_pid/fd/$hook_functional_process_parent_fd
@@ -4107,11 +4314,12 @@ run_functional_client_lease_probe() {
 
     advance_start_failure_stage functional-client-release || return 1
     printf '%s' "$functional_release_byte" >&6 || return 1
-    hook_functional_exit_ready_output=$(printf '%s\n%s' \
-        "$functional_ready_record" "$functional_exit_ready_record") || return 1
+    hook_functional_client_settled_output=$(printf '%s\n%s' \
+        "$functional_ready_record" \
+        "$functional_client_settled_record") || return 1
     hook_functional_wait_attempt=0
     while ! probe_output_is_exact \
-        "$hook_functional_stdout" "$hook_functional_exit_ready_output"; do
+        "$hook_functional_stdout" "$hook_functional_client_settled_output"; do
         private_file_is_safe "$hook_functional_stderr" || return 1
         if [ -s "$hook_functional_stderr" ] \
             || ! kill -0 "$hook_functional_probe_pid" 2>/dev/null; then
@@ -4140,6 +4348,29 @@ run_functional_client_lease_probe() {
     [ ! -e /proc/self/fd/8 ] && [ ! -L /proc/self/fd/8 ] || return 1
     command exec 7>&- || return 1
     [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
+    unit_fdstore_prior_custody_is_absent \
+        "$hook_functional_unit" "$hook_functional_custody_name" || return 1
+    helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
+
+    printf '%s' "$functional_release_byte" >&6 || return 1
+    hook_functional_exit_ready_output=$(printf '%s\n%s\n%s' \
+        "$functional_ready_record" \
+        "$functional_client_settled_record" \
+        "$functional_exit_ready_record") || return 1
+    hook_functional_wait_attempt=0
+    while ! probe_output_is_exact \
+        "$hook_functional_stdout" "$hook_functional_exit_ready_output"; do
+        private_file_is_safe "$hook_functional_stderr" || return 1
+        if [ -s "$hook_functional_stderr" ] \
+            || ! kill -0 "$hook_functional_probe_pid" 2>/dev/null; then
+            observe_functional_probe_failure \
+                "$hook_functional_probe_pid" "$hook_functional_stderr" || return 1
+            return 1
+        fi
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 300 ] || return 1
+        sleep 0.05
+    done
 
     advance_start_failure_stage functional-exit-ready || return 1
     running_identity_is_unchanged \
@@ -4148,7 +4379,10 @@ run_functional_client_lease_probe() {
         "$hook_functional_agent_gid" || return 1
     socket_identity_is_unchanged \
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
-    unit_fdstore_is_empty "$hook_functional_unit" || return 1
+    [ "$(unit_u32_property \
+        "$hook_functional_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore)" = 2 ] || return 1
 
     advance_start_failure_stage functional-exit-worker-observation || return 1
     hook_functional_exit_worker_pid=$(direct_helper_child "$hook_functional_main_pid") \
@@ -4164,6 +4398,16 @@ run_functional_client_lease_probe() {
     hook_functional_exit_process_identity=$hook_custody_process_identity
     hook_functional_exit_namespace_parent_fd=$hook_custody_namespace_fd
     hook_functional_exit_worker_namespace=$hook_custody_namespace_identity
+    hook_functional_exit_pidfd_fdstore_identity=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_pidfd_fd") || return 1
+    hook_functional_exit_namespace_fdstore_identity=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_namespace_fd") || return 1
+    hook_functional_exit_custody_name=$(unit_fdstore_exact_active_custody \
+        "$hook_functional_unit" \
+        "$hook_functional_exit_pidfd_fdstore_identity" \
+        "$hook_functional_exit_namespace_fdstore_identity") || return 1
+    [ "$hook_functional_exit_custody_name" != \
+        "$hook_functional_custody_name" ] || return 1
     # Retired PID and nsfs numbers are reusable after their last pins close.
     # Only the current live pidfd, proc-dir and netns custody is identity
     # authority; comparing against a stale numeric observation would be flaky.
@@ -4312,14 +4556,14 @@ run_functional_client_lease_probe() {
 
     advance_start_failure_stage functional-exit-release || return 1
     printf '%s' "$functional_release_byte" >&6 || return 1
-    hook_functional_relay_pair_ready_output=$(printf '%s\n%s\n%s\n%s' \
+    hook_functional_exit_settled_output=$(printf '%s\n%s\n%s\n%s' \
         "$functional_ready_record" \
+        "$functional_client_settled_record" \
         "$functional_exit_ready_record" \
-        "$functional_exit_pass_record" \
-        "$functional_relay_pair_ready_record") || return 1
+        "$functional_exit_pass_record") || return 1
     hook_functional_wait_attempt=0
     while ! probe_output_is_exact \
-        "$hook_functional_stdout" "$hook_functional_relay_pair_ready_output"; do
+        "$hook_functional_stdout" "$hook_functional_exit_settled_output"; do
         private_file_is_safe "$hook_functional_stderr" || return 1
         if [ -s "$hook_functional_stderr" ] \
             || ! kill -0 "$hook_functional_probe_pid" 2>/dev/null; then
@@ -4349,6 +4593,31 @@ run_functional_client_lease_probe() {
     [ ! -e /proc/self/fd/8 ] && [ ! -L /proc/self/fd/8 ] || return 1
     command exec 7>&- || return 1
     [ ! -e /proc/self/fd/7 ] && [ ! -L /proc/self/fd/7 ] || return 1
+    unit_fdstore_prior_custody_is_absent \
+        "$hook_functional_unit" "$hook_functional_exit_custody_name" || return 1
+    helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
+
+    printf '%s' "$functional_release_byte" >&6 || return 1
+    hook_functional_relay_pair_ready_output=$(printf '%s\n%s\n%s\n%s\n%s' \
+        "$functional_ready_record" \
+        "$functional_client_settled_record" \
+        "$functional_exit_ready_record" \
+        "$functional_exit_pass_record" \
+        "$functional_relay_pair_ready_record") || return 1
+    hook_functional_wait_attempt=0
+    while ! probe_output_is_exact \
+        "$hook_functional_stdout" "$hook_functional_relay_pair_ready_output"; do
+        private_file_is_safe "$hook_functional_stderr" || return 1
+        if [ -s "$hook_functional_stderr" ] \
+            || ! kill -0 "$hook_functional_probe_pid" 2>/dev/null; then
+            observe_functional_probe_failure \
+                "$hook_functional_probe_pid" "$hook_functional_stderr" || return 1
+            return 1
+        fi
+        hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
+        [ "$hook_functional_wait_attempt" -lt 300 ] || return 1
+        sleep 0.05
+    done
 
     advance_start_failure_stage functional-relay-pair-ready || return 1
     running_identity_is_unchanged \
@@ -4357,7 +4626,10 @@ run_functional_client_lease_probe() {
         "$hook_functional_agent_gid" || return 1
     socket_identity_is_unchanged \
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
-    unit_fdstore_is_empty "$hook_functional_unit" || return 1
+    [ "$(unit_u32_property \
+        "$hook_functional_unit" \
+        org.freedesktop.systemd1.Service \
+        NFileDescriptorStore)" = 2 ] || return 1
 
     advance_start_failure_stage functional-relay-pair-worker-observation || return 1
     hook_functional_pair_worker_pid=$(direct_helper_child \
@@ -4373,6 +4645,18 @@ run_functional_client_lease_probe() {
     hook_functional_pair_process_identity=$hook_custody_process_identity
     hook_functional_pair_namespace_parent_fd=$hook_custody_namespace_fd
     hook_functional_pair_worker_namespace=$hook_custody_namespace_identity
+    hook_functional_pair_pidfd_fdstore_identity=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_pidfd_fd") || return 1
+    hook_functional_pair_namespace_fdstore_identity=$(capture_fdstore_descriptor_identity \
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_namespace_fd") || return 1
+    hook_functional_pair_custody_name=$(unit_fdstore_exact_active_custody \
+        "$hook_functional_unit" \
+        "$hook_functional_pair_pidfd_fdstore_identity" \
+        "$hook_functional_pair_namespace_fdstore_identity") || return 1
+    [ "$hook_functional_pair_custody_name" != \
+        "$hook_functional_custody_name" ] \
+        && [ "$hook_functional_pair_custody_name" != \
+            "$hook_functional_exit_custody_name" ] || return 1
     # As above, retired numeric identities may be reused. Bind this generation
     # to its live parent-held descriptors instead of stale observations.
     [ "$hook_functional_pair_parent_namespace" = \
@@ -4658,7 +4942,8 @@ run_functional_client_lease_probe() {
         "$hook_functional_agent_gid" || return 1
     socket_identity_is_unchanged \
         "$proof_directory/socket.identity" "$hook_functional_agent_gid" || return 1
-    unit_fdstore_is_empty "$hook_functional_unit" || return 1
+    unit_fdstore_prior_custody_is_absent \
+        "$hook_functional_unit" "$hook_functional_pair_custody_name" || return 1
     hook_functional_wait_attempt=0
     while ! helper_has_no_children "$hook_functional_main_pid"; do
         hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
@@ -4669,6 +4954,19 @@ run_functional_client_lease_probe() {
     [ "$(stat -Lc '%d:%i' /proc/self/fd/8 2>/dev/null)" = \
         "$hook_functional_pair_process_identity" ] || return 1
     helper_holds_no_worker_custody "$hook_functional_main_pid" || return 1
+    hook_functional_journal_proof=$("$probe" prove-settled-journal \
+        "$hook_functional_main_pid" "$hook_functional_agent_gid" \
+        2>/dev/null) || return 1
+    [ "$hook_functional_journal_proof" = \
+        "$functional_journal_settled_record" ] || return 1
+    write_private_file "$proof_directory/journal.settled" \
+        "$hook_functional_journal_proof" || return 1
+    hook_functional_settled_journal_state=$(capture_journal_state \
+        "$hook_functional_agent_gid") || return 1
+    write_private_file "$proof_directory/journal.settled.state" \
+        "$hook_functional_settled_journal_state" || return 1
+    write_private_file "$proof_directory/fdstore-cycles.pass" \
+        "$functional_fdstore_proof_record" || return 1
     worker_wireguard_is_absent \
         7 "$hook_functional_pair_client_peer_address" || return 1
     worker_wireguard_is_absent \
@@ -4818,11 +5116,6 @@ start_hook() {
     write_private_file "$proof_directory/lock.identity" "$hook_lock_identity" \
         || fail 'ownership journal lock identity could not be published'
 
-    hook_journal_state=$(capture_journal_state "$agent_gid") \
-        || fail 'initial journal state could not be captured'
-    write_private_file "$proof_directory/journal.state" "$hook_journal_state" \
-        || fail 'initial journal state could not be published'
-
     bind_pass=VOLPAROSSA_HELPER_V3_IPC_BIND_RUNTIME_V1=pass
     frame_pass=VOLPAROSSA_HELPER_V3_IPC_FRAME_BOUNDS_V1=pass
     wire_pass=VOLPAROSSA_HELPER_V3_IPC_WIRE_SHAPES_V1=pass
@@ -4945,14 +5238,35 @@ stop_hook() {
     if [ -e "$journal_next" ] || [ -L "$journal_next" ]; then
         fail 'temporary journal entry remained after main exit'
     fi
-    private_file_is_safe "$proof_directory/journal.state" \
-        || fail 'initial journal state proof is unavailable'
-    hook_expected_journal_state=$(cat "$proof_directory/journal.state") \
-        || fail 'initial journal state could not be read'
+    private_file_is_safe "$proof_directory/journal.settled" \
+        || fail 'settled journal proof is unavailable'
+    hook_expected_journal_proof=$(cat "$proof_directory/journal.settled") \
+        || fail 'settled journal proof could not be read'
+    [ "$hook_expected_journal_proof" = \
+        "$functional_journal_settled_record" ] \
+        || fail 'settled journal proof is invalid'
+    hook_expected_main_pid=$(sed -n '2p' "$proof_directory/unit.identity") \
+        || fail 'settled journal helper PID could not be read'
+    number_is_safe "$hook_expected_main_pid" \
+        || fail 'settled journal helper PID is invalid'
+    hook_observed_journal_proof=$("$probe" prove-settled-journal \
+        "$hook_expected_main_pid" "$hook_expected_agent_gid" \
+        2>/dev/null) || fail 'settled journal tombstones could not be revalidated'
+    [ "$hook_observed_journal_proof" = "$hook_expected_journal_proof" ] \
+        || fail 'settled journal tombstone proof changed'
+    private_file_is_safe "$proof_directory/journal.settled.state" \
+        || fail 'settled journal state proof is unavailable'
+    hook_expected_journal_state=$(cat "$proof_directory/journal.settled.state") \
+        || fail 'settled journal state could not be read'
     hook_observed_journal_state=$(capture_journal_state "$hook_expected_agent_gid") \
         || fail 'settled journal state could not be captured'
     [ "$hook_observed_journal_state" = "$hook_expected_journal_state" ] \
-        || fail 'journal changed during non-mutating IPC proof'
+        || fail 'journal changed after settled tombstone proof'
+    private_file_is_safe "$proof_directory/fdstore-cycles.pass" \
+        || fail 'functional descriptor-store proof is unavailable'
+    [ "$(cat "$proof_directory/fdstore-cycles.pass")" = \
+        "$functional_fdstore_proof_record" ] \
+        || fail 'functional descriptor-store proof is invalid'
     private_file_is_safe "$proof_directory/lock.identity" \
         || fail 'initial lock identity proof is unavailable'
     hook_expected_lock_identity=$(cat "$proof_directory/lock.identity") \

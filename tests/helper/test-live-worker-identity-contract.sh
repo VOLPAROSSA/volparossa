@@ -4849,15 +4849,29 @@ done
 # shellcheck disable=SC2016
 if [ "$(grep -xc 'system_bus_address=unix:path=/run/dbus/system_bus_socket' \
         "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 5 ] \
-    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 5 ] \
+    || [ "$(grep -Fc '/usr/bin/busctl' "$ipc_hook")" -ne 7 ] \
+    || [ "$(grep -Fc -- '--address="$system_bus_address"' "$ipc_hook")" -ne 7 ] \
     || [ "$(grep -Fc 'GetUnit s "$1" 2>/dev/null)' "$ipc_hook")" -ne 1 ] \
+    || [ "$(grep -Fc 'DumpFileDescriptorStore 2>/dev/null)' \
+        "$ipc_hook")" -ne 2 ] \
     || grep -F -- 'SYSTEMCTL_FORCE_BUS' "$ipc_hook" >/dev/null \
     || grep -F -- 'systemctl ' "$ipc_hook" >/dev/null \
     || grep -F -- '/run/systemd/private' "$gate" >/dev/null \
     || grep -F -- '/run/systemd/private' "$ipc_hook" >/dev/null; then
     printf '%s\n' \
         'production hook does not use the exact policy-mediated systemd bus' >&2
+    exit 1
+fi
+if [ "$(grep -Fc 'capture_fdstore_descriptor_identity' "$ipc_hook")" -ne 7 ] \
+    || [ "$(grep -Fc 'unit_fdstore_exact_active_custody' "$ipc_hook")" -ne 4 ] \
+    || [ "$(grep -Fc 'unit_fdstore_prior_custody_is_absent' "$ipc_hook")" -ne 4 ] \
+    || [ "$(grep -Fc 'fdstore_dump_exact_custody_name' "$ipc_hook")" -ne 2 ] \
+    || [ "$(grep -Fc 'prove-settled-journal' "$ipc_hook")" -ne 2 ] \
+    || [ "$(grep -Fc \
+        'hook_descriptor_status_flags=$((hook_descriptor_status_flags & ~524288 & ~32768))' \
+        "$ipc_hook")" -ne 1 ]; then
+    printf '%s\n' \
+        'production hook does not bind all three active and settled custody cycles exactly' >&2
     exit 1
 fi
 
@@ -4961,11 +4975,17 @@ hook_custody_parser_functions=$temporary_directory/hook-custody-parser-functions
     sed -n '/^number_is_safe() {$/,/^}$/p' "$ipc_hook"
     sed -n '/^fd_number_is_safe() {$/,/^}$/p' "$ipc_hook"
     sed -n '/^pidfd_record_from_fdinfo() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^capture_fdstore_descriptor_identity() {$/,/^}$/p' "$ipc_hook"
+    sed -n '/^fdstore_dump_exact_custody_name() {$/,/^}$/p' "$ipc_hook"
 } >"$hook_custody_parser_functions"
 if [ "$(grep -c '^number_is_safe() {$' "$hook_custody_parser_functions")" -ne 1 ] \
     || [ "$(grep -c '^fd_number_is_safe() {$' \
         "$hook_custody_parser_functions")" -ne 1 ] \
     || [ "$(grep -c '^pidfd_record_from_fdinfo() {$' \
+        "$hook_custody_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^capture_fdstore_descriptor_identity() {$' \
+        "$hook_custody_parser_functions")" -ne 1 ] \
+    || [ "$(grep -c '^fdstore_dump_exact_custody_name() {$' \
         "$hook_custody_parser_functions")" -ne 1 ]; then
     printf '%s\n' 'worker custody parsers are not uniquely extractable' >&2
     exit 1
@@ -5013,6 +5033,51 @@ exercise_hook_custody_parsers() (
         >/dev/null 2>&1 \
         || pidfd_record_from_fdinfo "$valid_pidfd_info" 4294967295 4242 \
             >/dev/null 2>&1; then
+        exit 1
+    fi
+
+    command exec 7</dev/null
+    readonly_identity=$(capture_fdstore_descriptor_identity "/proc/$$/fd/7")
+    command exec 8<>/dev/null
+    readwrite_identity=$(capture_fdstore_descriptor_identity "/proc/$$/fd/8")
+    [ "${readonly_identity%:*}" = "${readwrite_identity%:*}" ]
+    [ "${readonly_identity##*:}" = 0 ]
+    [ "${readwrite_identity##*:}" = 2 ]
+    [ "$(printf '%s\n' "$readonly_identity" \
+        | awk -F: 'NF == 7 { print NF }')" = 7 ]
+    if capture_fdstore_descriptor_identity /dev/null >/dev/null 2>&1 \
+        || capture_fdstore_descriptor_identity /proc/self/fd/7 >/dev/null 2>&1; then
+        exit 1
+    fi
+    command exec 8>&-
+    command exec 7>&-
+
+    custody_name=volparossa-custody-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    pidfd_identity=33261:0:5:100:0:0:2
+    namespace_identity=33060:0:4:200:0:0:0
+    fdstore_dump=$(printf \
+        '{"type":"a(suuutuusu)","data":[["%s",33261,0,5,100,0,0,"anon_inode:[pidfd]",32770],["%s",33060,0,4,200,0,0,"net:[200]",32768]]}' \
+        "$custody_name" "$custody_name")
+    [ "$(fdstore_dump_exact_custody_name \
+        "$fdstore_dump" "$pidfd_identity" "$namespace_identity")" = \
+        "$custody_name" ]
+    for fdstore_mutation in \
+        '.data[0][8] = 32771' \
+        '.data[1][0] = "volparossa-custody-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
+        '.data |= .[0:1]' \
+        '.data += [.data[0]]'
+    do
+        mutated_fdstore_dump=$(printf '%s' "$fdstore_dump" \
+            | jq -c "$fdstore_mutation")
+        if fdstore_dump_exact_custody_name \
+            "$mutated_fdstore_dump" "$pidfd_identity" "$namespace_identity" \
+            >/dev/null 2>&1; then
+            exit 1
+        fi
+    done
+    if fdstore_dump_exact_custody_name \
+        "$(printf '%s\n%s' "$fdstore_dump" "$fdstore_dump")" \
+        "$pidfd_identity" "$namespace_identity" >/dev/null 2>&1; then
         exit 1
     fi
 )
@@ -6375,7 +6440,7 @@ test ! -s "$last_stdout" && test ! -s "$last_stderr"
 # shellcheck disable=SC2016
 if [ "$(grep -Fc 'wait "$hook_functional_failure_pid"' "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc 'wait "$hook_functional_failure_pid"; then' "$ipc_hook")" -ne 1 ] \
-    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 4 ]; then
+    || [ "$(grep -Fc 'observe_functional_probe_failure' "$ipc_hook")" -ne 6 ]; then
     printf '%s\n' 'functional probe failures are not observed through exact child waits' >&2
     exit 1
 fi
@@ -6620,6 +6685,11 @@ for required_hook_contract in \
     '/usr/sbin/ip -json route show default' \
     '/usr/sbin/ip -6 -json route show default' \
     'unit_fdstore_is_empty' \
+    'capture_fdstore_descriptor_identity() {' \
+    'fdstore_dump_exact_custody_name() {' \
+    'hook_descriptor_status_flags=$((hook_descriptor_status_flags & ~524288 & ~32768))' \
+    'unit_fdstore_exact_active_custody() {' \
+    'unit_fdstore_prior_custody_is_absent() {' \
     'remove_functional_underlay "$hook_functional_ifindex"' \
     'run_functional_client_lease_probe' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_RUNTIME_V1=pass' \
@@ -6632,6 +6702,7 @@ for required_hook_contract in \
     'VOLPAROSSA_HELPER_V3_IPC_ROOT_PEER_V1=pass' \
     'VOLPAROSSA_HELPER_V3_IPC_BIND_AFTER_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=ready' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_SETTLED_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_ACTIVATED_KERNEL_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_COMMITTED_KERNEL_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_CLIENT_LEASE_V1=pass' \
@@ -6646,6 +6717,9 @@ for required_hook_contract in \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_COMMITTED_KERNEL_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_V1=pass' \
     'VOLPAROSSA_HELPER_V3_FUNCTIONAL_RELAY_PAIR_LEASE_EXTERNAL_CLEANUP_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_JOURNAL_SETTLED_V1=pass' \
+    'VOLPAROSSA_HELPER_V3_FUNCTIONAL_FDSTORE_CYCLES_V1=pass' \
+    'prove-settled-journal' \
     '[ "${SERVICE_RESULT:-}" = success ]' \
     '[ "${EXIT_CODE:-}" = exited ]' \
     '[ "${EXIT_STATUS:-}" = 0 ]' \
@@ -7349,8 +7423,10 @@ if ! awk '
     in_functional && /while ! probe_output_is_exact/ {
         ready_wait_count++
         if (ready_wait_count == 1) client_ready = NR
-        if (ready_wait_count == 2) exit_ready_wait = NR
-        if (ready_wait_count == 3) pair_ready_wait = NR
+        if (ready_wait_count == 2) client_settled_wait = NR
+        if (ready_wait_count == 3) exit_ready_wait = NR
+        if (ready_wait_count == 4) exit_settled_wait = NR
+        if (ready_wait_count == 5) pair_ready_wait = NR
     }
     in_functional && /hook_functional_worker_pid=\$\(direct_helper_child/ {
         client_child = NR
@@ -7477,8 +7553,10 @@ if ! awk '
     in_functional && /functional_release_byte.*>&6/ {
         release_count++
         if (release_count == 1) client_release = NR
-        if (release_count == 2) exit_release = NR
-        if (release_count == 3) pair_release = NR
+        if (release_count == 2) client_settlement_release = NR
+        if (release_count == 3) exit_release = NR
+        if (release_count == 4) exit_settlement_release = NR
+        if (release_count == 5) pair_release = NR
     }
     in_functional && /exec 6>&-/ { release_close = NR }
     in_functional && /wait "\$hook_functional_probe_pid"/ { waited = NR }
@@ -7502,11 +7580,11 @@ if ! awk '
     in_functional && /command exec 7>&-/ { namespace_release_count++ }
     in_functional && /remove_functional_underlay/ { underlay_remove = NR }
     END {
-        valid = pristine_count == 2 && ready_wait_count == 3
+        valid = pristine_count == 2 && ready_wait_count == 5
         valid = valid && relay_ping_count == 2 && exit_relay_ping_count == 1
         valid = valid && custody_count == 9 && identity_count == 6
         valid = valid && activated_count == 10 && growth_count == 12
-        valid = valid && release_count == 3 && retired_count == 3
+        valid = valid && release_count == 5 && retired_count == 3
         valid = valid && wireguard_absent_count == 4
         valid = valid && process_release_count == 3 && namespace_release_count == 3
         valid = valid && pristine_before < underlay && underlay < fifo
@@ -7520,11 +7598,13 @@ if ! awk '
         valid = valid && client_traffic < client_relay_remove
         valid = valid && client_relay_remove < client_release_stage
         valid = valid && client_release_stage < client_release
-        valid = valid && client_release < exit_ready_wait
-        valid = valid && exit_ready_wait < client_cleanup_stage
+        valid = valid && client_release < client_settled_wait
+        valid = valid && client_settled_wait < client_cleanup_stage
         valid = valid && client_cleanup_stage < client_retired
         valid = valid && client_retired < client_wireguard_absent
-        valid = valid && client_wireguard_absent < exit_ready_stage
+        valid = valid && client_wireguard_absent < client_settlement_release
+        valid = valid && client_settlement_release < exit_ready_wait
+        valid = valid && exit_ready_wait < exit_ready_stage
         valid = valid && exit_ready_stage < exit_worker_stage
         valid = valid && exit_worker_stage < exit_child
         valid = valid && exit_child < exit_namespace_pin
@@ -7538,11 +7618,13 @@ if ! awk '
         valid = valid && exit_relay_remove < exit_retained
         valid = valid && exit_retained < exit_release_stage
         valid = valid && exit_release_stage < exit_release
-        valid = valid && exit_release < pair_ready_wait
-        valid = valid && pair_ready_wait < exit_cleanup_stage
+        valid = valid && exit_release < exit_settled_wait
+        valid = valid && exit_settled_wait < exit_cleanup_stage
         valid = valid && exit_cleanup_stage < exit_retired
         valid = valid && exit_retired < exit_wireguard_absent
-        valid = valid && exit_wireguard_absent < pair_ready_stage
+        valid = valid && exit_wireguard_absent < exit_settlement_release
+        valid = valid && exit_settlement_release < pair_ready_wait
+        valid = valid && pair_ready_wait < pair_ready_stage
         valid = valid && pair_ready_stage < pair_worker_stage
         valid = valid && pair_worker_stage < pair_child
         valid = valid && pair_child < pair_namespace_pin
