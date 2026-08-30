@@ -633,16 +633,16 @@ SHA-256 is identically
 `acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`; it is not live
 product-route or A01--A15 evidence. The fixed alpha score remains **11/100 (11%)**.
 
-Tags 35 and 28 provide only same-process ambiguity containment. The functional-alpha request path
-consumes tag 35's closed plan, which is directly convertible to the journal's canonical
-`ClosedPlan`, but no production request-path writer carries it into durable `MayOwnPrepare` custody
-and no production route-manager caller reaches this transaction. Production starts one boot-scoped,
+Tags 35 and 28 still provide only same-process ambiguity containment to the agent. The
+functional-alpha request path reconstructs the original canonical Prepare intent from tag 35's
+immutable lineage plus the correlated batch, commits it before worker reservation, and carries its
+affine owner through systemd custody, durable `MayOwnPrepare`, dispatch, and clean same-runtime
+settlement. No production route-manager caller reaches this transaction. Production starts one boot-scoped,
 secret-free canonical/CAS ownership actor before publishing its cleanup token or socket, and joins
 it after expiry-driver and engine cleanup. Startup may durably settle only never-dispatched
-`Intent`; its deliberately refusing executor leaves every `MayOwnPrepare` byte-identical and blocks
-the internal socket-publication boundary. No production issuance/arming writer, restart-stable
-namespace/pidfd vault, absence-proving `MayOwnPrepare` recovery backend, restart reaper, or
-cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
+`Intent`; its deliberately refusing restart executor leaves every inherited `MayOwnPrepare`
+byte-identical and blocks the internal socket-publication boundary. No inherited-custody recovery
+backend, restart reaper, or cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
 authority remains quarantined rather than being misreported as absent; an absent journal is not
 cleanup evidence.
 

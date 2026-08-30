@@ -152,9 +152,11 @@ coordinates; lifecycle phase and reconciliation evidence do not change it. Every
 kernel entry point consumes that typed resource and rejects any non-exact marker.
 The underlay parser independently accepts only the exact helper grammar and interface binding,
 rejecting malformed, legacy, or mismatched helper aliases. The marker is evidence, not current
-journal-phase or cleanup authority. The child transaction is not connected to the production
-durable-journal path; transaction-wide crash/restart rollback is still absent. The production
-server now selects a crate-private functional-alpha backend for exactly one live Client/Exit
+journal-phase or cleanup authority. Production Prepare reconstructs the original canonical
+`PrepareIntent` from immutable backend lineage plus the correlated `PrepareLeaseBatch`, rejects any
+context or expiry mismatch, and commits that exact intent to the durable journal before reserving
+or authenticating a worker generation. Crash/restart rollback is still absent. The production
+server selects a crate-private functional-alpha backend for exactly one live Client/Exit
 singleton or one live Relay context with exactly the ordered matching
 `WireguardRole::RelayClient` + `WireguardRole::RelayExit` pair. It
 obtains a consistent read-only direct-underlay
@@ -200,8 +202,9 @@ exit stops the server. Shutdown first stops and joins this driver, then cleans t
 the durable actor. The driver schedules a sweep once per second with missed ticks skipped; a sweep
 begins only after every earlier request in the serialized operation gate has settled. Once begun,
 its kernel-absence attempt remains bounded by the backend hard deadline. The public
-`HelperEngine::new` constructor remains fully fail-closed and does not select this backend. No
-crash/restart recovery or durable journal/systemd custody is claimed. The signed grant is
+`HelperEngine::new` constructor remains fully fail-closed and does not select this backend.
+Same-runtime durable journal/systemd custody is described below; inherited-custody adoption and
+crash/restart recovery are not claimed. The signed grant is
 self-contained: the request-to-response authority is cryptographically bound, but the helper does
 not yet receive an independent discovery/connection trust anchor or a separately trusted
 selected-relay/exit or policy authority. It therefore cannot distinguish a correctly signed grant
@@ -247,17 +250,16 @@ duplicates authority nor discards it on an error path.
 Validated records and private settlement targets now deterministically rederive the same non-`Clone`
 per-link resources. Focused tests fix the public alias grammar and cover every immutable field
 class, mutable-field exclusion, redacted debug output, canonical codec/reopen stability, a lost
-insert reply, and recovery projection. This dormant projection exposes no production issuance API
-and does not authorize a kernel operation.
+insert reply, and recovery projection. Production can consume the projection only after the exact
+same-runtime handoff reaches durable `MayOwnPrepare`; the marker alone authorizes no kernel operation.
 
-Production exposes only a start/shutdown wrapper around the actor; registration, custody marking,
-arming and raw settlement authority remain inaccessible to the server and engine. Its production
-executor always refuses both trusted cleanup and manager-absence proof requests, so
-`MayOwnCustody`, `MayOwnPrepare`, and `CleanupConfirmed` remain byte-identical and block startup.
-Only a never-dispatched `Intent` may be durably settled to `Absent` before the internal actor-ready
-and socket-publication boundary. There is no production request-path issuance/arming writer,
-restart-stable namespace custody, worker-death and kernel-cleanup executor, manager-absence
-executor, restart reaper, supported on-disk migration, or live-root proof. Every non-test actor
+Production retains the sole start/shutdown owner and issues one cloneable typed Prepare handle.
+That handle can register a validated wire intent, bind exact worker custody, arm it, and consume the
+resulting affine token through the two ordered same-runtime settlement phases. It exposes no raw
+revision, coordinates, startup recovery, or lifecycle authority. The installed restart executor
+still refuses both proof requests, so inherited `MayOwnCustody`, `MayOwnPrepare`, and
+`CleanupConfirmed` remain byte-identical and block startup. There is no inherited-custody adoption,
+restart reaper, supported on-disk migration, or live-root proof. Every non-test actor
 entry point requires one caller-supplied absolute hard deadline. That same value is carried through
 admission, the queued command, actor-thread execution, reply handling and thread settlement. Each
 settlement operation additionally receives its exact supplied deadline and rechecks it before
@@ -450,14 +452,13 @@ cleanup token or helper socket. The takeover creates no additional process-local
 dropping the refused set closes every captured source slot while PID 1 retains any manager copies.
 This classification invokes no descriptor-store removal, journal transition, worker adoption,
 reaper or cleanup. Those proofs remain mandatory before the refusal may be replaced by settlement
-and socket publication; the separate dormant removal adapter below does not change this startup
-authority boundary.
+and socket publication; the same-runtime removal path below does not grant restart authority.
 
-### Production-dormant systemd descriptor-store mutation boundary
+### Production systemd descriptor-store mutation boundary
 
 The helper contains a private adapter for the systemd v257 descriptor-store protocol. Its two
-private non-test callers are the live-proof selector and the dormant supervisor publisher; neither
-is connected to `ProductionServer`, `HelperEngine` or a request path. It
+private non-test callers are the live-proof selector and the production durable-Prepare supervisor;
+the latter is reachable only through `FunctionalAlphaLeaseBackend`. It
 validates one fixed-shape opaque custody name, borrows exactly two already-owned descriptors,
 snapshots their kernel identities and sends them together in one `SCM_RIGHTS` datagram containing
 only the required `FDSTORE=1`, `FDNAME=` and `FDPOLL=0` assignments. It then sends `BARRIER=1`
@@ -499,7 +500,7 @@ open-file-description identity. A `SupervisorDropped` terminal produced before a
 manager-may-own failure returns has no exported attempt identity and deliberately remains
 not reconcilable in this slice.
 
-A separate private dormant adapter can send exactly one name-scoped descriptor-store removal. It
+A separate private production adapter can send exactly one name-scoped descriptor-store removal. It
 accepts an already stable complete startup inventory, the exact custody name and binding, and
 borrows both affine local owners. Before its mutation boundary it validates the complete baseline,
 takes a fresh uncached preflight snapshot which must equal that baseline, remeasures the local
@@ -517,19 +518,19 @@ blindly. Its observation-only reconciler uses the same exact attempt, a new barr
 uncached complete snapshots, and local-binding remeasurement. Exact baseline-minus-pair may settle
 the shared gate, while exact unchanged-baseline evidence still authorizes no retry and leaves the
 gate poisoned; every other outcome remains unresolved. Publication, removal and their reconciler
-observations now hold that one gate from the fresh baseline/preflight read through terminal
+observations hold that one gate from the fresh baseline/preflight read through terminal
 attestation. An ambiguous attempt of either kind blocks both mutation kinds, and a reconciler with
 the wrong typed attempt kind or exact target binding fails before barrier or inventory I/O.
 Publication reconciliation never clears poison; only exact-removed evidence for the same removal
-attempt reopens a gate poisoned by that removal. The removal adapter and reconciler have no
-production caller, do not prove worker death or kernel cleanup, and cannot by themselves advance
-the ownership journal.
+attempt reopens a gate poisoned by that removal. The production same-runtime Destroy path calls the
+removal adapter and reconciler only after exact child/worker/kernel cleanup; neither component proves
+that cleanup or advances the ownership journal by itself.
 
 Only the durably confirmed `MayOwnCustody` token can derive an opaque, domain-separated fixed
 custody name from its exact journal epoch, context, ownership ID and generation without exposing
-those coordinates. A private dormant worker typestate first obtains the descriptor identities
+those coordinates. A private worker typestate first obtains the descriptor identities
 through the same measurement path used by descriptor-store publication, persists them with the
-complete worker anchor, and only then creates publication authority. A private dormant
+complete worker anchor, and only then creates publication authority. A private production
 activation-fenced supervisor can synchronously take that complete affine owner before any publisher
 poll, reserve bounded terminal storage, and register its capacity permit and blocking-task handle
 before activation. It performs at most one descriptor-store publication attempt, never retries, and
@@ -541,13 +542,11 @@ separately cloneable arm-only journal handle authorizes only the exact
 `MayOwnCustody -> MayOwnPrepare` transition; `ProductionOwnershipRuntime` remains the sole owner of
 actor startup, shutdown and thread settlement.
 
-This is not production composition. The supervisor entry point and production publisher remain
-private and unreachable from the server, engine and request path. Terminal storage has no
-production consumer for the in-process observer; cross-process/restart-stable reconciliation,
-adoption and authority-ordered manager removal are not connected, inherited descriptors are still
-refused rather than adopted, and no restart reaper exists. In particular, no production worker-death
-proof or exact namespace/kernel cleanup backend can satisfy the first settlement transition, and
-the dormant removal evidence is not wired into the second. The executable live-proof path has not yet
+The supervisor and publisher remain private but are reached only through production durable
+Prepare. Same-runtime clean Destroy consumes the successful terminal and authority-orders exact
+manager removal between `CleanupConfirmed` and `Absent`. Cross-process/restart-stable
+reconciliation and adoption remain disconnected, inherited descriptors are refused, and no restart
+reaper exists. The executable live-proof path has not yet
 produced recorded evidence inside the required disposable Debian 13 transient service. This
 therefore leaves AV1-10 Open, keeps the fixed alpha score at 11/100 (11%), and closes no production,
 crash-cleanup, datapath or acceptance milestone.
@@ -1223,8 +1222,8 @@ shutdown waiter is bounded independently from its caller-independent cleanup tas
 `Pending`; the attempt later publishes `Confirmed`, `Retryable`, or terminal `Unresolved`. An exact
 retry owner may remain in memory for the helper lifetime when the operating system never confirms
 reap. Neither that state nor the reaper permits are durable across a helper crash. The
-production-started v3 actor does not change that because no production issuance/arming writer or
-restart reaper is connected.
+production-started v3 actor now journals functional Prepare and same-runtime clean settlement, but
+no restart reaper or inherited-custody adoption is connected.
 
 Exact cache hits use a registry-lock-free point-in-time process probe followed by registry-locked
 checks of the atomic hint, expiry, generation and shutdown state. There is deliberately no watcher
@@ -1381,7 +1380,7 @@ retryable shutdown after incomplete cleanup. This establishes only the adapter b
 standalone constructor still installs the unavailable backend and performs no worker or network
 mutation; only the production server selects the functional-alpha adapter.
 
-A private dormant worker-lifecycle seam now reserves a coordinator-local generation, changes its
+A private worker-lifecycle seam now reserves a coordinator-local generation, changes its
 reservation to a non-expiring `LifecycleOwned` shutdown fence, authenticates one passive sandboxed
 worker under the caller's same hard deadline, and registers it in `Starting` without dispatching a
 child operation. Failures before reservation, or definitive spawn failures followed by exact
@@ -1401,8 +1400,8 @@ owner may prove that complete absence under the registry lock and settle idempot
 `ConfirmedWorkerGenerationAbsent`. That settlement neither signals nor waits for the process a
 second time. Any remaining record, reservation, cache entry, tombstone or ordering-index entry, or
 an elapsed hard deadline, fails closed while retaining the affine owner for exact retry. This seam
-remains private and dormant: it adds no production issuance/arming writer or restart reaper,
-performs no host-network mutation, and is not datapath or acceptance evidence.
+remains private and is used only by the durable functional backend. It adds no restart reaper and
+is not by itself datapath or acceptance evidence.
 
 The corresponding recovery source is available only for the exact same coordinator and generation
 while the registered record is live, unquarantined, idle and still in `Starting`. Bootstrap retains
@@ -1430,7 +1429,7 @@ idempotently without another signal or wait. Production activation consequently 
 owned cancellation-safe settlement guard, lifecycle quiescence before shutdown, and production
 journal/reaper wiring.
 
-A private composite handoff now commits the durable `Intent` before even reserving a local worker
+A production composite handoff commits the durable `Intent` before even reserving a local worker
 generation, then authenticates one child in an anonymous `NEWNET` namespace and registers it as an
 exact passive `Starting` worker under an atomically installed `DurableHandoffPending` dispatch
 fence and the same caller-supplied absolute deadline. Normal planning rejects that generation
@@ -1440,7 +1439,7 @@ pidfd/network-namespace identities through the descriptor-store adapter's measur
 the deadline again, and durably advances `Intent -> MayOwnCustody`. Only the returned affine
 phase-4 token can derive the deterministic custody name and create one publication owner retaining
 that token, worker, recovery-pin source, pidfd/network-namespace pair and original deadline. The
-handoff itself does not publish descriptors. A private dormant supervisor synchronously consumes
+handoff itself does not publish descriptors. A private production supervisor synchronously consumes
 that owner, reserves one bounded terminal slot, and registers both its capacity permit and blocking
 task handle before activation. The blocking supervisor owns a private current-thread runtime for at
 most one descriptor-store publication attempt and never retries; after exact attestation it fences
@@ -1452,39 +1451,38 @@ owns the phase-4 publication stores `SupervisorDropped`; after that owner has be
 guard instead aborts fail-closed rather than falsely claiming an in-memory terminal. Neither adapter
 failure authorizes retry. The terminal is stored before the non-authoritative completion is sent,
 dropping that waiter has no effect, and an activated blocking publication survives outer-runtime
-shutdown. A queued abort stores the phase-4 owner without polling the publisher. The pending fence
-deliberately remains closed after arming: this slice has no transition which consumes the
-`MayOwnPrepare` composite and opens child dispatch. It sends zero child protocol-request bytes and
-performs no WireGuard link/address, route, firewall, or dataplane configuration. Worker launch still
-creates the deliberately isolated process and anonymous `NEWNET`, without altering host-network
-state.
+shutdown. A queued abort stores the phase-4 owner without polling the publisher. Production
+consumes only the exact successful `MayOwnPrepare` terminal, revalidates the worker and recovery
+identity once more, atomically opens that generation's `DurableHandoffPending` dispatch fence, and
+converts only the journal-derived resources into live kernel owners. No child request or WireGuard
+mutation precedes that open. Every failed handoff, publication, or open terminal remains
+coordinator-owned and prevents a falsely confirmed shutdown.
 
-The supervisor and publisher remain private and dormant, with no server, engine or request-path
-caller and no production terminal consumer. Production startup now performs the separate read-only
-complete-set classification described above before retiring any `Intent`, but every non-empty
-classification still blocks. The durable `CleanupConfirmed` phase, dormant exact-name removal
-adapter and shared manager-mutation serialization now exist, but a production restart reaper,
-old-worker death proof, exact namespace/kernel cleanup, and authority-preserving composition of the
-two settlement proofs remain required before those phases can progress.
+On an exact same-runtime Destroy, the backend requires a correlated child `Destroyed` response for
+a previously adopted complete lease set, confirms worker-generation reap and parent birth-link
+absence, and only then consumes the affine settlement owner into durable `CleanupConfirmed`. It
+removes the exact attested systemd custody name against the retained post-publication inventory;
+an ambiguous send is observation-reconciled and never blindly retried. Exact manager absence then
+advances the record to `Absent` before the local recovery descriptors are released. Missing child,
+kernel, manager, or journal proof retains all available owners and fails closed.
 
-Full durable production wiring remains a separate audited change with these explicit blockers:
+Production startup still performs the separate read-only complete-set classification described
+above before retiring any `Intent`, and every non-empty classification still blocks. This is
+same-runtime clean settlement, not restart recovery: inherited custody is never adopted, the
+installed restart executor still refuses both proof transitions, and no restart reaper exists.
 
-- The functional-alpha adapter maps `BackendLineage`/`OperationBinding` to one process-owned
-  Client/Exit-singleton-or-Relay-pair worker generation and carries the engine deadline into the
-  worker call. A
-  separate non-cloneable live owner distinguishes same-runtime create/delete authority from its
-  public WireGuard marker metadata. It does not bind that
-  lineage to a durable ownership key or carry an owner from journal Intent through authenticated
-  anchor, durable MayOwn, child dispatch and exact settlement. It does not obtain a phase-authorized
-  per-link resource after durable `MayOwnPrepare`; its typed resource deliberately proves neither
-  current journal phase nor crash-cleanup authority. Before a complete adapter returns success it
-  must also revalidate every adopted kernel object
+Remaining durable/runtime blockers are explicit:
+
+- The functional-alpha adapter now binds `BackendLineage`/`OperationBinding` through durable
+  Intent, authenticated anchor, systemd custody, `MayOwnPrepare`, child dispatch, and exact
+  same-runtime settlement. This does not make its public marker current-phase or restart-cleanup
+  authority. Before a complete transport adapter returns success it must also revalidate every adopted kernel object
   against the requested socket kind, protocol, local/remote tuple, nonblocking/listening state and
   genuine MPTCP evidence. Descriptor adoption and complete-operation retryable shutdown therefore
   remain disconnected from the functional-alpha path.
 - Retryable shutdown ownership and the escalation reaper are still process-memory-only. The
-  journal has a production startup owner but no request-path issuance/arming writer or restart
-  reaper, so helper-crash reconciliation is not yet durable.
+  journal now has a production request-path issuance/arming writer and same-runtime settlement, but
+  no inherited-custody adoption or restart reaper, so helper-crash reconciliation is not complete.
 - Add/Remove MPTCP endpoint operations are intentionally outside `AsyncLeaseBackend`; their typed
   asynchronous seam and dispatch are a separate bounded extension.
 
@@ -1530,9 +1528,9 @@ the fixed 1024-record bound makes retention finite and capacity exhaustion fails
 itself retries exact Pending/Owned cleanup. Tag 29 `CleanupOwned` is an independent process-wide
 cleanup operation, neither part of per-route reconciliation nor that ACK, and leaves `Absent` proof
 retained. A helper restart loses this in-memory ledger and changes the runtime ID, so the agent
-quarantines rather than releasing. A production-started secret-free journal substrate exists, but
-the request-path issuance/arming writer, restart reaper, trusted worker/kernel-cleanup executor,
-exact manager-absence composition, and cross-runtime proof needed to settle that case do not.
+quarantines rather than releasing. The production journal now has request-path issuance/arming and
+exact same-runtime clean settlement, but the restart reaper, inherited worker/kernel-cleanup
+executor, and cross-runtime proof needed to settle that case do not exist.
 
 This same-runtime reconciliation path remains containment rather than crash recovery. The
 functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one Client/Exit
@@ -1697,12 +1695,12 @@ transport or ingress, and does not change the alpha score.
   foundations under one production route manager, extend it to every selected path, and prove one
   simultaneous production client-to-relay-to-exit route with correlated handshake, WireGuard,
   forwarding-counter, transport, ingress and cleanup evidence;
-- connect the durable two-step settlement only after restart-stable pidfd/namespace custody, exact
-  old-worker death, and a real namespace/kernel cleanup backend can prove the transition to
-  `CleanupConfirmed`; then authority-order the dormant exact-name manager removal and its stable
-  absence proof before `Absent`. The pure-tested typed marker/kernel foundation rejects an old
+- extend the connected same-runtime durable two-step settlement with restart-stable
+  pidfd/namespace adoption, exact old-worker death, and a real inherited namespace/kernel cleanup
+  backend. Exact-name manager removal is already authority-ordered between `CleanupConfirmed` and
+  `Absent` for a correlated clean live Destroy. The pure-tested typed marker/kernel foundation rejects an old
   same-name link carrying a non-exact marker but grants no journal-phase or cleanup authority;
-- add the production tag-35/tag-28 writer plus restart reaper; until then a runtime mismatch must
+- add the cross-runtime tag-28 proof plus restart reaper; until then a runtime mismatch must
   remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
 - invoke the implemented factories inside the correct committed child namespace and feed their
   descriptors through the private channel into the implemented external ancillary handoff;

@@ -361,14 +361,14 @@ sequentially in private namespaces and retained run 33301595311 proves the simul
 before forwarding. Non-retained run 33306523739 first proved the current exact single-path
 cross-leg fence, traffic, counter evidence, teardown and host-state boundary; retained exact-main
 run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced it as artifact 9731470248.
-The production manager does not call
-that helper-backed transaction. A boot-scoped, secret-free canonical/CAS ownership actor now starts before
-cleanup-token or socket publication and shuts down after engine cleanup. It may settle only
-never-dispatched `Intent` records; its refusing executor leaves `MayOwnPrepare` byte-identical and
-blocks startup. There is no production request-path issuance/arming writer, absence-proving
-recovery backend, restart reaper, or cross-runtime tag-28 proof. Tag 35 carries the exact canonical
-closed Prepare plan needed by that store, but production does not yet issue it; journal absence is
-not cleanup proof. Client ingress is also
+The production manager does not call that helper-backed transaction. A boot-scoped, secret-free
+canonical/CAS ownership actor starts before
+cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now
+reconstructs and registers tag 35's exact canonical intent before worker reservation, then carries
+its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. The
+refusing restart executor still leaves inherited `MayOwnPrepare` byte-identical and blocks startup;
+there is no inherited-custody recovery backend, restart reaper, or cross-runtime tag-28 proof.
+Journal absence is not cleanup proof. Client ingress is also
 blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
 helper's isolated endpoint-lifecycle path reaches Probe/Commit. Route-level end-to-end configuration and
 Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. Retained run 33294974441
