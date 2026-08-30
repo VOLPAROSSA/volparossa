@@ -1372,6 +1372,246 @@ not-found-success-return empty not-found failure worker-launch-status no
 nonzero-success empty exact success worker-launch-status yes
 EOF
 
+# Exercise retirement through exact manager snapshots. The fixture accepts
+# only one five-property `systemctl show` call per observation, so collection
+# can be represented as a complete not-found state instead of occurring
+# between independent property reads. No host unit is created or mutated.
+retirement_state_machine_functions=$temporary_directory/retirement-state-machine-functions.sh
+for retirement_function in observe_unit_retirement_snapshot retire_unit; do
+    sed -n "/^$retirement_function() {$/,/^}$/p" "$gate" \
+        >>"$retirement_state_machine_functions"
+done
+for retirement_function in observe_unit_retirement_snapshot retire_unit; do
+    if [ "$(grep -c "^$retirement_function() {$" \
+        "$retirement_state_machine_functions")" -ne 1 ]; then
+        printf 'retirement state-machine helper is not uniquely extractable: %s\n' \
+            "$retirement_function" >&2
+        exit 1
+    fi
+done
+sh -n "$retirement_state_machine_functions"
+# shellcheck source=/dev/null
+. "$retirement_state_machine_functions"
+
+# ShellCheck cannot resolve the fixture globals consumed by the extracted
+# retirement function or the dynamically dispatched systemctl/sleep mocks.
+# shellcheck disable=SC2034
+exercise_retirement_sequence() (
+    [ "$#" -eq 5 ] || exit 98
+    retirement_scenario=$1
+    expected_retirement_status=$2
+    expected_retirement_disposition=$3
+    expected_retirement_actions=$4
+    expected_retirement_shows=$5
+    retirement_stage=$temporary_directory/retirement-$retirement_scenario
+    mkdir -m 0700 "$retirement_stage"
+    retirement_sequence=$retirement_stage/snapshots
+    retirement_actions=$retirement_stage/actions
+    retirement_show_count=$retirement_stage/show-count
+    : >"$retirement_actions"
+    printf '%s\n' 0 >"$retirement_show_count"
+    retirement_default_snapshot=
+
+    case $retirement_scenario in
+        collected-after-stop)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'not-found absent inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        settled-then-collected)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'loaded current deactivating present 0' \
+                'loaded current inactive absent 0' \
+                'loaded current inactive absent 0' \
+                'not-found absent inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        failed-then-collected)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'loaded current failed absent 0' \
+                'loaded current inactive absent 0' \
+                'loaded current inactive absent 0' \
+                'not-found absent inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        collected-after-clean)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'loaded current inactive absent 0' \
+                'not-found absent inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        stop-failed-collected)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'not-found absent inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        substituted-after-stop)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'loaded other inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        malformed-snapshot)
+            printf '%s\n' 'malformed absent inactive absent 0' \
+                >"$retirement_sequence"
+            ;;
+        never-collected)
+            printf '%s\n' \
+                'loaded current active absent 0' \
+                'loaded current inactive absent 0' \
+                'loaded current inactive absent 0' \
+                >"$retirement_sequence"
+            retirement_default_snapshot='loaded current inactive absent 0'
+            ;;
+        *) exit 97 ;;
+    esac
+    chmod 0600 "$retirement_sequence" "$retirement_actions" \
+        "$retirement_show_count"
+
+    unit_name=volparossa-helper-live-proof-A1b2C3.service
+    unit_owned=yes
+    unit_may_own=no
+    unit_invocation_id=0123456789abcdef0123456789abcdef
+    unit_ownership_marker=volparossa-helper-live-proof-owner-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    retirement_other_invocation=ffffffffffffffffffffffffffffffff
+    expected_show_call="show --no-pager --property=LoadState --property=InvocationID --property=ActiveState --property=Job --property=NFileDescriptorStore $unit_name"
+
+    # Invoked indirectly by the extracted retirement function.
+    # shellcheck disable=SC2317
+    systemctl() {
+        [ "$#" -ge 1 ] || return 1
+        retirement_operation=$1
+        case $retirement_operation in
+            show)
+                [ "$*" = "$expected_show_call" ] || return 1
+                observed_show_count=$(cat "$retirement_show_count") || return 1
+                observed_show_count=$((observed_show_count + 1))
+                printf '%s\n' "$observed_show_count" \
+                    >"$retirement_show_count" || return 1
+                retirement_snapshot=$(sed -n "${observed_show_count}p" \
+                    "$retirement_sequence") || return 1
+                if [ -z "$retirement_snapshot" ]; then
+                    retirement_snapshot=$retirement_default_snapshot
+                fi
+                [ -n "$retirement_snapshot" ] || return 1
+                # The fixture syntax is exactly five space-delimited canonical
+                # atoms; intentional splitting is the parser under test here.
+                # shellcheck disable=SC2086
+                set -- $retirement_snapshot
+                [ "$#" -eq 5 ] || return 1
+                snapshot_load=$1
+                snapshot_invocation=$2
+                snapshot_active=$3
+                snapshot_job=$4
+                snapshot_fdstore=$5
+                if [ "$snapshot_load" = malformed ]; then
+                    printf '%s\n' \
+                        "NFileDescriptorStore=$snapshot_fdstore" \
+                        "ActiveState=$snapshot_active" \
+                        'InvocationID=' \
+                        'LoadState=not-found'
+                    return 0
+                fi
+                case $snapshot_invocation in
+                    current) snapshot_invocation=$unit_invocation_id ;;
+                    other) snapshot_invocation=$retirement_other_invocation ;;
+                    absent) snapshot_invocation= ;;
+                    *) return 1 ;;
+                esac
+                case $snapshot_job in
+                    absent) snapshot_job= ;;
+                    present) snapshot_job='7 /org/freedesktop/systemd1/job/7' ;;
+                    *) return 1 ;;
+                esac
+                # Deliberately use a different order than the requested
+                # properties; the strict parser is key-based, not positional.
+                printf '%s\n' \
+                    "NFileDescriptorStore=$snapshot_fdstore" \
+                    "Job=$snapshot_job" \
+                    "ActiveState=$snapshot_active" \
+                    "InvocationID=$snapshot_invocation" \
+                    "LoadState=$snapshot_load"
+                ;;
+            stop)
+                [ "$*" = "stop --no-block $unit_name" ] || return 1
+                printf '%s\n' stop >>"$retirement_actions" || return 1
+                [ "$retirement_scenario" != stop-failed-collected ]
+                ;;
+            clean)
+                [ "$*" = "clean --what=fdstore $unit_name" ] || return 1
+                printf '%s\n' clean >>"$retirement_actions"
+                ;;
+            reset-failed)
+                [ "$*" = "reset-failed $unit_name" ] || return 1
+                printf '%s\n' reset >>"$retirement_actions"
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    # Invoked indirectly by the extracted bounded polling loops.
+    # shellcheck disable=SC2317
+    sleep() {
+        [ "$#" -eq 1 ] && [ "$1" = 0.05 ]
+    }
+
+    if retire_unit; then
+        observed_retirement_status=0
+    else
+        observed_retirement_status=$?
+    fi
+    [ "$observed_retirement_status" -eq "$expected_retirement_status" ] \
+        || exit 96
+    case $expected_retirement_disposition in
+        forgotten)
+            [ -z "$unit_name" ] && [ "$unit_owned" = no ] \
+                && [ "$unit_may_own" = no ] && [ -z "$unit_invocation_id" ] \
+                || exit 95
+            ;;
+        retained)
+            [ "$unit_name" = volparossa-helper-live-proof-A1b2C3.service ] \
+                && [ "$unit_owned" = yes ] && [ "$unit_may_own" = no ] \
+                && [ "$unit_invocation_id" \
+                    = 0123456789abcdef0123456789abcdef ] || exit 95
+            ;;
+        *) exit 94 ;;
+    esac
+    observed_retirement_actions=$(paste -sd, "$retirement_actions") \
+        || exit 93
+    observed_retirement_shows=$(cat "$retirement_show_count") || exit 93
+    if [ "$expected_retirement_actions" = - ]; then
+        expected_retirement_actions=
+    fi
+    [ "$observed_retirement_actions" = "$expected_retirement_actions" ] \
+        && [ "$observed_retirement_shows" -eq "$expected_retirement_shows" ] \
+        || exit 92
+)
+while read -r retirement_name retirement_status retirement_disposition \
+    retirement_actions_expected retirement_shows_expected
+do
+    expect_status 0 exercise_retirement_sequence \
+        "$retirement_name" "$retirement_status" "$retirement_disposition" \
+        "$retirement_actions_expected" "$retirement_shows_expected"
+    if [ -s "$last_stdout" ] || [ -s "$last_stderr" ]; then
+        printf 'retirement sequence emitted diagnostics: %s\n' \
+            "$retirement_name" >&2
+        exit 1
+    fi
+done <<'EOF'
+collected-after-stop 0 forgotten stop 2
+settled-then-collected 0 forgotten stop,clean,reset 5
+failed-then-collected 0 forgotten stop,reset,clean,reset 5
+collected-after-clean 0 forgotten stop,clean 3
+stop-failed-collected 0 forgotten stop 2
+substituted-after-stop 1 retained stop 2
+malformed-snapshot 1 retained - 1
+never-collected 1 retained stop,clean,reset 1203
+EOF
+
 # Exercise the exact capability normalizer with Debian's awk implementation.
 # The production regression here was caused by using awk's built-in `index`
 # function name as a loop variable, which mawk rejects while parsing.
@@ -3953,7 +4193,10 @@ for required_contract in \
     'production_lock_fd_identity=$(stat -Lc' \
     '/usr/bin/flock -n 9' \
     'systemctl stop --no-block "$unit_name"' \
-    'systemctl show --property=Job --value "$unit_name"' \
+    'observe_unit_retirement_snapshot' \
+    'systemctl show --no-pager' \
+    '--property=Job' \
+    '[ "$retire_invocation_id" = "$unit_invocation_id" ] || return 1' \
     'systemctl clean --what=fdstore "$unit_name"' \
     '[ "$retire_fdstore_count" -eq 0 ]' \
     '[ "$retire_load_state" = not-found ]' \
