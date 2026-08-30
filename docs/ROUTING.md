@@ -380,8 +380,14 @@ run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced it as a
 The current 18-check exact-head contract additionally requires active Client/Exit/Relay FD-store
 counts `[2, 2, 2]` bound to exact pidfd/network-namespace identities, settled counts `[0, 0, 0]`, and
 exactly three stable `Absent(RecoveredMayOwn)` journal tombstones for the Client, ordered Relay pair
-and Exit plans. Its unit, schema, fixture and shell checks pass, but no privileged KVM run or retained
-artifact has exercised it; the older 16-check artifact remains historical helper-boundary evidence.
+and Exit plans. Exact-main
+[run 33318629099](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099) at
+`63e405119ca1266499fef145fbeff7348cef5562` proved all 18 checks on privileged Debian 13 KVM and
+retained
+[artifact 9734273695](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099/artifacts/9734273695).
+Its scope remains helper-boundary only; A01--A15, datapath, cleanup ownership, installed-package and
+restart-recovery evidence remain explicitly false. The older 16-check artifact remains historical
+helper-boundary evidence.
 The production manager does not call that helper-backed transaction. A boot-scoped, secret-free
 canonical/CAS ownership actor starts before
 cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now

@@ -855,9 +855,20 @@ single clean-build A01--A15 run; the score is not a release claim.
   tombstones with no recovery or reconciliation evidence: Client path 1 `[Client]`, Relay path 1
   ordered `[RelayClient, RelayExit]`, and Exit path 1 `[Exit]`. Two canonical journal reads must be
   byte-identical and `.next` absent. This is an 18-check contract; historical retained run
-  33309109220 proved only its older 16-check form. Unit, schema, PASS-fixture and shell checks pass,
-  but the fixture is validation data and no privileged KVM run or retained artifact has yet proved
-  the expanded contract, so it contributes no score or acceptance evidence. Restart-persistent
+  33309109220 proved only its older 16-check form. Exact-main
+  [run 33318629099](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099) at
+  `63e405119ca1266499fef145fbeff7348cef5562` subsequently proved the expanded contract and retained
+  40,476-byte
+  [artifact 9734273695](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099/artifacts/9734273695),
+  named `helper-boundary-evidence-63e405119ca1266499fef145fbeff7348cef5562` and expiring
+  `2026-11-28T15:04:58Z`. The locally validated report records overall `PASS`, all 18 checks
+  `PASS`, exact clean source, Debian 13 amd64 (`x86_64`) with systemd 257, and equal before/after
+  enumerated-host-state SHA-256
+  `736dc4eafc5832c672a7366978a0f18f69c47db1f2087f132bbee3dc17afd043`. Its scope is explicitly
+  `helper_boundary_only=true`, `acceptance_a01_a15=false`, `datapath=false`,
+  `cleanup_owned=false`, `installed_package=false`, and `restart_recovery=false`. This proves only
+  the scoped helper boundary, not an installed package, shipped restart, route manager, transport,
+  ingress, usable VPN, cleanup ownership, datapath, or A01--A15 acceptance. Restart-persistent
   durable recovery and the separate Add/Remove
   MPTCP endpoint seam remain required;
   AV1-09, AV1-10 and AV1-11, the **11/100 (11%)** score, and every datapath or A01--A15 acceptance
@@ -927,8 +938,9 @@ single clean-build A01--A15 run; the score is not a release claim.
   boundary, not production adoption, restart settlement, or crash cleanup. The child
   independently disables process dumpability after parent attestation and before Ready. The component-only transient driver
   exists and the production-server phase of the committed disposable driver now exercises one normal
-  functional worker lifetime. Staged-package validation and a retained exact-main Debian 13 PASS
-  remain outstanding, and the final worker proof permits only `CAP_NET_ADMIN`.
+  functional worker lifetime. Staged-package validation remains outstanding. Exact-main Debian 13
+  helper-boundary run 33318629099 retains the scoped 18-check PASS described below, and the final
+  worker proof permits only `CAP_NET_ADMIN`.
 - [ ] Helper crash/termination cleanup is idempotent and complete; fake-backend reaper/quarantine
   tests prove bounded timeout retry and process-fatal signal/wait errors without false reap evidence,
   and the disposable production-server gate covers normal exact Destroy, worker reap/purge and
