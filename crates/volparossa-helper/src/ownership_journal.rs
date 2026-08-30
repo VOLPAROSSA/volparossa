@@ -412,6 +412,11 @@ impl DurableWireguardResource {
         self.specification.peer_address()
     }
 
+    /// Absolute hard expiry retained from the authenticated durable Prepare record.
+    pub(crate) const fn hard_expires_at_unix(&self) -> u64 {
+        self.hard_expires_at_unix.get()
+    }
+
     /// Project the exact durable resource into the private worker-v3 lease descriptor.
     ///
     /// This is deliberately private to the ownership module: production callers receive a

@@ -199,6 +199,12 @@ pub(crate) struct LeaseActivation {
     pub(crate) allowed_prefixes: Vec<InternalIpPrefix>,
     #[prost(uint32, tag = "6")]
     pub(crate) persistent_keepalive_seconds: u32,
+    #[prost(uint32, tag = "7")]
+    pub(crate) maximum_up_mbps: u32,
+    #[prost(uint32, tag = "8")]
+    pub(crate) maximum_down_mbps: u32,
+    #[prost(uint64, tag = "9")]
+    pub(crate) hard_expires_at_unix: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -728,6 +734,8 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
             route_id(&operation.route_context_id)?;
             validate_lease_batch(&operation.leases, |lease| {
                 path_role(lease.path_id, lease.role)?;
+                let role = InternalEndpointRole::try_from(lease.role)
+                    .map_err(|_| InternalProtocolError::Invalid)?;
                 public_key(&lease.peer_public_key)?;
                 endpoint(
                     lease
@@ -738,8 +746,28 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
                 if lease.allowed_prefixes.is_empty()
                     || lease.allowed_prefixes.len() > MAX_PREFIXES
                     || lease.persistent_keepalive_seconds > 120
+                    || lease.hard_expires_at_unix == 0
                 {
                     return Err(InternalProtocolError::Invalid);
+                }
+                match role {
+                    InternalEndpointRole::RelayClient | InternalEndpointRole::RelayExit => {
+                        if lease.maximum_up_mbps == 0
+                            || lease.maximum_down_mbps == 0
+                            || lease.maximum_up_mbps > volparossa_routing::MAX_HELPER_RATE_MBPS
+                            || lease.maximum_down_mbps > volparossa_routing::MAX_HELPER_RATE_MBPS
+                        {
+                            return Err(InternalProtocolError::Invalid);
+                        }
+                    }
+                    InternalEndpointRole::Client | InternalEndpointRole::Exit => {
+                        if lease.maximum_up_mbps != 0 || lease.maximum_down_mbps != 0 {
+                            return Err(InternalProtocolError::Invalid);
+                        }
+                    }
+                    InternalEndpointRole::Unspecified => {
+                        return Err(InternalProtocolError::Invalid);
+                    }
                 }
                 for prefix in &lease.allowed_prefixes {
                     validate_prefix(prefix)?;
@@ -1036,6 +1064,47 @@ mod tests {
             .collect()
     }
 
+    fn relay_activations(plans: &[LeasePlan]) -> Vec<LeaseActivation> {
+        plans
+            .iter()
+            .map(|lease| LeaseActivation {
+                path_id: lease.path_id,
+                role: lease.role,
+                peer_public_key: vec![9; 32],
+                peer_endpoint: Some(InternalUdpEndpoint {
+                    address: vec![8, 8, 8, 8],
+                    port: 51_820,
+                }),
+                allowed_prefixes: vec![prefix()],
+                persistent_keepalive_seconds: 15,
+                maximum_up_mbps: 100,
+                maximum_down_mbps: 100,
+                hard_expires_at_unix: lease.hard_expires_at_unix,
+            })
+            .collect()
+    }
+
+    fn activation_with_role(role: InternalEndpointRole) -> LeaseActivation {
+        let relay = matches!(
+            role,
+            InternalEndpointRole::RelayClient | InternalEndpointRole::RelayExit
+        );
+        LeaseActivation {
+            path_id: 1,
+            role: role as i32,
+            peer_public_key: vec![9; 32],
+            peer_endpoint: Some(InternalUdpEndpoint {
+                address: vec![8, 8, 8, 8],
+                port: 51_820,
+            }),
+            allowed_prefixes: vec![prefix()],
+            persistent_keepalive_seconds: 15,
+            maximum_up_mbps: u32::from(relay) * 100,
+            maximum_down_mbps: u32::from(relay) * 100,
+            hard_expires_at_unix: 200,
+        }
+    }
+
     fn socket_address(address: [u8; 4], port: u32) -> InternalSocketAddress {
         InternalSocketAddress {
             address: address.to_vec(),
@@ -1086,6 +1155,9 @@ mod tests {
                     }),
                     allowed_prefixes: vec![prefix()],
                     persistent_keepalive_seconds: 15,
+                    maximum_up_mbps: 0,
+                    maximum_down_mbps: 0,
+                    hard_expires_at_unix: 200,
                 }],
             }),
             internal_worker_request::Operation::ProbeCommitLeases(ProbeCommitLeases {
@@ -1216,6 +1288,57 @@ mod tests {
         assert!(encode_request(&make(vec![uppercase_digest])).is_err());
     }
 
+    #[test]
+    fn activation_boundary_rejects_missing_expiry_and_role_incoherent_rates() {
+        let make = |lease| {
+            request(internal_worker_request::Operation::ActivateLeases(
+                ActivateLeases {
+                    route_context_id: vec![1; 16],
+                    leases: vec![lease],
+                },
+            ))
+        };
+        let rejected = |lease: LeaseActivation| {
+            let value = make(lease);
+            assert!(encode_request(&value).is_err());
+            assert!(decode_request(&value.encode_to_vec()).is_err());
+        };
+
+        for role in [
+            InternalEndpointRole::Client,
+            InternalEndpointRole::Exit,
+            InternalEndpointRole::RelayClient,
+            InternalEndpointRole::RelayExit,
+        ] {
+            let valid = make(activation_with_role(role));
+            let encoded = encode_request(&valid).expect("role-coherent activation");
+            assert_eq!(decode_request(&encoded).expect("decode"), valid);
+
+            let mut missing_expiry = activation_with_role(role);
+            missing_expiry.hard_expires_at_unix = 0;
+            rejected(missing_expiry);
+        }
+
+        for role in [InternalEndpointRole::Client, InternalEndpointRole::Exit] {
+            let mut rated = activation_with_role(role);
+            rated.maximum_up_mbps = 1;
+            rejected(rated);
+        }
+
+        for role in [
+            InternalEndpointRole::RelayClient,
+            InternalEndpointRole::RelayExit,
+        ] {
+            let mut zero = activation_with_role(role);
+            zero.maximum_down_mbps = 0;
+            rejected(zero);
+
+            let mut excessive = activation_with_role(role);
+            excessive.maximum_up_mbps = volparossa_routing::MAX_HELPER_RATE_MBPS + 1;
+            rejected(excessive);
+        }
+    }
+
     fn correlated_response(
         request: &InternalWorkerRequest,
         result: InternalWorkerResult,
@@ -1247,20 +1370,7 @@ mod tests {
             request(internal_worker_request::Operation::ActivateLeases(
                 ActivateLeases {
                     route_context_id: vec![1; 16],
-                    leases: plans
-                        .iter()
-                        .map(|lease| LeaseActivation {
-                            path_id: lease.path_id,
-                            role: lease.role,
-                            peer_public_key: vec![9; 32],
-                            peer_endpoint: Some(InternalUdpEndpoint {
-                                address: vec![8, 8, 8, 8],
-                                port: 51_820,
-                            }),
-                            allowed_prefixes: vec![prefix()],
-                            persistent_keepalive_seconds: 15,
-                        })
-                        .collect(),
+                    leases: relay_activations(&plans),
                 },
             )),
             request(internal_worker_request::Operation::ProbeCommitLeases(

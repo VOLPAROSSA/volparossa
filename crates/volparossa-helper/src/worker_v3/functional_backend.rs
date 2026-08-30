@@ -4,11 +4,13 @@
 //! RelayClient+RelayExit pair. It uses the real authenticated worker, a real anonymous network
 //! namespace and kernel `WireGuard` UAPI. Activate verifies the signed role-specific local and peer
 //! authority, then installs and reads back the complete exact peer set plus its main-table IPv6
-//! `/128` link routes. Probe-Commit requires a recent handshake and strict bidirectional counter
-//! growth from every activation baseline. The Relay pair does not enable forwarding between its
-//! two interfaces. This seam does not claim a usable datapath or crash/restart recovery. Durable
-//! journal and systemd descriptor-store composition stay closed until their affine recovery path
-//! is complete.
+//! `/128` link routes. A Relay worker starts behind a policy-drop baseline, enables forwarding only
+//! inside its exact private namespace, and atomically admits the two context-bound directions with
+//! authenticated rate and hard-expiry bounds. Probe-Commit requires a recent handshake plus strict
+//! `WireGuard` and forwarding-counter growth on both legs. This seam proves only helper-internal
+//! Relay forwarding; it does not yet claim a complete client-to-destination datapath or durable
+//! crash/restart recovery. Durable journal and systemd descriptor-store composition stay closed
+//! until their affine recovery path is complete.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -179,6 +181,10 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<Vec<PreparedKernelLease>, BackendError> {
         let (key, context_role, leases, context_ttl) =
             validate_prepare_batch_binding(binding, &value)?;
+        let path_id = leases
+            .first()
+            .and_then(|lease| u8::try_from(lease.path_id).ok())
+            .ok_or(BackendError::Invalid)?;
         let deadline = prepare_deadline(binding)?;
         let underlay =
             collect_consistent_direct_underlay(deadline).map_err(|_| BackendError::Unavailable)?;
@@ -200,7 +206,8 @@ impl FunctionalAlphaLeaseBackend {
         let prepare = internal_prepare_batch_plan(&wireguard, key, &leases)?;
 
         self.reserve_entry(key, context_role, wireguard, prepare, underlay)?;
-        self.admit_worker(key, context_ttl, deadline).await?;
+        self.admit_worker(key, context_role, path_id, context_ttl, deadline)
+            .await?;
         if let Err(error) = self.retain_recovery_source(key, deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
@@ -272,12 +279,18 @@ impl FunctionalAlphaLeaseBackend {
     async fn admit_worker(
         &self,
         key: OpenLineageKey,
+        context_role: ContextRole,
+        path_id: u8,
         context_ttl: Duration,
         deadline: HardDeadline,
     ) -> Result<(), BackendError> {
-        let admission =
-            self.coordinator
-                .reserve_spawn_register_until(key.context_id, context_ttl, deadline);
+        let admission = self.coordinator.reserve_spawn_register_for_context_until(
+            key.context_id,
+            context_role,
+            path_id,
+            context_ttl,
+            deadline,
+        );
         match admission {
             WorkerLifecycleAdmission::Registered(worker) => {
                 let mut state = lock_state(&self.state);
@@ -1592,10 +1605,7 @@ fn verify_activation_authority(
     replay_keys.push((*exit.sender_id(), *exit.nonce()));
 
     let relay_message = relay.message();
-    let hard_expires_at_ms = key
-        .hard_expires_at_unix
-        .checked_mul(1_000)
-        .ok_or(BackendError::Invalid)?;
+    let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
     if activations.iter().skip(1).any(|activation| {
         activation.signed_relay_reservation != activations[0].signed_relay_reservation
     }) || relay_message.route_context_id.as_slice() != key.context_id
@@ -1899,6 +1909,8 @@ fn project_internal_activation_batch(
             activation.path_id,
             prepared.role,
             *endpoint,
+            activation.maximum_up_mbps,
+            activation.maximum_down_mbps,
         )?);
     }
     Ok(ActivateLeases {
@@ -1935,10 +1947,7 @@ fn verified_internal_activate_plan(
     let result = (|| {
         let relay_message = relay_grant.message();
         let exit_message = exit_grant.message();
-        let hard_expires_at_ms = key
-            .hard_expires_at_unix
-            .checked_mul(1_000)
-            .ok_or(BackendError::Invalid)?;
+        let hard_expires_at_ms = unix_seconds_to_milliseconds(key.hard_expires_at_unix)?;
         if relay_message.route_context_id.as_slice() != key.context_id
             || relay_message.path_id != activation.path_id
             || relay_message.path_id != prepared.path_id
@@ -2009,6 +2018,8 @@ fn verified_internal_activate_plan(
                 activation.path_id,
                 prepared.role,
                 endpoint,
+                activation.maximum_up_mbps,
+                activation.maximum_down_mbps,
             )?],
         })
     })();
@@ -2023,6 +2034,8 @@ fn internal_lease_activation(
     path_id: u32,
     wireguard_role: i32,
     endpoint: VerifiedWireguardEndpoint,
+    maximum_up_mbps: u32,
+    maximum_down_mbps: u32,
 ) -> Result<InternalLeaseActivation, BackendError> {
     let role = functional_lease_role_for_wireguard(wireguard_role).ok_or(BackendError::Invalid)?;
     if resource.key()
@@ -2046,6 +2059,9 @@ fn internal_lease_activation(
             prefix_length: 128,
         }],
         persistent_keepalive_seconds: FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS,
+        maximum_up_mbps,
+        maximum_down_mbps,
+        hard_expires_at_unix: resource.hard_expires_at_unix(),
     })
 }
 
@@ -2094,6 +2110,10 @@ fn unix_milliseconds() -> Result<u64, BackendError> {
             .as_millis(),
     )
     .map_err(|_| BackendError::Unavailable)
+}
+
+fn unix_seconds_to_milliseconds(seconds: u64) -> Result<u64, BackendError> {
+    seconds.checked_mul(1_000).ok_or(BackendError::Invalid)
 }
 
 fn worker_request(

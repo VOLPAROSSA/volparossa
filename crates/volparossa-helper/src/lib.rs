@@ -1,14 +1,16 @@
 //! Minimal privileged service boundary for VOLPAROSSA network operations.
 //!
 //! Production requests arrive over a fixed root-owned Unix socket and are authenticated with
-//! Linux peer credentials. The crate-internal production engine can execute real Prepare and
-//! Destroy for exactly one process-owned functional-alpha Client lease. It does not implement
-//! Activate, Probe, transport acquisition, a usable datapath, or crash/restart recovery. The public
+//! Linux peer credentials. The crate-internal production engine executes an authenticated
+//! Prepare/Activate/Probe-Commit/Destroy lifecycle for one process-owned functional-alpha Client,
+//! Exit, or atomic Relay endpoint pair. Workers use private network namespaces, kernel `WireGuard`
+//! UAPI and, for Relay contexts, an exact namespace-local forwarding fence. This is not yet a
+//! complete client-to-destination datapath or crash/restart recovery path. The public
 //! [`HelperEngine::new`] constructor remains fail-closed with `Unavailable`, so only the production
-//! server selects that deliberately narrow backend. Production owns the canonical durable journal
-//! actor as a startup/shutdown barrier but still refuses `MayOwnPrepare` recovery; it has no
-//! restart-stable pidfd/network-namespace custody or restart reaper. Leader retirement still does
-//! not own descendants, and disposable live-root proof remains outstanding.
+//! server selects the functional backend. Production owns the canonical durable journal actor as a
+//! startup/shutdown barrier but still refuses `MayOwnPrepare` recovery; it has no restart-stable
+//! pidfd/network-namespace custody or restart reaper. Leader retirement still does not own
+//! descendants.
 
 #![cfg(target_os = "linux")]
 
@@ -25,8 +27,6 @@ mod lease_spec;
 #[allow(dead_code)] // V3 endpoint ownership remains isolated until worker-v3 wiring lands.
 mod mptcp_endpoint;
 mod ownership_journal;
-#[allow(dead_code)] // Secret-free v3 relay fences remain fail-closed until worker-v3 wiring.
-mod relay_fence;
 mod runtime;
 mod server;
 mod systemd_custody;
@@ -42,8 +42,6 @@ mod worker_transport;
 mod worker_v3;
 
 pub use engine::HelperEngine;
-#[doc(hidden)]
-pub use relay_fence::{INTERNAL_NFT_FRONTEND_ARGUMENT, run_internal_nft_frontend};
 pub use runtime::{AGENT_ACCOUNT, RUNTIME_DIRECTORY, SOCKET_PATH, TOKEN_PATH, WORKER_ACCOUNT};
 pub use server::{ServerError, run_production_server};
 #[doc(hidden)]
